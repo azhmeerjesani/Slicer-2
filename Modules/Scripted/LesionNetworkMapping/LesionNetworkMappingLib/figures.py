@@ -1003,21 +1003,53 @@ class MapInfo:
     values: object = None  # finite in-mask values of the native map (for the shown-sign share)
 
 
-def _in_mask_values(volume, mask):
+def _tested_voxels(volume, mask):
+    """The voxels of ``volume`` (on its own grid) that count as tested: the finite in-mask voxels, or the finite
+    non-zero voxels without a mask.
+    """
     data = np.asarray(volume.data, dtype=np.float64)
     if mask is not None:
         if np.shape(mask.data) == data.shape and np.allclose(mask.affine, volume.affine, atol=1e-4):
             inside = np.asarray(mask.data) > 0
         else:
             inside = reslice(mask, _NativeGrid(volume), order=0) > 0
-        values = data[inside]
-    else:
-        values = data[np.isfinite(data) & (data != 0)]
-    return values[np.isfinite(values)]
+        return inside & np.isfinite(data)
+    return np.isfinite(data) & (data != 0)
 
 
-def _resolve(info, options):
-    """Resolve the threshold of one map (None when the figure is unthresholded)."""
+def _in_mask_values(volume, mask):
+    return np.asarray(volume.data, dtype=np.float64)[_tested_voxels(volume, mask)]
+
+
+def _shared_v(infos, options):
+    """One number of voxels tested (V) for all the maps of a multi-map figure (triptych, replication), which are
+    tested over the same voxels: --v when given, else the voxels tested in any of the maps (the union when they
+    share a grid, else the largest count). V used to be each map's own count, so without --mask a sparse map (a
+    conjunction zero outside its overlap) got a much smaller V, hence a lower Bonferroni threshold than the other
+    panels, under a colour bar that stated only the first panel's threshold.
+    """
+    if options.v is not None:
+        return int(options.v)
+    first = infos[0].volume
+    if all(np.shape(info.volume.data) == np.shape(first.data) and np.allclose(info.volume.affine, first.affine, atol=1e-4) for info in infos):
+        union = np.zeros(np.shape(first.data), dtype=bool)
+        for info in infos:
+            union |= _tested_voxels(info.volume, options.mask)
+        return int(union.sum())
+    return max(int(_in_mask_values(info.volume, options.mask).size) for info in infos)
+
+
+def _resolve_all(infos, options):
+    """Resolve the thresholds of the maps of one figure, with one V for all of them (:func:`_shared_v`)."""
+    v = _shared_v(infos, options) if len(infos) > 1 else None
+    for info in infos:
+        _resolve(info, options, v)
+
+
+def _resolve(info, options, v=None):
+    """Resolve the threshold of one map (None when the figure is unthresholded); ``v``: the figure's shared
+    number of voxels tested (default: --v, else the map's own count).
+    """
     values = _in_mask_values(info.volume, options.mask)
     info.values = values
     info.v = int(options.v) if options.v is not None else int(values.size)
@@ -1025,12 +1057,16 @@ def _resolve(info, options):
     if rule is None and options.threshold is not None:
         rule = {"kind": "custom_t", "value": float(options.threshold)}
     if rule is None:
+        if v is not None:
+            info.v = int(v)
         return None
     if info.v < 1:
         # V = 0 used to fall back to 1 silently, so an FWE threshold became the uncorrected one under the FWE label
         if options.mask is not None:
             raise ValueError(f"The mask ({options.mask.name}) covers no finite voxel of the map {info.volume.name}: it is empty, lies outside the map's field of view or covers only its NaN voxels, so the number of voxels tested (V) is unknown. Is the mask in the map's space? Otherwise give V with --v.")
         raise ValueError(f"The map {info.volume.name} has no finite non-zero voxel, so the number of voxels tested (V) is unknown. Give V with --v.")
+    if v is not None:
+        info.v = int(v)
     rule = thresholds.normalize_rule(rule)
     if rule["kind"] == "top_pct" and options.sign and rule.get("sign") != options.sign:
         # The sign of a top-x% rule chooses its cut-off (top x% of T, -T or |T|): the shown sign (--sign) used to change
@@ -1234,9 +1270,13 @@ def _colorbar(bar, x, y, width, height, fonts, text_px, small_px):
         colors = tuple(_to_hex(rgb) for rgb in diverging_lut())
         for value in (-window, 0.0, window):
             ticks.append((x + width * (value + window) / (2 * window), _fmt(value), False))
-        threshold = bar.get("threshold")
-        if threshold is not None and math.isfinite(threshold) and threshold > 0:
-            sign = bar.get("sign", "both")
+        levels = bar.get("thresholds")
+        if levels is None:
+            levels = [bar.get("threshold")]
+        sign = bar.get("sign", "both")
+        for threshold in levels:
+            if threshold is None or not math.isfinite(threshold) or threshold <= 0:
+                continue
             for value, keep in ((-threshold, sign != "pos"), (threshold, sign != "neg")):
                 if not keep:
                     continue
@@ -1244,7 +1284,7 @@ def _colorbar(bar, x, y, width, height, fonts, text_px, small_px):
                 clamped = max(-window, min(window, value))
                 label = _fmt(value) if clamped == value else ("\u2265 " if value > 0 else "\u2264 ") + _fmt(value)
                 ticks.append((x + width * (clamped + window) / (2 * window), label, True))
-            ticks.sort(key=lambda tick: tick[0])
+        ticks.sort(key=lambda tick: tick[0])
     else:
         vmax = bar["vmax"]
         if bar.get("discrete"):
@@ -1593,12 +1633,28 @@ def _companion_titles(options):
 
 
 def _map_bar(infos, window, sign, options, statistic):
-    threshold = next((info.resolved.value for info in infos if info.resolved is not None and math.isfinite(info.resolved.value)), None)
+    """The colour bar of map panels. When the maps' thresholds differ (a top-x% rule cuts each map at its own
+    value), the label names each panel's threshold and every threshold gets a tick; the bar used to state only the
+    first map's threshold for all panels.
+    """
+    levels = []  # [threshold, [titles]] in panel order, equal thresholds merged
+    for info in infos:
+        if info.resolved is None or not math.isfinite(info.resolved.value):
+            continue
+        for level in levels:
+            if math.isclose(level[0], info.resolved.value, rel_tol=1e-9, abs_tol=1e-12):
+                level[1].append(info.title)
+                break
+        else:
+            levels.append([info.resolved.value, [info.title]])
     label = f"{_units(options, statistic)} (shared range ±{_fmt(window)}"
-    if threshold is not None:
-        label += f"; threshold {_threshold_condition(statistic, sign, threshold)}"
+    if len(levels) == 1:
+        label += f"; threshold {_threshold_condition(statistic, sign, levels[0][0])}"
+    elif levels:
+        label += "; thresholds " + ", ".join(f"{_threshold_condition(statistic, sign, value)} ({', '.join(titles)})" for value, titles in levels)
     label += ")"
-    return {"kind": "diverging", "window": float(window), "threshold": threshold, "sign": sign, "label": label}
+    threshold = levels[0][0] if len(levels) == 1 else None
+    return {"kind": "diverging", "window": float(window), "threshold": threshold, "thresholds": [value for value, _ in levels], "sign": sign, "label": label}
 
 
 def _map_rows(panels, infos, planes_coords):
@@ -1707,8 +1763,7 @@ def triptych(sensitivity, specificity, conjunction, template=None, slices="A aut
     volumes = [load_volume(source) for source in (sensitivity, specificity, conjunction)]
     ctx = _Context("triptych", options, template, volumes)
     infos = [ctx.map(volume, title, role=title.lower()) for volume, title in zip(volumes, titles, strict=False)]
-    for info in infos:
-        _resolve(info, options)
+    _resolve_all(infos, options)
     plane, coordinates, count = parse_slices(slices)
     if coordinates is None:
         threshold = infos[-1].resolved.value if infos[-1].resolved is not None else None
@@ -1806,8 +1861,7 @@ def replication(first, second, template=None, slices="auto", titles=("Discovery"
     volumes = [load_volume(first), load_volume(second)]
     ctx = _Context("replication", options, template, volumes)
     infos = [ctx.map(volume, title, role=title.lower()) for volume, title in zip(volumes, titles, strict=False)]
-    for info in infos:
-        _resolve(info, options)
+    _resolve_all(infos, options)
     a, b = infos[0].volume, infos[1].volume
     r, voxels, r_grid, where = _replication_r(a, b, ctx.mask)
     plane, coordinates, count = parse_slices(slices)

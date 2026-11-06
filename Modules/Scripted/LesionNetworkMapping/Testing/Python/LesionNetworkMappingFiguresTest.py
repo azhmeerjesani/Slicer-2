@@ -481,6 +481,42 @@ class FiguresTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             figures.gallery([(ball((0, 0, 0), 5), self.affine, "a")], None, per_page=0, **SMALL)
 
+    def test_multi_map_figures_share_v_and_the_bar_states_each_threshold(self):
+        # Without --mask, V was each map's own non-zero count: a sparse conjunction (the first map zeroed where
+        # |T| <= 3) got a smaller V, hence a lower Bonferroni threshold than the other panels, while the one colour
+        # bar stated only the first panel's threshold. The maps of a triptych or a replication are tested over the
+        # same voxels: one V (the voxels tested in any of them), one threshold, and the bar states it.
+        full = self.tmap[0]
+        sparse = (np.where(np.abs(full) > 3.0, full, 0.0).astype(np.float32), self.affine, "sparse")
+        tested = int(np.count_nonzero(full))
+        self.assertLess(np.count_nonzero(sparse[0]), tested / 4)
+        rule = {"kind": "fwe_bonferroni", "alpha": 0.05}
+        expected = figures.thresholds.resolve(rule, 100, tested).value
+        figure = figures.triptych(self.tmap, self.tmap, sparse, self.template, "A 0", rule=rule, n=100, **SMALL)
+        self.assertEqual({t["v"] for t in figure.meta["thresholds"].values()}, {tested})
+        self.assertEqual({panel["threshold"] for panel in figure.meta["panels"]}, {expected})
+        self.assertAlmostEqual(figure.meta["colorbars"][0]["threshold"], expected, places=10)
+        self.assertEqual(figure.caption.count(f"V={tested:,}"), 3)
+        replication = figures.replication(sparse, self.tmap, self.template, "A 0", rule=rule, n=100, mode="hard", **SMALL)
+        self.assertEqual({panel["threshold"] for panel in replication.meta["panels"]}, {expected})
+        # --v still wins for every map
+        given = figures.triptych(self.tmap, self.tmap, sparse, self.template, "A 0", rule=rule, n=100, v=500, **SMALL)
+        self.assertEqual({t["v"] for t in given.meta["thresholds"].values()}, {500})
+        # A top-x% rule cuts each map at its own value by design: the bar then names every panel's threshold and
+        # ticks each one, instead of stating the first map's threshold for all panels
+        other = (blob_map(amplitude=4.0), self.affine, "other")
+        top = figures.triptych(self.tmap, other, self.tmap, self.template, "A 0", rule={"kind": "top_pct", "value": 5}, n=100, **SMALL)
+        levels = {panel["threshold"] for panel in top.meta["panels"]}
+        self.assertEqual(len(levels), 2)
+        bar = top.meta["colorbars"][0]
+        self.assertIsNone(bar["threshold"])
+        self.assertEqual(sorted(bar["thresholds"]), sorted(levels))
+        self.assertIn("thresholds ", bar["label"])
+        self.assertIn("(Sensitivity, Conjunction)", bar["label"])
+        self.assertIn("(Specificity)", bar["label"])
+        ticks = [item.text for item in top.annotations if item.role == "threshold value"]
+        self.assertEqual(len(ticks), 4)  # ± each of the two thresholds
+
     def test_shared_range_identical_across_panels(self):
         strong = (blob_map(amplitude=20.0), self.affine, "strong")
         weak = (blob_map(amplitude=5.0), self.affine, "weak")
