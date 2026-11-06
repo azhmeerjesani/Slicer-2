@@ -1688,14 +1688,6 @@ def run(
     parents = list(parent_runs or ())
     work = os.path.join(out_dir, WORK_DIR)
     try:
-        for desc in OUTPUT_DESCS:  # never leave the outputs of an earlier run next to this one's
-            path = export.group_map_path(out_dir, bundle.name, desc)
-            for name in (path, _sidecar_path(path)):
-                if os.path.exists(name):
-                    os.remove(name)
-        for name in (NULLS_JSON, SETS_NAME, NULL_GROUP_FILE, NULL_GROUP_VOXELS, PARITY_JSON):
-            if os.path.exists(os.path.join(out_dir, name)):
-                os.remove(os.path.join(out_dir, name))
         if not resume:
             shutil.rmtree(work, ignore_errors=True)
         if study is not None:
@@ -1913,6 +1905,7 @@ def run(
 
         # Outputs
         stage("write")
+        _remove_outputs(out_dir, bundle.name)
         record = _write_outputs(context, bundle, info, out_dir, cohort, result, group_qa, design, parity_report, parity_source, sets, shifts, shared_shifts, set_shifts,
                                 null_mean, resolved, maps_tsv, run_id, parents, argv, started, fast_index, parity, pool, pool_maps, brain_mask)
         outputs = record.pop("outputs_list")
@@ -1938,6 +1931,24 @@ def run(
         raise
     finally:
         lock.release()
+
+
+def _remove_outputs(out_dir, bundle_name):
+    """Remove the outputs of an earlier run of ``out_dir`` (nulls.json first), so that none is left next to a new run's.
+
+    Only called once a run has computed its result (the "write" stage): a run that is stopped or fails before that keeps
+    the earlier finished result, which exact pooled nulls may have taken hours to compute.
+    """
+    from . import export
+
+    for name in (NULLS_JSON, SETS_NAME, NULL_GROUP_FILE, NULL_GROUP_VOXELS, PARITY_JSON):
+        if os.path.exists(os.path.join(out_dir, name)):
+            os.remove(os.path.join(out_dir, name))
+    for desc in OUTPUT_DESCS:
+        path = export.group_map_path(out_dir, bundle_name, desc)
+        for name in (path, _sidecar_path(path)):
+            if os.path.exists(name):
+                os.remove(name)
 
 
 def _sidecar_path(map_path):

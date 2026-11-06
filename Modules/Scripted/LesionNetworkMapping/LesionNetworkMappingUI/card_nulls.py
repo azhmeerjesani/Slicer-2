@@ -844,11 +844,17 @@ class NullsCard:
         _updateProgress(self.progress, force=event.get("event") != "progress")
 
     def onDone(self, job, folder=None):
+        from LesionNetworkMappingLib import nulls
+
         _updateProgress(self.progress, force=True)
+        # A run that does not finish leaves the earlier finished result of its folder in place (nulls.run removes it only when it writes)
+        kept = job.state in ("failed", "cancelled") and bool(folder) and os.path.isfile(os.path.join(folder, nulls.NULLS_JSON))
         if job.state == "failed":
             self.notice = _("The null models failed: {reason}").format(reason=job.failureReason)
+            if kept:
+                self.notice += " " + _("The earlier result is kept.")
         elif job.state == "cancelled":
-            self.notice = _("Stopped: a null run that did not finish has no results.")
+            self.notice = _("Stopped: the earlier result is kept.") if kept else _("Stopped: a null run that did not finish has no results.")
         else:
             self.notice = ""
         self.estimateLabel.hide()

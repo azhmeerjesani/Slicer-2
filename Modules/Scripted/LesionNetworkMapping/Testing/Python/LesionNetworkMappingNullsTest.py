@@ -368,6 +368,56 @@ class NullsTest(unittest.TestCase):
         for desc, values in reference_maps.items():
             np.testing.assert_array_equal(_read_map(os.path.join(resumed, os.path.basename(record["outputs"][desc])), self.bundle), values, err_msg=desc)
 
+    def test_stopped_or_failed_rerun_keeps_finished_result(self):
+        """A rerun that is stopped or fails before it writes leaves the earlier finished result as it was (BB-1)."""
+        import hashlib
+
+        out = self.path("rerun")
+
+        def run(**kwargs):
+            return nulls.run(self.bundle, out, maps_tsv=self.maps_tsv, kind="rl_independent", mode="exact", k=60, k_pool=4, rule=TOP10, register=False, budget_bytes=1, **kwargs)
+
+        def snapshot():
+            names = sorted(name for name in os.listdir(out) if os.path.isfile(os.path.join(out, name)))
+            return {name: hashlib.sha256(open(os.path.join(out, name), "rb").read()).hexdigest() for name in names}
+
+        record = run(emit=_quiet)
+        finished = snapshot()
+        self.assertIn(nulls.NULLS_JSON, finished)
+        self.assertGreaterEqual(len(finished), 2 * len(nulls.OUTPUT_DESCS) + 4)
+
+        class StopAfterFirstBatch:
+            batches = 0
+
+            def __call__(self):
+                return self.batches >= 1
+
+        stop = StopAfterFirstBatch()
+
+        def on_event(event, **fields):
+            if event == "progress" and fields.get("stage") == "null maps" and fields.get("batch"):
+                stop.batches += 1
+
+        with self.assertRaises(jobs.Cancelled):
+            run(emit=on_event, cancel=stop, seed=1)
+        self.assertEqual(snapshot(), finished, "a stopped rerun keeps the finished result")
+
+        def fail(event, **fields):
+            if event == "progress" and fields.get("stage") == "null maps":
+                raise RuntimeError("simulated failure")
+
+        with self.assertRaises(RuntimeError):
+            run(emit=fail, seed=1)
+        self.assertEqual(snapshot(), finished, "a failed rerun keeps the finished result")
+        self.assertEqual(nulls.load_null_group_maps(out)[0].shape[0], record["k"])
+
+        # A rerun that finishes replaces the result: no file of the earlier run is left next to the new one's
+        again = run(emit=_quiet, seed=1)
+        replaced = snapshot()
+        self.assertEqual(set(replaced), set(finished))
+        self.assertNotEqual(replaced[nulls.NULLS_JSON], finished[nulls.NULLS_JSON])
+        self.assertEqual(again["seeds"]["seed"], 1)
+
     def test_kinds_and_modes(self):
         parity = self.passing_parity()
         for kind, mode, k in (("rl_strength", "exact", 30), ("rl_cohort_shift", "exact", 30), ("rl_independent", "fast", 40), ("rl_cohort_shift", "fast", 20), ("rl_overlap", "fast", 5)):
