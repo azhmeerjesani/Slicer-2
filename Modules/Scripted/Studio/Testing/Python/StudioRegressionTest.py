@@ -174,6 +174,10 @@ Run with the main window and testing enabled::
   the user's to repair); the quit prompt says that the study changes of the subject are not saved and that they are kept;
   closing the study posts them to ``.studio/inbox`` (participants.tsv is left as it is), and the study opened again after the
   table is repaired has the subject's Done (status, lesion). They were kept only in memory and lost at quit.
+- ``test_81_assist_counts_stay_in_their_study`` (BB-1): the Smart fill counts of study A's sub-01 are not read for another
+  study's sub-01: study B's Brush-only tracing of its own sub-01 is recorded as ``manual`` without ``assist_pct`` or a Smart
+  fill share in its sidecar (it was ``manual+smartfill`` with study A's numbers); study A opened again keeps its counts, and
+  the counts of a lesion segment outside a study end with the scene (the next scene reuses its node IDs).
 """
 
 import inspect
@@ -6059,3 +6063,100 @@ class StudioRegressionTest(unittest.TestCase):
         finally:
             logging.getLogger().removeHandler(recorder)
             study_ui.closeStudy()
+
+    def test_81_assist_counts_stay_in_their_study(self):
+        """Smart fill counts are kept per study: another study's subject with the same id is not assisted (BB-1)."""
+        from LesionNetworkMappingLib import nifti
+        from LesionNetworkMappingLib.study import is_missing
+
+        from StudioLib import draw, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        shape = (40, 40, 30)
+        affine = np.array([[1.5, 0, 0, -30], [0, 1.5, 0, -30], [0, 0, 1.5, -22], [0, 0, 0, 1]], float)
+        rng = np.random.default_rng(81)
+
+        def scanFolder(name):
+            folder = os.path.join(self.directory, name)
+            os.makedirs(folder)
+            path = os.path.join(folder, "sub-01_T1w.nii.gz")
+            nifti.write_nifti(path, rng.normal(300, 8, shape).astype(np.int16), affine, sform_code=1, qform_code=1)
+            return folder, path
+
+        def paint(session, box):
+            segmentation, volume = session.segmentationNode(), session.volumeNode()
+            segmentId = segmentation.GetSegmentation().GetNthSegmentID(0)
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, segmentId, volume)
+            array[box] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, volume)
+            slicer.app.processEvents()
+
+        def pump():
+            for _ in range(4):
+                slicer.app.processEvents()
+
+        def sidecarAssist(session):
+            lesion = session.study.abspath(session.study.subject("sub-01")["lesion"])
+            sidecar = lesion[:-len(".nii.gz")] + ".json"
+            if not os.path.exists(sidecar):
+                return {}
+            with open(sidecar, encoding="utf-8") as f:
+                return (json.load(f).get("SlicerStudio") or {}).get("assist") or {}
+
+        saved = dict(draw._assistCounts)
+        draw._assistCounts.clear()
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        try:
+            # Study A: sub-01 is traced with Smart fill (what its apply reports to Draw), then Done
+            folderA, scanA = scanFolder("Study A")
+            session = study_ui.createStudy([scanA], studioShell, folder=folderA)
+            self.assertTrue(session.open("sub-01", switchToDraw=False))
+            paint(session, np.s_[10:15, 10:15, 10:15])
+            draw.notifyAssist("smartfill", 125, {"tolerance": 0.1})
+            self.assertEqual(draw.assistCounts("sub-01")["smartfill"]["voxels"], 125)
+            self.assertIsNotNone(session.done())
+            pump()
+            self.assertIn("smartfill", session.study.subject("sub-01")["trace_method"].split("+"))
+            study_ui.closeStudy()
+            slicer.mrmlScene.Clear(0)
+            # Study B, in another folder, has its own sub-01: traced with the Brush only
+            folderB, scanB = scanFolder("Study B")
+            session = study_ui.createStudy([scanB], studioShell, folder=folderB)
+            self.assertTrue(session.open("sub-01", switchToDraw=False))
+            self.assertEqual(draw.assistCounts("sub-01"), {}, "study A's Smart fill counts are not study B's")
+            self.assertEqual(draw.assistCounts(), {})
+            paint(session, np.s_[8:16, 8:16, 8:14])
+            self.assertIsNotNone(session.done())
+            pump()
+            row = session.study.subject("sub-01")
+            self.assertEqual(row["trace_method"], "manual")
+            self.assertTrue(is_missing(row.get("assist_pct")), row.get("assist_pct"))
+            assist = sidecarAssist(session)
+            self.assertIsNone(assist.get("smartfill_voxels_pct"), assist)
+            self.assertNotIn("smartfill", assist.get("tools") or {}, assist)
+            study_ui.closeStudy()
+            slicer.mrmlScene.Clear(0)
+            # Study A opened again: its sub-01 keeps its own counts
+            session = study_ui.openStudy(folderA, studioShell, showLibrary=False)
+            self.assertIsNotNone(session)
+            self.assertEqual(draw.assistCounts("sub-01")["smartfill"]["voxels"], 125)
+            study_ui.closeStudy()
+            # Outside a study the counts are kept per segment ID, which the next scene reuses: a closed scene ends them
+            draw._installImportGuard()
+            draw._assistCounts["vtkMRMLSegmentationNode1/Segment_1"] = {"smartfill": {"voxels": 3, "applies": 1, "params": []}}
+            slicer.mrmlScene.Clear(0)
+            self.assertEqual(draw.assistCounts("vtkMRMLSegmentationNode1/Segment_1"), {})
+            self.assertEqual(draw.assistCounts("sub-01"), {}, "no study is open")
+            self.assertEqual(len([key for key in draw._assistCounts if key.startswith("study:")]), 1, "the study counts are kept")
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+            draw._assistCounts.clear()
+            draw._assistCounts.update(saved)

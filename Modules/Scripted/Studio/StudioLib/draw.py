@@ -1853,6 +1853,9 @@ def _onSceneClosed(caller=None, event=None):
     _savedRecords.clear()
     _metricsCache.clear()
     _mniCache.clear()
+    # The assisted counts of lesion segments: the next scene reuses their node IDs (a study subject's counts are kept)
+    for key in [key for key in _assistCounts if not key.startswith(_STUDY_KEY_PREFIX)]:
+        del _assistCounts[key]
 
 
 #: The scene observed by ``_installImportGuard()`` and its observer tags
@@ -2560,20 +2563,43 @@ def _applyPendingSmartFill(shell=None):
     return True
 
 
-#: Assisted voxels per subject (or segmentation and segment): {key: {tool: {"voxels": n, "applies": n, "params": [...]}}}
+#: Assisted voxels per study subject (``"study:<study folder>|<subject id>"``) or lesion segment (``"<segmentation id>/<segment
+#: id>"``): {key: {tool: {"voxels": n, "applies": n, "params": [...]}}}. A subject id is scoped by its study (another study
+#: has its own sub-01); the segment keys end with the scene (node IDs are reused after a close, ``_onSceneClosed``).
 _assistCounts = {}
 
+_STUDY_KEY_PREFIX = "study:"
 
-def _assistKey():
+
+def _studyAssistScope():
+    """(scope, subject id) of the open study of the shell: scope ``"study:<normalized study folder>"``; (None, None) without a
+    study, subject id None without a current subject.
+    """
     shell = _currentShell()
     study = getattr(shell, "studySession", None) if shell is not None else None
-    if study is not None and hasattr(study, "current"):
+    if study is None:
+        return None, None
+    path = None
+    try:
+        path = getattr(study, "path", None)
+    except Exception:
+        pass
+    scope = _STUDY_KEY_PREFIX + (os.path.normcase(os.path.realpath(str(path))) if path else f"#{id(study)}")
+    sid = None
+    if hasattr(study, "current"):
         try:
             subject = study.current()
             if subject:
-                return str(getattr(subject, "id", subject))
+                sid = str(getattr(subject, "id", subject))
         except Exception:
             pass
+    return scope, sid
+
+
+def _assistKey():
+    scope, sid = _studyAssistScope()
+    if scope is not None and sid:
+        return f"{scope}|{sid}"
     editor = segmentEditor()
     if editor is None or editor.segmentationNode() is None:
         return None
@@ -2596,11 +2622,18 @@ def notifyAssist(tool, addedVoxels, params=None):
 
 
 def assistCounts(key=None):
-    """Assisted counts of a subject id or ``"<segmentation id>/<segment id>"`` (default: the current one), or all."""
+    """Assisted counts of a subject id of the open study or ``"<segmentation id>/<segment id>"`` (default: the current one),
+    or all. A subject id is read in the open study only: another study's subject with the same id has its own counts.
+    """
     if key is None:
         key = _assistKey()
     if key == "all":
         return json.loads(json.dumps(_assistCounts))
+    if key is not None and not str(key).startswith(_STUDY_KEY_PREFIX):
+        scope, _sid = _studyAssistScope()
+        scoped = f"{scope}|{key}" if scope is not None else None
+        if scoped is not None and scoped in _assistCounts:
+            key = scoped
     return json.loads(json.dumps(_assistCounts.get(key, {})))
 
 
