@@ -284,6 +284,27 @@ class MethodsTest(_StudyCase):
         # A summary of another shape keeps the scalar fallback
         self.assertEqual(methods.robustness_text({"split_half": 0.98}), "split_half 0.98")
 
+    def test_overwritten_robustness_runs_are_not_cited(self):
+        # Every Robust analysis writes one fixed folder: a rerun overwrites the earlier run's files, so only the run whose id is in the result file is cited
+        runs.register_kind("robustness")
+        self.make_study([("sub-01", {"group": "case"})])
+        folder = self.run_dir("robustness")
+        first = self.register("robustness", folder, summary={"analysis": "splithalf", "label": "lesion split-half", "lesion_split_half": {"r_overlap": 0.5}},
+                              params={"analysis": "splithalf", "n_splits": 100}, files={"splithalf.json": {"run_id": None}})
+        second = self.register("robustness", folder, summary={"analysis": "splithalf", "label": "lesion split-half", "lesion_split_half": {"r_overlap": 0.9}},
+                               params={"analysis": "splithalf", "n_splits": 200}, files={"splithalf.json": {"run_id": None}})
+        seeds_folder = self.run_dir("robustness-seeds")
+        old_seeds = self.register("robustness", seeds_folder, summary={"analysis": "seeds", "seed_variants": ["sphere2"]}, params={"analysis": "seeds", "variants": ["sphere2"]})
+        new_seeds = self.register("robustness", seeds_folder, summary={"analysis": "seeds", "seed_variants": ["sphere4"]}, params={"analysis": "seeds", "variants": ["sphere4"]})
+        export.write_json_atomic(os.path.join(folder, "splithalf.json"), {"run_id": second})
+        export.write_json_atomic(os.path.join(seeds_folder, "variants.json"), {"run_id": new_seeds})
+        text = {section.id: section.text() for section in methods.methods_sections(self.root)}["statistics"]
+        self.assertIn(f"(run {second})", text)
+        self.assertNotIn(f"(run {first})", text)
+        self.assertIn(f"(run {new_seeds})", text)
+        self.assertNotIn(f"(run {old_seeds})", text)
+        self.assertEqual(len([line for line in text.splitlines() if line.startswith("Robustness")]), 2)
+
     def test_acknowledgement_only_for_gsp_bundles(self):
         self.make_study([("sub-01", {})])
         self.cohortmaps(gsp=False)

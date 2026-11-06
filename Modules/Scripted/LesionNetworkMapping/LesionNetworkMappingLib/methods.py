@@ -476,6 +476,22 @@ class Records:
             return False
         return False
 
+    def overwritten(self, record):
+        """Whether a later run wrote its results into the folder of a Robust analysis run (``record``, kind robustness).
+
+        Each Robust analysis writes one fixed folder and result file (``splithalf.json``, ``influence.json``, ...) holding
+        the id of the run that wrote it: a record whose id differs no longer stands for the files on disk, as for GLM and
+        sLNM in :meth:`group_records`. A run without a readable result file is not overwritten.
+        """
+        from . import robustness
+
+        analysis = (self.params(record) or {}).get("analysis")
+        if not analysis:
+            return False
+        name = {"seeds": robustness.VARIANTS_JSON, "consolidate": robustness.CONSOLIDATION_JSON}.get(analysis, f"{analysis}.json")
+        data = self.run_json(record, name)
+        return isinstance(data, dict) and data.get("run_id") not in (None, record["id"])
+
     def summary(self, record):
         from . import runs as runslib
 
@@ -1007,6 +1023,8 @@ def statistics_section(records, used):
         section.paragraph(slnm_paragraph(data, run_id))
     for kind in [*STATISTICS_KINDS[3:], *sorted({r.get("kind") for r in records.runs.values()} - set(STATISTICS_KINDS) - {"map", "cohortmaps", "reference", "preflight", "figure", "report", "export", "normalization", "pipeline", "fastindex", "calibration", "parity", None})]:
         for record in records.done_runs(kind):
+            if kind == "robustness" and records.overwritten(record):
+                continue  # a later Robust run wrote its results to the same folder: only that run is cited
             found = True
             summary = records.summary(record) or {}
             if kind == "robustness":
