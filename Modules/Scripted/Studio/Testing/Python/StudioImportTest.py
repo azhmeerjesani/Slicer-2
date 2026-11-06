@@ -2599,6 +2599,95 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         draw.writeSidecar(path, lesion)
         self.assertEqual([sidecar()["Notes"], sidecar()["SourceReference"]], ["", ""])
 
+    def _windowDrag(self, widget, mimeData):
+        """Drag ``mimeData`` over the centre of ``widget`` and drop it, through the main window's QWindow (Qt then picks the
+        widget under the cursor, like a drag from the file manager). Returns the drop action of the drop, or None if this
+        PythonQt cannot make drag events.
+        """
+        window = self.mainWindow.windowHandle()
+        self.assertIsNotNone(window, "the main window is shown")
+        parent = widget.parentWidget()
+        while parent is not None and not parent.inherits("QScrollArea"):
+            parent = parent.parentWidget()
+        if parent is not None:
+            parent.ensureWidgetVisible(widget)
+            self._pump()
+        self.assertFalse(widget.visibleRegion().isEmpty(), f"{widget.objectName} is in view")
+        point = self.mainWindow.mapFromGlobal(widget.mapToGlobal(qt.QPoint(widget.width // 2, widget.height // 2)))
+        actions = qt.Qt.CopyAction | qt.Qt.MoveAction | qt.Qt.LinkAction
+        try:
+            enter = qt.QDragEnterEvent(point, actions, mimeData, qt.Qt.LeftButton, qt.Qt.NoModifier)
+            move = qt.QDragMoveEvent(point, actions, mimeData, qt.Qt.LeftButton, qt.Qt.NoModifier)
+            drop = qt.QDropEvent(qt.QPointF(point), actions, mimeData, qt.Qt.LeftButton, qt.Qt.NoModifier)
+        except (TypeError, ValueError):
+            # This PythonQt cannot make the events (QFlags arguments)
+            return None
+        for event in (enter, move, drop):
+            qt.QApplication.sendEvent(window, event)
+        self._pump()
+        return drop.dropAction() if drop.isAccepted() else qt.Qt.IgnoreAction
+
+    def test_file_dropped_on_a_text_field_is_opened_not_typed_in(self):
+        """A file dropped on a text field of the window (Draw Notes and Source) is opened like anywhere else on the window,
+        never typed in as its path (BB-1: the Notes took "file:///...", saved into the project scene); a dragged text is
+        still typed in, and Classic is unchanged.
+        """
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        grid = ((20, 24, 28), 2.0, (1, 1, 1), (-20.0, -24.0, -28.0))
+        scan = self._writeVolume("scan.nii.gz", grid)
+        lesion = self._writeMask("sub-08_lesion.nii.gz", grid, center=(5, 6, 7))
+        importer.loadFiles([scan], studioShell)
+        studioShell.switchTo("draw")
+        self._wait(300)
+        self.mainWindow.findChild("QPushButton", "StudioDrawNotesRow").click()
+        self._wait(300)
+        notes = self.mainWindow.findChild("QPlainTextEdit", "StudioLesionNotesEdit")
+        source = self.mainWindow.findChild("QLineEdit", "StudioLesionSourceReferenceEdit")
+        self.assertTrue(notes.isVisible() and source.isVisible())
+        dropped = []
+        original = importer.handleDrop
+        importer.handleDrop = lambda paths, addData=False, shell=None: dropped.append(list(paths))
+        initialSize = qt.QSize(self.mainWindow.size)
+        try:
+            # The fields are in view
+            self.mainWindow.resize(1600, 1000)
+            # Files only (a multi-line field took it), and files with text (a line edit took it)
+            urls = qt.QMimeData()
+            urls.setUrls([qt.QUrl.fromLocalFile(lesion)])
+            action = self._windowDrag(notes, urls)
+            if action is None:
+                return
+            self.assertEqual(action, qt.Qt.CopyAction)
+            self._wait(50)
+            self.assertEqual(str(notes.toPlainText()), "")
+            self.assertEqual(dropped, [[lesion]])
+            urlsAndText = qt.QMimeData()
+            urlsAndText.setUrls([qt.QUrl.fromLocalFile(lesion)])
+            urlsAndText.setText(lesion)
+            for field in (source, notes):
+                self.assertEqual(self._windowDrag(field, urlsAndText), qt.Qt.CopyAction)
+                self._wait(50)
+            self.assertEqual(str(source.text), "")
+            self.assertEqual(str(notes.toPlainText()), "")
+            self.assertEqual(dropped, [[lesion]] * 3)
+            # A dragged text (no file) is still typed in
+            text = qt.QMimeData()
+            text.setText("doi:10.1000/182")
+            self._windowDrag(source, text)
+            self._wait(50)
+            self.assertEqual(str(source.text), "doi:10.1000/182")
+            self.assertEqual(len(dropped), 3)
+            # Nothing stays installed on the application between drags, and Classic removes the Studio drop handling
+            self.assertFalse(importer._dropHandler.textFieldRouter.armed)
+            studioShell.dispose()
+            self._pump()
+            self.assertIsNone(importer._dropHandler)
+        finally:
+            importer.handleDrop = original
+            self.mainWindow.resize(initialSize)
+
     def test_tsv_drop_no_add_data(self):
         """A dropped participants.tsv never opens Add Data (a toast says what it holds); Shift+drop still does."""
         from StudioLib import importer

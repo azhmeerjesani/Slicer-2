@@ -4691,9 +4691,17 @@ class _DropHandler(qt.QObject):
     def __init__(self, shell):
         qt.QObject.__init__(self)
         self.shell = shell
+        # Files dropped on a text field are opened too
+        self.textFieldRouter = _TextFieldDropRouter(self)
+        self.textFieldRouter.watch(shell.mainWindow)
+
+    def dispose(self):
+        self.textFieldRouter.dispose()
 
     def eventFilter(self, obj, event):
         try:
+            if event.type() in (qt.QEvent.Show, qt.QEvent.WinIdChange):
+                self.textFieldRouter.watch(self.shell.mainWindow)
             return self._handleEvent(event)
         except Exception:
             logging.error(f"Studio drop handler failed:\n{traceback.format_exc()}")
@@ -4747,6 +4755,123 @@ class _DropHandler(qt.QObject):
             shell.toast(text, ms=12000, level="consequence")
         except Exception:
             logging.error(f"Studio: cannot show the drop failure:\n{traceback.format_exc()}")
+
+
+# Text fields that take a drag themselves before the main window sees it (a multi-line field: on its viewport)
+_TEXT_FIELD_CLASSES = ("QLineEdit", "QTextEdit", "QPlainTextEdit")
+# Fields that are meant to take a dragged path as text: a path field and the Python console
+_PATH_TEXT_OWNERS = ("ctkPathLineEdit", "ctkConsole")
+
+
+def _textFieldOf(obj):
+    """The text field that a drag event sent to ``obj`` is for (the field, or the viewport of a multi-line field), else None."""
+    if obj is None or not obj.isWidgetType():
+        return None
+    for className in _TEXT_FIELD_CLASSES:
+        if obj.inherits(className):
+            return obj
+    parent = obj.parentWidget()
+    if parent is not None and (parent.inherits("QTextEdit") or parent.inherits("QPlainTextEdit")) and parent.viewport() == obj:
+        return parent
+    return None
+
+
+class _TextFieldDropFilter(qt.QObject):
+    """Application event filter, installed only while a drag of files is over the main window: the drag events of a text
+    field of the main window go to the Studio drop handler, so the files are opened and not typed in as their path.
+    """
+
+    def __init__(self, dropHandler):
+        qt.QObject.__init__(self)
+        self.dropHandler = dropHandler
+
+    def eventFilter(self, obj, event):
+        try:
+            if event.type() not in (qt.QEvent.DragEnter, qt.QEvent.DragMove, qt.QEvent.DragLeave, qt.QEvent.Drop):
+                return False
+            field = _textFieldOf(obj)
+            if field is None or not self._routed(field):
+                return False
+            return self.dropHandler._handleEvent(event)
+        except Exception:
+            logging.error(f"Studio text field drop filter failed:\n{traceback.format_exc()}")
+        return False
+
+    def _routed(self, field):
+        mainWindow = self.dropHandler.shell.mainWindow
+        if not _isAlive(mainWindow) or field.window() != mainWindow:
+            return False
+        widget = field
+        while widget is not None:
+            if any(widget.inherits(className) for className in _PATH_TEXT_OWNERS):
+                return False
+            widget = widget.parentWidget()
+        return True
+
+
+class _TextFieldDropRouter(qt.QObject):
+    """Files dropped on a text field of the main window are opened like anywhere else on the window (SPEC: drops are caught
+    by the event filter of ``mw`` while Studio is on).
+
+    Qt gives a drag to the deepest widget under the cursor that accepts drops, and the main window's filter sees it only
+    when that widget ignores it; but a line edit takes any drag that offers text, and a multi-line field any drag with
+    URLs (typing the path in). The router watches the main window's QWindow, which receives every drag before Qt picks the
+    widget: while a drag of local files is over the window, ``_TextFieldDropFilter`` is installed on the application.
+    It is not installed otherwise, so that no Python filter runs for every event of the application.
+    """
+
+    def __init__(self, dropHandler):
+        qt.QObject.__init__(self)
+        self.window = None
+        self.fieldFilter = _TextFieldDropFilter(dropHandler)
+        self.armed = False
+        self.generation = 0
+
+    def watch(self, mainWindow):
+        """Watch the current QWindow of ``mainWindow`` (it has none before it is first shown)."""
+        window = mainWindow.windowHandle() if _isAlive(mainWindow) else None
+        if window is not None and self.window is not None and window == self.window:
+            return
+        self._unwatchWindow()
+        if window is not None:
+            window.installEventFilter(self)
+            self.window = window
+
+    def dispose(self):
+        self._unwatchWindow()
+        self._disarm(self.generation)
+
+    def _unwatchWindow(self):
+        if self.window is not None and _isAlive(self.window):
+            self.window.removeEventFilter(self)
+        self.window = None
+
+    def eventFilter(self, obj, event):
+        try:
+            eventType = event.type()
+            if eventType in (qt.QEvent.DragEnter, qt.QEvent.DragMove):
+                if self.armed:
+                    self.generation += 1  # the drag goes on: a pending disarm is stale
+                elif localPaths(event.mimeData()):
+                    self._arm()
+            elif eventType in (qt.QEvent.DragLeave, qt.QEvent.Drop) and self.armed:
+                # After the widget under the cursor has received the event
+                generation = self.generation
+                qt.QTimer.singleShot(0, lambda: self._disarm(generation))
+        except Exception:
+            logging.error(f"Studio text field drop router failed:\n{traceback.format_exc()}")
+        return False
+
+    def _arm(self):
+        self.generation += 1
+        slicer.app.installEventFilter(self.fieldFilter)
+        self.armed = True
+
+    def _disarm(self, generation):
+        if not self.armed or generation != self.generation:
+            return
+        slicer.app.removeEventFilter(self.fieldFilter)
+        self.armed = False
 
 
 def _setDropHighlight(active):
@@ -4834,6 +4959,7 @@ def uninstall(shell):
     mainWindow = _dropHandler.shell.mainWindow
     if _isAlive(mainWindow):
         mainWindow.removeEventFilter(_dropHandler)
+    _dropHandler.dispose()
     _dropHandler = None
     _setDropHighlight(False)
 
