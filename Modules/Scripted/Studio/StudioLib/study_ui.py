@@ -310,6 +310,14 @@ def _toast(shell, text, **kwargs):
         logging.info(f"Studio study: {text}")
 
 
+def _sidList(sids, shown=5):
+    """``"sub-01, sub-02 and 3 more"``: the first ``shown`` participant ids of a list, for a message."""
+    sids = list(sids)
+    if len(sids) <= shown:
+        return ", ".join(sids)
+    return _("{sids} and {count} more").format(sids=", ".join(sids[:shown]), count=len(sids) - shown)
+
+
 def _showFolder(folder):
     from . import projects
 
@@ -2227,7 +2235,8 @@ class StudySession:
         for node in hidden:
             if slicer.mrmlScene.IsNodePresent(node):
                 _importer()._setLesionVisible(node, True)
-        self.flush()
+        if not self.flush():
+            self._keepUnsaved()
         self._closed = True
         self._saveTimer.stop()
         self._heartbeatTimer.stop()
@@ -2472,7 +2481,11 @@ class StudySession:
             return False
         except Exception as e:
             self._lastSaveError = str(e)
-            logging.error(f"Studio: cannot save the study {self.study.path}:\n{traceback.format_exc()}")
+            if getattr(e, "user_problem", False):
+                # participants.tsv on disk cannot be read (another program saved it so): the message says what to do
+                logging.warning(f"Studio: cannot save the study {self.study.path}: {e}")
+            else:
+                logging.error(f"Studio: cannot save the study {self.study.path}:\n{traceback.format_exc()}")
             _toast(self._shell, _("The study could not be saved: {error}").format(error=e), ms=6000, level="warning")
             _notifySaved(self)
             return False
@@ -2480,6 +2493,43 @@ class StudySession:
         self._lastSaveError = None
         _notifySaved(self)  # the view drew "Saving…" while the save timer was active
         return True
+
+    def unsavedSubjects(self):
+        """The subjects whose study changes are not in participants.tsv yet (a save failed or is pending)."""
+        try:
+            changed, added, removed = self.study.unsaved_rows()
+        except Exception:
+            logging.error(f"Studio: the unsaved changes of the study could not be listed:\n{traceback.format_exc()}")
+            return []
+        return sorted(set(changed) | set(added) | set(removed))
+
+    def saveErrorText(self):
+        """Why the study changes are not saved (the last save error, or the table being in use by another program)."""
+        return self._lastSaveError or _("participants.tsv is in use by another program")
+
+    def _keepUnsaved(self):
+        """The study closes while its changes could not be saved in participants.tsv (another program made the table
+        unreadable, or keeps it locked): the changed cells are posted to the study's inbox, which the next session merges
+        once the table can be read (a study has no Save: closing never loses them). Return the subjects kept.
+        """
+        if not self.folderAvailable():
+            return []  # nothing is written at the old path (see flush)
+        try:
+            path, kept, notKept = self.study.keep_unsaved(self.saveErrorText(), source="studio-unsaved")
+        except Exception:
+            logging.error(f"Studio: the unsaved study changes could not be kept:\n{traceback.format_exc()}")
+            _toast(self._shell, _("The study changes could not be saved or kept: {error}").format(error=self.saveErrorText()),
+                   ms=15000, level="warning")
+            return []
+        if notKept:
+            logging.warning(f"Studio: the subjects added or removed in this session are not kept in {self.study.path}: {', '.join(notKept)}")
+        if kept:
+            logging.warning(f"Studio: the study changes of {', '.join(kept)} could not be saved in participants.tsv "
+                            f"({self.saveErrorText()}); they are kept in {path} for the next session")
+            _toast(self._shell, _("The study changes of {sids} could not be saved in participants.tsv. They are kept and added "
+                                  "when you open study {name} again (after the table is repaired)").format(sids=_sidList(kept), name=self.study.name),
+                   ms=15000, level="warning", toolTip=self.saveErrorText())
+        return kept
 
     def saveStatus(self):
         """``(text, timestamp)`` for the save status of the top bar (A-01b)."""

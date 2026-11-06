@@ -239,7 +239,11 @@ Saving a lesion and saving the scene are different things, with different keys:
   if only saved lesions and the template are unsaved, the message says "Your lesion is saved as
   sub-01_lesion.nii.gz. The session (scene) is not saved." with **Quit** as the default, and if a lesion has changes
   since it was saved, **Save lesion…** is the default. With a study open, there is no Save: the current subject is
-  written to the study first and the message only asks "All changes are saved in study <name>. Quit?".
+  written to the study first and the message only asks "All changes are saved in study <name>. Quit?". If
+  participants.tsv cannot be saved (another program saved it with a row it cannot read, or keeps it locked), the
+  message names the subjects whose study changes are not saved and why: **Cancel** lets you repair the table first, and
+  **Quit** keeps the changes in the study's `.studio/inbox/`, which adds them when you open the study again after the
+  table is repaired.
 
 Autosave (see [below](#autosave-and-recovery)) is not Save: it says "Autosaved", never "Saved".
 

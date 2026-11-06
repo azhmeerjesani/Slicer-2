@@ -1397,6 +1397,42 @@ class Study:
         schema.write_text_atomic(path, json.dumps(content, ensure_ascii=False) + "\n")
         return path
 
+    def unsaved_rows(self):
+        """The cells changed in memory since the files were last read or written: ``({sid: {column: value}}, added, removed)``.
+
+        ``added`` and ``removed`` are the participant ids of rows added or removed in memory (sorted).
+        """
+        base = (self._baseline or {}).get("rows", {})
+        changed, added = {}, []
+        for row in self._rows:
+            sid = row["participant_id"]
+            if sid not in base:
+                added.append(sid)
+                continue
+            values = {column: value for column, value in row.items() if column != "participant_id" and value != base[sid].get(column, NA)}
+            if values:
+                changed[sid] = values
+        removed = sorted(sid for sid in base if sid not in self._index)
+        return changed, sorted(added), removed
+
+    def keep_unsaved(self, reason, source="unsaved"):
+        """Keep the cells changed in memory that :meth:`save` could not write (participants.tsv on disk cannot be read, or
+        it stayed locked) as an inbox file, which the next session merges like a job result (:meth:`apply_inbox`)
+        once the table can be read again. Nothing is written when no cell changed.
+
+        Rows added or removed in memory cannot be posted (the inbox changes existing rows only); they are returned.
+
+        :return: ``(inbox file path or None, [participant ids kept], [ids added or removed that are not kept])``.
+        """
+        changed, added, removed = self.unsaved_rows()
+        path = None
+        if changed:
+            # The study's own folder is not named in the record (no local path in the study's files)
+            reason = str(reason).replace(self.path + os.sep, "").replace(self.path, ".")
+            audit = {"event": "unsaved_kept", "reason": reason, "sids": sorted(changed), "at": now_iso()}
+            path = Study.post_results(self.path, changed, source, audit=audit)
+        return path, sorted(changed), added + removed
+
     def apply_inbox(self, save=True, hold=None):
         """Merge the values that jobs posted (:meth:`post_result`), oldest first.
 

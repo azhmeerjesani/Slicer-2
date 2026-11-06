@@ -169,6 +169,11 @@ Run with the main window and testing enabled::
 - ``test_74_blind_search_does_not_match_the_group`` (BB-1): while the study traces blind, "Search subjects" of the Library
   list does not match the hidden group ("control" or "case" lists no subject, not exactly the controls or the cases) and its
   tooltip does not offer the group; without blinding the search by group works again.
+- ``test_79_unreadable_participants_tsv_keeps_study_changes_at_close`` (BB-1): while a study is open, another program saves
+  participants.tsv with an extra value that has no column name. Each save then fails (a warning, no traceback: the table is
+  the user's to repair); the quit prompt says that the study changes of the subject are not saved and that they are kept;
+  closing the study posts them to ``.studio/inbox`` (participants.tsv is left as it is), and the study opened again after the
+  table is repaired has the subject's Done (status, lesion). They were kept only in memory and lost at quit.
 """
 
 import inspect
@@ -5945,4 +5950,81 @@ class StudioRegressionTest(unittest.TestCase):
         finally:
             if host is not None:
                 host.deleteLater()
+            study_ui.closeStudy()
+
+    def test_79_unreadable_participants_tsv_keeps_study_changes_at_close(self):
+        """Study changes that participants.tsv cannot take (another program made it unreadable) are kept for the next session
+        when the study closes, the close prompt says so, and the save failure logs no traceback (BB-1).
+        """
+        from LesionNetworkMappingLib import study as studyModule
+
+        from StudioLib import firstrun, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        study = self._study([("sub-04", {"status": "untraced"}, False), ("sub-05", {}, False), ("sub-06", {}, False)])
+        folder = study.path
+        tsv = os.path.join(folder, "participants.tsv")
+        inbox = os.path.join(folder, ".studio", "inbox")
+        lesion = study.subject("sub-04")["lesion"]
+
+        class Recorder(logging.Handler):
+            def __init__(self):
+                super().__init__(logging.DEBUG)
+                self.records = []
+
+            def emit(self, record):
+                self.records.append(record)
+
+        recorder = Recorder()
+        logging.getLogger().addHandler(recorder)
+        try:
+            session = study_ui.openStudy(folder, showLibrary=False)
+            self.assertIsNotNone(session)
+            # Another program (a spreadsheet, a text editor) saves the table with a value that has no column name
+            with open(tsv, encoding="utf-8") as f:
+                text = f.read()
+            broken = "\n".join(line + "\tcheck scan quality" if line.startswith("sub-06\t") else line for line in text.split("\n"))
+            with open(tsv, "w", encoding="utf-8") as f:
+                f.write(broken)
+            # Done of sub-04 (the row of a traced subject)
+            session.study.set("sub-04", {"status": "traced", "lesion": lesion, "trace_seconds": "42"})
+            self.assertFalse(session.flush())
+            self.assertEqual(session.saveStatus()[0], "Study not saved")
+            errors = [record.getMessage()[:200] for record in recorder.records if record.levelno >= logging.ERROR]
+            self.assertEqual(errors, [], "a table that another program made unreadable is the user's problem, not a program error")
+            self.assertFalse(any("Traceback" in record.getMessage() for record in recorder.records))
+            self.assertEqual(session.unsavedSubjects(), ["sub-04"])
+            # The quit prompt says that the study changes are not saved, names the subject and says they are kept
+            mode, summary = firstrun.studyCloseSummary()
+            self.assertEqual(mode, firstrun.CLOSE_MODE_LESION_SAVED)
+            self.assertIn("sub-04", summary)
+            self.assertIn("could not be saved", summary)
+            self.assertIn("line", summary, "the reason (the table's line) is said")
+            self.assertIn("kept", summary)
+            self.assertNotIn("All changes are saved", summary)
+            # Closing (the application quits) keeps the changes in the study's inbox; the broken table is left as it was
+            study_ui.closeStudy()
+            with open(tsv, encoding="utf-8") as f:
+                self.assertEqual(f.read(), broken)
+            posted = [name for name in os.listdir(inbox) if name.endswith(".json")]
+            self.assertEqual(len(posted), 1, posted)
+            with open(os.path.join(inbox, posted[0]), encoding="utf-8") as f:
+                rows = json.load(f)["rows"]
+            self.assertEqual(set(rows), {"sub-04"}, "only the changed row is kept")
+            self.assertEqual((rows["sub-04"]["status"], rows["sub-04"]["trace_seconds"]), ("traced", "42"))
+            # The user repairs the table and opens the study again: sub-04's Done is in the study
+            with open(tsv, "w", encoding="utf-8") as f:
+                f.write(text)
+            session = study_ui.openStudy(folder, showLibrary=False)
+            self.assertIsNotNone(session)
+            row = session.study.subject("sub-04")
+            self.assertEqual((row["status"], row["lesion"], row["trace_seconds"]), ("traced", lesion, "42"))
+            self.assertEqual([name for name in os.listdir(inbox) if name.endswith(".json")], [], "the kept changes were merged")
+            study_ui.closeStudy()
+            reopened = studyModule.Study.open(folder)
+            self.assertEqual(reopened.subject("sub-04")["status"], "traced")
+            self.assertEqual(reopened.subject("sub-06").get("status"), "untraced")
+        finally:
+            logging.getLogger().removeHandler(recorder)
             study_ui.closeStudy()

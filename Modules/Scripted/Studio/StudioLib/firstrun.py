@@ -268,8 +268,10 @@ def studyCloseSummary():
     """``(mode, summary)`` of the close prompt while a study is open (SPEC D7: a study has no Save, its current subject
     is written when the application quits): the subject's edits are written now and, when that succeeded and nothing
     outside the study is unsaved, the question is only "All changes are saved in study <name>. Quit?" (the answer
-    cannot discard them, so the prompt never offers "Don't save" or a "Save lesion…" outside the study). ``("", "")``
-    (the classic prompt) when writing failed (a toast gives the reason) or other data is unsaved; None without a study.
+    cannot discard them, so the prompt never offers "Don't save" or a "Save lesion…" outside the study). When only
+    participants.tsv could not be saved (another program made it unreadable), the prompt names the subjects whose study
+    changes are kept for the next session (Cancel to repair the table first). ``("", "")`` (the classic prompt) when
+    writing failed otherwise (a toast gives the reason) or other data is unsaved; None without a study.
     """
     try:
         from . import study_ui
@@ -278,15 +280,23 @@ def studyCloseSummary():
     studySession = study_ui.session() if hasattr(study_ui, "session") else None
     if studySession is None:
         return None
-    ok = studySession.writeCurrent()
-    ok = studySession.flush() and ok
-    if not ok:
+    written = studySession.writeCurrent()
+    saved = studySession.flush()
+    # participants.tsv could not be saved (another program made it unreadable, or keeps it locked): the study changes
+    # are kept for the next session when the study closes (StudySession.close), and the prompt says so
+    unsaved = studySession.unsavedSubjects() if written and not saved and studySession.folderAvailable() else []
+    if not written or (not saved and not unsaved):
         return "", ""
     # The study's nodes (the subject's scan and lesion, the shared template) are in the study now
     others = [node for node in _modifiedStorableNodes()
               if not node.GetAttribute(study_ui.SUBJECT_ATTRIBUTE) and not _isTemplate(node)]
     if others:
         return "", ""
+    if unsaved:
+        return CLOSE_MODE_LESION_SAVED, _("The study changes of {sids} could not be saved in participants.tsv of study {study}: "
+                                          "{error}\n\nThey are kept and added when you open the study again after the table is "
+                                          "repaired. Quit?").format(
+            sids=study_ui._sidList(unsaved), study=studySession.name, error=studySession.saveErrorText())
     return CLOSE_MODE_LESION_SAVED, _("All changes are saved in study {study}. Quit?").format(study=studySession.name)
 
 
