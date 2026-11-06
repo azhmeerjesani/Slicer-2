@@ -657,8 +657,80 @@ def foreign_lesions(out_dir, run_meta):
     return foreign
 
 
+# Fields of provenance.json that describe one run: an earlier export's record in "earlier_runs"
+_RUN_RECORD_KEYS = ("created", "software", "versions", "host", "connectome", "N", "df", "subject_ids_sha256", "subject_list", "subset", "threshold",
+                    "null", "lesions", "run", "terms", "acknowledgement")
+
+
+def _earlier_runs(out_dir, replaced):
+    """Records of the earlier exports into ``out_dir`` whose lesions keep their files after this export (oldest first).
+
+    Another lesion exported earlier into the same folder (``conn-<label>``) keeps its maps and sidecar, so the folder's
+    provenance.json, methods.md and reproduce.sh keep describing it: its run record is read from the provenance.json
+    there (its own run and its "earlier_runs"), with only the lesions whose sidecar is still in the folder and none of
+    whose files is in ``replaced`` (the file names this export writes).
+    """
+    try:
+        with open(os.path.join(out_dir, "provenance.json"), encoding="utf-8") as f:
+            previous = json.load(f)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(previous, dict) or previous.get("format") != PROVENANCE_FORMAT:
+        return []
+    records = [record for record in previous.get("earlier_runs") or [] if isinstance(record, dict)]
+    records.append({key: previous[key] for key in _RUN_RECORD_KEYS if key in previous})
+    out = []
+    for record in records:
+        kept = []
+        for lesion in record.get("lesions") or []:
+            if not isinstance(lesion, dict) or not isinstance(lesion.get("sidecar"), str) or not lesion.get("sidecar"):
+                continue
+            maps = lesion.get("maps") if isinstance(lesion.get("maps"), dict) else {}
+            names = [os.path.basename(lesion["sidecar"])] + [os.path.basename(name) for name in maps.values() if isinstance(name, str) and name]
+            if any(name in replaced for name in names) or not os.path.isfile(os.path.join(out_dir, names[0])):
+                continue
+            kept.append(lesion)
+        if kept:
+            files = [os.path.basename(name) for lesion in kept for name in [*(lesion.get("maps") or {}).values(), lesion["sidecar"]]]
+            out.append({**record, "lesions": kept, "files": files})
+    return out
+
+
+def _earlier_run_meta(record):
+    """The run record (run.json-like) of an earlier export's provenance record, for its methods and engine command line."""
+    subset = record.get("subset") or {}
+    run_meta = {key: value for key, value in (record.get("run") or {}).items() if key in ("argv", "cwd")}
+    run_meta.update({
+        "n": record.get("N"),
+        "cancelled": bool(subset.get("partial")),
+        "subject_list": record.get("subject_list"),
+        "null": record.get("null"),
+        "subjects": {"random": subset.get("random"), "seed": subset.get("seed", 0)},
+        "software": record.get("software"),
+        "versions": record.get("versions"),
+    })
+    return run_meta
+
+
+def _earlier_methods_text(record, info, index):
+    """methods.md part of an earlier export in the folder (:func:`_earlier_runs`)."""
+    from . import methods
+
+    names = " ".join(", ".join(str(lesion.get("name")) for lesion in record["lesions"]).split())
+    title = f"Methods: earlier export {index} in this folder ({names})"
+    try:
+        sections = methods.run_sections(record.get("connectome") or info, int(record.get("N") or 0), record["subset"], record["threshold"], record["lesions"],
+                                        _earlier_run_meta(record), software=record.get("software"))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return f"# {title}\n\nN = {record.get('N')}; exported {record.get('created') or NOT_RECORDED}; see provenance.json \"earlier_runs\".\n"
+    return methods.render(sections, "md", title=title)
+
+
 def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=None, run_meta=None, preview_n=None, software=None):
     """Export a network-mapping run: maps, one sidecar per lesion, provenance.json, methods.md and reproduce.sh.
+
+    Lesions exported earlier into ``out_dir`` by other runs keep their maps and sidecars: provenance.json lists their
+    run records in "earlier_runs" (and their files in "files"), methods.md and reproduce.sh cover them too.
 
     :param out_dir: destination folder (created if needed).
     :param maps: ``engine.NetworkMaps`` (the maps are written), or {lesion name: {"AvgR", "AvgFz", "T": path}}
@@ -773,6 +845,8 @@ def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=
     provenance_path = os.path.join(out_dir, "provenance.json")
     methods_path = os.path.join(out_dir, "methods.md")
     reproduce_path = os.path.join(out_dir, "reproduce.sh")
+    files = [os.path.basename(p) for name in lesion_names for p in written_maps[name].values()] + [os.path.basename(p) for p in sidecars]
+    earlier = _earlier_runs(out_dir, set(files))
     provenance = {
         "format": PROVENANCE_FORMAT,
         "version": 1,
@@ -790,15 +864,20 @@ def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=
         "null": run_meta.get("null"),
         "lesions": lesions,
         "run": {key: run_meta.get(key) for key in ("argv", "cwd", "threads", "start", "end", "elapsed", "engine_elapsed", "status", "desc_suffix") if key in run_meta},
-        "files": [os.path.basename(p) for name in lesion_names for p in written_maps[name].values()] + [os.path.basename(p) for p in sidecars] + ["methods.md", "reproduce.sh"],
+        "files": files + [name for record in earlier for name in record["files"]] + ["methods.md", "reproduce.sh"],
         "citations": [CITATIONS["boes2015"], CITATIONS["fox2018"], *([info["citation"]] if info.get("citation") else []), *(CITATIONS[key] for key in DEBATE_CITATIONS)],
         "terms": licence,
         "acknowledgement": acknowledgement,
         "disclaimer": DISCLAIMER,
     }
+    if earlier:
+        provenance["earlier_runs"] = earlier  # other lesions exported earlier into this folder, oldest first
+    methods = methods_text(info, n, subset, threshold, lesions, run_meta, software=software)
+    for index, record in enumerate(earlier, 1):
+        methods += "\n" + _earlier_methods_text(record, info, index)
     write_json_atomic(provenance_path, _clean(provenance))
-    _write_text_atomic(methods_path, methods_text(info, n, subset, threshold, lesions, run_meta, software=software))
-    _write_text_atomic(reproduce_path, reproduce_script(run_meta, info, lesions, preview_n), mode=0o755)
+    _write_text_atomic(methods_path, methods)
+    _write_text_atomic(reproduce_path, reproduce_script(run_meta, info, lesions, preview_n, earlier=earlier), mode=0o755)
     return {
         "maps": [p for name in lesion_names for p in written_maps[name].values()],
         "sidecars": sidecars,
@@ -954,8 +1033,11 @@ def _engine_arguments(run_meta, info, lesions, preview_n):
     return out
 
 
-def reproduce_script(run_meta, info, lesions, preview_n=None):
+def reproduce_script(run_meta, info, lesions, preview_n=None, earlier=()):
     """reproduce.sh: the engine command line that recomputes the run's maps into $OUT.
+
+    ``earlier``: provenance records of other lesions exported earlier into the same folder (:func:`_earlier_runs`);
+    their runs are recomputed too, each into $OUT/earlier-<k> (the engine writes run.json and qa.json in its folder).
 
     The script runs ``slicer-lnm engine`` when the ``slicer-lnm`` command (the wheel, the container image or
     ``Slicer Studio.app/Contents/bin/slicer-lnm``) is named by $SLICER_LNM, is on PATH or is the one that wrote
@@ -1013,7 +1095,18 @@ def reproduce_script(run_meta, info, lesions, preview_n=None):
     if (run_meta or {}).get("cancelled"):
         lines.insert(5, f"# The run was stopped after {run_meta.get('n')} subjects: this command recomputes the complete run.")
     lines += [f"  {shlex.quote(token)} \\" for token in arguments]
-    lines += ['  --out "$OUT" --run-json "$OUT/run.json"', ""]
+    lines += ['  --out "$OUT" --run-json "$OUT/run.json"']
+    for index, record in enumerate(earlier or (), 1):
+        earlier_meta = _earlier_run_meta(record)
+        earlier_info = record.get("connectome") or info
+        names = " ".join(", ".join(str(lesion.get("name")) for lesion in record["lesions"]).split())  # one comment line
+        subset = record.get("subset") or {}
+        lines.append(f"# Earlier export {index} in this folder ({names}), recomputed into $OUT/earlier-{index}" + (" (it was a partial run: this recomputes the complete run)" if subset.get("partial") else ""))
+        lines.append('"$@" \\')
+        earlier_arguments = _engine_arguments(earlier_meta, earlier_info, record["lesions"], (subset.get("n_requested") or record.get("N")) if subset.get("preview") else None)
+        lines += [f"  {shlex.quote(token)} \\" for token in earlier_arguments]
+        lines.append(f'  --out "$OUT/earlier-{index}" --run-json "$OUT/earlier-{index}/run.json"')
+    lines.append("")
     return "\n".join(lines)
 
 

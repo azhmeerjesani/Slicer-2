@@ -80,6 +80,47 @@ class LesionNetworkMappingExportCollisionLibTest(_Helpers, unittest.TestCase):
         _runDir, renamed = self.runMeta("patient2", name="Lesion2")
         self.assertEqual(export.foreign_lesions(self.dest, renamed), [], "a lesion of another name replaces nothing")
 
+    def test_lesion_of_another_name_keeps_the_run_level_files_of_the_first(self):
+        """A second lesion exported into the folder of the first: provenance.json, methods.md and reproduce.sh cover both."""
+        _runDir, first = self.runMeta("patient1")
+        self.write(first)
+        _runDir, second = self.runMeta("patient2", name="Lesion2")
+        files = self.write(second)
+        with open(files["provenance"], encoding="utf-8") as f:
+            provenance = json.load(f)
+        firstFiles = sorted(name for name in os.listdir(self.dest) if name.startswith("Lesion_"))
+        self.assertEqual(len(firstFiles), 4, "the first lesion's three maps and sidecar stay")
+        self.assertEqual([lesion["name"] for lesion in provenance["lesions"]], ["Lesion2"], "the top level describes this export's run")
+        self.assertEqual([[lesion["name"] for lesion in record["lesions"]] for record in provenance["earlier_runs"]], [["Lesion"]])
+        self.assertEqual(provenance["earlier_runs"][0]["N"], 120)
+        listed = sorted(name for name in os.listdir(self.dest) if name != "provenance.json")
+        self.assertEqual(sorted(provenance["files"]), listed, "provenance.json lists every file of the folder")
+        with open(files["reproduce"], encoding="utf-8") as f:
+            script = f.read()
+        self.assertIn("lesion/Lesion2.nii.gz", script)
+        self.assertIn("lesion/Lesion.nii.gz", script, "reproduce.sh also recomputes the first lesion")
+        self.assertIn('--out "$OUT/earlier-1"', script)
+        if shutil.which("sh"):
+            import subprocess
+
+            self.assertEqual(subprocess.run(["sh", "-n", files["reproduce"]], check=False).returncode, 0, "reproduce.sh is valid shell")
+        with open(files["methods"], encoding="utf-8") as f:
+            methods = f.read()
+        self.assertIn("earlier export 1 in this folder (Lesion)", methods)
+        self.assertEqual(methods.count("For each of N = 120 subjects"), 2, "methods.md describes both runs")
+
+        # The first lesion exported again: its own record is replaced, the second lesion's becomes the earlier one
+        provenance = json.load(open(self.write(first)["provenance"], encoding="utf-8"))
+        self.assertEqual([lesion["name"] for lesion in provenance["lesions"]], ["Lesion"])
+        self.assertEqual([[lesion["name"] for lesion in record["lesions"]] for record in provenance["earlier_runs"]], [["Lesion2"]])
+        self.assertEqual(sorted(provenance["files"]), listed)
+
+        # A lesion of the same name replaced (as asked): the replaced lesion is not described any more
+        os.remove(export.sidecar_path(self.dest, "Lesion2", BUNDLE["name"]))
+        _runDir, third = self.runMeta("patient3")
+        provenance = json.load(open(self.write(third)["provenance"], encoding="utf-8"))
+        self.assertNotIn("earlier_runs", provenance, "Lesion was replaced and Lesion2's sidecar is gone")
+
     def test_maps_without_a_readable_sidecar_count_as_foreign(self):
         _runDir, first = self.runMeta("patient1")
         self.write(first)
