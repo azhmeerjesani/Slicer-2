@@ -1820,6 +1820,67 @@ class StudioProjectsTest(unittest.TestCase):
             else:
                 os.environ["SLICER_STUDIO_WEB"] = webValue
 
+    def test_27a_location_window_is_usable_above_a_modal_dialog(self):
+        """The location window opened from a modal dialog (Settings, Report a Bug) is a child of that dialog.
+
+        Qt drops the clicks on a window that does not descend from the active modal dialog, and the window manager keeps the
+        modal dialog on top, so a window that was a child of the main window showed behind the dialog and its [Copy] button
+        did nothing.
+        """
+        projects = self.projects
+        folder = os.path.join(self.tempDir, "Modal folder")
+        os.makedirs(folder)
+        webValue = os.environ.get("SLICER_STUDIO_WEB")
+        os.environ["SLICER_STUDIO_WEB"] = "1"
+        modal = qt.QDialog(slicer.util.mainWindow())
+        modal.setObjectName("TestModalDialog")
+        modal.setModal(True)
+        modal.show()
+        slicer.app.processEvents()
+        shown = None
+        try:
+            self.assertEqual(qt.QApplication.activeModalWidget(), modal)
+            self.assertTrue(projects.showInFileManager(folder))
+            slicer.app.processEvents()
+            shown = modal.findChild(qt.QDialog, "StudioLocationDialog")
+            self.assertIsNotNone(shown, "the location window is a child of the modal dialog")
+            self.assertTrue(shown.isVisible())
+            self.assertEqual(shown.findChild(qt.QLineEdit, "StudioLocationField").text, folder)
+            # A second window replaces the first one and is a child of the modal dialog too
+            projects.openLink("https://example.org/modal")
+            slicer.app.processEvents()
+            links = [found for found in modal.findChildren("QDialog") if found.objectName == "StudioLocationDialog" and found.isVisible()]
+            self.assertEqual(len(links), 1, "the first window was closed")
+            self.assertEqual(links[0].findChild(qt.QLineEdit, "StudioLocationField").text, "https://example.org/modal")
+            qt.QApplication.clipboard().setText("before")
+            # Qt blocks the input of a window unless it descends from the active modal dialog
+            ancestor = links[0].parent()
+            while ancestor is not None and ancestor != modal:
+                ancestor = ancestor.parent()
+            self.assertEqual(ancestor, modal, "the location window descends from the modal dialog, so Qt does not block it")
+            links[0].findChild(qt.QPushButton, "StudioLocationCopyButton").click()
+            self.assertEqual(qt.QApplication.clipboard().text(), "https://example.org/modal")
+        finally:
+            modal.close()
+            modal.deleteLater()
+            slicer.app.processEvents()
+            if webValue is None:
+                os.environ.pop("SLICER_STUDIO_WEB", None)
+            else:
+                os.environ["SLICER_STUDIO_WEB"] = webValue
+        # Without a modal dialog the window is a child of the main window again
+        os.environ["SLICER_STUDIO_WEB"] = "1"
+        try:
+            self.assertIsNone(qt.QApplication.activeModalWidget())
+            found = projects._showLocationDialog("folder", folder)
+            self.assertEqual(found.parent(), slicer.util.mainWindow())
+            found.close()
+        finally:
+            if webValue is None:
+                os.environ.pop("SLICER_STUDIO_WEB", None)
+            else:
+                os.environ["SLICER_STUDIO_WEB"] = webValue
+
     def test_27b_clicked_links_in_rich_text_without_a_desktop(self):
         """Links that a user clicks in rich-text labels and text browsers show the link window in the web build.
 

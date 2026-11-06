@@ -2399,6 +2399,7 @@ def _openDesktopUrl(url):
 def _showLocationDialog(kind, text):
     """A non-modal message with ``text`` (a folder path or a link) in a read-only field and a [Copy] button.
 
+    It is a child of the main window, or of the modal dialog that is open (Settings, Report a Bug), so that it stays usable.
     ``kind`` is "folder" or "link". The object names are ``StudioLocationDialog``, ``StudioLocationField`` and
     ``StudioLocationCopyButton``. Return the dialog.
     """
@@ -2411,7 +2412,11 @@ def _showLocationDialog(kind, text):
             pass
         _locationDialog = None
     folder = kind == "folder"
-    dialog = qt.QDialog(slicer.util.mainWindow())
+    # While a modal dialog is open (Settings, Report a Bug, About) Qt drops the clicks on every window that does not descend
+    # from it, and the window manager keeps the modal dialog on top: a window that is a child of the main window would
+    # show behind the dialog with a [Copy] button that does nothing. A child of the modal dialog is neither blocked nor hidden.
+    modal = qt.QApplication.activeModalWidget()
+    dialog = qt.QDialog(modal if modal is not None else slicer.util.mainWindow())
     dialog.setObjectName("StudioLocationDialog")
     dialog.setModal(False)
     dialog.setWindowTitle(_("Folder location") if folder else _("Link"))
