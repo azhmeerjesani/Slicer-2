@@ -44,6 +44,7 @@ import shutil
 import threading
 import time
 import traceback
+import zlib
 
 from StudioLib import lazyNumpy as np
 import qt
@@ -83,6 +84,10 @@ MODE_BINARY = "binary_pm"
 DEFAULT_EXTRUDE_MM = 2.0
 #: Drain timer of the worker results
 DRAIN_MS = 120
+# A NIfTI file that cannot be read: bad gzip header or CRC (OSError), truncated gzip stream such as an interrupted copy
+# (EOFError), corrupt deflate data (zlib.error), bad header or short image data (ValueError). One such file is skipped
+# and said in words; it never stops a job that reads the other files.
+UNREADABLE_FILE_ERRORS = (OSError, EOFError, ValueError, zlib.error)
 #: The duplicate scan starts this long after a lesion was written, and after a study was opened
 SCAN_DELAY_MS = 1500
 OPEN_SCAN_DELAY_MS = 2500
@@ -554,7 +559,8 @@ def buildChips(result, row=None, mni=False, duplicates=(), policy=None, studyOpe
     :param duplicates: ``[(sid, dice)]`` of the possible duplicates of the subject (not dismissed).
     :param policy: ``trace_policy.extrude_2d`` of the study.
     :param atlasJob: None, "running" or a failure text of the last "Get atlases" job.
-    :param fileHygiene: ``lesionops.hygiene`` result of the lesion file on disk (not binary, header, grid), or None.
+    :param fileHygiene: ``lesionops.hygiene`` result of the lesion file on disk (not binary, header, grid), or None;
+      ``{"unreadable": reason}`` when the file could not be read.
     """
     ops = _lnm("lesionops")
     row = row or {}
@@ -620,6 +626,8 @@ def buildChips(result, row=None, mni=False, duplicates=(), policy=None, studyOpe
         messages.append(_("{pct:.0f}% outside the brain").format(pct=hygiene.get("outside_pct") or 0.0))
         actions.append({"id": "clip", "text": _("Clip outside brain"), "tooltip": _("Remove the voxels outside the brain mask of the template (one undo step; the original is kept)")})
     filed = fileHygiene or {}
+    if filed.get("unreadable"):
+        messages.append(_("the saved file could not be read (damaged or incompletely copied?)"))
     if filed.get("nonbinary"):
         messages.append(_("the file has values other than 0 and 1"))
         actions.append({"id": "binarize", "text": _("Binarize at 0.5"), "tooltip": _("Replace the lesion by the voxels of the saved file with a value of at least 0.5 (one undo step; the original file is kept)")})
@@ -666,6 +674,7 @@ class _Worker:
         self._lock = threading.Lock()
         self.pending = 0
         self._indexes = {}  # study path -> LesionIndex (used by the thread only)
+        self._unreadable = {}  # lesion path -> file key of the unreadable version already said (used by the thread only)
 
     def submit(self, kind, **payload):
         with self._lock:
@@ -730,7 +739,7 @@ class _Worker:
                     return None, None
                 data, affine, _header = nifti.read_nifti(path)
                 return (data[..., 0] if data.ndim > 3 else data), (resource, affine)
-            except (fetch.FetchError, OSError, ValueError):
+            except (fetch.FetchError, *UNREADABLE_FILE_ERRORS):
                 return None, None
 
         csf, ventricles, brain = {}, {}, {}
@@ -751,7 +760,7 @@ class _Worker:
             try:
                 data, affine, _header = nifti.read_nifti(brainPath)
                 brain["2009"] = ((data[..., 0] if data.ndim > 3 else data) > 0, affine)
-            except (OSError, ValueError):
+            except UNREADABLE_FILE_ERRORS:
                 pass
         return {"atlases": loaded, "csf": csf, "ventricles": ventricles, "brain": brain, "missingAtlases": len(loaded) < len(ATLAS_IDS)}
 
@@ -779,8 +788,14 @@ class _Worker:
                 data, affine, _header = nifti.read_nifti(path)
                 index.update(sid, data[..., 0] if data.ndim > 3 else data, affine, key=key)
                 changed = True
-            except (OSError, ValueError):
-                logging.warning(f"Studio: the lesion of {sid} could not be indexed for duplicates")
+            except UNREADABLE_FILE_ERRORS as exc:
+                if sid in index:  # the entry was made from what the file was before: it no longer says what the lesion is
+                    index.remove(sid)
+                    changed = True
+                if self._unreadable.get(path) != key:  # said once per version of the file, not on every scan
+                    self._unreadable[path] = key
+                    logging.warning(f"Studio: the lesion of {sid} could not be read, so it is not compared with the others for duplicates "
+                                    f"(the file may be damaged or incompletely copied: {str(exc) or type(exc).__name__})")
         if changed:
             index.save(ops.index_path(studyPath))
         pairs = [(a, b, dice) for a, b, dice in index.all_pairs() if frozenset((a, b)) not in dismissed]
@@ -795,7 +810,10 @@ class _Worker:
     def _do_filehygiene(self, sid, path, templateGrid, multifocal, key, tag=None):
         ops = _lnm("lesionops")
         nifti = _lnm("nifti")
-        data, affine, header = nifti.read_nifti(path)
+        try:
+            data, affine, header = nifti.read_nifti(path)
+        except UNREADABLE_FILE_ERRORS as exc:
+            return {"sid": sid, "key": key, "hygiene": {"unreadable": str(exc) or type(exc).__name__}}
         found = ops.hygiene(data[..., 0] if data.ndim > 3 else data, affine, header=header, template_grid=templateGrid, multifocal=multifocal)
         return {"sid": sid, "key": key, "hygiene": found}
 

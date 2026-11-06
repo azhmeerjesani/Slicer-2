@@ -564,6 +564,51 @@ class StudioRegressionTest(unittest.TestCase):
                 self.assertTrue(reason.endswith("\u2026") or reason.endswith("."), reason)
                 self.assertNotIn("amazonaws.c ", reason + " ")
 
+    # Damaged lesion file in the duplicate scan (BB-1)
+
+    def test_82_truncated_lesion_file_does_not_stop_the_duplicate_scan(self):
+        """A truncated .nii.gz (an interrupted copy: gzip raises EOFError) is skipped and said in words: the other lesions are
+        still compared for duplicates, the file's old index entry is dropped, and the file check gives a chip, not a traceback.
+        """
+        from LesionNetworkMappingLib import nifti
+
+        from StudioLib import lesionqc
+
+        study = self._study([("sub-01", {}, False), ("sub-02", {}, False), ("sub-03", {}, False)])
+        entries = [(sid, study.abspath(study.subject(sid)["lesion"])) for sid in ("sub-01", "sub-02", "sub-03")]
+        worker = lesionqc._Worker()
+        found = worker._do_scan(study.path, entries, frozenset())
+        self.assertEqual({frozenset(pair[:2]) for pair in found["pairs"]},
+                         {frozenset(("sub-01", "sub-02")), frozenset(("sub-01", "sub-03")), frozenset(("sub-02", "sub-03"))})
+        # sub-02's file is cut to half its size (header intact)
+        damaged = entries[1][1]
+        with open(damaged, "rb") as f:
+            content = f.read()
+        with open(damaged, "wb") as f:
+            f.write(content[:len(content) // 2])
+        with self.assertRaises(EOFError):
+            nifti.read_nifti(damaged)
+        with self.assertLogs(level="WARNING") as logs:
+            found = worker._do_scan(study.path, entries, frozenset())
+        self.assertEqual([frozenset(pair[:2]) for pair in found["pairs"]], [frozenset(("sub-01", "sub-03"))])
+        self.assertEqual(found["indexed"], 2)
+        said = "\n".join(logs.output)
+        self.assertIn("sub-02", said)
+        self.assertIn("could not be read", said)
+        self.assertNotIn("Traceback", said)
+        # The next scan says it no more, and still compares the others
+        with self.assertNoLogs(level="WARNING"):
+            found = worker._do_scan(study.path, entries, frozenset())
+        self.assertEqual([frozenset(pair[:2]) for pair in found["pairs"]], [frozenset(("sub-01", "sub-03"))])
+        # The file check of the open subject: a Mask chip in words instead of a failed job
+        key = lesionqc._stat(damaged)
+        checked = worker._do_filehygiene("sub-02", damaged, None, False, key)
+        self.assertEqual((checked["sid"], checked["key"]), ("sub-02", key))
+        self.assertTrue(checked["hygiene"]["unreadable"])
+        chips = [chip for chip in lesionqc.buildChips({"voxels": 0}, mni=True, fileHygiene=checked["hygiene"]) if chip["key"] == "hygiene"]
+        self.assertEqual(len(chips), 1)
+        self.assertIn("could not be read", chips[0]["text"])
+
     # Quit (W4-I1)
 
     def test_2_quit_with_chips_pending(self):
