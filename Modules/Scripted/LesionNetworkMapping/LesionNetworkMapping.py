@@ -2292,11 +2292,39 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
 
         mode = mode or self.seedMode()
         visible = {spec["id"] for spec in visibleSpecs([spec for spec, _widget in self._cardWidgets.values()], mode, self._classic())}
-        if mode in ("cohort", *SEED_SET_MODES) and self.loadedMap is None:
+        if self._mapHiddenBySeedMode(mode):
             visible.discard("result")  # the cohort's maps are in the Cohort card; Result shows a browsed lesion map
         if mode in SEED_SET_MODES and getattr(self.ctx, "cohortMaps", None) and "cohort" in self._cardWidgets:
             visible.add("cohort")  # the seed maps go through the Cohort card (overlap, browsing) like a cohort's lesion maps
         return visible
+
+    def _mapHiddenBySeedMode(self, mode=None):
+        """True on a page of seed mode ``mode`` (the current one by default) without the Result card: Cohort, Coordinates and
+        Stimulation while no map was browsed. The run's map (the drawn lesion's) then stays out of the views, the legend and
+        the layer chips, which would present it as the map of that page's seeds; it comes back with the Lesion page.
+        """
+        mode = mode or self.seedMode()
+        return mode in ("cohort", *SEED_SET_MODES) and self.loadedMap is None
+
+    def _followSeedModeInViews(self, wasHidden):
+        """The seed mode changed: on a page without the Result card the run's map (and a QA derived map of it) leaves the views
+        and the lesion its outline; from such a page (``wasHidden``) back to one with it, the map is shown again as entering
+        Map shows it. The run itself stays (navigation never discards it).
+        """
+        from LesionNetworkMappingLib import display
+
+        if self._mapHiddenBySeedMode():
+            node = self._parameterNode
+            qa = self.ctx.card("qa") if self.ctx is not None else None
+            overlay = qa.shownOverlay() if qa is not None and hasattr(qa, "shownOverlay") else None
+            for volume in (node.resultVolume if node is not None else None, self.ctx.resultVolume if self.ctx is not None else None,
+                           overlay["volume"] if overlay is not None else None):
+                if volume is not None and volume.GetScene() is not None:
+                    display.hideForeground(volume)
+            self.restoreLesionDisplay()
+        elif wasHidden and self._entered:
+            self.showMapLayers()
+        self._refreshMapOverlay()
 
     def updateCardVisibility(self):
         visible = self._visibleCardIds()
@@ -2492,8 +2520,11 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         ``{statistic, window (half-width), level, threshold (None: unthresholded), thresholdText, sign, opacity, outline}``.
 
         While the QA card shows a derived map in the views (the debiased view or the analytic z), the legend describes
-        that map: its own window, no threshold (both are descriptive) and ``"derived"`` set to its kind.
+        that map: its own window, no threshold (both are descriptive) and ``"derived"`` set to its kind. On a page without the
+        Result card (``_mapHiddenBySeedMode``) the run's map is not in the views: None.
         """
+        if self._mapHiddenBySeedMode():
+            return None
         state = self.resultLegendState()
         overlay = self._shownDerivedOverlay() if state is not None else None
         if overlay is None:
@@ -2743,9 +2774,11 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
     def onSeedModeClicked(self, index):
         if self._parameterNode is None or index < 0 or index >= len(self.seedModes):
             return
+        wasHidden = self._mapHiddenBySeedMode()
         self._parameterNode.seedMode = self.seedModes[index]
         self._showSeedMode()
         self.updateCardVisibility()
+        self._followSeedModeInViews(wasHidden)
         self.updateComputeState()
         self._notifyControllers("onCohortMapsChanged", getattr(self.ctx, "cohortMaps", None))
 
@@ -5804,6 +5837,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
     def _showLayers(self, volume):
         from LesionNetworkMappingLib import display
 
+        if self._mapHiddenBySeedMode():
+            return  # a page without the Result card: the map comes back with the Lesion page (_followSeedModeInViews)
         mappage = self._mappage()
         if mappage is not None:
             mappage.captureLayers()  # the layers seen before Map come back when Map is left
@@ -5824,6 +5859,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         volume = node.resultVolume if node is not None else None
         if volume is not None and volume.GetScene() is None:
             volume = None
+        if self._mapHiddenBySeedMode():
+            volume = None  # a page without the Result card shows no lesion map (_followSeedModeInViews)
         if volume is not None:
             display.showLayers(self._templateUnderMaps(load=True), volume, node.opacity if node is not None else 0.8)
             qa = self.ctx.card("qa") if self.ctx is not None else None
