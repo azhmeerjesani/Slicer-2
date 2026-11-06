@@ -1799,7 +1799,9 @@ class ConnectomeManagerDialog(qt.QDialog):
         wide = [max(header.sectionSizeHint(column), table.sizeHintForColumn(column)) for column in range(table.columnCount)]
         least, most = self.NAME_COLUMN_WIDTH
         name = max(least, min(wide[0], most))
-        margins = layout.contentsMargins()
+        # Qt 6 declares the contentsMargins property on QLayout: PythonQt then gives the QMargins value, not the getter
+        margins = layout.contentsMargins
+        margins = margins() if callable(margins) else margins
         extra = 2 * table.frameWidth + table.verticalScrollBar().sizeHint.width() + margins.left() + margins.right()
         return name + sum(wide[1:]) + extra
 

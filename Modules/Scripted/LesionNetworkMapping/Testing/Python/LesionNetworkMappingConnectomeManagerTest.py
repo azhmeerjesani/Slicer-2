@@ -418,6 +418,29 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
             qt.QApplication.setFont(original)
             _pump(200)
 
+    def test_table_width_hint_reads_the_layout_margins_on_qt5_and_qt6(self):
+        # Qt 6 declares the contentsMargins property on QLayout, so PythonQt gives the QMargins value instead of the
+        # getter: "layout.contentsMargins()" raised TypeError in the manager's constructor and no entry point opened it
+        manager = self.widget.openManager()
+        _pump(100)
+        layout = manager.layout()
+
+        class _Qt6Layout:
+            """The layout as Qt 6 PythonQt shows it: contentsMargins is the property value."""
+
+            def __init__(self, layout):
+                self._layout = layout
+
+            def __getattr__(self, name):
+                if name == "contentsMargins":
+                    return self._layout.contentsMargins()
+                return getattr(self._layout, name)
+
+        qt5 = manager._tableWidthHint(layout)
+        qt6 = manager._tableWidthHint(_Qt6Layout(layout))
+        self.assertGreater(qt5, 0)
+        self.assertEqual(qt6, qt5)
+
 
 if __name__ == "__main__":
     unittest.main()
