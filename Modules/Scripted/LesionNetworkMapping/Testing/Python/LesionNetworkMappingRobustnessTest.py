@@ -293,6 +293,30 @@ class PrimaryLesionsTest(unittest.TestCase):
             f.write("participant_id\tgroup\n" + "".join(f"{sid}\tpatient\n" for sid in ids))
         self.assertEqual(robustness.case_subset(cohort, participants), (cohort, []))
 
+    def test_top_pct_primary_keeps_the_overlap_sign(self):
+        """A Top x% rule's sign chooses its cut-off; the Overlap tab's sign (--sign) chooses the voxels kept."""
+        from LesionNetworkMappingLib import cohort as cohort_lib
+
+        # 6 lesions: +8 at voxels 0-11, -8 at voxels 12-19, noise elsewhere; Top 25% of |T| keeps all 20 of them
+        rng = np.random.default_rng(3)
+        maps = rng.uniform(-1.0, 1.0, (6, 80)).astype(np.float32)
+        maps[:, 0:12], maps[:, 12:20] = 8.0, -8.0
+        for rule_sign in ("both", "pos", "neg"):
+            rule = {"kind": "top_pct", "value": 25, "statistic": "T", "sign": rule_sign}
+            for sign in ("both", "pos", "neg"):
+                overlap = cohort_lib.group_maps(maps, rule, None, 90, sign, n=1000).maps[cohort_lib.sensitivity_desc(90)]
+                want = int(np.count_nonzero(overlap))
+                primary = robustness.threshold_sweep(maps, 1000, 80, rule, 90, sign=sign)[0]
+                self.assertTrue(primary["is_primary"])
+                self.assertEqual(primary["voxels"], want, f"rule sign {rule_sign}, Overlap sign {sign}: the primary is not the Overlap tab's map")
+                if rule_sign == "both":
+                    self.assertEqual(want, {"both": 20, "pos": 12, "neg": 8}[sign])
+        # split-half, influence and replicate threshold each lesion the same way (_threshold_maps)
+        rule = thresholds.normalize_rule({"kind": "top_pct", "value": 25, "statistic": "T", "sign": "both"})
+        for sign, kept in (("both", range(0, 20)), ("pos", range(0, 12)), ("neg", range(12, 20))):
+            binary, _resolved = robustness._threshold_maps(maps, rule, 1000, 80, sign, None)
+            self.assertEqual([np.flatnonzero(row).tolist() for row in binary], [list(kept)] * 6, sign)
+
 
 class SeedsTest(RobustnessTestBase):
     def test_variants_never_touch_lesions(self):

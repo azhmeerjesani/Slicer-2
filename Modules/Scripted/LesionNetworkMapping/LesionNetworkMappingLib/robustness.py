@@ -170,7 +170,9 @@ def _resolve(rule, n, v, gsr, values=None):
 def _threshold_maps(maps, rule, n, v, sign, gsr):
     """Binary per-lesion maps (L, V) of a rule and the resolved threshold(s).
 
-    Fixed rules resolve once; top-x% rules resolve on each lesion's map (a tuple of Resolved).
+    Fixed rules resolve once; top-x% rules resolve on each lesion's map (a tuple of Resolved). A top-x% rule's own
+    sign chooses its cut-off (the top x% of T, -T or |T|); every rule then keeps the voxels of ``sign`` at or past
+    the cut, as the Overlap tab's maps (``cohort.group_maps``, ``cohort.binarize_maps``) do.
     Comparisons are made in float64, one lesion at a time (as :func:`thresholds.fraction_connected`).
     """
     import numpy as np
@@ -179,7 +181,6 @@ def _threshold_maps(maps, rule, n, v, sign, gsr):
     if rule["kind"] == "top_pct":
         resolved = tuple(_resolve(rule, n, v, gsr, values=row) for row in maps)
         cuts = [r.value for r in resolved]
-        sign = rule["sign"]
     else:
         resolved = _resolve(rule, n, v, gsr)
         cuts = [resolved.value] * maps.shape[0]
@@ -271,8 +272,8 @@ def threshold_sweep(
     :param primary_overlap: the fixed primary overlap criterion, in % of lesions.
     :param rules: rule dicts or :func:`DEFAULT_RULES` entries; default: ``DEFAULT_RULES(n, statistic, sign)``.
     :param overlaps: overlap criteria in %; default :data:`DEFAULT_OVERLAPS`.
-    :param sign: sign used by fixed (T/Fz) rules: "both" (|map| ≥ t), "pos" or "neg". Top-x% rules
-      use their own sign.
+    :param sign: sign of the voxels kept by every rule (the Overlap tab's sign): "both" (|map| ≥ t), "pos" or "neg".
+      A top-x% rule's own sign only chooses its cut-off (the top x% of T, -T or |T|), as in ``cohort.group_maps``.
     :param voxel_volume_ml: volume of one voxel in ml; default from ``grid`` (else ``ml`` is None).
     :param grid: ``geometry.Grid`` of the maps, needed for peak persistence.
     :param mask_indices: flat C-order grid indices of the V voxels (default: the maps cover the grid).
@@ -315,10 +316,9 @@ def threshold_sweep(
     if grid is not None:
         world = _voxel_world(grid, mask_indices, n_vox)
         if peak_world is None and primary_binary.any():
-            primary_sign = primary_rule.get("sign", sign)
             mean_score = np.zeros(n_vox, dtype=np.float64)
             for lesion_map in maps:
-                mean_score += np.nan_to_num(_scores(lesion_map.astype(np.float64), primary_sign), nan=-np.inf)
+                mean_score += np.nan_to_num(_scores(lesion_map.astype(np.float64), sign), nan=-np.inf)
             candidates = np.flatnonzero(primary_overlap_map == primary_overlap_map[primary_binary].max())
             peak_world = world[candidates[np.argmax(mean_score[candidates])]]
         if peak_world is not None:
