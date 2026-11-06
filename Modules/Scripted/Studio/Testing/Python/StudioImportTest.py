@@ -337,6 +337,19 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertFalse(importer.STATMAP_NAME_PATTERN.search(name), name)
         # Lesion names keep priority; figures and tables
         self.assertEqual(importer.fileKind(os.path.join(self.directory, "sub-05_desc-T_lesion.nii.gz")), "lesion")
+        self.assertEqual(importer.fileKind(os.path.join(self.directory, "sub-05_desc-T_mask.nii.gz")), "lesion")
+        self.assertEqual(importer.fileKind(os.path.join(self.directory, "sub-01_lesion_funcmap.nrrd")), "lesion")
+        # ... but the maps that Map exports are named after their lesion: they open as maps, never as a lesion (a seed)
+        from LesionNetworkMappingLib import export
+
+        for lesionName in ("Lesions-Lesion", "sub-01_lesion", "sub_M2001_lesion.nii"):
+            path = export.map_paths(self.directory, lesionName, "Synthetic demo")["T"]
+            self.assertTrue(importer.hasStatMapSuffix(path), path)
+            self.assertEqual(importer.fileKind(path), "statmap", path)
+            with open(plain, "rb") as source, gzip.open(path, "wb") as f:
+                f.write(source.read())
+            self.assertEqual(importer.fileKind(path), "statmap", path)
+        self.assertEqual(importer.fileKind(os.path.join(self.directory, "roi_statmap.nii")), "statmap")
         self.assertEqual(importer.fileKind(os.path.join(self.directory, "fig.PNG")), "figure")
         self.assertEqual(importer.fileKind(os.path.join(self.directory, "participants.tsv")), "table")
 

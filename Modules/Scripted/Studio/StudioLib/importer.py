@@ -44,7 +44,8 @@ Studio import routes (USABILITY 2, 6.4, 7, 8, 13; U-07). Nothing here hides a fo
   opens for tracing (``StudioLib.figure``, L-29): the Figure card of Draw crops it, fits it to a cut plane of the
   template with landmarks and shows it over the template; on a scan in scan space it stays this reference only;
 - a **statistical map** (``*_statmap``, ``*_desc-T_*``... or a NIfTI intent code TTEST, ZSCORE, CORREL) is shown as a
-  thresholded two-sided overlay with a colour legend on the anatomy, with one threshold control in a notice;
+  thresholded two-sided overlay with a colour legend on the anatomy, with one threshold control in a notice. A name
+  that ends in ``_funcmap`` or ``_statmap`` is a map even if it names its lesion, as the maps that Map exports do;
 - a **lesion without a scan** is shown on the template only when it is on an MNI grid (``space.spaceOf()``), on its
   own grid (the template is only the source); a lesion in scan space offers its scan instead (the ``Source`` of its
   BIDS-style sidecar). Several lesions loaded at once are a **loaded set** (``loadedSet()``), shown one at a time;
@@ -92,6 +93,9 @@ FIGURE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
 TABLE_EXTENSIONS = (".tsv", ".csv")
 #: Names of statistical maps (BIDS-derivative and LNM outputs): "sub-05_desc-T_funcmap.nii.gz", "x_statmap.nii"...
 STATMAP_NAME_PATTERN = re.compile(r"(?i)(_statmap|_funcmap|(^|_)desc-(T|Z|AvgR|AvgRFz|Fz|tmap|zmap)(_|\.))")
+#: BIDS suffixes of statistical maps. A NIfTI name that ends in one is a map even if it names its lesion, as Map names its
+#: outputs after the lesion ("Lesions-Lesion_conn-<label>_desc-T_funcmap.nii.gz", "sub-01_lesion_conn-..._funcmap.nii.gz")
+STATMAP_SUFFIX_PATTERN = re.compile(r"(?i)(^|_)(statmap|funcmap)$")
 #: NIfTI-1 intent codes of statistical maps: CORREL, TTEST, ZSCORE
 STATMAP_INTENT_CODES = (2, 3, 5)
 #: BIDS subject entity of a file name ("sub-05")
@@ -233,7 +237,8 @@ def fileKind(path):
 
     A 4D NIfTI image (fMRI, a 4D mask) is a "sequence" whatever its name: the volume reader cannot read it. So is a NRRD
     volume sequence (``isNrrdSequence()``), which the volume reader would read as one vector volume. Lesion names have
-    priority over statistical map names.
+    priority over statistical map names ("sub-05_desc-T_lesion.nii.gz" is a lesion), except for a NIfTI file whose name
+    ends in a statistical map suffix (``hasStatMapSuffix()``): Map names its maps after their lesion.
     """
     if os.path.isdir(path):
         return "folder"
@@ -247,7 +252,7 @@ def fileKind(path):
     if isNrrdSequence(path):
         return "sequence"
     if extension in VOLUME_EXTENSIONS:
-        if isLesionName(path):
+        if isLesionName(path) and not hasStatMapSuffix(path):
             return "lesion"
         if extension in NIFTI_EXTENSIONS and isStatMap(path):
             return "statmap"
@@ -326,6 +331,13 @@ def niftiIntentCode(path):
         if struct.unpack(byteOrder + "i", header[0:4])[0] == 348:
             return struct.unpack(byteOrder + "h", header[68:70])[0]
     return None
+
+
+def hasStatMapSuffix(path):
+    """True for a NIfTI file whose name ends in ``_statmap`` or ``_funcmap`` (the BIDS suffix of a statistical map), such
+    as the maps that Map writes ("<lesion>_conn-<label>_desc-T_funcmap.nii.gz").
+    """
+    return isNiftiFile(path) and STATMAP_SUFFIX_PATTERN.search(_baseName(path)) is not None
 
 
 def isStatMap(path):
