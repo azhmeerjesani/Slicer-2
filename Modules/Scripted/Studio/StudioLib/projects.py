@@ -380,7 +380,8 @@ class MoveJournal:
     so the move finished at the next start would point those paths at the new folder's own items that kept the names, and
     leave two templates with one id. So the move writes them here before each item moves (``recordRename``), with the
     item names Templates/ of the new folder had before (``setTemplatesBefore``) and each new template id before it is
-    written (``recordId``), and the move that finishes it reads them back (``resume``).
+    written (``recordId``), and the move that finishes it reads them back (``resume``). The item names Projects/ had before
+    (``setProjectsBefore``) tell the projects that moved in, whose scenes follow the new template ids.
 
     Holds local paths (as the settings do): kept in the application data folder, deleted when the move ends
     (``projects.setRoot``) or another move starts. Worker-safe (files only); never raises.
@@ -391,7 +392,8 @@ class MoveJournal:
         self.oldRoot = os.path.normpath(oldRoot)
         self.newRoot = os.path.normpath(newRoot)
         self._lock = threading.Lock()
-        self._data = {"from": self.oldRoot, "to": self.newRoot, "renamed": {}, "renamedIds": {}, "templatesBefore": None}
+        self._data = {"from": self.oldRoot, "to": self.newRoot, "renamed": {}, "renamedIds": {}, "templatesBefore": None,
+                      "projectsBefore": None}
         if not path:
             return
         if resume:
@@ -411,6 +413,8 @@ class MoveJournal:
                     self._data["renamedIds"] = {str(key): str(value) for key, value in data["renamedIds"].items()}
                 if isinstance(data.get("templatesBefore"), list):
                     self._data["templatesBefore"] = [str(name) for name in data["templatesBefore"]]
+                if isinstance(data.get("projectsBefore"), list):
+                    self._data["projectsBefore"] = [str(name) for name in data["projectsBefore"]]
                 return
         # A new move: what an earlier one wrote is not this move's
         with contextlib.suppress(OSError):
@@ -459,6 +463,16 @@ class MoveJournal:
     def setTemplatesBefore(self, names):
         with self._lock:
             self._data["templatesBefore"] = sorted(names)
+            self._write()
+
+    def projectsBefore(self):
+        """The item names of Projects/ of the new folder before the move (a set), or None when not recorded."""
+        names = self._data["projectsBefore"]
+        return None if names is None else set(names)
+
+    def setProjectsBefore(self, names):
+        with self._lock:
+            self._data["projectsBefore"] = sorted(names)
             self._write()
 
     def completedRenames(self):
@@ -2264,7 +2278,9 @@ def moveContent(oldRoot, newRoot, progress=None, renamed=None, renamedIds=None, 
     ``pathAfterMove`` so a path follows the item, never the other one that kept the name.
 
     ``renamedIds`` (a dict) receives ``{old id: new id}`` of the moved templates that got another id because a template of
-    ``newRoot`` already had theirs (``templates.followRenamedIds`` makes the default and the scene follow them).
+    ``newRoot`` already had theirs (``templates.followRenamedIds`` makes the default and the scene follow them). The scenes
+    of the moved projects follow them here (``_movedScenesFollowRenamedIds``): their scans would otherwise name the template
+    of ``newRoot`` that kept the id (another image and space).
 
     ``journal`` (a ``MoveJournal``) receives both as they happen, so a move that was killed and is finished later (a journal
     read back) returns them too, the items that moved before the kill included: the result is that of an uninterrupted move.
@@ -2281,12 +2297,14 @@ def moveContent(oldRoot, newRoot, progress=None, renamed=None, renamedIds=None, 
     absoluteRenames = _JournaledRenames(journal) if journal is not None else {}
     templatesBefore = None
     templatesChecked = False
+    projectsBefore = None
     if journal is not None:
         # What the interrupted run of this move renamed before it was killed (already in the journal)
         dict.update(absoluteRenames, journal.completedRenames())
         if renamedIds is not None:
             renamedIds.update(journal.completedIds(os.path.join(newRoot, TEMPLATES_DIR)))
         templatesBefore = journal.templatesBefore()
+        projectsBefore = journal.projectsBefore()
     try:
         for name in movableItems(oldRoot):
             target = os.path.join(newRoot, name)
@@ -2309,6 +2327,11 @@ def moveContent(oldRoot, newRoot, progress=None, renamed=None, renamedIds=None, 
             elif name == LNM_DIR:
                 _mergeLnm(os.path.join(oldRoot, name), target, sameVolume, progress, absoluteRenames)
             else:
+                if name == PROJECTS_DIR and projectsBefore is None:
+                    # What Projects/ there had before this move: the projects that moved in are the others
+                    projectsBefore = _visibleNames(target)
+                    if journal is not None:
+                        journal.setProjectsBefore(projectsBefore)
                 _mergeMove(os.path.join(oldRoot, name), target, sameVolume, progress, absoluteRenames)
             moved.append(name)
     except OSError:
@@ -2320,11 +2343,89 @@ def moveContent(oldRoot, newRoot, progress=None, renamed=None, renamedIds=None, 
         if not templatesChecked and templatesBefore is not None:
             # The interrupted run moved all of Templates/ and was killed before (or while) its templates got their own ids
             _movedTemplateIdsUnique(os.path.join(newRoot, TEMPLATES_DIR), templatesBefore, renamedIds, journal)
+        if renamedIds and projectsBefore is not None:
+            _movedScenesFollowRenamedIds(os.path.join(newRoot, PROJECTS_DIR), projectsBefore, renamedIds)
         _studiesFollowRenamedFolders(absoluteRenames, newRoot)  # also after a failed move: what moved is listed there
         if renamed is not None:
             for source, destination in absoluteRenames.items():
                 renamed[os.path.normpath(os.path.relpath(source, oldRoot))] = os.path.normpath(os.path.relpath(destination, newRoot))
     return moved
+
+
+def _visibleNames(folder):
+    """The names in ``folder`` that are not hidden (a set; empty when it does not exist). Worker-safe."""
+    try:
+        return {name for name in os.listdir(folder) if not name.startswith(".")} if os.path.isdir(folder) else set()
+    except OSError:
+        return set()
+
+
+#: ``Studio.TemplateId:<id>`` in the ``attributes`` of a scene node (``vtkMRMLNode::WriteXML``: "name:value" pairs separated
+#: by ";", in a double-quoted XML attribute)
+_SCENE_TEMPLATE_ID = re.compile(rb'(?<=[";]Studio\.TemplateId:)([^;"]*)(?=[;"])')
+
+
+def _sceneAttributeValue(value):
+    """``value`` as ``vtkMRMLNode::WriteXML`` writes an attribute value into a scene (bytes)."""
+    value = str(value).replace("%", "%25").replace(";", "%3B")
+    value = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    return value.encode("utf-8")
+
+
+def _movedScenesFollowRenamedIds(projectsFolder, before, renamedIds):
+    """The scenes of the projects that moved into ``projectsFolder`` (whose item names were ``before``) follow the moved
+    templates that got another id (``renamedIds``, ``{old id: new id}``): their scans keep naming their own template, never
+    the template of the new folder that kept the id (same name, perhaps the same grid, another image and space). The open
+    project follows in memory (``templates.followRenamedIds``); the projects that were there before keep their ids.
+
+    Only the ``Studio.TemplateId`` attribute values change; the scene keeps its modification time (the Library orders the
+    projects by it). A new id is never the old id of another moved template (``templates.makeMovedIdsUnique``), so a move
+    that is finished after a kill can follow them again. Worker-safe; never raises.
+    """
+    mapping = {_sceneAttributeValue(oldId): _sceneAttributeValue(newId) for oldId, newId in renamedIds.items() if oldId and newId}
+    if not mapping:
+        return
+    for name in sorted(_visibleNames(projectsFolder) - set(before)):
+        folder = os.path.join(projectsFolder, name)
+        try:
+            entries = os.listdir(folder)
+        except OSError:
+            continue
+        # What a move killed while it wrote a scene left
+        removePaths([os.path.join(folder, entry) for entry in entries if entry.endswith(_FOLLOWING_SUFFIX)])
+        scenes = [os.path.join(folder, entry) for entry in entries
+                  if entry.lower().endswith(SCENE_EXTENSION) and ".studio-tmp" not in entry and not entry.startswith(".")]
+        for scene in scenes:
+            try:
+                _sceneFollowRenamedIds(scene, mapping)
+            except Exception:
+                logging.warning(f"Slicer Studio: the template ids of the moved project {name} could not be updated", exc_info=True)
+
+
+#: The staging copy of a scene whose template ids are being updated (next to it, renamed over it once written)
+_FOLLOWING_SUFFIX = ".following-ids"
+
+
+def _sceneFollowRenamedIds(scene, mapping):
+    with open(scene, "rb") as f:
+        content = f.read()
+    updated = _SCENE_TEMPLATE_ID.sub(lambda match: mapping.get(match.group(1), match.group(1)), content)
+    if updated == content:
+        return
+    status = os.stat(scene)
+    staging = scene + _FOLLOWING_SUFFIX
+    try:
+        with open(staging, "wb") as f:
+            f.write(updated)
+            f.flush()
+            os.fsync(f.fileno())
+        shutil.copymode(scene, staging)
+        os.utime(staging, ns=(status.st_atime_ns, status.st_mtime_ns))
+        os.replace(staging, scene)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.remove(staging)
+        raise
 
 
 def _studiesFollowRenamedFolders(absoluteRenames, newRoot):

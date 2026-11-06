@@ -11,6 +11,7 @@ Studio folder is a temporary folder "Slicer Studio tést" (``SLICER_STUDIO_PROJE
 ``Studio/Templates/Default`` is restored afterwards.
 """
 
+import contextlib
 import gzip
 import hashlib
 import json
@@ -1429,6 +1430,110 @@ class StudioTemplatesTest(unittest.TestCase):
             settings.remove(projects.ROOT_KEY)
             settings.remove(projects.ROOT_CHOSEN_KEY)
             shutil.rmtree(os.path.dirname(oldRoot), ignore_errors=True)
+
+    def test_37_closed_projects_follow_the_moved_template(self):
+        """BB-1: after Change folder > Move into a folder with a same-name template, the scans of the moved projects that were
+        closed still name their own template ("user:my-template-2"), as the open project's do. Their scenes kept
+        "user:my-template": opened in the new folder, the scan was taken for that folder's template (same name and grid,
+        another image and space), and its NIfTI export wrote that template's space and checksum. The projects that were
+        there keep their ids. Also when the move is finished after a kill (the journal).
+        """
+        from StudioLib import autosave, niftiexport
+
+        templates, projects = self.templates, self.projects
+        newRoot = self.root
+        oldRoot = os.path.join(self.tempDir, "old folder 37", "Slicer Studio")
+        shutil.rmtree(os.path.dirname(oldRoot), ignore_errors=True)
+        settings = qt.QSettings()
+        stamp = 1600000000
+
+        def writeProject(root, name, templateId):
+            folder = os.path.join(root, projects.PROJECTS_DIR, name)
+            os.makedirs(folder)
+            scene = slicer.vtkMRMLScene()
+            node = scene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "scan")
+            node.SetAttribute(templates.TEMPLATE_ID_ATTRIBUTE, templateId)
+            node.SetAttribute("Studio.Note", "a;b%c")  # another attribute, encoded by the scene writer
+            path = os.path.join(folder, name + projects.SCENE_EXTENSION)
+            scene.SetRootDirectory(folder)
+            scene.SetURL(path)
+            self.assertTrue(scene.Commit(path))
+            os.utime(path, (stamp, stamp))
+            return path
+
+        def scanOf(path):
+            scene = slicer.vtkMRMLScene()
+            scene.SetRootDirectory(os.path.dirname(path))
+            scene.SetURL(path)
+            scene.Import()
+            nodes = [scene.GetNthNodeByClass(index, "vtkMRMLScalarVolumeNode")
+                     for index in range(scene.GetNumberOfNodesByClass("vtkMRMLScalarVolumeNode"))]
+            self.assertEqual(len(nodes), 1, path)
+            self.assertEqual(nodes[0].GetAttribute("Studio.Note"), "a;b%c")
+            return scene, nodes[0]
+
+        try:
+            kept = self._add(name="My template", rootPath=newRoot)
+            moved = templates.addTemplate(self.bundled, mask=self.bundledMask, name="My template", rootPath=oldRoot)
+            self.assertEqual(moved.id, kept.id)
+            theirs = writeProject(newRoot, "Untitled project", kept.id)
+            mine = writeProject(oldRoot, "Untitled project", moved.id)
+            other = writeProject(oldRoot, "Other project", "user:another-template")
+
+            os.environ.pop(projects.ROOT_ENVIRONMENT, None)
+            settings.setValue(projects.ROOT_KEY, oldRoot)
+            service = autosave.AutosaveService(force=True, root=os.path.join(self.tempDir, "private autosave move 37"))
+            service.studioActiveOverride = True
+            service.reloadSettings()
+            self.services.append(service)
+            self.assertIn("Templates", service.moveRoot(newRoot, moveContent=True))
+            self.assertEqual(templates.templateById("user:my-template-2").imageSha256, moved.imageSha256)
+
+            movedScene = os.path.join(newRoot, projects.PROJECTS_DIR, "Untitled project 2", "Untitled project" + projects.SCENE_EXTENSION)
+            _scene, scan = scanOf(movedScene)
+            self.assertEqual(scan.GetAttribute(templates.TEMPLATE_ID_ATTRIBUTE), "user:my-template-2", "the closed project follows")
+            self.assertEqual(templates.templateOfNode(scan).imageSha256, moved.imageSha256)
+            info = niftiexport.templateInfo(scan)
+            self.assertEqual((info["id"], info["sha256"], info["space"]), ("user:my-template-2", moved.imageSha256, moved.space))
+            self.assertEqual(int(os.path.getmtime(movedScene)), stamp, "the scene keeps its modification time")
+            _scene, scan = scanOf(theirs)
+            self.assertEqual(scan.GetAttribute(templates.TEMPLATE_ID_ATTRIBUTE), "user:my-template", "a project that was there keeps its id")
+            self.assertEqual(templates.templateOfNode(scan).imageSha256, kept.imageSha256)
+            _scene, scan = scanOf(os.path.join(newRoot, projects.PROJECTS_DIR, "Other project", os.path.basename(other)))
+            self.assertEqual(scan.GetAttribute(templates.TEMPLATE_ID_ATTRIBUTE), "user:another-template")
+            self.assertFalse(os.path.exists(mine))
+
+            # A move finished after a kill: Projects/ had moved, Templates/ had not
+            settings.remove(projects.ROOT_KEY)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+            again = os.path.join(self.tempDir, "old folder 37b", "Slicer Studio")
+            target = os.path.join(self.tempDir, "new folder 37b", "Slicer Studio")
+            for folder in (again, target):
+                shutil.rmtree(os.path.dirname(folder), ignore_errors=True)
+            templates.addTemplate(self.bundled, mask=self.bundledMask, name="Atlas", rootPath=target)
+            killedMoved = templates.addTemplate(self.image15, name="Atlas", rootPath=again)
+            writeProject(target, "Theirs", "user:atlas")
+            writeProject(again, "Mine", "user:atlas")
+            journalPath = os.path.join(self.tempDir, "journal 37.json")
+            journal = projects.MoveJournal(journalPath, again, target)
+            journal.setProjectsBefore({"Theirs"})
+            os.rename(os.path.join(again, projects.PROJECTS_DIR, "Mine"), os.path.join(target, projects.PROJECTS_DIR, "Mine"))
+            os.rmdir(os.path.join(again, projects.PROJECTS_DIR))
+            renamedIds = {}
+            projects.moveContent(again, target, renamedIds=renamedIds, journal=projects.MoveJournal(journalPath, again, target, resume=True))
+            self.assertEqual(renamedIds, {"user:atlas": "user:atlas-2"})
+            _scene, scan = scanOf(os.path.join(target, projects.PROJECTS_DIR, "Mine", "Mine" + projects.SCENE_EXTENSION))
+            self.assertEqual(scan.GetAttribute(templates.TEMPLATE_ID_ATTRIBUTE), "user:atlas-2")
+            self.assertEqual(templates.templateById("user:atlas-2", rootPath=target).imageSha256, killedMoved.imageSha256)
+            _scene, scan = scanOf(os.path.join(target, projects.PROJECTS_DIR, "Theirs", "Theirs" + projects.SCENE_EXTENSION))
+            self.assertEqual(scan.GetAttribute(templates.TEMPLATE_ID_ATTRIBUTE), "user:atlas")
+        finally:
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            for folder in ("old folder 37", "old folder 37b", "new folder 37b"):
+                shutil.rmtree(os.path.join(self.tempDir, folder), ignore_errors=True)
+            with contextlib.suppress(OSError):
+                os.remove(os.path.join(self.tempDir, "journal 37.json"))
 
     def test_27_cancelled_add_adds_nothing(self):
         """BB-1: Cancel in "Add your own MNI template" adds nothing, for a 4D image as well. The first volume of a 4D image
