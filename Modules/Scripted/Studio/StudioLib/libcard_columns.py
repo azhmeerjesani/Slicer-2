@@ -499,6 +499,28 @@ class ColumnsDialog:
         self.helpLabel.setText(text)
         self.helpLabel.setVisible(bool(text))
 
+    def _rowState(self, name):
+        """What the row of ``name`` shows: ``(role, type, units, levels, description)``."""
+        row = self.rowOf(name)
+        roleCombo = self.table.cellWidget(row, COL_ROLE)
+        typeCombo = self.table.cellWidget(row, COL_TYPE)
+        texts = tuple(self.table.item(row, column).text() for column in (COL_UNITS, COL_LEVELS, COL_DESCRIPTION))
+        return (roleCombo.itemData(roleCombo.currentIndex), typeCombo.itemData(typeCombo.currentIndex), *texts)
+
+    def _restoreRow(self, name, state):
+        """Show ``state`` (from :meth:`_rowState`) again in the row of ``name``, when the row is still there."""
+        row = self.rowOf(name)
+        if row < 0:
+            return
+        role, typeName, *texts = state
+        for column, data in ((COL_ROLE, role), (COL_TYPE, typeName)):
+            combo = self.table.cellWidget(row, column)
+            index = combo.findData(data)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+        for column, text in zip((COL_UNITS, COL_LEVELS, COL_DESCRIPTION), texts, strict=True):
+            self.table.item(row, column).setText(text)
+
     # Changes
 
     def changes(self):
@@ -543,9 +565,15 @@ class ColumnsDialog:
         notes = list(problems.values()) + [f"{name}: {message}" for name, message in result["errors"].items()]
         for name in result["declined"]:
             self.setRole(name, self.original[name]["role"])  # the answer was "Keep as is"
+            if name in self.changes()[0]:  # its other edits stay in the table for the next Confirm
+                notes.append(_("{name} keeps its role: Confirm again to save its other changes.").format(name=name))
         if result["applied"]:
             _toast(_("Roles saved for {n} columns").format(n=len(result["applied"])) if len(result["applied"]) != 1 else _("Role saved for {name}").format(name=result["applied"][0]))
+            # fill() rebuilds every row from the study: the rows that were not saved (no role yet, declined, refused) keep what was typed
+            pending = {name: self._rowState(name) for name in [*problems, *result["declined"], *result["errors"]]}
             self.fill()
+            for name, state in pending.items():
+                self._restoreRow(name, state)
         self._setNote(" ".join(notes))
         result["errors"].update(problems)
         if result["applied"] and not notes and not result["declined"]:

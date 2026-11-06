@@ -6325,3 +6325,72 @@ class StudioRegressionTest(unittest.TestCase):
                 slicer.app.processEvents()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
+
+    def test_83_columns_confirm_keeps_the_edits_of_rows_it_did_not_save(self):
+        """Columns...: a Confirm that saved one row rebuilt the table from the study, so a row without a role lost its typed
+        Description under the note "Choose a role for X to keep its other changes.", and a row whose score question was answered
+        "Keep as is" lost its other edits without a word (BB-1). Those rows keep what was typed, and the next Confirm saves it.
+        """
+        from StudioLib import libcard_columns as lc
+        from StudioLib import study_ui
+
+        study = self._study([(f"sub-0{index}", {"nihss": str(index), "site": "A", "barthel": str(10 * index)}, False) for index in range(1, 4)])
+        folder = study.path
+        session = study_ui.openStudy(folder, None, showLibrary=False)
+        self.addCleanup(study_ui.closeStudy)
+        slicer.app.processEvents()
+        self.assertEqual(session.study.column_spec("nihss").role, lc.NOT_SET)
+
+        def saved(name):
+            with open(os.path.join(folder, "participants.json"), encoding="utf-8") as f:
+                return json.load(f).get(name) or {}
+
+        dialog = lc.ColumnsDialog(session)
+        self.addCleanup(dialog.widget.deleteLater)
+        dialog.show()
+        dialog.onlyUnset.setChecked(False)
+        slicer.app.processEvents()
+
+        def cell(name, column):
+            return dialog.table.item(dialog.rowOf(name), column).text()
+
+        # A row without a role keeps its edits while another row is saved
+        dialog.setText("nihss", lc.COL_DESCRIPTION, "NIH Stroke Scale at admission")
+        dialog.setText("nihss", lc.COL_UNITS, "points")
+        dialog.setRole("site", "metadata")
+        result = dialog.confirm()
+        slicer.app.processEvents()
+        self.assertEqual(result["applied"], ["site"], result)
+        self.assertIn("Choose a role for nihss", str(dialog.noteLabel.text))
+        self.assertTrue(dialog.widget.isVisible())
+        self.assertEqual(cell("nihss", lc.COL_DESCRIPTION), "NIH Stroke Scale at admission", "the typed description was dropped")
+        self.assertEqual(cell("nihss", lc.COL_UNITS), "points")
+        self.assertEqual(dialog.original["site"]["role"], "metadata", "the saved row shows what the study holds")
+        dialog.setRole("nihss", "score")
+        self.assertEqual(dialog.confirm()["applied"], ["nihss"])
+        self.assertEqual(saved("nihss").get("Description"), "NIH Stroke Scale at admission")
+        self.assertEqual(saved("nihss").get("Units"), "points")
+
+        # A row answered "Keep as is" keeps its role and its other edits, and the note says so
+        dialog = lc.ColumnsDialog(session)
+        self.addCleanup(dialog.widget.deleteLater)
+        dialog.show()
+        slicer.app.processEvents()
+        dialog.setRole("site", "score")
+        dialog.setText("site", lc.COL_DESCRIPTION, "Recruiting site")
+        dialog.setRole("barthel", "score")
+        asked = []
+        original = lc.confirmScore
+        lc.confirmScore = lambda names, reasons, parent=None: (asked.extend(names), [])[1]
+        try:
+            result = dialog.confirm()
+        finally:
+            lc.confirmScore = original
+        slicer.app.processEvents()
+        self.assertEqual((asked, result["applied"], result["declined"]), (["site"], ["barthel"], ["site"]), result)
+        self.assertEqual(dialog.roleCombo("site").currentData, "metadata")
+        self.assertEqual(cell("site", lc.COL_DESCRIPTION), "Recruiting site", "the declined row lost its other edits")
+        self.assertIn("site keeps its role", str(dialog.noteLabel.text))
+        self.assertEqual(dialog.confirm()["applied"], ["site"])
+        self.assertEqual(saved("site").get("Description"), "Recruiting site")
+        self.assertEqual(session.study.column_spec("site").role, "metadata")
