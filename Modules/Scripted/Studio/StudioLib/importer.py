@@ -1779,21 +1779,44 @@ def _bindLoadedLesions(lesions, scans):
     """Bind each loaded lesion that is not bound to a scan yet to the scan of ``scans`` whose grid it is on.
 
     A scan of the lesion's own BIDS subject is tried first, and a scan of another BIDS subject is never chosen (scans of
-    different subjects may share a grid). A lesion on none of the grids stays unbound.
+    different subjects may share a grid). Then the scan whose file is nearest to the lesion's file is tried first (in its
+    folder, else in the deepest common folder): with generic names (``patient01/T1.nii.gz`` and ``patient01/lesion.nii.gz``)
+    the folder is the only pairing of a lesion with its scan. A lesion on none of the grids stays unbound.
     """
     role = slicer.vtkMRMLSegmentationNode.GetReferenceImageGeometryReferenceRole()
     for lesion in lesions:
         if lesion is None or lesion.GetNodeReference(role) is not None:
             continue
         subject = _nodeSubject(lesion)
+        lesionFolder = _fileFolder(_lesionFilePath(lesion))
         candidates = []
         for scan in scans:
             if _otherSubjectLesion(lesion, scan):
                 continue
-            candidates.append((0 if subject and _nodeSubject(scan) else 1, scan))
+            candidates.append(((0 if subject and _nodeSubject(scan) else 1, -_commonFolderDepth(lesionFolder, _fileFolder(_lesionFilePath(scan)))), scan))
+        # sorted() is stable: scans of the same rank keep the load order
         for _rank, scan in sorted(candidates, key=lambda item: item[0]):
             if _bindToScanGrid(lesion, scan):
                 break
+
+
+def _fileFolder(path):
+    """The normalized absolute folder of a file (None for no file)."""
+    if not path:
+        return None
+    return os.path.normcase(os.path.dirname(os.path.abspath(path)))
+
+
+def _commonFolderDepth(folder, otherFolder):
+    """The number of path components two folders have in common (0 when one is unknown or they share no root)."""
+    if not folder or not otherFolder:
+        return 0
+    try:
+        common = os.path.commonpath([folder, otherFolder])
+    except ValueError:
+        # Different drives (Windows), or an absolute and a relative path
+        return 0
+    return len([part for part in common.replace("\\", "/").split("/") if part])
 
 
 def _bindToScanGrid(segmentationNode, volumeNode, tolerance=1e-3):

@@ -1576,6 +1576,32 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertEqual(background(), "sub-01_T1w")
             self.assertIn("sub-03_lesion is a lesion of sub-03", " ".join(text for _time, text, _level in studioShell.recentMessages()[-3:]))
 
+    def test_two_patient_folders_one_load_each_lesion_on_its_folders_scan(self):
+        """Two patients opened at once with generic names on one grid (patient01/T1 + lesion, patient02/T1 + lesion): the
+        folder is the only pairing, so every lesion is bound to the scan of its own folder, never to the first scan loaded.
+        """
+        from StudioLib import importer, library
+
+        studioShell = self._applyStudio()
+        paths = {}
+        for patient, center in (("patient01", (45, 50, 40)), ("patient02", (30, 40, 20))):
+            paths[f"{patient}/T1"] = self._writeVolume("T1.nii.gz", GRID_SHIFTED, subdirectory=f"patients/{patient}")
+            paths[f"{patient}/lesion"] = self._writeMask("lesion.nii.gz", GRID_SHIFTED, center=center, subdirectory=f"patients/{patient}")
+        role = slicer.vtkMRMLSegmentationNode.GetReferenceImageGeometryReferenceRole()
+        folder = lambda node: os.path.basename(os.path.dirname(node.GetStorageNode().GetFileName()))
+        for order in (("patient01", "patient02"), ("patient02", "patient01")):
+            slicer.mrmlScene.Clear(0)
+            self._pump()
+            importer.loadFiles([paths[f"{patient}/{kind}"] for patient in order for kind in ("T1", "lesion")], studioShell)
+            self._pump(8)
+            lesions = [node for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode") if not node.GetHideFromEditors()]
+            self.assertEqual(sorted(folder(lesion) for lesion in lesions), ["patient01", "patient02"])
+            for lesion in lesions:
+                scan = lesion.GetNodeReference(role)
+                self.assertIsNotNone(scan, folder(lesion))
+                self.assertEqual(folder(scan), folder(lesion))
+                self.assertEqual(folder(library.lesionScan(lesion)), folder(lesion))
+
     def test_sagittal_scan_lesion_gaps_along_view_axis(self):
         """A sagittal 3D acquisition (k = left-right): the Lesion card and participants.tsv count the gap slices along
         the view's slicing axis (S for the axial Red view), not along k, and N jumps to the slices the card counts
