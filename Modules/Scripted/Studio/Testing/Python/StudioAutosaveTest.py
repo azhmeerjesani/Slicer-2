@@ -664,6 +664,74 @@ class StudioAutosaveTest(unittest.TestCase):
         finally:
             dialog.close()
 
+    def test_g2_crashedSessionInReadOnlyFolderIsCrashedNotRunning(self):
+        """QLockFile cannot delete the stale lock of a crashed session in a folder that cannot be written (it says locked)."""
+        import types
+
+        from StudioLib import recovery
+
+        self._buildScene()
+        service = self._service()
+        self._generate(service)
+        crashedDir = os.path.join(self.root, "20260101-120000-1-abcd")
+        os.makedirs(os.path.join(crashedDir, "scene-1"))
+        shutil.copy(os.path.join(service.writer.slotDir, self.io.SCENE_FILE), os.path.join(crashedDir, "scene-1", self.io.SCENE_FILE))
+        process = subprocess.Popen([sys.executable, "-c", "pass"])
+        process.wait()
+        lockPath = os.path.join(crashedDir, self.io.LOCK_FILE)
+
+        def writeLock(pid, host=None):
+            with open(lockPath, "w") as f:
+                f.write(f"{pid}\nSlicer\n{host or qt.QSysInfo.machineHostName()}\n")
+
+        writeLock(process.pid)
+        data = service._sessionJson()
+        data.update(sessionId="20260101-120000-1-abcd", state="running", pid=process.pid)
+        data["slots"] = [{"name": "scene-1", "state": "current", "unsaved": True, "summary": {"title": "Crashed"}}]
+        self.io.atomicWriteJson(os.path.join(crashedDir, self.io.SESSION_FILE), data)
+
+        class StuckLock:
+            """A QLockFile that cannot take the lock because it cannot delete the stale lock file (no write permission)."""
+
+            def __init__(self, path):
+                pass
+
+            def setStaleLockTime(self, ms):
+                pass
+
+            def tryLock(self, timeout=0):
+                return False
+
+        def sessionStatus():
+            return {s.sessionId: s for s in recovery.scan(self.root, None)}["20260101-120000-1-abcd"]
+
+        realQt = recovery.qt
+        recovery.qt = types.SimpleNamespace(QLockFile=StuckLock, QSysInfo=qt.QSysInfo)
+        try:
+            session = sessionStatus()
+            self.assertEqual(session.status, "crashed")
+            self.assertTrue(session.presentable())
+            self.assertEqual(recovery.lockState(crashedDir), "free")
+            # A live holder, another machine and an unreadable lock stay locked
+            writeLock(os.getpid())
+            self.assertEqual(sessionStatus().status, "running")
+            writeLock(process.pid, "some-other-machine.example")
+            self.assertEqual(sessionStatus().status, "running")
+            with open(lockPath, "w") as f:
+                f.write("not a lock\n")
+            self.assertEqual(sessionStatus().status, "running")
+        finally:
+            recovery.qt = realQt
+
+        # With the real QLockFile and a folder that really cannot be written (not possible as the superuser)
+        if os.name == "posix" and os.geteuid() != 0:
+            writeLock(process.pid)
+            os.chmod(crashedDir, 0o500)
+            try:
+                self.assertEqual(sessionStatus().status, "crashed")
+            finally:
+                os.chmod(crashedDir, 0o700)
+
     def test_h_retention(self):
         from StudioLib import recovery
 

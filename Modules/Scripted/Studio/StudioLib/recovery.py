@@ -166,7 +166,45 @@ def lockState(sessionDir):
     if lock.tryLock(0):
         lock.unlock()
         return "free"
+    # QLockFile treats the lock of a dead process as stale only when it can delete the lock file, which it cannot in a
+    # folder that cannot be written (for example a crashed session made read-only): look at the holder itself
+    if _lockHolderGone(lockPath):
+        return "free"
     return "locked"
+
+
+def _lockHolderGone(lockPath):
+    """True if the lock file names a process on this machine that no longer exists (POSIX only; never signals a process)."""
+    if os.name != "posix":
+        return False
+    try:
+        with open(lockPath, encoding="utf-8", errors="replace") as f:
+            lines = [line.strip() for line in f.read().split("\n")]
+        pid = int(lines[0])
+    except (OSError, ValueError, IndexError):
+        return False
+    if pid <= 0:
+        return False
+    # "This machine" as QLockFile decides it: the machine ID when the lock has one, else the host name
+    hostName = lines[2] if len(lines) > 2 else ""
+    hostId = lines[3] if len(lines) > 3 else ""
+    sameHost = not hostName or hostName == str(qt.QSysInfo.machineHostName())
+    try:
+        ownHostId = qt.QSysInfo.machineUniqueId()
+        ownHostId = bytes(ownHostId.data() if hasattr(ownHostId, "data") else ownHostId).decode("utf-8", "replace").strip()
+    except (TypeError, ValueError):
+        ownHostId = ""
+    if hostId and ownHostId:
+        sameHost = hostId == ownHostId
+    if not sameHost:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def scan(root, ownSessionId=None):
