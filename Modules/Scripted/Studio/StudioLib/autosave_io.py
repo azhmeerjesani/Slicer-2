@@ -526,6 +526,32 @@ def defaultStorageNodeClassName(node):
         return node.GetDefaultStorageNodeClassName("") or ""
 
 
+def storageWriteOptions(storageNode):
+    """Write options of a user's storage node that the private autosave copy sets differently (``_WriteJob``:
+    cropped, uncompressed segmentations, uncompressed volumes): ``{"useCompression", "compressionParameter"[,
+    "cropToMinimumExtent"]}``, or None without a storage node. Recorded in the manifest so that Recover puts them
+    back on the node of the user's file (``applyStorageWriteOptions()``), and a later Save writes that file as before.
+    """
+    if storageNode is None:
+        return None
+    options = {"useCompression": int(storageNode.GetUseCompression()), "compressionParameter": storageNode.GetCompressionParameter() or ""}
+    if storageNode.IsA("vtkMRMLSegmentationStorageNode"):
+        options["cropToMinimumExtent"] = bool(storageNode.GetCropToMinimumExtent())
+    return options
+
+
+def applyStorageWriteOptions(storageNode, options):
+    """Set the write options of ``storageWriteOptions()`` on ``storageNode`` (options it does not have are ignored)."""
+    if storageNode is None or not options:
+        return
+    if "useCompression" in options:
+        storageNode.SetUseCompression(int(options["useCompression"]))
+    if options.get("compressionParameter"):
+        storageNode.SetCompressionParameter(options["compressionParameter"])
+    if "cropToMinimumExtent" in options and storageNode.IsA("vtkMRMLSegmentationStorageNode"):
+        storageNode.SetCropToMinimumExtent(bool(options["cropToMinimumExtent"]))
+
+
 def classify(node, oldEntry, rootDirectory, roots, maxNodeBytes, systemTemporary=True):
     """How a storable node is autosaved: ``(kind, files, stat)``.
 
@@ -1221,6 +1247,7 @@ class SlotWriter:
                 "original": storageNode.GetFileName() if storageNode is not None and storageNode.GetFileName() else None,
                 "storageId": storageNode.GetID() if storageNode is not None else None,
                 "originalStorageClass": storageNode.GetClassName() if storageNode is not None and storageNode.GetFileName() else None,
+                "originalStorageOptions": storageWriteOptions(storageNode) if storageNode is not None and storageNode.GetFileName() else None,
                 "contentMTime": contentMTime(node),
             }
             sameFiles = bool(old) and old.get("files") == files
@@ -1247,7 +1274,8 @@ class SlotWriter:
             # write
             if old and old.get("kind") == "write" and old.get("contentMTime") == entry["contentMTime"] and old.get("class") == entry["class"] and self._dirExists(old):
                 kept = dict(old)
-                kept.update(name=entry["name"], original=entry["original"], storageId=entry["storageId"], originalStorageClass=entry["originalStorageClass"])
+                kept.update(name=entry["name"], original=entry["original"], storageId=entry["storageId"], originalStorageClass=entry["originalStorageClass"],
+                            originalStorageOptions=entry["originalStorageOptions"])
                 kept.pop("stale", None)
                 plan.entries[nodeId] = kept
                 continue
@@ -1256,7 +1284,8 @@ class SlotWriter:
                 if now - float(old.get("writtenAt") or 0) < HEAVY_INTERVAL_S or idle < HEAVY_IDLE_S:
                     plan.incomplete = True
                     if self._dirExists(old) and old.get("kind") == "write":
-                        plan.entries[nodeId] = dict(old, stale=True, name=entry["name"], original=entry["original"], storageId=entry["storageId"])
+                        plan.entries[nodeId] = dict(old, stale=True, name=entry["name"], original=entry["original"], storageId=entry["storageId"],
+                                                    originalStorageClass=entry["originalStorageClass"], originalStorageOptions=entry["originalStorageOptions"])
                     else:
                         plan.entries[nodeId] = dict(entry, kind="deferred", reason="heavy")
                     continue

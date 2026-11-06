@@ -475,6 +475,81 @@ class StudioAutosaveTest(unittest.TestCase):
             else:
                 os.environ["SLICER_STUDIO_AUTOSAVE_DIR"] = previous
 
+    def test_e8_recoverRestoresWriteOptionsOfUserFiles(self):
+        """BB-1: the autosave writes its private copies cropped and uncompressed, and Recover kept those options on the
+        storage nodes of the user's files: a later Save rewrote lesion.seg.nrrd cropped to the lesion and scan.nrrd as raw
+        NRRD. Now Recover puts back the options of the user's files (also for autosaves that did not record them).
+        """
+        from StudioLib import recovery
+
+        def header(path):
+            with open(path, "rb") as stream:
+                text = stream.read(1 << 16).split(b"\n\n", 1)[0].decode("latin-1")
+            return {line.split(":", 1)[0]: line.split(":", 1)[1].strip() for line in text.splitlines()[1:] if ":" in line and ":=" not in line}
+
+        scene = slicer.mrmlScene
+        volume = self._userVolume(name="scan", shape=(20, 24, 28))  # small: written by the C++ storage node (uncompressed)
+        segmentation = scene.AddNewNodeByClass("vtkMRMLSegmentationNode", "lesion")
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(volume)
+        segmentId = segmentation.GetSegmentation().AddEmptySegment("Lesion")
+        lesion = np.zeros((20, 24, 28), dtype=np.uint8)
+        lesion[8:12, 10:14, 12:16] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(lesion, segmentation, segmentId, volume)
+        segPath = os.path.join(self.userDir, "lesion.seg.nrrd")
+        segmentation.AddDefaultStorageNode()
+        segmentation.GetStorageNode().SetFileName(segPath)
+        self.assertTrue(segmentation.GetStorageNode().WriteData(segmentation))
+        scanPath = volume.GetStorageNode().GetFileName()
+        before = {"seg": header(segPath)["sizes"], "scan": header(scanPath)["sizes"]}
+        self.assertEqual(before["seg"], "28 24 20", "the user's lesion is on the full grid of the scan")
+        self.assertEqual((header(segPath)["encoding"], header(scanPath)["encoding"]), ("gzip", "gzip"))
+
+        for manifestOptions in (True, False):
+            with self.subTest(manifestOptions=manifestOptions):
+                scene.Clear(0)
+                volume = slicer.util.loadVolume(scanPath)
+                segmentation = slicer.util.loadSegmentation(segPath)
+                self.assertFalse(segmentation.GetStorageNode().GetCropToMinimumExtent())
+                # Edits: paint in the lesion, change the scan
+                lesion[9:11, 11:13, 13:15] = 0
+                slicer.util.updateSegmentBinaryLabelmapFromArray(lesion, segmentation, segmentation.GetSegmentation().GetNthSegmentID(0), volume)
+                voxels = slicer.util.arrayFromVolume(volume)
+                voxels[0, 0, 0] += 1
+                slicer.util.arrayFromVolumeModified(volume)
+                service = self._service()
+                self._generate(service)
+                scenePath = os.path.join(service.writer.slotDir, self.io.SCENE_FILE)
+                with open(scenePath, encoding="utf-8") as stream:
+                    self.assertIn('CropToMinimumExtent="true"', stream.read(), "the private autosave copy is cropped")
+                slot = recovery.scan(self.root, None)[0].slots[0]
+                if not manifestOptions:
+                    # An autosave of an earlier version: the manifest has no options of the original storage nodes
+                    manifestPath = os.path.join(slot.path, self.io.MANIFEST_FILE)
+                    manifest = self.io.readJson(manifestPath)
+                    for entry in manifest["entries"].values():
+                        self.assertIn("originalStorageOptions", entry)
+                        entry.pop("originalStorageOptions")
+                    self.io.atomicWriteText(manifestPath, json.dumps(manifest))
+                service.dispose()
+                scene.Clear(0)
+                self.assertIsNotNone(recovery.recover(slot, mode="replace"))
+                self.assertEqual(self._storageFilesUnder(self.root), [])
+                segmentation = slicer.util.getNode("lesion")
+                volume = slicer.util.getNode("scan")
+                segStorage, scanStorage = segmentation.GetStorageNode(), volume.GetStorageNode()
+                self.assertEqual(os.path.realpath(segStorage.GetFileName()), os.path.realpath(segPath))
+                self.assertEqual(os.path.realpath(scanStorage.GetFileName()), os.path.realpath(scanPath))
+                self.assertFalse(segStorage.GetCropToMinimumExtent(), "Recover kept the crop of the private autosave copy")
+                self.assertTrue(segStorage.GetUseCompression())
+                self.assertTrue(scanStorage.GetUseCompression(), "Recover kept the uncompressed writing of the private autosave copy")
+                # File > Save writes the user's files as before the crash
+                self.assertTrue(segStorage.WriteData(segmentation))
+                self.assertTrue(scanStorage.WriteData(volume))
+                self.assertEqual(header(segPath)["sizes"], before["seg"], "Save cropped the user's lesion file")
+                self.assertEqual(header(scanPath)["sizes"], before["scan"])
+                self.assertEqual((header(segPath)["encoding"], header(scanPath)["encoding"]), ("gzip", "gzip"))
+                shutil.rmtree(self.root, ignore_errors=True)
+
     def test_e2_recoveredMessagePlural(self):
         from StudioLib import recovery
 

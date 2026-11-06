@@ -366,6 +366,17 @@ def autosaveSlotOfScene(scene, roots):
     return None
 
 
+def _defaultWriteOptions(scene, className):
+    """Write options (``autosave_io.storageWriteOptions()``) of a new storage node of ``className``."""
+    fresh = scene.CreateNodeByClass(className)
+    if fresh is None:
+        return None
+    try:
+        return io.storageWriteOptions(fresh)
+    finally:
+        fresh.UnRegister(None)
+
+
 def rehomeAfterLoad(scene, slotDir, manifest=None, restoreUrl=None):
     """Point the storage nodes that a loaded autosave created back at the original files, or at no file.
 
@@ -419,9 +430,17 @@ def rehomeAfterLoad(scene, slotDir, manifest=None, restoreUrl=None):
                 replacement.SetFileName(original)
                 node.SetAndObserveStorageNodeID(replacement.GetID())
                 scene.RemoveNode(storageNode)
+                restored = replacement
             else:
                 storageNode.ResetFileNameList()
                 storageNode.SetFileName(original)
+                restored = storageNode
+            # The autosave wrote its private copy cropped and uncompressed: a later Save writes the user's file with the
+            # options it had (its full grid, compressed). Autosaves without recorded options: the defaults of the class.
+            options = entry.get("originalStorageOptions")
+            if options is None:
+                options = _defaultWriteOptions(scene, restored.GetClassName())
+            io.applyStorageWriteOptions(restored, options)
             node.StorableModified()
             report["written"] += 1
             report["restored"] += 1
