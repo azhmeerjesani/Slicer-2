@@ -55,6 +55,23 @@ class LesionNetworkMappingLesionNameTest(unittest.TestCase):
         self.assertEqual(self._name(self._seg("lesion"), "Lesion"), "lesion-Lesion")
         self.assertEqual(self._name(self._seg("Stroke A", "Stroke A"), "Stroke A"), "StrokeA")
 
+    def test_names_in_other_scripts_stay_distinct(self):
+        """BB-1: lesions named 张三, 李四, Иван or محمد all became "-Lesion" (non-ASCII letters were dropped), so that
+        exporting one replaced the maps of another; José and Jos both became "Jos-Lesion".
+        """
+        names = {owner: self._name(self._seg(owner), "Lesion") for owner in ("张三", "李四", "Иван", "محمد", "José", "Jos", "Ödem rechts")}
+        self.assertEqual(len(set(names.values())), len(names), names)
+        self.assertEqual(names["José"], "Jose-Lesion")
+        self.assertEqual(names["Jos"], "Jos-Lesion")
+        self.assertEqual(names["Ödem rechts"], "Odemrechts-Lesion")
+        for owner, name in names.items():
+            self.assertRegex(name, r"^[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9]$", owner)  # a BIDS-style label, no edge dash
+        # The same name gives the same label (a stable tag, not a counter)
+        self.assertEqual(self._name(self._seg("张三"), "Lesion"), names["张三"])
+        from LesionNetworkMapping import _safeName
+
+        self.assertEqual(_safeName("★"), "lesion")  # no letters at all: the default
+
 
 if __name__ == "__main__":
     unittest.main()

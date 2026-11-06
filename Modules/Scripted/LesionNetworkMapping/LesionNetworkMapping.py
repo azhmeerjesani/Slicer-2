@@ -527,9 +527,39 @@ def _settingList(key):
     return [str(item) for item in value if item]
 
 
+def _plainLetters(text):
+    """``text`` with accented letters written as plain ones ("José" -> "Jose"), as Slicer Studio's NIfTI export names them."""
+    try:
+        from StudioLib.niftiexport import asciiText
+
+        return asciiText(text)
+    except ImportError:  # Map without the Studio package: accents only
+        import unicodedata
+
+        return "".join(char for char in unicodedata.normalize("NFKD", str(text or "")) if not unicodedata.combining(char))
+
+
 def _safeName(text, default="lesion"):
-    """Letters, digits and dashes of ``text`` (a BIDS-style label), or ``default``."""
-    name = re.sub(r"[^A-Za-z0-9-]+", "", text or "")
+    """Letters, digits and dashes of ``text`` (a BIDS-style label), or ``default``.
+
+    Accented letters are written as plain ones ("José" -> "Jose"), and a run of letters that have no plain form ("张三",
+    "Иван") becomes a stable tag of it ("u" + 8 hex digits, ``glm._unicode_tag``): dropping them gave lesions named in
+    other scripts all the same run and export name ("-Lesion"), so that exporting one replaced the maps of another.
+    """
+    import unicodedata
+
+    from LesionNetworkMappingLib import glm
+
+    pieces, other = [], ""
+    for char in unicodedata.normalize("NFC", str(text or "")):
+        plain = _plainLetters(char)
+        if plain.isascii():
+            pieces.append(glm._unicode_tag(other) + plain)
+            other = ""
+        else:
+            other += char
+    pieces.append(glm._unicode_tag(other))
+    name = re.sub(r"[^A-Za-z0-9-]+", "", "".join(pieces)).strip("-")
     return name or default
 
 

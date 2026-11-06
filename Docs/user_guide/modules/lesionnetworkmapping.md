@@ -347,7 +347,10 @@ PFdr, TfcePFwe, HedgesG, PartialR and R.
 **Display.** A result opens as a volume on the MNI template with the shared colour table "LNM Diverging" (hot and cold,
 transparent below the threshold) and the lesion as a white outline, opacity 80%. The colour table node is saved with
 the scene, so a scene with a map looks the same in official 3D Slicer. **Export…** (Ctrl+E) copies the outputs of a
-result to a folder you choose.
+result to a folder you choose. When that folder already holds the maps of another lesion with the same name, Export asks
+first: export into a new folder (`conn-<label>-2`), replace them, or cancel. Outside a study a lesion is named after its
+segmentation and segment; accented letters are written as plain ones (José: `Jose`), and a name in another script gets a
+short tag of it (张三: `u1d841bc0`), so that two patients keep two names.
 
 ## Command-line tools
 

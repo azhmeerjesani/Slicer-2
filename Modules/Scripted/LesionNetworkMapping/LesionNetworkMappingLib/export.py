@@ -613,6 +613,50 @@ def resolve_record_paths(record, folder, fields):
     return out
 
 
+def _export_suffix(run_meta, preview_n=None):
+    """The desc suffix of a run's exported files: "PreviewN<k>", a named subset's "Subset<Name>", or ""."""
+    if preview_n is None:
+        preview_n = _preview_from_suffix(run_meta.get("desc_suffix"))
+    suffix = preview_suffix(preview_n)
+    if not suffix and _subject_list(run_meta)["name"]:
+        suffix = run_meta.get("desc_suffix") or ""  # a named-subset run keeps its "Subset<Name>" label
+    return suffix
+
+
+def foreign_lesions(out_dir, run_meta):
+    """Names of the run's lesions whose exported files in ``out_dir`` belong to another lesion.
+
+    Exporting the run there (:func:`write_run`) would replace the maps and sidecar of that other lesion, which has the
+    same name (two segmentations both called "Lesion", files with the same name...). A lesion's own earlier export (its
+    sidecar records the same lesion file sha256) is not foreign: exporting it again updates it. Files whose lesion cannot
+    be told (no or unreadable sidecar next to existing maps) count as foreign.
+    """
+    run_meta = dict(run_meta or {})
+    bundle_name = bundle_info(run_meta.get("bundle") or {}).get("name")
+    if not bundle_name or not os.path.isdir(out_dir):
+        return []
+    suffix = _export_suffix(run_meta)
+    foreign = []
+    for entry in run_meta.get("lesions") or []:
+        if not isinstance(entry, dict) or not entry.get("name"):
+            continue
+        name = entry["name"]
+        sidecar = sidecar_path(out_dir, name, bundle_name, desc_suffix=suffix)
+        maps = map_paths(out_dir, name, bundle_name, desc_suffix=suffix)
+        if not os.path.exists(sidecar):
+            if any(os.path.exists(path) for path in maps.values()):
+                foreign.append(name)
+            continue
+        try:
+            with open(sidecar, encoding="utf-8") as f:
+                recorded = (json.load(f).get("lesion") or {}).get("sha256")
+        except (OSError, ValueError, AttributeError):
+            recorded = None
+        if not recorded or recorded != entry.get("sha256"):
+            foreign.append(name)
+    return foreign
+
+
 def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=None, run_meta=None, preview_n=None, software=None):
     """Export a network-mapping run: maps, one sidecar per lesion, provenance.json, methods.md and reproduce.sh.
 
@@ -639,9 +683,7 @@ def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=
     lesion_names = list(lesion_names)
     if preview_n is None:
         preview_n = _preview_from_suffix(run_meta.get("desc_suffix"))
-    suffix = preview_suffix(preview_n)
-    if not suffix and _subject_list(run_meta)["name"]:
-        suffix = run_meta.get("desc_suffix") or ""  # a named-subset run keeps its "Subset<Name>" label
+    suffix = _export_suffix(run_meta, preview_n)
 
     # Maps
     written_maps = {}
