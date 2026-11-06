@@ -1266,6 +1266,83 @@ class StudioNiftiExportTest(unittest.TestCase):
             logging.getLogger().removeHandler(handler)
             slicer.mrmlScene.RemoveNode(node)
 
+    def test_08af_many_masks_are_written_one_at_a_time(self):
+        """One segmentation with many segments written as masks (a TotalSegmentator-like atlas, all in one layer): each mask is
+        prepared only after the previous one was written and its array released (memory of one mask, not of all), the
+        event loop runs between two masks, the progress bar counts masks, and Esc stops after the current mask.
+        """
+        from StudioLib import niftiexport_ui
+
+        count = 8
+        scan = self._volume("scan", np.zeros((10, 12, 40), np.int16), np.eye(4))
+        atlas = np.zeros((10, 12, 40), np.uint8)
+        for value in range(1, count + 1):
+            atlas[2:8, 3:9, 5 * value - 4:5 * value - 1] = value
+        labelmap = self._volume("atlas labels", atlas, np.eye(4), "vtkMRMLLabelMapVolumeNode")
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Atlas")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(labelmap, segmentation)
+        slicer.mrmlScene.RemoveNode(labelmap)
+        self.assertEqual(segmentation.GetSegmentation().GetNumberOfSegments(), count)
+
+        class Deferred:
+            """A background writer that writes from the event loop and records what was handed over and not written yet."""
+
+            def __init__(self):
+                self.queue = []
+                self.submitted = []
+                self.mostPending = 0
+                self.heldArrays = []
+
+            def submit(self, function, *args, onDone=None, onError=None):
+                self.queue.append((function, args, onDone, onError))
+                self.mostPending = max(self.mostPending, len(self.queue))
+                # Arrays of the masks handed over earlier that are still held (by anyone: the runner, the job, the writer)
+                self.heldArrays.append(sum(1 for task in self.submitted if task.data is not None))
+                # The image handed over: the WriteTask the job is written from
+                self.submitted.append(args[0] if args else function.__self__)
+                qt.QTimer.singleShot(0, self._writeOne)
+
+            def _writeOne(self):
+                function, args, onDone, onError = self.queue.pop(0)
+                try:
+                    result = function(*args)
+                except Exception as error:
+                    onError(error)
+                    return
+                onDone(result)
+
+        progress = []
+        jobs = self.export.planExport([segmentation], self.out, segmentationMode=self.export.SEGMENTATION_MASKS)
+        executor = Deferred()
+        runner = niftiexport_ui.ExportRunner(jobs, executor=executor, onProgress=lambda done, total, title: progress.append((done, total)))
+        runner.start()
+        self.assertTrue(runner.wait(60))
+        self.assertEqual(runner.result.errors, [])
+        self.assertEqual(len(runner.result.images), count)
+        self.assertEqual(executor.mostPending, 1, "the next mask is prepared only after the previous one was written")
+        self.assertEqual(executor.heldArrays, [0] * count, "a written mask's array is released before the next mask is prepared")
+        self.assertEqual({total for _done, total in progress}, {count}, "the progress counts masks, not jobs")
+        self.assertEqual(sorted({done for done, _total in progress}), list(range(count + 1)))
+        for path in runner.result.images:
+            self.assertEqual(int(self._read(path)[0].sum()), 6 * 6 * 3)
+
+        # Esc in the dialog: the export stops after the current mask
+        out = os.path.join(self.out, "stopped")
+        dialog = niftiexport_ui.exportNodesDialog([segmentation], show=False, executor=Deferred())
+        dialog.show()
+        dialog.setSegmentationMode(self.export.SEGMENTATION_MASKS)
+        dialog.setFolder(out)
+        runner = dialog.export()
+        qt.QTimer.singleShot(0, dialog.reject)
+        self.assertTrue(runner.wait(60))
+        self.assertTrue(runner.cancelled)
+        self.assertGreaterEqual(len(runner.result.images), 1)
+        self.assertLessEqual(len(runner.result.images), 2, "Esc stops after the current mask")
+        self.assertEqual(len([name for name in os.listdir(out) if name.endswith(".nii.gz")]), len(runner.result.images))
+        self.assertEqual(dialog.progress.maximum, count)
+
     def test_08aa_dialog_grows_when_the_summary_wraps(self):
         """Select all makes the summary wrap onto more lines: the dialog grows and the image list stays above the folder card."""
         from StudioLib import autosave_io, niftiexport_ui

@@ -30,7 +30,9 @@ The product does not depend on nibabel; images are written with ``LesionNetworkM
 3D Slicer's own writer when that library is not part of the build.
 
 Use :func:`planExport` (or :func:`planProject`, :func:`planDicom`) to get the jobs and the files they write, then
-:func:`runJobs` (synchronous) or ``niftiexport_ui.ExportRunner`` (progress, writing in a background thread).
+:func:`runJobs` (synchronous) or ``niftiexport_ui.ExportRunner`` (progress, writing in a background thread). A job gives its
+images one at a time (``Job.iterTasks``), so that a segmentation with many segments written as masks never holds more than
+one full-grid mask in memory and the user interface can run between two masks.
 """
 
 import contextlib
@@ -801,7 +803,9 @@ def _hexColor(rgb):
 
 
 class Job:
-    """The export of one node: ``prepare()`` reads the scene (main thread) and returns ``WriteTask`` objects."""
+    """The export of one node: ``iterTasks()`` reads the scene (main thread) and gives its ``WriteTask`` objects one at a
+    time; ``prepare()`` returns them all at once.
+    """
 
     def __init__(self, node, kind, path, options=None, title=None):
         self.nodeId = node.GetID()
@@ -871,6 +875,17 @@ class Job:
         return result
 
     def prepare(self):
+        """Every ``WriteTask`` of this job (main thread). Each one holds a full-grid image: prefer ``iterTasks``."""
+        return list(self.iterTasks())
+
+    def iterTasks(self):
+        """The ``WriteTask`` objects of this job, one at a time (main thread; a generator).
+
+        The scene is read when the next task is asked for, and nothing is kept between two tasks (no temporary node, no
+        array but the task's own): a segmentation written as one mask per segment yields one mask at a time, so its
+        memory stays that of one mask and the caller can write it, run the event loop or stop before the next one. The
+        notes (``notes``) are complete once the generator is exhausted.
+        """
         node = self.node()
         if node is None:
             raise ExportError(_("{name} is no longer open").format(name=self.nodeName))
@@ -878,8 +893,9 @@ class Job:
         if reason:
             raise ExportError(f"{self.nodeName}: {reason}")
         if self.kind == KIND_SEGMENTATION:
-            return self._prepareSegmentation(node)
-        return self._prepareVolume(node)
+            yield from self._segmentationTasks(node)
+        else:
+            yield from self._prepareVolume(node)
 
     def _prepareVolume(self, node):
         # A 4D image (its sequence browser's proxy node) is written whole: every time point, not only the one on screen
@@ -1035,43 +1051,64 @@ class Job:
             sidecar["Resampled"] = {"Reference": referenceNode.GetName(), "Interpolation": "nearest neighbour"}
         return sidecar, code
 
-    def _prepareSegmentation(self, node):
+    def _maskTask(self, node, segmentId, path):
+        """``(task or None, transform note, shear note)`` of the mask of one segment; None when no voxel of the segment
+        remains on the export grid. Every temporary node is removed before it returns.
+        """
+        segmentation = node.GetSegmentation()
+        with _temporaryNodes():
+            referenceNode, resampled = self._referenceVolume(node)
+            labelmapNode = self._exportLabelmap(node, [segmentId], referenceNode)
+            maskShearNote = gridShearNote(labelmapNode)
+            data, affine, labelmapNote = volumeData(labelmapNode)
+            transformNote, referenceNote = self._segmentationTransformNotes(node, labelmapNode, labelmapNote, referenceNode)
+            data = (data != 0).astype(np.uint8)
+            if not np.any(data):
+                return None, transformNote, maskShearNote
+            sidecar, code = self._segmentationSidecar(node, data, affine, transformNote, referenceNode, resampled, referenceNote)
+        segment = segmentation.GetSegment(segmentId)
+        sidecar.update({"Kind": "mask", "Units": "binary", "Segment": segment.GetName(), "SegmentColor": _hexColor(segment.GetColor()),
+                        "VoxelCount": int(np.count_nonzero(data))})
+        if maskShearNote is not None:
+            sidecar["GridResampled"] = maskShearNote
+        return WriteTask(path, data, affine, code, sidecar), transformNote, maskShearNote
+
+    def _segmentationTasks(self, node):
+        """The ``WriteTask`` objects of a segmentation (a generator): one label map, or one mask per segment, prepared one at
+        a time (``iterTasks``).
+        """
         mode = self.options.get("mode") or SEGMENTATION_LABELMAP
         segmentation = node.GetSegmentation()
         allIds = segmentIds(node)
-        ids = segmentIds(node, nonEmpty=True)
+        if mode == SEGMENTATION_MASKS:
+            maskPaths = self._maskPaths(node)
+            ids = [segmentId for segmentId, _path in maskPaths]
+        else:
+            ids = segmentIds(node, nonEmpty=True)
         empty = [segmentation.GetSegment(segmentId).GetName() for segmentId in allIds if segmentId not in ids]
         if empty:
             self.notes.append(_("{name}: empty segments were skipped: {segments}").format(name=self.nodeName, segments=", ".join(empty)))
-        tasks = []
         # Segments that have voxels on their own grid but none on the chosen grid (a thin lesion resampled onto a coarser image)
         lostOnGrid = []
         # Label map only: segments that have voxels on the chosen grid but all of them are covered by a later segment
         covered = []
         transformNote = None
         shearNote = None
-        with _temporaryNodes():
-            referenceNode, resampled = self._referenceVolume(node)
-            if mode == SEGMENTATION_MASKS:
-                for segmentId, path in self._maskPaths(node):
-                    labelmapNode = self._exportLabelmap(node, [segmentId], referenceNode)
-                    maskShearNote = gridShearNote(labelmapNode)
-                    shearNote = maskShearNote or shearNote
-                    data, affine, labelmapNote = volumeData(labelmapNode)
-                    transformNote, referenceNote = self._segmentationTransformNotes(node, labelmapNode, labelmapNote, referenceNode)
-                    data = (data != 0).astype(np.uint8)
-                    if not np.any(data):
-                        # An all-zero mask would be a lesion silently lost: it is skipped, with a note
-                        lostOnGrid.append(segmentation.GetSegment(segmentId).GetName())
-                        continue
-                    sidecar, code = self._segmentationSidecar(node, data, affine, transformNote, referenceNode, resampled, referenceNote)
-                    segment = segmentation.GetSegment(segmentId)
-                    sidecar.update({"Kind": "mask", "Units": "binary", "Segment": segment.GetName(), "SegmentColor": _hexColor(segment.GetColor()),
-                                    "VoxelCount": int(np.count_nonzero(data))})
-                    if maskShearNote is not None:
-                        sidecar["GridResampled"] = maskShearNote
-                    tasks.append(WriteTask(path, data, affine, code, sidecar))
-            else:
+        if mode == SEGMENTATION_MASKS:
+            for segmentId, path in maskPaths:
+                task, transformNote, maskShearNote = self._maskTask(node, segmentId, path)
+                shearNote = maskShearNote or shearNote
+                if task is None:
+                    # An all-zero mask would be a lesion silently lost: it is skipped, with a note
+                    lostOnGrid.append(segmentation.GetSegment(segmentId).GetName())
+                    continue
+                yield task
+                # The caller owns the mask now: this generator keeps no reference to it while the next one is prepared
+                task = None
+            labelmapTask = None
+        else:
+            with _temporaryNodes():
+                referenceNode, resampled = self._referenceVolume(node)
                 labelmapNode = self._exportLabelmap(node, ids, referenceNode)
                 shearNote = gridShearNote(labelmapNode)
                 data, affine, labelmapNote = volumeData(labelmapNode)
@@ -1095,23 +1132,24 @@ class Job:
                 if len(ids) > 1:
                     sidecar["Overlap"] = "Where segments overlap, a voxel has the value of the later segment"
                 base = splitExtension(self.path)[0]
-                tasks.append(WriteTask(self.path, data, affine, code, sidecar, textFiles={base + ".tsv": labelTableTsv(labels),
-                                                                                         base + ".txt": labelTableItkSnap(labels)}))
-            if lostOnGrid:
-                if mode == SEGMENTATION_MASKS:
-                    message = _("{name}: no voxel of these segments remains on the chosen grid, so no mask was written: {segments}")
-                else:
-                    message = _("{name}: no voxel of these segments remains on the chosen grid (VoxelCount 0): {segments}")
-                self.notes.append(message.format(name=self.nodeName, segments=", ".join(lostOnGrid)))
-            if covered:
-                self.notes.append(_("{name}: these segments are entirely covered by a later segment, so they are missing from the label map "
-                                    "(the later segment wins where segments overlap; use One mask per segment to keep them): {segments}")
-                                  .format(name=self.nodeName, segments=", ".join(covered)))
-            if transformNote is not None:
-                self.notes.append(_("{name}: its transform was applied to the exported copy (the scene is unchanged)").format(name=self.nodeName))
-            if shearNote is not None:
-                self.notes.append(_gridShearMessage().format(name=self.nodeName))
-        return tasks
+                labelmapTask = WriteTask(self.path, data, affine, code, sidecar, textFiles={base + ".tsv": labelTableTsv(labels),
+                                                                                           base + ".txt": labelTableItkSnap(labels)})
+        if lostOnGrid:
+            if mode == SEGMENTATION_MASKS:
+                message = _("{name}: no voxel of these segments remains on the chosen grid, so no mask was written: {segments}")
+            else:
+                message = _("{name}: no voxel of these segments remains on the chosen grid (VoxelCount 0): {segments}")
+            self.notes.append(message.format(name=self.nodeName, segments=", ".join(lostOnGrid)))
+        if covered:
+            self.notes.append(_("{name}: these segments are entirely covered by a later segment, so they are missing from the label map "
+                                "(the later segment wins where segments overlap; use One mask per segment to keep them): {segments}")
+                              .format(name=self.nodeName, segments=", ".join(covered)))
+        if transformNote is not None:
+            self.notes.append(_("{name}: its transform was applied to the exported copy (the scene is unchanged)").format(name=self.nodeName))
+        if shearNote is not None:
+            self.notes.append(_gridShearMessage().format(name=self.nodeName))
+        if labelmapTask is not None:
+            yield labelmapTask
 
 
 def _labelmapLabels(node, data):
@@ -1550,9 +1588,10 @@ def runJobs(jobs, overwrite=False, readme=None, progress=None):
         if progress is not None:
             progress(index, len(jobs), job.title)
         try:
-            tasks = job.prepare()
-            for task in tasks:
+            # One image at a time: each is written (and its array released) before the next one is prepared
+            for task in job.iterTasks():
                 result.add(_writeWithSlicer(task) if task.data is None else task.write())
+                task = None
         except Exception as e:
             logging.error(f"Slicer Studio: NIfTI export of {job.nodeName} failed: {e}")
             result.errors.append(f"{job.nodeName}: {e}")

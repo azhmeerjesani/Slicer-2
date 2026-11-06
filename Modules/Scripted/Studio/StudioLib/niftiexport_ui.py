@@ -123,11 +123,18 @@ def plainError(error):
 
 
 class ExportRunner:
-    """Run export jobs: each job reads the scene on the main thread (``Job.prepare``), then its images are written by the
-    background writer (``autosave_io.backgroundWriter()``, or ``executor``). ``onProgress(done, total, title)`` and
-    ``onFinished(result)`` are called on the main thread. ``cancel()`` stops before the next job. ``remove``: files of an
-    earlier project export that this one does not write again (``niftiexport.earlierExportFiles``), removed when it starts.
+    """Run export jobs one image at a time: the next image of a job is read from the scene on the main thread
+    (``Job.iterTasks``) only after the previous one was written by the background writer (``autosave_io.backgroundWriter()``,
+    or ``executor``). The event loop runs between two images, so the dialog repaints and Esc works even for one segmentation
+    with hundreds of segments written as masks, and only one full-grid image is held in memory at a time.
+
+    ``onProgress(done, total, title)`` (images written of the images planned) and ``onFinished(result)`` are called on the
+    main thread. ``cancel()`` stops after the current image. ``remove``: files of an earlier project export that this one
+    does not write again (``niftiexport.earlierExportFiles``), removed when it starts.
     """
+
+    #: Images handed to the writer and not written yet: the next image is prepared once this many are pending
+    MAX_PENDING_WRITES = 1
 
     def __init__(self, jobs, executor=None, readme=None, onProgress=None, onFinished=None, remove=None):
         self.jobs = list(jobs)
@@ -137,10 +144,17 @@ class ExportRunner:
         self.onProgress = onProgress
         self.onFinished = onFinished
         self.result = niftiexport.Result(os.path.dirname(self.jobs[0].path) if self.jobs else None)
+        #: Jobs started (the job in progress is ``jobs[index - 1]``)
         self.index = 0
+        #: Images written (or failed), and the images planned
+        self.done = 0
+        self.total = sum(len(job.images()) for job in self.jobs)
         self.cancelled = False
         self.finished = False
         self._waiting = 0
+        self._job = None
+        self._tasks = None
+        self._scheduled = False
 
     def _executor(self):
         if self.executor is None:
@@ -152,40 +166,89 @@ class ExportRunner:
     def start(self):
         if self.remove:
             niftiexport.removeFiles(self.remove, self.result)
-        self._next()
+        self._step()
 
     def cancel(self):
         self.cancelled = True
 
-    def _next(self):
+    def _schedule(self):
+        """Run the next step from the event loop (never nested in a callback), once."""
+        if not self._scheduled and not self.finished:
+            self._scheduled = True
+            qt.QTimer.singleShot(0, self._step)
+
+    def _progress(self):
+        if self.onProgress is not None:
+            self.onProgress(min(self.done, self.total), max(self.total, self.done), self._job.title if self._job is not None else "")
+
+    def _step(self):
+        """Prepare and hand over the next image (or start the next job, or finish)."""
+        self._scheduled = False
         if self.finished:
             return
-        if self.cancelled or self.index >= len(self.jobs):
-            self._finish()
+        if self.cancelled:
+            self._endJob()
+            if self._waiting <= 0:
+                self._finish()
             return
-        job = self.jobs[self.index]
-        if self.onProgress is not None:
-            self.onProgress(self.index, len(self.jobs), job.title)
+        if self._waiting >= self.MAX_PENDING_WRITES:
+            # _taskDone schedules the next step
+            return
+        if self._tasks is None:
+            if self.index >= len(self.jobs):
+                if self._waiting <= 0:
+                    self._finish()
+                return
+            self._job = self.jobs[self.index]
+            self.index += 1
+            self._tasks = self._job.iterTasks()
+            self._progress()
+        job = self._job
         try:
-            tasks = job.prepare()
+            task = next(self._tasks)
+        except StopIteration:
+            self._endJob()
+            self._schedule()
+            return
         except Exception as e:
             self._failure(job.nodeName, e, traceback.format_exc())
-            tasks = []
-        self.result.notes += job.notes
-        self.index += 1
-        background = [task for task in tasks if task.data is not None]
-        for task in tasks:
-            if task.data is None:
-                try:
-                    self.result.add(niftiexport._writeWithSlicer(task))
-                except Exception as e:
-                    self._failure(job.nodeName, e, traceback.format_exc())
-        if not background:
-            qt.QTimer.singleShot(0, self._next)
+            self._endJob()
+            self._schedule()
             return
-        self._waiting = len(background)
-        for task in background:
-            self._executor().submit(task.write, onDone=self._onWritten, onError=lambda error, name=job.nodeName: self._onFailed(name, error))
+        if task.data is None:
+            try:
+                self.result.add(niftiexport._writeWithSlicer(task))
+            except Exception as e:
+                self._failure(job.nodeName, e, traceback.format_exc())
+            self.done += 1
+            self._progress()
+            self._schedule()
+            return
+        self._waiting += 1
+        self._executor().submit(self._write, task, onDone=self._onWritten, onError=lambda error, name=job.nodeName: self._onFailed(name, error))
+        if self._waiting < self.MAX_PENDING_WRITES:
+            self._schedule()
+
+    @staticmethod
+    def _write(task):
+        """Write one image (writer thread), then release its array: only the images not written yet stay in memory."""
+        try:
+            return task.write()
+        finally:
+            task.data = None
+
+    def _endJob(self):
+        """Close the job in progress (its generator, so that nothing it prepared is kept) and keep its notes."""
+        if self._job is None:
+            return
+        tasks, self._tasks = self._tasks, None
+        if tasks is not None:
+            try:
+                tasks.close()
+            except Exception:
+                logging.debug("Slicer Studio: closing a NIfTI export job failed", exc_info=True)
+        self.result.notes += self._job.notes
+        self._job = None
 
     def _onWritten(self, files):
         self.result.add(files)
@@ -211,8 +274,9 @@ class ExportRunner:
 
     def _taskDone(self):
         self._waiting -= 1
-        if self._waiting <= 0:
-            qt.QTimer.singleShot(0, self._next)
+        self.done += 1
+        self._progress()
+        self._schedule()
 
     def _finish(self):
         self.finished = True
@@ -224,7 +288,8 @@ class ExportRunner:
                 logging.warning(f"Slicer Studio: the NIfTI export README could not be written: {e}")
                 self.result.errors.append(f"{os.path.basename(self.readme[0])}: {plainError(e)}")
         if self.onProgress is not None:
-            self.onProgress(len(self.jobs), len(self.jobs), "")
+            total = max(self.total, self.done)
+            self.onProgress(total, total, "")
         if self.onFinished is not None:
             self.onFinished(self.result)
 
@@ -709,11 +774,12 @@ class ExportDialog(qt.QDialog):
         self.list.setEnabled(False)
         self.changeButton.setEnabled(False)
         self.exportButton.setEnabled(False)
-        self.progress.setRange(0, len(jobs))
-        self.progress.setValue(0)
-        self.progress.show()
         self.runner = ExportRunner(jobs, executor=self.executor, readme=self.readme(), onProgress=self._onProgress, onFinished=self._onFinished,
                                    remove=self._stale)
+        # The bar counts images, not jobs: one segmentation written as 100 masks moves it 100 times
+        self.progress.setRange(0, max(1, self.runner.total))
+        self.progress.setValue(0)
+        self.progress.show()
         self.runner.start()
         return self.runner
 
@@ -731,9 +797,10 @@ class ExportDialog(qt.QDialog):
     def _onProgress(self, done, total, title):
         if not _isAlive(self.progress):
             return
+        self.progress.setRange(0, max(1, total))
         self.progress.setValue(done)
         if title:
-            self.summaryLabel.setText(_("Writing {name}… ({done} of {total})").format(name=title, done=done + 1, total=total))
+            self.summaryLabel.setText(_("Writing {name}… ({done} of {total})").format(name=title, done=min(done + 1, total), total=total))
 
     def _onFinished(self, result):
         self.lastResult = result
