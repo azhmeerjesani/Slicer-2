@@ -23,6 +23,7 @@ folder "Slicer Studio tést" (spaces and non-ASCII characters). The tests cover:
 - a file that official Slicer saved next to the scene file is moved into its kind folder;
 - a closed-surface segmentation (a file plus a folder) saved again in place; temporary folders left by a crash go;
 - a detached-header volume (.nhdr) from outside is written into the project as one file;
+- a colour table (.ctbl) taken over by the project names its own file, not the absolute path of the original, on its first line;
 - a project loaded in Classic continues in place in Studio (no copy); the Library order follows official saves;
 - a project saves when its data fits on the disk, also with less than 1 GB free (only the private autosave keeps 1 GB);
 - a scene file that another program changed is kept: Studio writes "<project> (Slicer Studio).mrml" next to it;
@@ -1107,6 +1108,74 @@ class StudioProjectsTest(unittest.TestCase):
         reloaded = slicer.mrmlScene.GetFirstNodeByName("Head")
         self.assertIsNotNone(reloaded)
         self.assertTrue(np.array_equal(slicer.util.arrayFromVolume(reloaded), expected))
+
+    def test_15b_color_table_taken_over_names_no_local_path(self):
+        """A colour table that 3D Slicer saved as .ctbl names the absolute path of its file on its first line: the project's
+        copy (opened from outside, or moved from next to the scene file) names its own file only, and the privacy check
+        reads colour tables.
+        """
+        checker = _privacyModule()
+        service = self._service()
+        _volume, _path = self._userVolume()
+        colors = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLColorTableNode", "My labels")
+        colors.SetTypeToUser()
+        colors.SetNumberOfColors(3)
+        colors.SetColor(0, "Background", 0.0, 0.0, 0.0, 0.0)
+        colors.SetColor(1, "Lesion", 1.0, 0.0, 0.0, 1.0)
+        colors.SetColor(2, "Edema", 0.0, 1.0, 0.0, 1.0)
+        outsidePath = os.path.join(self.userDir, "My labels.ctbl")
+        self.assertTrue(slicer.util.saveNode(colors, outsidePath))
+        slicer.mrmlScene.RemoveNode(colors)
+        with open(outsidePath, "rb") as f:
+            original = f.read()
+        self.assertTrue(original.startswith(b"# Color table file "), original[:120])
+        self.assertIn(os.path.basename(self.tempDir).encode(), original.split(b"\n", 1)[0], "3D Slicer writes the full path")
+        colors = slicer.util.loadColorTable(outsidePath)
+        project = self._projectFor(service)
+        self._save(service)
+        copied = colors.GetStorageNode().GetFileName()
+        self.assertTrue(copied.startswith(project.path + os.sep), copied)
+        self.assertTrue(copied.endswith(".ctbl"), copied)
+        with open(copied, "rb") as f:
+            data = f.read()
+        self.assertEqual(data.split(b"\n", 1)[0], b"# Color table file " + os.path.basename(copied).encode())
+        self.assertEqual(data.split(b"\n", 1)[1], original.split(b"\n", 1)[1], "the colours are copied unchanged")
+        self.assertNotIn(os.path.basename(self.tempDir).encode(), data)
+        with open(outsidePath, "rb") as f:
+            self.assertEqual(f.read(), original, "the outside file is not changed")
+        self.assertFalse(colors.GetModifiedSinceRead())
+        # 3D Slicer's Save dialog put a colour table next to the scene file: moved into its kind folder, without the path
+        second = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLColorTableNode", "More labels")
+        second.SetHideFromEditors(False)  # a colour table the user loaded (new colour nodes are hidden)
+        second.SetTypeToUser()
+        second.SetNumberOfColors(2)
+        second.SetColor(1, "Region", 0.0, 0.0, 1.0, 1.0)
+        self.assertTrue(slicer.util.saveNode(second, os.path.join(project.path, "More labels.ctbl")))
+        self.assertFalse(second.GetModifiedSinceRead())
+        self.assertTrue(service.saveNow("test", progress=False))
+        self.io.backgroundWriter().drain(10.0)
+        moved = second.GetStorageNode().GetFileName()
+        self.assertNotEqual(os.path.dirname(moved), project.path, moved)
+        with open(moved, "rb") as f:
+            self.assertEqual(f.read().split(b"\n", 1)[0], b"# Color table file More labels.ctbl")
+        # Every file of the project names no absolute local path, and both tables open again
+        for path in self._projectFiles(project):
+            with open(os.path.join(project.path, path), "rb") as f:
+                self.assertNotIn(os.path.basename(self.tempDir).encode(), f.read(), path)
+        reloaded = slicer.util.loadColorTable(copied)
+        self.assertEqual(reloaded.GetColorName(1), "Lesion")
+        self.assertEqual(slicer.util.loadColorTable(moved).GetColorName(1), "Region")
+        if checker is None:
+            return
+        self.assertEqual(checker.scan([project.path], out=lambda _line: None), 0)
+        # The privacy check reads colour tables (.ctbl, and a .txt colour table) that name a local path
+        for name in ("Leaky.ctbl", "Leaky.txt"):
+            folder = os.path.join(self.tempDir, "privacy-" + name)
+            os.makedirs(folder)
+            with open(os.path.join(folder, name), "wb") as f:
+                f.write(b"# Color table file /home/alice/patients/Leaky.ctbl\n# 2 values\n1 Lesion 255 0 0 255\n")
+            lines = []
+            self.assertEqual(checker.scan([folder], out=lines.append), 1, f"{name} is flagged: {lines}")
 
     def test_16_project_loaded_in_classic_continues_in_place(self):
         """A project of the folder loaded in Classic (official Load Scene) continues in place when Studio is shown: no copy."""

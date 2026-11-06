@@ -1892,6 +1892,44 @@ SOURCES_FORMAT = "slicer-studio-sources"
 #: prefix of the values of .studio/sources.json: a hash of the outside file's path, never the path itself (the project
 #: folder is shared whole, and the folder of a scan is often named after the patient)
 SOURCE_ID_PREFIX = "sha256:"
+#: First line of a colour table that vtkMRMLColorTableStorageNode wrote as .ctbl or .txt: "# Color table file <full path of
+#: the file>". A comment (every reader skips lines that start with "#"), but the path is an absolute local one
+COLOR_TABLE_HEADER = b"# Color table file "
+
+
+def portableColorTableHeader(data, name):
+    """``data`` (the bytes of a .ctbl/.txt colour table) with the path on its "# Color table file" line replaced by the file
+    name ``name``: the project folder is shared whole, and the header names the absolute path of the file that official
+    3D Slicer wrote. Anything else (other files, other lines) is returned unchanged.
+    """
+    if not data.startswith(COLOR_TABLE_HEADER):
+        return data
+    end = data.find(b"\n")
+    if end < 0:
+        end = len(data)
+    lineEnd = b"\r" if end > 0 and data[end - 1 : end] == b"\r" else b""
+    header = COLOR_TABLE_HEADER + os.path.basename(name).encode("utf-8", "surrogateescape") + lineEnd
+    return header + data[end:]
+
+
+def makeColorTableHeaderPortable(path):
+    """Rewrite the header line of the colour table file ``path`` if it names a path (``portableColorTableHeader()``).
+    True if the file was changed. Worker-safe.
+    """
+    with open(path, "rb") as f:
+        data = f.read()
+    portable = portableColorTableHeader(data, os.path.basename(path))
+    if portable == data:
+        return False
+    atomicWriteBytes(path, portable)
+    return True
+
+
+def _isColorTableFile(storageNode, path):
+    """True for a .ctbl/.txt file of a colour table node (its header line may hold the absolute path of the file)."""
+    if storageNode is None or not storageNode.IsA("vtkMRMLColorTableStorageNode"):
+        return False
+    return path.lower().endswith((".ctbl", ".txt"))
 
 
 def sourceId(path):
@@ -2431,16 +2469,17 @@ class ProjectWriter(SlotWriter):
         base, extension = projects.splitExtension(os.path.basename(source))
         destination = self._newPath(plan, folder, projects.sanitizeName(base, fallback="data") + extension)
         plan.imports.append((nodeId, source, stat, destination))
-        plan.copyJobs.append((nodeId, source, stat, destination))
+        # A colour table's .ctbl/.txt names the absolute path of the file on its first line: the copy names its own file
+        plan.copyJobs.append((nodeId, source, stat, destination, _isColorTableFile(node.GetStorageNode(), source)))
         entry["bytes"] = stat[0] if stat else 0
 
     def submitCopies(self, plan):
         """Queue the copies of unchanged files (background writer). Main thread."""
         jobs, plan.copyJobs = plan.copyJobs, []
-        for nodeId, source, stat, destination in jobs:
+        for nodeId, source, stat, destination, colorTable in jobs:
             plan.workerPending += 1
 
-            def copy(source=source, destination=destination):
+            def copy(source=source, destination=destination, colorTable=colorTable):
                 if plan.cancelled:
                     return None
                 os.makedirs(os.path.dirname(destination), exist_ok=True)
@@ -2448,6 +2487,13 @@ class ProjectWriter(SlotWriter):
                 start = time.perf_counter()
                 try:
                     shutil.copy2(source, temporary)
+                    if colorTable:
+                        with open(temporary, "rb") as f:
+                            data = f.read()
+                        portable = portableColorTableHeader(data, os.path.basename(destination))
+                        if portable != data:
+                            with open(temporary, "wb") as f:
+                                f.write(portable)
                     fsyncFile(temporary)
                     replaceWithRetry(temporary, destination)
                 except BaseException:
@@ -2859,6 +2905,12 @@ class _ProjectMoveJob:
             if record is not None:
                 self.writer.records[_canonical(self.path)] = record
             return True
+        if _isColorTableFile(node.GetStorageNode(), destination):
+            # Official 3D Slicer wrote the absolute path of the file on its first line: the project names the file only
+            try:
+                makeColorTableHeaderPortable(destination)
+            except OSError as error:
+                logging.warning(f"Slicer Studio: the header of {os.path.basename(destination)} could not be rewritten: {error}")
         _setSingleFile(node.GetStorageNode(), destination)
         self.writer._record(destination, ours=bool(record and record.get("ours")))
         self.entry["files"] = [destination]

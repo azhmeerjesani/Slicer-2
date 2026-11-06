@@ -13,7 +13,8 @@ the file; provenance and reproduce files are the exception, by design):
   sidecar/study  other .json next to data, study files           shared: a hit fails
   log            .log in a study folder (for example derivatives/normalization/<sid>/logs; the child output of a run,
                  written with paths relative to the run folder)  shared: a hit fails
-  other          anything else that is text                      shared: a hit fails
+  other          anything else that is text, and colour tables   shared: a hit fails
+                 (.ctbl, and a .txt that starts with "# Color table file": 3D Slicer writes the full path of the file there)
   report         .html / .md / .txt                              reported, not a failure
   run-record     argv / inputs of a run: runs.jsonl, normalization.json, provenance.json, reproduce.sh and reproduce_<name>.sh
                  (for example the pipeline's reproduce_pipeline.sh), job and design records
@@ -46,7 +47,9 @@ RUN_RECORDS = {"runs.jsonl", "normalization.json", "provenance.json", "slnm.json
 #: Reproduce scripts are run records: reproduce.sh and reproduce_<name>.sh (the pipeline's reproduce_pipeline.sh), nothing else
 REPRODUCE_SCRIPT = re.compile(r"^reproduce(_\w+)?\.sh$")
 RUN_RECORDS_LOOSE = {"cohortmaps.json", "glm.json"}
-TEXT_SUFFIXES = (".mrml", ".json", ".jsonl", ".tsv", ".csv", ".html", ".md", ".txt", ".sh", ".log")
+TEXT_SUFFIXES = (".mrml", ".json", ".jsonl", ".tsv", ".csv", ".html", ".md", ".txt", ".sh", ".log", ".ctbl")
+#: First line of a colour table that 3D Slicer wrote as .ctbl or .txt (followed by the full path of the file)
+COLOR_TABLE_HEADER = "# Color table file "
 SHARED = ("scene", "table", "sidecar/study", "log", "other")
 
 
@@ -78,7 +81,11 @@ def _texts(path, rel, name, strict):
             return [(f"{rel}!{n}", "scene", z.read(n).decode("utf-8", "replace")) for n in z.namelist() if n.endswith(TEXT_SUFFIXES)]
     if name.endswith(TEXT_SUFFIXES):
         with open(path, encoding="utf-8", errors="replace") as f:
-            return [(rel, classify(rel, name, strict), f.read())]
+            text = f.read()
+        cls = classify(rel, name, strict)
+        if cls == "report" and name.endswith(".txt") and text.startswith(COLOR_TABLE_HEADER):
+            cls = "other"  # a colour table (data), not a report
+        return [(rel, cls, text)]
     return []
 
 
