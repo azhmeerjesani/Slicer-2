@@ -17,6 +17,8 @@ presenter (``autosave.instance().setRecoveryPresenter()``, A-01b), which reuses 
 import calendar
 import logging
 import os
+import re
+import tempfile
 import time
 import traceback
 
@@ -544,14 +546,12 @@ def _loadAutosavedScene(scenePath):
         ioManager.blockSignals(wasBlocked)
 
 
-def recover(slot, mode=None, parent=None):
-    """Load an autosaved slot and re-link its data to the original files. Return the report, or None if cancelled."""
+def _loadSlot(slot, scenePath, manifest, replace):
+    """Load ``scenePath`` (the scene of ``slot``, or a part of it in the slot folder) and re-link its data to the original
+    files. ``replace``: clear the current scene first, else add to it. Return the report of ``rehomeAfterLoad()``, or
+    None if the load failed (the error is shown).
+    """
     scene = slicer.mrmlScene
-    if mode is None:
-        mode = askReplaceOrAdd(parent) if sceneHasDisplayableData(scene) else "replace"
-    if mode is None:
-        return None
-    manifest = io.readJson(os.path.join(slot.path, io.MANIFEST_FILE)) or {}
     restoreUrl = None
     service = _service()
     if service is not None:
@@ -560,7 +560,7 @@ def recover(slot, mode=None, parent=None):
         service.protectSlot(slot.path)
     report = None
     try:
-        if mode == "replace":
+        if replace:
             # Before beginRecovery(): unsaved changes of the replaced scene stay recoverable (closed-unsaved slot)
             scene.Clear(0)
         else:
@@ -571,7 +571,7 @@ def recover(slot, mode=None, parent=None):
             with slicer.util.tryWithErrorDisplay(_("Failed to recover the autosaved scene."), waitCursor=True):
                 loadError = None
                 try:
-                    _loadAutosavedScene(slot.scenePath())
+                    _loadAutosavedScene(scenePath)
                 except Exception as error:
                     # A node that cannot be read (for example its original file was moved or deleted) fails the load,
                     # but the other nodes are loaded: they are re-linked like after a complete load, so that none stays
@@ -588,6 +588,178 @@ def recover(slot, mode=None, parent=None):
     finally:
         if service is not None:
             service.releaseSlot(slot.path)
+    return report
+
+
+def _nodeAttributes(text):
+    """The node attributes of an MRML element's ``attributes`` value (``name:value;``, as ``vtkMRMLNode`` reads them)."""
+    attributes = {}
+    for item in (text or "").split(";"):
+        if item:
+            name, _separator, value = item.partition(":")
+            attributes[name] = value.replace("%3B", ";").replace("%25", "%")
+    return attributes
+
+
+def _referencedIds(element, ids):
+    """IDs of the other nodes of ``ids`` that ``element`` (an MRML node element) refers to, in any attribute."""
+    referenced = set()
+    for item in element.iter():
+        for key, value in item.attrib.items():
+            if key in ("id", "name", "attributes"):
+                continue
+            for token in re.split(r"[\s;:,]+", value):
+                if token in ids:
+                    referenced.add(token)
+    referenced.discard(element.get("id"))
+    return referenced
+
+
+def otherDataScene(sceneText, isRestored):
+    """The part of an autosaved scene (MRML text) that a recovery handler did not restore itself: ``(text, nodeIds)``,
+    or None when there is no such data.
+
+    ``isRestored(info)``: True for a node that the handler restored, with ``info`` ``{"tag", "id", "name",
+    "attributes"}`` (the node attributes as a dict). These nodes, the nodes that only they use (display and storage
+    nodes), the settings of the views and modules (singletons) and the subject hierarchy are left out; the other data
+    (point lists, tables, models...) is kept with the nodes it uses. References to the left out nodes are removed.
+    """
+    from xml.etree import ElementTree
+
+    root = ElementTree.fromstring(sceneText)
+    elements = {element.get("id"): element for element in root if element.get("id")}
+    candidates = {nodeId for nodeId, element in elements.items()
+                  if element.get("singletonTag") is None and element.tag != "SubjectHierarchy"}
+    references = {nodeId: _referencedIds(elements[nodeId], candidates) for nodeId in candidates}
+
+    def closure(start):
+        found, todo = set(start), list(start)
+        while todo:
+            for referenced in references.get(todo.pop(), ()):
+                if referenced not in found:
+                    found.add(referenced)
+                    todo.append(referenced)
+        return found
+
+    restored = set()
+    for nodeId in candidates:
+        element = elements[nodeId]
+        info = {"tag": element.tag, "id": nodeId, "name": element.get("name") or "", "attributes": _nodeAttributes(element.get("attributes"))}
+        try:
+            if isRestored(info):
+                restored.add(nodeId)
+        except Exception:
+            logging.error("Autosave: recovery handler failed:\n" + traceback.format_exc())
+    # A node that a kept node uses is kept even when a restored node uses it too (for example a shared transform)
+    kept = closure(candidates - closure(restored)) - restored
+    if not kept:
+        return None
+    for nodeId, element in elements.items():
+        if nodeId not in kept:
+            root.remove(element)
+            continue
+        text = element.get("references")
+        if text:
+            roles = []
+            for role in text.split(";"):
+                name, separator, ids = role.partition(":")
+                ids = [referenced for referenced in ids.split() if referenced in kept or referenced not in elements]
+                if separator and ids:
+                    roles.append(f"{name}:{' '.join(ids)};")
+            element.set("references", "".join(roles))
+    return '<?xml version="1.0" encoding="UTF-8"?>\n' + ElementTree.tostring(root, encoding="unicode"), kept
+
+
+#: (class, getter, setter) of the node references that ``_shownNodes()`` keeps (a getter returns a node ID or a node)
+_SHOWN_REFERENCES = (
+    ("vtkMRMLSliceCompositeNode", "GetBackgroundVolumeID", "SetBackgroundVolumeID"),
+    ("vtkMRMLSliceCompositeNode", "GetForegroundVolumeID", "SetForegroundVolumeID"),
+    ("vtkMRMLSliceCompositeNode", "GetLabelVolumeID", "SetLabelVolumeID"),
+    ("vtkMRMLSegmentEditorNode", "GetSegmentationNode", "SetAndObserveSegmentationNode"),
+    ("vtkMRMLSegmentEditorNode", "GetSourceVolumeNode", "SetAndObserveSourceVolumeNode"),
+)
+
+
+def _referencedId(node, getter):
+    value = getattr(node, getter)()
+    if value is not None and not isinstance(value, str):
+        value = value.GetID()
+    return value or None
+
+
+def _shownNodes():
+    """``[(node, getter, setter, node ID)]``: the volumes that the slice views show and the nodes that the Segment Editor edits."""
+    shown = []
+    for className, getter, setter in _SHOWN_REFERENCES:
+        for node in slicer.util.getNodesByClass(className):
+            if hasattr(node, getter) and hasattr(node, setter):
+                nodeId = _referencedId(node, getter)
+                if nodeId:
+                    shown.append((node, getter, setter, nodeId))
+    return shown
+
+
+def _restoreShownNodes(shown):
+    """Show again what ``_shownNodes()`` recorded where a load emptied it (when the node is still in the scene)."""
+    for node, getter, setter, nodeId in shown:
+        referenced = slicer.mrmlScene.GetNodeByID(nodeId)
+        if referenced is None or slicer.mrmlScene.GetNodeByID(node.GetID()) is not node or _referencedId(node, getter):
+            continue
+        getattr(node, setter)(nodeId if getter.endswith("ID") else referenced)
+
+
+def recoverOtherData(slot, isRestored):
+    """Add the data of ``slot`` that a recovery handler did not restore itself to the current scene (W3-07: after
+    "Reopen study at <sid>", the point lists, tables and other data that the card lists), re-linked like ``recover()``
+    does. ``isRestored``: see ``otherDataScene()``. Return the report, or None when there was nothing else to add or the
+    load failed. The session is not marked as recovered here (the caller does).
+    """
+    if not os.path.isfile(slot.scenePath()):
+        return None
+    try:
+        with open(slot.scenePath(), encoding="utf-8") as sceneFile:
+            other = otherDataScene(sceneFile.read(), isRestored)
+    except Exception:
+        logging.error(f"Autosave: cannot read the autosaved scene {slot.scenePath()}:\n{traceback.format_exc()}")
+        return None
+    if other is None:
+        return None
+    text, kept = other
+    manifest = io.readJson(os.path.join(slot.path, io.MANIFEST_FILE)) or {}
+    manifest = dict(manifest, entries={nodeId: entry for nodeId, entry in (manifest.get("entries") or {}).items() if nodeId in kept})
+    # In the slot folder, so that the relative file names of the scene stay valid (the folder is private, SPEC 9.9)
+    try:
+        handle, path = tempfile.mkstemp(prefix="StudioOtherData-", suffix=".mrml", dir=slot.path)
+    except OSError:
+        logging.error(f"Autosave: cannot recover the other data of {slot.path}:\n{traceback.format_exc()}")
+        return None
+    # Loading a scene into the current one empties the layers of the slice views and the segmentation of the Segment
+    # Editor (3D Slicer does so too): what the handler just showed stays shown
+    shown = _shownNodes()
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as sceneFile:
+            sceneFile.write(text)
+        report = _loadSlot(slot, path, manifest, replace=False)
+    finally:
+        _restoreShownNodes(shown)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    if report is not None and report["restored"]:
+        notify(recoveredText(report["restored"], _shortTime(slot.updated, timeOnlyToday=True)), report)
+    return report
+
+
+def recover(slot, mode=None, parent=None):
+    """Load an autosaved slot and re-link its data to the original files. Return the report, or None if cancelled."""
+    scene = slicer.mrmlScene
+    if mode is None:
+        mode = askReplaceOrAdd(parent) if sceneHasDisplayableData(scene) else "replace"
+    if mode is None:
+        return None
+    manifest = io.readJson(os.path.join(slot.path, io.MANIFEST_FILE)) or {}
+    report = _loadSlot(slot, slot.scenePath(), manifest, replace=mode == "replace")
     if report is None:
         return None
     markRecovered(slot)

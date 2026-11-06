@@ -870,7 +870,8 @@ Save) and the exit prompt keep their meaning. Use *File > Save* to keep your wor
   Show") points to it. *Recover* puts the scene back and returns to the workspace (Draw or Map) that was
   current at the autosave. Every autosave records the workspace and the open study and subject for this. If
   the autosave was made with a study open, *Recover* reads *Reopen study at sub-012*: it reopens the study at
-  that subject (where the journal offers the lesion, below) instead of loading the scene. Switching to
+  that subject (where the journal offers the lesion, below) instead of loading the subject's scan and lesion
+  from the scene; the scene's other data (point lists, tables, models…) is added to it. Switching to
   Classic removes the status and the card, and Classic's window and status-bar messages take over.
 - **Study journal and scene autosave.** The two work side by side. The scene autosave copies the whole
   scene to the private folder above. The journal of an open study (see

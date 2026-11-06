@@ -4532,6 +4532,16 @@ def _canRecover(slot):
     return bool(record and record.get("path") and isAvailable() and _lnm("study").Study.is_study(record["path"]))
 
 
+#: Node attributes of the nodes that reopening a study restores itself (its subject's scan and lesion, the study template,
+#: the tracings of a second tracing or an adjudication): ``adjudicate.NODE_ATTRIBUTE`` is "Studio.AgreementSubject"
+_STUDY_NODE_ATTRIBUTES = (SUBJECT_ATTRIBUTE, "Studio.AgreementSubject")
+
+
+def _restoredByStudy(info):
+    """True for an autosaved node (``recovery.otherDataScene()``) that reopening the study restores itself."""
+    return any(info["attributes"].get(name) for name in _STUDY_NODE_ATTRIBUTES)
+
+
 def _recover(slot):
     record = _slotStudy(slot)
     agreementRecord = record.get("agreement") if isinstance(record.get("agreement"), dict) else None
@@ -4540,8 +4550,14 @@ def _recover(slot):
         # offers its journal); the subject itself is never opened by the session (blinding)
         session = openStudy(record["path"])
         _reopenAgreement(session, agreementRecord.get("queue"), agreementRecord["subject"])
-        return
-    openStudy(record["path"], subject=record.get("subject") or None)
+    else:
+        openStudy(record["path"], subject=record.get("subject") or None)
+    # The study restores its subject (its journal holds the edits of the lesion); the other autosaved data of the scene
+    # (point lists, tables, models... that the recovery card lists) is added to it (SPEC 9.9: Recover loads the scene)
+    if hasattr(slot, "scenePath"):
+        from . import recovery
+
+        recovery.recoverOtherData(slot, _restoredByStudy)
 
 
 def _reopenAgreement(session, queue, sid):

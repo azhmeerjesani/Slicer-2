@@ -1383,6 +1383,76 @@ class StudioAutosaveTest(unittest.TestCase):
         self.assertEqual(state(sessions[0]), "recovered")
         self.assertIsNotNone(studioShell)
 
+    def test_u3_reopenStudyKeepsOtherData(self):
+        """BB-1: the card of a crash in a study listed '1 point list · 1 table', but 'Reopen study at <sid>' only reopened
+        the study: the autosaved point list and table were never loaded, and no part of the UI could restore them. The
+        study's subject is reopened by the study (not loaded twice), the other data is added with the views kept.
+        """
+        from StudioLib import autosave_ui, importer, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        from LesionNetworkMappingLib import geometry, nifti
+
+        service = self._service()
+        studioShell = self._applyStudio(service)
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: None
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        self.addCleanup(study_ui.closeStudy)
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.userDir, "Points study")
+        os.makedirs(folder)
+        scans = []
+        for index, sid in enumerate(("sub-01", "sub-02")):
+            scans.append(os.path.join(folder, f"{sid}_T1w.nii.gz"))
+            nifti.write_nifti(scans[-1], (np.indices(grid.shape).sum(axis=0) % (50 + index)).astype(np.int16), grid.affine)
+        session = study_ui.createStudy(scans, studioShell, folder=folder)
+        self.assertTrue(session.open("sub-01", switchToDraw=False))
+        self._pump()
+        points = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Targets")
+        for position in ((1.0, 2.0, 3.0), (4.0, 5.0, 6.0), (7.0, 8.0, 9.0)):
+            points.AddControlPoint(vtk.vtkVector3d(*position))
+        table = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTableNode", "Measurements")
+        table.AddColumn().SetName("value")
+        table.SetCellText(table.AddEmptyRow(), 0, "7")
+        self._generate(service)
+        sessions = self._crashedSessions(service)
+        slot = sessions[0].recoverableSlots()[0]
+        self.assertIn("1 point list", slot.contentsText())
+        self.assertIn("1 table", slot.contentsText())
+        self.assertEqual(autosave_ui.recoverText(slot), "Reopen study at sub-01")
+
+        # The restart: no study, an empty scene
+        study_ui.closeStudy()
+        slicer.mrmlScene.Clear(0)
+        self._pump()
+        self.assertTrue(autosave_ui.instance().recover(slot))
+        self._pump()
+        session = study_ui.session()
+        self.assertIsNotNone(session)
+        self.assertEqual(session.current(), "sub-01")
+        # The subject is the study's own, once (the autosaved copy of its scan and lesion is not added)
+        self.assertEqual([node.GetID() for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode")], [session.segmentationNode().GetID()])
+        self.assertEqual([node.GetID() for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")], [session.volumeNode().GetID()])
+        # The point list and the table are back, on no file of the autosave folder
+        recoveredPoints = slicer.util.getNodesByClass("vtkMRMLMarkupsFiducialNode")
+        self.assertEqual([node.GetName() for node in recoveredPoints], ["Targets"])
+        self.assertEqual(recoveredPoints[0].GetNumberOfControlPoints(), 3)
+        recoveredTables = slicer.util.getNodesByClass("vtkMRMLTableNode")
+        self.assertEqual([node.GetName() for node in recoveredTables], ["Measurements"])
+        self.assertEqual(recoveredTables[0].GetCellText(0, 0), "7")
+        self.assertEqual(self._storageFilesUnder(self.root), [])
+        # The views still show the subject and Draw still edits its lesion (loading a scene empties them)
+        for compositeNode in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode"):
+            self.assertEqual(compositeNode.GetBackgroundVolumeID(), session.volumeNode().GetID())
+        editor = importer.segmentEditorWidget()
+        editor = getattr(editor, "editor", editor)
+        if editor is not None and editor.mrmlSegmentEditorNode() is not None:
+            self.assertEqual(editor.segmentationNode().GetID(), session.segmentationNode().GetID())
+        # No temporary scene file is left in the private slot folder
+        self.assertEqual([name for name in os.listdir(slot.path) if name.endswith(".mrml")], [self.io.SCENE_FILE])
+
     def test_v_studioClassic(self):
         from StudioLib import autosave_ui, library
 
