@@ -1030,7 +1030,9 @@ def createStudy(files, shell=None, folder=None, groupColumn=None, groupMapping=N
         studyObject = studyModule.Study.create(folder, name, template=template, software=_softwareRecord())
         studyObject.trace_policy = defaultTracePolicy(template)
         how = "created"
-    report = studyObject.add_files(files) if files else {"added": [], "updated": [], "skipped": [], "pairs": {}, "warnings": []}
+    # Ids come from the file names, else from the subject folders below the study folder (patient01/T1.nii.gz), never
+    # from the folders above it
+    report = studyObject.add_files(files, root=folder) if files else {"added": [], "updated": [], "skipped": [], "pairs": {}, "warnings": []}
     gridRows = _gridCandidates(studyObject)
     _applyGridAnswers(studyObject, gridRows)
     imported, importProblem = None, None
@@ -1063,11 +1065,28 @@ def createStudy(files, shell=None, folder=None, groupColumn=None, groupMapping=N
     renames.update((imported or {}).get("renamed") or {})
     for column, kept in renames.items():
         message += " · " + _("your {column} column is kept as {kept}").format(column=column, kept=kept)
+    noId = _noSubjectId(report)
     if report.get("skipped"):
-        message += " · " + (_("1 file skipped") if len(report["skipped"]) == 1 else _("{n} files skipped").format(n=len(report["skipped"])))
-    _toast(shell, message, ms=5000 if not importProblem else 10000, action=lambda: _showFolder(folder), actionText=_("Show folder"),
+        message += " · " + skippedText(report)
+    _toast(shell, message, ms=5000 if not (importProblem or noId) else 10000, action=lambda: _showFolder(folder), actionText=_("Show folder"),
            level="consequence" if not importProblem else "warning")
     return session
+
+
+def _noSubjectId(report):
+    """The number of files that ``Study.add_files`` skipped for want of a subject id."""
+    return sum(1 for item in (report or {}).get("skipped") or () if item.get("reason") == "no subject id")
+
+
+def skippedText(report):
+    """"4 files skipped (...)": the files that ``Study.add_files`` skipped, with how to name files that had no subject id."""
+    skipped = len((report or {}).get("skipped") or ())
+    text = _("1 file skipped") if skipped == 1 else _("{n} files skipped").format(n=skipped)
+    noId = _noSubjectId(report)
+    if noId:
+        text += " " + _("({n} without a subject id: name the files or their folders by subject, as patient01_T1.nii.gz or "
+                        "patient01/T1.nii.gz, or set the ID rule in Import)").format(n=noId)
+    return text
 
 
 def _importTable(studyObject, path, groupColumn=None, groupMapping=None):

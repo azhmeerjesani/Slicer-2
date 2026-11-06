@@ -545,6 +545,61 @@ class StudyTest(unittest.TestCase):
         self.assertEqual(report["added"][0].casefold(), "sub-patient09")
         self.assertEqual((row["scan"], row["lesion"], row["status"]), (created.relpath(scan), created.relpath(lesion), "traced"))
 
+    def test_subject_folders_name_their_files(self):
+        # patients/patient01/T1.nii.gz + lesion.nii.gz (BB-1): names made only of modality or lesion words take the
+        # subject id from their folder below the chosen folder (it was "0 subjects, 4 files skipped: no subject id")
+        for subject, names in (("patient01", ("T1", "lesion")), ("patient02", ("T1", "lesion")), ("P003", ("FLAIR", "mask"))):
+            for name in names:
+                self._image(f"sub-cohort/patients/{subject}/anat/{name}.nii.gz" if subject == "P003" else f"sub-cohort/patients/{subject}/{name}.nii.gz", value=int(name in ("lesion", "mask")))
+        patients = self.path("sub-cohort", "patients")
+        created = Study.create(self.path("study_folders"))
+        report = created.add_files(patients)
+        self.assertEqual(report["skipped"], [])
+        self.assertEqual(sorted(report["added"]), ["sub-P003", "sub-patient01", "sub-patient02"])
+        for sid, subject, folder, scan, lesion in (("sub-patient01", "patient01", "", "T1", "lesion"), ("sub-patient02", "patient02", "", "T1", "lesion"), ("sub-P003", "P003", "anat", "FLAIR", "mask")):
+            row = created.subject(sid)
+            self.assertEqual(report["pairs"][sid], {"scan": os.path.join(patients, subject, folder, f"{scan}.nii.gz") if folder else os.path.join(patients, subject, f"{scan}.nii.gz"),
+                                                    "lesion": os.path.join(patients, subject, folder, f"{lesion}.nii.gz") if folder else os.path.join(patients, subject, f"{lesion}.nii.gz")})
+            self.assertEqual((row["status"], row["source_id"]), ("traced", subject))
+        # The same files given one by one (createStudy) with the folder they were chosen in: the same subjects; folders
+        # above the chosen folder are never read ("sub-cohort" made one subject of all of them)
+        files = sorted(os.path.join(folder, name) for folder, _, names in os.walk(patients) for name in names)
+        in_place = Study.create(patients)
+        report = in_place.add_files(files, root=patients)
+        self.assertEqual((report["skipped"], sorted(report["added"])), ([], ["sub-P003", "sub-patient01", "sub-patient02"]))
+        # The chosen folder itself names no subject: files without an id directly in it are skipped, as before
+        self._image("flat/T1.nii.gz")
+        report = Study.create(self.path("study_flat")).add_files(self.path("flat"))
+        self.assertEqual((report["added"], [item["reason"] for item in report["skipped"]]), ([], ["no subject id"]))
+        # A BIDS subject folder chosen itself still names its files
+        self._image("bids_one/sub-09/anat/T1w.nii.gz")
+        self.assertEqual(Study.create(self.path("study_one")).add_files(self.path("bids_one", "sub-09"))["added"], ["sub-09"])
+
+    def test_modality_folder_chosen_takes_id_from_the_subject_folder_above(self):
+        # Import > add the folder sub-01/anat (or sub-01/ses-01/anat) itself, with no id in the file names: the chosen
+        # folder is a modality or session folder, so the subject folder above it names the files, as it did before the
+        # chosen folder bounded the search (BB-1 recheck). A chosen folder that is not one ("patients") still bounds it.
+        self._image("bids_in/sub-01/anat/T1w.nii.gz")
+        self._image("bids_in/sub-01/anat/lesion.nii.gz", value=1)
+        self._image("bids_in/sub-02/ses-01/anat/T1w.nii.gz")
+        self._image("bids_in/sub-02/ses-01/anat/lesion.nii.gz", value=1)
+        created = Study.create(self.path("study_in"))
+        report = created.add_files(self.path("bids_in", "sub-01", "anat"))
+        self.assertEqual((report["skipped"], report["added"]), ([], ["sub-01"]))
+        self.assertEqual(created.subject("sub-01")["status"], "traced")
+        report = created.add_files(self.path("bids_in", "sub-02", "ses-01", "anat"))
+        self.assertEqual((report["skipped"], report["added"]), ([], ["sub-02"]))
+        self.assertEqual(created.subject("sub-02")["status"], "traced")
+        # createStudy on such a folder: the files one by one, the folder as root
+        report = Study.create(self.path("study_in2")).add_files(
+            [self.path("bids_in", "sub-01", "anat", f"{name}.nii.gz") for name in ("T1w", "lesion")], root=self.path("bids_in", "sub-01", "anat"))
+        self.assertEqual((report["skipped"], report["added"]), ([], ["sub-01"]))
+        # The chosen folder names no subject but is not a modality folder: folders above it are not read
+        self._image("sub-outer/patients/T1.nii.gz")
+        self._image("sub-outer/patients/lesion.nii.gz", value=1)
+        report = Study.create(self.path("study_in3")).add_files(self.path("sub-outer", "patients"))
+        self.assertEqual((report["added"], [item["reason"] for item in report["skipped"]]), ([], ["no subject id"] * 2))
+
 
 if __name__ == "__main__":
     unittest.main()

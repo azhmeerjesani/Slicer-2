@@ -197,6 +197,15 @@ def _nifti_stem(path):
     return None
 
 
+def _is_relative_to(path, folder):
+    """Whether ``path`` is ``folder`` or inside it (absolute paths; letter case as the platform compares it)."""
+    path, folder = os.path.normcase(path), os.path.normcase(folder)
+    try:
+        return os.path.commonpath([path, folder]) == folder
+    except ValueError:  # another drive
+        return False
+
+
 def detect_file_space(path):
     """Template space of a NIfTI file from its header: "MNI152NLin6Asym", "MNI152NLin2009cAsym" or "native"."""
     from .geometry import detect_space
@@ -1684,12 +1693,14 @@ class Study:
         write_tsv(path, self._columns, self._rows)
         return path
 
-    def add_files(self, paths, lesion_rule=None, id_regex=None):
+    def add_files(self, paths, lesion_rule=None, id_regex=None, root=None):
         """Add scans and lesion masks, paired by subject id (only NIfTI headers are read).
 
         :param paths: NIfTI files and/or folders (searched recursively; hidden folders and the
           study's own derivatives and .studio folders are skipped). BIDS layouts work: the subject
-          id is searched in the file name, then in the parent folders (sub-01/anat/...).
+          id is searched in the file name, then in the parent folders (sub-01/anat/...), up to the
+          folder that was chosen (a folder of ``paths``, else ``root``): folders above it are read only
+          when the chosen folder is itself a modality or session folder (sub-01/anat chosen: sub-01).
         :param lesion_rule: regular expression (case-insensitive) that marks lesion files by name, matched
           as whole words (see :func:`whole_word_rule`: "sub-01_desc-lesion_mask" and "LesionSmooth" are
           lesions, "sub-01_T1w_masked" and "Segura_01_T1" are scans); default: the study's rule
@@ -1699,7 +1710,12 @@ class Study:
           Files without a match use the start of their name: the words before the first modality or
           lesion word (T1, FLAIR, lesion, ...) up to the first word with a digit ("patient_01_T1.nii.gz":
           "patient01"; "sub_01_lesion.nii.gz": "01"; "Patient 7 T1.nii": "Patient7"), or the first
-          word when there is no digit ("smith_T1.nii": "smith").
+          word when there is no digit ("smith_T1.nii": "smith"). A name made only of such words
+          ("T1.nii.gz", "lesion.nii.gz") takes its id the same way from the nearest folder below the
+          chosen folder that gives one ("patients/patient01/T1.nii.gz": "patient01").
+        :param root: the folder that ``paths`` given as files were chosen in (``createStudy()``: the
+          study folder); without it, such files search three parent folders for ``id_regex`` and
+          take no id from a folder name.
         :return: {"added": [ids], "updated": [ids], "skipped": [{"path", "reason"}], "pairs": {id: {"scan", "lesion"}},
           "warnings": [{"path", "message"}]} (files that are added but lie at different places in
           different programs because their sform and qform disagree).
@@ -1714,7 +1730,8 @@ class Study:
         candidates = {}
         original_stems = {}
         canonical = {}  # casefolded id: the id its files go to
-        for path in self._expand(paths):
+        root = os.path.abspath(os.fspath(root)) if root else None
+        for path, chosen_root in self._expand(paths, root):
             stem = _nifti_stem(path)
             if stem is None:
                 continue
@@ -1731,13 +1748,14 @@ class Study:
                 continue
             is_lesion = bool(lesion_re.search(stem))
             try:
-                raw_id = self._subject_id(path, stem, id_re, lesion_re)
+                raw_id, id_source = self._subject_id_and_source(path, stem, id_re, lesion_re, chosen_root)
                 sid = participant_label(raw_id)
             except ValueError:
                 report["skipped"].append({"path": path, "reason": "no subject id"})
                 continue
             if sid != raw_id:
-                original_stems[path] = stem  # not a BIDS id: the row keeps the file's stem as source_id
+                # Not a BIDS id: the row keeps the file's stem (or the folder name the id came from) as source_id
+                original_stems[path] = id_source
             # Ids differing only in letter case name one subject (one file name on macOS): "patient01_T1w.nii.gz"
             # belongs to the row sub-Patient01 of the participants table, and files spelling one new id in
             # different cases go to one new subject
@@ -1789,33 +1807,97 @@ class Study:
                 report["updated"].append(sid)
         return report
 
-    def _expand(self, paths):
+    def _expand(self, paths, root=None):
+        """Yield (file, the folder it was chosen in): a folder of ``paths``, else ``root`` (None when not given)."""
         if isinstance(paths, (str, os.PathLike)):
             paths = [paths]
         excluded = {os.path.join(self.path, DERIVATIVES_DIR, "lnm"), os.path.join(self.path, PRIVATE_DIR)}
         for path in paths:
             path = os.path.abspath(os.fspath(path))
             if os.path.isfile(path):
-                yield path
+                yield path, root
                 continue
             for folder, subfolders, files in os.walk(path):
                 subfolders[:] = sorted(d for d in subfolders if not d.startswith(".") and os.path.join(folder, d) not in excluded)
                 for name in sorted(files):
-                    yield os.path.join(folder, name)
+                    yield os.path.join(folder, name), path
 
     @staticmethod
-    def _subject_id(path, stem, id_re, lesion_re):
-        match = id_re.search(stem)
+    def _subject_id(path, stem, id_re, lesion_re, root=None):
+        """The subject id of a file (see :meth:`add_files`); ValueError when it has none."""
+        return Study._subject_id_and_source(path, stem, id_re, lesion_re, root)[0]
+
+    @staticmethod
+    def _subject_id_and_source(path, stem, id_re, lesion_re, root=None):
+        """(subject id, the name it was taken from: the file's stem or a folder name); ValueError when there is none.
+
+        ``root`` is the folder the file was chosen in: the parent folders are searched up to it (it included), and a stem
+        without an id takes it from the nearest folder below it that gives one. Folders above it are read only when the
+        chosen folder is itself a modality or session folder (sub-01/anat chosen: anat names no subject, sub-01 above it
+        does). Without ``root`` (or for a file outside it), three parent folders are searched for ``id_re`` and no folder
+        name gives an id.
+        """
+        ancestors = []  # nearest first, at most three: BIDS sub-<id>/[ses-<id>/]anat/<file>
         folder = os.path.dirname(path)
-        for _ in range(3):  # BIDS: sub-<id>/[ses-<id>/]anat/<file>
-            if match is not None or os.path.dirname(folder) == folder:
-                break
-            match = id_re.search(os.path.basename(folder))
+        while len(ancestors) < 3 and os.path.dirname(folder) != folder:
+            ancestors.append(folder)
             folder = os.path.dirname(folder)
-        if match is not None:
+        if root is not None and not _is_relative_to(os.path.dirname(path), root):
+            root = None
+        # The folders up to the chosen one (it included), those strictly below it, and those above it
+        folders, below, above = ancestors, ancestors, []
+        if root is not None:
+            for index, folder in enumerate(ancestors):
+                if os.path.normcase(folder) == os.path.normcase(root):
+                    folders, below, above = ancestors[: index + 1], ancestors[:index], ancestors[index + 1 :]
+                    break
+
+        def matched(match):
             if "id" in id_re.groupindex:
                 return match.group("id")
             return match.group(1) if id_re.groups else match.group(0)
+
+        source = stem
+        match = id_re.search(stem)
+        for folder in folders:
+            if match is not None:
+                break
+            source = os.path.basename(folder)
+            match = id_re.search(source)
+        if match is not None:
+            return matched(match), source
+        try:
+            return Study._id_from_name(stem, lesion_re, path), stem
+        except ValueError:
+            if root is None:
+                raise
+        # patients/patient01/T1.nii.gz: the subject folder names the subject (not the chosen folder itself)
+        for folder in below:
+            try:
+                return Study._id_from_name(os.path.basename(folder), lesion_re, path), os.path.basename(folder)
+            except ValueError:
+                continue  # anat/, ses-01/: modality words
+        # sub-01/anat chosen: the chosen folder is a modality or session folder, so the subject folder lies above it;
+        # any other chosen folder ("patients") bounds the search, so that an ancestor such as "sub-generic" never names
+        # every subject
+        if above and not Study._names_subject(os.path.basename(root), lesion_re):
+            for folder in above:
+                match = id_re.search(os.path.basename(folder))
+                if match is not None:
+                    return matched(match), os.path.basename(folder)
+        raise ValueError(f"No subject id in {path}")
+
+    @staticmethod
+    def _names_subject(name, lesion_re):
+        """Whether a folder name can name a subject: not one made only of modality or lesion words (anat, ses-01, lesions)."""
+        try:
+            Study._id_from_name(name, lesion_re, name)
+        except ValueError:
+            return False
+        return True
+
+    @staticmethod
+    def _id_from_name(stem, lesion_re, path):
         # The first run of words that are not modality or lesion words ("T1_patient_01_lesion_v2": patient, 01)
         def named(word):
             return _SCAN_WORD.fullmatch(word) or lesion_re.fullmatch(word)

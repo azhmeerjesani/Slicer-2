@@ -375,7 +375,10 @@ browser, edited in a spreadsheet and backed up by copying it.
   `reproduce.sh` keep full local paths on purpose, because they reproduce one run on one computer.
 - **Creating a study.** **Create study** on the folder card writes `study.json`, `participants.tsv` and a `lesions/` folder
   into the folder you opened; your own files are not changed or moved. Scans and lesions are paired by the ID found in
-  the file names (`sub-01`) and by the lesion words listed in `study.json`. A `participants.tsv` or `.csv` in the folder
+  the file names (`sub-01`, `patient01_T1.nii.gz`), else in the subject folders inside the folder you opened
+  (`patient01/T1.nii.gz` and `patient01/lesion.nii.gz`), and by the lesion words listed in `study.json`. Folders above the
+  one you opened give an ID only when the folder you opened is itself a modality or session folder (`sub-01/anat`); files
+  without one are skipped, and the toast says how to name them or to set the ID rule in **Import**. A `participants.tsv` or `.csv` in the folder
   supplies the group and the scores. Only the subject you are editing is loaded in the scene. **Import** in the inspector adds
   files, folders or a participants table later.
 - **Journal.** While you draw, the lesion is written to `.studio/journal/` two seconds after the last edit, in the

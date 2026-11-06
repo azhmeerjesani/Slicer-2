@@ -5952,6 +5952,37 @@ class StudioRegressionTest(unittest.TestCase):
                 host.deleteLater()
             study_ui.closeStudy()
 
+    def test_80_create_study_on_patient_folders(self):
+        """Create study on patients/patient01/T1.nii.gz + lesion.nii.gz made an empty study ("0 subjects · 4 files skipped",
+        BB-1): names made only of modality or lesion words take the subject id from their folder below the study folder,
+        folders above it ("sub-outer") never give one, and files still without an id are skipped with how to name them.
+        """
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "sub-outer", "patients")
+        paths = []
+        for subject in ("patient01", "patient02"):
+            for name in ("T1", "lesion"):
+                paths.append(os.path.join(folder, subject, f"{name}.nii.gz"))
+                os.makedirs(os.path.dirname(paths[-1]), exist_ok=True)
+                nifti.write_nifti(paths[-1], np.full(grid.shape, int(name == "lesion"), np.uint8), grid.affine)
+        study = study_ui.createStudy(paths, folder=folder, openIt=False)
+        self.assertEqual(study.subject_ids, ["sub-patient01", "sub-patient02"])
+        for subject in ("patient01", "patient02"):
+            row = study.subject(f"sub-{subject}")
+            self.assertEqual((row["scan"], row["lesion"], row["status"]), (f"{subject}/T1.nii.gz", f"{subject}/lesion.nii.gz", "traced"))
+        # The toast of files without an id says why they were skipped and how to name them
+        text = study_ui.skippedText({"skipped": [{"path": "T1.nii.gz", "reason": "no subject id"}, {"path": "b.nii.gz", "reason": "unreadable: x"}]})
+        self.assertTrue(text.startswith("2 files skipped (1 without a subject id"), text)
+        self.assertIn("patient01/T1.nii.gz", text)
+        self.assertIn("ID rule", text)
+        self.assertEqual(study_ui.skippedText({"skipped": [{"path": "b.nii.gz", "reason": "unreadable: x"}]}), "1 file skipped")
+
     def test_79_unreadable_participants_tsv_keeps_study_changes_at_close(self):
         """Study changes that participants.tsv cannot take (another program made it unreadable) are kept for the next session
         when the study closes, the close prompt says so, and the save failure logs no traceback (BB-1).

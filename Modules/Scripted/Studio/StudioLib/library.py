@@ -5016,8 +5016,11 @@ class ImportCard(qt.QObject):
     def _report(studySession, report):
         shell = _shell()
         if report and shell is not None:
-            shell.toast(_("{added} subjects added, {updated} updated, {skipped} files skipped").format(
-                added=len(report["added"]), updated=len(report["updated"]), skipped=len(report["skipped"])), ms=4000)
+            text = _("{added} subjects added, {updated} updated").format(added=len(report["added"]), updated=len(report["updated"]))
+            # Files without a subject id: the toast says how to name them (patient01/T1.nii.gz) or to set the ID rule
+            noId = any(item.get("reason") == "no subject id" for item in report["skipped"])
+            text += ", " + (_studyUi().skippedText(report) if report["skipped"] else _("0 files skipped"))
+            shell.toast(text, ms=10000 if noId else 4000)
 
     def dispose(self):
         for _key, widget, _card in self._extras:
