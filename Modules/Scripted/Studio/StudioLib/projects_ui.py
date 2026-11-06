@@ -471,6 +471,22 @@ def chooserNeeded():
     return projects.needsChooser()
 
 
+def _makeUsableRoot(path):
+    """Create the chosen Slicer Studio folder and check that it can be written. Raise OSError when it cannot be used
+    (a read-only drive, no permission, a file in the way): the folder setting must not change then.
+    """
+    projects.ensureRoot(path, recreate=True)
+    if not os.access(path, os.W_OK | os.X_OK):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES))
+    return path
+
+
+def _cannotUseMessage(path, error):
+    """"The folder … cannot be used: <reason>. Choose another folder." for an OSError of ``_makeUsableRoot``."""
+    reason = (getattr(error, "strerror", None) or str(error)).strip()
+    return _("The folder {path} cannot be used: {reason}. Choose another folder.").format(path=projects.shortPath(path), reason=reason)
+
+
 def showChooser(then=None, parent=None):
     """Show the folder chooser (window-modal, not blocking the caller); ``then()`` runs once it was answered."""
     global _chooser
@@ -486,15 +502,11 @@ def showChooser(then=None, parent=None):
         retry = False
         try:
             # The folder is stored only once it exists and can be written: otherwise the next start asks again
-            projects.ensureRoot(path, recreate=True)
-            if not os.access(path, os.W_OK | os.X_OK):
-                raise PermissionError(errno.EACCES, os.strerror(errno.EACCES))
+            _makeUsableRoot(path)
             projects.setRoot(path, chosen=True)
         except OSError as error:
-            reason = (getattr(error, "strerror", None) or str(error)).strip()
             logging.error(f"Slicer Studio: the folder {path} cannot be used: {error}")
-            message(_("The folder {path} cannot be used: {reason}. Choose another folder.").format(path=projects.shortPath(path), reason=reason),
-                    level="warning", ms=8000, toolTip=path)
+            message(_cannotUseMessage(path, error), level="warning", ms=8000, toolTip=path)
             # Continue asks again; Escape or closing the window (never blocks the application) leaves the choice for the next start
             retry = not getattr(dialog, "dismissed", False)
         dialog.deleteLater()
@@ -997,6 +1009,14 @@ def changeRootDialog(parent=None):
         if answer in (-1, 2):
             return None
         move = answer == 0
+    try:
+        # The new folder is made and checked before anything moves or the setting changes, as the first-start chooser does:
+        # a folder that cannot be written (a read-only drive) was stored first, and its error reported as a failed move
+        _makeUsableRoot(newRoot)
+    except OSError as error:
+        logging.error(f"Slicer Studio: the folder {newRoot} cannot be used: {error}")
+        _notice(parent, _("Change the Slicer Studio folder"), _cannotUseMessage(newRoot, error))
+        return None
     service = _service()
     try:
         if service is not None:

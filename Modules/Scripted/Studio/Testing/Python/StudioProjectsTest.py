@@ -7388,6 +7388,103 @@ class StudioProjectsTest(unittest.TestCase):
         scene.GetFirstNodeByName("Peaks").GetNthControlPointPosition(0, position)
         self.assertEqual([round(value, 3) for value in position], [4.0, 5.0, 6.0])
 
+    def test_96_change_folder_refuses_a_folder_that_cannot_be_written(self):
+        """Settings > Saving > Change… to a folder that cannot be made or written (a read-only drive) is refused before the
+        setting changes, as the first-start chooser does (BB-1). The folder was stored first and its error then reported as
+        "Your projects could not all be moved … the folder setting is unchanged": the setting had changed, Library lost the
+        projects that were kept in the old folder and autosave paused for every new scan.
+        """
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        settings = qt.QSettings()
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        oldRoot = os.path.normpath(self.root)
+        settings.setValue(projects.ROOT_KEY, oldRoot)
+        os.makedirs(oldRoot, exist_ok=True)
+        # A file where the new folder's parent should be: it cannot be made, even by an administrator (as on a read-only drive)
+        blocker = os.path.join(self.tempDir, "a file")
+        with open(blocker, "w") as f:
+            f.write("not a folder")
+        blocked = os.path.join(blocker, projects.ROOT_FOLDER_NAME)
+        # A folder that exists but cannot be written
+        readOnly = os.path.join(self.tempDir, "read-only", projects.ROOT_FOLDER_NAME)
+        os.makedirs(readOnly)
+        realAccess = os.access
+
+        def access(path, mode, *args, **kwargs):
+            if os.path.normpath(str(path)) == os.path.normpath(readOnly) and mode & os.W_OK:
+                return False
+            return realAccess(path, mode, *args, **kwargs)
+
+        template = os.path.join(oldRoot, projects.TEMPLATES_DIR, "Kept")
+
+        def change(newRoot, answer, service):
+            shown = []
+
+            class FakeChooser:
+                path = newRoot
+                continueButton = mock.Mock()
+                setWindowTitle = mock.Mock()
+                choose = mock.Mock()
+                exec = mock.Mock()
+                exec_ = mock.Mock()
+                deleteLater = mock.Mock()
+
+                def __init__(self, *args, **kwargs):
+                    pass
+
+            running = self.autosave._service
+            self.autosave._service = service
+            try:
+                with mock.patch.object(projects_ui, "FolderChooserDialog", FakeChooser), \
+                        mock.patch.object(projects_ui, "_question", lambda *args, **kwargs: answer), \
+                        mock.patch.object(projects_ui, "_runWithProgress", lambda function, *args, **kwargs: function()), \
+                        mock.patch.object(projects_ui, "_notice", lambda parent, title, text: shown.append(text)), \
+                        mock.patch.object(slicer.util, "infoDisplay", lambda text, *a, **k: shown.append(text)), \
+                        mock.patch.object(slicer.util, "errorDisplay", lambda text, *a, **k: shown.append(text)), \
+                        mock.patch.object(os, "access", access):
+                    return projects_ui.changeRootDialog(None), shown
+            finally:
+                self.autosave._service = running
+
+        try:
+            service = self._service()
+            # Empty old folder (no question), kept projects ("Keep them where they are") and Move; with and without the service
+            for keep, answer in ((False, None), (True, 1), (True, 0)):
+                if keep:
+                    os.makedirs(template, exist_ok=True)
+                    with open(os.path.join(template, "template.json"), "w") as f:
+                        f.write("{}")
+                for newRoot in (blocked, readOnly):
+                    for running in (service, None):
+                        case = f"keep={keep} answer={answer} {os.path.basename(os.path.dirname(newRoot))} service={running is not None}"
+                        result, shown = change(newRoot, answer, running)
+                        self.assertIsNone(result, case)
+                        self.assertEqual(projects.root(), oldRoot, case)
+                        self.assertEqual(os.path.normpath(str(qt.QSettings().value(projects.ROOT_KEY))), oldRoot, case)
+                        self.assertEqual(len(shown), 1, (case, shown))
+                        self.assertIn("cannot be used", shown[0], case)
+                        self.assertIn("Choose another folder", shown[0], case)
+                        self.assertNotIn("could not all be moved", shown[0], case)
+                        self.assertIsNone(projects.pendingMove(), case)
+                        if keep:
+                            self.assertTrue(os.path.isfile(os.path.join(template, "template.json")), case)
+                            self.assertFalse(os.path.exists(os.path.join(readOnly, projects.TEMPLATES_DIR)), case)
+            # A folder that can be written is still used
+            usable = os.path.join(self.tempDir, "usable", projects.ROOT_FOLDER_NAME)
+            result, shown = change(usable, 1, service)
+            self.assertEqual(result, usable)
+            self.assertEqual(shown, [])
+            self.assertEqual(projects.root(), os.path.normpath(usable))
+            self.assertTrue(os.path.isfile(os.path.join(template, "template.json")), "kept where it was")
+        finally:
+            qt.QSettings().remove(projects.ROOT_KEY)
+            qt.QSettings().remove(projects.ROOT_CHOSEN_KEY)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk
