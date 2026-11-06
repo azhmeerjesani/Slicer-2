@@ -105,9 +105,23 @@ def normalize_pmid(value):
 
 
 def normalize_title(value):
-    """Lower case, accents and punctuation removed, one space between words."""
-    text = unicodedata.normalize("NFKD", _clean(value)).encode("ascii", "ignore").decode("ascii").lower()
-    return " ".join(re.sub(r"[^a-z0-9]+", " ", text).split())
+    """Lower case, accents and punctuation removed, one space between words, in any script.
+
+    Letters, digits and marks of every script are kept (a Chinese or Russian title is compared in its own script, not
+    reduced to its ASCII part); the accents of Latin, Greek and Cyrillic letters are removed ("Étude" matches "etude"),
+    while marks that belong to other scripts (kana voicing marks, Indic vowel signs) stay.
+    """
+    kept = []
+    base = ""
+    for char in unicodedata.normalize("NFKD", _clean(value)):
+        if unicodedata.combining(char):
+            if base and ord(base) < 0x0530:  # an accent on a Latin, Greek or Cyrillic letter
+                continue
+        else:
+            base = char
+        kept.append(char)
+    text = unicodedata.normalize("NFC", "".join(kept)).casefold()
+    return " ".join("".join(char if unicodedata.category(char)[0] in "LNM" else " " for char in text).split())
 
 
 def _year(value):

@@ -256,6 +256,29 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual(records.merged_count(), 1)
         self.assertEqual(records.merge_offers(), [])
 
+    def test_non_latin_titles_are_compared_in_their_own_script(self):
+        # Titles are compared in any script: CJK, Cyrillic and Greek letters are kept (not reduced to their ASCII part)
+        self.assertEqual(sources.normalize_title("Αφασία Μετά Αγγειακό"),
+                         sources.normalize_title("ΑΦΑΣΙΑ ΜΕΤΑ ΑΓΓΕΙΑΚΟ"))  # noqa: RUF001
+        self.assertEqual(sources.normalize_title("Étude, d'un cas."), "etude d un cas")
+        self.assertEqual(sources.normalize_title("Zur Läsion"), sources.normalize_title("zur LASION"))
+        self.assertEqual(sources.normalize_title("ガイド MRI"), "ガイド mri")  # kana keep their voicing marks
+        first = "脑卒中后失语症的病灶网络映射：COVID-19 患者病例报告"  # noqa: RUF001
+        other = "丘脑梗死后视幻觉 COVID-19 一例"
+        russian = ("Картирование сети очагов "
+                   "при афазии после инсульта")
+        self.assertNotEqual(sources.normalize_title(first), sources.normalize_title(other))
+        self.assertEqual(sources.normalize_title(russian), sources.normalize_title(russian + "."))
+        records = sources.Records.open(self.study)
+        records.add([sources.draft(title=first, year="2021"), sources.draft(title=other, year="2021"),
+                     sources.draft(title=russian, year="2020"), sources.draft(title=russian + ".", year="2020")])
+        self.assertEqual(len(records), 4)
+        offers = records.merge_offers()
+        self.assertEqual(len(offers), 1, offers)
+        titles = {row["record_id"]: row["title"] for row in records.rows}
+        self.assertEqual({titles[offers[0][0]], titles[offers[0][1]]}, {russian, russian + "."})
+        self.assertGreaterEqual(offers[0][2], sources.TITLE_RATIO)
+
     # Stages
 
     def test_stages_and_undo(self):
