@@ -2287,10 +2287,8 @@ class ProjectWriter(SlotWriter):
             exists = bool(files) and os.path.isfile(files[0]) and (len(files) == 1 or all(os.path.exists(path) for path in files[1:2]))
             inside = bool(files) and all(_isUnder(_canonical(path), projectCanonical) for path in files)
             self._rememberSource(nodeId, files, projectCanonical)
-            if files and self._needsPortableFile(storageNode, files[0]):
-                modified = True  # a 4D NIfTI: written as .seq.nrrd, never copied (official 3D Slicer 5.12 reads NRRD only)
-            if inside and any(self._isTemporaryFile(path) for path in files):
-                modified = True  # left in a temporary folder by an interrupted generation: written into its kind folder
+            if self._writtenAgain(storageNode, files, inside):
+                modified = True
             if not modified and exists and inside:
                 entry.update(kind="stored", files=files)
                 if _canonical(files[0]) not in self.records:
@@ -2327,6 +2325,38 @@ class ProjectWriter(SlotWriter):
         """
         _base, extension = _projects().splitExtension(os.path.basename(path))
         return extension.lower() in DETACHED_EXTENSIONS
+
+    def _writtenAgain(self, storageNode, files, inside):
+        """True if a generation writes the node of these files although it is not modified: a 4D NIfTI (written as
+        .seq.nrrd, never copied: official 3D Slicer 5.12 reads NRRD only), or a file left in a temporary folder by an
+        interrupted generation (written into its kind folder). ``inside``: every file is in the project folder.
+        """
+        if files and self._needsPortableFile(storageNode, files[0]):
+            return True
+        return inside and any(self._isTemporaryFile(path) for path in files)
+
+    def needsMigration(self, scene):
+        """True if files of the project are in a form that the next save replaces although nothing was edited: a file
+        that a generation writes again (``_writtenAgain()``: a project saved by an earlier version), or .studio/sources.json
+        of an earlier version (it holds the outside files' paths, not their identifiers). Save now, leaving and quitting
+        save such a project (``AutosaveService.projectNeedsSave(includeScene=True)``); looking at it is not an edit.
+        """
+        if any(not value.startswith(SOURCE_ID_PREFIX) for value in (self._sourcesWritten or {}).values()):
+            return True
+        projectCanonical = _canonical(self.project.path)
+        rootDirectory = scene.GetRootDirectory()
+        nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
+        for index in range(nodes.GetNumberOfItems()):
+            node = nodes.GetItemAsObject(index)
+            storageNode = node.GetStorageNode()
+            if not node.GetSaveWithScene() or node.GetHideFromEditors() or storageNode is None or not storageNode.GetSaveWithScene():
+                continue  # as plan(): not written by a generation
+            files = _storagePaths(storageNode, rootDirectory)
+            inside = bool(files) and all(_isUnder(_canonical(path), projectCanonical) for path in files)
+            if self._writtenAgain(storageNode, files, inside):
+                return True
+        return False
 
     @staticmethod
     def _needsPortableFile(storageNode, path):

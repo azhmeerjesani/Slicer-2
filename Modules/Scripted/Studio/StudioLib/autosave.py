@@ -1663,7 +1663,13 @@ class AutosaveService:
         return modified
 
     def projectNeedsSave(self, fingerprint=None, includeScene=False):
-        """True if the open project is not up to date on disk (``includeScene``: also views, layout and other scene state)."""
+        """True if the open project is not up to date on disk. ``includeScene`` (Save now, leaving, quitting): also files of
+        the project that a save would bring up to date though nothing was edited (``ProjectWriter.needsMigration``).
+
+        What counts as an edit is the periodic autosave's (``sceneFingerprint``), never ``vtkMRMLScene::GetModifiedSinceRead``:
+        that is true after every open (the hierarchy is merged with new item numbers, the views' slice models appear),
+        so leaving a project that was only looked at would rewrite it and move "Last edited" to now.
+        """
         if self.project is None or self.projectWriter is None:
             return False
         if not self.projectWriter.hasContent():
@@ -1674,7 +1680,7 @@ class AutosaveService:
             fingerprint = io.sceneFingerprint(scene, io.sentinelIds())
         if fingerprint != self._savedFingerprint or self._modifiedProjectNodes(scene):
             return True
-        return bool(includeScene and scene.GetModifiedSinceRead())
+        return bool(includeScene and self.projectWriter.needsMigration(scene))
 
     def _startProjectGeneration(self, reason, fingerprint, synchronous=False, ignoreBusy=False, force=False, progress=False,
                                 timeoutS=PROJECT_SAVE_TIMEOUT_S):
@@ -2388,14 +2394,22 @@ class AutosaveService:
 
     def newProject(self):
         """New project (Ctrl+N): save and close the open project; the next data creates the next project."""
-        if self.project is not None:
-            self.saveNow("new project", progress=True)
+        saved = self.project is not None and self.saveNow("new project", progress=True)
+        scene = slicer.mrmlScene
         mainWindow = slicer.util.mainWindow()
         action = mainWindow.findChild(qt.QAction, "FileCloseSceneAction") if mainWindow is not None else None
-        if action is not None:
+        if action is not None and not (saved and scene.GetModifiedSinceRead()):
             action.trigger()
-        else:
-            slicer.mrmlScene.Clear(0)
+            return
+        scene.Clear(0)
+        if action is not None:
+            # The project is up to date, and what changed since its scene file was written is not saved as an edit (the
+            # views, the hierarchy's item numbers): Close Scene would still ask "Save before closing scene?" about it. The
+            # scene is closed as that action closes it (qSlicerMainWindow::on_FileCloseSceneAction_triggered), unasked.
+            from slicer.i18n import translate
+
+            scene.SetURL("")
+            slicer.app.coreIOManager().setDefaultSceneFileType(translate("qSlicerMainWindow", "MRML Scene") + " (.mrml)")
 
     def finishInterruptedMove(self, run=None, notify=None):
         """Finish a move of the Slicer Studio folder that was interrupted (the app was closed or killed during ``moveRoot``).

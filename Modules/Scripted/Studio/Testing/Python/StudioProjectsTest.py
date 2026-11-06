@@ -38,7 +38,9 @@ folder "Slicer Studio tést" (spaces and non-ASCII characters). The tests cover:
   folder of the old name);
 - a scene saved inside a project folder (a subfolder such as Exports/) opens as a copy: only the project's own scene file
   continues the project in place;
-- a lesion that was cleared (or has one voxel) is saved so that the project opens again, also in official 3D Slicer.
+- a lesion that was cleared (or has one voxel) is saved so that the project opens again, also in official 3D Slicer;
+- leaving or quitting a project that was only looked at saves nothing and keeps "Last edited" (an edit made just before
+  leaving is saved).
 """
 
 import contextlib
@@ -7268,6 +7270,123 @@ class StudioProjectsTest(unittest.TestCase):
             settings.remove(projects.ROOT_KEY)
             settings.remove(projects.ROOT_CHOSEN_KEY)
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
+    def test_95_leaving_a_project_that_was_only_looked_at_saves_nothing(self):
+        """Opening a project and leaving it without an edit (New project, opening another project, quitting) rewrote its
+        scene file and moved "Last edited" to now (BB-1), so a project that was only looked at went to the top of Library.
+        The save before leaving counted what the scene does by itself after an open (the hierarchy made again, the views'
+        slice models) as edits; it now goes by what the periodic autosave goes by (test_64), and New project asks nothing.
+        An edit made just before leaving (a paint stroke, a rename, a moved point) is still saved.
+        """
+        service = self._service()
+        volume, _path = self._userVolume("Scan", shape=(12, 14, 16), extension=".nrrd")
+        self._lesion(volume)
+        points = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Peaks")
+        points.AddControlPoint((1.0, 2.0, 3.0))
+        project = self._projectFor(service)
+        self._save(service)
+        projectJson = os.path.join(project.path, ".studio", "project.json")
+        lesionFile = os.path.join(project.path, "Segmentations", "Lesions.seg.nrrd")
+        pointsFile = os.path.join(project.path, "Markups", "Peaks.mrk.json")
+        asked = []
+
+        def closeQuestion():
+            dialog = slicer.app.activeModalWidget()
+            if dialog is not None:
+                asked.append(str(dialog.windowTitle))
+                dialog.reject()
+
+        timer = qt.QTimer()
+        timer.setInterval(200)
+        timer.connect("timeout()", closeQuestion)
+
+        def onDisk():
+            with open(project.scenePath, encoding="utf-8") as f:
+                sceneText = f.read()
+            return {"modified": self.projects.readJson(projectJson).get("modified"), "sceneTime": os.path.getmtime(project.scenePath),
+                    "scene": sceneText, "lesion": _md5File(lesionFile), "points": _md5File(pointsFile)}
+
+        def look():
+            """Open the project as a card click does and only look at it: the scene then changes by itself."""
+            slicer.mrmlScene.Clear(0)
+            self.io.backgroundWriter().drain(10.0)
+            self.assertTrue(service.openProject(project.path))
+            scene = slicer.mrmlScene
+            # The views show: their slice models (not saved with the scene) appear, and the slice views fit their size
+            model = scene.CreateNodeByClass("vtkMRMLModelNode")
+            model.UnRegister(None)  # a new reference: the scene keeps it
+            model.SetName("Red Volume Slice")
+            model.SetSaveWithScene(False)
+            model.SetHideFromEditors(True)
+            scene.AddNode(model)
+            sliceNode = scene.GetFirstNodeByClass("vtkMRMLSliceNode")
+            if sliceNode is not None:
+                sliceNode.SetFieldOfView(321.0, 123.0, 1.0)
+            # The hierarchy of the scene file is merged after the load (its items are made again with new numbers)
+            slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(scene).Modified()
+            self.assertTrue(scene.GetModifiedSinceRead(), "the scene changed by itself since it was read")
+            self.assertFalse(service.projectNeedsSave(includeScene=True), "a project that was only looked at is up to date")
+            return scene
+
+        def leave(how):
+            time.sleep(1.1)  # "Last edited" has whole seconds
+            timer.start()
+            try:
+                if how == "new project":
+                    service.newProject()  # Ctrl+N: the project is saved if needed, then the scene is closed
+                    self.assertIsNone(service.project)
+                    self.assertEqual(slicer.mrmlScene.GetNumberOfNodesByClass("vtkMRMLSegmentationNode"), 0, "the scene was closed")
+                elif how == "another project":
+                    slicer.mrmlScene.Clear(0)  # opening another project's card closes the scene of this one first
+                    self.assertIsNone(service.project)
+                else:
+                    self.assertTrue(service.flushForClose(), "quitting: the project is up to date before the close prompt")
+            finally:
+                timer.stop()
+            self.io.backgroundWriter().drain(30.0)
+            self.assertEqual(asked, [], f"{how}: nothing is asked")
+            return onDisk()
+
+        before = onDisk()
+        for how in ("new project", "another project", "quit"):
+            look()
+            self.assertEqual(leave(how), before, f"{how}: the scene file and Last edited are as they were")
+
+        # An edit made just before leaving is saved
+        scene = look()
+        lesion = scene.GetFirstNodeByClass("vtkMRMLSegmentationNode")
+        scan = scene.GetFirstNodeByName("Scan")
+        segmentId = lesion.GetSegmentation().GetNthSegmentID(0)
+        painted = slicer.util.arrayFromSegmentBinaryLabelmap(lesion, segmentId, scan)
+        lesionVoxels = int(painted.sum())
+        painted[1:3, 1:3, 1:3] = 1  # a paint stroke
+        slicer.util.updateSegmentBinaryLabelmapFromArray(painted, lesion, segmentId, scan)
+        after = leave("new project")
+        self.assertNotEqual(after["lesion"], before["lesion"], "the paint stroke is saved")
+        self.assertNotEqual(after["modified"], before["modified"], "Last edited moves")
+        before = after
+        scene = look()
+        scene.GetFirstNodeByName("Scan").SetName("Scan renamed")
+        after = leave("quit")
+        self.assertIn('name="Scan renamed"', after["scene"], "the rename is saved")
+        self.assertNotEqual(after["modified"], before["modified"], "Last edited moves")
+        before = after
+        scene = look()
+        scene.GetFirstNodeByName("Peaks").SetNthControlPointPosition(0, 4.0, 5.0, 6.0)
+        after = leave("new project")
+        self.assertNotEqual(after["points"], before["points"], "the moved point is saved")
+        self.assertNotEqual(after["modified"], before["modified"], "Last edited moves")
+        # The project opens with the three edits
+        self.assertTrue(service.openProject(project.path))
+        scene = slicer.mrmlScene
+        scan = scene.GetFirstNodeByName("Scan renamed")
+        self.assertIsNotNone(scan)
+        lesion = scene.GetFirstNodeByClass("vtkMRMLSegmentationNode")
+        reopened = slicer.util.arrayFromSegmentBinaryLabelmap(lesion, lesion.GetSegmentation().GetNthSegmentID(0), scan)
+        self.assertEqual(int(reopened.sum()), lesionVoxels + 8)
+        position = [0.0, 0.0, 0.0]
+        scene.GetFirstNodeByName("Peaks").GetNthControlPointPosition(0, position)
+        self.assertEqual([round(value, 3) for value in position], [4.0, 5.0, 6.0])
 
 
 def _sphere(center=(0, 0, 0)):
