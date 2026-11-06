@@ -1530,6 +1530,29 @@ def addTemplate(imagePath, mask=None, head=None, surfaces=(), name=None, space=N
     return finishAdd(plan, record)
 
 
+def _removalRefusal(template, folder, wholeTree):
+    """Why the folder of ``template`` cannot be removed (moved to the trash, or deleted when ``wholeTree``), in plain
+    words; None if it can. Moving or deleting a folder needs write access to the folder that holds it and to the folder
+    itself (and, to delete it, to every folder inside it).
+    """
+    access = os.W_OK | os.X_OK
+    parent = os.path.dirname(os.path.normpath(folder))
+    readOnly = None
+    if not os.access(parent, access):
+        readOnly = parent
+    elif not os.access(folder, access):
+        readOnly = folder
+    elif wholeTree:
+        for directory, _folders, _files in os.walk(folder):
+            if not os.access(directory, access):
+                readOnly = directory
+                break
+    if readOnly is None:
+        return None
+    return _("The template {name} cannot be removed: the folder {folder} is read-only. Nothing was deleted.").format(
+        name=template.name, folder=readOnly)
+
+
 def removeTemplate(templateId, confirmDelete=None):
     """Remove one of your templates: its folder goes to the trash (deleted after ``confirmDelete()`` where there is none).
 
@@ -1543,10 +1566,22 @@ def removeTemplate(templateId, confirmDelete=None):
     if template.builtin:
         raise TemplateError(_("Built-in templates cannot be removed."))
     folder = template.folder
+    # A folder in a read-only place (a share where Templates/ is locked) can be neither moved to the trash nor deleted:
+    # say so and change nothing, rather than offer to delete it for good as if there were no trash and then stop half way
+    refusal = _removalRefusal(template, folder, wholeTree=False)
+    if refusal:
+        raise TemplateError(refusal)
     if not projects.moveToTrash(folder):
+        refusal = _removalRefusal(template, folder, wholeTree=True)
+        if refusal:
+            raise TemplateError(refusal)
         if confirmDelete is not None and not confirmDelete():
             return False
-        shutil.rmtree(folder)
+        try:
+            shutil.rmtree(folder)
+        except OSError as error:
+            raise TemplateError(_("The template {name} could not be deleted completely ({reason}).").format(
+                name=template.name, reason=error.strerror or str(error))) from error
     if str(qt.QSettings().value(DEFAULT_KEY) or "") == template.id:
         qt.QSettings().remove(DEFAULT_KEY)
     registerGrids(force=True)

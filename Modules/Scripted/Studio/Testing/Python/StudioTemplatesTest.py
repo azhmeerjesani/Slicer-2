@@ -2052,3 +2052,48 @@ class StudioTemplatesTest(unittest.TestCase):
         finally:
             dialog.deleteLater()
             os.remove(text)
+
+    def test_38_template_in_a_read_only_folder_is_not_half_removed(self):
+        """BB-1: removing a template from a read-only Templates folder (a share where only Templates/ is locked) asked
+        "There is no Trash here: delete the template folder for good?" (there is a Trash; the folder is read-only), then
+        deleted the template's files but not its folder and showed "[Errno 13] Permission denied". It now says the folder
+        is read-only, asks nothing and deletes nothing. Read-only is simulated (root may write anywhere).
+        """
+        from StudioLib import projects
+
+        templates = self.templates
+        realAccess, realTrash = os.access, projects.moveToTrash
+        for case in ("Templates folder", "template folder", "folder inside, no trash"):
+            with self.subTest(case=case):
+                template = self._add(name="Read only " + str(len(case)))
+                folder = template.folder
+                inside = os.path.join(folder, "inside")
+                os.makedirs(inside, exist_ok=True)
+                readOnly = {"Templates folder": os.path.dirname(folder), "template folder": folder}.get(case, inside)
+                before = sorted(os.listdir(folder))
+                asked = []
+
+                def access(path, mode, *args, readOnly=readOnly, **kwargs):
+                    if mode & os.W_OK and os.path.normpath(str(path)) == os.path.normpath(readOnly):
+                        return False
+                    return realAccess(path, mode, *args, **kwargs)
+
+                os.access = access
+                if case == "folder inside, no trash":
+                    projects.moveToTrash = lambda path: False
+                try:
+                    with self.assertRaises(templates.TemplateError) as context:
+                        templates.removeTemplate(template.id, confirmDelete=lambda asked=asked: asked.append(True) or True)
+                finally:
+                    os.access, projects.moveToTrash = realAccess, realTrash
+                text = str(context.exception)
+                self.assertIn("read-only", text)
+                self.assertIn("Nothing was deleted", text)
+                self.assertNotIn("Errno", text)
+                self.assertNotIn("Trash", text)
+                self.assertEqual(asked, [], "no question to delete for good")
+                self.assertEqual(sorted(os.listdir(folder)), before, "nothing deleted")
+                self.assertIsNotNone(templates.templateById(template.id))
+                shutil.rmtree(inside)
+                self.assertTrue(templates.removeTemplate(template.id, confirmDelete=lambda: True))
+                self.assertFalse(os.path.exists(folder))
