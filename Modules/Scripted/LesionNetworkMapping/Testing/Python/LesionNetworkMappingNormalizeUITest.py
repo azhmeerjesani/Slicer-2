@@ -1038,6 +1038,31 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
             nc.userTemplates = original
             self.card.options["templateId"] = None
 
+    def test_09c_chosen_template_follows_a_moved_template_id(self):
+        """BB-1: Change folder > Move gave the chosen user template another id (the new folder had a template with its id): the
+        Map card's chosen template and the remembered options follow the new id, so Normalize keeps registering to the image
+        the user chose instead of the other folder's template that kept the old id.
+        """
+        from StudioLib import templates
+
+        settings = qt.QSettings()
+        try:
+            self.card.options["templateId"] = "user:lab-template"
+            settings.setValue(self.nc.LAST_OPTIONS_SETTING, json.dumps({"templateId": "user:lab-template", "quality": "fine"}))
+            templates.followRenamedIds({"user:lab-template": "user:lab-template-2"})
+            self.assertEqual(self.card.options["templateId"], "user:lab-template-2")
+            self.assertEqual(self.nc.rememberedOptions()["templateId"], "user:lab-template-2")
+            self.assertEqual(self.nc.rememberedOptions()["quality"], "fine")
+            # Another chosen template is left alone
+            self.card.options["templateId"] = self.nc.DEFAULT_TEMPLATE
+            templates.followRenamedIds({"user:lab-template-2": "user:lab-template-3"})
+            self.assertEqual(self.card.options["templateId"], self.nc.DEFAULT_TEMPLATE)
+            self.assertEqual(self.nc.rememberedOptions()["templateId"], "user:lab-template-3")
+        finally:
+            self.card.options["templateId"] = None
+            settings.remove(self.nc.LAST_OPTIONS_SETTING)
+            self.card.refreshState()
+
     #
     # Scene close (last: it clears the scene)
     #

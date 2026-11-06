@@ -61,6 +61,9 @@ SURFACES_DIR = "surfaces"
 THUMBNAIL_FILE = ".thumbnail.png"
 #: Fork-only setting: the id of the default template ("Start on template")
 DEFAULT_KEY = "Studio/Templates/Default"
+#: Fork-only settings that hold a template id in a field of their JSON value, which follow a moved template's new id
+#: (``followRenamedIds``): "Remember these options" of Normalize to MNI (``normalize_controller.LAST_OPTIONS_SETTING``)
+REMEMBERED_TEMPLATE_SETTINGS = (("Studio/LNM/Normalize/LastOptions", "templateId"),)
 USER_PREFIX = "user:"
 BUILTIN_PREFIX = "builtin:"
 #: The space id of "MNI (other)" (an unknown MNI family: Map shows the family notice)
@@ -120,6 +123,7 @@ _BUILTINS = (
 BUILTIN_DEFAULT = _BUILTINS[0][0]
 
 _listeners = []
+_renameListeners = []
 _registered = {"root": None, "stamp": None, "ids": set(), "others": []}
 _thumbnails = {}
 _unwritableCopies = set()  # copied template folders whose template.json could not be given their own id
@@ -1279,8 +1283,10 @@ def makeMovedIdsUnique(folder, movedNames, recordId=None):
 
 
 def followRenamedIds(renamedIds):
-    """Main thread, after a move gave moved templates new ids (``makeMovedIdsUnique``): the default and the scene's
-    volumes and surfaces of those templates follow them (they came from the moved folder), and the lists refresh.
+    """Main thread, after a move gave moved templates new ids (``makeMovedIdsUnique``): the default, the remembered
+    Normalize options (``REMEMBERED_TEMPLATE_SETTINGS``), the ids held by rename listeners (the Map card's chosen
+    template) and the scene's volumes and surfaces of those templates follow them (they came from the moved folder), and
+    the lists refresh.
     """
     if not renamedIds:
         return
@@ -1288,6 +1294,8 @@ def followRenamedIds(renamedIds):
     value = str(settings.value(DEFAULT_KEY) or "")
     if value in renamedIds:
         settings.setValue(DEFAULT_KEY, renamedIds[value])
+    for key, field in REMEMBERED_TEMPLATE_SETTINGS:
+        _followRenamedIdInSetting(settings, key, field, renamedIds)
     nodes = list(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")) + list(slicer.util.getNodesByClass("vtkMRMLModelNode"))
     tagged = [(node, node.GetAttribute(TEMPLATE_ID_ATTRIBUTE)) for node in nodes if node is not None]
     for node, templateId in tagged:
@@ -1296,7 +1304,31 @@ def followRenamedIds(renamedIds):
     for oldId, newId in renamedIds.items():
         forgetThumbnails(oldId)
         forgetThumbnails(newId)
+    for callback in list(_renameListeners):
+        try:
+            callback(dict(renamedIds))
+        except Exception:
+            logging.error("Slicer Studio: a listener of renamed template ids failed", exc_info=True)
     _notify()
+
+
+def _followRenamedIdInSetting(settings, key, field, renamedIds):
+    """The template id in ``field`` of the JSON setting ``key`` follows ``renamedIds`` (an unreadable value is left alone).
+
+    Without this, the remembered id would name the template of the target folder that kept it: another image and space.
+    """
+    if not settings.contains(key):
+        return
+    try:
+        stored = json.loads(str(settings.value(key) or ""))
+    except ValueError:
+        return
+    if not isinstance(stored, dict):
+        return
+    templateId = stored.get(field)
+    if isinstance(templateId, str) and templateId in renamedIds:
+        stored[field] = renamedIds[templateId]
+        settings.setValue(key, json.dumps(stored, sort_keys=True))
 
 
 def nameTaken(name, rootPath=None):
@@ -1692,6 +1724,19 @@ def addListener(callback):
 def removeListener(callback):
     while callback in _listeners:
         _listeners.remove(callback)
+
+
+def addRenameListener(callback):
+    """``callback({old id: new id})`` after a move gave moved templates other ids (``followRenamedIds``): an id held in
+    memory (a card's chosen template) follows it.
+    """
+    if callback not in _renameListeners:
+        _renameListeners.append(callback)
+
+
+def removeRenameListener(callback):
+    while callback in _renameListeners:
+        _renameListeners.remove(callback)
 
 
 def _notify():

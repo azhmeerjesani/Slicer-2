@@ -67,6 +67,15 @@ def _bundleSpace(bundle):
     return None
 
 
+def _studioTemplatesCall(name, *args):
+    """``StudioLib.templates.<name>(*args)`` when Slicer Studio's templates are available (also in Classic)."""
+    try:
+        from StudioLib import templates
+    except ImportError:
+        return None
+    return getattr(templates, name)(*args)
+
+
 class NormalizeCard:
     """Controller of the Normalize to MNI card (``widget`` is a collapsible card named LNMNormalizeCard)."""
 
@@ -74,6 +83,8 @@ class NormalizeCard:
         self.ctx = ctx
         self.controller = nc.NormalizeController(context=ctx, name="map")
         self.options = self._loadOptions()
+        self._renameListener = self._followRenamedTemplateIds
+        _studioTemplatesCall("addRenameListener", self._renameListener)
         self.roughTransform = None
         self.anatNode = None
         self._seed = (None, None)
@@ -191,6 +202,7 @@ class NormalizeCard:
         self.refreshState()
 
     def cleanup(self):
+        _studioTemplatesCall("removeRenameListener", self._renameListener)
         for name, callback in (("seedChanged", self.refresh), ("bundleChanged", self.refreshState)):
             callbacks = getattr(self.ctx, name, [])
             if callback in callbacks:
@@ -350,6 +362,16 @@ class NormalizeCard:
     #
     # Options
     #
+
+    def _followRenamedTemplateIds(self, renamedIds):
+        """Change folder > Move gave the chosen template another id (a template of the new folder had its id): the
+        options follow it, as the remembered ones do, so Normalize keeps registering to the image the user chose.
+        """
+        chosen = self.options.get("templateId")
+        if isinstance(chosen, str) and chosen in renamedIds:
+            self.options["templateId"] = renamedIds[chosen]
+            if not self._widgetGone():
+                self.refreshState()
 
     def _loadOptions(self):
         """Options of the last run when they were remembered (``Studio/LNM/Normalize/LastOptions``, read only here)."""

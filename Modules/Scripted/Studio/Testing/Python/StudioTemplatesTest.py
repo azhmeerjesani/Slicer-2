@@ -1371,6 +1371,65 @@ class StudioTemplatesTest(unittest.TestCase):
             settings.remove(projects.ROOT_CHOSEN_KEY)
             shutil.rmtree(os.path.dirname(oldRoot), ignore_errors=True)
 
+    def test_36_remembered_normalize_template_follows_the_moved_template(self):
+        """BB-1: after Change folder > Move into a folder with a same-name template, the template remembered by Normalize's
+        "Remember these options" (and the one chosen in an open Map card) follows the moved template's new id, as the default
+        does. It used to keep "user:my-template", which then named the other folder's template: Normalize registered to
+        another image and labelled the result with another space.
+        """
+        from LesionNetworkMappingLib import normalize
+        from LesionNetworkMappingUI import normalize_controller as nc
+
+        from StudioLib import autosave
+
+        templates, projects = self.templates, self.projects
+        newRoot = self.root
+        oldRoot = os.path.join(self.tempDir, "old folder 36", "Slicer Studio")
+        shutil.rmtree(os.path.dirname(oldRoot), ignore_errors=True)
+        settings = qt.QSettings()
+        held = {"templateId": "user:my-template"}
+
+        def follow(renamedIds):
+            held["templateId"] = renamedIds.get(held["templateId"], held["templateId"])
+
+        templates.addRenameListener(follow)
+        try:
+            kept = self._add(name="My template", rootPath=newRoot)
+            moved = templates.addTemplate(self.bundled, mask=self.bundledMask, name="My template", rootPath=oldRoot)
+            self.assertEqual(moved.id, kept.id)
+            settings.setValue(nc.LAST_OPTIONS_SETTING, json.dumps({"templateId": moved.id, "quality": "fine", "modality": "auto", "dilateMm": 4.0}))
+            os.environ.pop(projects.ROOT_ENVIRONMENT, None)
+            settings.setValue(projects.ROOT_KEY, oldRoot)
+            service = autosave.AutosaveService(force=True, root=os.path.join(self.tempDir, "private autosave move 36"))
+            service.studioActiveOverride = True
+            service.reloadSettings()
+            self.services.append(service)
+            self.assertIn("Templates", service.moveRoot(newRoot, moveContent=True))
+
+            renamed = templates.templateById("user:my-template-2")
+            self.assertIsNotNone(renamed)
+            self.assertEqual(renamed.imageSha256, moved.imageSha256)
+            remembered = nc.rememberedOptions()
+            self.assertEqual(remembered["templateId"], "user:my-template-2", "the remembered template follows the moved one")
+            self.assertEqual((remembered["quality"], remembered["dilateMm"]), ("fine", 4.0), "the other options are kept")
+            record = normalize.resolve_user_template(remembered["templateId"], nc.templateDirectories())
+            self.assertEqual(record["sha256"]["image"], moved.imageSha256)
+            self.assertEqual(nc.rememberedRequestOptions()["templateId"], "user:my-template-2")
+            self.assertEqual(held["templateId"], "user:my-template-2", "an id held in memory follows it too")
+            self.assertEqual(templates.templateById("user:my-template").imageSha256, kept.imageSha256)
+
+            # A remembered template that was not renamed, and an unreadable value, are left alone
+            for value in (json.dumps({"templateId": "user:my-template", "quality": "fine"}), "not json"):
+                settings.setValue(nc.LAST_OPTIONS_SETTING, value)
+                templates.followRenamedIds({"user:other": "user:other-2"})
+                self.assertEqual(str(settings.value(nc.LAST_OPTIONS_SETTING)), value)
+        finally:
+            templates.removeRenameListener(follow)
+            settings.remove(nc.LAST_OPTIONS_SETTING)
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            shutil.rmtree(os.path.dirname(oldRoot), ignore_errors=True)
+
     def test_27_cancelled_add_adds_nothing(self):
         """BB-1: Cancel in "Add your own MNI template" adds nothing, for a 4D image as well. The first volume of a 4D image
         was read and written without looking at Cancel, and the dialog registered a copy whose result came after Cancel:
