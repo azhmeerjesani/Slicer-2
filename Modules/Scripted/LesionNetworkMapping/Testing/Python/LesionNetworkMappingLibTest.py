@@ -165,6 +165,38 @@ class NiftiTest(_TempDirTestCase):
         with self.assertRaises(ValueError):
             nifti.read_nifti(path)
 
+    def test_image_data_problem_finds_files_cut_short(self):
+        """A file cut short is found (readers that show its missing part as zeros say nothing); a complete file is not,
+        also as several gzip members or with padding after the stream (BB-1).
+        """
+        import gzip
+
+        data = np.random.default_rng(5).integers(0, 2, size=(20, 18, 16)).astype(np.uint8)
+        path = self.path("lesion.nii.gz")
+        nifti.write_nifti(path, data, RAS_AFFINE)
+        with open(path, "rb") as f:
+            raw = f.read()
+        plain = gzip.decompress(raw)
+        expected = len(plain)
+
+        def write(name, payload):
+            with open(self.path(name), "wb") as f:
+                f.write(payload)
+            return nifti.image_data_problem(self.path(name))
+
+        self.assertIsNone(nifti.image_data_problem(path))
+        self.assertIsNone(write("plain.nii", plain))
+        self.assertIsNone(write("members.nii.gz", gzip.compress(plain[:1000]) + gzip.compress(plain[1000:])))
+        self.assertIsNone(write("padded.nii.gz", raw + b"\0" * 16))
+        self.assertIsNone(write("trailing.nii.gz", raw + b"not gzip"))
+        self.assertIsNone(nifti.image_data_problem(self.path("absent.nii.gz")), "a missing file is left to the caller")
+        self.assertIsNone(write("nifti2.nii", (540).to_bytes(4, "little") + b"\0" * 600), "not read here: left to other readers")
+        self.assertIn("cut short", write("half.nii", plain[:expected // 2]))
+        self.assertIsNotNone(write("half.nii.gz", raw[:len(raw) // 2]))
+        self.assertIsNotNone(write("header.nii.gz", raw[:30]))
+        self.assertIsNotNone(write("members-cut.nii.gz", (gzip.compress(plain[:1000]) + gzip.compress(plain[1000:]))[:-200]))
+        self.assertIsNotNone(write("short-stream.nii.gz", gzip.compress(plain[:expected - 10])), "a complete stream of too few bytes")
+
     def test_consistent_with_simpleitk(self):
         try:
             import SimpleITK as sitk

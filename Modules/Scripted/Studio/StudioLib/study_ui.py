@@ -374,6 +374,20 @@ def _isNifti(path):
     return lower.endswith(".nii") or lower.endswith(".nii.gz")
 
 
+def _imageDataProblem(path):
+    """Why the image data of the NIfTI file ``path`` cannot be read in full (cut short, damaged), else None.
+
+    The volume and segmentation readers read such a file without an error: the missing part comes back as zeros.
+    """
+    if not path or not _isNifti(path):
+        return None
+    try:
+        return _lnm("nifti").image_data_problem(path)
+    except Exception:
+        logging.error(f"Studio: {path} could not be checked:\n{traceback.format_exc()}")
+        return None
+
+
 def _isInside(path, folder):
     try:
         relative = os.path.relpath(os.path.realpath(path), os.path.realpath(folder))
@@ -3366,7 +3380,7 @@ class StudySession:
             if self._current is not None and not self._leave(write=True):
                 return False
             try:
-                self._load(sid)
+                damaged = self._load(sid)
             except Exception as e:
                 logging.error(f"Studio: cannot open {sid}:\n{traceback.format_exc()}")
                 _toast(shell, _("{sid} could not be opened: {error}").format(sid=sid, error=e), ms=6000, level="warning")
@@ -3394,6 +3408,8 @@ class StudySession:
         if missingLesion is not None:
             # Last: a traced subject shown with an empty lesion is said, and stays said until the next input
             self._sayMissing(shell, sid, "lesion", missingLesion)
+        elif damaged:
+            self._sayDamaged(shell, sid, damaged)
         return True
 
     def subjectOfFile(self, path):
@@ -3441,6 +3457,30 @@ class StudySession:
         _toast(shell, text, ms=8000, action=lambda: _showFolder(folder), actionText=_("Show folder"), level="consequence",
                toolTip=path)
 
+    def _sayDamaged(self, shell, sid, damaged):
+        """Tell the user that the scan or lesion file of ``sid`` is damaged (``{column: (table path, path, reason)}`` from
+        ``_load()``): the readers show the part they could not read as zeros, without an error. A consequence: it stays
+        until the next input.
+        """
+        scan, lesion = damaged.get("scan"), damaged.get("lesion")
+        if scan is not None and lesion is not None:
+            text = _("The scan and the lesion file of {sid} are damaged: {scan} and {file} cannot be read in full (cut short "
+                     "or corrupted). The part of the scan that could not be read is black; an empty lesion is shown and Done "
+                     "saves a new one").format(sid=sid, scan=scan[0], file=lesion[0])
+        elif lesion is not None:
+            text = _("The lesion file of {sid} is damaged: {file} cannot be read in full (cut short or corrupted). An empty "
+                     "lesion is shown; Done saves a new one").format(sid=sid, file=lesion[0])
+        else:
+            text = _("The scan of {sid} is damaged: {file} cannot be read in full (cut short or corrupted). The part that "
+                     "could not be read is black").format(sid=sid, file=scan[0])
+        entries = [entry for entry in (scan, lesion) if entry is not None]
+        folder = os.path.dirname(entries[-1][1])
+        if not os.path.isdir(folder):
+            folder = self.study.path
+        toolTip = "\n".join(f"{path}: {reason}" for _tablePath, path, reason in entries)
+        _toast(shell, text, ms=8000, action=lambda: _showFolder(folder), actionText=_("Show folder"), level="consequence",
+               toolTip=toolTip)
+
     def _showDraw(self, shell):
         if shell is None:
             return
@@ -3451,6 +3491,10 @@ class StudySession:
             shell.switchTo("draw")
 
     def _load(self, sid):
+        """Load the scan and the lesion of ``sid`` and make it the current subject. Return ``{column: (table path, path,
+        reason)}`` of the scan and lesion files that cannot be read in full (a damaged lesion is not read: an empty one is
+        shown, as for a missing file).
+        """
         importer = _importer()
         row = self.study.subject(sid)
         scanPath = self.study.abspath(row.get("scan"))
@@ -3469,6 +3513,18 @@ class StudySession:
         lesionStamp = _fileStamp(lesionPath) if lesionPath else None
         prefetched = self._takePrefetchedLesion(sid, lesionPath)
         self.lastSwitchPrefetched = prefetched is not None
+        # A file cut short reads without an error, the missing part as zeros: a damaged lesion would open empty or with
+        # part of its voxels, as if it were traced so (a prefetched lesion was read in full)
+        damaged = {}
+        for column, path in (("scan", scanPath), ("lesion", None if prefetched is not None else lesionPath)):
+            problem = _imageDataProblem(path)
+            if problem:
+                logging.warning(f"Studio: the {column} file of {sid} is damaged: {path}: {problem}")
+                damaged[column] = (str(row.get(column)), path, problem)
+        if "lesion" in damaged:
+            # Its stamp is kept: a Done that writes the subject's file under lesions/ replaces the damaged file, not another
+            # window's version
+            lesionPath = None
         with importer._ownLoad():
             if scanPath:
                 volumeNode = slicer.util.loadVolume(scanPath, {"singleFile": True, "show": False})
@@ -3511,6 +3567,7 @@ class StudySession:
         self._activeSeconds = 0.0
         self._lastActivity = None
         self._observer.observe(segmentationNode)
+        return damaged
 
     def _context(self, sid):
         return {"session": self, "study": self.study, "row": self.study.subject(sid) if sid in self.study else {},

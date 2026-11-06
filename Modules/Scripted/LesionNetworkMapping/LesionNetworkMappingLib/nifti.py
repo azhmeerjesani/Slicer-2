@@ -303,6 +303,55 @@ def read_nifti_header(path):
     return _parse_header(raw, path)
 
 
+def image_data_problem(path):
+    """Why the image data of a .nii or .nii.gz file cannot be read in full (a file cut short by a copy, a damaged
+    deflate stream), or None when it can.
+
+    Some readers (ITK's NIfTI reader) read such a file without an error and show the missing part as zeros. A header
+    that this module does not read (NIfTI-2, an unsupported datatype) and a file that cannot be opened are left to the
+    other readers: None. A .nii.gz whose gzip trailer gives the expected size is not decompressed (a truncated stream
+    ends in compressed data, whose last four bytes are that size by chance only); otherwise it is decompressed to its
+    end, so a file of several gzip members or with padding after the stream is complete when its data are.
+    """
+    try:
+        header = read_nifti_header(path)
+    except (EOFError, zlib.error) as exc:
+        return f"the header cannot be read ({exc})"
+    except (OSError, ValueError):
+        return None
+    offset = int(header["vox_offset"])
+    if offset < HEADER_SIZE:
+        offset = HEADER_SIZE + 4
+    expected = offset + int(np.prod(header["shape"], dtype=np.int64)) * header["dtype"].itemsize
+    try:
+        if not _is_gzip(path):
+            size = os.path.getsize(path)
+            return None if size >= expected else f"the image data are cut short ({size} of {expected} bytes)"
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            if f.tell() >= 4:
+                f.seek(-4, os.SEEK_END)
+                if int.from_bytes(f.read(4), "little") == expected % (1 << 32):
+                    return None
+    except OSError:
+        return None
+    total = 0
+    try:
+        with gzip.open(path, "rb") as f:
+            while True:
+                # read1: the data before an error are counted (read() would drop the data of the call that fails)
+                block = f.read1(1 << 20)
+                if not block:
+                    break
+                total += len(block)
+    except (EOFError, OSError, zlib.error) as exc:
+        # Data after the end of a complete stream (padding that gzip does not accept) do not hide the image
+        if total >= expected:
+            return None
+        return f"the compressed data are damaged or cut short ({exc})"
+    return None if total >= expected else f"the image data are cut short ({total} of {expected} bytes)"
+
+
 def read_nifti(path, apply_scaling=True, on_block=None):
     """Read a NIfTI-1 image.
 

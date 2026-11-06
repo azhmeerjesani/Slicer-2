@@ -178,6 +178,11 @@ Run with the main window and testing enabled::
   study's sub-01: study B's Brush-only tracing of its own sub-01 is recorded as ``manual`` without ``assist_pct`` or a Smart
   fill share in its sidecar (it was ``manual+smartfill`` with study A's numbers); study A opened again keeps its counts, and
   the counts of a lesion segment outside a study end with the scene (the next scene reuses its node IDs).
+- ``test_82_damaged_lesion_or_scan_is_said`` (BB-1): a traced subject whose lesion file is cut short opens with an empty
+  lesion and a consequence toast that names the damaged file (it opened silently, empty or with part of its voxels, and the
+  Lesion card said "Unsaved changes" without an edit); the card says "Not saved yet" and leaving the subject keeps the file.
+  A damaged scan is said too (its unread part is black), alone or with the lesion in one toast, also after the lesion was
+  read ahead while it was intact.
 """
 
 import inspect
@@ -6205,3 +6210,118 @@ class StudioRegressionTest(unittest.TestCase):
             slicer.mrmlScene.Clear(0)
             draw._assistCounts.clear()
             draw._assistCounts.update(saved)
+
+    def test_82_damaged_lesion_or_scan_is_said(self):
+        """A lesion or scan file cut short opened without a word: the readers show the missing part as zeros (BB-1)."""
+        import hashlib
+
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import draw, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Damaged study")
+        os.makedirs(folder)
+        rng = np.random.default_rng(82)
+        scans = []
+        for index in range(1, 4):
+            scans.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(scans[-1], rng.integers(100, 400, grid.shape).astype(np.int16), grid.affine)
+
+        def truncate(path):
+            with open(path, "rb") as f:
+                data = f.read()
+            with open(path, "wb") as f:
+                f.write(data[:len(data) // 2])
+
+        def md5(path):
+            with open(path, "rb") as f:
+                return hashlib.md5(f.read()).hexdigest()
+
+        toasts = []
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: toasts.append((str(text), kwargs))
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        try:
+            session = study_ui.createStudy(scans, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            study = session.study
+            # sub-01 and sub-02 are traced, then sub-03 is open
+            self.assertTrue(session.open("sub-01", switchToDraw=False))
+            for sid in ("sub-01", "sub-02"):
+                self.assertEqual(session.current(), sid)
+                segmentationNode, volumeNode = session.segmentationNode(), session.volumeNode()
+                segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+                array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode)
+                array[20:30, 30:40, 20:30] = 1
+                slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, volumeNode)
+                for _ in range(4):
+                    slicer.app.processEvents()
+                self.assertIsNotNone(session.done())
+            self.assertEqual(session.current(), "sub-03")
+            lesions = {sid: study.abspath(study.subject(sid)["lesion"]) for sid in ("sub-01", "sub-02")}
+            for path in lesions.values():
+                self.assertIsNone(nifti.image_data_problem(path), "a complete lesion file is not damaged")
+            self.assertIsNone(nifti.image_data_problem(scans[0]))
+
+            def damagedToasts(sid):
+                return [(text, kwargs) for text, kwargs in toasts if sid in text and "damaged" in text]
+
+            # The lesion of sub-01 is cut short: an empty lesion, the damaged file is said, no unsaved changes are claimed
+            truncate(lesions["sub-01"])
+            self.assertIsNotNone(nifti.image_data_problem(lesions["sub-01"]))
+            damagedMd5 = md5(lesions["sub-01"])
+            del toasts[:]
+            self.assertTrue(session.open("sub-01", switchToDraw=False))
+            self.assertEqual(session.current(), "sub-01")
+            said = damagedToasts("sub-01")
+            self.assertTrue(said, toasts)
+            self.assertIn(study.subject("sub-01")["lesion"], said[-1][0])
+            self.assertIn("lesion", said[-1][0])
+            self.assertNotIn(folder, said[-1][0], "the toast names the table path, not the local path")
+            self.assertEqual(said[-1][1].get("level"), "consequence")
+            self.assertEqual(said[-1][1].get("actionText"), "Show folder")
+            self.assertIsNone(study_ui.lesionMask(session.segmentationNode()), "the damaged lesion is not shown in part")
+            self.assertFalse(session.isDirty())
+            self.assertFalse(draw.saveStateText(session.segmentationNode())[0].startswith("Unsaved"),
+                             draw.saveStateText(session.segmentationNode()))
+            # The scan and the lesion of sub-02 are cut short after its lesion was read ahead: one toast says both
+            session.waitForPrefetch()
+            truncate(lesions["sub-02"])
+            truncate(scans[1])
+            del toasts[:]
+            self.assertTrue(session.open("sub-02", switchToDraw=False))
+            self.assertEqual(session.current(), "sub-02")
+            said = damagedToasts("sub-02")
+            self.assertTrue(said, toasts)
+            self.assertIn(study.subject("sub-02")["lesion"], said[-1][0])
+            self.assertIn("sub-02_T1w.nii.gz", said[-1][0])
+            self.assertIsNone(study_ui.lesionMask(session.segmentationNode()))
+            # Leaving sub-01 unchanged kept its damaged file and its row
+            self.assertEqual(md5(lesions["sub-01"]), damagedMd5)
+            self.assertEqual(study.subject("sub-01").get("status"), "traced")
+            # Only the scan of sub-03 is cut short: the subject opens, and the damaged scan is said
+            truncate(scans[2])
+            del toasts[:]
+            self.assertTrue(session.open("sub-03", switchToDraw=False))
+            said = damagedToasts("sub-03")
+            self.assertTrue(said, toasts)
+            self.assertIn("sub-03_T1w.nii.gz", said[-1][0])
+            self.assertNotIn("lesion file", said[-1][0])
+            # A subject whose files are complete opens without the toast
+            del toasts[:]
+            nifti.write_nifti(scans[2], rng.integers(100, 400, grid.shape).astype(np.int16), grid.affine)
+            self.assertTrue(session.open("sub-03", switchToDraw=False, reload=True))
+            self.assertFalse(damagedToasts("sub-03"), toasts)
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
