@@ -6394,3 +6394,78 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertEqual(dialog.confirm()["applied"], ["site"])
         self.assertEqual(saved("site").get("Description"), "Recruiting site")
         self.assertEqual(session.study.column_spec("site").role, "metadata")
+
+    # Share outside the brain on the FSL 2 mm grid (BB-1)
+
+    def test_84_downloaded_nlin6_brain_mask_gives_the_outside_check_and_clip(self):
+        """The NLin6Asym brain mask the user downloaded (Normalize options, in slicer.app.cachePath) feeds the Mask chip."""
+        import hashlib
+
+        from LesionNetworkMappingLib import nifti, normalize
+        from LesionNetworkMappingUI import normalize_controller
+
+        from StudioLib import lesionqc, study_ui
+
+        # A stand-in for tpl-MNI152NLin6Asym_res-02_desc-brain_mask.nii.gz (no download in tests): its record names this file
+        info = normalize.TEMPLATES["MNI152NLin6Asym"]["files"]["mask"]
+        affine = np.array([[2.0, 0, 0, -20.0], [0, 2.0, 0, -20.0], [0, 0, 2.0, -20.0], [0, 0, 0, 1.0]])
+        brain = np.zeros((21, 21, 21), np.uint8)
+        brain[4:17, 4:17, 4:17] = 1
+        downloads = os.path.join(self.directory, "cache")
+        os.makedirs(downloads)
+        maskPath = os.path.join(downloads, info["name"])
+        nifti.write_nifti(maskPath, brain, affine, dtype=np.uint8)
+        with open(maskPath, "rb") as stream:
+            digest = hashlib.sha256(stream.read()).hexdigest()
+        saved = dict(info)
+        hidden = maskPath + ".hidden"
+        os.replace(maskPath, hidden)  # not downloaded yet
+        originalCache = normalize_controller.cacheDirectory
+        normalize_controller.cacheDirectory = lambda: downloads
+        info.update(sha256=digest, bytes=os.path.getsize(hidden))
+        c = lesionqc.core()
+
+        def restore():
+            info.clear()
+            info.update(saved)
+            normalize_controller.cacheDirectory = originalCache
+            c.ensureResources(reload=True)
+            c.waitIdle(60.0)
+
+        self.addCleanup(restore)
+        c.ensureResources(reload=True)
+        self.assertTrue(c.waitIdle(60.0))
+        fromFetchCache = "fsl6" in c.resources.brain
+
+        # The user's explicit download: the next look at a lesion loads the mask, without a "Get atlases" download
+        os.replace(hidden, maskPath)
+        c.ensureResources()
+        self.assertTrue(c.waitIdle(60.0))
+        self.assertIn("fsl6", sorted(c.resources.brain), "the downloaded NLin6Asym brain mask was not loaded")
+        if not fromFetchCache:
+            self.assertEqual(c.resources.brain["fsl6"][0].shape, brain.shape)
+            version = c.resources.version
+            c.ensureResources()  # loaded once: no reload on each lesion
+            self.assertTrue(c.waitIdle(10.0))
+            self.assertEqual(c.resources.version, version)
+
+            # An NLin6 lesion (2 mm grid) half outside the brain: the amber Mask chip and its Clip action
+            lesion = np.zeros(brain.shape, bool)
+            lesion[14:20, 8:12, 8:12] = True
+            result = lesionqc.evaluate(lesion, affine, mni=True, space="MNI152NLin6Asym", resources=c.resources)
+            self.assertEqual(result["family"], "fsl6")
+            self.assertAlmostEqual(result["outsidePct"], 50.0, delta=1.0)
+            chips = [chip for chip in lesionqc.buildChips(result, mni=True, resourcesState=c.resources.state) if chip["key"] == "hygiene"]
+            self.assertEqual(len(chips), 1, chips)
+            self.assertIn("outside the brain", chips[0]["text"])
+            self.assertIn("clip", [action["id"] for action in chips[0]["actions"]])
+
+            # The participants.tsv column of the same lesion
+            loaded = study_ui._loadBrainMask("MNI152NLin6Asym")
+            self.assertIsNotNone(loaded)
+            values = study_ui.metricsValues(np.ascontiguousarray(lesion.transpose(2, 1, 0)), affine, "MNI152NLin6Asym", loaded)
+            self.assertAlmostEqual(values["outside_brain_pct"], 50.0, delta=1.0)
+
+        # A file of that name that is not the template (another checksum) is not used
+        info.update(sha256="0" * 64)
+        self.assertIsNone(study_ui.brainMaskFile("MNI152NLin6Asym"))

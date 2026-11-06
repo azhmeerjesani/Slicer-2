@@ -1620,12 +1620,44 @@ def _contentStamp(segmentationNode):
 # Lesion metrics (worker-safe: numpy only)
 #
 
+#: MNI templates whose lesions get the share outside the brain: the bundled 2009c mask, and the NLin6Asym mask once the user
+#: downloaded it (Normalize options' "Download NLin6Asym 2 mm" or SampleData; it is never downloaded automatically)
+BRAIN_MASK_SPACES = ("MNI152NLin2009cAsym", "MNI152NLin6Asym")
 _brainMask = None
+_brainMasks = {}  # (space, path, mtime, size) of a downloaded mask -> (data, affine), or None when unreadable
+_verifiedMaskFiles = {}  # (path, mtime, size, expected sha256) -> whether the file has that sha256
 
 
-def brainMaskFile():
-    """Path of the bundled MNI152NLin2009cAsym 2 mm brain mask, or None."""
-    return sampleFile(BRAIN_MASK_SAMPLE)
+def brainMaskFile(space="MNI152NLin2009cAsym"):
+    """Path of the 2 mm brain mask of an MNI template, or None.
+
+    MNI152NLin2009cAsym: the bundled mask. MNI152NLin6Asym: the mask the user downloaded (found where Normalize and Smart fill find
+    it, ``normalize_controller.templateFile``), only when its sha256 is the one of ``normalize.TEMPLATES``.
+    """
+    if space == "MNI152NLin2009cAsym":
+        return sampleFile(BRAIN_MASK_SAMPLE)
+    if space not in BRAIN_MASK_SPACES:
+        return None
+    try:
+        from LesionNetworkMappingUI import normalize_controller
+
+        path = normalize_controller.templateFile(space, "mask")
+        expected = _lnm("normalize").TEMPLATES[space]["files"]["mask"]["sha256"]
+        if not path:
+            return None
+        stat = os.stat(path)
+    except Exception:
+        return None
+    key = (path, stat.st_mtime, stat.st_size, expected)
+    if key not in _verifiedMaskFiles:
+        import hashlib
+
+        try:
+            with open(path, "rb") as stream:
+                _verifiedMaskFiles[key] = hashlib.sha256(stream.read()).hexdigest() == expected
+        except OSError:
+            return None
+    return path if _verifiedMaskFiles[key] else None
 
 
 def outsideBrainPercent(maskIndicesIjk, ijkToRas, brainMask):
@@ -1653,7 +1685,7 @@ def metricsValues(maskKji, ijkToRas, lesionSpace=None, brainMask=None):
     for axis, value in zip(("x", "y", "z"), centroid, strict=True):
         values["centroid_" + axis] = None if value is None else round(value, 2)
     outside = None
-    if brainMask is not None and lesionSpace == "MNI152NLin2009cAsym" and metrics["voxels"]:
+    if brainMask is not None and lesionSpace in BRAIN_MASK_SPACES and metrics["voxels"]:
         kk, jj, ii = np.nonzero(maskKji)
         outside = outsideBrainPercent(np.c_[ii, jj, kk], ijkToRas, brainMask)
     values["outside_brain_pct"] = None if outside is None else round(outside, 2)
@@ -1674,7 +1706,24 @@ def _fileMetrics(path, lesionSpace, brainMask):
     return values, stat.st_mtime, stat.st_size
 
 
-def _loadBrainMask():
+def _loadBrainMask(space="MNI152NLin2009cAsym"):
+    """The brain mask ``(data, affine)`` of an MNI template (``brainMaskFile``), or None (main thread: a small file, read once)."""
+    if space != "MNI152NLin2009cAsym":
+        path = brainMaskFile(space)
+        if path is None:
+            return None  # not cached: a later download is found
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return None
+        key = (space, path, stat.st_mtime, stat.st_size)
+        if key not in _brainMasks:
+            try:
+                data, affine, _header = _lnm("nifti").read_nifti(path)
+                _brainMasks[key] = (data, affine)
+            except Exception:
+                _brainMasks[key] = None
+        return _brainMasks[key]
     global _brainMask
     if _brainMask is None:
         path = brainMaskFile()
@@ -2839,10 +2888,10 @@ class StudySession:
             from . import autosave_io
 
             self._metricsWriter = autosave_io.BackgroundWriter()
-        brainMask = _loadBrainMask()
+        brainMasks = {space: _loadBrainMask(space) for space in BRAIN_MASK_SPACES}
         for sid, path, lesionSpace in work:
             self._metricsPending.add(sid)
-            self._metricsWriter.submit(_fileMetrics, path, lesionSpace, brainMask,
+            self._metricsWriter.submit(_fileMetrics, path, lesionSpace, brainMasks.get(lesionSpace),
                                        onDone=lambda result, sid=sid: self._onMetrics(sid, result),
                                        onError=lambda error, sid=sid: self._onMetricsError(sid, error))
         return len(work)
@@ -3781,7 +3830,7 @@ class StudySession:
         spaceName = rowSpace or self._spaceOfReference() or self.study.space or "native"
         if not re.fullmatch(r"[A-Za-z0-9]+", spaceName):
             spaceName = "native"
-        brainMask = _loadBrainMask() if spaceName == "MNI152NLin2009cAsym" else None
+        brainMask = _loadBrainMask(spaceName) if spaceName in BRAIN_MASK_SPACES else None
         values = metricsValues(array, ijkToRas, spaceName, brainMask)
         target, reviewEdit = self._lesionTarget(sid, row, spaceName)
         # An approval (or rejection) is for the voxels that were reviewed: a write without Done (leaving the subject, the

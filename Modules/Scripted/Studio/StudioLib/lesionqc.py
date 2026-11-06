@@ -72,6 +72,9 @@ PRIOR_IDS = (("templates", "nlin6asym-hospa-ventricles"), ("templates", "nlin200
 CSF_PRIOR_IDS = {"2009": "nlin2009casym-res02-csf-probseg"}
 VENTRICLE_IDS = {"fsl6": "nlin6asym-hospa-ventricles"}
 BRAIN_MASK_IDS = {"fsl6": "nlin6asym-res02-brain-mask"}
+#: Template of each brain-mask family when the mask is not in the fetch cache: the file the user downloaded explicitly (Normalize
+#: options, SampleData), found by ``study_ui.brainMaskFile``
+DOWNLOADED_BRAIN_MASK_SPACES = {"fsl6": "MNI152NLin6Asym"}
 #: Location rows below this percentage of the lesion are not listed; at most this many are
 LOCATION_MIN_PCT = 5.0
 LOCATION_MAX_ROWS = 3
@@ -720,7 +723,7 @@ class _Worker:
             self._indexes[studyPath] = index
         return index
 
-    def _do_resources(self, cache, brainPath=None, tag=None):
+    def _do_resources(self, cache, brainPath=None, downloadedMasks=None, tag=None):
         fetch = _lnm("fetch")
         atlases = _lnm("atlases")
         nifti = _lnm("nifti")
@@ -756,6 +759,14 @@ class _Worker:
             data, extra = volume(resourceId, "templates")
             if data is not None:
                 brain[family] = (np.asarray(data) > 0, extra[1])
+        for family, path in (downloadedMasks or {}).items():
+            if family in brain or not path:
+                continue
+            try:
+                data, affine, _header = nifti.read_nifti(path)
+                brain[family] = ((data[..., 0] if data.ndim > 3 else data) > 0, affine)
+            except UNREADABLE_FILE_ERRORS:
+                pass
         if brainPath:
             try:
                 data, affine, _header = nifti.read_nifti(brainPath)
@@ -974,6 +985,7 @@ class QcCore:
         self.policyCard = None
         self.listeners = []
         self.brainMaskPath = None
+        self._downloadedTried = {}  # family -> path of the downloaded brain mask given to the last resources job
         self.scanCount = 0
         self.lastScanSeconds = None
         self._scanStarted = None
@@ -1031,17 +1043,43 @@ class QcCore:
     def cacheDir(self):
         return _lnm("fetch").app_cache_dir()
 
+    def downloadedBrainMasks(self):
+        """``{family: path}`` of the brain masks the user downloaded outside the fetch cache (``DOWNLOADED_BRAIN_MASK_SPACES``)."""
+        studyUi = _studyUi()
+        masks = {}
+        for family, space in DOWNLOADED_BRAIN_MASK_SPACES.items():
+            try:
+                path = studyUi.brainMaskFile(space) if studyUi is not None else None
+            except Exception:
+                path = None
+            if path:
+                masks[family] = path
+        return masks
+
     def ensureResources(self, reload=False):
-        """Load the cached atlases, priors and brain masks in the worker (once; ``reload`` after a download)."""
-        if self.resources.state == "loading" or (self.resources.state == "ready" and not reload):
+        """Load the cached atlases, priors and brain masks in the worker (once; ``reload`` after a download).
+
+        A brain mask that was missing and that the user has downloaded since (Normalize options) loads them again.
+        """
+        if self.resources.state == "loading":
             return
+        downloaded = None
+        if self.resources.state == "ready" and not reload:
+            missing = [family for family in DOWNLOADED_BRAIN_MASK_SPACES if family not in self.resources.brain]
+            if not missing:
+                return
+            downloaded = self.downloadedBrainMasks()
+            if all(downloaded.get(family) in (None, self._downloadedTried.get(family)) for family in missing):
+                return
         self.resources.state = "loading"
         if self.brainMaskPath is None:
             try:
                 self.brainMaskPath = _studyUi().brainMaskFile() or ""
             except Exception:
                 self.brainMaskPath = ""
-        self._submit("resources", cache=self.cacheDir(), brainPath=self.brainMaskPath or None)
+        downloaded = self.downloadedBrainMasks() if downloaded is None else downloaded
+        self._downloadedTried = dict(downloaded)
+        self._submit("resources", cache=self.cacheDir(), brainPath=self.brainMaskPath or None, downloadedMasks=downloaded)
 
     # Study
 
