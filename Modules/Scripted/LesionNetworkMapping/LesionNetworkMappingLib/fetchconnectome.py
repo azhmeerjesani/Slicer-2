@@ -158,7 +158,7 @@ def destination_notice(destination, web=None):
     web = is_web_build() if web is None else web
     if not web or not destination:
         return ""
-    path = os.path.normpath(os.path.abspath(os.fspath(destination)))
+    path = os.path.normpath(_folder(destination))
     if path == WEB_DATA_ROOT or path.startswith(WEB_DATA_ROOT + os.sep):
         return ""
     return f"{destination} is inside the container but outside {WEB_DATA_ROOT}: connectomes saved there are lost when the container is removed. Use a folder under {WEB_DATA_ROOT}."
@@ -699,14 +699,19 @@ def _entry_slug(entry):
     return re.sub(r"[^A-Za-z0-9._-]+", "_", entry["id"])
 
 
+def _folder(dest):
+    """``dest`` as an absolute folder, ``~`` expanded (the job's working folder is the module folder, never the user's)."""
+    return os.path.abspath(os.path.expanduser(os.fspath(dest)))
+
+
 def bundle_path(entry, dest):
     """``<dest>/<entry id>.lnmc``: the bundle a fetch writes."""
-    return os.path.join(os.path.abspath(os.fspath(dest)), f"{_entry_slug(entry)}.lnmc")
+    return os.path.join(_folder(dest), f"{_entry_slug(entry)}.lnmc")
 
 
 def lock_path(entry, dest):
     """``<dest>/.<entry id>.lock``: the output lock a running fetch holds (``jobs.OutputLock``)."""
-    return os.path.join(os.path.abspath(os.fspath(dest)), f".{_entry_slug(entry)}.lock")
+    return os.path.join(_folder(dest), f".{_entry_slug(entry)}.lock")
 
 
 def running_fetch(entry, dest):
@@ -727,7 +732,7 @@ def finished_fetch(entry, dest):
 
 def work_dir(entry, dest):
     """``<dest>/<entry id>.fetch``: the state of a fetch, the accepted terms text, small files and kept archives."""
-    return os.path.join(os.path.abspath(os.fspath(dest)), f"{_entry_slug(entry)}.fetch")
+    return os.path.join(_folder(dest), f"{_entry_slug(entry)}.fetch")
 
 
 def bundle_name(entry):
@@ -1007,7 +1012,7 @@ def fetch_connectome(entry, dest, terms_sha, subset=None, streams=2, keep_archiv
     full_set = len(archives) == len(catalogs.archives(entry))
     plan["selection"]["text"] = None if subset in (None, "", "all") else str(subset)
 
-    dest = os.path.abspath(os.fspath(dest))
+    dest = _folder(dest)
     os.makedirs(dest, exist_ok=True)
     bundle = bundle_path(entry, dest)
     work = work_dir(entry, dest)

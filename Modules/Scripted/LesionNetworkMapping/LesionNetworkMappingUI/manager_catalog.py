@@ -34,7 +34,7 @@ import qt
 import slicer
 from slicer.i18n import tr as _
 
-from . import jobrunner
+from . import jobrunner, widgets
 
 ENABLE_SETTING = "Studio/LNM/EnableConnectomeFetch"
 ACCEPTED_TERMS_TEXT_SETTING = "Studio/LNM/AcceptedTermsText"
@@ -152,6 +152,8 @@ class FetchController:
             return _("Read and accept the provider's terms first: nothing is downloaded before.")
         if not request.get("dest"):
             return _("Choose a destination folder.")
+        if not os.path.isabs(os.path.expanduser(str(request["dest"]))):  # the job runs in the module folder: never write inside the application
+            return widgets.relativePathProblem(request["dest"])
         return None
 
     def checkResumeSubset(self, request):

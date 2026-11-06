@@ -442,5 +442,71 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
         self.assertEqual(qt6, qt5)
 
 
+    def test_typed_paths_of_convert_and_import_are_expanded_or_refused(self):
+        """'~/…' typed as Convert…'s bundle folder was given to the job unchanged: the job runs in the module folder, so the bundle
+        was written into <modules>/~/… inside the application, and registering the same text (resolved in the application's own
+        folder) failed. '~' is expanded now in Convert… and Import Lead-DBS maps…; a relative path is refused with a hint.
+        """
+        from unittest import mock
+
+        from LesionNetworkMappingUI import jobrunner, manager_parity
+
+        home = os.path.expanduser("~")
+        manager = self.widget.openManager()
+        dialog = manager.openConvert()
+        try:
+            dialog.sourceCombo.setCurrentIndex(dialog.sourceCombo.findData("nifti"))
+            dialog.termsEdit.setPlainText("")
+            dialog.resumeCheckBox.setChecked(False)
+            dialog.inputEdit.setText("~/LNM convert runs")
+            dialog.maskEdit.setText("~/LNM convert runs/mask.nii.gz")
+            dialog.outEdit.setText(" ~/LNM tilde.lnmc ")
+            with mock.patch.object(jobrunner, "instance") as runner:
+                dialog.runEstimate()
+                args = runner.return_value.submit.call_args[0][0].args
+            self.assertEqual(args[args.index("--out") + 1], os.path.join(home, "LNM tilde.lnmc"))  # the free space of the folder written to
+            dialog.estimate = {"enough": True}
+            with mock.patch.object(manager, "startConversion") as start:
+                dialog.onConvert()
+            args, outPath = start.call_args[0]
+            self.assertEqual(outPath, os.path.join(home, "LNM tilde.lnmc"))  # what is registered is what the job writes
+            self.assertEqual(args[args.index("--out") + 1], outPath)
+            self.assertEqual(args[args.index("--input") + 1], os.path.join(home, "LNM convert runs"))
+            self.assertEqual(args[args.index("--mask") + 1], os.path.join(home, "LNM convert runs", "mask.nii.gz"))
+            for edit in (dialog.outEdit, dialog.inputEdit, dialog.maskEdit):
+                saved = edit.text
+                edit.setText("relative folder")
+                dialog.estimate = {"enough": True}
+                with mock.patch.object(manager, "startConversion") as start, mock.patch.object(jobrunner, "instance") as runner:
+                    dialog.onConvert()
+                    self.assertIsNone(dialog.runEstimate())
+                    start.assert_not_called()
+                    runner.assert_not_called()
+                self.assertIn("is not a full path", str(dialog.estimateLabel.text), edit.objectName)
+                edit.setText(saved)
+        finally:
+            dialog.hide()
+        importDialog = manager_parity.openImport(self.widget.ctx)
+        try:
+            importDialog.folderEdit.setText("~/LNM lead-dbs maps")
+            importDialog.outEdit.setText("~/LNM imported")
+            args = importDialog.arguments()
+            self.assertEqual(args[args.index("--folder") + 1], os.path.join(home, "LNM lead-dbs maps"))
+            if "--out" in args:  # no study open: the typed destination folder
+                self.assertEqual(args[args.index("--out") + 1], os.path.join(home, "LNM imported"))
+            importDialog.scan()
+            self.assertIn(os.path.join(home, "LNM lead-dbs maps"), str(importDialog.statusLabel.text))  # not found, but looked for in the home folder
+            importDialog.folderEdit.setText("lead-dbs maps")
+            importDialog.scan()
+            self.assertIn("is not a full path", str(importDialog.statusLabel.text))
+            self.assertIsNone(importDialog.arguments())
+            with mock.patch.object(jobrunner, "instance") as runner:
+                self.assertIsNone(importDialog.startImport())
+                runner.assert_not_called()
+            self.assertIn("is not a full path", str(importDialog.statusLabel.text))
+        finally:
+            importDialog.hide()
+
+
 if __name__ == "__main__":
     unittest.main()

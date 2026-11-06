@@ -1608,10 +1608,24 @@ class ConvertConnectomeDialog(qt.QDialog):
             self.outEdit.setText(os.path.join(path, f"{name}.lnmc"))
             self._inputsChanged()
 
-    def sourceArguments(self):
-        args = ["--source", self.source(), "--input", self.inputEdit.text.strip()]
-        if self.source() == "nifti" and self.maskEdit.text.strip():
-            args += ["--mask", self.maskEdit.text.strip()]
+    def typedPaths(self):
+        """``({input, mask, out}, problem)``: the Folder, Mask and Bundle folder fields as absolute paths (``~`` expanded, "" when
+        empty), and why one cannot be used, or None. A relative path is refused: the job runs in the module folder, so it would be
+        read or written inside the application (``widgets.typedPath``).
+        """
+        from LesionNetworkMappingUI import widgets
+
+        paths = {}
+        for key, edit in (("input", self.inputEdit), ("mask", self.maskEdit), ("out", self.outEdit)):
+            paths[key] = widgets.typedPath(edit.text) if key != "mask" or self.source() == "nifti" else ""
+            if paths[key] is None:
+                return paths, widgets.relativePathProblem(edit.text)
+        return paths, None
+
+    def sourceArguments(self, paths):
+        args = ["--source", self.source(), "--input", paths["input"]]
+        if self.source() == "nifti" and paths["mask"]:
+            args += ["--mask", paths["mask"]]
         packages = _pythonPackagesDirectory()
         if os.path.isdir(packages):
             args += ["--python-packages", packages]
@@ -1621,12 +1635,16 @@ class ConvertConnectomeDialog(qt.QDialog):
         """The size of the bundle and the free space (a light job that reads only headers)."""
         from LesionNetworkMappingUI import jobrunner
 
-        if not self.inputEdit.text.strip():
+        paths, problem = self.typedPaths()
+        if problem:
+            self.estimateLabel.setText(problem)
+            return None
+        if not paths["input"]:
             self.estimateLabel.setText(_("Choose the folder to convert."))
             return None
-        args = ["estimate", *self.sourceArguments()]
-        if self.outEdit.text.strip():
-            args += ["--out", self.outEdit.text.strip()]
+        args = ["estimate", *self.sourceArguments(paths)]
+        if paths["out"]:
+            args += ["--out", paths["out"]]
         self.estimateLabel.setText(_("Estimating…"))
 
         def onDone(job):
@@ -1659,13 +1677,17 @@ class ConvertConnectomeDialog(qt.QDialog):
         return text
 
     def onConvert(self):
+        paths, problem = self.typedPaths()
+        if problem:
+            self.estimateLabel.setText(problem)
+            return
         if self.estimate is None:
             self.runEstimate(then=self.onConvert)
             return
         if self.estimate.get("enough") is False and not self.resumeCheckBox.checked:
             slicer.util.errorDisplay(self.estimateText(self.estimate), windowTitle=_("Not enough free space"))
             return
-        args = ["convert", *self.sourceArguments(), "--out", self.outEdit.text.strip(), "--gsr", self.gsrCombo.currentData or "unknown"]
+        args = ["convert", *self.sourceArguments(paths), "--out", paths["out"], "--gsr", self.gsrCombo.currentData or "unknown"]
         if self.nameEdit.text.strip():
             args += ["--name", self.nameEdit.text.strip()]
         if self.source() == "nifti" and self.groupingEdit.text.strip():
@@ -1682,7 +1704,7 @@ class ConvertConnectomeDialog(qt.QDialog):
             args += ["--terms-file", termsPath]
         if self.resumeCheckBox.checked:
             args.append("--resume")
-        self.manager.startConversion(args, self.outEdit.text.strip())
+        self.manager.startConversion(args, paths["out"])
         self.close()
 
 

@@ -672,8 +672,14 @@ class CatalogDialog(qt.QDialog):
 
     # Destination and download
 
+    def destination(self):
+        """The destination folder as the job is given it: ``~`` expanded; "" when empty, None for a relative path (refused:
+        the job runs in the module folder, so it would be written inside the application, see ``widgets.typedPath``).
+        """
+        return widgets.typedPath(self.destEdit.text)
+
     def browse(self):
-        start = self.destEdit.text.strip() or self.defaultDestination()
+        start = self.destination() or self.defaultDestination()
         folder = qt.QFileDialog.getExistingDirectory(self, _("Where should the connectome be saved?"), nearestExisting(start))
         if folder:
             self.destEdit.setText(folder)
@@ -681,7 +687,7 @@ class CatalogDialog(qt.QDialog):
     def request(self):
         terms = self.currentTerms()
         subset = self.subsetCombo.currentData
-        return {"entry": self.entry["id"], "dest": self.destEdit.text.strip(), "subset": None if subset in (None, "", "all") else str(subset), "keepArchives": bool(self.keepCheck.checked),
+        return {"entry": self.entry["id"], "dest": self.destination(), "subset": None if subset in (None, "", "all") else str(subset), "keepArchives": bool(self.keepCheck.checked),
                 "streams": int(self.streamsSpin.value), "termsSha": terms["sha"] if terms else None}
 
     def updateState(self):
@@ -692,15 +698,18 @@ class CatalogDialog(qt.QDialog):
         if entry is None or not fetchable(entry):
             return
         terms = self.currentTerms()
-        destination = self.destEdit.text.strip()
+        destination = self.destination()
         subset = self.subsetCombo.currentData or "all"
         problem = None
-        if destination:
+        if destination is None:
+            problem = widgets.relativePathProblem(self.destEdit.text)
+            self.planLabel.setText("")
+        elif destination:
             text, problem = planSummary(entry, subset, self.keepCheck.checked, destination, None if self.mismatchHere() else self.unfinishedHere())
             self.planLabel.setText(text)
         else:
             self.planLabel.setText("")
-        self.destNotice.setText(fetchconnectome.destination_notice(destination))
+        self.destNotice.setText(fetchconnectome.destination_notice(destination or ""))
         self.destNotice.setVisible(bool(self.destNotice.text))
         running = self.controller.isRunning()
         hint = None
@@ -708,7 +717,7 @@ class CatalogDialog(qt.QDialog):
             hint = _("Load the terms first.")
         elif not (self.acceptCheck.checked and manager_catalog.termsAccepted(terms["sha"])):
             hint = _("Read the terms and tick the box to accept them.")
-        elif not destination:
+        elif destination == "":
             hint = _("Choose a destination folder.")
         elif problem:
             hint = problem
@@ -730,7 +739,7 @@ class CatalogDialog(qt.QDialog):
         """True when a finished bundle of the selected entry is in the chosen folder (nothing to resume: a new download would be refused)."""
         from LesionNetworkMappingLib import fetchconnectome
 
-        destination = self.destEdit.text.strip()
+        destination = self.destination()
         if self.entry is None or not destination or self.unfinishedHere():
             return False
         return os.path.exists(os.path.join(fetchconnectome.bundle_path(self.entry, destination), "connectome.json"))
@@ -745,7 +754,7 @@ class CatalogDialog(qt.QDialog):
         request = controller.request
         if controller.state != "failed" or not request or self.entry is None or not controller.status()["mismatch"]:
             return False
-        destination = self.destEdit.text.strip()
+        destination = self.destination()
         if request.get("entry") != self.entry.get("id") or not destination or os.path.normpath(request.get("dest") or "") != os.path.normpath(destination):
             return False
         try:
@@ -758,7 +767,7 @@ class CatalogDialog(qt.QDialog):
         """A summary of an interrupted download of the selected entry in the chosen folder (it is continued, not started again)."""
         from LesionNetworkMappingLib import fetchconnectome
 
-        destination = self.destEdit.text.strip()
+        destination = self.destination()
         if self.entry is None or not destination:
             return None
         try:
@@ -772,7 +781,7 @@ class CatalogDialog(qt.QDialog):
         """
         from LesionNetworkMappingLib import fetchconnectome
 
-        destination = self.destEdit.text.strip()
+        destination = self.destination()
         if self.entry is None or not destination:
             return None
         try:
@@ -784,6 +793,9 @@ class CatalogDialog(qt.QDialog):
         if self.entry is None or self.mismatchHere():
             return None
         request = self.request()
+        if not request["dest"]:  # empty or relative (updateState disables Download and says why)
+            self.updateState()
+            return None
         job = self.controller.start(request, resume=self.unfinishedHere() is not None)
         if job is None:
             self.showNotice(self.controller.lastRequestError or _("The download could not start."))

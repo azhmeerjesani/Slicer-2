@@ -7,6 +7,7 @@ only set on a chip or banner when the style does not paint roles.
 """
 
 import html
+import os
 import re
 
 import ctk
@@ -38,6 +39,28 @@ def dialogStartFolder(fallback=""):
         return importer.dialogStartFolder(fallback)
     except Exception:
         return fallback
+
+
+def typedPath(text):
+    """A path typed in a dialog field, as the absolute path a job is given: ``~`` is expanded; "" for an empty field.
+
+    Jobs run with the module folder as their working folder (``jobrunner``), so a relative path would be written inside
+    the application (a ``~`` that is not expanded is a relative path too): None is returned for one, and the dialog shows
+    ``relativePathProblem()`` instead of starting the job.
+    """
+    text = str(text or "").strip()
+    if not text:
+        return ""
+    path = os.path.expanduser(text)
+    return os.path.normpath(path) if os.path.isabs(path) else None
+
+
+def relativePathProblem(text):
+    """Why a typed path (``typedPath`` gave None) is not used, and what to type instead."""
+    text = str(text or "").strip()
+    name = os.path.basename(os.path.normpath(text)) if text else ""
+    example = "~/" + (name if name not in ("", ".", "..", "~") else "SlicerStudio")
+    return _("{path} is not a full path: type one that starts with / or ~ (for example {example}), or choose the folder with the browse button.").format(path=text, example=example)
 
 
 def _studioUi():

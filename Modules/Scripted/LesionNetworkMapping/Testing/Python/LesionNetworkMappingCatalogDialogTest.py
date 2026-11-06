@@ -320,5 +320,68 @@ class LesionNetworkMappingCatalogDialogTest(unittest.TestCase):
         self.assertTrue(dialog.loadTermsButton.enabled)
 
 
+    def test_typed_destination_is_expanded_or_refused_never_resolved_in_the_application(self):
+        """'~/…' typed as the destination was passed to the job unchanged; the job runs in the module folder, so the download
+        landed in <modules>/~/… inside the application (and a relative path in <modules>/…), while the plan measured the free
+        space of the home folder. '~' is expanded now, everywhere the destination is used; a relative path is refused.
+        """
+        from LesionNetworkMappingLib import catalog, fetchconnectome
+        from LesionNetworkMappingUI import catalog_dialog, manager_catalog
+
+        entry = catalog.load_catalog().get("gsp1000-ilxiks")
+        dialog = self.makeDialog(None)
+        dialog.entry = entry
+        dialog.terms[entry["id"]] = {"text": "terms", "display": "terms", "sha": "a" * 64}
+        wasBlocked = dialog.acceptCheck.blockSignals(True)
+        dialog.acceptCheck.setChecked(True)
+        dialog.acceptCheck.blockSignals(wasBlocked)
+        controller = dialog.controller
+        saved = (controller.state, controller.request, controller.errorEvent, controller.job)
+        self.addCleanup(lambda: (setattr(controller, "state", saved[0]), setattr(controller, "request", saved[1]), setattr(controller, "errorEvent", saved[2]),
+                                 setattr(controller, "job", saved[3])))
+        controller.job = None
+        controller.state = "idle"
+        controller.errorEvent = None
+        home = os.path.expanduser("~")
+        expanded = os.path.join(home, "LNM tilde test", "Connectomes")
+        for patcher in (mock.patch.object(manager_catalog, "termsAccepted", return_value=True), mock.patch.object(manager_catalog, "setLastDestination")):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        with mock.patch.object(catalog_dialog, "planSummary", return_value=("plan", None)) as plan:
+            dialog.destEdit.setText("  ~/LNM tilde test/Connectomes ")
+            dialog.updateState()
+            self.assertEqual(plan.call_args[0][3], expanded)  # the plan measures the folder the job writes to
+        self.assertTrue(dialog.downloadButton.enabled, dialog.hintLabel.text)
+        self.assertEqual(dialog.request()["dest"], expanded)
+        with mock.patch.object(controller, "start", return_value=mock.Mock()) as start:
+            self.assertIsNotNone(dialog.onDownload())
+            self.assertEqual(start.call_args[0][0]["dest"], expanded)
+            manager_catalog.setLastDestination.assert_called_with(expanded)
+        # The Lib resolves '~' too (a request saved before, a fetch run from the command line), never against its working folder
+        self.assertEqual(fetchconnectome.bundle_path(entry, "~/LNM tilde test/Connectomes"), os.path.join(expanded, f"{entry['id']}.lnmc"))
+        self.assertEqual(os.path.dirname(fetchconnectome.work_dir(entry, "~/x")), os.path.join(home, "x"))
+        self.assertEqual(os.path.dirname(fetchconnectome.lock_path(entry, "~/x")), os.path.join(home, "x"))
+        # A relative path is refused with a plain hint: no plan, no job, nothing remembered
+        manager_catalog.setLastDestination.reset_mock()
+        for text in ("Connectomes here", "./Connectomes", "~not-a-user-LNM/x"):
+            dialog.destEdit.setText(text)
+            dialog.updateState()
+            self.assertIsNone(dialog.destination(), text)
+            self.assertFalse(dialog.downloadButton.enabled, text)
+            self.assertIn("is not a full path", dialog.hintLabel.text, text)
+            self.assertEqual(dialog.planLabel.text, "", text)
+            self.assertFalse(dialog.completeHere() or dialog.unfinishedHere() or dialog.resumeSubsetProblem(), text)
+            with mock.patch.object(controller, "start") as start:
+                self.assertIsNone(dialog.onDownload())
+                start.assert_not_called()
+        manager_catalog.setLastDestination.assert_not_called()
+        # The controller refuses a relative destination itself (Resume of a saved request, the resume offer)
+        with mock.patch.object(controller, "entry", return_value=entry), mock.patch.object(manager_catalog, "fetchEnabled", return_value=True), \
+                mock.patch.object(manager_catalog.jobrunner, "instance") as runner:
+            self.assertIsNone(controller.start({"entry": entry["id"], "dest": "Connectomes here", "termsSha": "a" * 64}))
+            self.assertIn("is not a full path", controller.lastRequestError or "")
+            runner.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

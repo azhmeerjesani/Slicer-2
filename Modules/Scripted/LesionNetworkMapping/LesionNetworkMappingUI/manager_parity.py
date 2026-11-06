@@ -152,9 +152,13 @@ class ImportDialog(qt.QDialog):
         """List the connectome labels of the folder's Lead-DBS maps (with their counts) in the combo box."""
         from LesionNetworkMappingLib import leaddbs
 
-        folder = self.folderEdit.text.strip()
+        folder = widgets.typedPath(self.folderEdit.text)
         self.labelCombo.clear()
         self.found = {}
+        if folder is None:
+            self.statusLabel.setText(widgets.relativePathProblem(self.folderEdit.text))
+            self.updateButtons()
+            return
         if not folder or not os.path.isdir(folder):
             self.statusLabel.setText(_("Choose the folder that holds the Lead-DBS outputs.") if not folder else _("Folder not found: {folder}").format(folder=folder))
             self.updateButtons()
@@ -181,13 +185,24 @@ class ImportDialog(qt.QDialog):
         destination = bool(_studyPath(self.ctx)) or bool(self.outEdit.text.strip())
         self.importButton.setEnabled(not running and self.labelCombo.count > 0 and (destination or self.destinationLabel is None))
 
+    def pathProblem(self):
+        """Why the typed folder or destination cannot be used (a relative path: the job runs in the module folder, so it would
+        be read or written inside the application, see ``widgets.typedPath``), or None.
+        """
+        edits = [self.folderEdit] + ([] if _studyPath(self.ctx) else [self.outEdit])
+        return next((widgets.relativePathProblem(edit.text) for edit in edits if widgets.typedPath(edit.text) is None), None)
+
     def arguments(self):
-        args = ["import", "--folder", self.folderEdit.text.strip(), "--label", self.labelCombo.currentData]
+        """The job's arguments (typed paths absolute, ``~`` expanded), or None when a path is missing or relative."""
+        folder = widgets.typedPath(self.folderEdit.text)
+        if not folder:
+            return None
+        args = ["import", "--folder", folder, "--label", self.labelCombo.currentData]
         studyPath = _studyPath(self.ctx)
         if studyPath:
             args += ["--study", studyPath]
         else:
-            out = self.outEdit.text.strip()
+            out = widgets.typedPath(self.outEdit.text)
             if not out:
                 return None
             args += ["--out", out]
@@ -196,9 +211,9 @@ class ImportDialog(qt.QDialog):
     def startImport(self):
         args = self.arguments()
         if args is None:
-            self.statusLabel.setText(_("Choose an output folder (or open a study first)."))
+            self.statusLabel.setText(self.pathProblem() or _("Choose an output folder (or open a study first)."))
             return None
-        qt.QSettings().setValue(IMPORT_FOLDER_SETTING, self.folderEdit.text.strip())
+        qt.QSettings().setValue(IMPORT_FOLDER_SETTING, args[args.index("--folder") + 1])
         self.statusLabel.setText(_("Importing…"))
         spec = jobrunner.JobSpec(JOB_MODULE, args, title=_("Importing Lead-DBS maps"), heavy=False, kind="leaddbs-import", name="leaddbs-import",
                                  runRoot=jobrunner.defaultRunRoot(), onEvent=lambda event: self.progress.update(), onDone=self.onDone)
