@@ -150,8 +150,14 @@ def _peaks(score, cluster, offset, grid, min_mm, max_subpeaks):
 
 
 def _label_rows(labels, table):
-    """Normalize labeler output to [(atlas, label, pct)] and the network of its largest overlap."""
-    rows, network = [], None
+    """Normalize labeler output to [(atlas, label, pct)] and the network that holds the largest share of the mask.
+
+    The share of a network is summed over the labels of one atlas: over all of them when the labeler gives
+    ``labels.networks`` ({atlas: {network: pct}}, as :func:`atlas_labeler` does), else over the rows it returned.
+    Atlases are not added together (two cortical atlases would count the same voxels twice); the largest share of
+    any atlas wins, ties going to the earlier atlas and then to the name, so the order of the atlases only breaks ties.
+    """
+    rows, shares = [], {}
     for notice in getattr(labels, "notices", None) or []:
         if notice not in table.notices:  # one notice per atlas, not one per cluster
             table.notices.append(notice)
@@ -160,9 +166,15 @@ def _label_rows(labels, table):
         rows.append((atlas, label, pct))
         if atlas not in table.atlases:
             table.atlases.append(atlas)
-        if network is None and len(item) > 3 and isinstance(item[3], str) and item[3]:
-            network = item[3]
-    return rows, network
+        if len(item) > 3 and isinstance(item[3], str) and item[3]:
+            byNetwork = shares.setdefault(atlas, {})
+            byNetwork[item[3]] = byNetwork.get(item[3], 0.0) + pct
+    given = getattr(labels, "networks", None)
+    if given:
+        shares = {atlas: dict(byNetwork) for atlas, byNetwork in given.items() if byNetwork}
+    order = {atlas: index for index, atlas in enumerate(dict.fromkeys([*(row[0] for row in rows), *shares]))}
+    candidates = [(-pct, order[atlas], name) for atlas, byNetwork in shares.items() for name, pct in byNetwork.items() if pct > 0]
+    return rows, (min(candidates)[2] if candidates else None)
 
 
 def cluster_table(values, grid, mask_indices, threshold, sign="both", connectivity=26, min_extent_mm3=0.0, subpeak_min_mm=8.0, max_subpeaks=3, labeler=None, extra_maps=None, statistic=None):
@@ -264,7 +276,7 @@ def atlas_labeler(atlases, top=3, min_pct=0.0, space=None, allow_cross_family=Fa
     """A ``labeler`` for :func:`cluster_table` that labels each cluster with ``atlases.label_cluster``.
 
     Rows are (atlas id, label, pct of the cluster, network); the atlases' notices (e.g. a space-family mismatch)
-    reach ``table.notices``.
+    reach ``table.notices``, and their network shares over every label (``networks``) name the cluster's network.
     """
     from . import atlases as atlases_module
 
@@ -272,6 +284,7 @@ def atlas_labeler(atlases, top=3, min_pct=0.0, space=None, allow_cross_family=Fa
         result = atlases_module.label_cluster(mask, grid, atlases, allow_cross_family=allow_cross_family, space=space, top=top, min_pct=min_pct)
         rows = atlases_module.LabelResult((detail["atlas"], detail["label"], detail["pct_of_mask"], detail["network"]) for detail in result.details)
         rows.notices = result.notices
+        rows.networks = result.networks  # network shares over every label, not only the rows kept
         return rows
 
     return labeler

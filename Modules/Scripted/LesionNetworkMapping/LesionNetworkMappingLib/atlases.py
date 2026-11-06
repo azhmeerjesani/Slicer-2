@@ -358,6 +358,8 @@ class LabelResult(list):
     :ivar allowed_cross_family: dicts of the atlases used across families on request (recorded in provenance).
     :ivar details: for :func:`label_mask`, a dict per row with label_id, network, volume_mm3 and region_mm3 too.
     :ivar unlabelled: {atlas id: percentage of the mask outside every label of that atlas}.
+    :ivar networks: {atlas id: {network: percentage of the mask inside that network's labels}}, over every label of
+      the atlas (not only the rows kept by ``top`` and ``min_pct``); atlases without networks are left out.
     :ivar mask_family: family of the labelled mask ("unknown" when it could not be told).
     :ivar peak: for :func:`label_cluster` with ``peak``, the (atlas, label, network) rows of the peak coordinate.
     """
@@ -368,6 +370,7 @@ class LabelResult(list):
         self.allowed_cross_family = []
         self.details = []
         self.unlabelled = {}
+        self.networks = {}
         self.mask_family = "unknown"
         self.mask_space = None
         self.peak = None
@@ -503,6 +506,13 @@ def _label_atlas(occ, affine, total, atlas, top, min_pct, result):
     volumes = np.bincount(inverse, weights=weights[inside], minlength=len(values)) * voxel
     counts = atlas.region_counts()
     result.unlabelled[atlas.id] = max(0.0, 100.0 * (1.0 - float(volumes.sum()) / total))
+    shares = {}
+    for value, volume in zip(values, volumes, strict=True):
+        network = atlas.network(value)
+        if network and volume > 0:
+            shares[network] = shares.get(network, 0.0) + 100.0 * float(volume) / total
+    if shares:
+        result.networks[atlas.id] = shares
     order = sorted(range(len(values)), key=lambda index: (-volumes[index], int(values[index])))
     rows = []
     for index in order:

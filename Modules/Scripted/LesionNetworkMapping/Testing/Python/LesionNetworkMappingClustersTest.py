@@ -295,6 +295,35 @@ class LabelTest(unittest.TestCase):
         self.assertGreater(len(table.clusters), 1)
         self.assertEqual([notice["code"] for notice in table.notices], ["family_mismatch"])  # once, not once per cluster
 
+    def test_network_is_the_largest_share_of_the_cluster(self):
+        """The network names the network holding most of the cluster, whatever the order of the atlases (BB-1)."""
+        space = "MNI152NLin6Asym"
+        family = space_family(space)
+        volume = np.zeros(SHAPE)
+        volume[2:12, 10, 10] = 5.0  # one 10-voxel bar cluster
+        # one atlas: 40 % in a Cont parcel, 30 % + 30 % in two Default parcels -> Default (60 %), not the top parcel
+        data = np.zeros(SHAPE, dtype=np.int32)
+        data[2:6, 10, 10], data[6:9, 10, 10], data[9:12, 10, 10] = 1, 2, 3
+        names = {1: "7Networks_LH_Cont_pCun_1", 2: "7Networks_LH_Default_PCC_1", 3: "7Networks_LH_Default_PCC_2"}
+        schaefer = atlases.Atlas("schaefer", data, AFFINE, names, family=family, space=space, networks="schaefer")
+        for top in (3, 1):  # also when only the top parcel is kept as a row: the share counts every parcel
+            table = clusters.cluster_table(volume, grid(), None, 2.0, labeler=clusters.atlas_labeler([schaefer], top=top, min_pct=5.0, space=space))
+            self.assertEqual(table[0]["network"], "Default", top)
+        # two atlases: 10 % in a Schaefer Vis parcel, 90 % in a Tian thalamus parcel -> THA in both orders
+        cortex = np.zeros(SHAPE, dtype=np.int32)
+        cortex[2, 10, 10] = 1
+        thalamus = np.zeros(SHAPE, dtype=np.int32)
+        thalamus[3:12, 10, 10] = 1
+        schaefer = atlases.Atlas("schaefer", cortex, AFFINE, {1: "7Networks_LH_Vis_13"}, family=family, space=space, networks="schaefer")
+        tian = atlases.Atlas("tian", thalamus, AFFINE, {1: "pTHA-lh"}, family=family, space=space, networks="tian")
+        for order in ([schaefer, tian], [tian, schaefer]):
+            table = clusters.cluster_table(volume, grid(), None, 2.0, labeler=clusters.atlas_labeler(order, top=3, min_pct=5.0, space=space))
+            self.assertEqual(table[0]["network"], "THA", [atlas.id for atlas in order])
+            self.assertEqual([label for _atlas, label, _pct in table[0]["labels"]], [label for atlas in order for label in ({"schaefer": ["7Networks_LH_Vis_13"], "tian": ["pTHA-lh"]}[atlas.id])])
+        # a plain labeler without network shares: summed over its rows of one atlas
+        table = clusters.cluster_table(volume, grid(), None, 2.0, labeler=lambda mask, grid_: [("toy", "a", 40.0, "Cont"), ("toy", "b", 30.0, "Default"), ("toy", "c", 30.0, "Default")])
+        self.assertEqual(table[0]["network"], "Default")
+
 
 class HomologueTest(unittest.TestCase):
     def test_pairs(self):
