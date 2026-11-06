@@ -328,6 +328,29 @@ class NestingTest(_StudyTestCase):
         info = next(check for check in design.checks if check.code == "nested")
         self.assertEqual(info.detail["single_level_blocks"], ["d3"])
 
+    def test_control_database_without_case_source_records_limitations(self):
+        # A linked control set writes source_type=control_db on its rows only; the study's own cases keep no
+        # source_type. The design is still cases vs a control database, so the source confound is a limitation.
+        rows = [(f"sub-c{index:02d}", {"group": "case", "volume_ml": 5.0 + index}) for index in range(8)]
+        rows += [(f"sub-k{index:02d}", {"group": "control", "volume_ml": 6.3 + index, "source_type": "control_db"}) for index in range(12)]
+        design = designlib.build_design(self.make_study(rows, "linked"), DesignSpec())
+        self.assertEqual(design.design_type, "cases_vs_control_database")
+        self.assertEqual(design.block_column, "source_type")
+        self.assertIn("limitations recorded", design.permute_reason)
+        self.assertEqual(design.limitations, ["source_type (Cramér's V = 1.00 with group) cannot be adjusted for in this design"])
+        self.assertAlmostEqual(design.cramers_v["source_type"], 1.0)
+        # Partly nested (some own controls have no source_type either): the nesting is still recorded
+        rows += [(f"sub-o{index:02d}", {"group": "control", "volume_ml": 7.1 + index}) for index in range(6)]
+        partly = designlib.build_design(self.make_study(rows, "linked2"), DesignSpec())
+        self.assertEqual(partly.design_type, "cases_vs_control_database")
+        self.assertIn("limitations recorded", partly.permute_reason)
+        self.assertEqual(partly.limitations, ["source_type control_db holds a single level of group (cases vs a control database) and cannot be adjusted for in this design"])
+        # Every design that says "limitations recorded" records at least one
+        for study in (self.nested_study(), self.make_study([(f"sub-{d}{i}", {"group": "case" if i % 2 or d == "d3" else "control", "volume_ml": 5.0 + i, "dataset": d}) for d in ("d1", "d2", "d3") for i in range(6)], "partial3")):
+            built = designlib.build_design(study, DesignSpec())
+            self.assertIn("limitations recorded", built.permute_reason)
+            self.assertTrue(built.limitations, built.permute_reason)
+
     def test_missing_implicit_block_does_not_decide_nesting(self):
         rows = []
         for dataset in ("d1", "d2"):

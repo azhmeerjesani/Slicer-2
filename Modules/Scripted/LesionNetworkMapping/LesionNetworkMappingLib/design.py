@@ -11,7 +11,8 @@ Design types:
   case-control, Petersen 2026); labels are permuted within blocks.
 - ``cases_vs_control_database``: the group is nested in dataset or source (literature cases against a
   control-lesion database, Ferguson 2019). Exchange is free, and the confounds that cannot be adjusted
-  for (Cramér's V >= 0.9 with group) are listed in :attr:`Design.limitations` for the methods text.
+  for (Cramér's V >= 0.9 with group, and the nesting block column itself) are listed in
+  :attr:`Design.limitations` for the methods text.
   A dataset covariate collinear with group blocks the design with an explanation; it is never dropped.
 - ``continuous`` (symptom LNM: a score regressor) and ``one_sample`` (sign flipping; always warned).
 
@@ -70,6 +71,8 @@ NESTING_COLUMNS = ("dataset", "source_type")
 #: Columns whose association with group is reported as a limitation (Cramér's V >= CRAMERS_V_LIMIT)
 CONFOUND_COLUMNS = ("dataset", "source_type", "dimensionality", "etiology", "image_modality", "scanner")
 CRAMERS_V_LIMIT = 0.9
+#: Level of the block column for subjects without a value, in the Cramér's V of a cases-vs-control-database design
+_NO_BLOCK_LEVEL = "(none)"
 VIF_LIMIT = 5.0
 MIN_PER_GROUP = 10
 SKEW_LIMIT = 2.0
@@ -800,12 +803,22 @@ def build_design(study, spec=None, run_metas=None, maps=None):
         for column in confounds:
             if column not in study.columns:
                 continue
-            value = _cramers_v([row.get(column) for row in rows], group_labels)
+            values = [row.get(column) for row in rows]
+            if column == block_column and design_type == "cases_vs_control_database":
+                # As in the nesting, subjects without a value of the block column form a level of their own
+                # (cases with no source_type against linked control-set rows with source_type=control_db)
+                values = [_NO_BLOCK_LEVEL if label == schema.NA else label for label in block_labels]
+            value = _cramers_v(values, group_labels)
             if value is None:
                 continue
             cramers_v[column] = value
             if value >= CRAMERS_V_LIMIT - 1e-12:
                 limitations.append(f"{column} (Cramér's V = {value:.2f} with {spec.group_column}) cannot be adjusted for in this design")
+        if design_type == "cases_vs_control_database" and cramers_v.get(block_column, 0.0) < CRAMERS_V_LIMIT - 1e-12:
+            # Partly nested: the blocks that hold a single level cannot be adjusted for either (free exchange
+            # says "limitations recorded", so the nesting itself is always one)
+            verb = "holds" if len(single_level) == 1 else "hold"
+            limitations.append(f"{block_column} {_blocks_text(single_level)} {verb} a single level of {spec.group_column} (cases vs a control database) and cannot be adjusted for in this design")
 
     # Exchangeability
     row_labels = _row_codes(X)
