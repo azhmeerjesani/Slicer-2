@@ -183,6 +183,9 @@ Run with the main window and testing enabled::
   Lesion card said "Unsaved changes" without an edit); the card says "Not saved yet" and leaving the subject keeps the file.
   A damaged scan is said too (its unread part is black), alone or with the lesion in one toast, also after the lesion was
   read ahead while it was intact.
+- ``test_85_review_of_a_read_only_study_says_so_and_changes_nothing`` (BB-1): Approve or Request changes on a study whose folder
+  cannot be written shows a warning toast that the review was not recorded and leaves the row as it was (an uncaught
+  PermissionError of the audit log left it "pending" in memory).
 """
 
 import inspect
@@ -6469,3 +6472,53 @@ class StudioRegressionTest(unittest.TestCase):
         # A file of that name that is not the template (another checksum) is not used
         info.update(sha256="0" * 64)
         self.assertIsNone(study_ui.brainMaskFile("MNI152NLin6Asym"))
+
+    def test_85_review_of_a_read_only_study_says_so_and_changes_nothing(self):
+        """Approve or Request changes on a study whose folder cannot be written (a shared, read-only study): a warning toast says
+        the review was not recorded, the in-memory row keeps its review state (Approve of an unreviewed lesion first submits
+        it: that step is not half-applied either) and nothing is saved. The PermissionError of the audit log was uncaught.
+        """
+        from LesionNetworkMappingLib import review as rules
+        from LesionNetworkMappingLib.study import Study
+
+        from StudioLib import review
+
+        studyObject = Study.create(os.path.join(self.directory, "Shared study"), space="MNI152NLin6Asym")
+        for sid in ("sub-01", "sub-02"):
+            studyObject.add_subject(sid, group="case", status="traced", trace_method="manual")
+        studyObject.save()
+        # The audit log cannot be opened for appending (a directory in its place: also for root, who ignores file modes)
+        os.makedirs(rules.audit_path(studyObject))
+
+        class FakeSession:
+            study = studyObject
+            flushes = 0
+
+            def current(self):
+                return None
+
+            def isDirty(self, sid=None):
+                return False
+
+            def setValues(self, sids, values):
+                pass
+
+            def flush(self):
+                FakeSession.flushes += 1
+
+        toasts = []
+        originalToast = review._toast
+        review._toast = lambda text, ms=3000, **kwargs: toasts.append((str(text), kwargs.get("level")))
+        self.addCleanup(setattr, review, "_toast", originalToast)
+        before = {sid: studyObject.subject(sid) for sid in ("sub-01", "sub-02")}
+        self.assertIsNone(review.transition("sub-01", "approved", session=FakeSession(), who="Rita Reviewer", via="library"))
+        self.assertIsNone(review.transition("sub-02", "changes", comment="extend it", session=FakeSession(), who="Rita Reviewer", via="library"))
+        self.assertEqual(len(toasts), 2, toasts)
+        for text, level in toasts:
+            self.assertIn("cannot be written", text)
+            self.assertIn("not recorded", text)
+            self.assertEqual(level, "warning")
+        for sid, row in before.items():
+            self.assertEqual(studyObject.subject(sid), row, f"{sid} was changed in memory")
+            self.assertEqual(rules.status_of(studyObject.subject(sid)), "none")
+        self.assertEqual(FakeSession.flushes, 0)

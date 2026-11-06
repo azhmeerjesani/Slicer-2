@@ -285,6 +285,16 @@ def transition(sid, to, comment=None, reason=None, session=None, who=None, via="
     except rules.TransitionError as e:
         _toast(str(e), ms=5000, level="warning")
         return None
+    except OSError as e:
+        # A study folder that cannot be written (a shared, read-only study): the failed apply_transition changed nothing
+        logging.warning(f"Studio review: the review of {sid} was not recorded: {e}")
+        _toast(_("The study folder cannot be written, so the review was not recorded ({error})").format(error=e.strerror or e),
+               ms=6000, level="warning")
+        if studyObject.subject(sid) != row:
+            # The submit step (→ pending) was recorded before the decision failed: save it and tell the views
+            session.setValues([], {})
+            session.flush()
+        return None
     _writeSidecarReview(studyObject, sid)
     session.setValues([], {})  # save soon and tell the views
     session.flush()

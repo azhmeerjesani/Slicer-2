@@ -206,6 +206,20 @@ class TransitionTest(ReviewTestBase):
         self.assertTrue(review.changes_requested({"review_status": "changes"}))
         self.assertEqual(review.status_of({"review_status": "n/a"}), "none")
 
+    def test_unwritable_audit_log_changes_nothing(self):
+        """A study folder that cannot be written (a shared, read-only study): OSError, and the row keeps its values."""
+        study = self.study
+        review.apply_transition(study, "sub-01", "pending", "tracer")
+        os.remove(review.audit_path(study))
+        os.makedirs(review.audit_path(study))  # cannot be opened for appending (also for root, who ignores file modes)
+        before = study.subject("sub-01")
+        for target, kwargs in (("approved", {}), ("changes", {"comment": "extend it"}), ("rejected", {"reason": "duplicate"})):
+            with self.assertRaises(OSError, msg=target):
+                review.apply_transition(study, "sub-01", target, "Dr B", **kwargs)
+            self.assertEqual(study.subject("sub-01"), before, target)
+        with self.assertRaises(OSError):
+            review.apply_transition(study, "sub-02", "pending", "tracer")
+        self.assertEqual(review.status_of(study.subject("sub-02")), "none")
 
 class AssistTest(unittest.TestCase):
     def test_assisted_summary(self):

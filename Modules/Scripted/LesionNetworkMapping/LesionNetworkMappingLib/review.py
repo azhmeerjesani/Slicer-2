@@ -221,6 +221,7 @@ def apply_transition(study, sid, to, who, comment=None, reason=None, save=False,
     :param extra: more keys of the audit record (for example {"via": "done", "edited": True}).
     :return: the audit record.
     :raises KeyError: unknown subject. :raises TransitionError: see :func:`validate_transition` (nothing is changed).
+    :raises OSError: the audit log cannot be written, for example in a read-only study folder (nothing is changed).
     """
     row = study.subject(sid)
     source = validate_transition(row, to, who, comment, reason)
@@ -248,10 +249,13 @@ def apply_transition(study, sid, to, who, comment=None, reason=None, save=False,
         record["blind"] = True
     if extra:
         record.update({key: value for key, value in dict(extra).items() if key not in ("event", "sid", "from", "to")})
-    study.set(sid, values)
-    if save:
-        study.save()
-    append_audit(study, record)
+    # The audit log is opened before the row changes: a study folder that cannot be written (a read-only share) raises
+    # OSError here and nothing is changed, in memory or on disk
+    with _open_audit(study) as log:
+        study.set(sid, values)
+        if save:
+            study.save()
+        log.write(_audit_text([record]))
     return record
 
 
@@ -291,11 +295,20 @@ def append_audit(study, records):
     path = audit_path(study)
     if not records:
         return path
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    text = "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records)
-    with open(path, "a", encoding="utf-8", newline="\n") as f:
-        f.write(text)
+    with _open_audit(study) as f:
+        f.write(_audit_text(records))
     return path
+
+
+def _open_audit(study):
+    """The study's audit log opened for appending (its folder is created). :raises OSError: it cannot be written."""
+    path = audit_path(study)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return open(path, "a", encoding="utf-8", newline="\n")
+
+
+def _audit_text(records):
+    return "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records)
 
 
 def read_audit(study, sid=None, event=None):
