@@ -755,6 +755,48 @@ class StudioUpdatesTest(unittest.TestCase):
         self.assertTrue(self._waitFor(lambda: not os.path.exists(prepared.backup), 10))
         self.assertEqual(install.readRecord(self.stateDir), (None, None))
 
+    def test_SecondStartLeavesPendingInstallAlone(self):
+        """Slicer Studio is started again while the window that chose the update (Install when I quit, Restart now) is
+        still exiting: the helper still waits, so the second start must leave the record and the staged copy alone
+        (it used to report a failed install and delete the staged copy, so the chosen update was lost).
+        """
+        updates, install = self.updates, self.install
+        target = self._fakeLinuxInstall("0.9.0")
+        package = os.path.join(self.tempDir, "new.tar.gz")
+        _fakeLinuxPackage(package, "1.2.0")
+        prepared = install.prepareLinux(package, target, "1.2.0")
+        exiting = self._sleeper(60)  # the first window, still exiting
+        self.addCleanup(exiting.kill)
+        helper = prepared.launch(self.stateDir, pid=exiting.pid, relaunch=False, record={"from": "0.9.0"})
+        threading.Thread(target=helper.wait, daemon=True).start()
+        record, result = install.readRecord(self.stateDir)
+        self.assertEqual((record["pid"], record["helperPid"], result), (exiting.pid, helper.pid, None), "the record names the waited-for process")
+        updates.installTargetOverride = target
+        second = self._service()
+        self.assertIsNone(second.finishInstall(), "the install is still pending")
+        self.assertIsNone(second._finishedMessage, "no failure is reported")
+        self._pump(0.5)
+        self.assertIsNotNone(install.readRecord(self.stateDir)[0], "the install record is kept")
+        self.assertEqual(install.linuxPackageVersion(prepared.staged), "1.2.0", "the staged copy is kept")
+        # The first window has exited: the update chosen there is installed, and the new version reports it
+        exiting.kill()
+        self.assertEqual(install.waitForResult(self.stateDir, 30), "ok")
+        self.assertEqual(install.linuxPackageVersion(target), "1.2.0")
+        updates.currentVersionOverride = "1.2.0"
+        self.assertTrue(self._service().finishInstall())
+        self.assertEqual(install.readRecord(self.stateDir), (None, None))
+        # Pending only while a recorded process runs, no result is written, and not long after the helper started
+        other = self._sleeper(30)
+        self.addCleanup(other.kill)
+        alive = {"version": "1.2.0", "pid": other.pid, "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        self.assertTrue(updates._installPending(alive, None))
+        self.assertFalse(updates._installPending(alive, "failed the new version is incomplete"))
+        self.assertFalse(updates._installPending(dict(alive, pid=os.getpid()), None), "the record of this run")
+        self.assertFalse(updates._installPending(dict(alive, pid=exiting.pid), None), "the exited window")
+        self.assertFalse(updates._installPending({"version": "1.2.0", "started": alive["started"]}, None), "a record without pids")
+        old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - install.EXIT_WAIT_S - updates.INSTALL_PENDING_GRACE_S - 60))
+        self.assertFalse(updates._installPending(dict(alive, started=old), None), "a recorded pid long after the helper gave up")
+
     def test_LinuxSwapFailureRestores(self):
         updates, install = self.updates, self.install
         target = self._fakeLinuxInstall("0.9.0")

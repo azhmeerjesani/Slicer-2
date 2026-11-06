@@ -21,6 +21,7 @@ here imports Qt or Slicer, so the tests run the whole swap in a temporary folder
 ``xattr`` and ``open`` commands on Linux).
 """
 
+import calendar
 import json
 import os
 import plistlib
@@ -287,6 +288,9 @@ class PreparedInstall:
             "admin": bool(self.needsAdmin),
             "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "log": logPath,
+            # The process the helper waits for: while it (or the helper) runs and no result is written, the install is
+            # still pending, and another Slicer Studio that starts meanwhile must leave the record and the staged copy alone
+            "pid": int(pid),
         }
         data.update(record or {})
         writeRecord(stateDir, data)
@@ -309,6 +313,10 @@ class PreparedInstall:
             with open(logPath, "ab") as log:
                 process = popen(arguments, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, env=environment,
                                 close_fds=True, start_new_session=True)
+            helperPid = getattr(process, "pid", None)
+            if isinstance(helperPid, int) and helperPid > 0:
+                data["helperPid"] = helperPid
+                writeRecord(stateDir, data)
         self.launched = True
         return process
 
@@ -546,6 +554,14 @@ def readRecord(stateDir):
     except OSError:
         result = None
     return (record if isinstance(record, dict) else None), result
+
+
+def recordStartTime(record):
+    """When the helper of ``record`` was started (seconds since the epoch), or None."""
+    try:
+        return calendar.timegm(time.strptime(str(record.get("started") or ""), "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, OverflowError):
+        return None
 
 
 def clearRecord(stateDir):

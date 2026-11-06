@@ -733,6 +733,27 @@ def _processAlive(pid):
     return True
 
 
+#: How long after the helper started an install without a result can still be pending: the helper waits at most
+#: ``updates_install.EXIT_WAIT_S`` for the application to exit, then swaps the folders (this bounds a recorded pid that
+#: the system gave to another process, for example after a restart)
+INSTALL_PENDING_GRACE_S = 1800
+
+
+def _installPending(record, result):
+    """True while the install of ``record`` may still finish: no result is written yet, and the process that the helper
+    waits for (a Slicer Studio that is still exiting) or the helper itself still runs.
+    """
+    if result:
+        return False
+    waited, helper = record.get("pid"), record.get("helperPid")
+    if waited == os.getpid():
+        return False  # the record of this run (tests): nothing else can finish it
+    started = updates_install.recordStartTime(record)
+    if started is None or time.time() - started > updates_install.EXIT_WAIT_S + INSTALL_PENDING_GRACE_S:
+        return False
+    return any(type(pid) is int and pid > 0 and pid != os.getpid() and _processAlive(pid) for pid in (waited, helper))
+
+
 def _removeQuietly(path):
     try:
         os.remove(path)
@@ -1996,6 +2017,11 @@ class UpdateService:
         target = self.installTarget()
         if not target or os.path.realpath(str(record.get("target") or "")) != os.path.realpath(target):
             # The update of another installation (for example a package, while this is a build tree)
+            return None
+        if _installPending(record, result):
+            # Another Slicer Studio chose the update and is still exiting (a big scene, a slow disk): its helper installs
+            # the update once it has exited, and the version that then starts reports the result
+            logging.info("Updates: the update to {} is still being installed by another Slicer Studio".format(record.get("version")))
             return None
         updates_install.clearRecord(stateDir)
         newVersion = str(record.get("version") or "")
