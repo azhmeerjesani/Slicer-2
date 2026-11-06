@@ -979,8 +979,17 @@ class NullsCard:
         if str(group.get("statistic") or "").startswith("approximate"):
             return _("Group map QA of the fast-mode map (approximate; the QA card uses an exact run when there is one): r(fast-mode map, μC_r) is at the {p} percentile of {k} null cohorts' maps ({text}).").format(
                 p=ordinal(round(values["percentile"])), k=int(values.get("k") or 0), text=values.get("text") or "")
-        return _("Group map QA (shown in the QA card): r(group map, μC_r) is at the {p} percentile of {k} null cohorts' maps ({text}).").format(
-            p=ordinal(round(values["percentile"])), k=int(values.get("k") or 0), text=values.get("text") or "")
+        from .card_qa import GROUP_QA_KIND, MATCHED_NULL_KINDS
+
+        kind = values.get("null_kind") or group.get("null_kind") or GROUP_QA_KIND
+        if kind in MATCHED_NULL_KINDS:
+            where = _("not the QA card's verdict: these null cohorts keep each lesion's mean connectivity, μC_r")
+        elif kind == GROUP_QA_KIND:
+            where = _("shown in the QA card")
+        else:
+            where = _("shown in the QA card when there is no exact {kind} run").format(kind=GROUP_QA_KIND)
+        return _("Group map QA ({where}): r(group map, μC_r) is at the {p} percentile of {k} {kind} null cohorts' maps ({text}).").format(
+            where=where, p=ordinal(round(values["percentile"])), k=int(values.get("k") or 0), kind=kind, text=values.get("text") or "")
 
     @staticmethod
     def parityText(record):

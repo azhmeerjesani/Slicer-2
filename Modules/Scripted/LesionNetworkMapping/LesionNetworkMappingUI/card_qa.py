@@ -6,8 +6,9 @@ spatial modes, its hubs), so the card says how far a map is from that, calibrate
 - **Calibrated chip.** The percentile of r(map, μC_r) among the same similarity of the lesion's relocated null maps
   (K and the percentile resolution are shown: "2% at K=50"). Below the 5th percentile is green, 5th-95th amber
   ("indistinguishable from relocated lesions on this axis"), above the 95th red. A group map is calibrated against null
-  cohorts when a Nulls run exists, otherwise it says "not calibrated: run Nulls". The fixed 0.3 / 0.6 / 0.75 cut-offs
-  are only secondary text (the hubness line); no fixed cut-off is the verdict.
+  cohorts when a Nulls run exists, otherwise it says "not calibrated: run Nulls". The rl_independent run is used when
+  there is one (as in the pipeline report), the chip names the null kind, and an rl_strength run (matched on μC_r) gives
+  no verdict. The fixed 0.3 / 0.6 / 0.75 cut-offs are only secondary text (the hubness line); no fixed cut-off is the verdict.
 - **Reference rows.** r and rho of the map with μC_r, PC1-3 and hubness, the spatial R² on these four references, with the
   definition of each reference (reference.json, ``lnm-reference-v1``) in the tooltip. No "93%" line.
 - **Debiased view.** The map's OLS residual on [1, μC_r, PC1] (``similarity.residual_map``) as a separate volume
@@ -62,6 +63,20 @@ DEBIASED_COVARIATES = ("mu_r", "pc1")
 DERIVED_ATTRIBUTE = "LNM.Derived"
 #: Names of the files of a group (null) record that may carry the group QA of a cohort map (L-25)
 NULLS_RECORDS = ("nulls.json", os.path.join("nulls", "nulls.json"))
+#: The null kind the group chip is calibrated against when a run of it exists: the established relocated-lesion null,
+#: the kind the pipeline report uses too (addendum 3.7, F22)
+GROUP_QA_KIND = "rl_independent"
+#: Null kinds whose null cohorts are matched on the axis the chip measures (each lesion keeps its local μC_r, or its
+#: hubness), so their percentile of r(group map, μC_r) is not a degree-confound verdict
+MATCHED_NULL_KINDS = ("rl_strength",)
+#: How the group chip names the null kind of its run
+NULL_KIND_TEXT = {
+    "rl_independent": _("rl_independent: lesions relocated independently"),
+    "rl_cohort_shift": _("rl_cohort_shift: one shared shift of the cohort"),
+    "rl_strength": _("rl_strength: strength-matched relocations"),
+    "rl_overlap": _("rl_overlap: overlap-matched, experimental"),
+    "empirical_pool": _("control set"),
+}
 
 
 def nullCostText(bundle, nSubjects=None):
@@ -439,9 +454,23 @@ class QACard:
     def _number(value):
         return _fixed(value) if isinstance(value, (int, float)) and math.isfinite(value) else "\u2013"
 
-    def _setCalibrated(self, level, chipText, text):
+    def _setCalibrated(self, level, chipText, text, toolTip=""):
         widgets.setChipLevel(self.calibratedChip, _LEVELS.get(level, "neutral") if level in _LEVELS else level, chipText)
+        self.calibratedChip.setToolTip(toolTip)
         self.calibratedLabel.setText(text)
+
+    @staticmethod
+    def _nullKindText(values):
+        """The name of the null kind of group QA values ("rl_independent: lesions relocated independently"), or ""."""
+        kind = values.get("null_kind") or ""
+        return NULL_KIND_TEXT.get(kind, kind if kind not in ("relocated", "null_cohort") else "")
+
+    def _calibratedToolTip(self, values):
+        """Tooltip of the calibrated chip of group QA values: the null kind and K of the Nulls run it is calibrated with."""
+        kindText = self._nullKindText(values)
+        if not kindText or values.get("percentile") is None:
+            return ""
+        return _("Calibrated against the Nulls run {kind} (K = {k}).").format(kind=kindText, k=int(values.get("k") or 0))
 
     def _calibratedFromValues(self, values):
         """(level, chip text, label text) of a "reference" qa value dict (single lesion or group)."""
@@ -454,6 +483,15 @@ class QACard:
         nulls = _("null cohorts") if group else _("relocated lesions")
         if level == "not_calibrated" or percentile is None:
             return "not_calibrated", _("Not calibrated"), f"{muText}{values.get('text') or _('not calibrated')}"
+        kindText = self._nullKindText(values) if group else ""
+        if kindText:
+            nulls = _("{nulls} ({kind})").format(nulls=nulls, kind=kindText)
+        if group and values.get("null_kind") in MATCHED_NULL_KINDS:
+            # These null cohorts keep each lesion's local mean connectivity, the axis the chip measures: their percentile
+            # is shown as information, never as the degree-confound verdict
+            text = _("{mu}{p} percentile of {k} {nulls}; these null cohorts keep each lesion's mean connectivity (μC_r), so this percentile does not say how degree-like "
+                     "the map is. Run Nulls with {kind} to calibrate the group map.").format(mu=muText, p=ordinal(round(percentile)), k=int(k), nulls=nulls, kind=GROUP_QA_KIND)  # fmt: skip
+            return "not_calibrated", _("Not calibrated"), text
         chipText = _("{p} percentile").format(p=ordinal(round(percentile)))
         text = _("{mu}{p} percentile of {k} {nulls}: {text}").format(mu=muText, p=ordinal(round(percentile)), k=int(k), nulls=nulls, text=values.get("text") or "")
         return level, chipText, text
@@ -468,7 +506,11 @@ class QACard:
 
         An exact-pooled run wins over a newer fast-mode one: a fast run compares the approximate fast-mode map (recomputed
         like with like), not the group map of the Map module, and fast-mode maps are never reported as the observed map
-        (addendum §3.6). Without an exact run, the newest fast run is returned marked ``"approximate": True``.
+        (addendum §3.6). Without an exact run, the best fast run is returned marked ``"approximate": True``.
+
+        Within a mode the verdict does not depend on which kind of Nulls ran last: a run of :data:`GROUP_QA_KIND`
+        (rl_independent, as the pipeline report) wins, then the newest run of another kind, and a run of a kind matched
+        on μC_r (:data:`MATCHED_NULL_KINDS`) only when there is no other. The values carry the run's ``null_kind``.
         """
         self.groupQaStale = False
         mapsPath = getattr(self.ctx, "cohortMaps", None)
@@ -483,7 +525,7 @@ class QACard:
                 found.append((os.stat(path).st_mtime_ns, path))
             except OSError:
                 continue
-        approximate = None
+        best = {}  # approximate (bool) -> (rank, values); the lowest rank wins, the newest run within a rank
         for stamp, path in sorted(found, reverse=True):
             try:
                 with open(path, encoding="utf-8") as f:
@@ -505,11 +547,15 @@ class QACard:
                 values = group
             if values is None:
                 continue
-            if not self._nullsApproximate(record):
-                return values
-            if approximate is None:
-                approximate = dict(values, approximate=True)
-        return approximate
+            kind = values.get("null_kind") or group.get("null_kind") or record.get("kind")
+            values = dict(values, null_kind=kind) if kind else values
+            rank = 0 if kind == GROUP_QA_KIND else 2 if kind in MATCHED_NULL_KINDS else 1
+            approximate = self._nullsApproximate(record)
+            if approximate not in best or rank < best[approximate][0]:
+                best[approximate] = (rank, dict(values, approximate=True) if approximate else values)
+        if False in best:
+            return best[False][1]
+        return best[True][1] if True in best else None
 
     @staticmethod
     def _nullsApproximate(record):
@@ -618,11 +664,12 @@ class QACard:
                 if level != "not_calibrated":
                     chipText = _("{chip} (approx.)").format(chip=chipText)
                     levels.append(level)
-                self._setCalibrated(level, chipText, _("Group map: no exact Nulls run of these maps. Fast-mode run (approximate maps, not the group map): {text}. Run Nulls in exact mode to calibrate the group map.").format(text=text))
+                self._setCalibrated(level, chipText, _("Group map: no exact Nulls run of these maps. Fast-mode run (approximate maps, not the group map): {text}. Run Nulls in exact mode to calibrate the group map.").format(text=text),
+                                    self._calibratedToolTip(group) if level != "not_calibrated" else "")
             else:
                 level, chipText, text = self._calibratedFromValues(group)
-                self._setCalibrated(level, chipText, _("Group map: {text}").format(text=text))
-                levels.append(group.get("level") or "not_calibrated")
+                self._setCalibrated(level, chipText, _("Group map: {text}").format(text=text), self._calibratedToolTip(group) if level != "not_calibrated" else "")
+                levels.append(level)
                 shownValues = group if group.get("mu_r") is not None else None
         elif bundle is None:
             self._setCalibrated("neutral", _("Not calibrated"), _("Choose a connectome to calibrate the QA."))

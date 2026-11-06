@@ -579,6 +579,10 @@ class QaGroupChipFastModeTest(unittest.TestCase):
     """BB-1 qa-group-chip-uses-fast-mode-approximate-group-map: the QA card's group chip and reference rows describe the
     exact group map. An exact-pooled Nulls run wins over a newer fast-mode one (whose group_qa is of the approximate
     fast-mode map); a fast-only run is labelled approximate and its reference rows are not shown as the group map's.
+
+    BB-1 qa-group-chip-verdict-depends-on-unnamed-null-kind: the chip's verdict does not follow whichever kind of Nulls
+    ran last. An rl_independent run wins over a newer run of another kind, the chip and label name the null kind, and an
+    rl_strength run (matched on μC_r, the axis the chip measures) never gives a verdict.
     """
 
     IDS = ("sub-01", "sub-02", "sub-03")
@@ -611,14 +615,14 @@ class QaGroupChipFastModeTest(unittest.TestCase):
         self.card._mode = lambda: "cohort"
         self.card._hasReferenceFiles = lambda bundle: True
 
-    def _writeNulls(self, name, fast, percentile, muR, level, k, after):
+    def _writeNulls(self, name, fast, percentile, muR, level, k, after, kind="rl_independent"):
         folder = os.path.join(self.folder, name)
         os.makedirs(folder)
         values = {"mu_r": muR, "mu_rho": muR, "pc1_r": muR, "r2_ref": muR, "percentile": percentile, "k": k, "level": level,
-                  "text": "test verdict", "null_kind": "rl_independent"}  # fmt: skip
-        record = {"format": "lnm-nulls", "kind": "rl_independent", "mode": "approximate" if fast else "exact_pooled", "approximate": fast,
+                  "text": "test verdict", "null_kind": kind}  # fmt: skip
+        record = {"format": "lnm-nulls", "kind": kind, "mode": "approximate" if fast else "exact_pooled", "approximate": fast,
                   "statistic": "approximate Fz" if fast else "T", "participants": list(self.IDS), "excluded": [], "inputs": {"cohortmaps_run": "cm-1"},
-                  "group_qa": {"available": True, "null_kind": "rl_independent", "mean": values, "overlap": dict(values),
+                  "group_qa": {"available": True, "null_kind": kind, "mean": values, "overlap": dict(values),
                                "statistic": "approximate Fz" if fast else "T"}}  # fmt: skip
         path = os.path.join(folder, "nulls.json")
         with open(path, "w", encoding="utf-8") as f:
@@ -650,6 +654,45 @@ class QaGroupChipFastModeTest(unittest.TestCase):
         self.assertNotIn("1.00", label)  # the approximate map's r(μC_r) is not shown as the group map's
         self.assertTrue(self.card.table.isHidden())
         self.assertTrue(self.card.r2Label.isHidden())
+
+    def test_rl_independent_wins_over_newer_rl_strength_run(self):
+        self._writeNulls("nulls-rl_independent-exact", False, 68.8, 0.9836, "amber", 199, after=10)
+        self._writeNulls("nulls-rl_strength-exact", False, 0.0, 0.9836, "below", 99, after=20, kind="rl_strength")
+        values = self.card._findGroupQa()
+        self.assertEqual((values["null_kind"], values["k"]), ("rl_independent", 199))
+        self.card.refresh()
+        self.assertEqual(self.card.calibratedChip.text, "69th percentile")
+        self.assertEqual(self.card.calibratedChip.property("chipLevel"), "warn")
+        self.assertIn("of 199 null cohorts (rl_independent", self.card.calibratedLabel.text)
+        self.assertIn("rl_independent", self.card.calibratedChip.toolTip)
+        self.assertIn("K = 199", self.card.calibratedChip.toolTip)
+
+    def test_rl_independent_wins_over_newer_cohort_shift_run(self):
+        self._writeNulls("nulls-rl_independent-exact", False, 68.8, 0.9836, "amber", 199, after=10)
+        self._writeNulls("nulls-rl_cohort_shift-exact", False, 80.0, 0.9836, "amber", 20, after=20, kind="rl_cohort_shift")
+        self.assertEqual(self.card._findGroupQa()["null_kind"], "rl_independent")
+        shutil.rmtree(os.path.join(self.folder, "nulls-rl_independent-exact"))
+        self.card.refresh()  # without an rl_independent run, another kind calibrates the chip and is named
+        self.assertEqual(self.card.calibratedChip.text, "80th percentile")
+        self.assertIn("of 20 null cohorts (rl_cohort_shift", self.card.calibratedLabel.text)
+
+    def test_rl_strength_alone_gives_no_verdict(self):
+        self._writeNulls("nulls-rl_strength-exact", False, 0.0, 0.9836, "below", 99, after=20, kind="rl_strength")
+        self.card.refresh()
+        label = self.card.calibratedLabel.text
+        self.assertEqual(self.card.calibratedChip.text, "Not calibrated")
+        self.assertEqual(self.card.calibratedChip.property("chipLevel"), "neutral")
+        self.assertIn("rl_strength", label)
+        self.assertIn("mean connectivity (μC_r)", label)
+        self.assertIn("Run Nulls with rl_independent", label)
+        self.assertNotIn("less degree-like", label)
+        self.assertFalse(self.card.table.isHidden())  # the reference rows of the group map are still shown
+        from LesionNetworkMappingUI import card_nulls
+
+        text = card_nulls.NullsCard.groupQaText(
+            {"available": True, "null_kind": "rl_strength", "mean": {"percentile": 0.0, "k": 99, "level": "below", "text": "x", "null_kind": "rl_strength"}, "statistic": "T"})
+        self.assertIn("not the QA card's verdict", text)
+        self.assertIn("99 rl_strength null cohorts", text)
 
     def test_nulls_card_labels_fast_group_qa(self):
         from LesionNetworkMappingUI import card_nulls
