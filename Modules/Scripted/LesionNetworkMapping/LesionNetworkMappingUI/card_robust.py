@@ -1288,30 +1288,11 @@ class RobustCard:
         _fitTable(self.influenceTable, len(rows))
 
     def showSubject(self, sid):
-        """Open the Library with a subject selected; return whether it could."""
-        shell = self.ctx.shell()
-        if shell is not None:
-            shell.switchTo("library")
-        elif hasattr(slicer.modules, "studio"):
-            slicer.util.selectModule("Studio")
-        try:
-            from StudioLib import library
-
-            views = list(getattr(library, "_studyViews", []))
-            for view in views:
-                if hasattr(view, "search"):
-                    view.search.setText("")
-                if hasattr(view, "setFilter"):
-                    view.setFilter("all")
-            library._setStudySelection([sid])
-            for view in views:
-                row = view.model.rowOf(sid) if hasattr(view, "model") else -1
-                if row >= 0:
-                    view.table.scrollTo(view.model.index(row, 0))
-        except Exception:
-            logging.exception("Lesion network mapping: the Library could not select the subject")
-            return False
-        return True
+        """Open the Library with a subject of the study selected (the study is opened there when the Library does not
+        have it, as when it was chosen in Map's Seed card); return whether it could.
+        """
+        study = self.ctx.study
+        return widgets.showSubjectsInLibrary(getattr(study, "path", None) if study is not None else None, [sid], self.ctx.shell())
 
     def showSeeds(self, folder):
         from LesionNetworkMappingLib import robustness

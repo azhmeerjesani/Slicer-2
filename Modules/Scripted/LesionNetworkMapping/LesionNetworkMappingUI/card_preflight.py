@@ -762,31 +762,11 @@ class PreflightCard:
         return True
 
     def openLibrary(self, subjects, checkId=None):
-        """Open the Library with the subjects of a check selected (the list shows all subjects, scrolled to the first)."""
-        subjects = list(subjects or [])
-        shell = self.ctx.shell()
-        if shell is not None:
-            shell.switchTo("library")
-        elif hasattr(slicer.modules, "studio"):
-            slicer.util.selectModule("Studio")
-        try:
-            from StudioLib import library
-        except Exception:
-            return False
-        try:
-            for view in list(getattr(library, "_studyViews", [])):
-                if hasattr(view, "search"):
-                    view.search.setText("")
-                if hasattr(view, "setFilter"):
-                    view.setFilter("all")
-            library._setStudySelection(subjects)
-            for view in list(getattr(library, "_studyViews", [])):
-                row = view.model.rowOf(subjects[0]) if subjects and hasattr(view, "model") else -1
-                if row >= 0:
-                    view.table.scrollTo(view.model.index(row, 0))
-        except Exception:
-            logging.exception("Lesion network mapping: the Library could not be filtered to the subjects")
-        return True
+        """Open the Library with the subjects of a check selected (the list shows all subjects, scrolled to the first); the
+        study is opened there when the Library does not have it (it was chosen in Map's Seed card).
+        """
+        study = self.ctx.study
+        return widgets.showSubjectsInLibrary(getattr(study, "path", None) if study is not None else None, subjects, self.ctx.shell())
 
     def switchRuleToFwe(self):
         widget = _widget()

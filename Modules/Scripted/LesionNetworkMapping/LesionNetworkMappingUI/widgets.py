@@ -7,6 +7,7 @@ only set on a chip or banner when the style does not paint roles.
 """
 
 import html
+import logging
 import os
 import re
 
@@ -109,6 +110,57 @@ def showInFileManager(path):
     if projects is not None:
         return projects.showInFileManager(path)
     return bool(qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(path)))
+
+
+def showSubjectsInLibrary(studyPath, subjects, shell=None):
+    """Show the study at ``studyPath`` in the Library with ``subjects`` selected, the list scrolled to the first (L-37).
+
+    Map keeps a study of its own (Seed > Cohort, remembered in ``Studio/LNM/CohortStudy``): when the Library does not
+    have that study open, it is opened there first (``StudioLib.study_ui.openStudy``), else the Library would show its
+    Projects page with no subject on screen. Return whether the subjects could be shown.
+    """
+    subjects = list(subjects or [])
+    try:
+        from StudioLib import library, study_ui
+    except Exception:
+        library = study_ui = None
+    if study_ui is not None and studyPath:
+        current = study_ui.session()
+        currentPath = getattr(getattr(current, "study", None), "path", None) if current is not None else None
+        same = bool(currentPath) and os.path.normcase(os.path.abspath(currentPath)) == os.path.normcase(os.path.abspath(studyPath))
+        if not same:
+            try:
+                study_ui.openStudy(studyPath, shell, showLibrary=True)
+            except Exception as error:
+                logging.exception("Lesion network mapping: the study could not be opened in the Library")
+                message = str(error) or _("The study could not be opened in the Library.")
+                if shell is not None and hasattr(shell, "toast"):
+                    shell.toast(message, 6000)
+                else:
+                    slicer.util.errorDisplay(message)
+                return False
+    if shell is not None:
+        shell.switchTo("library")
+    elif hasattr(slicer.modules, "studio"):
+        slicer.util.selectModule("Studio")
+    if library is None:
+        return False
+    try:
+        views = list(getattr(library, "_studyViews", []))
+        for view in views:
+            if hasattr(view, "search"):
+                view.search.setText("")
+            if hasattr(view, "setFilter"):
+                view.setFilter("all")
+        library._setStudySelection(subjects)
+        for view in views:
+            row = view.model.rowOf(subjects[0]) if subjects and hasattr(view, "model") else -1
+            if row >= 0:
+                view.table.scrollTo(view.model.index(row, 0))
+    except Exception:
+        logging.exception("Lesion network mapping: the Library could not select the subjects")
+        return False
+    return bool(views)
 
 
 def openLink(url):
