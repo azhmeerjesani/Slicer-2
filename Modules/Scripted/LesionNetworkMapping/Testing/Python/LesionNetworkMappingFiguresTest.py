@@ -833,6 +833,37 @@ class FiguresTest(unittest.TestCase):
         sagittal = next(row for row in figure.sourcedata if row["plane"] == "sagittal" and row["mode"] == "hard")
         self.assertGreater(sagittal["voxels_suprathreshold"], 0)
 
+    def test_glass_unthresholded_projection_keeps_both_signs(self):
+        """An unthresholded glass panel (the companion, or --mode unthresholded) projects the signed maximum
+        |value| whatever --sign is, as montage and ortho companions show both signs; only the thresholded
+        panels project the shown sign.
+        """
+        values = np.zeros(SHAPE, dtype=np.float32)
+        values[6:10, 6:11, 6:11] = 6.0  # a positive and a negative block on different rays in every view
+        values[19:23, 24:29, 18:23] = -6.0
+        grid = figures.DisplayGrid(tuple(self.affine[:3, 3]), SPACING, SHAPE)
+
+        def warm_cool(layer):
+            image = np.asarray(figures.render_slice(figures.Scene(grid, None, [layer]), "axial", None, (SHAPE[0], SHAPE[1])), dtype=np.int64)
+            lit = image.sum(axis=2) > 0
+            return int((lit & (image[..., 0] > image[..., 2])).sum()), int((lit & (image[..., 2] > image[..., 0])).sum())
+
+        for sign in ("neg", "pos"):
+            warm, cool = warm_cool(figures.Layer(values, "diverging", 6.0, 3.0, "unthresholded", sign))
+            self.assertGreater(warm, 0, sign)
+            self.assertGreater(cool, 0, sign)
+            warm, cool = warm_cool(figures.Layer(values, "diverging", 6.0, 3.0, "hard", sign))
+            self.assertEqual((warm > 0, cool > 0), (sign == "pos", sign == "neg"))
+            figure = figures.glass((values, self.affine, "g"), template=self.template, threshold=3.0, sign=sign, **SMALL)
+            self.assertEqual([panel["mode"] for panel in figure.meta["panels"]], ["hard", "unthresholded"])
+            for row in figure.sourcedata:
+                if row["mode"] == "unthresholded":
+                    self.assertEqual((row["min"], row["max"]), (-6.0, 6.0), (sign, row["plane"]))
+                else:
+                    self.assertEqual(row["max" if sign == "neg" else "min"], -6.0 if sign == "neg" else 6.0, (sign, row["plane"]))
+            alone = figures.glass((values, self.affine, "g"), template=self.template, threshold=3.0, sign=sign, mode="unthresholded", **SMALL)
+            self.assertTrue(all((row["min"], row["max"]) == (-6.0, 6.0) for row in alone.sourcedata), (sign, alone.sourcedata))
+
     def test_display_modes(self):
         values = np.array([0.0, 1.0, 2.0, -2.0, 4.0, -5.0])
         _, alpha, supra = figures.diverging_rgba(values, 5.0, 4.0, "transparent")

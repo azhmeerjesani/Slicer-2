@@ -521,6 +521,16 @@ def section(volume3d, plane, index, sign="both"):
     return np.take(volume3d, index, axis=axis)
 
 
+def projection_sign(mode, threshold, sign):
+    """The sign a map projection keeps: ``sign`` only where the display hides the other sign (a finite
+    threshold in a thresholded mode, as in :func:`diverging_rgba`); an unthresholded panel shows every
+    non-zero voxel, so it projects the signed maximum |value| ("both").
+    """
+    if mode == "unthresholded" or threshold is None or not math.isfinite(threshold):
+        return "both"
+    return sign
+
+
 def _tile_mm(grid, plane):
     nx, ny, nz = grid.shape
     width, height = {"axial": (nx, ny), "coronal": (nx, nz), "sagittal": (ny, nz)}[plane]
@@ -685,7 +695,7 @@ def render_slice(scene, plane, index, size, convention=DEFAULT_CONVENTION, cross
         rgb[_edge(projected)] = _hex(scene.outline_color)
     for layer in scene.layers:
         label = layer.kind in ("binary", "outline") or (layer.kind == "sequential" and layer.discrete)
-        values = section(layer.values, plane, index, layer.sign if layer.kind == "diverging" else "both")
+        values = section(layer.values, plane, index, projection_sign(layer.mode, layer.threshold, layer.sign) if layer.kind == "diverging" else "both")
         pixels = _resample2d(orient(values, convention), shape, 0 if label else 1)
         contour = None
         if layer.kind == "diverging":
@@ -1662,7 +1672,7 @@ def _map_rows(panels, infos, planes_coords):
     for panel in panels:
         info = next(i for i in infos if i.key == panel.meta["key"])
         for plane, coordinate, index in planes_coords:
-            values = section(info.grid_values, plane, index, panel.meta["sign"])
+            values = section(info.grid_values, plane, index, projection_sign(panel.meta["mode"], panel.meta["threshold"], panel.meta["sign"]))
             threshold = panel.meta["threshold"]
             scores = _scores(values, panel.meta["sign"])
             finite = values[np.isfinite(values) & (values != 0)]
