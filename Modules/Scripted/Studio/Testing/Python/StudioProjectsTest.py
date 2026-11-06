@@ -7615,6 +7615,67 @@ class StudioProjectsTest(unittest.TestCase):
             qt.QSettings().remove(projects.ROOT_CHOSEN_KEY)
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
 
+    def test_97_save_a_copy_over_an_older_copy_that_cannot_be_written_is_not_reported_saved(self):
+        """"Save a copy as…" onto an older copy in a folder that cannot be written (or onto a read-only older copy) fails, and
+        says so, naming the folder or the file. It said "Saved a copy as MRHead.mrb" and returned the path because the older
+        file of that name was still there: the success was taken from the file being there, not from the writer (BB-1).
+        """
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        service = self._service()
+        self._userVolume()
+        self._projectFor(service)
+        self._save(service)
+        folder = os.path.join(self.tempDir, "read-only copies")
+        os.makedirs(folder)
+        copyPath = os.path.join(folder, "MRHead.mrb")
+        with open(copyPath, "w") as f:
+            f.write("old copy")
+        realAccess = os.access
+        denied = []
+
+        def access(path, mode, *args, **kwargs):
+            # As a read-only folder or file is for a user who is not an administrator (the test may run as root)
+            if os.path.normpath(os.path.abspath(str(path))) in denied and mode & os.W_OK:
+                return False
+            return realAccess(path, mode, *args, **kwargs)
+
+        toasts = []
+        running = self.autosave._service
+        self.autosave._service = service
+        try:
+            with mock.patch.object(projects_ui, "message", lambda text, **kwargs: toasts.append((str(text), kwargs))), \
+                    mock.patch.object(os, "access", access):
+                # The folder cannot be written: the writer refuses it, the older copy stays
+                denied[:] = [os.path.normpath(folder)]
+                self.assertIsNone(projects_ui.saveCopyAs(copyPath))
+                self.assertEqual(len(toasts), 1, toasts)
+                self.assertNotIn("Saved a copy", toasts[-1][0])
+                self.assertIn("could not be saved", toasts[-1][0])
+                self.assertIn(folder, toasts[-1][0])
+                self.assertEqual(toasts[-1][1].get("level"), "warning")
+                # A read-only older copy (the bundle cannot be compressed over it): the writer fails, the file is named
+                denied[:] = [os.path.normpath(copyPath)]
+                with mock.patch.object(projects_ui, "writeBundleKeepingState", lambda scene, path: False):
+                    self.assertIsNone(projects_ui.saveCopyAs(copyPath))
+                self.assertEqual(len(toasts), 2, toasts)
+                self.assertNotIn("Saved a copy", toasts[-1][0])
+                self.assertIn("could not be saved", toasts[-1][0])
+                self.assertIn("MRHead.mrb is read-only", toasts[-1][0])
+                with open(copyPath) as f:
+                    self.assertEqual(f.read(), "old copy", "nothing was written")
+                # A folder that can be written: the older copy is replaced by the bundle and the copy is reported saved
+                denied[:] = []
+                self.assertEqual(projects_ui.saveCopyAs(copyPath), copyPath)
+                self.assertEqual(toasts[-1][0], "Saved a copy as MRHead.mrb")
+                import zipfile
+
+                self.assertTrue(zipfile.is_zipfile(copyPath), "the older copy was replaced by the bundle")
+        finally:
+            self.autosave._service = running
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

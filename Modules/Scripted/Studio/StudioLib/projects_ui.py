@@ -658,18 +658,27 @@ def saveCopyAs(path=None):
         service.saveNow("copy", progress=True)
     scene = slicer.mrmlScene
     url, rootDirectory = scene.GetURL(), scene.GetRootDirectory()
+    written = False
     try:
         with slicer.util.WaitCursor():
-            writeBundleKeepingState(scene, path)
+            written = writeBundleKeepingState(scene, path)
     finally:
         # Writing a .mrb points the scene at the bundle: the scene stays in its project
         scene.SetURL(url)
         scene.SetRootDirectory(rootDirectory)
-    if os.path.isfile(path):
+    # Success is what the writer returns: an older file of that name is still there when the write failed
+    if written and os.path.isfile(path):
         message(_("Saved a copy as {name}").format(name=os.path.basename(path)), action=lambda: projects.showInFileManager(os.path.dirname(path)),
                 actionText=_("Show"), toolTip=path)
         return path
-    message(_("The copy could not be saved (see the error log)"), level="warning")
+    folder = os.path.dirname(os.path.abspath(path))
+    if os.path.isdir(folder) and not os.access(folder, os.W_OK):
+        text = _("The copy could not be saved: the folder {folder} cannot be written").format(folder=folder)
+    elif os.path.isfile(path) and not os.access(path, os.W_OK):
+        text = _("The copy could not be saved: {name} is read-only").format(name=os.path.basename(path))
+    else:
+        text = _("The copy could not be saved (see the error log)")
+    message(text, level="warning", toolTip=path)
     return None
 
 
