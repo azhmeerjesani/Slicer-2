@@ -473,6 +473,41 @@ class SummaryTest(StudyTestBase):
         items = [item for kind, *rest in lesions.blocks if kind == "ul" for item in rest[0]]
         self.assertTrue(any(item.startswith("Inter-rater agreement: 3 pair(s); median Dice 0.8") for item in items), items)
 
+    def test_summary_in_steps_matches_and_recomputes_changed_pairs(self):
+        """prepare_summary → compute_summary (a worker thread: files and numpy only) → summary(computed=...) gives what summary()
+        gives, recomputes a pair whose second tracing changed meanwhile, and stops with jobs.Cancelled (BB-1: the Library
+        computed every pair on the GUI thread).
+        """
+        from LesionNetworkMappingLib import jobs
+
+        agreement.assign(self.study, sids=["sub-01", "sub-02", "sub-03"], rater="Carl Diaz")
+        self.second("sub-01", "Carl Diaz", cube((13, 20, 20), 3))
+        self.second("sub-02", "Carl Diaz", cube((28, 20, 20), 3))
+        self.second("sub-03", "Carl Diaz", cube((30, 30, 30), 2))
+        expected = agreement.summary(self.study, write=False, update_rows=False)
+        prepared = agreement.prepare_summary(self.study)
+        self.assertEqual([job["participant_id"] for job in prepared["jobs"]], ["sub-01", "sub-02", "sub-03"])
+        steps = []
+        computed = agreement.compute_summary(prepared, progress=lambda *step: steps.append(step))
+        self.assertEqual(steps, [("pairs", 0, 3), ("pairs", 1, 3), ("pairs", 2, 3), ("baseline", None, None)])
+        reads = []
+        with unittest.mock.patch.object(agreement, "load_mask", side_effect=lambda path: reads.append(path) or agreement.nifti.read_nifti(path)[:2]):
+            data = agreement.summary(self.study, write=False, update_rows=False, computed=computed)
+        self.assertEqual(reads, [], "the main thread reads no mask when the worker computed every pair")
+        self.assertEqual(data["pairs"], expected["pairs"])
+        self.assertEqual(data["median"], expected["median"])
+        self.assertEqual(data["baseline"], expected["baseline"])
+        # A second tracing saved again while the worker ran is computed again on the main thread
+        computed = agreement.compute_summary(agreement.prepare_summary(self.study))
+        self.second("sub-03", "Carl Diaz", cube((20, 12, 20), 3))  # now the same as the first tracing
+        data = agreement.summary(self.study, write=False, update_rows=False, computed=computed)
+        self.assertEqual(expected["pairs"][2]["dice"], 0.0)
+        self.assertEqual(data["pairs"][2]["dice"], 1.0)
+        self.assertEqual(data["pairs"][:2], expected["pairs"][:2])
+        # Stop: before the next file is read
+        with self.assertRaises(jobs.Cancelled):
+            agreement.compute_summary(agreement.prepare_summary(self.study), progress=lambda *step: steps.append(step), cancel=lambda: len(steps) > 4)
+
 
 class AdjudicateTest(StudyTestBase):
     def setUp(self):

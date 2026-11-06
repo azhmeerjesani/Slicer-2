@@ -1905,6 +1905,120 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 self.assertFalse(form.isOpen())
                 self.assertFalse(row.isHidden(), form.widget.objectName)
 
+    def test_compute_agreement_reads_no_mask_on_the_gui_thread(self):
+        """"Compute agreement" reads the masks and computes the metrics in a worker thread, with its progress and Stop on the card;
+        the main thread writes interrater.tsv and the rows when it has finished (BB-1: every pair was computed on the GUI thread,
+        about 0.4 s per pair on 1 mm data, and the application froze for seconds with no progress and no way to stop it).
+        """
+        import datetime
+        import threading
+        import types
+
+        from LesionNetworkMappingLib import agreement, nifti
+        from LesionNetworkMappingLib.study import Study
+        from StudioLib import libcard_agreement, review
+
+        shape = (40, 40, 40)
+        affine = np.array([[1.0, 0, 0, -20.0], [0, 1.0, 0, -30.0], [0, 0, 1.0, -10.0], [0, 0, 0, 1.0]])
+
+        def cube(center, half=3):
+            mask = np.zeros(shape, dtype=np.uint8)
+            mask[tuple(slice(c - half, c + half + 1) for c in center)] = 1
+            return mask
+
+        study = Study.create(os.path.join(self.directory, "study"), space="MNI152NLin6Asym")
+        old = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=10)).isoformat(timespec="seconds")
+        centers = {"sub-01": (12, 20, 20), "sub-02": (28, 20, 20), "sub-03": (20, 12, 20), "sub-04": (20, 28, 20)}
+        for sid, center in centers.items():
+            relative = f"lesions/{sid}_space-MNI152NLin6Asym_desc-lesion_mask.nii.gz"
+            os.makedirs(os.path.join(study.path, "lesions"), exist_ok=True)
+            nifti.write_nifti(os.path.join(study.path, relative), cube(center), affine, dtype=np.uint8)
+            study.add_subject(sid, group="case", status="traced", lesion=relative, space="MNI152NLin6Asym", tracer="Ana Bell", modified=old)
+        scan = os.path.join(study.path, "template.nii.gz")
+        nifti.write_nifti(scan, np.zeros(shape, dtype=np.float32), affine)
+        agreement.assign(study, sids=list(centers), rater="Carl Diaz")
+        for sid, center in centers.items():
+            shifted = (center[0] + 1, center[1], center[2])
+            agreement.save_second_tracing(study, sid, np.ascontiguousarray(cube(shifted).transpose(2, 1, 0)), affine, scan, "Carl Diaz", compute=False)
+        study.save()
+        expected = agreement.summary(study, write=False, update_rows=False)
+        self.assertEqual(expected["n_pairs"], 4)
+
+        flushed, toasts = [], []
+        session = types.SimpleNamespace(study=study, setValues=lambda *args, **kwargs: None, flush=lambda: flushed.append(True))
+        saved = (libcard_agreement._session, review._toast, agreement.load_mask)
+        gate = threading.Event()
+        reads = []
+
+        def loadMask(path):
+            onMain = threading.current_thread() is threading.main_thread()
+            reads.append(onMain)
+            if not onMain:
+                gate.wait(30)  # holds the worker while the test looks at the card
+            return saved[2](path)
+
+        def restore():
+            gate.set()
+            libcard_agreement.waitForAgreement(30)
+            libcard_agreement._session, review._toast, agreement.load_mask = saved
+
+        libcard_agreement._session = lambda: session
+        review._toast = lambda text, *args, **kwargs: toasts.append(text)
+        agreement.load_mask = loadMask
+        self.cleanup.append(restore)
+        card = libcard_agreement._cards[libcard_agreement._createCard(None)]  # as the Library creates it
+        host = qt.QWidget()
+        qt.QVBoxLayout(host).addWidget(card.widget)
+        host.show()
+        self.cleanup.append(host.deleteLater)
+        card.refresh()
+        self._pump()
+        self.assertTrue(card.computeRow.isVisible())
+        tsv = os.path.join(study.path, *agreement.INTERRATER_TSV)
+
+        card.computeButton.click()
+        self._wait(100)
+        self.assertNotIn(True, reads, "no mask is read on the GUI thread")
+        self.assertTrue(libcard_agreement.isComputing(), "the worker waits at the gate")
+        self.assertFalse(os.path.exists(tsv))
+        self.assertTrue(card.progressRow.isVisible())
+        self.assertFalse(card.computeButton.enabled)
+        self.assertTrue(str(card.progressLabel.text).startswith("Computing agreement"), card.progressLabel.text)
+        gate.set()
+        self.assertTrue(libcard_agreement.waitForAgreement(60))
+        self.assertNotIn(True, reads, "no mask is read on the GUI thread")
+        self.assertGreaterEqual(len(reads), 8)
+        self.assertEqual(toasts[-1], libcard_agreement.written_text(4))
+        self.assertTrue(flushed)
+        data = agreement.read_summary(study)
+        self.assertEqual(data["n_pairs"], 4)
+        self.assertEqual(data["median"], expected["median"])
+        self.assertEqual(data["baseline"], expected["baseline"])
+        with open(tsv, encoding="utf-8") as f:
+            rows = f.read().splitlines()[1:]
+        dice = {row.split("\t")[0]: float(row.split("\t")[agreement.TSV_COLUMNS.index("dice")]) for row in rows}
+        self.assertEqual(dice, {pair["participant_id"]: pair["dice"] for pair in expected["pairs"]})
+        self.assertAlmostEqual(float(study.subject("sub-01")["rater2_dice"]), expected["pairs"][0]["dice"], places=4)
+        self._pump()
+        self.assertFalse(card.progressRow.isVisible())
+        self.assertTrue(card.computeButton.enabled)
+
+        # Stop: the worker stops before the next pair and the last interrater.tsv stays
+        with open(tsv, encoding="utf-8") as f:
+            before = f.read()
+        gate.clear()
+        del reads[:]
+        card.computeButton.click()
+        self._wait(100)
+        self.assertTrue(libcard_agreement.isComputing())
+        card.stopLink.click()
+        gate.set()
+        self.assertTrue(libcard_agreement.waitForAgreement(60))
+        self.assertEqual(toasts[-1], "Agreement not computed: stopped")
+        self.assertLess(len(reads), 8, "stopped before every pair was read")
+        with open(tsv, encoding="utf-8") as f:
+            self.assertEqual(f.read(), before)
+
     def test_corrupt_lesion_thumbnail_is_named_unreadable(self):
         """A damaged lesion file gives a one-line log message and the card note "Lesion file cannot be read" (BB-1)."""
         import logging
