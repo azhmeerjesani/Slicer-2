@@ -316,10 +316,64 @@ def installSceneMigration():
             migrateNormalizationReferences(caller)
         except Exception:
             logging.exception("Lesion network mapping: the normalization references of an earlier scene could not be replaced")
+        try:
+            migrateMapSpace(caller)
+        except Exception:
+            logging.exception("Lesion network mapping: the template space of the maps of an earlier scene could not be added")
 
     installSceneMigration._tags = [scene.AddObserver(event, onSceneEvent, SCENE_MIGRATION_PRIORITY)
                                    for event in (slicer.vtkMRMLScene.EndImportEvent, slicer.vtkMRMLScene.StartSaveEvent)]
     return True
+
+
+def migrateMapSpace(scene=None):
+    """Add the template space (``Studio.Space``) to the Map result volumes of an earlier scene that have none.
+
+    Earlier versions did not tag a map with its connectome's space, so a map of a connectome whose grid is not a standard
+    one (the demo's, a conversion's) was exported as scanner space and the Clusters card could not label it. The space
+    is that of the project's connectome (``connectomeSpaceName``), added only to a volume on exactly that connectome's
+    grid, and never to a map shown from a file (it may come from another connectome). Return the number of volumes tagged.
+    """
+    import numpy as np
+
+    scene = scene or slicer.mrmlScene
+    from LesionNetworkMappingLib import display
+
+    pending = []
+    parameterNodes = []
+    for index in range(scene.GetNumberOfNodes()):
+        node = scene.GetNthNode(index)
+        if node.IsA("vtkMRMLScriptedModuleNode"):
+            if node.GetAttribute("ModuleName") == "LesionNetworkMapping" and node.GetParameter("connectome"):
+                parameterNodes.append(node)
+        elif (node.IsA("vtkMRMLScalarVolumeNode") and node.GetAttribute(display.RESULT_ATTRIBUTE) == "1"
+              and not node.GetAttribute("Studio.Space") and not node.GetAttribute(LOADED_MAP_ATTRIBUTE)
+              and not node.GetAttribute(COMPUTING_ATTRIBUTE) and node.GetImageData() is not None):
+            pending.append(node)
+    if not pending or not parameterNodes:
+        return 0
+    logic = LesionNetworkMappingLogic()
+    bundles = []
+    for parameterNode in parameterNodes:
+        try:
+            path = logic.resolveConnectome(parameterNode.GetParameter("connectome"))
+            bundle = logic.openBundle(path) if path else None
+        except Exception:
+            bundle = None
+        if bundle is not None and logic.connectomeSpaceName(bundle):
+            bundles.append(bundle)
+    changed = 0
+    for volume in pending:
+        matrix = vtk.vtkMatrix4x4()
+        volume.GetIJKToRASMatrix(matrix)
+        affine = np.array([[matrix.GetElement(row, column) for column in range(4)] for row in range(4)])
+        dims = tuple(volume.GetImageData().GetDimensions())
+        for bundle in bundles:
+            if dims == tuple(bundle.shape) and np.allclose(affine, bundle.affine, atol=1e-2):
+                volume.SetAttribute("Studio.Space", logic.connectomeSpaceName(bundle))
+                changed += 1
+                break
+    return changed
 
 
 def migrateNormalizationReferences(scene=None):

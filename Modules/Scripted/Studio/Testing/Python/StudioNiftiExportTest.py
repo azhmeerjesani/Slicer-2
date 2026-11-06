@@ -1079,6 +1079,63 @@ class StudioNiftiExportTest(unittest.TestCase):
             json.dump({"N": 2, "connectome": {"space": lnm.DEMO_SPACE}}, f)
         self.assertEqual(logic.mapFileInfo(enginePath)["space"], lnm.DEMO_SPACE)
 
+    def test_07c_map_of_an_earlier_scene_gets_its_connectome_space(self):
+        """A Map result saved by a version that did not tag maps with their space has it once the scene opens: it is
+        exported as the connectome's template space (code 4), not as scanner space; a map shown from a file, one on another
+        grid and one of a connectome that is not here are left as they are.
+        """
+        import LesionNetworkMapping as lnm
+        from LesionNetworkMappingLib import connectome, nifti
+
+        lnm.installSceneMigration()
+        logic = lnm.LesionNetworkMappingLogic()
+        demoPath = os.path.join(self.tempDir, "demo2.lnmc")
+        lnm.writeDemoConnectome(demoPath, nSubjects=2, shape=(8, 9, 8), runs=(12,))
+        demo = connectome.ConnectomeBundle.open(demoPath)
+        identifier = logic.rememberConnectome(demo)
+        values = np.zeros(tuple(demo.shape), np.float32)
+        values[3, 4, 3] = 6.0
+        mapPath = os.path.join(self.tempDir, "old_conn-Demo_desc-T_funcmap.nii.gz")
+        nifti.write_nifti(mapPath, values, demo.affine)
+        # The earlier version's scene: the project's connectome in the parameter node, maps without Studio.Space
+        parameterNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScriptedModuleNode", "LesionNetworkMapping")
+        parameterNode.SetAttribute("ModuleName", "LesionNetworkMapping")
+        parameterNode.SetParameter("connectome", identifier)
+        result = logic.loadMap(mapPath, "Old map", None, attributes={"LNM.Statistic": "T", "LNM.N": 2})
+        fromFile = logic.loadMap(mapPath, "Shown from a file", None, attributes={lnm.LOADED_MAP_ATTRIBUTE: "map.nii.gz"})
+        otherGrid = logic.loadMap(mapPath, "Other grid", None)
+        matrix = vtk.vtkMatrix4x4()
+        otherGrid.GetIJKToRASMatrix(matrix)
+        matrix.SetElement(0, 3, matrix.GetElement(0, 3) + 5.0)
+        otherGrid.SetIJKToRASMatrix(matrix)
+        scenePath = os.path.join(self.tempDir, "scene", "old.mrml")
+        os.makedirs(os.path.dirname(scenePath))
+        for node in (result, fromFile, otherGrid):
+            node.SetSaveWithScene(True)
+            # saved with the scene, as a project's maps are
+            self.assertTrue(slicer.util.saveNode(node, os.path.join(os.path.dirname(scenePath), node.GetName().replace(" ", "_") + ".nrrd")))
+            self.assertIsNone(node.GetAttribute("Studio.Space"))
+        self.assertIsNone(self.export.spaceInfo(result, None)[0], "an untagged map on the demo grid has no space")
+        self.assertTrue(slicer.util.saveScene(scenePath))
+        slicer.mrmlScene.Clear(0)
+        self.assertTrue(slicer.util.loadScene(scenePath))
+        reopened = slicer.util.getNode("Old map")
+        self.assertEqual(reopened.GetAttribute("Studio.Space"), lnm.DEMO_SPACE)
+        self.assertEqual(self.export.spaceInfo(reopened, None)[0], lnm.DEMO_SPACE)
+        self.assertIsNone(slicer.util.getNode("Shown from a file").GetAttribute("Studio.Space"))
+        self.assertIsNone(slicer.util.getNode("Other grid").GetAttribute("Studio.Space"))
+        exported = self.export.exportVolume(reopened, os.path.join(self.tempDir, "reopened", "map.nii.gz"))
+        for path in exported.images:
+            _data, _affine, header = self._read(path)
+            self.assertEqual((header["sform_code"], header["qform_code"]), (4, 4), path)
+            self.assertEqual(self._sidecar(path)["Space"], lnm.DEMO_SPACE)
+        # The connectome of the project is not on this computer: nothing is guessed
+        reopened.RemoveAttribute("Studio.Space")
+        slicer.util.getNode("LesionNetworkMapping").SetParameter("connectome", "Elsewhere#0123456789abcdef")
+        self.assertEqual(lnm.migrateMapSpace(), 0)
+        self.assertIsNone(reopened.GetAttribute("Studio.Space"))
+        lnm.LesionNetworkMappingLogic._knownConnectomes.pop(identifier, None)
+
     def test_08_dialog_multi_select_and_overwrite(self):
         """The dialog exports several images at once, asks before replacing files and remembers only Studio/* keys."""
         from StudioLib import autosave_io, niftiexport_ui
