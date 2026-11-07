@@ -34,6 +34,27 @@
         <true/>
         <key>LSRequiresCarbon</key>
         <true/>
+        <key>CFBundleDocumentTypes</key>
+        <array>
+                <dict>
+                        <key>CFBundleTypeName</key>
+                        <string>Medical image or 3D Slicer scene</string>
+                        <key>CFBundleTypeRole</key>
+                        <string>Viewer</string>
+                        <key>LSHandlerRank</key>
+                        <string>Alternate</string>
+                        <key>CFBundleTypeExtensions</key>
+                        <array>
+                                <string>nii</string>
+                                <string>nrrd</string>
+                                <string>nhdr</string>
+                                <string>mha</string>
+                                <string>mgz</string>
+                                <string>mrml</string>
+                                <string>mrb</string>
+                        </array>
+                </dict>
+        </array>
         <key>NSHumanReadableCopyright</key>
         <string>${MACOSX_BUNDLE_COPYRIGHT}</string>
 </dict>

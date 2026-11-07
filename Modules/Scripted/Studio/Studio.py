@@ -60,7 +60,73 @@ def _openCommandLineArguments():
         logging.error("The files given on the command line could not be opened:\n" + traceback.format_exc())
 
 
+#: Files that macOS hands to the running application as QFileOpenEvent (Finder "Open With", a double click, a drop on the
+#: Dock icon; at a cold start they come as an event instead of command line arguments). They are kept until startup is
+#: completed (Studio is applied by then) and then opened with the routes of the command line files.
+_pendingFileOpens = []
+_startupCompleted = False
+_fileOpenFilter = None
+
+
+class _FileOpenFilter(qt.QObject):
+    """Event filter of the application: QEvent::FileOpen opens the file like Open... does (nothing else handles it)."""
+
+    def eventFilter(self, obj, event):
+        if event.type() != qt.QEvent.FileOpen:
+            return False
+        try:
+            path = str(event.file())
+            if not path:
+                url = event.url()
+                path = str(url.toString()) if url is not None else ""
+        except Exception:
+            return False
+        if path:
+            openFileFromSystem(path)
+        return True
+
+
+def installFileOpenFilter():
+    """Install the QFileOpenEvent handling on the application (once). Return the filter."""
+    global _fileOpenFilter
+    if _fileOpenFilter is None:
+        _fileOpenFilter = _FileOpenFilter(slicer.app)
+        slicer.app.installEventFilter(_fileOpenFilter)
+    return _fileOpenFilter
+
+
+def openFileFromSystem(path):
+    """Open a file that the system gave to the running application (QFileOpenEvent): at once, or after startup."""
+    if not _startupCompleted:
+        _pendingFileOpens.append(path)
+        return
+    _openFiles([path])
+
+
+def _openFiles(paths):
+    try:
+        from StudioLib import importer
+
+        importer.openCommandLineArguments(paths)
+    except Exception:
+        import logging
+        import traceback
+
+        logging.error("The file given by the system could not be opened:\n" + traceback.format_exc())
+
+
+def _openPendingFileOpens():
+    paths = list(_pendingFileOpens)
+    del _pendingFileOpens[:]
+    if paths:
+        _openFiles(paths)
+
+
 def _onStartupCompleted():
+    global _startupCompleted
+    _startupCompleted = True
+    if _pendingFileOpens:
+        qt.QTimer.singleShot(0, _openPendingFileOpens)
     import time
 
     # The apply time of Studio includes importing the shell
@@ -217,6 +283,7 @@ copyright (c) The Inter Project Authors.</p>
 """)
         if not slicer.app.testingEnabled():
             slicer.app.connect("startupCompleted()", _onStartupCompleted)
+            installFileOpenFilter()
             if _studioWillApplyAtStartup():
                 # Set before the main window is first shown: it emits disclaimerRequested() instead of opening its
                 # disclaimer dialog, and Studio shows a non-modal research-use line (StudioLib/firstrun.py)

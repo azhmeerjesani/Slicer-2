@@ -1593,6 +1593,38 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(scalars(), ["sub-01_T1w", "sub-01_lesion"])
         self.assertFalse(slicer.util.getNodesByClass("vtkMRMLSegmentationNode"))
 
+    def test_file_open_event_opens_the_file(self):
+        """macOS gives Finder's Open With, a double click and a Dock drop as QFileOpenEvent: the file opens like Open... does."""
+        import Studio
+
+        scan = self._writeVolume("sub-01_T1w.nii.gz", GRID_SHIFTED)
+        lesion = self._writeMask("sub-01_lesion.nii.gz", GRID_SHIFTED)
+        studioShell = self._applyStudio()
+        wasStarted = Studio._startupCompleted
+        Studio.installFileOpenFilter()
+        try:
+            # Before startup is completed the path is kept, not lost
+            Studio._startupCompleted = False
+            self.assertTrue(qt.QApplication.sendEvent(slicer.app, qt.QFileOpenEvent(scan)))
+            self._pump(4)
+            self.assertEqual(Studio._pendingFileOpens, [scan])
+            self.assertFalse(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"))
+            Studio._startupCompleted = True
+            Studio._openPendingFileOpens()
+            self._pump(8)
+            self.assertEqual(Studio._pendingFileOpens, [])
+            self.assertEqual([node.GetName() for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")], ["sub-01_T1w"])
+            # With the scan open, a lesion is a lesion segmentation on it (the routing of Open...)
+            self.assertTrue(qt.QApplication.sendEvent(slicer.app, qt.QFileOpenEvent(lesion)))
+            self._pump(8)
+            self.assertIn("sub-01_lesion", [node.GetName() for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode")])
+            self.assertEqual([node.GetName() for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")], ["sub-01_T1w"])
+        finally:
+            Studio._startupCompleted = wasStarted
+            del Studio._pendingFileOpens[:]
+            studioShell.dispose()
+            self._pump()
+
     def test_two_subjects_one_load_each_lesion_on_its_scan(self):
         """Two subjects opened at once (scan and lesion each): every lesion is bound to its own scan, and Draw edits it there."""
         from StudioLib import importer, library
