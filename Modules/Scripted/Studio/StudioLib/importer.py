@@ -2243,8 +2243,8 @@ def openCommandLineArguments(arguments, shell=None):
     as a plain volume: in Studio a lesion would become a grey scan over its scan, a statistical map or a figure a scan, a
     4D image one frame, and a folder an error box. The Studio module takes them over when Studio applies at startup
     (``Studio.takeOverCommandLineArguments()``) and opens them here: the existing paths with ``handleDrop()``, and the
-    other arguments (``slicer://`` URLs, which the DICOM module receives) with the core handler, which also logs the ignored
-    ones. In Classic (no live shell) all of them take the core route, as in 3D Slicer. Return what ``handleDrop()`` returned,
+    other arguments (``slicer://`` URLs, which the DICOM module receives) with the core handler; an argument that is not
+    an existing path (moved file, typo) is also reported with a "moved or deleted" message. In Classic (no live shell) all of them take the core route, as in 3D Slicer. Return what ``handleDrop()`` returned,
     or None.
     """
     arguments = [str(argument) for argument in arguments if argument]
@@ -2255,12 +2255,22 @@ def openCommandLineArguments(arguments, shell=None):
         slicer.app.handleURIArguments(arguments)
         return None
     scheme = str(slicer.app.applicationName).lower()
-    paths, others = [], []
+    paths, others, missing = [], [], []
     for argument in arguments:
         isUrl = str(qt.QUrl(argument).scheme()).lower() == scheme
-        (paths if not isUrl and os.path.exists(argument) else others).append(argument)
+        if not isUrl and os.path.exists(argument):
+            paths.append(argument)
+        else:
+            others.append(argument)
+            if not isUrl:
+                missing.append(argument)
     if others:
         slicer.app.handleURIArguments(others)
+    for argument in missing:
+        # The core handler only logs an ignored argument: say that the file cannot be opened, as loadRecentFile() does
+        slicer.util.warningDisplay(
+            _("{name} was moved or deleted, so it cannot be opened.").format(name=os.path.basename(argument) or argument),
+            windowTitle=_("File not found"), detailedText=argument)
     if not paths:
         return None
     return handleDrop([os.path.abspath(path) for path in paths], shell=shell)

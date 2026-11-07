@@ -1586,8 +1586,18 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
 
         # Studio: the lesion is a lesion segmentation on its scan in Draw (not a grey scan over it); a missing file is ignored
         studioShell = self._applyStudio()
-        result = importer.openCommandLineArguments([scan, lesion, os.path.join(self.directory, "missing.nii.gz")], studioShell)
+        warnings = []
+        warningDisplay = slicer.util.warningDisplay
+        slicer.util.warningDisplay = lambda text, *args, **kwargs: warnings.append(str(text))
+        try:
+            result = importer.openCommandLineArguments([scan, lesion, os.path.join(self.directory, "missing.nii.gz")], studioShell)
+        finally:
+            slicer.util.warningDisplay = warningDisplay
         self._pump(8)
+        # The missing file is named, not ignored silently
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("missing.nii.gz", warnings[0])
+        self.assertIn("cannot be opened", warnings[0])
         self.assertIsNotNone(result)
         self.assertEqual(result.errors, [])
         scalars = lambda: sorted(node.GetName() for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
