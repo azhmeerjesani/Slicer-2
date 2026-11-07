@@ -268,9 +268,11 @@ class ExportRunner:
             if self.result.writeFailure is None:
                 self.result.writeFailure = reason
             self.result.errors.append(f"{name}: {reason}")
+            self.result.failures.append((name, reason))
             return
         logging.error(f"Slicer Studio: NIfTI export of {name} failed:\n{details or error}")
         self.result.errors.append(f"{name}: {error}")
+        self.result.failures.append((name, str(error)))
 
     def _taskDone(self):
         self._waiting -= 1
@@ -311,6 +313,13 @@ def resultText(result):
     text = (_("Exported 1 NIfTI image to {folder}") if count == 1 else _("Exported {count} NIfTI images to {folder}")).format(count=count, folder=folder)
     if result.errors:
         text += " · " + (_("1 failed") if len(result.errors) == 1 else _("{count} failed").format(count=len(result.errors)))
+        failures = getattr(result, "failures", None)
+        if failures:
+            # Which image and why (the first one; the others are in the log): the images mode writes no README
+            name, reason = failures[0]
+            name = name if len(name) <= 40 else name[:39].rstrip() + "…"
+            reason = reason if len(reason) <= 80 else reason[:79].rstrip() + "…"
+            text += f" ({name}: {reason})"
     return text
 
 

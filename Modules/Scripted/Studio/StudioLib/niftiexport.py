@@ -1574,6 +1574,8 @@ class Result:
         self.removed = []
         #: The plain reason (no error number, no temporary file name) of the first file that could not be written
         self.writeFailure = None
+        #: ``(image name, plain reason)`` of each image that failed, in order (``errors`` holds the same as "name: reason")
+        self.failures = []
 
     def add(self, written):
         self.files += written
@@ -1607,6 +1609,7 @@ def runJobs(jobs, overwrite=False, readme=None, progress=None):
         except Exception as e:
             logging.error(f"Slicer Studio: NIfTI export of {job.nodeName} failed: {e}")
             result.errors.append(f"{job.nodeName}: {e}")
+            result.failures.append((job.nodeName, str(e)))
         result.notes += job.notes
     if readme:
         writeReadme(readme[0], jobs, result, readme[1])

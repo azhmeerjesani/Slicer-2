@@ -1341,6 +1341,40 @@ class StudioNiftiExportTest(unittest.TestCase):
             logging.getLogger().removeHandler(handler)
             slicer.mrmlScene.RemoveNode(node)
 
+    def test_08ae_partial_failure_names_the_image_and_the_reason(self):
+        """Some images are written and one fails: the message says which image and why, not only "1 failed"."""
+        from StudioLib import autosave_io, niftiexport_ui
+
+        class FailsOne(autosave_io.InlineExecutor):
+            def submit(self, function, *args, onDone=None, onError=None):
+                if "bad_scan" in str(getattr(args[0], "path", "")):
+                    return onError(OSError(36, "File name too long"))
+                return super().submit(function, *args, onDone=onDone, onError=onError)
+
+        toasts = []
+        original = niftiexport_ui.message
+        niftiexport_ui.message = lambda text, **kwargs: toasts.append(text)
+        good = self._volume("good scan", np.zeros((3, 3, 3), np.int16), np.eye(4))
+        bad = self._volume("bad_scan", np.zeros((3, 3, 3), np.int16), np.eye(4))
+        try:
+            dialog = niftiexport_ui.exportNodesDialog([good, bad], show=False, executor=FailsOne())
+            dialog.show()
+            dialog.setFolder(self.out)
+            runner = dialog.export()
+            self.assertTrue(runner.wait(30))
+            self.assertEqual(len(runner.result.images), 1)
+            exported = [text for text in toasts if "Exported" in text]
+            self.assertEqual(len(exported), 1, toasts)
+            self.assertIn("Exported 1 NIfTI image", exported[0])
+            self.assertIn("1 failed", exported[0])
+            self.assertIn("bad_scan", exported[0])
+            self.assertIn("File name too long", exported[0])
+            self.assertNotIn("Errno", exported[0])
+        finally:
+            niftiexport_ui.message = original
+            slicer.mrmlScene.RemoveNode(good)
+            slicer.mrmlScene.RemoveNode(bad)
+
     def test_08af_many_masks_are_written_one_at_a_time(self):
         """One segmentation with many segments written as masks (a TotalSegmentator-like atlas, all in one layer): each mask is
         prepared only after the previous one was written and its array released (memory of one mask, not of all), the
