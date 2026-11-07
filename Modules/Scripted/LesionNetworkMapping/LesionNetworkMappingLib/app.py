@@ -68,6 +68,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import warnings
 
 PACKAGE = __package__ or "LesionNetworkMappingLib"
 LIB_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -164,7 +165,10 @@ def run_library_command(name, argv):
     # runpy (alter_sys) replaces sys.argv[0] by the module's file, so the parsers and hints take the name from jobs.APP_PROG
     jobs.APP_PROG = PROG
     try:
-        runpy.run_module(f"{PACKAGE}.{name}", run_name="__main__", alter_sys=True)
+        with warnings.catch_warnings():
+            # jobs is imported above (APP_PROG), so runpy warns that it runs a module that is already in sys.modules: expected here
+            warnings.filterwarnings("ignore", message=".*found in sys.modules after import of package", category=RuntimeWarning)
+            runpy.run_module(f"{PACKAGE}.{name}", run_name="__main__", alter_sys=True)
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
     finally:

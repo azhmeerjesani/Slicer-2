@@ -2805,11 +2805,27 @@ def _split_command(argv):
     return "", argv
 
 
+def _usage_text():
+    """Usage line, one-sentence description and command list for ``normalize`` without a command or with ``--help``."""
+    summary = " ".join(__doc__.split("\n\n")[0].split())
+    return (
+        f"usage: python -m LesionNetworkMappingLib.normalize [-h] {{{','.join(COMMANDS)}}} ...\n\n{summary}\n\n"
+        "commands:\n"
+        "  run     normalize one scan (and its lesion) to the template; 'run' is implied when the first argument is an option\n"
+        "  batch   normalize every subject of a study folder\n"
+        "  warp    warp another image with the transform of a finished run\n"
+        "  check   report whether BRAINSFit, BRAINSResample and the template files are available\n\n"
+        "example:\n"
+        "  python -m LesionNetworkMappingLib.normalize run --scan S [--lesion L] --out DIR\n\n"
+        "Use 'python -m LesionNetworkMappingLib.normalize <command> --help' for the options of a command."
+    )
+
+
 def main(argv):
     """Command-line entry point (see the module documentation); events go to standard output."""
     command, rest = _split_command(argv)
     if command is None:
-        print(jobs.command_text(__doc__), file=sys.stderr)
+        print(jobs.command_text(_usage_text()), file=sys.stderr)
         if not argv:
             jobs.emit("error", code="usage", message=f"Give a command: {', '.join(COMMANDS)}")
             return jobs.EXIT_USAGE

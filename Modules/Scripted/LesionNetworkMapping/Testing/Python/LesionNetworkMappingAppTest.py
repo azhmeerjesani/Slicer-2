@@ -361,6 +361,28 @@ class AppHelpersTest(unittest.TestCase):
         self.assertEqual(seen["prog"], "slicer-lnm")
         self.assertIsNone(jobs.APP_PROG)
 
+    def test_library_command_help_texts(self):
+        # 'slicer-lnm jobs' prints no runpy RuntimeWarning, and 'slicer-lnm normalize --help' prints a usage line, not the developer docstring
+        import io
+        import warnings
+        from contextlib import redirect_stderr
+
+        from LesionNetworkMappingLib import app
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            err = io.StringIO()
+            with redirect_stderr(err):
+                self.assertEqual(app.run_library_command("jobs", ["selftest", "--help"]), 0)
+        self.assertEqual([str(w.message) for w in caught if issubclass(w.category, RuntimeWarning)], [])
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertEqual(app.run_library_command("normalize", ["--help"]), 0)
+        text = err.getvalue()
+        self.assertTrue(text.startswith("usage: slicer-lnm normalize"), text[:80])
+        for internal in (":mod:", "A-10", "never imports slicer", "standard library at import"):
+            self.assertNotIn(internal, text)
+
     def test_usage_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, events, _out, _err = cli(tmp, os.path.join(tmp, "out"), "group", "--connectome", tmp, "--subject-list", "a,b", "--events", "json")
