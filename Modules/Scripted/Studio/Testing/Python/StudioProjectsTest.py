@@ -202,6 +202,20 @@ class StudioProjectsTest(unittest.TestCase):
                               ("/Users/a/Library/CloudStorage/GoogleDrive-a@b.c/My Drive/x", "Google Drive"), ("/Users/a/Box/x", "Box"),
                               ("/home/a/Documents/Slicer Studio", None), ("/home/a/boxes/x", None)):
             self.assertEqual(projects.syncedService(path), service, path)
+        # Box Drive on current macOS, but not a folder that merely starts with "box"
+        self.assertEqual(projects.syncedService("/Users/ana/Library/CloudStorage/Box-Box/Lab/Slicer Studio"), "Box")
+        self.assertIsNone(projects.syncedService("/Users/ana/Library/CloudStorage/Boxes/Lab"))
+        # A folder reached through a symbolic link into a synced folder
+        if hasattr(os, "symlink"):
+            synced = os.path.join(self.tempDir, "Dropbox", "Documents")
+            os.makedirs(synced)
+            link = os.path.join(self.tempDir, "LinkedDocuments")
+            try:
+                os.symlink(synced, link)
+            except OSError:
+                link = None
+            if link:
+                self.assertEqual(projects.syncedService(os.path.join(link, "Slicer Studio")), "Dropbox")
         # The environment wins and skips the chooser
         self.assertEqual(projects.root(), os.path.normpath(self.root))
         self.assertFalse(projects.needsChooser())

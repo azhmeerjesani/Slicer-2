@@ -537,8 +537,7 @@ def lnmFolder(rootPath=None):
     return os.path.join(rootPath or root(), LNM_DIR)
 
 
-def syncedService(path):
-    """The name of the cloud service that syncs ``path`` ("iCloud Drive", "Dropbox", ...), or None."""
+def _syncedServiceOfText(path):
     parts = [part.lower() for part in re.split(r"[\\/]+", os.path.normpath(str(path or ""))) if part]
     for fragment, service in SYNCED_FOLDERS:
         for index in range(len(parts) - len(fragment) + 1):
@@ -547,7 +546,27 @@ def syncedService(path):
         # Cloud folders are often named "Dropbox (Company)", "OneDrive - Company", "GoogleDrive-name@..."
         if len(fragment) == 1 and fragment[0] != "box" and any(part.startswith(fragment[0]) for part in parts):
             return service
+    # Box Drive on current macOS is a File Provider folder: ~/Library/CloudStorage/Box-Box (a prefix match on "box" alone
+    # would also catch folders like "Boxes", so it is limited to the CloudStorage folder).
+    for index, part in enumerate(parts[:-1]):
+        if part == "cloudstorage" and parts[index + 1].startswith("box-"):
+            return "Box"
     return None
+
+
+def syncedService(path):
+    """The name of the cloud service that syncs ``path`` ("iCloud Drive", "Dropbox", ...), or None.
+
+    The path as given is checked, and so is its real path (a folder reached through a symbolic link into a synced folder).
+    """
+    service = _syncedServiceOfText(path)
+    if service or not path:
+        return service
+    try:
+        real = os.path.realpath(os.path.expanduser(str(path)))
+    except (OSError, ValueError):
+        return None
+    return _syncedServiceOfText(real)
 
 
 def webFolderNotice(path, web=None):
