@@ -388,6 +388,34 @@ class _LabelTextToolTipFilter(qt.QObject):
         return False
 
 
+class _NoticeSlotHeightFilter(qt.QObject):
+    """Keep the inspector notice slot exactly as tall as its height-for-width (never taller).
+
+    A Preferred vertical policy lets the dock layout hand the slot spare height (a tall empty box); Maximum
+    caps it at the width-independent sizeHint, which cuts off the last wrapped line. So the cap follows
+    heightForWidth(width) instead.
+    """
+
+    def __init__(self, slot):
+        super().__init__(slot)
+        self._slot = slot
+        slot.installEventFilter(self)
+
+    def update(self):
+        slot = self._slot
+        layout = slot.layout()
+        if layout is None or slot.width <= 0:
+            return
+        needed = layout.heightForWidth(slot.width)
+        if needed > 0 and slot.maximumHeight != needed:
+            slot.setMaximumHeight(needed)
+
+    def eventFilter(self, obj, event):
+        if event.type() in (qt.QEvent.Resize, qt.QEvent.LayoutRequest, qt.QEvent.Show):
+            self.update()
+        return False
+
+
 class MainWindowCloseGuard(qt.QObject):
     """Keep the settings that Slicer saves when the main window is closed readable by Classic and
     by other Slicer installations (they share the settings file).
@@ -1528,6 +1556,7 @@ class Shell:
         self._inspectorHandle = None
         #: Inspector notice slot (above the module panel) and its notice: [widget, key, workspace key]
         self._noticeSlot = None
+        self._noticeSlotFilter = None
         self._notice = None
         #: Last toast messages: (time.time(), text, level)
         self._recentMessages = collections.deque(maxlen=RECENT_MESSAGES_COUNT)
@@ -2305,6 +2334,7 @@ class Shell:
         # A rounded notice (VISUAL 4.8) inset like the inspector cards
         noticeLayout.setContentsMargins(12, 8, 12, 4)
         noticeLayout.setSpacing(0)
+        self._noticeSlotFilter = _NoticeSlotHeightFilter(self._noticeSlot)
         self._noticeSlot.hide()
         layout.insertWidget(layout.indexOf(self._modulePanel()), self._noticeSlot)
 
@@ -2317,6 +2347,7 @@ class Shell:
         self._noticeSlot.hide()
         self._noticeSlot.setObjectName("")
         self._noticeSlot.deleteLater()
+        self._noticeSlotFilter = None
         self._noticeSlot = None
 
     def _makeTopBarFocusable(self):
@@ -3378,6 +3409,8 @@ class Shell:
                 self._notice = None
                 visible = False
         self._noticeSlot.setVisible(visible)
+        if visible and self._noticeSlotFilter is not None:
+            self._noticeSlotFilter.update()
 
     def setDataProbeVisible(self, visible):
         dataProbe = self._dataProbe()

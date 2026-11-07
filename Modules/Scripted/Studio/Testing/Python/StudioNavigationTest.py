@@ -1143,6 +1143,13 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             studioShell.setInspectorNotice(short, key="short", workspace="draw")
             self._pump(10)
             self.assertLessEqual(slot.height, short.heightForWidth(short.width) + 20)
+            # Spare height in the inspector never goes to the notice (a tall empty box above the tools): the slot
+            # is capped at its height-for-width, for a one-line notice and for a wrapped one
+            self.assertLessEqual(slot.maximumHeight, slot.heightForWidth(slot.width) + 2, "the notice slot may take spare height")
+            studioShell.setInspectorNotice(notice, key="wrapped2", workspace="draw")
+            self._pump(10)
+            self.assertLessEqual(slot.maximumHeight, slot.heightForWidth(slot.width) + 2)
+            self.assertGreaterEqual(slot.maximumHeight, slot.heightForWidth(slot.width), "the cap cuts off the last line")
             studioShell.setInspectorNotice(None)
         finally:
             if savedWidth is None:
