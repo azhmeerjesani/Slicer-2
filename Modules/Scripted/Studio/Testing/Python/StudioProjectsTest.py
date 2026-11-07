@@ -1913,6 +1913,23 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertIn("Slicer Studio/Projects/Head", note.text)
             closeDialog()
 
+            # A link to the data folder (the container's ~/Documents) is shown as /data/... with the same note
+            fakeData = os.path.realpath(os.path.join(self.tempDir, "fakedata"))
+            os.makedirs(os.path.join(fakeData, "Exports"))
+            linkPath = os.path.join(self.tempDir, "Documents")
+            os.symlink(fakeData, linkPath)
+            realWebData = projects.WEB_DATA_FOLDER
+            projects.WEB_DATA_FOLDER = fakeData
+            try:
+                projects.showInFileManager(os.path.join(linkPath, "Exports"))
+                self.assertEqual(field(), fakeData + "/Exports", "the link is resolved to the data folder path")
+                note = dialog().findChild(qt.QLabel, "StudioLocationHostNote")
+                self.assertIsNotNone(note, "a folder reached through a link to the data folder gets the host note")
+                self.assertIn("In that folder: Exports", note.text)
+                closeDialog()
+            finally:
+                projects.WEB_DATA_FOLDER = realWebData
+
             # The buttons of the interface
             from StudioLib import projects_ui
 

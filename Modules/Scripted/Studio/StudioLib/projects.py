@@ -2532,6 +2532,20 @@ def _openDesktopUrl(url):
     return bool(qt.QDesktopServices.openUrl(url))
 
 
+def _webHostDataPath(path):
+    """``path`` shown as ``/data/...`` when its real path is the host data folder or under it (the web build's
+    ``~/Documents`` is a link to ``/data``), else ``path`` unchanged.
+    """
+    path = str(path)
+    try:
+        real = os.path.realpath(path)
+    except Exception:
+        return path
+    if real == WEB_DATA_FOLDER or real.startswith(WEB_DATA_FOLDER + "/"):
+        return real
+    return path
+
+
 def _showLocationDialog(kind, text):
     """A non-modal message with ``text`` (a folder path or a link) in a read-only field and a [Copy] button.
 
@@ -2548,6 +2562,8 @@ def _showLocationDialog(kind, text):
             pass
         _locationDialog = None
     folder = kind == "folder"
+    if folder and isWebBuild():
+        text = _webHostDataPath(text)
     # While a modal dialog is open (Settings, Report a Bug, About) Qt drops the clicks on every window that does not descend
     # from it, and the window manager keeps the modal dialog on top: a window that is a child of the main window would
     # show behind the dialog with a [Copy] button that does nothing. A child of the modal dialog is neither blocked nor hidden.
