@@ -2165,3 +2165,22 @@ class StudioTemplatesTest(unittest.TestCase):
         self.assertIn("Start on Lab ICBM (image missing)", titles)
         # A usable template still works
         templates.setDefault(templates.BUILTIN_DEFAULT)
+
+    def test_42_names_are_shown_as_typed(self):
+        """'&' is not a menu mnemonic and '<b>..</b>' is not rich text in the Start on template menu and the Settings list."""
+        templates, ui = self.templates, self.ui
+        ampersand = self._add(name="R&D Lab ICBM")
+        markup = self._add(name="<b>Bold</b> brain", path=self.image15)
+        menu = qt.QMenu()
+        ui.populateTemplateMenu(menu, onStart=lambda templateId: None)
+        shown = {action.data(): action.text for action in menu.actions() if action.objectName == "studioTemplateMenuItem"}
+        self.assertEqual(shown[ampersand.id], "R&&D Lab ICBM")  # Qt displays "&&" as one "&"
+        self.assertEqual(shown[markup.id], "<b>Bold</b> brain")
+        menu.deleteLater()
+        panel = ui.TemplatesSettingsPanel()
+        panel.refresh()
+        for template, expected in ((ampersand, "R&D Lab ICBM"), (markup, "<b>Bold</b> brain")):
+            label = panel.rowFor(template.id).findChild(qt.QLabel, "studioTemplateName")
+            self.assertEqual(label.text, expected)
+            self.assertEqual(int(label.textFormat), int(qt.Qt.PlainText))
+        panel.deleteLater()

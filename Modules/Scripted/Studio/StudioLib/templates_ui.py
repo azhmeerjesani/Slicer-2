@@ -90,6 +90,7 @@ def _setElidedText(label, text, maxWidth, mode=None):
     """
     metrics = qt.QFontMetrics(label.font)
     shown = metrics.elidedText(text or "", mode if mode is not None else qt.Qt.ElideRight, maxWidth)
+    label.setTextFormat(qt.Qt.PlainText)  # names and file names are shown as typed, never as rich text
     label.setText(shown)
     label.setToolTip(text if shown != text else "")
 
@@ -1055,7 +1056,8 @@ def populateTemplateMenu(menu, onStart=None):
     defaultId = templates.defaultTemplateId()
     for template in templates.listTemplates():
         missing = template.isUser and not template.isAvailable()
-        action = menu.addAction(_("{name} (image missing)").format(name=template.name) if missing else template.name)
+        shownName = template.name.replace("&", "&&")  # a single "&" would make the next letter a menu mnemonic
+        action = menu.addAction(_("{name} (image missing)").format(name=shownName) if missing else shownName)
         action.setObjectName("studioTemplateMenuItem")
         action.setData(template.id)
         action.setCheckable(True)
