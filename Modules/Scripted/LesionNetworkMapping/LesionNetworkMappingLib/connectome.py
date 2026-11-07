@@ -292,6 +292,28 @@ def _read_npy(path, shape, dtype, out=None):
     return out
 
 
+def not_a_bundle_hint(path):
+    """Why ``path`` is not a bundle and what to do next, or None when it is not one of the known cases.
+
+    Known cases: a bundle whose download or conversion is unfinished (only connectome.partial.json), and a folder
+    that holds exactly one finished ``.lnmc`` bundle (for example the destination chosen for a download).
+    """
+    path = os.path.abspath(os.fspath(path))
+    if os.path.isfile(os.path.join(path, MANIFEST_NAME)):
+        return None
+    if os.path.isfile(os.path.join(path, PARTIAL_MANIFEST_NAME)):
+        return "unfinished"
+    try:
+        inside = [
+            os.path.join(path, n)
+            for n in sorted(os.listdir(path))
+            if n.lower().endswith(".lnmc") and os.path.isfile(os.path.join(path, n, MANIFEST_NAME))
+        ]
+    except OSError:
+        return None
+    return inside[0] if len(inside) == 1 else None
+
+
 class ConnectomeBundle:
     """Read access to a connectome bundle directory."""
 

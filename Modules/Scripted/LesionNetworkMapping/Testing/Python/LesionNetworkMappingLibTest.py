@@ -86,6 +86,24 @@ class _TempDirTestCase(unittest.TestCase):
         return os.path.join(self.tmp, *parts)
 
 
+class NotABundleHintTest(_TempDirTestCase):
+    def test_unfinished_parent_and_other_folders(self):
+        partial = self.path("dest", "x.lnmc")
+        os.makedirs(partial)
+        with open(os.path.join(partial, connectome.PARTIAL_MANIFEST_NAME), "w") as f:
+            f.write("{}")
+        self.assertEqual(connectome.not_a_bundle_hint(partial), "unfinished")
+        done = self.path("dest2", "y.lnmc")
+        os.makedirs(done)
+        with open(os.path.join(done, connectome.MANIFEST_NAME), "w") as f:
+            f.write("{}")
+        self.assertEqual(connectome.not_a_bundle_hint(self.path("dest2")), done)
+        os.makedirs(self.path("empty"))
+        self.assertIsNone(connectome.not_a_bundle_hint(self.path("empty")))
+        self.assertIsNone(connectome.not_a_bundle_hint(self.path("missing")))
+        self.assertIsNone(connectome.not_a_bundle_hint(done))
+
+
 class NiftiTest(_TempDirTestCase):
     def test_round_trip_orientations_dtypes_and_compression(self):
         rng = np.random.default_rng(0)

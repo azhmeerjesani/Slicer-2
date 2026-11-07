@@ -4521,7 +4521,18 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         try:
             bundle = self.logic.registerConnectome(path)
         except Exception as exc:
-            slicer.util.errorDisplay(_("This folder is not a connectome bundle: {error}").format(error=exc), windowTitle=_("Add connectome"))
+            from LesionNetworkMappingLib import connectome
+
+            hint = connectome.not_a_bundle_hint(path) if isinstance(exc, FileNotFoundError) else None
+            if hint == "unfinished":
+                message = _("This connectome download is not finished yet: {path}\n\nResume it from Get a connectome….")
+                message = message.format(path=path)
+            elif hint:
+                message = _("This folder holds the connectome bundle {name}. Choose that folder instead: {path}")
+                message = message.format(name=os.path.basename(hint), path=hint)
+            else:
+                message = _("This folder is not a connectome bundle: {error}").format(error=exc)
+            slicer.util.errorDisplay(message, windowTitle=_("Add connectome"))
             return
         self.refreshConnectomes(select=bundle.path)
 
