@@ -854,6 +854,27 @@ class CorruptLesionMessagesTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn(path, last_event(events)["message"])
 
+    def test_bids_app_text_uses_singular_for_one_lesion_and_subject(self):
+        root = os.path.join(self.tmp, "singular")
+        os.makedirs(root)
+        bids = make_bids(root, self.fx["study"])
+        for path in app.find_bids_lesions(bids)["sub-03"][1:]:
+            os.remove(path)
+        for sid in list(app.find_bids_lesions(bids)):
+            if sid != "sub-03":
+                for path in app.find_bids_lesions(bids)[sid]:
+                    os.remove(path)
+        events = []
+        emit = lambda kind, **fields: events.append({"event": kind, **fields})  # noqa: E731
+        app.prepare_bids_study(bids, os.path.join(self.tmp, "one out"), group_map="patient=case,HC=control", emit=emit)
+        message = next(event["message"] for event in events if event.get("code") == "bids_study")
+        self.assertIn("1 lesion mask;", message)
+        self.assertIn("(1 subject)", message)
+        line = pipeline.Emitter(mode="text").text("start", {"run_id": "r", "n_rows": 1, "n_compute": 1, "n_reuse": 0, "n_excluded": 0, "estimate_s": 9})
+        self.assertIn(": 1 subject, 1 to map", line)
+        line = pipeline.Emitter(mode="text").text("start", {"run_id": "r", "n_rows": 2, "n_compute": 2, "n_reuse": 0, "n_excluded": 0, "estimate_s": 9})
+        self.assertIn(": 2 subjects, 2 to map", line)
+
     def test_bids_app_reports_an_unreadable_lesion_as_unreadable(self):
         bids = make_bids(self.tmp, self.fx["study"])
         target = os.path.join(bids, "sub-03", "anat", f"sub-03_space-{SPACE}_label-lesion_mask.nii.gz")

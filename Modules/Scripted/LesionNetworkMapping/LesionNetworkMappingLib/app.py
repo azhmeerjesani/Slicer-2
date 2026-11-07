@@ -356,7 +356,7 @@ def prepare_bids_study(input_dir, output_dir, group_column=None, group_map=None,
     summary["lesion_files"] = len(chosen)
     summary["other_lesion_files"] = skipped
     if emit is not None:
-        emit("info", code="bids_study", message=f"BIDS input: {len(chosen)} lesion masks; study {os.path.join(*STUDY_RELPATH)} ({len(study)} subjects)")
+        emit("info", code="bids_study", message=f"BIDS input: {len(chosen)} lesion mask{'' if len(chosen) == 1 else 's'}; study {os.path.join(*STUDY_RELPATH)} ({len(study)} subject{'' if len(study) == 1 else 's'})")
         for item in unusable:
             emit("warning", code="bids_lesion_unreadable", participant_id=item["participant_id"], message=item["message"])
         for item in skipped:

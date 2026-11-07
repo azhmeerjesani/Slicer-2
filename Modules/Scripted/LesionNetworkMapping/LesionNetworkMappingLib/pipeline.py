@@ -854,7 +854,7 @@ class Emitter:
         names = [name for name, _ in STAGES]
         head = f"[{names.index(stage) + 1}/{len(STAGES)} {STAGE_LABELS[stage]}]" if stage in STAGE_LABELS else ""
         if event == "start":
-            return f"Pipeline {fields.get('run_id') or ''}: {fields.get('n_rows')} subjects, {fields.get('n_compute')} to map, {fields.get('n_reuse')} reused, {fields.get('n_excluded')} excluded; about {_duration_text(fields.get('estimate_s'))}"
+            return f"Pipeline {fields.get('run_id') or ''}: {fields.get('n_rows')} subject{'' if fields.get('n_rows') == 1 else 's'}, {fields.get('n_compute')} to map, {fields.get('n_reuse')} reused, {fields.get('n_excluded')} excluded; about {_duration_text(fields.get('estimate_s'))}"
         if event == "stage":
             reason = fields.get("reason")
             return f"{head} {fields.get('status')}" + (f": {reason}" if reason else "")
