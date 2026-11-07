@@ -2386,6 +2386,58 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         slicer.mrmlScene.RemoveNode(segmentation)
         slicer.mrmlScene.RemoveNode(volume)
 
+    def test_25e_layout_key_without_hovered_view_keeps_the_view_focus(self):
+        """Keyboard-only use (BB-1): F6 put the keys on Red and the pointer rests on the top bar. A layout key (Alt+3,
+        Alt+4, Alt+2) or Search used to move the keys to an inspector button; Red, still shown, keeps them now.
+        """
+        from StudioLib import layouts, shell
+
+        volume, segmentation = self._loadScanAndSegmentation()
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        slicer.util.setSliceViewerLayers(background=volume, fit=True)
+        studioShell.setLayoutFromPicker("focus")
+        self._pump(10)
+        self.mainWindow.activateWindow()
+        self._pump()
+        if not self.mainWindow.isActiveWindow:
+            self.skipTest("the main window cannot be activated on this display")
+        topBar = studioShell.topBar
+        qt.QCursor.setPos(topBar.menuButton.mapToGlobal(qt.QPoint(2, 2)))
+        self._pump()
+        _hovered, view = shell.Shell._hoveredSliceView()
+        if view is not None:
+            self.skipTest("the pointer cannot be put outside the views on this display")
+        redFocus = self.layoutManager.sliceWidget("Red").sliceView().VTKWidget()
+
+        def redHasFocus(context):
+            self._pump(10)
+            focusWidget = slicer.app.focusWidget()
+            self.assertEqual(focusWidget, redFocus,
+                             f"{context}: the focus is on {focusWidget.className() if focusWidget else None} "
+                             f"{focusWidget.objectName if focusWidget else ''}")
+
+        for context, change in (
+            ("Alt+3", lambda: studioShell.setLayoutFromPicker("fourup")),
+            ("Alt+4", lambda: studioShell.setLayoutFromPicker("row")),
+            ("Alt+2", lambda: studioShell.setLayoutFromPicker("single")),
+            ("Search layout", lambda: topBar.runLayoutChange(lambda: self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView))),
+        ):
+            studioShell.setLayoutFromPicker("focus")
+            self._pump(10)
+            if layouts.isMaximized():
+                layouts.restoreMaximized()
+                self._pump(10)
+            redFocus.setFocus(qt.Qt.TabFocusReason)
+            self._pump()
+            self.assertEqual(slicer.app.focusWidget(), redFocus)
+            if context == "Alt+2":
+                studioShell.hoverTracker.lastSliceViewName = "Red"
+            change()
+            redHasFocus(context)
+        slicer.mrmlScene.RemoveNode(segmentation)
+        slicer.mrmlScene.RemoveNode(volume)
+
     def test_25_page_keys_step_the_hovered_view(self):
         """PageUp and PageDown step the slice view under the pointer also when the focus is on a tool tile of Draw (they
         used to scroll the inspector); over the inspector they scroll it as before; a text input keeps them. A view

@@ -1119,7 +1119,24 @@ class TopBar:
         focusNow = qt.QApplication.focusWidget()
         if focusBefore is not None and focusNow == focusBefore and not shellModule._isInView(focusNow):
             return
-        self.shell.focusHoveredView()
+        if self.shell.focusHoveredView():
+            return
+        # No view is under the pointer (keyboard-only use, the pointer rests on the top bar): the view that had the
+        # keys (F6, Tab) and is still shown keeps them, instead of the next widget in the inspector.
+        if (
+            focusBefore is not None
+            and focusNow != focusBefore
+            and shellModule._isInView(focusBefore)
+            and not shellModule._isInView(focusNow)
+            and not shellModule._isTextInput(focusNow)
+            and qt.QApplication.activePopupWidget() is None
+            and qt.QApplication.activeModalWidget() is None
+        ):
+            try:
+                if focusBefore.isVisible() and focusBefore.focusPolicy != qt.Qt.NoFocus:
+                    focusBefore.setFocus(qt.Qt.OtherFocusReason)
+            except (RuntimeError, ValueError):
+                pass
 
     def _updateLayoutPicker(self):
         layoutManager = slicer.app.layoutManager()
