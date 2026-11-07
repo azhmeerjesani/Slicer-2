@@ -1309,9 +1309,20 @@ def _colorbar(bar, x, y, width, height, fonts, text_px, small_px):
     items.append(Annotation("bar", x, y, w=width, h=height, colors=colors, role=bar["label"]))
     items.append(Annotation("rect", x, y + height, w=width, h=1, color="#000000"))
     rows = _label_rows(ticks, fonts, small_px)
+    # Where each label sits (left, right, top offset below the bar, row), so that the tick line of a label on a
+    # lower row stops above any label on an upper row that it would otherwise strike through
+    spans = []
     for (tx, label, is_threshold), row in zip(ticks, rows, strict=True):
         tick = height * (0.9 if is_threshold else 0.45) + row * COLORBAR_ROW_EM * small_px
-        items.append(Annotation("line", tx, y + height, w=tx, h=y + height + tick, size=1, color="#000000", role="threshold tick" if is_threshold else "tick"))
+        half = fonts.width(label, small_px) / 2
+        spans.append((tx - half, tx + half, tick + small_px * 0.15, row))
+    for (tx, label, is_threshold), row in zip(ticks, rows, strict=True):
+        tick = height * (0.9 if is_threshold else 0.45) + row * COLORBAR_ROW_EM * small_px
+        line = tick
+        for left, right, top, other in spans:
+            if other < row and left <= tx <= right:
+                line = min(line, top - 1)
+        items.append(Annotation("line", tx, y + height, w=tx, h=y + height + line, size=1, color="#000000", role="threshold tick" if is_threshold else "tick"))
         items.append(Annotation("text", tx, y + height + tick + small_px * 0.15, text=label, size=small_px, anchor="mt", role="threshold value" if is_threshold else "tick value"))
     return items
 

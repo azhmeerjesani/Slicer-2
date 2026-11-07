@@ -771,6 +771,18 @@ class FiguresTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(len(ends), 1)
 
+    def test_colorbar_clamped_threshold_tick_does_not_strike_end_label(self):
+        # BB-1: a threshold beyond --window is marked at the bar end; its long tick line crossed the end label
+        figure = figures.montage(self.tmap, self.template, "A 0", threshold=3.0, window=2.0, sign="both", **SMALL)
+        labels = [item for item in figure.annotations if item.role == "tick value"]
+        lines = [item for item in figure.annotations if item.role == "threshold tick"]
+        self.assertEqual(len(lines), 2)
+        for line in lines:
+            for item in labels:
+                half = figure.fonts.width(item.text, item.size) / 2
+                if item.x - half <= line.x <= item.x + half:
+                    self.assertLessEqual(line.h, item.y, f"threshold tick at {line.x} strikes {item.text!r}")
+
     def test_colorbar_label_and_caption_state_the_displayed_sign(self):
         # --sign neg shows T <= -t: the bar must not read "T >= t", and the caption must say which tail is shown
         rule = {"kind": "custom_t", "value": 4.0}
