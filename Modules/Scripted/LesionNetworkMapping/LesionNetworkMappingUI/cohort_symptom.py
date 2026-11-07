@@ -563,6 +563,10 @@ class SymptomTab(CohortTab):
         self.showLodo(lodo)
         comparisons = [control.get("text") for control in record.get("controls") or [] if control.get("text")]
         reason = (record.get("comparison") or {}).get("reference_missing_reason")
+        if reason:
+            from LesionNetworkMappingLib import slnm
+
+            reason = slnm.app_reason(reason)
         texts = [f"<div>{html.escape(_('Control {name}: {text}').format(name=control.get('name') or control.get('desc') or '', text=control.get('text')))}</div>"
                  for control in record.get("controls") or [] if control.get("text")]
         if comparisons and reason:

@@ -875,6 +875,21 @@ def _prepare_permutations(sdesign, n_perm, what):
     return count, exhaustive
 
 
+#: Where to build the missing reference maps, for reasons that people read in the app (same text as validate.REFERENCE_BUILD_HINT)
+REFERENCE_BUILD_HINT = "build them in the Connectome card: Manage… > Build reference maps"
+_REFERENCE_COMMAND = re.compile(r"\((?:python -m LesionNetworkMappingLib\.|slicer-lnm )reference build\)")
+
+
+def app_reason(text):
+    """``text`` with the command-line pointer of the "no valid reference maps" reason replaced by the app's own wording.
+
+    For records that a command line run wrote (slnm.json) and that the app shows; the record keeps the command.
+    """
+    if not isinstance(text, str):
+        return text
+    return _REFERENCE_COMMAND.sub(f"({REFERENCE_BUILD_HINT})", text)
+
+
 def _reference_for(args, cohort, subjects_sha, indices, mask_shape, build_hint=None):
     """(Reference or None, reason, info dict) for the partial comparison.
 

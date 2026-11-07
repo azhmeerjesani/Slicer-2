@@ -656,6 +656,21 @@ class CommandLineTest(unittest.TestCase):
         _, reason, _ = slnm._reference_for(args, None, None, bundle.mask_indices, tuple(bundle.shape))
         bundle.close()
         self.assertIn("python -m LesionNetworkMappingLib.reference build", reason)
+        # The app words the pointer for people (Symptom tab, Calibrate card): no terminal command
+        from LesionNetworkMappingLib import validate
+
+        self.assertEqual(slnm.REFERENCE_BUILD_HINT, validate.REFERENCE_BUILD_HINT)
+        for text in (reason, "no valid reference maps (slicer-lnm reference build)"):
+            shown = slnm.app_reason(text)
+            self.assertIn("Manage… > Build reference maps", shown)
+            self.assertNotIn("python -m", shown)
+            self.assertNotIn("slicer-lnm", shown)
+        self.assertIn("python -m", reason)
+        args = type("Args", (), {"bundle": bundle_path})()
+        bundle = connectome.ConnectomeBundle.open(bundle_path)
+        _, hinted, _ = slnm._reference_for(args, None, None, bundle.mask_indices, tuple(bundle.shape), build_hint=slnm.REFERENCE_BUILD_HINT)
+        bundle.close()
+        self.assertNotIn("python -m", hinted)
 
     def _rewrite_datasets(self, participants, filler):
         with open(participants, encoding="utf-8") as f:
