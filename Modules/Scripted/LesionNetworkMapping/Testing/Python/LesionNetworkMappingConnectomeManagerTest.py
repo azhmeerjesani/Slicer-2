@@ -530,6 +530,38 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
         finally:
             importDialog.hide()
 
+    def test_same_name_connectomes_are_told_apart(self):
+        from LesionNetworkMapping import CONNECTOMES_SETTING
+        from LesionNetworkMappingLib import connectome
+
+        folders = [os.path.join(self.tmp, "same full"), os.path.join(self.tmp, "same subset")]
+        paths = []
+        for folder, n in zip(folders, (6, 3), strict=True):
+            os.makedirs(folder, exist_ok=True)
+            paths.append(os.path.abspath(connectome.make_synthetic(os.path.join(folder, "c.lnmc"), shape=(8, 9, 8), n_subjects=n, runs=(12, 12), name="Same Name")["path"]))
+        import qt
+
+        saved = list(qt.QSettings().value(CONNECTOMES_SETTING) or [])
+        try:
+            for path in paths:
+                self.logic.registerConnectome(path)
+            self.widget.refreshConnectomes(select=paths[0])
+            combo = self.widget.connectomeCombo
+            texts = [combo.itemText(i) for i in range(combo.count)]
+            same = [combo.itemText(combo.findData(p)) for p in paths]
+            self.assertEqual(len(set(same)), 2, same)
+            self.assertIn("6", same[0])
+            self.assertIn("3", same[1])
+            # Names that are unique stay as they are
+            self.assertEqual([t for t in texts if t.startswith("Manager one")], ["Manager one (SYNTHETIC — not real data)"])
+            manager = self.widget.openManager()
+            _pump(100)
+            names = [manager.table.item(r, 0).text() for r in range(manager.table.rowCount) if "Same Name" in manager.table.item(r, 0).text()]
+            self.assertEqual(len(set(names)), 2, names)
+        finally:
+            qt.QSettings().setValue(CONNECTOMES_SETTING, saved)
+            self.widget.refreshConnectomes(select=self.paths[0])
+
 
 if __name__ == "__main__":
     unittest.main()

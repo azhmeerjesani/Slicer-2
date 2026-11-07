@@ -394,6 +394,33 @@ def migrateNormalizationReferences(scene=None):
     return 0
 
 
+def disambiguateConnectomeLabels(entries):
+    """Labels for registered connectomes that tell bundles of the same name apart.
+
+    ``entries`` is a list of ``(label, nSubjects, path)``. A label that is unique stays as it is; labels that several
+    bundles share (the full connectome and a fetched subset) get " · N subjects", and bundles that still look
+    alike (same name and N) also get their folder name.
+    """
+    counts = {}
+    for label, _n, _path in entries:
+        counts[label] = counts.get(label, 0) + 1
+    marked = []
+    for label, n, path in entries:
+        if counts[label] > 1 and n is not None:
+            label = f"{label} · " + _("{n} subjects").format(n=f"{n:,}")
+        marked.append(label)
+    counts = {}
+    for label in marked:
+        counts[label] = counts.get(label, 0) + 1
+    result = []
+    for label, (_l, _n, path) in zip(marked, entries, strict=True):
+        if counts[label] > 1:
+            folder = os.path.basename(os.path.dirname(os.path.normpath(path))) or os.path.basename(os.path.normpath(path))
+            label = f"{label} · {folder}"
+        result.append(label)
+    return result
+
+
 def legacyConnectomeName(path):
     """Name-only connectome identifier of a legacy path whose bundle is not on this computer: its folder name."""
     name = re.split(r"[/\\]", (path or "").rstrip("/\\"))[-1]
@@ -1915,6 +1942,9 @@ class ConnectomeManagerDialog(qt.QDialog):
         table = self.table
         table.setRowCount(len(self.rows))
         selectRow = -1
+        labels = disambiguateConnectomeLabels(
+            [(row["name"] + (f" ({DEMO_LABEL})" if row.get("synthetic") else ""), None if row.get("error") else row["n_subjects"], row["path"]) for row in self.rows],
+        )
         for index, row in enumerate(self.rows):
             if row.get("error"):
                 values = [row["name"], "—", "—", "—", "—", "—", "—", _("cannot be opened")]
@@ -1925,8 +1955,7 @@ class ConnectomeManagerDialog(qt.QDialog):
                 except Exception:
                     accepted = False
                 terms = _("accepted") if accepted else _("not accepted")
-                name = row["name"] + (f" ({DEMO_LABEL})" if row.get("synthetic") else "")
-                values = [name, f"{row['n_subjects']:,}", f"{row['time_points']:,}", f"{row['n_voxels']:,}", row["size"], row.get("space") or "—", terms,
+                values = [labels[index], f"{row['n_subjects']:,}", f"{row['time_points']:,}", f"{row['n_voxels']:,}", row["size"], row.get("space") or "—", terms,
                           self._referenceText(row)]
             for column, value in enumerate(values):
                 item = qt.QTableWidgetItem(str(value))
@@ -4180,13 +4209,17 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             paths.append(current)
         wasBlocked = self.connectomeCombo.blockSignals(True)
         self.connectomeCombo.clear()
+        entries = []
         for path in paths:
-            label = os.path.basename(path.rstrip("/\\")) or path
+            label, count = os.path.basename(path.rstrip("/\\")) or path, None
             try:
                 bundle = self.logic.openBundle(path)
                 label = bundle.name + (f" ({DEMO_LABEL})" if self.logic.isSynthetic(bundle) else "")
+                count = bundle.n_subjects
             except Exception:
                 label += " " + _("(cannot be opened)")
+            entries.append((label, count, path))
+        for label, path in zip(disambiguateConnectomeLabels(entries), paths, strict=True):
             self.connectomeCombo.addItem(label, path)
             self.connectomeCombo.setItemData(self.connectomeCombo.count - 1, path, qt.Qt.ToolTipRole)
         index = self.connectomeCombo.findData(current) if current else -1
