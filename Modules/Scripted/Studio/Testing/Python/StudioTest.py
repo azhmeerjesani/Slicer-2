@@ -496,6 +496,26 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             assertNoKeyCollisions(keys)
             self.assertEqual(ambiguousShortcuts(self.mainWindow), {}, f"ambiguous shortcuts in {ws.title}")
 
+    def test_4b_computed_network_map_is_not_a_draw_source(self):
+        """A map that Map computed (LNM.Result, no Studio.Role) is never offered as the scan to draw on."""
+        import numpy as np
+        from StudioLib import draw
+
+        scan = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "scan for source test")
+        slicer.util.updateVolumeFromArray(scan, np.zeros((4, 4, 4), np.float32))
+        networkMap = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "computed map for source test")
+        slicer.util.updateVolumeFromArray(networkMap, np.zeros((4, 4, 4), np.float32))
+        networkMap.SetAttribute("LNM.Result", "1")
+        networkMap.SetAttribute("LNM.Statistic", "T")
+        try:
+            editable = draw._editableVolumes()
+            self.assertIn(scan, editable)
+            self.assertNotIn(networkMap, editable)
+            self.assertFalse(draw._isEditableSource(networkMap))
+        finally:
+            slicer.mrmlScene.RemoveNode(scan)
+            slicer.mrmlScene.RemoveNode(networkMap)
+
     def test_5_layouts(self):
         """The Studio layouts are registered with the canonical XML (SPEC 9.7 rule 3)."""
         from StudioLib import layouts

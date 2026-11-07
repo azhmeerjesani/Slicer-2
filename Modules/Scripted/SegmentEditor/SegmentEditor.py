@@ -164,13 +164,16 @@ def tileLabelText(text, metrics, width, padding=0):
 
 def isEditableSourceVolume(node):
     """True if ``node`` may be a source volume of the studio presentation: a scalar volume that is not a
-    reference image (Studio.Role figure or statmap), not a colour (vector) image and not a single slice.
+    reference image (Studio.Role figure or statmap), not a computed network map (LNM.Result / LNM.Statistic, which
+    carries no Studio.Role), not a colour (vector) image and not a single slice.
     """
     if node is None or not node.IsA("vtkMRMLScalarVolumeNode") or node.IsA("vtkMRMLLabelMapVolumeNode"):
         return False
     if node.IsA("vtkMRMLVectorVolumeNode"):
         return False
     if node.GetAttribute("Studio.Role") in ("figure", "statmap"):
+        return False
+    if node.GetAttribute("LNM.Result") == "1" or node.GetAttribute("LNM.Statistic"):
         return False
     imageData = node.GetImageData()
     return imageData is None or 1 not in imageData.GetDimensions()
