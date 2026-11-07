@@ -578,6 +578,33 @@ class StudioProjectsTest(unittest.TestCase):
         with self.assertRaises(projects.ProjectError):
             projects.renameFolder(closedPath, "STUDY")
 
+    def test_07bb_duplicate_is_complete_before_it_gets_its_name(self):
+        """A Duplicate commits with its final rename: the copy is complete (scene named, project.json closed) before it."""
+        projects = self.projects
+        service = self._service()
+        volume, _path = self._userVolume()
+        self._lesion(volume)
+        self._projectFor(service)
+        self._save(service)
+        studyPath = service.renameProject("Study")
+        seen = []
+        realRename = os.rename
+
+        def spyRename(source, target, *args, **kwargs):
+            if str(source).endswith(projects.COPY_MARKER):
+                data = projects.readProjectJson(source) or {}
+                seen.append((sorted(n for n in os.listdir(source) if n.endswith(".mrml")), data.get("name"), data.get("state")))
+            return realRename(source, target, *args, **kwargs)
+
+        os.rename = spyRename
+        try:
+            copyPath = projects.duplicateFolder(studyPath)
+            self.io.backgroundWriter().drain(30.0)
+        finally:
+            os.rename = realRename
+        self.assertEqual(seen, [(["Study copy.mrml"], "Study copy", "closed")])
+        self.assertTrue(os.path.isfile(os.path.join(copyPath, "Study copy.mrml")))
+
     def test_07c_rename_refuses_a_name_that_differs_only_in_letter_case(self):
         """No rename leaves two project folders whose names differ only in case (they cannot coexist on macOS or Windows)."""
         projects = self.projects

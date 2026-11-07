@@ -1517,11 +1517,14 @@ def renameFolder(path, newName):
     return newPath
 
 
-def renameSceneFile(projectPath, oldScene):
-    """Rename <old name>.mrml (and its <old name>_Private folder) to <folder name>.mrml after the folder was renamed."""
+def renameSceneFile(projectPath, oldScene, name=None):
+    """Rename <old name>.mrml (and its <old name>_Private folder) to <folder name>.mrml after the folder was renamed.
+
+    ``name`` is the folder name the scene follows when the folder will only get it later (default: the folder's own name).
+    """
     if not oldScene:
         return None
-    name = os.path.basename(os.path.normpath(projectPath))
+    name = name or os.path.basename(os.path.normpath(projectPath))
     oldBase = os.path.basename(oldScene)
     oldPath = os.path.join(projectPath, oldBase)
     newPath = os.path.join(projectPath, name + SCENE_EXTENSION)
@@ -1848,6 +1851,12 @@ def duplicateFolder(path, onDone=None, onError=None):
                 # Made meanwhile by another program (another Slicer Studio): take the next free name
                 targetName = uniqueName(parent, newName, isFile=False)
                 target = os.path.join(parent, targetName)
+            # Complete the copy (scene name, project.json) inside the temporary folder: the final rename is then the only
+            # step that commits, and a crash never leaves a folder with the name of the copy that still says "open"
+            renameSceneFile(temporary, scene, name=targetName)
+            data = readProjectJson(temporary) or {}
+            data.update(name=targetName, state="closed", created=_isoTime(), modified=_isoTime())
+            autosave_io.atomicWriteJson(projectFile(temporary), data)
             os.rename(temporary, target)
         except OSError as error:
             removePaths([temporary])
@@ -1865,10 +1874,6 @@ def duplicateFolder(path, onDone=None, onError=None):
         finally:
             _releaseCopyName(parent, newName)
         _unlockCopy(descriptor, lockPath)
-        renameSceneFile(target, scene)
-        data = readProjectJson(target) or {}
-        data.update(name=targetName, state="closed", created=_isoTime(), modified=_isoTime())
-        autosave_io.atomicWriteJson(projectFile(target), data)
         return target
 
     autosave_io.backgroundWriter().submit(copy, onDone=onDone, onError=onError)
