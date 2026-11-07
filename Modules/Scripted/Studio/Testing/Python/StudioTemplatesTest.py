@@ -2137,3 +2137,31 @@ class StudioTemplatesTest(unittest.TestCase):
         self.assertFalse(os.path.exists(stale2))
         self.assertTrue(os.path.exists(live))
         shutil.rmtree(live)
+
+    def test_41_missing_image_cannot_be_the_default(self):
+        """BB-1: "Set as default" on a template whose image is gone did nothing visible but wrote Studio/Templates/Default,
+        so the template became the default without notice when its file came back. Now the button is disabled, setDefault
+        refuses, and the palette entry says "image missing".
+        """
+        from StudioLib import templates_ui as ui
+
+        templates = self.templates
+        template = self._add(name="Lab ICBM")
+        os.remove(template.imagePath)
+        template = templates.templateById(template.id)
+        self.assertFalse(template.isAvailable())
+        panel = ui.TemplatesSettingsPanel()
+        panel.refresh()
+        button = panel.rowFor(template.id).findChild(qt.QPushButton, "studioTemplateSetDefault")
+        self.assertIsNotNone(button)
+        self.assertFalse(button.enabled, "disabled for an unusable template")
+        self.assertTrue(button.toolTip)
+        qt.QSettings().remove(templates.DEFAULT_KEY)
+        with self.assertRaises(ValueError):
+            templates.setDefault(template.id)
+        panel.setDefault(template.id)
+        self.assertFalse(qt.QSettings().contains(templates.DEFAULT_KEY), "nothing is written")
+        titles = [item["title"] for item in ui.paletteItems() if item["id"].startswith("templates.start.")]
+        self.assertIn("Start on Lab ICBM (image missing)", titles)
+        # A usable template still works
+        templates.setDefault(templates.BUILTIN_DEFAULT)

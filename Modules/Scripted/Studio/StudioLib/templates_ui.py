@@ -913,6 +913,9 @@ class TemplatesSettingsPanel(ctk.ctkSettingsPanel):
             layout.addWidget(defaultLabel)
         else:
             setDefault = _button(_("Set as default"), "studioTemplateSetDefault", lambda templateId=template.id: self.setDefault(templateId), role="ghost")
+            if not template.isAvailable():
+                setDefault.setEnabled(False)
+                setDefault.setToolTip(_("The image file of this template is missing, so it cannot be the default. Remove the template and add it again."))
             layout.addWidget(setDefault)
         more = qt.QToolButton()
         more.setObjectName("studioTemplateMoreButton")
@@ -947,7 +950,13 @@ class TemplatesSettingsPanel(ctk.ctkSettingsPanel):
         showAddDialog(self.window(), onAdded=lambda template: self.refresh())
 
     def setDefault(self, templateId):
-        templates.setDefault(templateId)
+        try:
+            templates.setDefault(templateId)
+        except ValueError as error:
+            # The row's button is disabled for such a template; this is for a stale row or a script
+            if not slicer.app.testingEnabled():
+                slicer.util.warningDisplay(str(error), windowTitle=_("Set as default"))
+            return
         self.refresh()
 
     def remove(self, templateId, confirm=True):
@@ -1073,7 +1082,9 @@ def paletteItems(shell=None):
          "synonyms": ["templates", "default template", "remove template", "template settings", "mni templates"]},
     ]
     for template in templates.userTemplates():
-        items.append({"id": f"templates.start.{template.slug}", "title": _("Start on {name}").format(name=template.name), "category": _("Action"),
+        missing = not template.isAvailable()
+        title = _("Start on {name} (image missing)") if missing else _("Start on {name}")
+        items.append({"id": f"templates.start.{template.slug}", "title": title.format(name=template.name), "category": _("Action"),
                       "callback": lambda templateId=template.id: startOn(templateId), "synonyms": ["template", "start on template", template.space.lower()],
                       "description": template.metaLine()})
     return items

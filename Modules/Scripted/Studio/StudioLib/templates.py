@@ -1163,6 +1163,9 @@ def setDefault(templateId):
     template = templateById(templateId)
     if template is None:
         raise ValueError(_("No template {id}").format(id=templateId))
+    if not template.isAvailable():
+        # defaultTemplateId() would ignore it for now and take it up silently if its image came back
+        raise ValueError(_("The image of the template {name} is missing, so it cannot be the default.").format(name=template.name))
     qt.QSettings().setValue(DEFAULT_KEY, template.id)
     _notify()
     return template
