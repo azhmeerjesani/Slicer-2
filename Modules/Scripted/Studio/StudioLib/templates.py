@@ -604,6 +604,10 @@ def checkCompanion(detection, path):
         return False, _("This file cannot be read as an image: {error}").format(error=error)
     if detection is None or detection.shape is None:
         return False, _("Choose the template image first.")
+    if header["frames"] > 1:
+        # Only the template image keeps its first volume (copyFiles); a mask or head is copied as it is, and a 4D mask has no usable voxels
+        return False, _("{name} holds several volumes: a brain mask or head image must be one volume (save its first volume as a separate file).").format(
+            name=os.path.basename(path))
     refusal = xformRefusal(header)
     if refusal:
         return False, os.path.basename(path) + ": " + refusal

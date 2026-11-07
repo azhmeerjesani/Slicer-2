@@ -2097,3 +2097,15 @@ class StudioTemplatesTest(unittest.TestCase):
                 shutil.rmtree(inside)
                 self.assertTrue(templates.removeTemplate(template.id, confirmDelete=lambda: True))
                 self.assertFalse(os.path.exists(folder))
+
+    def test_39_four_volume_mask_or_head_is_refused(self):
+        """BB-1: a brain mask or head image with several volumes is refused with a plain reason (it would be copied as it is and
+        Normalize would fail on it); the same 3D file is accepted.
+        """
+        templates = self.templates
+        detection = templates.identify(self.image15)
+        self.assertTrue(templates.checkCompanion(detection, self.mask15)[0])
+        ok, reason = templates.checkCompanion(detection, self.image4d)
+        self.assertFalse(ok)
+        self.assertIn("several volumes", reason)
+        self.assertIn(os.path.basename(self.image4d), reason)
