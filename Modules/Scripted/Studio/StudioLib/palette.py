@@ -732,7 +732,12 @@ def _selectTool(shell, effectName):
 
 
 def _openSettings(panel=None):
-    slicer.app.openSettingsDialog(panel or "")
+    # An empty panel name would make Qt log "QStackedWidget::setCurrentWidget: widget 0x0 not
+    # contained in stack" once the dialog has a current page: pass the name only when there is one
+    if panel:
+        slicer.app.openSettingsDialog(panel)
+    else:
+        slicer.app.openSettingsDialog()
 
 
 def _showToolBar(toolBar, shell):

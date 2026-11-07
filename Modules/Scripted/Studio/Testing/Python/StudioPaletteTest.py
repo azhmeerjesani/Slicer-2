@@ -1373,3 +1373,25 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             palette._menuActions = realMenuActions
         menu.deleteLater()
+
+    def test_17_open_settings_without_a_panel_passes_no_empty_name(self):
+        """Search > Settings... used to call openSettingsDialog("") and Qt then logged "QStackedWidget::setCurrentWidget: widget 0x0
+        not contained in stack" once the dialog had shown another page (BB-1): with no panel the call has no argument.
+        """
+        from StudioLib import palette
+
+        calls = []
+
+        class FakeApp:
+            def openSettingsDialog(self, *args):
+                calls.append(args)
+
+        realSlicer = palette.slicer
+        palette.slicer = types.SimpleNamespace(app=FakeApp())
+        try:
+            palette._openSettings()
+            palette._openSettings("")
+            palette._openSettings("Updates")
+        finally:
+            palette.slicer = realSlicer
+        self.assertEqual(calls, [(), (), ("Updates",)])
