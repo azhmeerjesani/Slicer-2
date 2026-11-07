@@ -1937,6 +1937,24 @@ class StudioAutosaveTest(unittest.TestCase):
         scene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "More")
         self.assertNotEqual(fingerprint(), before)
 
+    def test_zc1_folderAttributeIsAnEdit(self):
+        """BB-1: an attribute set on a subject hierarchy item (``SetItemAttribute``: the DICOM tag editor, extensions)
+        does not modify the node; it is an edit of the project and changes the fingerprint (quit lost it).
+        """
+        scene = slicer.mrmlScene
+        hierarchy = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(scene)
+        folder = hierarchy.CreateFolderItem(hierarchy.GetSceneItemID(), "Group A")
+
+        def fingerprint():
+            return self.io.sceneFingerprint(scene, self.io.sentinelIds())
+
+        before = fingerprint()
+        hierarchy.SetItemAttribute(folder, "Group", "case")
+        after = fingerprint()
+        self.assertNotEqual(after, before, "a folder attribute is not seen as an edit")
+        hierarchy.SetItemAttribute(folder, "Group", "control")
+        self.assertNotEqual(fingerprint(), after)
+
     def test_zc_labelLockAndTreeOrderAreEdits(self):
         """BB-1: the label, the description and the lock of a control point (they invoke a custom modified event, not
         Modified(), so the node's MTime stays) and the order of siblings in the Data tree (the fingerprint sorted the items)

@@ -311,7 +311,8 @@ def contentMTime(node):
 
 
 def _hierarchyItems(node):
-    """What the user sees of a subject hierarchy: the data node or the name of each item and of its parent.
+    """What the user sees of a subject hierarchy: the data node or the name of each item, its parent and its attributes
+    (the DICOM tag editor and extensions set them with ``SetItemAttribute``, which does not modify the node).
 
     The numbers of the items are not part of it: entering and leaving Draw (segments shown in the hierarchy) removes
     and makes the items again with new numbers for the same data, which is not a change of the project. The order of the
@@ -335,7 +336,11 @@ def _hierarchyItems(node):
         for index in range(ids.GetNumberOfIds()):
             itemId = ids.GetId(index)
             parent = node.GetItemParent(itemId)
-            entries.append((key(itemId), "" if parent == sceneItem else key(parent)))
+            names = node.GetItemAttributeNames(itemId)
+            attributes = tuple(
+                (name, node.GetItemAttribute(itemId, name)) for name in sorted(names)
+            ) if names else ()
+            entries.append((key(itemId), "" if parent == sceneItem else key(parent), attributes))
     except Exception:
         entries = [("modified", node.GetMTime())]  # an unreadable hierarchy counts as changed whenever it is modified
     return entries
