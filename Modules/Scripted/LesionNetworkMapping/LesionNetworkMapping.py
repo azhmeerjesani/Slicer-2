@@ -2100,7 +2100,7 @@ class ConnectomeManagerDialog(qt.QDialog):
         from LesionNetworkMappingUI import jobrunner
 
         path = self.selectedPath()
-        if not path:
+        if not path or (self.job is not None and not self.job.isFinished()):
             return None
         self.statusLabel.setText(_("Estimating the reference build…"))
 
@@ -2122,9 +2122,9 @@ class ConnectomeManagerDialog(qt.QDialog):
             self._startReference(path)
 
         spec = jobrunner.JobSpec("LesionNetworkMapping", ["job", "LesionNetworkMappingLib.reference", "estimate", "--bundle", path], title=_("Estimate"), heavy=False,
-                                 kind="reference-estimate", name="reference-estimate", runRoot=jobrunner.defaultRunRoot(), onDone=estimated)
-        self.job = jobrunner.instance().submit(spec)
-        return self.job
+                                 kind="reference-estimate", name="reference-estimate", runRoot=jobrunner.defaultRunRoot())
+        # Through _submit so the dialog is busy (button disabled) while the estimate runs: one click, one question, one build
+        return self._submit(spec, estimated)
 
     def _startReference(self, path):
         from LesionNetworkMappingUI import jobrunner

@@ -279,6 +279,29 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
             widget._demoJob = None
             widget._updateDemoButton()
 
+    def test_reference_button_is_disabled_while_its_estimate_runs(self):
+        # A double click on "Build reference maps…" asks once (and would build once): the estimate job marks the dialog busy
+        widget = self.widget
+        manager = widget.openManager()
+        _pump(100)
+        self._select(manager, self.paths[0])
+        asked = []
+        original = slicer.util.confirmYesNoDisplay
+        slicer.util.confirmYesNoDisplay = lambda text, **kwargs: asked.append(text) and False
+        try:
+            manager.referenceButton.click()
+            _pump(50)
+            self.assertFalse(manager.referenceButton.enabled)
+            self.assertIsNone(manager.buildReference(), "a second request while the estimate runs starts nothing")
+            deadline = time.monotonic() + 120
+            while (manager.job is not None or not asked) and time.monotonic() < deadline:
+                _pump(50)
+            _pump(200)
+            self.assertEqual(len(asked), 1, asked)
+            self.assertTrue(manager.referenceButton.enabled)
+        finally:
+            slicer.util.confirmYesNoDisplay = original
+
     def test_import_dialog_label_count_uses_the_singular_for_one_lesion(self):
         from LesionNetworkMappingUI import manager_parity
 
