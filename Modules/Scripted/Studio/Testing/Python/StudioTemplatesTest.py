@@ -2109,3 +2109,31 @@ class StudioTemplatesTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("several volumes", reason)
         self.assertIn(os.path.basename(self.image4d), reason)
+
+    def test_40_staging_folder_of_a_killed_add_is_removed(self):
+        """BB-1: an add killed while copying (crash, force quit, power cut) left its hidden ".adding-<id>-<pid>" folder in
+        Templates/ for good. The next read of Templates/ or add removes it, but not the folder of a live process.
+        """
+        import subprocess
+
+        templates = self.templates
+        folder = templates.templatesFolder()
+        os.makedirs(folder, exist_ok=True)
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        stale = os.path.join(folder, f".adding-big-7t-{dead.pid}")
+        stale2 = os.path.join(folder, f".adding-other-{dead.pid}")
+        live = os.path.join(folder, f".adding-live-{os.getppid()}")
+        for path in (stale, stale2, live):
+            os.makedirs(path, exist_ok=True)
+            with open(os.path.join(path, "image.nii.gz"), "wb") as f:
+                f.write(b"x" * 1000)
+        templates.userTemplates()
+        self.assertFalse(os.path.exists(stale), "read of Templates/ removes the dead add's folder")
+        self.assertTrue(os.path.exists(live), "the folder of a live process is kept")
+        os.makedirs(stale, exist_ok=True)
+        self._add(name="After kill")
+        self.assertFalse(os.path.exists(stale), "an add removes it too")
+        self.assertFalse(os.path.exists(stale2))
+        self.assertTrue(os.path.exists(live))
+        shutil.rmtree(live)

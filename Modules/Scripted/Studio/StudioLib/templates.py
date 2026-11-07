@@ -884,12 +884,62 @@ def readRecord(folder):
     return record
 
 
+_STAGING_PREFIX = ".adding-"
+#: Staging folders of the adds running in this process (a lock guards it: adds run in worker threads)
+_activeStaging = set()
+_activeStagingLock = threading.Lock()
+
+
+def _processAlive(pid):
+    if sys.platform == "win32":
+        return True  # os.kill(pid, 0) would end the process there: keep what might belong to a live add
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # exists, but belongs to another user
+    return True
+
+
+def removeStaleStaging(folder):
+    """Remove the hidden ".adding-<id>-<pid>" folders of adds that never finished (the app was killed, crashed or lost
+    power while copying), so that they do not stay as invisible garbage. A folder of a live process, and one of an add
+    running in this process, is kept. Returns the number of folders removed.
+    """
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return 0
+    removed = 0
+    for name in names:
+        if not name.startswith(_STAGING_PREFIX):
+            continue
+        path = os.path.join(folder, name)
+        if not os.path.isdir(path):
+            continue
+        match = re.search(r"-(\d+)$", name)
+        if match is None:
+            continue
+        pid = int(match.group(1))
+        with _activeStagingLock:
+            if os.path.normpath(path) in _activeStaging:
+                continue
+        # The pid of this process without an active add is a leftover of an earlier run that had the same pid
+        if pid != os.getpid() and _processAlive(pid):
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        removed += 1
+    return removed
+
+
 def userTemplates(rootPath=None):
     """Your templates (folders of Templates/ with a template.json), sorted by name. Each has its own id: a folder copied
     in by hand with the id of another one gets its own first (``_makeCopiedIdsUnique``).
     """
     folder = templatesFolder(rootPath)
     entries = []
+    removeStaleStaging(folder)
     try:
         names = os.listdir(folder)
     except OSError:
@@ -1472,9 +1522,12 @@ def copyFiles(plan):
     """
     parent = os.path.dirname(plan.folder)
     os.makedirs(parent, exist_ok=True)
-    staging = os.path.join(parent, f".adding-{plan.record['id']}-{os.getpid()}")
+    removeStaleStaging(parent)
+    staging = os.path.join(parent, f"{_STAGING_PREFIX}{plan.record['id']}-{os.getpid()}")
     shutil.rmtree(staging, ignore_errors=True)
     os.makedirs(staging)
+    with _activeStagingLock:
+        _activeStaging.add(os.path.normpath(staging))
     try:
         record = dict(plan.record)
         record["sha256"] = {}
@@ -1505,6 +1558,9 @@ def copyFiles(plan):
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
+    finally:
+        with _activeStagingLock:
+            _activeStaging.discard(os.path.normpath(staging))
 
 
 def finishAdd(plan, record):
