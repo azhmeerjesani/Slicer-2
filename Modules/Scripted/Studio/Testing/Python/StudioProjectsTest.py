@@ -8017,6 +8017,34 @@ class StudioProjectsTest(unittest.TestCase):
             slicer.app.setProperty(firstrun.DISCLAIMER_HANDLED_PROPERTY, handled)
             mainWindow.setProperty(firstrun.CLOSE_MODE_PROPERTY, "")
 
+    def test_100_files_saved_elsewhere_come_back_under_their_plain_names(self):
+        """Classic "Save Data" into another folder points every node at the new files; the project's old files leave in the
+        same save, so the re-imported copies keep "Scan.nrrd" etc. instead of "Scan 2.nrrd" (BB-1).
+        """
+        service = self._service()
+        volume, _path = self._userVolume("Scan")
+        points = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Pts")
+        points.AddControlPoint((1, 2, 3))
+        project = self._projectFor(service)
+        self._save(service)
+        before = self._projectFiles(project)
+        self.assertIn("Markups/Pts.mrk.json", before)
+        elsewhere = os.path.join(self.tempDir, "elsewhere")
+        os.makedirs(elsewhere)
+        self.assertTrue(slicer.util.saveNode(volume, os.path.join(elsewhere, "Scan.nrrd")))
+        self.assertTrue(slicer.util.saveNode(points, os.path.join(elsewhere, "Pts.mrk.json")))
+        points.AddControlPoint((4, 5, 6))
+        self.assertTrue(slicer.util.saveNode(points, os.path.join(elsewhere, "Pts.mrk.json")))
+        self._save(service)
+        after = self._projectFiles(project)
+        self.assertFalse([path for path in after if " 2." in path], after)
+        self.assertIn("Markups/Pts.mrk.json", after)
+        self.assertEqual(sorted(path for path in after if path.startswith("Images/")), ["Images/Scan.nrrd"], after)
+        self.assertEqual(sorted(os.listdir(elsewhere)), ["Pts.mrk.json", "Scan.nrrd"], "the user's other folder is untouched")
+        for node in (volume, points):
+            self.assertTrue(os.path.abspath(node.GetStorageNode().GetFileName()).startswith(os.path.abspath(project.path)))
+
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 

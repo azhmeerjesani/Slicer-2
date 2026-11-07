@@ -678,17 +678,18 @@ def splitExtension(fileName):
     return base, extension
 
 
-def uniqueName(folder, name, reserved=(), isFile=True):
+def uniqueName(folder, name, reserved=(), isFile=True, free=()):
     """``name``, else "name 2", "name 3"... (before the extension of a file), so that nothing in ``folder`` is replaced.
 
-    ``reserved``: names already planned (compared case-insensitively, as on macOS and Windows). Worker-safe.
+    ``reserved``: names already planned (compared case-insensitively, as on macOS and Windows). ``free``: existing names
+    that the caller is about to replace or remove. Worker-safe.
     """
     reservedLower = {str(item).lower() for item in reserved}
     try:
         existing = {entry.lower() for entry in os.listdir(folder)} if os.path.isdir(folder) else set()
     except OSError:
         existing = set()
-    taken = existing | reservedLower
+    taken = (existing - {str(item).lower() for item in free}) | reservedLower
     base, extension = splitExtension(name) if isFile else (name, "")
     candidate = name
     index = 2

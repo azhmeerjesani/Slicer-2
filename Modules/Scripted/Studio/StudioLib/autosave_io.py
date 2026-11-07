@@ -2360,6 +2360,7 @@ class ProjectWriter(SlotWriter):
         storableNodes = scene.GetNodesByClass("vtkMRMLStorableNode")
         storableNodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         snapshotJobs = []
+        plan.freed = self._freedNames(plan, storableNodes, projectCanonical)
         for index in range(storableNodes.GetNumberOfItems()):
             node = storableNodes.GetItemAsObject(index)
             if node.GetHideFromEditors() and node.IsA("vtkMRMLSequenceNode") and node.GetSaveWithScene():
@@ -2437,6 +2438,28 @@ class ProjectWriter(SlotWriter):
             return True
         return inside and any(self._isTemporaryFile(path) for path in files)
 
+    def _freedNames(self, plan, storableNodes, projectCanonical):
+        """{(folder, lower-case name)} of files in the kind folders that no node references any more (the node was saved
+        elsewhere, e.g. by the Classic Save Data dialog) and that nobody changed since this writer recorded them: this
+        generation leaves them (they are orphans at its commit), so a new file may take their name instead of "name 2".
+        """
+        referenced = set()
+        for index in range(storableNodes.GetNumberOfItems()):
+            for path in _storagePaths(storableNodes.GetItemAsObject(index).GetStorageNode(), plan.rootDirectory):
+                referenced.add(_canonical(path))
+        freed = set()
+        for path, record in self.records.items():
+            if path in referenced or not _isUnder(path, projectCanonical) or self._isPrivateFile(path):
+                continue
+            folder = os.path.dirname(path)
+            if folder == projectCanonical or record["stat"] is None or _statOrNone(path) != record["stat"]:
+                continue  # the project folder holds the scene files; a changed file is kept
+            _base, extension = _projects().splitExtension(os.path.basename(path))
+            if extension.lower() in _COMPANION_SUFFIXES:
+                continue
+            freed.add((folder, os.path.basename(path).lower()))
+        return freed
+
     def needsMigration(self, scene):
         """True if files of the project are in a form that the next save replaces although nothing was edited: a file
         that a generation writes again (``_writtenAgain()``: a project saved by an earlier version), or .studio/sources.json
@@ -2482,7 +2505,9 @@ class ProjectWriter(SlotWriter):
 
     def _newPath(self, plan, folder, fileName):
         """A file name in ``folder`` that replaces nothing (on disk or planned in this generation)."""
-        name = _projects().uniqueName(folder, fileName, plan.reserved.get(_canonical(folder), ()))
+        folderKey = _canonical(folder)
+        free = {name for key, name in getattr(plan, "freed", ()) if key == folderKey}
+        name = _projects().uniqueName(folder, fileName, plan.reserved.get(folderKey, ()), free=free)
         self._reserve(plan, folder, name)
         return os.path.join(folder, name)
 
