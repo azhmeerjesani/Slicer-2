@@ -1957,6 +1957,30 @@ class StudioAutosaveTest(unittest.TestCase):
         hierarchy.SetItemAttribute(folder, "Group", "control")
         self.assertNotEqual(fingerprint(), after)
 
+    def test_zd_discardConfirmationSaysTrash(self):
+        """BB-1: Discard moves the session to the OS Trash, so its confirmation must not say "This cannot be undone"
+        (a user who believes it is deleted will not empty the Trash); it names the Trash.
+        """
+        from StudioLib import projects, recovery
+
+        folder = os.path.join(self.root, "session-trash")
+        os.makedirs(folder)
+        session = recovery.SessionInfo(folder, {"updated": ""}, "closed")
+        asked = []
+        moved = []
+        realQuestion, realMove, realMark = qt.QMessageBox.question, projects.moveToTrash, recovery.markSession
+        try:
+            qt.QMessageBox.question = lambda parent, title, text, *args: (asked.append(text), qt.QMessageBox.Discard)[1]
+            projects.moveToTrash = lambda path: (moved.append(path), True)[1]
+            recovery.markSession = lambda *args, **kwargs: None
+            self.assertTrue(recovery.discard(session))
+        finally:
+            qt.QMessageBox.question, projects.moveToTrash, recovery.markSession = realQuestion, realMove, realMark
+        self.assertEqual(moved, [folder])
+        self.assertEqual(len(asked), 1)
+        self.assertNotIn("cannot be undone", asked[0].lower())
+        self.assertIn("Trash", asked[0])
+
     def test_zc_labelLockAndTreeOrderAreEdits(self):
         """BB-1: the label, the description and the lock of a control point (they invoke a custom modified event, not
         Modified(), so the node's MTime stays) and the order of siblings in the Data tree (the fingerprint sorted the items)

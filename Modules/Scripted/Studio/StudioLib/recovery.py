@@ -879,6 +879,14 @@ def _classicMessage(text, details, report=None):
     slicer.util.infoDisplay(text, windowTitle=_("Recover autosaved work"), **kwargs)
 
 
+def discardQuestion(when):
+    """The confirmation text of Discard: the session goes to the Trash of the operating system, where it stays (with its
+    scene and data) until the Trash is emptied, so the text says so and does not claim that it is gone for good.
+    """
+    return _("Discard autosaved work from {time}? It is moved to the Trash, where it stays until you empty the Trash. "
+             "It may contain patient data.").format(time=when)
+
+
 def discard(session, confirm=True, parent=None):
     """Move a session to the trash of the operating system (after a confirmation). Return True if discarded."""
     if session.own or session.status in ("running", "possibly-crashed"):
@@ -886,7 +894,7 @@ def discard(session, confirm=True, parent=None):
     if confirm:
         when = _shortTime(session.updated)
         answer = qt.QMessageBox.question(parent or slicer.util.mainWindow(), _("Discard autosaved work"),
-                                         _("Discard autosaved work from {time}? This cannot be undone.").format(time=when),
+                                         discardQuestion(when),
                                          qt.QMessageBox.Discard | qt.QMessageBox.Cancel, qt.QMessageBox.Cancel)
         if answer != qt.QMessageBox.Discard:
             return False
