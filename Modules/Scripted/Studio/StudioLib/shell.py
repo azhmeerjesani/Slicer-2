@@ -3277,8 +3277,11 @@ class Shell:
         self._inspectorHiddenByUser = True
         self._updateInspectorHandle()
         ws = workspaces.workspace(self.currentWorkspace() or self._transientOrigin)
-        if ws is not None:
+        handleShown = self._inspectorHandleWanted()  # not over the Library canvas: name only controls that exist
+        if ws is not None and handleShown:
             text = _("Inspector hidden · click the {workspace} tab or the {handle} handle to show it").format(workspace=ws.title, handle="\u2039")
+        elif ws is not None:
+            text = _("Inspector hidden · click the {workspace} tab to show it").format(workspace=ws.title)
         else:
             text = _("Inspector hidden · click the {handle} handle to show it").format(handle="\u2039")
         self.toast(text, level="consequence", action=lambda: self.setInspectorVisible(True), actionText=_("Show"),
