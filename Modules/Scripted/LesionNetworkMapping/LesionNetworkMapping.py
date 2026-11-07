@@ -4372,6 +4372,19 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         segment = segNode.GetSegmentation().GetSegment(segmentId) if segNode is not None and segmentId and hasattr(segNode, "GetSegmentation") else None
         return segment.GetName() if segment is not None else ""
 
+    def _parkedSeedHint(self, parked, lesion):
+        """What to choose in Seed to show the map of a parked run (same connectome) again: its segment, and its segmentation
+        when the chosen seed is a segment of another segmentation (a segment of the same name would not be a hint to act on).
+        """
+        segment = self._parkedSegmentName(parked) or lesion
+        nodeId = (parked.get("runSeed") or ("", ""))[0]
+        segNode = slicer.mrmlScene.GetNodeByID(nodeId) if nodeId else None
+        if segNode is not None and nodeId != self._seedKey()[0]:
+            return _("No map of this lesion yet: the map of {lesion} was computed for the segment “{segment}” of the segmentation “{segmentation}”; choose that segmentation in Seed to show it again.").format(
+                lesion=lesion, segment=segment, segmentation=segNode.GetName())
+        return _("No map of this lesion yet: the map of {lesion} was computed for the segment “{segment}”; choose that segment in Seed to show it again.").format(
+            lesion=lesion, segment=segment)
+
     def _parkedRunShown(self):
         """The latest parked run whose map is still in the scene (the Result card names it), or None."""
         for parked in reversed(list(self._parkedRuns.values())):
@@ -5694,8 +5707,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             lesion = parked["state"][0] or _("the lesion")
             runBundle = parked["runBundle"]
             if runBundle is not None and self.bundle is not None and self._connectomeKey(runBundle.path) == self._connectomeKey(self.bundle.path):
-                self.resultTitleLabel.setText(_("No map of this lesion yet: the map of {lesion} was computed for the segment “{segment}”; choose that segment in Seed to show it again.").format(
-                    lesion=lesion, segment=self._parkedSegmentName(parked) or lesion))
+                self.resultTitleLabel.setText(self._parkedSeedHint(parked, lesion))
             else:
                 self.resultTitleLabel.setText(_("No map with this connectome yet: the map of {lesion} was computed with {connectome}; choose that connectome to show it again.").format(
                     lesion=lesion, connectome=runBundle.name if runBundle is not None else _("another connectome")))

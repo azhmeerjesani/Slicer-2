@@ -135,6 +135,29 @@ class LesionNetworkMappingSeedModeMapUITest(unittest.TestCase):
         self.assertFalse(displayNode.GetVisibility2DFill(), "the Lesion page does not show the lesion as an outline again")
         self.assertIs(widget.ctx.currentRun, run)
 
+    def test_parked_run_hint_names_the_segmentation_of_another_segmentation(self):
+        """BB-1 map-single:parked-run-hint-names-segment-of-other-segmentation: with a segment of the same name chosen in
+        another segmentation, the hint names the segmentation to choose, not the segment already selected.
+        """
+        widget = self.widget
+        scene = slicer.mrmlScene
+        mapped = scene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions")
+        mappedSegment = mapped.GetSegmentation().AddEmptySegment("lesion-a", "Lesion")
+        other = scene.AddNewNodeByClass("vtkMRMLSegmentationNode", "sub-02_lesion")
+        otherSegment = other.GetSegmentation().AddEmptySegment("lesion-b", "Lesion")
+        parked = {"runSeed": (mapped.GetID(), mappedSegment), "state": ("Lesions-Lesion",), "runBundle": None}
+        original = widget._seedKey
+        self.addCleanup(setattr, widget, "_seedKey", original)
+        widget._seedKey = lambda: (other.GetID(), otherSegment)
+        text = widget._parkedSeedHint(parked, "Lesions-Lesion")
+        self.assertIn("segmentation \u201cLesions\u201d", text)
+        self.assertIn("choose that segmentation", text)
+        # The same segmentation chosen (another segment): the segment is what to choose
+        widget._seedKey = lambda: (mapped.GetID(), "other-segment")
+        text = widget._parkedSeedHint(parked, "Lesions-Lesion")
+        self.assertIn("choose that segment in Seed", text)
+        self.assertNotIn("segmentation", text)
+
 
 if __name__ == "__main__":
     unittest.main()
