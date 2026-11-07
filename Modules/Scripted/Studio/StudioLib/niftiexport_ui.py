@@ -677,8 +677,11 @@ class ExportDialog(qt.QDialog):
         # erased segments, closed images): Exports/nifti then matches the project as it is now
         stale = niftiexport.earlierExportFiles(jobs, readme[0]) if readme and jobs else []
         if existing and stale:
-            ui.setNotice(self.existingNotice, _("{count} files already exist and will be replaced, and {stale} files of an earlier export that are "
-                                                "not part of this one will be removed, after you confirm").format(count=len(existing), stale=len(stale)))
+            replaced = _("1 file already exists and will be replaced") if len(existing) == 1 else \
+                _("{count} files already exist and will be replaced").format(count=len(existing))
+            removed = _("1 file of an earlier export that is not part of this one will be removed") if len(stale) == 1 else \
+                _("{stale} files of an earlier export that are not part of this one will be removed").format(stale=len(stale))
+            ui.setNotice(self.existingNotice, _("{replaced}, and {removed}, after you confirm").format(replaced=replaced, removed=removed))
         elif stale:
             ui.setNotice(self.existingNotice, (_("1 file of an earlier export is not part of this one and will be removed after you confirm: {name}")
                                                if len(stale) == 1 else

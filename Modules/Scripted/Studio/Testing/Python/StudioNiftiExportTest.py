@@ -1702,6 +1702,7 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertEqual(asked[0][1], stale)
         self.assertNotIn("manual_mask.nii.gz", asked[0][1])
         self.assertIn("4 files of an earlier export that are not part of this one will be removed", notice)
+        self.assertIn("3 files already exist and will be replaced, and 4 files of an earlier export", notice)
         self.assertTrue(all(os.path.exists(os.path.join(folder, name)) for name in stale), "Cancel removes nothing")
         # The real question names them apart from the files it replaces
         dialog = niftiexport_ui.exportProjectDialog(show=False, executor=autosave_io.InlineExecutor(), mapOptions={})
@@ -1756,6 +1757,29 @@ class StudioNiftiExportTest(unittest.TestCase):
                          ["sub-03_label-Edge_desc-lesion_mask.json", "sub-03_label-Edge_desc-lesion_mask.nii.gz"])
         self.assertEqual(sorted(name for name in os.listdir(folder) if "_mask" in name), ["manual_mask.nii.gz"])
         self._assertNoAbsolutePaths(project.path)
+
+    def test_09aa_reexport_notice_uses_the_singular_for_one_file(self):
+        """Renaming the only scan leaves just README.txt to replace: the notice says '1 file already exists', not '1 files'."""
+        from StudioLib import autosave_io, niftiexport_ui, projects
+
+        project = projects.createProject("NIfTI notice")
+        projects.setCurrentProject(project)
+        folder = self.export.projectExportFolder(create=True)
+        scan = self._phantom("sub-04_T1w", np.array([[-1.0, 0, 0, 10], [0, -1.0, 0, 10], [0, 0, 1.0, -10], [0, 0, 0, 1]]))
+        dialog = niftiexport_ui.exportProjectDialog(show=False, executor=autosave_io.InlineExecutor(), mapOptions={})
+        runner = dialog.export(confirm=lambda files: True)
+        self.assertTrue(runner.wait(60))
+        dialog.close()
+        scan.SetName("sub-05_T1w")
+        dialog = niftiexport_ui.exportProjectDialog(show=False, executor=autosave_io.InlineExecutor(), mapOptions={})
+        try:
+            self.assertEqual([os.path.basename(path) for path in dialog._existing], ["README.txt"])
+            notice = dialog.existingNotice.findChild("QLabel", "StudioNoticeBoxText").text
+        finally:
+            dialog.close()
+        self.assertIn("1 file already exists and will be replaced, and 2 files of an earlier export", notice)
+        self.assertNotIn("1 files", notice)
+        self.assertTrue(os.path.isdir(folder))
 
     def test_10_entry_points(self):
         """Library's Open now ⋯, Draw's lesion ⋯ and Search list the exports; a figure is not exportable."""
