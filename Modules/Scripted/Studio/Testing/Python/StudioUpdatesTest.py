@@ -476,6 +476,20 @@ class StudioUpdatesTest(unittest.TestCase):
         with self.assertRaisesRegex(updates.UpdateError, "connection was interrupted"):
             updates.fetchManifest(self.feed)
 
+    def test_NonManifestAnswerIsPlainSentence(self):
+        """A proxy block page, a login page, an empty answer or binary data is reported in plain words, not with the
+        JSON parser's text.
+        """
+        updates = self.updates
+        for body in (b"<html><body>Blocked by proxy</body></html>", b"", b"\xff\xfe", "Please log in"):
+            with self.assertRaises(updates.UpdateError) as caught:
+                updates.parseManifest(body)
+            text = str(caught.exception)
+            self.assertIn("did not send an update manifest", text)
+            self.assertTrue(text.endswith("and try again."), text)
+            for raw in ("JSON", "Expecting", "line 1", "codec", "char 0"):
+                self.assertNotIn(raw, text)
+
     def test_OfflineMessagesArePlainSentences(self):
         """No connection (a closed port, a name that cannot be resolved, a timeout) is a plain message without the error
         number or the library's text, and it ends in a full stop so that the next sentence can follow it.

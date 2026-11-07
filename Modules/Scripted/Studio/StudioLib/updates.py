@@ -382,8 +382,11 @@ def parseManifest(content):
     """Return the ``Manifest`` of ``content`` (bytes, text or dict), or raise ``UpdateError`` if it is not valid."""
     try:
         data = content if isinstance(content, dict) else json.loads(content.decode("utf-8") if isinstance(content, (bytes, bytearray)) else content)
-    except (ValueError, UnicodeDecodeError) as error:
-        raise UpdateError(_("The update manifest is not valid JSON: {error}").format(error=error))
+    except (ValueError, UnicodeDecodeError):
+        # an answer that is not JSON at all is not from our feed: a proxy block page, a login page or an empty answer;
+        # the parser's own text ("Expecting value: line 1 column 1") would only confuse
+        raise UpdateError(_("The update server did not send an update manifest (a proxy or login page may be in the way). "
+                            "Check your internet connection, try another network, and try again."))
     if not isinstance(data, dict):
         raise UpdateError(_("The update manifest is not a JSON object."))
     problems = []
