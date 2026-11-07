@@ -384,7 +384,11 @@ class AddTemplateDialog(qt.QDialog):
         self.spaceLabelEdit = qt.QLineEdit()
         self.spaceLabelEdit.setObjectName("studioAddTemplateSpaceName")
         self.spaceLabelEdit.setPlaceholderText(_("Your label (optional)"))
-        self.spaceLabelEdit.setMaximumWidth(180)
+        # Room for the placeholder and a short label at the app font of the run (the field was squeezed to 97 px at 125%).
+        fm = qt.QFontMetrics(self.spaceLabelEdit.font)
+        textWidth = fm.horizontalAdvance(self.spaceLabelEdit.placeholderText) if hasattr(fm, "horizontalAdvance") else fm.width(self.spaceLabelEdit.placeholderText)
+        self.spaceLabelEdit.setMinimumWidth(textWidth + 32)
+        self.spaceLabelEdit.setMaximumWidth(max(180, textWidth + 48))
         spaceRow.addWidget(self.spaceLabelEdit)
         form.addLayout(spaceRow, 1, 1)
         form.addWidget(_label(_("Contrast"), "studioAddTemplateContrastLabel", 13, color="text2"), 2, 0)

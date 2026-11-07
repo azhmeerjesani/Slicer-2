@@ -2184,3 +2184,25 @@ class StudioTemplatesTest(unittest.TestCase):
             self.assertEqual(label.text, expected)
             self.assertEqual(int(label.textFormat), int(qt.Qt.PlainText))
         panel.deleteLater()
+
+    def test_43_space_label_field_fits_its_placeholder_at_larger_font(self):
+        original = qt.QApplication.font()
+        try:
+            for factor in (1.0, 1.25, 1.5):
+                font = qt.QFont(original)
+                font.setPointSizeF(original.pointSizeF() * factor)
+                qt.QApplication.setFont(font)
+                dialog = self.ui.AddTemplateDialog()
+                try:
+                    dialog.show()
+                    slicer.app.processEvents()
+                    edit = dialog.spaceLabelEdit
+                    fm = qt.QFontMetrics(edit.font)
+                    need = fm.horizontalAdvance(edit.placeholderText) if hasattr(fm, "horizontalAdvance") else fm.width(edit.placeholderText)
+                    self.assertGreaterEqual(edit.minimumWidth, need + 16, factor)
+                    self.assertGreaterEqual(edit.width, need + 16, factor)
+                finally:
+                    dialog.close()
+                    dialog.deleteLater()
+        finally:
+            qt.QApplication.setFont(original)
