@@ -390,6 +390,26 @@ class AppHelpersTest(unittest.TestCase):
                 self.assertEqual(code, 2, option)
                 self.assertIn(option, events[-1]["message"])
                 self.assertIn("nosuch.nii.gz", events[-1]["message"])
+            # A missing --design / --pipeline-config file names the option and the file, not a raw FileNotFoundError
+            for option in ("--design", "--pipeline-config"):
+                code, events, _out, _err = cli(tmp, os.path.join(tmp, "out"), "group", "--connectome", tmp, option, os.path.join(tmp, "nosuch.json"), "--events", "json")
+                self.assertEqual(code, 2, option)
+                self.assertIn(option, events[-1]["message"])
+                self.assertIn("nosuch.json", events[-1]["message"])
+                self.assertNotIn("FileNotFoundError", events[-1]["message"])
+            # ... and so does a broken one (no JSONDecodeError text alone)
+            broken = os.path.join(tmp, "broken.json")
+            with open(broken, "w", encoding="utf-8") as f:
+                f.write("{not json")
+            with self.assertRaises(ValueError) as caught:
+                app.design_options(broken)
+            self.assertIn("--design", str(caught.exception))
+            self.assertIn("broken.json", str(caught.exception))
+            args = app._parser().parse_args(["in", "out", "group", "--connectome", "c", "--accept-terms", "--pipeline-config", broken])
+            with self.assertRaises(ValueError) as caught:
+                app.build_config(args, tmp, None)
+            self.assertIn("--pipeline-config", str(caught.exception))
+            self.assertIn("broken.json", str(caught.exception))
             # A figure convention typo or a template that is no NIfTI image is refused at once, not after the whole run (the report is the last stage)
             code, events, _out, _err = cli(tmp, os.path.join(tmp, "out"), "group", "--connectome", tmp, "--figure-convention", "radiologic", "--events", "json")
             self.assertEqual(code, 2)

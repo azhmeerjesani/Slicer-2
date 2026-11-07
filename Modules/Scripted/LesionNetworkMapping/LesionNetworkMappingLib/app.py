@@ -397,7 +397,10 @@ def design_options(path):
     """
     from . import design
 
-    spec = design.DesignSpec.load(path)
+    try:
+        spec = design.DesignSpec.load(path)
+    except (OSError, ValueError) as exc:  # a missing or broken file: name the option and the file, not the exception class
+        raise ValueError(f"The file of --design cannot be read: {path} ({exc})") from None
     unsupported = []
     if spec.test == "anova":
         unsupported.append("test anova")
@@ -459,7 +462,10 @@ def build_config(args, study_path, emit=None):
             for step in outside:  # never skipped silently (as 'slicer-lnm recipes config' says)
                 emit("info", code="recipe_step_outside", step=step["id"], message=f"Recipe {recipe.id}: step {step['id']} ({step['label']}) is not part of the pipeline: run it from {step['where']}")
     if args.pipeline_config:
-        values.update(pipeline.PipelineConfig.load(args.pipeline_config).to_json())
+        try:
+            values.update(pipeline.PipelineConfig.load(args.pipeline_config).to_json())
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"The file of --pipeline-config cannot be read: {args.pipeline_config} ({exc})") from None
         values.pop("participant_label", None)  # the subjects of this run are --participant-label's (default: all)
     if args.design:
         values.update(design_options(args.design))
@@ -757,8 +763,8 @@ def _main(argv):
         what = "The output folder is a file" if blocker == output_dir else f"The output folder cannot be created: {blocker} is a file"
         emit("error", code="usage", message=f"{what}: {args.output_dir}" if blocker == output_dir else f"{what} (output folder {args.output_dir})")
         return jobs.EXIT_USAGE
-    for option in ("template", "atlas", "atlas_labels"):
-        path = getattr(args, option)
+    for option in ("template", "atlas", "atlas_labels", "design", "pipeline_config"):
+        path = getattr(args, option, None)
         if path is not None and not os.path.isfile(path):
             emit("error", code="usage", message=f"The file of --{option.replace('_', '-')} does not exist: {path}")
             return jobs.EXIT_USAGE
