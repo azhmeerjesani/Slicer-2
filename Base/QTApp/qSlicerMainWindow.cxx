@@ -622,7 +622,9 @@ bool qSlicerMainWindowPrivate::confirmCloseApplication()
   }
 
   QString details;
-  bool sceneModified = isSceneContentModifiedSinceRead(details);
+  // "projectSaved": the application saved the project and nothing else is unsaved (the scene's own changes since it
+  // was read, such as the views, are not edits): ask only whether to exit
+  bool sceneModified = closeMode != "projectSaved" && isSceneContentModifiedSinceRead(details);
 
   bool close = false;
   if (sceneModified)
@@ -793,6 +795,13 @@ bool qSlicerMainWindowPrivate::confirmCloseScene()
   if (!isSceneContentModifiedSinceRead(details))
   {
     // no unsaved changes, no need to ask confirmation
+    return true;
+  }
+  // The application may have saved the project already (see qSlicerMainWindow::closeSceneSummaryRequested())
+  q->setProperty("SlicerStudioCloseMode", QVariant());
+  emit q->closeSceneSummaryRequested();
+  if (q->property("SlicerStudioCloseMode").toString() == "projectSaved")
+  {
     return true;
   }
 

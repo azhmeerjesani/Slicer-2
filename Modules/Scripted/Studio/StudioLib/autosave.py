@@ -1895,6 +1895,8 @@ class AutosaveService:
         if self._closeSummaryConnected or mainWindow is None or not hasattr(mainWindow, "closeSummaryRequested"):
             return False
         mainWindow.connect("closeSummaryRequested()", self.flushForClose)
+        if hasattr(mainWindow, "closeSceneSummaryRequested"):
+            mainWindow.connect("closeSceneSummaryRequested()", self.flushForClose)
         self._closeSummaryConnected = True
         return True
 
@@ -1909,7 +1911,23 @@ class AutosaveService:
             logging.error("Slicer Studio: saving before quitting failed:\n" + traceback.format_exc())
             ok = False
         self.closeFlushResult = (ok, self._projectPausedReason)
+        if ok:
+            self._markProjectSavedForClose()
         return ok
+
+    def _markProjectSavedForClose(self):
+        """The project is up to date: the main window asks nothing about "unsaved" scene state (the views and the hierarchy
+        numbers that a project open changes are not edits, and ``saveNow`` writes nothing then), in Classic as well. Studio's
+        own close prompt (``firstrun``) sets its mode itself; a mode already set is kept.
+        """
+        mainWindow = slicer.util.mainWindow()
+        if mainWindow is None or mainWindow.property("SlicerStudioCloseMode"):
+            return
+        from StudioLib import firstrun
+
+        if slicer.app.property(firstrun.DISCLAIMER_HANDLED_PROPERTY):
+            return
+        mainWindow.setProperty("SlicerStudioCloseMode", "projectSaved")
 
     def _closeProjectOnSceneClose(self):
         """The scene is closed (New project, Close scene, loading another scene): save the project, then release it."""

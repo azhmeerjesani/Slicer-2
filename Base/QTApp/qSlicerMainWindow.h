@@ -200,6 +200,11 @@ signals:
   /// \sa saveRequested()
   void closeSummaryRequested();
 
+  /// Emitted when Close Scene is about to ask whether to save a modified scene, after the main window property
+  /// SlicerStudioCloseMode is cleared. A handler connected with a direct connection may set it to "projectSaved":
+  /// the project is up to date on disk and nothing is asked. Same value is honored by closeSummaryRequested().
+  void closeSceneSummaryRequested();
+
   /// Emitted when the user chose "Save lesion..." in the exit confirmation. A handler connected with a direct
   /// connection saves and sets the main window property SlicerStudioSaveResult to "saved" (anything else,
   /// for example "cancelled", keeps the application open).

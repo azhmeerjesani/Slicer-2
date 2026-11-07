@@ -7763,6 +7763,42 @@ class StudioProjectsTest(unittest.TestCase):
             slicer.app.processEvents()
 
 
+    def test_99_classic_close_asks_nothing_about_a_saved_unedited_project(self):
+        """A project that is up to date on disk but whose scene is "modified since read" (what an open changes: views,
+        hierarchy numbers) is closed unasked by File > Close Scene and by quitting in Classic (the project save, not the
+        official "Save before ...?" prompt, is what protects the data); a project that is not saved still asks.
+        """
+        from StudioLib import firstrun
+
+        mainWindow = slicer.util.mainWindow()
+        if not hasattr(mainWindow, "closeSceneSummaryRequested"):
+            self.skipTest("the main window has no close scene summary hook")
+        service = self._service()
+        self._userVolume()
+        self._projectFor(service)
+        self._save(service)
+        # What an open leaves behind: the scene differs from its file, the project has nothing to save
+        slicer.mrmlScene.GetNodeByID("vtkMRMLSliceNodeRed").Modified()
+        slicer.mrmlScene.GetSubjectHierarchyNode().Modified()
+        self.assertTrue(slicer.mrmlScene.GetModifiedSinceRead())
+        self.assertFalse(service.projectNeedsSave(includeScene=True))
+        handled = slicer.app.property(firstrun.DISCLAIMER_HANDLED_PROPERTY)
+        slicer.app.setProperty(firstrun.DISCLAIMER_HANDLED_PROPERTY, False)
+        service.connectCloseSummary()
+        try:
+            for signalName in ("closeSceneSummaryRequested", "closeSummaryRequested"):
+                mainWindow.setProperty(firstrun.CLOSE_MODE_PROPERTY, "")
+                getattr(mainWindow, signalName)()
+                self.assertEqual(mainWindow.property(firstrun.CLOSE_MODE_PROPERTY), "projectSaved", signalName)
+            # Not up to date: the handler leaves the official prompt on
+            service.saveNow = lambda *args, **kwargs: False
+            mainWindow.setProperty(firstrun.CLOSE_MODE_PROPERTY, "")
+            mainWindow.closeSceneSummaryRequested()
+            self.assertFalse(mainWindow.property(firstrun.CLOSE_MODE_PROPERTY))
+        finally:
+            slicer.app.setProperty(firstrun.DISCLAIMER_HANDLED_PROPERTY, handled)
+            mainWindow.setProperty(firstrun.CLOSE_MODE_PROPERTY, "")
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 
