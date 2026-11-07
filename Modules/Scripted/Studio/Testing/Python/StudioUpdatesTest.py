@@ -1279,6 +1279,86 @@ fi
         self.assertFalse(dialog.dialog.isVisible())
         self.assertFalse(dialog.wanted)
 
+    def test_ClassicRequiredBoxFromModalSettingsIsUsable(self):
+        """Classic: the 'Update required' box shown while the application-modal Settings is open is a child of Settings
+        (Qt ignores clicks on any other window), and goes back to the main window, still visible, when Settings closes.
+        """
+        updates = self.updates
+        self._publish("1.2.1", required=True)
+        updates._installableOverride = True
+        saved = updates._shell
+        updates._shell = lambda: None
+        self.addCleanup(setattr, updates, "_shell", saved)
+        service = self._service()
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        mainWindow = slicer.util.mainWindow()
+        settings = slicer.app.settingsDialog()
+        seen = {}
+
+        def probe():
+            try:
+                seen["modal"] = slicer.app.activeModalWidget() == settings
+                box = service.showBanner()
+                seen["box"] = box
+                seen["visible"] = box.isVisible()
+                seen["child"] = box.parentWidget() == settings
+            except Exception as error:
+                seen["error"] = repr(error)
+            finally:
+                settings.reject()
+
+        qt.QTimer.singleShot(300, probe)
+        slicer.app.openSettingsDialog()
+        self.assertNotIn("error", seen, seen.get("error"))
+        self.assertTrue(seen["modal"])
+        self.assertTrue(seen["visible"])
+        self.assertTrue(seen["child"], "the box is a child of the modal Settings dialog, so it receives clicks")
+        box = seen["box"]
+        self.assertTrue(self._waitFor(lambda: box.parentWidget() == mainWindow and box.isVisible(), 5))
+        service.hideBanner()
+
+    def test_ClassicRequiredBoxDismissedInSettingsStaysClosed(self):
+        """Classic: the 'Update required' box dismissed with OK while Settings is open does not come back when Settings
+        closes (it is no longer the banner).
+        """
+        updates = self.updates
+        self._publish("1.2.1", required=True)
+        updates._installableOverride = True
+        saved = updates._shell
+        updates._shell = lambda: None
+        self.addCleanup(setattr, updates, "_shell", saved)
+        service = self._service()
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        settings = slicer.app.settingsDialog()
+        seen = {}
+
+        def probe():
+            try:
+                box = service.showBanner()
+                seen["box"] = box
+                seen["visibleBefore"] = box.isVisible()
+                box.button(qt.QMessageBox.Ok).click()
+                slicer.app.processEvents()
+                seen["visibleAfterOK"] = box.isVisible()
+                seen["bannerAfterOK"] = service.banner
+            except Exception as error:
+                seen["error"] = repr(error)
+            finally:
+                settings.reject()
+
+        qt.QTimer.singleShot(300, probe)
+        slicer.app.openSettingsDialog()
+        self.assertNotIn("error", seen, seen.get("error"))
+        self.assertTrue(seen["visibleBefore"])
+        self.assertFalse(seen["visibleAfterOK"], "OK closes the box")
+        self.assertIsNone(seen["bannerAfterOK"], "a dismissed box is no longer the banner")
+        box = seen["box"]
+        for _i in range(10):
+            slicer.app.processEvents()
+            self.assertFalse(updates._isAlive(box) and box.isVisible(), "the dismissed box does not come back after Settings closes")
+            time.sleep(0.05)
+        self.assertIsNone(service.banner)
+
     def test_RequiredFoundOnline(self):
         """A required release that can be installed but is shown as a warning (found after the startup, or cached while
         automatic checks are off) offers Update now, not 'Connect to the internet'.

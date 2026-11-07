@@ -1573,7 +1573,8 @@ class UpdateService:
             self.banner = (widget, where)
             return widget
         # Classic: a non-modal message, once
-        box = qt.QMessageBox(_mainWindow())
+        # Over Settings (application-modal) the box is a child of Settings so that its buttons work at once
+        box = qt.QMessageBox(self._updateDialogParent())
         box.setObjectName("StudioRequiredUpdateBanner")
         box.setIcon(qt.QMessageBox.Warning)
         box.setWindowTitle(_("Update required"))
@@ -1586,9 +1587,19 @@ class UpdateService:
             updateButton.setObjectName("StudioRequiredUpdateBannerUpdateButton")
             updateButton.connect("clicked()", self.updateNow)
         box.setModal(False)
+        # OK (or Update now) dismisses the box: forget it, so that it is not shown again when Settings closes
+        box.connect("finished(int)", lambda result, box=box: self._onBannerFinished(box))
         box.show()
         self.banner = (box, "window")
         return box
+
+    def _onBannerFinished(self, box):
+        """The Classic required-update box was dismissed with one of its buttons: it is no longer the banner."""
+        if self.banner is None or self.banner[1] != "window" or self.banner[0] != box:
+            return
+        self.banner = None
+        if _isAlive(box):
+            box.deleteLater()
 
     def hideBanner(self):
         banner, self.banner = self.banner, None
@@ -1668,8 +1679,27 @@ class UpdateService:
             return settings
         return mainWindow
 
+    def _returnBannerToMainWindow(self):
+        """The Classic required-update box shown over Settings goes back to the main window, and stays visible unless
+        the user dismissed it (OK) while Settings was open: a dismissed box is not shown again.
+        """
+        if self.banner is None or self.banner[1] != "window":
+            return
+        box = self.banner[0]
+        mainWindow = _mainWindow()
+        if not _isAlive(box) or mainWindow is None or box.parent() == mainWindow:
+            return
+        dismissed = box.isHidden()  # explicitly hidden (close, OK), not just hidden with Settings
+        box.setParent(mainWindow, box.windowFlags())
+        if dismissed:
+            self.banner = None
+            box.deleteLater()
+        else:
+            box.show()
+
     def _onSettingsClosed(self, result=0):
         """Settings closed: the update dialog (hidden with it) returns to the main window, shown again if it was open."""
+        self._returnBannerToMainWindow()
         dialog = self.updateDialog
         if dialog is None or not _isAlive(dialog.dialog):
             return
