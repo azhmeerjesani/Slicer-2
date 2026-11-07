@@ -144,3 +144,20 @@ class StudioLazyWrappersTest(unittest.TestCase):
         self.assertFalse(hasattr(slicer, _CLASS), "the import brought back the deleted class")
         with self.assertRaises(AttributeError):
             delattr(slicer, _CLASS)
+
+    def test_index_generator_skips_object_factory_initialize_helpers(self):
+        """The index lists only classes that slicer.<Class> can resolve: the "<Class>Initialize" helper types that
+        VTK wraps for object factories (not vtkObjectBase subclasses) are left out, so dir(slicer) has no phantom.
+        """
+        script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), *([os.pardir] * 5), "Utilities", "Scripts", "GenerateSlicerWrapperIndex.py",
+        )
+        if not os.path.isfile(script):
+            self.skipTest("the source tree is not available")
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("GenerateSlicerWrapperIndexForTest", script)
+        generator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(generator)
+        data = b"\0vtkFooModulePython.vtkFooLogic\0vtkFooModulePython.vtkFooFactoryInitialize\0"
+        self.assertEqual(generator.vtk_class_names("vtkFooModulePython", data), {"vtkFooLogic"})
