@@ -387,6 +387,36 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertEqual([os.path.basename(path) for path in removed], ["Peaks.mrk.json"], "kept in .studio/removed, not deleted")
         self.assertNotIn("Peaks", open(project.scenePath, encoding="utf-8").read())
 
+    def test_05b_superseded_file_leaves_the_project(self):
+        """BB-1: a scan whose data are edited is written under a new name; the earlier copy ("sub-012_T1w.nii.gz" next
+        to the new "sub-012_T1w.nrrd" shares a base name) goes to .studio/removed too, while the data file that a
+        storage node writes next to its file (a table's schema) is kept.
+        """
+        service = self._service()
+        volume, _path = self._userVolume()
+        project = self._projectFor(service)
+        self._save(service)
+        old = os.path.join(project.path, "Images", "sub-012_T1w.nii.gz")
+        self.assertTrue(os.path.isfile(old))
+        array = slicer.util.arrayFromVolume(volume)
+        array[1:3, 1:3, 1:3] += 7
+        slicer.util.arrayFromVolumeModified(volume)
+        self.assertTrue(service.projectNeedsSave())
+        self._save(service)
+        files = _relativeFiles(project.path)
+        imageFiles = [path for path in files if path.startswith("Images/")]
+        self.assertNotIn("Images/sub-012_T1w.nii.gz", imageFiles, files)
+        self.assertEqual(len(imageFiles), 1, files)
+        self.assertEqual([os.path.basename(path) for path in files if path.startswith(".studio/removed/")], ["sub-012_T1w.nii.gz"], files)
+
+    def test_05c_companion_files_are_not_orphans(self):
+        from StudioLib import autosave_io
+
+        suffixes = autosave_io._COMPANION_SUFFIXES
+        self.assertIn(".schema.tsv", suffixes[".tsv"])
+        self.assertIn(".raw.gz", suffixes[".nhdr"])
+        self.assertNotIn(".mgz", [suffix for values in suffixes.values() for suffix in values])
+
     def test_06_copy_on_open_and_continue(self):
         projects = self.projects
         # A scene saved by 3D Slicer somewhere else
@@ -1545,7 +1575,7 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertEqual(_md5File(project.scenePath), theirs)
         self.assertEqual(announced, [])
         self.assertEqual(sorted(name for name in os.listdir(project.path) if name.endswith(".mrml")), ["Scan (Slicer Studio).mrml", "Scan.mrml"])
-        self.assertFalse(os.path.exists(os.path.join(project.path, ".studio", "removed")), "no scene file is moved away")
+        self.assertFalse([path for path in _relativeFiles(project.path) if path.startswith(".studio/removed/") and path.endswith(".mrml")], "no scene file is moved away")
         # Studio's scene file is a standard scene with relative paths: it loads with the last edit
         with open(ours, encoding="utf-8") as f:
             self.assertNotIn(self.tempDir, f.read())

@@ -494,6 +494,16 @@ def estimateBytes(node):
     return 64 * 1024
 
 
+# Files that a storage node writes next to its own file, by the extension of that file
+_COMPANION_SUFFIXES = {
+    ".tsv": (".schema.tsv",),
+    ".csv": (".schema.csv",),
+    ".nhdr": (".raw", ".raw.gz", ".zraw", ".img", ".img.gz"),
+    ".mhd": (".raw", ".zraw", ".img"),
+    ".seg.vtm": (".seg",),  # the folder of the closed-surface segments
+}
+
+
 def _canonical(path):
     return os.path.normcase(os.path.realpath(path))
 
@@ -2697,14 +2707,18 @@ class ProjectWriter(SlotWriter):
         for index in range(nodes.GetNumberOfItems()):
             for path in _storagePaths(nodes.GetItemAsObject(index).GetStorageNode(), rootDirectory):
                 referenced.add(_canonical(path))
-        # Files that a storage node writes next to its file are referenced too (a table's "<name>.schema.tsv", the data
-        # file of a .nhdr): a file whose name starts with "<base name of a referenced file>." in the same folder
-        companions = {(os.path.dirname(path), _projects().splitExtension(os.path.basename(path))[0] + ".") for path in referenced}
+        # Files that a storage node writes next to its file are referenced too: a table's "<name>.schema.tsv" and the
+        # data file of a .nhdr/.mhd ("<name>.raw", ".raw.gz", ".zraw", ".img"), the "<name>.seg" folder of a .seg.vtm. Only these suffixes count: a file that
+        # merely shares the base name ("T1.mgz" next to the new "T1.nrrd") is a superseded copy and leaves the project
+        companions = set()
+        for path in referenced:
+            base, extension = _projects().splitExtension(os.path.basename(path))
+            for suffix in _COMPANION_SUFFIXES.get(extension.lower(), ()):
+                companions.add((os.path.dirname(path), (base + suffix).lower()))
         for path, record in list(self.records.items()):
             if path in referenced or not _isUnder(path, _canonical(projectDir)) or self._isPrivateFile(path):
                 continue
-            folder, name = os.path.dirname(path), os.path.basename(path)
-            if any(folder == companionFolder and name.startswith(prefix) for companionFolder, prefix in companions):
+            if (os.path.dirname(path), os.path.basename(path).lower()) in companions:
                 continue
             plan.orphans.append((path, record["stat"]))
             del self.records[path]
