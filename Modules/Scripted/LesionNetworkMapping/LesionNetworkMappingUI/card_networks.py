@@ -1671,8 +1671,13 @@ class NetworksCard:
             return ""
         source = self.source
         atlasNames = sorted({shortName(row["atlas"]) for row in self.rows if row.get("atlas")})
-        text = _("Networks of the {statistic} map ({name}) at {threshold}: {scheme}; cortex from the Schaefer names, cerebellum from Buckner, subcortex from Tian structures; atlases: {atlases}. ").format(
-            statistic=source.statistic, name=source.name, threshold=source.thresholdText(), scheme=SCHEMES[self.scheme]["title"], atlases=", ".join(atlasNames) or _("none"))
+        # The cerebellum is named as from Buckner only when cerebellum rows exist; the 2009 family has no cerebellar atlas
+        if any(row.get("system") == "cerebellum" for row in self.rows):
+            sources = _("cortex from the Schaefer names, cerebellum from Buckner, subcortex from Tian structures")
+        else:
+            sources = _("cortex from the Schaefer names, subcortex from Tian structures; the cerebellum was not assigned to networks (its voxels count under 'not in these networks')")
+        text = _("Networks of the {statistic} map ({name}) at {threshold}: {scheme}; {sources}; atlases: {atlases}. ").format(
+            statistic=source.statistic, name=source.name, threshold=source.thresholdText(), scheme=SCHEMES[self.scheme]["title"], sources=sources, atlases=", ".join(atlasNames) or _("none"))
         if self.null is not None:
             text += _("Null: {description}. ").format(description=self.nullInfo["description"])
         else:

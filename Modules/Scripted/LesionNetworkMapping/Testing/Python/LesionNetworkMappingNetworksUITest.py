@@ -238,6 +238,26 @@ class LesionNetworkMappingNetworksUITest(unittest.TestCase):
         # Without a network unit (only ROIs) there is no "not in these networks" row
         self.assertEqual([row["system"] for row in self.cn.networkStatistics(values, roi, 5.0, "both")], ["roi"])
 
+    def test_caption_names_buckner_only_when_cerebellum_rows_exist(self):
+        """The caption describes what was computed: the 2009 family has no cerebellar atlas, so Buckner is not named."""
+        from types import SimpleNamespace
+
+        source = SimpleNamespace(statistic="T", name="map", thresholdText=lambda: "|T| >= 5")
+        nullInfo = {"reason": "no null maps."}
+
+        def captionOf(systems):
+            rows = [{"system": system, "atlas": f"atlas-{system}"} for system in systems]
+            card = SimpleNamespace(source=source, rows=rows, scheme="yeo7", null=None, nullInfo=nullInfo)
+            return self.cn.NetworksCard.caption(card)
+
+        without = captionOf(["cortex", "subcortex", "other"])
+        self.assertNotIn("Buckner", without)
+        self.assertIn("cerebellum was not assigned to networks", without)
+        self.assertIn("not in these networks", without)
+        withCerebellum = captionOf(["cortex", "cerebellum", "subcortex"])
+        self.assertIn("cerebellum from Buckner", withCerebellum)
+        self.assertNotIn("not assigned", withCerebellum)
+
     def test_declared_template_space_off_the_standard_grids(self):
         """A map whose template space the app knows (its sidecar's connectome space, the ``Studio.Space`` of its volume)
         but whose grid is no standard grid (a 4 mm resampled map, the demo connectome's 6 mm grid) gets its Side column,
