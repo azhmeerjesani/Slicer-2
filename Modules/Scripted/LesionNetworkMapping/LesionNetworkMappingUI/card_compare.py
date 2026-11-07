@@ -774,8 +774,11 @@ class CompareCard:
                 try:
                     values = self.vector(source)
                 except Exception as exc:
-                    logging.exception(f"Lesion network mapping: the map {source.label} could not be loaded")
-                    problems.append(f"{source.label}: {exc}")
+                    if isinstance(exc, refmaps.RefmapsError):
+                        logging.warning(f"Lesion network mapping: the map {source.label} could not be loaded: {exc}")
+                    else:
+                        logging.exception(f"Lesion network mapping: the map {source.label} could not be loaded")
+                    problems.append(f"{source.label}: {str(exc).rstrip('. ')}.")
                     continue
                 if np.count_nonzero(np.isfinite(values)) < 3:
                     problems.append(_("{label}: does not cover this connectome's voxels").format(label=source.label))

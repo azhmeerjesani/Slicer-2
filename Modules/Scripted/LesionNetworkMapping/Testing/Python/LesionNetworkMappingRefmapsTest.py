@@ -586,6 +586,17 @@ class SourcesTest(RefmapsTestBase):
         self.assertEqual([item["id"] for item in refmaps.entries(self.root)], [entry["id"]])
         self.assertEqual(kept(), before)
 
+    def test_multi_volume_file_is_refused_up_front(self):
+        """BB-1: a 3-volume NIfTI was added ('Added ...') and then failed with a traceback on every Compare."""
+        four_d = os.path.join(self.tmp, "three_contrasts.nii.gz")
+        nifti.write_nifti(four_d, np.zeros(SHAPE + (3,), dtype=np.float32), self.bundle.affine)
+        with self.assertRaises(refmaps.RefmapsError) as raised:
+            refmaps.add_file(four_d, root=self.root)
+        message = str(raised.exception)
+        self.assertIn("3 volumes; give a single 3D map", message)
+        self.assertNotIn(self.tmp, message)
+        self.assertEqual(refmaps.entries(self.root), [])
+
     def test_full_disk_keeps_no_partial_file_and_later_additions_work(self):
         """BB-1: the .part file that filled the disk was kept, so every later addition (even a small map) failed with
         "[Errno 28] No space left on device". The partial file is removed and the message says the disk is full and where.

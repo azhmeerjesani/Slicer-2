@@ -469,6 +469,9 @@ def _image_problem(path):
         return reason[:1].lower() + reason[1:]
     if data < expected:
         return f"the image data is incomplete, {data} of {expected} bytes"
+    volumes = int(np.prod(header["shape"][3:], dtype=np.int64))
+    if volumes > 1:
+        return f"it has {volumes} volumes; give a single 3D map"
     return None
 
 
@@ -476,6 +479,8 @@ def _check_map(path, label):
     """Raise RefmapsError unless ``path`` is a complete, readable NIfTI-1 image (``label`` names it in the message)."""
     problem = _image_problem(path)
     if problem:
+        if problem.startswith("it has "):
+            raise RefmapsError(f"{label} {problem[3:]}. Nothing was added to the reference library.")
         raise RefmapsError(f"{label} is not a complete, readable NIfTI image: {problem}. Nothing was added to the reference library.")
 
 
