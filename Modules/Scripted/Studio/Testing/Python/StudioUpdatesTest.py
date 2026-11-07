@@ -147,6 +147,12 @@ def _sha256(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
+def updates_settings_panelName():
+    from StudioLib import updates_settings
+
+    return updates_settings.PANEL_OBJECT_NAME
+
+
 class StudioUpdatesTest(unittest.TestCase):
     """In-app updates with a local feed. Needs the main window (dialogs, settings dialog)."""
 
@@ -180,6 +186,13 @@ class StudioUpdatesTest(unittest.TestCase):
         updates.stateDirectoryOverride = self.stateDir
         updates.currentVersionOverride = "0.9.0"
         self.services = []
+        self.addCleanup(self._assertNoParentlessPanels)  # registered first, so it runs after every deleteLater cleanup
+
+    def _assertNoParentlessPanels(self):
+        # A parentless settings panel alive at exit makes Slicer exit abnormally (code 1) although every test passed
+        qt.QApplication.sendPostedEvents(None, 52)  # QEvent.DeferredDelete
+        leaked = [w for w in slicer.app.topLevelWidgets() if w.objectName == updates_settings_panelName()]
+        self.assertEqual(leaked, [], "a test left a parentless UpdatesSettingsPanel alive (add self.addCleanup(panel.deleteLater))")
 
     def tearDown(self):
         updates = self.updates
@@ -512,6 +525,7 @@ class StudioUpdatesTest(unittest.TestCase):
         service.check(onDone=lambda status, error: done.append(error))
         self.assertTrue(self._waitFor(lambda: done, 15))
         panel = updates_settings.UpdatesSettingsPanel(service)
+        self.addCleanup(panel.deleteLater)
         text = panel.statusText()
         self.assertIn("The last check failed. Cannot reach the update server (no connection). "
                       "Check your internet connection and try again.", text)
