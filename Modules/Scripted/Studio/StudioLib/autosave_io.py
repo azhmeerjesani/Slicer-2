@@ -446,6 +446,26 @@ def sceneFingerprint(scene, ignoreIds=()):
     return (count, storableMTime, otherMTime, hash(tuple(items)), hash(tuple(points)))
 
 
+def viewState(scene):
+    """What the views show, as a comparable value: for each slice composite node its background, foreground and label
+    volumes and their opacities, and the layout number. ``sceneFingerprint`` leaves these nodes out (they change while a
+    project opens), but Save now and leaving write them to the scene as official 3D Slicer does, so a change made on
+    purpose to what a view shows is an edit for those two (``AutosaveService.projectNeedsSave(includeScene=True)``).
+    """
+    composites = []
+    layout = None
+    for index in range(scene.GetNumberOfNodes()):
+        node = scene.GetNthNode(index)
+        if node is None or not node.GetSaveWithScene():
+            continue
+        if node.IsA("vtkMRMLSliceCompositeNode"):
+            composites.append((node.GetID(), node.GetBackgroundVolumeID(), node.GetForegroundVolumeID(),
+                               node.GetLabelVolumeID(), round(node.GetForegroundOpacity(), 4), round(node.GetLabelOpacity(), 4)))
+        elif node.IsA("vtkMRMLLayoutNode"):
+            layout = node.GetViewArrangement()
+    return (tuple(sorted(composites)), layout)
+
+
 def estimateBytes(node):
     """Approximate size of the data of a storable node."""
     try:

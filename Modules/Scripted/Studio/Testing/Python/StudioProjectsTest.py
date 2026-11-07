@@ -807,6 +807,27 @@ class StudioProjectsTest(unittest.TestCase):
         text = open(project.scenePath, encoding="utf-8").read()
         self.assertIn('fileName="Markups/Targets.mrk.json"', text)
 
+    def test_12b_view_only_change_is_saved_by_save_now(self):
+        """BB-1: what a view shows (overlay, background, opacity) is not part of the autosave fingerprint, but Save now
+        and leaving write it to the scene, as official 3D Slicer does: they do not say "nothing to save".
+        """
+        service = self._service()
+        volume, _path = self._userVolume()
+        other = slicer.util.addVolumeFromArray(np.arange(8 * 9 * 10, dtype=np.int16).reshape(8, 9, 10), name="Second scan")
+        project = self._projectFor(service)
+        self._save(service)
+        self.assertFalse(service.projectNeedsSave(includeScene=True), "nothing changed since the save")
+        composite = slicer.app.layoutManager().sliceWidget("Red").mrmlSliceCompositeNode()
+        composite.SetBackgroundVolumeID(other.GetID())
+        composite.SetForegroundVolumeID(volume.GetID())
+        composite.SetForegroundOpacity(0.4)
+        self.assertFalse(service.projectNeedsSave(), "the autosave does not count a view change")
+        self.assertTrue(service.projectNeedsSave(includeScene=True), "Save now and leaving do")
+        self._save(service)
+        self.assertFalse(service.projectNeedsSave(includeScene=True))
+        text = open(project.scenePath, encoding="utf-8").read()
+        self.assertIn('foregroundOpacity="0.4"', text)
+
     def test_13_ui(self):
         """The Library section, the folder chooser and the save status of a project (built with the ui builders)."""
         from StudioLib import projects_ui

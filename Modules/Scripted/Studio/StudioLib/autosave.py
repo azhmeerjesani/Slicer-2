@@ -265,6 +265,7 @@ class AutosaveService:
         self.plan = None
         self.slots = {}
         self._savedFingerprint = None
+        self._savedViewState = None
         self._lastPolledFingerprint = None
         self.dirty = False
         self.firstDirtyTime = None
@@ -1618,6 +1619,7 @@ class AutosaveService:
         fingerprint = io.sceneFingerprint(scene, io.sentinelIds())
         clean = inPlace and os.path.isfile(project.scenePath) and self._projectFilesInPlace(scene)
         self._savedFingerprint = fingerprint if clean else None
+        self._savedViewState = io.viewState(scene) if clean else None
         self._lastPolledFingerprint = fingerprint
         self.dirty = not clean
         self.firstDirtyTime = _clock() if self.dirty else None
@@ -1658,6 +1660,7 @@ class AutosaveService:
         self.project = None
         self.projectWriter = None
         self._savedFingerprint = None
+        self._savedViewState = None
         self._lastPolledFingerprint = None
         self._lastProjectCheck = None
         self.dirty = False
@@ -1696,6 +1699,7 @@ class AutosaveService:
         io = _io()
         fingerprint = io.sceneFingerprint(slicer.mrmlScene, io.sentinelIds())
         self._savedFingerprint = fingerprint
+        self._savedViewState = io.viewState(slicer.mrmlScene)
         self._lastPolledFingerprint = fingerprint
 
     def projectNeedsSave(self, fingerprint=None, includeScene=False):
@@ -1716,7 +1720,11 @@ class AutosaveService:
             fingerprint = io.sceneFingerprint(scene, io.sentinelIds())
         if fingerprint != self._savedFingerprint or self._modifiedProjectNodes(scene):
             return True
-        return bool(includeScene and self.projectWriter.needsMigration(scene))
+        if not includeScene:
+            return False
+        if self._savedViewState is not None and io.viewState(scene) != self._savedViewState:
+            return True  # what a view shows changed (background, overlay, layout): Save now writes it, as official Slicer does
+        return bool(self.projectWriter.needsMigration(scene))
 
     def _startProjectGeneration(self, reason, fingerprint, synchronous=False, ignoreBusy=False, force=False, progress=False,
                                 timeoutS=PROJECT_SAVE_TIMEOUT_S):
@@ -1738,6 +1746,7 @@ class AutosaveService:
             self._projectFailed(_("see the error log"))
             return False
         plan.reason = reason
+        plan.viewState = io.viewState(slicer.mrmlScene)
         estimated = sum(entry.get("bytes") or 0 for entry in plan.entries.values() if entry.get("kind") in ("write", "import"))
         if not self._enoughSpace(estimated, self.project.path, project=True):
             writer.abort(plan, "not enough disk space")
@@ -1826,6 +1835,7 @@ class AutosaveService:
         logging.debug(f"Slicer Studio project generation {plan.generation}: {metrics}")
         if not plan.incomplete:
             self._savedFingerprint = plan.fingerprint
+            self._savedViewState = getattr(plan, "viewState", None)
         self.dirty = io.sceneFingerprint(slicer.mrmlScene, io.sentinelIds()) != self._savedFingerprint or plan.incomplete
         self.firstDirtyTime = _clock() if self.dirty else None
         self._lastProjectPlan = plan
