@@ -346,6 +346,16 @@ class CommandLineTest(_CalibrateTestCase):
             self.assertEqual(events[-1]["code"], "usage", value)
             self.assertIn("--overlap", events[-1]["message"], value)
 
+    def test_sensitivity_rule_is_validated_before_any_work(self):
+        # A mistyped --rule is a usage error at the start, not after the empirical FWER stage has run.
+        common = ["--maps", self.path("maps.tsv"), "--participants", self.path("participants.tsv"), "--mask", self.path("mask.nii.gz"), "--out", self.path("out"), "--sensitivity"]
+        code, events, _ = self.run_cli(*common, "--rule", '{"kind": "fwe_bonferroni", "alpha": 0.05')
+        self.assertEqual(code, 2)
+        self.assertEqual(events[-1]["event"], "error")
+        self.assertEqual(events[-1]["code"], "usage")
+        self.assertIn("--rule", events[-1]["message"])
+        self.assertEqual([e for e in events if e.get("event") in ("stage", "progress", "result")], [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -913,6 +913,12 @@ def main(argv=None):
         low, high = nulls.OVERLAP_RANGE
         if not low <= args.overlap <= high:  # also refuses nan
             raise jobs.JobError(f"--overlap must be between {low:g} and {high:g} %, got {args.overlap}", code="usage", exit_code=jobs.EXIT_USAGE)
+        from . import thresholds
+
+        try:  # before any work: the sensitivity stage runs last, after the empirical FWER
+            thresholds.normalize_rule(args.rule)
+        except ValueError as exc:
+            raise jobs.JobError(f"Invalid --rule: {exc}", code="usage", exit_code=jobs.EXIT_USAGE) from None
     if args.target and args.target_lesion:
         raise jobs.JobError("Give --target or --target-lesion, not both", code="usage", exit_code=jobs.EXIT_USAGE)
     if args.no_fwer and args.no_planted and not args.sensitivity:
