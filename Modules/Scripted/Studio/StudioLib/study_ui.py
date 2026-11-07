@@ -4582,6 +4582,8 @@ def _reopenAgreement(session, queue, sid):
 
 
 def _paletteEntries(shell=None):
+    from . import ui
+
     if not isAvailable():
         return []
     entries = [
@@ -4615,7 +4617,7 @@ def _paletteEntries(shell=None):
         for spec in availableQueues(row):
             entries.append({"id": f"study.queue.{spec['key']}", "title": _("Trace queue: {queue}").format(queue=spec["label"]), "category": _("Action"),
                             "synonyms": ["queue", "next case", "worklist"], "callback": lambda key=spec["key"]: _setQueueAction(key, shell),
-                            "description": _("Done → next and Alt+←/→ follow this queue")})
+                            "description": _("Done → next and {keys} follow this queue").format(keys=ui.keyText("Alt+Left") + "/" + ui.keyText("Alt+Right"))})
     return entries
 
 

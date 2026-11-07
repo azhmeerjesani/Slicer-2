@@ -1298,5 +1298,7 @@ def _showCurrent():
         return None
     _browser.showLesion()
     if shell is not None and len(_browser.items) > 1:
-        shell.toast(_("{label} · {index} of {count} · Alt+← / Alt+→").format(label=item[0], index=_browser.index + 1, count=len(_browser.items)))
+        from . import ui
+
+        shell.toast(_("{label} · {index} of {count} · {previous} / {next}").format(label=item[0], index=_browser.index + 1, count=len(_browser.items), previous=ui.keyText("Alt+Left"), next=ui.keyText("Alt+Right")))
     return item

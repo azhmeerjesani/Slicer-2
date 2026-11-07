@@ -1247,20 +1247,31 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         allowed = ("Ctrl+F2", "AltGr+digit", "Inspector: Ctrl+")
         import StudioLib
 
-        libDirectory = os.path.dirname(os.path.abspath(StudioLib.__file__))
+        import LesionNetworkMappingUI
+
+        studioDirectory = os.path.dirname(os.path.dirname(os.path.abspath(StudioLib.__file__)))
+        lnmDirectory = os.path.dirname(os.path.abspath(LesionNetworkMappingUI.__file__))
+        sources = [os.path.join(studioDirectory, "Studio.py")]
+        for directory in (os.path.join(studioDirectory, "StudioLib"), lnmDirectory):
+            sources += [os.path.join(directory, name) for name in sorted(os.listdir(directory)) if name.endswith(".py")]
+        self.assertTrue(any(path.endswith("card_cohort.py") for path in sources), sources)
         offenders = []
-        for name in sorted(os.listdir(libDirectory)):
-            if not name.endswith(".py"):
-                continue
-            with open(os.path.join(libDirectory, name), encoding="utf-8") as source:
+        for path in sources:
+            with open(path, encoding="utf-8") as source:
                 tree = ast.parse(source.read())
             for node in ast.walk(tree):
                 if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_" and node.args
                         and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
                     text = re.sub(r"\{key:[^}]*\}", "", node.args[0].value)
-                    if re.search(r"\bCtrl\+", text) and not any(item in text for item in allowed):
-                        offenders.append(f"{name}:{node.lineno}: {text[:80]}")
+                    # The Windows-only AltGr sentence of the Library help names the keys of that platform
+                    text = re.sub(r"On Windows, where AltGr.*?Ctrl\+Alt\+digit\.", "", text, flags=re.S)
+                    if re.search(r"\b(Ctrl|Alt)\+", text) and not any(item in text for item in allowed):
+                        offenders.append(f"{os.path.basename(path)}:{node.lineno}: {text[:80]}")
         self.assertEqual(offenders, [], "portable keys in texts: use {key:...}, ui.keyText or ui.tooltip")
+        # The Library module help marks its keys; none is left as a marker
+        help_ = slicer.util.getModule("Studio").helpText
+        self.assertNotIn("{key:", help_)
+        self.assertIn(ui.keyText("Ctrl+K"), help_)
 
     def test_23_texts_use_the_labels_on_screen(self):
         """Tour and Search texts name the controls as they are labelled now: the Draw inspector row is "Overlay" (not the old

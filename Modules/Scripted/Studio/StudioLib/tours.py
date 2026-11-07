@@ -323,7 +323,7 @@ _LIBRARY_STEPS = (
            "is not saved. The inspector lists the same under Open now."),
          rows=("data-module",), workspace="library"),
     Step("loaded-set", "StudioLoadedSetCard", _("Loaded set"),
-         _("Lesion masks loaded together (up to 60) are reviewed one at a time: Review in Draw shows the first, Alt+← and Alt+→ "
+         _("Lesion masks loaded together (up to 60) are reviewed one at a time: Review in Draw shows the first, {key:Alt+Left} and {key:Alt+Right} "
            "step through them. Close set removes exactly these masks from the scene; your files are never deleted."),
          rows=("data-module",), workspace="library"),
     Step("projects", "studioProjectsSection", _("Projects"),
@@ -410,7 +410,7 @@ _MAP_STEPS = (
            "worked out again from the number of subjects, so a T threshold is never silently reused on another N. "
            "The statistic, the sign (±, +, −) and the opacity change only what is shown. Notes about the map are one line with Details, "  # noqa: RUF001
            "the peaks name their region from an atlas you have downloaded, and ⋯ in the inspector header has the recipes and the "
-           "reporting checks. A map opened from Library is shown here too; Alt+← / Alt+→ show the maps next to it, one at a time."),
+           "reporting checks. A map opened from Library is shown here too; {key:Alt+Left} / {key:Alt+Right} show the maps next to it, one at a time."),
          inSlicer=_("Not part of official 3D Slicer. The map is an ordinary volume: the Volumes and Data modules work on it as usual."),
          workspace="map", inspector=True, placement="left"),
     Step("disclaimer", "LNMDisclaimer", _("Research use only"),

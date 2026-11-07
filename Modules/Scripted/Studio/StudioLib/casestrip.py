@@ -441,7 +441,7 @@ class CaseStrip:
         shortLabel = spec["label"] if spec is not None else _("All")
         self.queueButton.setText(f"{shortLabel} · {positionText} ▾")
         self.queueButton.setToolTip(ui.tooltip(_("Trace queue: {queue}").format(queue=label), None,
-                                               _("case {position} of {count}; Done → next and Alt+←/→ follow it").format(position=position or "—", count=count)))
+                                               _("case {position} of {count}; Done → next and {keys} follow it").format(position=position or "—", count=count, keys=ui.keyText("Alt+Left") + "/" + ui.keyText("Alt+Right"))))
         self.queueButton.setAccessibleName(_("Trace queue {queue}, case {position} of {count}").format(queue=label, position=position or "—", count=count))
         # Fields
         for key, columns, title in FIELDS:
@@ -579,7 +579,7 @@ class CaseStrip:
         allAction = self.queueMenu.addAction(_("All subjects (table order) · {n}").format(n=len(session.study)))
         allAction.setCheckable(True)
         allAction.setChecked(activeKey is None)
-        allAction.setToolTip(_("Done → next opens the next untraced subject; Alt+←/→ step in table order"))
+        allAction.setToolTip(_("Done → next opens the next untraced subject; {keys} step in table order").format(keys=ui.keyText("Alt+Left") + "/" + ui.keyText("Alt+Right")))
         group.addAction(allAction)
         allAction.connect("triggered()", lambda: self._setQueue(None))
         self.queueMenu.addSeparator()

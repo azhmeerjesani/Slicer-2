@@ -235,6 +235,19 @@ class Studio(ScriptedLoadableModule):
     when the application has started (see StudioLib/shell.py).
     """
 
+    @staticmethod
+    def _formatHelpKeys(text):
+        """``text`` with its ``{key:Ctrl+K}`` markers as this platform shows the keys (⌘K on macOS), as
+        ``StudioLib.migration.formatKeys`` does (not imported: the module is created at start-up).
+        """
+        import re
+
+        def native(match):
+            sequence = qt.QKeySequence(match.group(1))
+            return (sequence.toString(qt.QKeySequence.NativeText) if sequence.count() == 1 else "") or match.group(1)
+
+        return re.sub(r"\{key:([^}]+)\}", native, text)
+
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
         self.parent.title = _("Library")
@@ -242,16 +255,16 @@ class Studio(ScriptedLoadableModule):
         self.parent.dependencies = []
         self.parent.hidden = False
         self.parent.contributors = ["Slicer Studio contributors"]
-        self.parent.helpText = _("""
+        self.parent.helpText = self._formatHelpKeys(_("""
 <p>Slicer Studio is the streamlined default interface of this application.
 Its three workspaces follow the path of a lesion network mapping study:
 <b>Library</b> (open data and choose a subject), <b>Draw</b> (trace the lesion) and <b>Map</b>
 (compute and read a network map).</p>
-<p>Keyboard: Ctrl+Alt+1/2/3 switch workspaces, Ctrl+K searches tools and actions,
-Alt+1..5 change the view layout, Ctrl+\\ (or Ctrl+5) shows or hides the inspector,
+<p>Keyboard: {key:Ctrl+Alt+1}/2/3 switch workspaces, {key:Ctrl+K} searches tools and actions,
+{key:Alt+1}..5 change the view layout, {key:Ctrl+\\} (or {key:Ctrl+5}) shows or hides the inspector,
 F6 and Shift+F6 move the keyboard focus between the top bar, the inspector and the views,
-F11 (or Ctrl+6) hides or shows the panels, Esc backs out of the place and window/level modes, a maximized view
-and hidden panels, and Ctrl+Alt+0 switches to the Classic interface and back
+F11 (or {key:Ctrl+6}) hides or shows the panels, Esc backs out of the place and window/level modes, a maximized view
+and hidden panels, and {key:Ctrl+Alt+0} switches to the Classic interface and back
 (also View &gt; Studio interface). On Windows, where AltGr and Ctrl+Alt cannot be told apart, text fields
 keep the characters typed with AltGr (for example @) and in a view AltGr+digit acts as Ctrl+Alt+digit.</p>
 <p>The Classic interface is never removed. Studio is not used when testing,
@@ -260,7 +273,7 @@ or when the Studio/Enabled setting is false.</p>
 <p>Projects (Studio): at the first start you choose the Slicer Studio folder (Documents/Slicer Studio by
 default). From then on your work is saved there automatically as you work, one folder per project
 (Projects/&lt;name&gt;, a 3D Slicer scene with Images, Segmentations, Lesions, Maps and other folders), and
-studies go to Studies. Ctrl+S saves at once, Ctrl+N starts a new project, and File &gt; Save a copy as… writes
+studies go to Studies. {key:Ctrl+S} saves at once, {key:Ctrl+N} starts a new project, and File &gt; Save a copy as… writes
 a .mrb file anywhere. The folder can be changed in the Saving panel of the application settings.</p>
 <p>Recovery (Classic, and scenes that are not a project): while you work, the scene is autosaved every few
 minutes to a private folder of your user account (the StudioAutosave folder in the application data folder),
@@ -273,7 +286,7 @@ Slicer Studio restarts. Automatic checks can be turned off in the Updates panel.
 <p>Your own MNI templates: Library &gt; Start on template ▾ &gt; Add your own template… (or Search: Add MNI template)
 adds an MNI-space brain image, with an optional brain mask and 3D surfaces. It is copied into the Templates folder of
 the Slicer Studio folder and can be drawn on, mapped from and normalized to; Settings &gt; Templates sets the default.</p>
-""")
+"""))
         self.parent.acknowledgementText = _("""
 <p>Icons: <a href="https://lucide.dev">Lucide</a> 0.468.0, ISC License,
 copyright (c) Lucide Contributors 2022 and Cole Bemis 2013-2022 (Feather, MIT).

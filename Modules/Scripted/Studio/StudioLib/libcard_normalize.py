@@ -738,7 +738,7 @@ class _Manager:
             if not qualifies:
                 continue
             if sid == session.current() and session.isDirty():
-                notes.append(_("{sid} has edits that are not saved yet: finish it first (Done or Alt+→)").format(sid=sid))
+                notes.append(_("{sid} has edits that are not saved yet: finish it first (Done or {key})").format(sid=sid, key=ui.keyText("Alt+Right")))
                 continue
             chosen.append(sid)
         if not chosen:

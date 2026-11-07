@@ -2745,10 +2745,10 @@ class Shell:
         if cheatsheet is not None and hasattr(cheatsheet, "toggle"):
             cheatsheet.toggle(self)
             return
-        self.toast(_("{search} search · {workspaces} Library, 2 Draw, 3 Map · Alt+1..5 layouts · {inspector} inspector · {panels} hide panels · "
+        self.toast(_("{search} search · {workspaces} Library, 2 Draw, 3 Map · {layouts} layouts · {inspector} inspector · {panels} hide panels · "
                      "F10 menu · F6 regions · {classic} Classic").format(
             search=ui.keyText("Ctrl+K"), workspaces=ui.keyText("Ctrl+Alt+1"), classic=ui.keyText("Ctrl+Alt+0"),
-            inspector=self.inspectorShortcutText(alternate=True), panels=focusModeKeyText()), 6000)
+            layouts=ui.keyText("Alt+1") + "..5", inspector=self.inspectorShortcutText(alternate=True), panels=focusModeKeyText()), 6000)
 
     #
     # Keyboard access: menus and focus regions

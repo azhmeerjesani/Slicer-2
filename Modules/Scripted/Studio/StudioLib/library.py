@@ -2113,7 +2113,7 @@ class LoadedSetCard(qt.QObject):
 
         buttonRow = _buttonRow()
         self.reviewButton = _roleButton(_("Review in Draw"), "StudioLoadedSetReviewButton", lambda: reviewLoadedSet(_shell(), self._chosenIndex()), "primary")
-        self.reviewButton.setToolTip(_("Edit one lesion at a time in Draw; Alt+← and Alt+→ step through the set"))
+        self.reviewButton.setToolTip(_("Edit one lesion at a time in Draw; {previous} and {next} step through the set").format(previous=ui.keyText("Alt+Left"), next=ui.keyText("Alt+Right")))
         self.closeButton = _roleButton(_("Close set"), "StudioLoadedSetCloseButton", lambda: closeLoadedSet(), "secondary")  # noqa: PLW0108
         self.closeButton.setToolTip(_("Remove these lesions from the scene (files are never deleted)"))
         buttonRow.layout().addWidget(self.reviewButton, 3)

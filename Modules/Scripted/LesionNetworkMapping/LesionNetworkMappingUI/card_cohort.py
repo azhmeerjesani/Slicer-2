@@ -31,6 +31,17 @@ from slicer.i18n import tr as _
 
 from . import ORDER_COHORT, discoverCohortTabs, widgets
 
+
+def _keyText(key):
+    """``key`` as Studio shows it (⌘ and ⌥ on macOS); as given when Studio is not there (the module also runs in Classic)."""
+    try:
+        from StudioLib import ui
+
+        return ui.keyText(key)
+    except ImportError:
+        return key
+
+
 #: Node attribute of the volume that shows the group maps (one volume, reused)
 GROUP_VOLUME_ATTRIBUTE = "LNM.GroupMapVolume"
 SIGNS = ("both", "pos", "neg")
@@ -444,7 +455,7 @@ class CohortCard:
         self.browseButton = qt.QPushButton(_("Browse lesion maps"))
         self.browseButton.setObjectName("LNMCohortBrowseButton")
         self.browseButton.setProperty("slicerRole", "ghost")
-        self.browseButton.setToolTip(_("Show the lesions' maps one at a time with the lesion outline (Alt+← / Alt+→ in Studio)"))
+        self.browseButton.setToolTip(_("Show the lesions' maps one at a time with the lesion outline ({previous} / {next} in Studio)").format(previous=_keyText("Alt+Left"), next=_keyText("Alt+Right")))
         self.browseButton.connect("clicked()", self.browseMaps)
         row.addWidget(self.browseButton)
         row.addStretch(1)
