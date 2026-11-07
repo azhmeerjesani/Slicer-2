@@ -6648,3 +6648,14 @@ class StudioRegressionTest(unittest.TestCase):
                 slicer.app.processEvents()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
+
+    def test_87_extrusion_binary_tooltip_voxel_count_follows_the_thickness(self):
+        import re
+
+        from StudioLib import lesionqc
+        card = lesionqc.PolicyCard(None, None)
+        for total, voxels in ((2.0, 3), (4.0, 5), (6.0, 7)):
+            card.spin.setValue(total)
+            tip = str(card.binaryButton.toolTip)
+            self.assertIn(f"({voxels} voxels at 1 mm)", tip, tip)
+            self.assertEqual(len(re.findall(r"\d+ voxels at 1 mm", tip)), 1)

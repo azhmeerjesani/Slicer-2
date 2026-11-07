@@ -1984,7 +1984,8 @@ class PolicyCard:
         self.fractionalButton.setText(_("Extrude to {mm:g} mm total").format(mm=total))
         self.fractionalButton.setToolTip(ui.tooltip(_("Extrude to {mm:g} mm total").format(mm=total), None, _("exact total thickness centred on the drawn slice; the edge slices are fractional (desc-lesionProb)")))
         self.binaryButton.setText(_("Extrude ±{mm:g} mm, binary").format(mm=total / 2.0))
-        self.binaryButton.setToolTip(ui.tooltip(_("Extrude ±{mm:g} mm, binary").format(mm=total / 2.0), None, _("whole voxels on both sides of the drawn slice (3 voxels at 1 mm)")))
+        voxels = 2 * _lnm("lesionops")._round_half_down(total / 2.0) + 1  # the count lesionops.extrude writes on a 1 mm grid
+        self.binaryButton.setToolTip(ui.tooltip(_("Extrude ±{mm:g} mm, binary").format(mm=total / 2.0), None, _("whole voxels on both sides of the drawn slice ({voxels} voxels at 1 mm)").format(voxels=voxels)))
 
     def _choose(self, mode):
         if _session() is not self.session:  # the study of this card was closed or replaced: nothing is written to it
