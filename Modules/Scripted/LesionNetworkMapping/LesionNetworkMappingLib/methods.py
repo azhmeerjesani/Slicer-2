@@ -1157,7 +1157,11 @@ def _influence_text(summary, params, seeds):
         f"leave-one-lesion-out influence ({_or_nr(summary.get('influence'))}), "
         f"{'with the GLM design' if params.get('design') else 'overlap maps only (no GLM design)'}, {_lesions_text(params)}; "
         f"rule {_rule_param_text(params.get('rule'))}, ≥ {_or_nr(_number(params.get('overlap_pct')))}% overlap, sign {_or_nr(params.get('sign'))}; "
-        f"most influential lesions {', '.join(str(sid) for sid in top) if isinstance(top, list) and top else NOT_RECORDED}"
+        + (
+            f"most influential lesions {', '.join(str(sid) for sid in top)}"
+            if isinstance(top, list) and top
+            else "no single lesion changes the result" if isinstance(top, list) else f"most influential lesions {NOT_RECORDED}"
+        )
     )
 
 

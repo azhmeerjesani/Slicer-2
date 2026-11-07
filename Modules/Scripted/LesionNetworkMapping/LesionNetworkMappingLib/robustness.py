@@ -1276,6 +1276,10 @@ def _peak_index(t, sign):
     return int(np.argmax(np.abs(t)))
 
 
+def _has_influence(value):
+    return value is not None and value > 1e-12
+
+
 def leave_one_lesion_out(maps, design=None, ids=None, rule=None, n=None, v=None, gsr=None, sign="both", overlap_pct=DEFAULT_SENSITIVITY_PCT, top_k=DEFAULT_TOP_K, grid=None, mask_indices=None, cancel=None,
                          glm_maps=None):
     """Leave-one-lesion-out influence, by downdates (no refit).
@@ -1287,7 +1291,8 @@ def leave_one_lesion_out(maps, design=None, ids=None, rule=None, n=None, v=None,
     ``glm_maps`` (the maps of the design's input, AvgFz for input "Fz"; rows as ``maps``), default ``maps``.
 
     :return: {"rows" (one per lesion, in map order; keys of :data:`INFLUENCE_COLUMNS`), "top" (the ``top_k`` most
-      influential participant ids, ranked by |Δt at the peak| with a design, else by 1 - Dice), "peak" (full GLM peak)}.
+      influential participant ids, ranked by |Δt at the peak| with a design, else by 1 - Dice; lesions with no influence are never listed, so
+      empty when no single lesion changes the result), "peak" (full GLM peak)}.
     """
     np = _np()
     if isinstance(maps, Cohort):
@@ -1343,8 +1348,10 @@ def leave_one_lesion_out(maps, design=None, ids=None, rule=None, n=None, v=None,
     order = sorted(range(n_lesions), key=lambda index: -(rows[index]["influence"] if rows[index]["influence"] is not None else -1.0))
     for rank, index in enumerate(order, start=1):
         rows[index]["rank"] = rank
-        rows[index]["top_k"] = rank <= top_k
-    return {"label": INFLUENCE_LABEL, "rows": rows, "top": [rows[index]["participant_id"] for index in order[:top_k]], "peak": peak, "rule": rule,
+        # A lesion is only "most influential" if removing it changes something: tied zeros keep map order and must not be listed
+        rows[index]["top_k"] = rank <= top_k and _has_influence(rows[index]["influence"])
+    top = [rows[index]["participant_id"] for index in order[:top_k] if rows[index]["top_k"]]
+    return {"label": INFLUENCE_LABEL, "rows": rows, "top": top, "peak": peak, "rule": rule,
             "overlap_pct": float(overlap_pct), "influence": "|Δt at the GLM peak|" if stats_ is not None else "1 - Dice of the sensitivity map"}
 
 

@@ -252,6 +252,18 @@ class SplitHalfInfluenceTest(unittest.TestCase):
         self.assertIsNone(plain["peak"])
         self.assertEqual(plain["influence"], "1 - Dice of the sensitivity map")
 
+    def test_leave_one_lesion_out_ties_at_zero_are_not_listed(self):
+        from LesionNetworkMappingLib import methods
+
+        same = np.tile(self.maps[:1], (self.L, 1))  # identical lesions: removing any one changes nothing
+        result = robustness.leave_one_lesion_out(same, rule=TOP10, overlap_pct=50, top_k=3)
+        self.assertEqual([item["influence"] for item in result["rows"]], [0.0] * self.L)
+        self.assertEqual(result["top"], [])
+        self.assertFalse(any(item["top_k"] for item in result["rows"]))
+        text = methods._influence_text({"influence_top": result["top"], "influence": result["influence"]}, {"rule": TOP10, "overlap_pct": 50}, {})
+        self.assertIn("no single lesion changes the result", text)
+        self.assertNotIn("most influential lesions", text)
+
     def path_tsv(self):
         folder = tempfile.mkdtemp(prefix="lnm-robustness-influence-")
         self.addCleanup(shutil.rmtree, folder, True)

@@ -1269,7 +1269,11 @@ class RobustCard:
     def showInfluence(self, folder):
         record = _readJson(os.path.join(folder, "influence.json")) or {}
         rows = sorted(_readTsv(os.path.join(folder, "influence.tsv")), key=lambda row: _float(row.get("rank")) or 1e9)[:TOP_K]
-        self.influenceLabel.setText(_("The {k} most influential lesions, ranked by {measure}. Influence alone is not a reason to remove a lesion.").format(k=len(rows), measure=record.get("influence", "")))
+        influential = [row for row in rows if str(row.get("top_k", "")).lower() == "true"] if rows and "top_k" in rows[0] else rows
+        if rows and not influential:
+            self.influenceLabel.setText(_("No single lesion changes the result: removing any one lesion leaves it unchanged, so none is more influential than the others (influence by {measure}).").format(measure=record.get("influence", "")))
+        else:
+            self.influenceLabel.setText(_("The {k} most influential lesions, ranked by {measure}. Influence alone is not a reason to remove a lesion.").format(k=len(influential), measure=record.get("influence", "")))
         self.influenceTable.setRowCount(len(rows))
         for index, row in enumerate(rows):
             sid = row["participant_id"]
