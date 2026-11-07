@@ -895,12 +895,53 @@ class RobustCard:
                 changed.append(row.get("participant_id"))
         return changed
 
+    def changedSources(self, kind, folder):
+        """The participant ids whose lesion file no longer has the ``source_sha256`` that the manifest of a seeds or consolidate result recorded."""
+        from LesionNetworkMappingLib import export
+
+        record = _readJson(os.path.join(folder, RESULT_FILES[kind])) or {}
+        if kind == "seeds":
+            variants = record.get("variants")
+            groups = [(v or {}).get("lesions") for v in variants.values()] if isinstance(variants, dict) else []
+        else:
+            groups = [record.get("lesions")]
+        changed = []
+        for entries in groups:
+            for entry in entries if isinstance(entries, list) else []:
+                if not isinstance(entry, dict):
+                    continue
+                source, recorded = entry.get("source"), entry.get("source_sha256")
+                if not source or not recorded:
+                    continue
+                path = source if os.path.isabs(source) else os.path.normpath(os.path.join(folder, source))
+                try:
+                    info = os.stat(path)
+                except OSError:
+                    continue  # a removed lesion is the Cohort card's matter
+                key = (path, info.st_size, info.st_mtime_ns)
+                if key not in self._lesionHashes:
+                    try:
+                        self._lesionHashes[key] = export.file_sha256(path)
+                    except OSError:
+                        continue
+                sid = entry.get("participant_id")
+                if self._lesionHashes[key] != recorded and sid not in changed:
+                    changed.append(sid)
+        return changed
+
     def staleReason(self, kind, folder):
         """Why the result in ``folder`` does not belong to the current cohort maps (a sentence), or "" when it does.
 
         A result records the maps it used (``cohort_maps.maps_sha256``); a result written before that was recorded is
-        stale when the maps.tsv is newer than it. Only the analyses of the cohort maps (``MAP_KINDS``) are checked.
+        stale when the maps.tsv is newer than it. The analyses of the cohort maps (``MAP_KINDS``) are checked against the maps;
+        the seed variants and the hemisphere consolidation, which derive files from the lesions, against the lesion bytes they recorded.
         """
+        if kind in ("seeds", "consolidate") and folder:
+            changed = self.changedSources(kind, folder)
+            if changed:
+                names = ", ".join(changed[:3]) + (" …" if len(changed) > 3 else "")
+                return _("A lesion changed after this was made ({names}): its derived files come from the old lesion. Run it again; until then this is not the current result.").format(names=names)
+            return ""
         if kind not in MAP_KINDS or not folder:
             return ""
         mapsTsv = self.currentMapsTsv()

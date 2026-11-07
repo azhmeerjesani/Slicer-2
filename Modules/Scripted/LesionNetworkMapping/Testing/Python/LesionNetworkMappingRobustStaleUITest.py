@@ -154,6 +154,27 @@ class RobustStaleUITest(unittest.TestCase):
         _touch(self.lesions["sub-02"], 60)
         self.assertEqual(self.card()[0]["splithalf"], None)
 
+    def test_seed_variants_and_consolidation_are_marked_stale_after_a_lesion_edit(self):
+        """Bug map-robust-card:robust-seeds-consolidation-not-stale-after-lesion-edit: their manifests record each source_sha256."""
+        folders = {}
+        for kind, name in (("seeds", "variants.json"), ("consolidate", "consolidation.json")):
+            folders[kind] = os.path.join(self.conn, "robustness", kind)
+            entries = [{"participant_id": sid, "source": os.path.relpath(self.lesions[sid], folders[kind]), "source_sha256": self.sha(sid)} for sid in IDS]
+            record = {"variants": {"flipped": {"lesions": entries}}} if kind == "seeds" else {"lesions": entries}
+            _write(os.path.join(folders[kind], name), json.dumps(record))
+        with mock.patch.object(self.robust, "currentMapsTsv", return_value=self.maps):
+            for kind, folder in folders.items():
+                self.assertEqual(self.robust.staleReason(kind, folder), "", kind)
+            with open(self.lesions["sub-02"], "a", encoding="utf-8") as f:
+                f.write(" edited")
+            _touch(self.lesions["sub-02"], 40)
+            for kind, folder in folders.items():
+                self.assertIn("A lesion changed after this was made (sub-02)", self.robust.staleReason(kind, folder), kind)
+            _write(self.lesions["sub-02"], "lesion of sub-02")
+            _touch(self.lesions["sub-02"], 60)
+            for kind, folder in folders.items():
+                self.assertEqual(self.robust.staleReason(kind, folder), "", kind)
+
 
 if __name__ == "__main__":
     unittest.main()
