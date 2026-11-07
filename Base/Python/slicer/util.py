@@ -507,7 +507,9 @@ def importModuleObjects(from_module_name, dest_module_name, type_info):
 # - after ``startupCompleted``, the remaining wrappers are imported one per event-loop pass while
 #   the application is idle, so that the namespace converges to the eager one within seconds.
 
+import sys
 import threading
+import types
 
 # One re-entrant lock serializes every change of the state below and every wrapper import, so that a
 # Python worker thread that reads ``slicer.<Class>`` while the main thread imports wrappers (the idle
@@ -524,6 +526,7 @@ _lazyWrapperState = {
     "imported": set(),
     "startupCompleted": False,
     "timer": None,
+    "removed": set(),  # names that the user deleted from slicer: a later import must not bring them back
 }
 
 _LAZY_WRAPPER_PATTERNS = (
@@ -545,6 +548,37 @@ def _lazyWrapperMatches(item, kind):
         except TypeError:
             return False
     return type(item).__name__ == "PythonQtClassWrapper"
+
+
+class _LazyWrapperSlicerModule(types.ModuleType):
+    """Class of the ``slicer`` module while wrappers are imported lazily.
+
+    As in a module without lazy wrappers, ``slicer.<Class> = value`` replaces the class for good
+    (the lazy import must not overwrite it later) and ``del slicer.<Class>`` removes it, also for
+    an indexed class that is not imported yet.
+    """
+
+    def __setattr__(self, name, value):
+        with _lazyWrapperLock:
+            _lazyWrapperState["classes"].pop(name, None)
+            _lazyWrapperState["removed"].discard(name)
+            super().__setattr__(name, value)
+
+    def __delattr__(self, name):
+        with _lazyWrapperLock:
+            state = _lazyWrapperState
+            pending = state["classes"].pop(name, None) is not None
+            if name in self.__dict__:
+                super().__delattr__(name)
+            elif not pending:
+                raise AttributeError(f"module 'slicer' has no attribute {name!r}")
+            state["removed"].add(name)
+
+
+def _installLazyWrapperModuleClass():
+    slicerModule = sys.modules.get("slicer")
+    if slicerModule is not None and type(slicerModule) is types.ModuleType:
+        slicerModule.__class__ = _LazyWrapperSlicerModule
 
 
 def _registerLazyWrapperIndex(directory, indexPath):
@@ -606,6 +640,7 @@ def _registerLazyWrapperIndexLocked(directory, indexPath):
     presentNames = {name for name, _ in present}
 
     state["indexes"].append(key)
+    _installLazyWrapperModuleClass()
     unindexed = []
     for moduleName, kind in present:
         if moduleName in state["imported"] or moduleName in state["pending"]:
@@ -667,16 +702,18 @@ def _importLazyWrapperModuleLocked(moduleName):
     if module is not None:
         for itemName in dir(module):
             item = getattr(module, itemName)
-            if not _lazyWrapperMatches(item, kind):
+            if itemName in state["removed"] or not _lazyWrapperMatches(item, kind):
                 continue
             owner = classes.get(itemName)
             if owner == moduleName:
-                setattr(slicerModule, itemName, item)
+                # __dict__ directly: a name that the user assigned or deleted is no longer in
+                # ``classes`` (see _LazyWrapperSlicerModule), so it is never overwritten here.
+                slicerModule.__dict__[itemName] = item
                 del classes[itemName]
             elif owner is None and itemName not in slicerModule.__dict__:
                 # Not in the index, for example an abstract Qt base class that PythonQt registers
                 # with the first wrapped subclass.
-                setattr(slicerModule, itemName, item)
+                slicerModule.__dict__[itemName] = item
     # Indexed names that the eager import would not have copied (not a class of this kind)
     for className in [name for name, owner in list(classes.items()) if owner == moduleName]:
         del classes[className]
@@ -711,7 +748,9 @@ def _resolveLazyWrapperAttribute(name):
     state = _lazyWrapperState
     slicerModule = sys.modules["slicer"]
     moduleName = state["classes"].get(name)
-    if moduleName is not None:
+    if name in state["removed"]:
+        pass
+    elif moduleName is not None:
         _importLazyWrapperModule(moduleName)
     elif state["pending"]:
         # A class that the index cannot list (an abstract Qt base class registered with a subclass):

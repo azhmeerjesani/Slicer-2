@@ -49,6 +49,7 @@ class StudioLazyWrappersTest(unittest.TestCase):
         state["imported"].discard(_MODULE)
         state["kinds"].pop(_MODULE, None)
         state["classes"].pop(_CLASS, None)
+        state["removed"].discard(_CLASS)
         key = (os.path.normcase(os.path.abspath(self.directory)), os.path.normcase(os.path.abspath(self.indexPath)))
         if key in state["indexes"]:
             state["indexes"].remove(key)
@@ -114,3 +115,32 @@ class StudioLazyWrappersTest(unittest.TestCase):
         thread.join(10)
         self.assertFalse(thread.is_alive())
         self.assertEqual(result, {"name": _CLASS})
+
+    def test_assignment_survives_and_del_removes_pending_class(self):
+        """slicer.<Class> = x and del slicer.<Class> on a class that is not imported yet behave as without lazy
+        wrappers: the later import (idle prefetch) does not overwrite the assignment, and del removes the class.
+        """
+        self.assertTrue(slicer.util._registerLazyWrapperIndex(self.directory, self.indexPath))
+        self.assertNotIn(_CLASS, slicer.__dict__)
+        shim = type("Shim", (), {})
+        setattr(slicer, _CLASS, shim)
+        slicer.util._importPendingLazyWrappers()
+        self.assertNotIn(_MODULE, slicer.util._lazyWrapperState["pending"])
+        self.assertIs(getattr(slicer, _CLASS), shim, "the import overwrote the assigned class")
+
+        # A pending class that is deleted stays deleted, also after its wrapper is imported
+        slicer.__dict__.pop(_CLASS, None)
+        state = slicer.util._lazyWrapperState
+        state["imported"].discard(_MODULE)
+        sys.modules.pop(_MODULE, None)
+        state["classes"].pop(_CLASS, None)
+        state["removed"].discard(_CLASS)
+        key = (os.path.normcase(os.path.abspath(self.directory)), os.path.normcase(os.path.abspath(self.indexPath)))
+        state["indexes"].remove(key)
+        self.assertTrue(slicer.util._registerLazyWrapperIndex(self.directory, self.indexPath))
+        delattr(slicer, _CLASS)
+        self.assertFalse(hasattr(slicer, _CLASS))
+        slicer.util._importPendingLazyWrappers()
+        self.assertFalse(hasattr(slicer, _CLASS), "the import brought back the deleted class")
+        with self.assertRaises(AttributeError):
+            delattr(slicer, _CLASS)
