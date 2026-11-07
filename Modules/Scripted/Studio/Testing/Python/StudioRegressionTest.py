@@ -2381,6 +2381,45 @@ class StudioRegressionTest(unittest.TestCase):
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
 
+    def test_21b_unwritable_folders_are_named_in_plain_words(self):
+        """A control set or a share export into a folder that cannot be written says "The folder ... cannot be written. Choose
+        another folder." (no exception class, errno or temporary name) and the share checklist flags such an output before
+        Export is enabled. The tests run as root, so a folder without permission is simulated (BB-1).
+        """
+        import errno
+        import types
+        from unittest import mock
+
+        from StudioLib import libcard_cohort, libcard_controls, libcard_share
+
+        error = PermissionError(errno.EACCES, "Permission denied", os.path.join(self.directory, "out", "share-out.partial-12-abc"))
+        message = libcard_cohort.unwritableMessage(error)
+        self.assertIn(os.path.join(self.directory, "out"), message)
+        self.assertIn("cannot be written", message)
+        for noise in ("PermissionError", "Errno", "partial"):
+            self.assertNotIn(noise, message)
+        self.assertIsNone(libcard_cohort.unwritableMessage(FileNotFoundError(errno.ENOENT, "No such file", "x")))
+        self.assertIsNone(libcard_cohort.unwritableMessage(ValueError("x")))
+
+        folder = os.path.join(self.directory, "readonly-parent")
+        os.makedirs(folder)
+        fake = types.SimpleNamespace(zipCheck=types.SimpleNamespace(checked=False))
+        unwritable = libcard_share.ShareDialog.unwritableFolder
+        self.assertIsNone(unwritable(fake, os.path.join(folder, "new")))
+        with mock.patch.object(os, "access", lambda path, mode: os.path.abspath(path) != folder):
+            self.assertEqual(unwritable(fake, os.path.join(folder, "new")), folder)
+            self.assertEqual(unwritable(fake, os.path.join(folder, "deeper", "new")), folder)
+            fake.zipCheck.checked = True
+            self.assertEqual(unwritable(fake, os.path.join(folder, "new.zip")), folder)
+
+        # The registration dialog wraps its message instead of cutting it off
+        if slicer.util.mainWindow() is not None:
+            dialog = libcard_controls.AddControlSetDialog()
+            try:
+                self.assertTrue(dialog.progressLabel.wordWrap)
+            finally:
+                dialog.dialog.close()
+
     def test_21_share_dialog_shows_success_after_export(self):
         """After a successful "Export study for sharing" the dialog shows the success ("Exported N files to ...") and Close, and
         its checklist has no failure mark: the folder that was just written is not reported as "It already exists" and Export

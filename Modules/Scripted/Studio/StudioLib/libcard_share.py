@@ -522,9 +522,33 @@ class ShareDialog:
             pass  # the output this dialog just wrote: the success line says so; the exists-blocker would read as a failure
         elif os.path.exists(output) and (not os.path.isdir(output) or os.listdir(output)):
             items.append({"id": "output", "label": _("Output chosen"), "status": "blocker", "detail": _("It already exists; choose a new name or an empty folder.")})
+        if output and not any(item["id"] == "output" for item in items):
+            folder = self.unwritableFolder(output)
+            if folder:
+                items.append({"id": "output", "label": _("Output chosen"), "status": "blocker",
+                              "detail": _("The folder {folder} cannot be written. Choose another folder.").format(folder=folder)})
         self.items = items
         self.checklistLabel.setText(self.checklistHtml(items))
         self._updateButtons()
+
+    def unwritableFolder(self, output):
+        """The folder the export would have to write into when it cannot be written (the output itself when it is an existing
+        empty folder, else its nearest existing parent), else None.
+        """
+        if os.name == "nt":
+            return None  # the read-only attribute of a folder does not stop writing there
+        if os.path.isdir(output) and not self.zipCheck.checked:
+            folder = output
+        else:
+            folder = os.path.dirname(output)
+        while folder and not os.path.exists(folder):
+            parent = os.path.dirname(folder)
+            if parent == folder:
+                break
+            folder = parent
+        if folder and os.path.isdir(folder) and not os.access(folder, os.W_OK | os.X_OK):
+            return folder
+        return None
 
     @staticmethod
     def checklistHtml(items):

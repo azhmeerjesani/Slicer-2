@@ -748,6 +748,19 @@ def _peak(volume):
 #
 
 
+def unwritableMessage(error):
+    """The sentence for a folder that cannot be written (permission denied, read-only medium), or None for any other error.
+
+    The folder is the one that holds the file the failing call named (no exception class, errno or temporary file name).
+    """
+    import errno
+
+    if not isinstance(error, OSError) or error.errno not in (errno.EACCES, errno.EPERM, errno.EROFS) or not error.filename:
+        return None
+    folder = os.path.dirname(os.fspath(error.filename).rstrip(os.sep)) or os.fspath(error.filename)
+    return _("The folder {folder} cannot be written. Choose another folder.").format(folder=folder)
+
+
 class _Worker:
     """Runs one function in a thread and hands its result to ``callback(result, error)`` on the main thread.
 
@@ -795,8 +808,12 @@ class _Worker:
             self._queue.put((None, "cancelled"))
         except Exception as e:
             logging.debug(f"Studio cohort diagnostics: the run failed:\n{traceback.format_exc()}")
-            # A failed download is a sentence for the user (no exception class); other failures keep their class
-            self._queue.put((None, _lnm("fetch").user_message(e) if isinstance(e, _lnm("fetch").FetchError) else f"{type(e).__name__}: {e}"))
+            # A failed download or a folder that cannot be written is a sentence for the user (no exception class); other failures keep their class
+            if isinstance(e, _lnm("fetch").FetchError):
+                message = _lnm("fetch").user_message(e)
+            else:
+                message = unwritableMessage(e) or f"{type(e).__name__}: {e}"
+            self._queue.put((None, message))
 
     def _pump(self):
         if self.onProgress is not None and self.progress != self._shown:

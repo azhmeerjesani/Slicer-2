@@ -270,6 +270,7 @@ class AddControlSetDialog:
         layout.addWidget(self.linkCheck)
         self.progressLabel = qt.QLabel()
         self.progressLabel.setObjectName("StudioControlSetProgress")
+        self.progressLabel.setWordWrap(True)
         layout.addWidget(self.progressLabel)
         buttons = qt.QHBoxLayout()
         buttons.addStretch(1)
