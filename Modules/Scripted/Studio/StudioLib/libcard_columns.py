@@ -734,6 +734,29 @@ def levelLabel(level, description):
     return f"{level} · {description}" if str(level).isdigit() else str(description)
 
 
+class _CaseEscFilter(qt.QObject):
+    """Event filter of a Case field's line edit: Esc with unsent edits puts the stored value back (the shell leaves Esc to a
+    modified line edit); without unsent edits the key goes on to the Esc ladder of the shell.
+    """
+
+    def __init__(self, lineEdit, stored):
+        qt.QObject.__init__(self, lineEdit)
+        self._edit = lineEdit
+        self._stored = stored
+
+    def eventFilter(self, obj, event):
+        eventType = event.type()
+        if eventType in (qt.QEvent.ShortcutOverride, qt.QEvent.KeyPress) and event.key() == qt.Qt.Key_Escape:
+            if self._edit.hasFocus() and str(self._edit.text) != self._stored():
+                if eventType == qt.QEvent.KeyPress:
+                    self._edit.setText(self._stored())
+                    self._edit.setModified(False)
+                    self._edit.selectAll()
+                event.accept()
+                return True
+        return False
+
+
 class CaseSection:
     """The 'Case' section of the SUBJECT card (SUBJECT_SECTION): the registry fields of the open subject, edited in place."""
 
@@ -845,6 +868,7 @@ class CaseSection:
                 combo.setEditable(True)
                 combo.lineEdit().setPlaceholderText("—")
                 combo.lineEdit().connect("editingFinished()", lambda column=column, combo=combo: self._commitCombo(column, combo, typed=True))
+                self._escFilter(column, combo.lineEdit())
             combo.connect("activated(int)", lambda index, column=column, combo=combo: self._commitCombo(column, combo))
             return combo
         edit = qt.QLineEdit()
@@ -852,9 +876,22 @@ class CaseSection:
         edit.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
         edit.setPlaceholderText(f"— ({spec.units})" if spec.units else "—")
         edit.connect("editingFinished()", lambda column=column, edit=edit: self._commitLine(column, edit))
+        self._escFilter(column, edit)
         if column == "doi":
             edit.connect("textChanged(QString)", lambda text: self._updateDoiButton())
         return edit
+
+    def _escFilter(self, column, lineEdit):
+        """Esc in a field with unsent edits gives them up (USABILITY 3 rung 0), so the next focus-out writes nothing."""
+        escFilter = _CaseEscFilter(lineEdit, lambda: self._storedText(column))
+        lineEdit.installEventFilter(escFilter)
+
+    def _storedText(self, column):
+        session = _session()
+        if session is None or self.sid is None or self.sid not in session.study:
+            return ""
+        value = session.study.subject(self.sid).get(column)
+        return "" if _missing(value) else str(value)
 
     @staticmethod
     def _fillLevels(combo, spec):

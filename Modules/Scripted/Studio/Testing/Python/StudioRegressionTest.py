@@ -4459,6 +4459,60 @@ class StudioRegressionTest(unittest.TestCase):
         finally:
             host.deleteLater()
 
+    def test_48b_case_field_esc_gives_up_the_typed_value(self):
+        """Esc in a Case field with unsent edits restored nothing and the next focus-out wrote the abandoned text to
+        participants.tsv (BB-1). Esc now puts the stored value back (a plain field and the line edit of a lenient combo).
+        """
+        from StudioLib import libcard_columns, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        study = self._study([("sub-01", {}, False), ("sub-02", {}, False)])
+        host = None
+        try:
+            session = study_ui.openStudy(study.path, showLibrary=False)
+            self.assertIsNotNone(session)
+            host = qt.QWidget()
+            hostLayout = qt.QVBoxLayout(host)
+            sectionWidget = libcard_columns._createSection(session)
+            section = libcard_columns._sections[sectionWidget]
+            hostLayout.addWidget(sectionWidget)
+            host.resize(306, 700)
+            host.show()
+            section.refresh("sub-02")
+            for key in ("imaging", "case"):
+                button = section.groups[key][0]
+                if not button.isChecked():
+                    button.click()
+            slicer.app.processEvents()
+            self.assertTrue(section.setField("age", "70"))
+            section.refresh("sub-02")
+
+            def press(widget, eventType):
+                event = qt.QKeyEvent(eventType, qt.Qt.Key_Escape, qt.Qt.NoModifier)
+                qt.QApplication.sendEvent(widget, event)
+                return event.isAccepted()
+
+            edit = section.editors["age"]
+            host.activateWindow()
+            host.raise_()
+            edit.setFocus(qt.Qt.OtherFocusReason)
+            for _ in range(10):
+                slicer.app.processEvents()
+            if not edit.hasFocus():
+                self.skipTest("the window cannot take the keyboard focus here")
+            edit.setText("99")
+            self.assertTrue(press(edit, qt.QEvent.ShortcutOverride), "Esc with unsent edits stays with the field")
+            self.assertTrue(press(edit, qt.QEvent.KeyPress))
+            self.assertEqual(str(edit.text), "70", "Esc puts the stored value back")
+            self.assertFalse(press(edit, qt.QEvent.ShortcutOverride), "without unsent edits Esc goes on to the shell")
+            edit.clearFocus()
+            slicer.app.processEvents()
+            self.assertEqual(str(session.study.subject("sub-02")["age"]), "70", "the abandoned value is not written")
+        finally:
+            if host is not None:
+                host.deleteLater()
+
     def test_48_case_doi_field_is_as_wide_as_the_other_source_fields(self):
         """The Case section's DOI field was 53 px wide in a 137 px field: the flat "Open" button next to it keeps a minimum
         width of about 80 px, so no DOI could be read (BB-1). The edit now has the width of the other fields and the link
