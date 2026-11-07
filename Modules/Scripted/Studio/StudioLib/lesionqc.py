@@ -1168,7 +1168,13 @@ class QcCore:
         changed = False
         for kind, _tag, result, error in results:
             if error:
-                logging.error(f"Studio: the lesion QC job {kind} failed:\n{error}")
+                lastLine = error.strip().splitlines()[-1] if error.strip() else ""
+                if lastLine.startswith("PermissionError"):
+                    # Expected for a study folder that cannot be written (a read-only study): one line, no traceback
+                    logging.warning(f"Studio: the lesion QC job {kind} could not write in the study folder (read-only?): "
+                                    f"{lastLine.split(':', 1)[-1].strip()}")
+                else:
+                    logging.error(f"Studio: the lesion QC job {kind} failed:\n{error}")
                 if kind == "resources":
                     self.resources.state = "ready"
                 continue

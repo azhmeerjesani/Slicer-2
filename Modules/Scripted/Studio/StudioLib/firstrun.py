@@ -285,13 +285,19 @@ def studyCloseSummary():
     # participants.tsv could not be saved (another program made it unreadable, or keeps it locked): the study changes
     # are kept for the next session when the study closes (StudySession.close), and the prompt says so
     unsaved = studySession.unsavedSubjects() if written and not saved and studySession.folderAvailable() else []
-    if not written or (not saved and not unsaved):
+    # A read-only study: the current subject's tracing cannot be written, and the prompt names it (nothing else is lost)
+    unwritten = [studySession.current()] if (not written and getattr(studySession, "readOnly", False) and studySession.folderAvailable()
+                                             and studySession.current() is not None and studySession.isDirty()) else []
+    if (not written and not unwritten) or (not unwritten and not saved and not unsaved):
         return "", ""
     # The study's nodes (the subject's scan and lesion, the shared template) are in the study now
     others = [node for node in _modifiedStorableNodes()
               if not node.GetAttribute(study_ui.SUBJECT_ATTRIBUTE) and not _isTemplate(node)]
     if others:
         return "", ""
+    if unwritten:
+        return CLOSE_MODE_LESION_SAVED, _("The tracing of {sid} cannot be saved: study {study} is read-only. Quitting discards it "
+                                          "(Cancel to keep working). Quit?").format(sid=unwritten[0], study=studySession.name)
     if unsaved:
         return CLOSE_MODE_LESION_SAVED, _("The study changes of {sids} could not be saved in participants.tsv of study {study}: "
                                           "{error}\n\nThey are kept and added when you open the study again after the table is "

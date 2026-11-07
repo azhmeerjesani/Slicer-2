@@ -2240,6 +2240,8 @@ class StudySession:
         self._openedEpoch = None  # time.time() when the current subject was opened
         self._hiddenOutside = []  # segmentations of the work that was open, hidden while the study is open (openStudy)
         self._folderGoneSaid = False  # the "study folder moved or renamed" toast was shown (until the folder is back)
+        self.readOnly = False  # the study folder cannot be written (a shared or locked study): changes cannot be saved
+        self._readOnlySaid = False
 
     # Identity (A-01b records these in every autosave slot)
 
@@ -2270,6 +2272,8 @@ class StudySession:
         The trace queue and the position of the last session (``.studio/session.json``) are restored first.
         """
         self._restoreQueue()
+        if not self._studyWritable():
+            self._markReadOnly()
         # Another window with this study open: said now, before this session's heartbeat replaces the other one's
         self._noticeOtherSession(_liveOtherSession(self._readSessionRecord()))
         self._writeHeartbeat()
@@ -2482,6 +2486,27 @@ class StudySession:
                               "subject in one window only.").format(name=self.study.name, pid=other.get("pid"), host=other.get("host")),
                ms=12000, level="warning")
 
+    def _studyWritable(self):
+        """False when the study folder (or its ``.studio`` folder) cannot be written by this user."""
+        folder = self.study.path
+        private = os.path.join(folder, _lnm("study").PRIVATE_DIR)
+        if os.path.isdir(private):
+            folder = private
+        return os.access(folder, os.W_OK | os.X_OK)
+
+    def readOnlyText(self):
+        return _("The study {name} is read-only: you can look at it and trace, but changes cannot be saved. Ask for write access, "
+                 "or open a copy of the study folder.").format(name=self.study.name)
+
+    def _markReadOnly(self):
+        """The study folder cannot be written: say so once (a warning line in the log and a toast), and write nothing."""
+        self.readOnly = True
+        if self._readOnlySaid:
+            return
+        self._readOnlySaid = True
+        logging.warning(f"Studio: the study {self.study.path} is read-only (Permission denied): changes cannot be saved")
+        _toast(self._shell, self.readOnlyText(), ms=15000, level="warning", toolTip=self.study.path)
+
     def _writeSessionRecord(self, closed=False):
         """``.studio/session.json``: the heartbeat while the study is open (``heartbeat_epoch`` 0 once closed), the
         current subject and the trace queue with its position (L-45).
@@ -2491,6 +2516,8 @@ class StudySession:
         """
         if not self._checkFolder(sayOnce=not closed):
             return
+        if self.readOnly:
+            return  # nothing can be written (said once when the study opened)
         other = _liveOtherSession(self._readSessionRecord())
         if closed:
             if other is not None:
@@ -2498,6 +2525,8 @@ class StudySession:
             if _liveOtherSession(self._otherSession) is not None:
                 try:
                     _lnm("schema").write_text_atomic(self._sessionFile(), json.dumps(self._otherSession) + "\n")
+                except PermissionError:
+                    self._markReadOnly()
                 except OSError:
                     logging.warning(f"Studio: cannot write the study heartbeat:\n{traceback.format_exc()}")
                 return
@@ -2513,6 +2542,8 @@ class StudySession:
             path = self._sessionFile()
             os.makedirs(os.path.dirname(path), exist_ok=True)
             _lnm("schema").write_text_atomic(path, json.dumps(content) + "\n")
+        except PermissionError:
+            self._markReadOnly()
         except OSError:
             logging.warning(f"Studio: cannot write the study heartbeat:\n{traceback.format_exc()}")
 
@@ -2560,6 +2591,15 @@ class StudySession:
             logging.info("Studio: participants.tsv is locked by another program, the save is retried")
             if not self._closed:
                 self._saveTimer.start(SAVE_RETRY_MS)
+            return False
+        except PermissionError as e:
+            # Expected for a study folder that cannot be written: plain words, one warning line, no traceback
+            self._markReadOnly()
+            self._lastSaveError = _("{name} is read-only").format(name=self.study.name)
+            logging.warning(f"Studio: cannot save the study {self.study.path}: {e}")
+            _toast(self._shell, _("The study could not be saved: the study folder is read-only ({reason})").format(reason=_plainOSError(e)),
+                   ms=6000, level="warning")
+            _notifySaved(self)
             return False
         except Exception as e:
             self._lastSaveError = str(e)
@@ -2615,6 +2655,8 @@ class StudySession:
 
     def saveStatus(self):
         """``(text, timestamp)`` for the save status of the top bar (A-01b)."""
+        if self.readOnly:
+            return _("Read-only: changes are not saved"), self._lastSaveTime
         if self._lastSaveError:
             return _("Study not saved"), self._lastSaveTime
         if self._saveTimer.isActive():

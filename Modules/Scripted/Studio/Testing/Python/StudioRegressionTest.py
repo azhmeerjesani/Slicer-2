@@ -186,6 +186,9 @@ Run with the main window and testing enabled::
 - ``test_85_review_of_a_read_only_study_says_so_and_changes_nothing`` (BB-1): Approve or Request changes on a study whose folder
   cannot be written shows a warning toast that the review was not recorded and leaves the row as it was (an uncaught
   PermissionError of the audit log left it "pending" in memory).
+- ``test_16b_read_only_study_says_so_and_logs_one_line_warnings`` (BB-1): a study folder that cannot be written is said
+  when it opens, its save status is not "All changes saved", PermissionErrors of the heartbeat, the study save and the lesion
+  QC jobs are one-line warnings (no traceback, no errno or lock name in the toast) and the quit prompt names the tracing.
 """
 
 import inspect
@@ -1647,6 +1650,85 @@ class StudioRegressionTest(unittest.TestCase):
             for text in toasts:
                 self.assertNotIn("Errno", text)
                 self.assertNotIn(".tmp", text)
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
+    def test_16b_read_only_study_says_so_and_logs_one_line_warnings(self):
+        """A study whose folder cannot be written says so when it opens (changes cannot be saved), its card does not say
+        "All changes saved", the expected PermissionErrors are warnings without a traceback, the toast gives the reason in
+        plain words and the quit prompt names the unsaved tracing (BB-1).
+        """
+        from unittest import mock
+
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import firstrun, lesionqc, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Shared read-only study")
+        os.makedirs(folder)
+        paths = [os.path.join(folder, f"sub-0{index}_T1w.nii.gz") for index in (1, 2)]
+        for path in paths:
+            nifti.write_nifti(path, np.zeros(grid.shape, np.uint8), grid.affine)
+        toasts = []
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: toasts.append(str(text))
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        records = []
+
+        class Recorder(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = Recorder(level=logging.DEBUG)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        try:
+            logging.getLogger().addHandler(handler)
+            try:
+                # The study opens from a folder that cannot be written (os.access says so; the tests run as root)
+                with mock.patch.object(study_ui.StudySession, "_studyWritable", return_value=False):
+                    session = study_ui.createStudy(paths, studioShell, folder=folder)
+                self.assertIsNotNone(session)
+                self.assertTrue(session.readOnly)
+                self.assertTrue([text for text in toasts if "read-only" in text and "cannot be saved" in text], toasts)
+                self.assertNotIn("All changes saved", session.saveStatus()[0])
+                # The heartbeat, the study save and a lesion QC job all hit PermissionError
+                error = PermissionError(13, "Permission denied", os.path.join(folder, ".studio", "participants.lock"))
+                toasts[:] = []
+                session.study.set("sub-01", notes="changed")
+                with mock.patch.object(session.study, "save", side_effect=error):
+                    self.assertFalse(session.flush())
+                self.assertTrue([text for text in toasts if "read-only" in text], toasts)
+                for text in toasts:
+                    self.assertNotIn("Errno", text)
+                    self.assertNotIn("participants.lock", text)
+                # (a stand-in for the QC core: the shared one is not created here)
+                qcError = ("Traceback (most recent call last):\n  File x\n"
+                           "PermissionError: [Errno 13] Permission denied: '/x/.studio/cache'\n")
+                fakeWorker = types.SimpleNamespace(pending=1, drain=lambda: [("scan", None, None, qcError)])
+                lesionqc.QcCore._drain(types.SimpleNamespace(worker=fakeWorker))
+                self.assertTrue([r for r in records if r.levelno == logging.WARNING and "lesion QC job scan" in r.getMessage()])
+                # The quit prompt names the tracing that cannot be written
+                session.open("sub-01", switchToDraw=False)
+                session.markDirty()
+                with mock.patch.object(session, "writeCurrent", return_value=False), mock.patch.object(session, "isDirty", return_value=True):
+                    result = firstrun.studyCloseSummary()
+                self.assertEqual(result[0], firstrun.CLOSE_MODE_LESION_SAVED)
+                self.assertIn("sub-01", result[1])
+                self.assertIn("read-only", result[1])
+            finally:
+                logging.getLogger().removeHandler(handler)
+            self.assertEqual([record for record in records if record.levelno >= logging.ERROR], [])
+            self.assertFalse([record for record in records if record.exc_info or "Traceback" in record.getMessage()])
         finally:
             study_ui.closeStudy()
             studioShell.dispose()
