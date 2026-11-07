@@ -2623,6 +2623,21 @@ _webLinkRelay = None
 #: The web address schemes that the web build routes to :func:`openLink`
 WEB_LINK_SCHEMES = ("http", "https")
 
+#: The schemes whose addresses are a place on the disk: "file" (``QUrl::fromLocalFile``) and "" (a bare folder path, which
+#: the official Report a Bug dialog passes). The web build shows the location with [Copy path] for them.
+WEB_FILE_SCHEMES = ("file", "")
+
+
+def _openRelayed(url):
+    """The web build's ``QDesktopServices::openUrl`` target: a place on the disk shows its location, a web address its link."""
+    qurl = url if hasattr(url, "toString") else qt.QUrl(str(url))
+    if str(qurl.scheme()).lower() in WEB_FILE_SCHEMES:
+        path = qurl.toLocalFile() if str(qurl.scheme()).lower() == "file" else qurl.path()
+        if path:
+            _showLocationDialog("folder", str(path))
+            return True
+    return openLink(qurl)
+
 
 def installWebLinkHandler():
     """In the web build, send every ``QDesktopServices::openUrl`` of a web address to :func:`openLink`.
@@ -2642,11 +2657,11 @@ def installWebLinkHandler():
     if _webLinkRelay is None:
         relay = qt.QTextBrowser()
         relay.setObjectName("StudioWebLinkRelay")
-        relay.connect("anchorClicked(QUrl)", openLink)
+        relay.connect("anchorClicked(QUrl)", _openRelayed)
         _webLinkRelay = relay
         # Qt wants the handler removed before its receiver is destroyed (deprecated since Qt 6.6)
         slicer.app.connect("aboutToQuit()", uninstallWebLinkHandler)
-    for scheme in WEB_LINK_SCHEMES:
+    for scheme in WEB_LINK_SCHEMES + WEB_FILE_SCHEMES:
         qt.QDesktopServices.setUrlHandler(scheme, _webLinkRelay, "anchorClicked")
     return True
 
@@ -2654,7 +2669,7 @@ def installWebLinkHandler():
 def uninstallWebLinkHandler():
     """Undo :func:`installWebLinkHandler` (the tests)."""
     global _webLinkRelay
-    for scheme in WEB_LINK_SCHEMES:
+    for scheme in WEB_LINK_SCHEMES + WEB_FILE_SCHEMES:
         qt.QDesktopServices.unsetUrlHandler(scheme)
     _webLinkRelay = None
 

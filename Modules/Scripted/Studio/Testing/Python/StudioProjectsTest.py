@@ -103,6 +103,9 @@ def _privacyModule():
     return module
 
 
+# The original, kept before any test replaces the Python name (the official dialogs call the C++ function)
+_REAL_OPEN_URL = qt.QDesktopServices.openUrl
+
 class StudioProjectsTest(unittest.TestCase):
     """The Slicer Studio folder, projects and their continuous saving. Needs the main window."""
 
@@ -1942,6 +1945,54 @@ class StudioProjectsTest(unittest.TestCase):
         finally:
             qt.QDesktopServices.openUrl = realOpenUrl
             closeDialog()
+            if webValue is None:
+                os.environ.pop("SLICER_STUDIO_WEB", None)
+            else:
+                os.environ["SLICER_STUDIO_WEB"] = webValue
+
+    def test_27b_web_file_urls_show_the_location(self):
+        """A file:// address or a bare folder path (Report a Bug "Open log location" / "Open log in editor", Settings, Segmentations
+        export, Sample Data, Screen Capture) shows the location window with [Copy path] in the web build, not nothing.
+        """
+        projects = self.projects
+        folder = os.path.join(self.tempDir, "Official folder")
+        os.makedirs(folder)
+        logFile = os.path.join(folder, "Slicer.log")
+        open(logFile, "w").close()
+        webValue = os.environ.get("SLICER_STUDIO_WEB")
+        os.environ["SLICER_STUDIO_WEB"] = "1"
+
+        def dialog():
+            for found in qt.QApplication.topLevelWidgets():
+                if found.objectName == "StudioLocationDialog" and found.isVisible():
+                    return found
+            return None
+
+        try:
+            self.assertTrue(projects.installWebLinkHandler())
+            for name, url, expected in (
+                ("file url", qt.QUrl.fromLocalFile(logFile), logFile),
+                ("bare path", qt.QUrl(folder, qt.QUrl.TolerantMode), folder),
+            ):
+                _REAL_OPEN_URL(url)
+                slicer.app.processEvents()
+                found = dialog()
+                self.assertIsNotNone(found, "%s shows the location" % name)
+                self.assertEqual(found.windowTitle, "Folder location")
+                self.assertEqual(found.findChild(qt.QLineEdit, "StudioLocationField").text, expected)
+                found.close()
+                slicer.app.processEvents()
+            _REAL_OPEN_URL(qt.QUrl("https://example.org/x"))
+            slicer.app.processEvents()
+            found = dialog()
+            self.assertIsNotNone(found)
+            self.assertEqual(found.windowTitle, "Link")
+            found.close()
+        finally:
+            projects.uninstallWebLinkHandler()
+            found = dialog()
+            if found is not None:
+                found.close()
             if webValue is None:
                 os.environ.pop("SLICER_STUDIO_WEB", None)
             else:
