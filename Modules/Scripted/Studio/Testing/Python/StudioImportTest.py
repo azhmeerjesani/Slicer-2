@@ -1521,6 +1521,78 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         # ... but a lesion of another BIDS subject (sub-03) is not bound to the scan of sub-04
         self.assertFalse(importer._isBoundTo(lesion, normalized))
 
+    def test_command_line_files_take_studio_routes(self):
+        """Files given on the command line (``Slicer scan.nii.gz lesion.nii.gz``) take Studio's import routes, not the core
+        loader that reads every image as a plain volume: the Studio module turns the core handling off when Studio applies
+        at startup, and opens them as a drop once Studio is applied. Classic keeps 3D Slicer's handling.
+        """
+        import Studio
+        from StudioLib import importer
+
+        app = slicer.app
+        # The core handling can be turned off from Python (it is on in the application, off under --testing)
+        self.assertTrue(hasattr(app, "setURIArgumentHandlingEnabled"))
+        wasEnabled = app.isURIArgumentHandlingEnabled()
+        scan = self._writeVolume("sub-01_T1w.nii.gz", GRID_SHIFTED)
+        lesion = self._writeMask("sub-01_lesion.nii.gz", GRID_SHIFTED)
+
+        class Options:
+            def __init__(self, arguments, pythonScript=""):
+                self.unparsedArguments = arguments
+                self.pythonScript = pythonScript
+                self.extraPythonScript = ""
+
+        try:
+            app.setURIArgumentHandlingEnabled(True)
+            # Not taken over: Classic at startup, or a Python script (the arguments are its own)
+            self.assertEqual(Studio.takeOverCommandLineArguments(willApply=False, options=Options([scan, lesion])), [])
+            self.assertEqual(Studio.takeOverCommandLineArguments(willApply=True, options=Options([scan], "run.py")), [])
+            self.assertTrue(app.isURIArgumentHandlingEnabled())
+            self.assertIsNone(Studio._commandLineArguments)
+            # Studio at startup: the core loader does not read them, Studio keeps them for after the apply
+            self.assertEqual(Studio.takeOverCommandLineArguments(willApply=True, options=Options([scan, lesion])), [scan, lesion])
+            self.assertFalse(app.isURIArgumentHandlingEnabled())
+            self.assertEqual(Studio._commandLineArguments, [scan, lesion])
+        finally:
+            Studio._commandLineArguments = None
+            app.setURIArgumentHandlingEnabled(wasEnabled)
+
+        # Studio: the lesion is a lesion segmentation on its scan in Draw (not a grey scan over it); a missing file is ignored
+        studioShell = self._applyStudio()
+        result = importer.openCommandLineArguments([scan, lesion, os.path.join(self.directory, "missing.nii.gz")], studioShell)
+        self._pump(8)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.errors, [])
+        scalars = lambda: sorted(node.GetName() for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
+                                 if node.GetClassName() == "vtkMRMLScalarVolumeNode")
+        self.assertEqual(scalars(), ["sub-01_T1w"])
+        self.assertEqual([node.GetName() for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode")], ["sub-01_lesion"])
+        self.assertEqual(slicer.mrmlScene.GetNodeByID(self._composite("Red").GetBackgroundVolumeID()).GetName(), "sub-01_T1w")
+        self.assertEqual(slicer.util.selectedModule(), "SegmentEditor")
+        self.assertEqual(self._editor().segmentationNode().GetName(), "sub-01_lesion")
+        # A folder takes the Open folder... route (not the core loader's "Adding data failed" box)
+        slicer.mrmlScene.Clear(0)
+        self._pump()
+        self._writeVolume("sub-02_T1w.nii.gz", GRID_SHIFTED, subdirectory="cli folder")
+        calls = []
+        loadFolder = importer.loadFolder
+        importer.loadFolder = lambda path, shell=None: calls.append(path)
+        try:
+            importer.openCommandLineArguments([os.path.join(self.directory, "cli folder")], studioShell)
+        finally:
+            importer.loadFolder = loadFolder
+        self.assertEqual(calls, [os.path.join(self.directory, "cli folder")])
+        studioShell.dispose()
+        self._pump()
+
+        # Classic: 3D Slicer's core loader, unchanged (both images are volumes)
+        slicer.mrmlScene.Clear(0)
+        self._pump()
+        self.assertIsNone(importer.openCommandLineArguments([scan, lesion]))
+        self._pump()
+        self.assertEqual(scalars(), ["sub-01_T1w", "sub-01_lesion"])
+        self.assertFalse(slicer.util.getNodesByClass("vtkMRMLSegmentationNode"))
+
     def test_two_subjects_one_load_each_lesion_on_its_scan(self):
         """Two subjects opened at once (scan and lesion each): every lesion is bound to its own scan, and Draw edits it there."""
         from StudioLib import importer, library

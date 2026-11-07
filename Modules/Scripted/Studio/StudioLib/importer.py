@@ -2232,6 +2232,36 @@ def handleDrop(paths, addData=False, shell=None):
     return loadFiles(paths, shell)
 
 
+def openCommandLineArguments(arguments, shell=None):
+    """Open the files and folders given on the command line (``Slicer scan.nii.gz lesion.nii.gz``) as a drop would.
+
+    3D Slicer reads them with its core loader (``qSlicerCoreApplication::handleURIArguments()``), which reads every image
+    as a plain volume: in Studio a lesion would become a grey scan over its scan, a statistical map or a figure a scan, a
+    4D image one frame, and a folder an error box. The Studio module takes them over when Studio applies at startup
+    (``Studio.takeOverCommandLineArguments()``) and opens them here: the existing paths with ``handleDrop()``, and the
+    other arguments (``slicer://`` URLs, which the DICOM module receives) with the core handler, which also logs the ignored
+    ones. In Classic (no live shell) all of them take the core route, as in 3D Slicer. Return what ``handleDrop()`` returned,
+    or None.
+    """
+    arguments = [str(argument) for argument in arguments if argument]
+    if not arguments:
+        return None
+    shell = _currentShell(shell)
+    if shell is None:
+        slicer.app.handleURIArguments(arguments)
+        return None
+    scheme = str(slicer.app.applicationName).lower()
+    paths, others = [], []
+    for argument in arguments:
+        isUrl = str(qt.QUrl(argument).scheme()).lower() == scheme
+        (paths if not isUrl and os.path.exists(argument) else others).append(argument)
+    if others:
+        slicer.app.handleURIArguments(others)
+    if not paths:
+        return None
+    return handleDrop([os.path.abspath(path) for path in paths], shell=shell)
+
+
 #
 # Recent files and folders (Studio/RecentOpenTimes, Studio/RecentFolders)
 #

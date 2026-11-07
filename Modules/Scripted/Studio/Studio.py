@@ -12,11 +12,62 @@ from slicer.ScriptedLoadableModule import *
 #
 
 
+#: Files, folders and URLs given on the command line that the Studio module took over from the core loader
+#: (``takeOverCommandLineArguments()``), opened once Studio has been applied; None when there are none
+_commandLineArguments = None
+
+
+def takeOverCommandLineArguments(willApply=None, options=None):
+    """Take the files given on the command line from 3D Slicer's core loader when Studio applies at startup.
+
+    The core loader (``qSlicerCoreApplication::handleURIArguments()``, run when the event loop starts) reads every image as a
+    plain volume. When Studio will be applied, its handling is turned off here, before the event loop starts, and the
+    arguments are opened by ``StudioLib.importer.openCommandLineArguments()`` once Studio is applied, as a drop would be.
+    The same arguments as the core loader are taken: none when a Python script was given (they are its arguments).
+    ``willApply`` (default ``_studioWillApplyAtStartup()``) and ``options`` (default ``slicer.app.commandOptions()``) are for
+    tests. Return the arguments taken over (a list).
+    """
+    global _commandLineArguments
+    app = slicer.app
+    if not hasattr(app, "setURIArgumentHandlingEnabled") or not app.isURIArgumentHandlingEnabled():
+        # A build without the setter, or the application does not open them: the core keeps its own handling
+        return []
+    options = app.commandOptions() if options is None else options
+    arguments = [str(argument) for argument in (options.unparsedArguments or [])]
+    if not arguments or options.pythonScript or options.extraPythonScript:
+        return []
+    if not (_studioWillApplyAtStartup() if willApply is None else willApply):
+        return []
+    app.setURIArgumentHandlingEnabled(False)
+    _commandLineArguments = arguments
+    return list(arguments)
+
+
+def _openCommandLineArguments():
+    """Open the arguments taken over by ``takeOverCommandLineArguments()`` (with the core loader in Classic)."""
+    global _commandLineArguments
+    arguments, _commandLineArguments = _commandLineArguments, None
+    if not arguments:
+        return
+    try:
+        from StudioLib import importer
+
+        importer.openCommandLineArguments(arguments)
+    except Exception:
+        import logging
+        import traceback
+
+        logging.error("The files given on the command line could not be opened:\n" + traceback.format_exc())
+
+
 def _onStartupCompleted():
     import time
 
     # The apply time of Studio includes importing the shell
     startTime = time.perf_counter()
+    if _commandLineArguments:
+        # After this slot (Studio is applied by then), when the core loader would have read them
+        qt.QTimer.singleShot(0, _openCommandLineArguments)
     # Imported lazily, so that the module costs nothing at startup when Studio is not used
     from StudioLib import shell
 
@@ -170,6 +221,8 @@ copyright (c) The Inter Project Authors.</p>
                 # Set before the main window is first shown: it emits disclaimerRequested() instead of opening its
                 # disclaimer dialog, and Studio shows a non-modal research-use line (StudioLib/firstrun.py)
                 slicer.app.setProperty("SlicerDisclaimerHandledByApplication", True)
+                # Files given on the command line take Studio's import routes, not the core loader (U-07)
+                takeOverCommandLineArguments(willApply=True)
 
 
 #
