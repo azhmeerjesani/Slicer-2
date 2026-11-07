@@ -2473,7 +2473,32 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         if scrollArea is not None:
             scrollArea.ensureWidgetVisible(widget)
         widget.setFocus()
+        # Map may just have been switched to (for example from a search entry run in Library): its inspector is not laid out
+        # yet, so the scroll position and the focus above did not take effect; repeat once the workspace switch has been laid out
+        for delay in (0, 150, 500):
+            qt.QTimer.singleShot(delay, lambda: self._focusCardLater(cardId))
         return True
+
+    def _focusCardLater(self, cardId, attempt=0):
+        entry = self._cardWidgets.get(str(cardId))
+        if entry is None:
+            return
+        widget = entry[1]
+        scrollArea = None
+        parent = widget.parentWidget()
+        while parent is not None:
+            if hasattr(parent, "ensureWidgetVisible"):
+                scrollArea = parent
+                break
+            parent = parent.parentWidget()
+        if not widget.isVisible() or (scrollArea is not None and not scrollArea.isVisible()):
+            if attempt < 20:  # still not shown: try again shortly, then give up
+                qt.QTimer.singleShot(50, lambda: self._focusCardLater(cardId, attempt + 1))
+            return
+        if scrollArea is not None:
+            slicer.app.processEvents()  # let the layout of the just expanded card settle
+            scrollArea.ensureWidgetVisible(widget)
+        widget.setFocus()
 
     def _revealCard(self, cardId):
         """Scroll a card into view in its scroll area (no focus change, no expansion)."""
