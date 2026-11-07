@@ -1147,6 +1147,23 @@ class CohortCard:
     def _onInclude(self, checked):
         self.includeUnreviewed = bool(checked)
 
+    def showCard(self):
+        """Scroll the inspector that holds the card so the card's top is shown (a Search command's result must be visible)."""
+        widget = self.widget
+        if not library._isAlive(widget):
+            return
+        parent = widget.parentWidget()
+        while parent is not None:
+            if parent.inherits("QScrollArea") and parent.widget() is not None and parent.widget().isAncestorOf(widget):
+                try:
+                    bar = parent.verticalScrollBar()
+                    top = widget.mapTo(parent.widget(), qt.QPoint(0, 0)).y()
+                    bar.setValue(max(0, top - 8))
+                except Exception:
+                    logging.error(f"Studio cohort diagnostics: scrolling to the card failed:\n{traceback.format_exc()}")
+                return
+            parent = parent.parentWidget()
+
     def overview(self):
         """Lesion overview: the overlap maps in the views, the numbered gallery and the case table. Return True when it started."""
         return self.run(overview=True)
@@ -1526,6 +1543,7 @@ def _withCard(function):
     if card is None:
         _toast(_("Show the study in Library first"))
         return False
+    card.showCard()
     return function(card)
 
 

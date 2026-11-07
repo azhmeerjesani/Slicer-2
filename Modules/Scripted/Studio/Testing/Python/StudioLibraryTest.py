@@ -2080,6 +2080,53 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertNotIn("\n", message)
             self.assertIn("cannot be read", message)
 
+    def test_search_lesion_set_commands_scroll_to_the_cohort_card(self):
+        """Search > Check lesion set scrolls the inspector to the Cohort card, which sits below the visible part."""
+        from StudioLib import libcard_cohort
+
+        scroll = qt.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.resize(300, 200)
+        content = qt.QWidget()
+        layout = qt.QVBoxLayout(content)
+        filler = qt.QWidget()
+        filler.setMinimumHeight(1200)
+        layout.addWidget(filler)
+        cardWidget = qt.QWidget()
+        cardWidget.setMinimumHeight(100)
+        layout.addWidget(cardWidget)
+        scroll.setWidget(content)
+        scroll.show()
+        slicer.app.processEvents()
+        self.addCleanup(scroll.deleteLater)
+        calls = []
+
+        class FakeCard:
+            widget = cardWidget
+            showCard = libcard_cohort.CohortCard.showCard
+
+            def run(self):
+                calls.append("run")
+                return True
+
+            def overview(self):
+                calls.append("overview")
+                return True
+
+        card = FakeCard()
+        original = (libcard_cohort._session, libcard_cohort.liveCard)
+        libcard_cohort._session = object
+        libcard_cohort.liveCard = lambda: card
+        try:
+            self.assertEqual(scroll.verticalScrollBar().value, 0)
+            self.assertTrue(libcard_cohort.checkLesionSetAction())
+            slicer.app.processEvents()
+            top = cardWidget.mapTo(scroll.viewport(), qt.QPoint(0, 0)).y()
+            self.assertEqual(calls, ["run"])
+            self.assertTrue(0 <= top < scroll.viewport().height, f"the card's top is at y={top}")
+        finally:
+            libcard_cohort._session, libcard_cohort.liveCard = original
+
     def test_cohort_subset_line_uses_singular_for_one(self):
         """The subset line says "1 case + 1 control" and "1 case without a control", not "1 cases + 1 controls"."""
         from StudioLib import libcard_cohort
