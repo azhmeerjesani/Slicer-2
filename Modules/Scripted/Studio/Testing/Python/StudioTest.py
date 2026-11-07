@@ -1001,6 +1001,52 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._pump()
         self.assertIsNotNone(self.mainWindow.findChild("QPushButton", "StudioSaveLesionButton"))
 
+    def test_11b_save_lesion_into_a_folder_that_cannot_be_written(self):
+        """A folder that cannot be written gives its reason, logs no traceback and changes nothing (the old file and
+        its sidecar stay as they were).
+        """
+        import logging
+        import os
+
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        path, editor = self._openScanInDraw(studioShell)
+        self._paintCube(editor)
+        folder = os.path.join(os.path.dirname(path), "readonly_lesions")
+        os.makedirs(folder)
+        target = os.path.join(folder, "les.nii.gz")
+        with open(target, "wb") as f:
+            f.write(b"old")
+        # os.access is patched: the tests may run as a user that can write everywhere
+        originalAccess, shown, records = os.access, [], []
+
+        class _Handler(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = _Handler()
+        logging.getLogger().addHandler(handler)
+        originalDisplay = slicer.util.errorDisplay
+        slicer.util.errorDisplay = lambda text, **kwargs: shown.append((text, kwargs))
+        os.access = lambda p, mode, *a, **k: False if os.path.normpath(str(p)) == os.path.normpath(folder) else originalAccess(p, mode, *a, **k)
+        try:
+            self.assertIsNone(draw.saveLesionDialog(studioShell, path=target))
+        finally:
+            os.access = originalAccess
+            slicer.util.errorDisplay = originalDisplay
+            logging.getLogger().removeHandler(handler)
+        self.assertEqual(len(shown), 1)
+        self.assertIn("the folder", shown[0][0])
+        self.assertIn("cannot be written", shown[0][0])
+        self.assertEqual(open(target, "rb").read(), b"old")
+        self.assertFalse(os.path.exists(draw.sidecarPath(target)))
+        for record in records:
+            self.assertIsNone(record.exc_info)
+            self.assertNotIn("Traceback", record.getMessage())
+        self.assertNotIn("cannot save the lesion", " ".join(r.getMessage() for r in records if r.levelno >= logging.ERROR))
+        self.assertEqual(draw.lesionSaveState(editor.segmentationNode())[0], "never")
+
     def test_12_recent_already_open(self):
         """A Recent row or an Open… of a file that is already loaded does not load a duplicate in Studio (NAV-05)."""
         from StudioLib import importer

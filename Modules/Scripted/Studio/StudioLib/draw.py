@@ -2274,6 +2274,10 @@ def _recordedGridVolume(segmentationNode):
     return volumeNode
 
 
+class FolderNotWritableError(RuntimeError):
+    """The folder of the lesion file cannot be written (read-only folder or drive, no permission)."""
+
+
 def saveLesion(path, segmentationNode, referenceVolumeNode=None, segmentIds=None):
     """Write the segments of ``segmentationNode`` as a NIfTI label map (official Slicer writer) and return the path.
 
@@ -2313,6 +2317,11 @@ def saveLesion(path, segmentationNode, referenceVolumeNode=None, segmentIds=None
         directory = os.path.dirname(path)
         if directory and not os.path.isdir(directory):
             os.makedirs(directory, exist_ok=True)
+        if not os.access(directory or ".", os.W_OK | os.X_OK):
+            # Checked before writing: the writer would otherwise fail on its temporary folder, and could still
+            # overwrite an existing (writable) file in a read-only folder while the sidecar cannot be written
+            raise FolderNotWritableError(_("The lesion could not be saved: the folder {folder} cannot be written").format(
+                folder=directory or os.getcwd()))
         if not slicer.util.saveNode(labelmapNode, path):
             raise RuntimeError(_("Failed to write {path}").format(path=path))
     finally:
@@ -2439,6 +2448,15 @@ def _writeLesion(shell, segmentationNode, sourceVolumeNode, path):
         with slicer.util.WaitCursor():
             path = saveLesion(path, segmentationNode, None if referenceGeometry else sourceVolumeNode)
             writeSidecar(path, segmentationNode, sourceVolumeNode)
+    except FolderNotWritableError as e:
+        logging.warning(f"Studio: {e}")
+        slicer.util.errorDisplay(str(e))
+        return None
+    except (OSError, RuntimeError) as e:
+        # Expected write failures: the reason is shown, no traceback
+        logging.warning(f"Studio: cannot save the lesion: {e}")
+        slicer.util.errorDisplay(_("The lesion could not be saved."), detailedText=str(e))
+        return None
     except Exception as e:
         logging.error(f"Studio: cannot save the lesion:\n{traceback.format_exc()}")
         slicer.util.errorDisplay(_("The lesion could not be saved."), detailedText=str(e))
