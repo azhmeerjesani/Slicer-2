@@ -226,6 +226,8 @@ class FetchController:
             return None
         request = self.request if self.state in ("paused", "failed") else None
         request = request or self.savedRequest()
+        if request and self.runningElsewhere(request) is not None:
+            return None  # another process runs this job and its saved request is what it is resumed from after a crash
         qt.QSettings().remove(ACTIVE_FETCH_SETTING)
         if self.state != "done":
             self.state = "idle"

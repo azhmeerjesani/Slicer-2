@@ -12,6 +12,7 @@ It needs the Slicer application::
 Under a plain PythonSlicer (the library test glob) the module is skipped.
 """
 
+import collections
 import copy
 import json
 import os
@@ -223,6 +224,35 @@ class LesionNetworkMappingFetchControllerTest(unittest.TestCase):
         self.assertIsNone(fetchconnectome.running_fetch(self.entry, self.dest))  # the holder is gone: its lock is stale
         self.assertIsNone(self.controller.runningElsewhere())
         self.assertIsNotNone(self.controller.unfinished())
+
+    def test_a_second_window_does_not_offer_or_discard_a_download_another_window_runs(self):
+        from LesionNetworkMappingUI import catalog_dialog
+
+        self._state(complete=False)
+        process = self._liveProcess()
+        self._lock(process.pid)
+        usage = shutil.disk_usage
+        shutil.disk_usage = lambda path: collections.namedtuple("usage", "total used free")(10**13, 0, 10**13)
+        self.addCleanup(setattr, shutil, "disk_usage", usage)
+        dialog = catalog_dialog.CatalogDialog(catalogPath=self.catalogPath)
+        self.addCleanup(dialog.deleteLater)
+        dialog.controller = self.controller
+        dialog.entry = self.entry
+        dialog.destEdit.setText(self.dest)
+        dialog.currentTerms = lambda: {"sha": "a" * 64}
+        dialog.acceptCheck.setChecked(True)
+        self.mc.termsAccepted = lambda sha: True
+        dialog.updateState()
+        self.assertFalse(dialog.downloadButton.enabled)
+        self.assertIn("another Slicer window", dialog.hintLabel.text)
+        dialog.onDiscard()  # must not clear the other window's saved request
+        self.assertEqual(json.loads(qt.QSettings().value(self.mc.ACTIVE_FETCH_SETTING)), self.request)
+        self.assertIsNone(self.controller.discard())
+        self.assertIsNotNone(qt.QSettings().value(self.mc.ACTIVE_FETCH_SETTING))
+        process.kill()
+        process.wait()
+        dialog.updateState()
+        self.assertTrue(dialog.downloadButton.enabled)  # the holder is gone: Resume is offered again
 
 
 if __name__ == "__main__":

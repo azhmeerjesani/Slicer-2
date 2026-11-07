@@ -723,6 +723,8 @@ class CatalogDialog(qt.QDialog):
             hint = problem
         elif running:
             hint = _("A connectome is being fetched.")
+        elif self.runningElsewhereHere() is not None:
+            hint = _("Being downloaded by another Slicer window: wait until it finishes, or choose another folder.")
         elif self.mismatchHere():
             hint = _("The checksum of an archive does not match: use Keep this data anyway…, or choose another folder. Reading the archive again would fail the same way.")
         elif resumeProblem := self.resumeSubsetProblem():
@@ -734,6 +736,18 @@ class CatalogDialog(qt.QDialog):
         self.downloadButton.setText(_("Resume this download") if resumable else _("Download and convert"))
         self.downloadButton.setEnabled(hint is None)
         self.loadTermsButton.setEnabled(self.termsJob is None or self.termsJob.isFinished())
+
+    def runningElsewhereHere(self):
+        """The lock holder of a download of the selected entry into the chosen folder that another live process runs, or None."""
+        from LesionNetworkMappingLib import fetchconnectome
+
+        destination = self.destination()
+        if self.entry is None or not destination or self.controller.isRunning():
+            return None
+        try:
+            return fetchconnectome.running_fetch(self.entry, destination)
+        except OSError:
+            return None
 
     def completeHere(self):
         """True when a finished bundle of the selected entry is in the chosen folder (nothing to resume: a new download would be refused)."""
@@ -873,6 +887,8 @@ class CatalogDialog(qt.QDialog):
 
     def onDiscard(self):
         request = self.controller.discard()
+        if request is None and self.controller.runningElsewhere() is not None:
+            return  # the saved request belongs to a download that another window runs
         if request is not None:
             self.showNotice(self.controller.discardedNotice(request))
 
