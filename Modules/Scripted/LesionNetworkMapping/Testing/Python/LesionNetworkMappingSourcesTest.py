@@ -502,6 +502,22 @@ class SourcesTest(unittest.TestCase):
         self.assertIn("1 other reason", shown)
         self.assertNotIn("1 other reasons", shown)
 
+    def test_prisma_svg_wraps_cjk_reasons(self):
+        long_reason = "症状出现前已有其他脑损伤\uff0c或病灶不是单一的局灶性病变\uff0c无法确定责任病灶"
+        counts = {"identified": 10, "fulltext_excluded": 8, "fulltext_excluded_reasons": {
+            long_reason: 5, "症状出现前已有其他脑损伤或病灶": 3}}
+        root = ET.fromstring(sources.prisma_flow_svg(counts))
+        width = float(root.get("width"))
+        texts = [element for element in root.iter() if element.tag.endswith("text") and element.get("x")]
+        for element in texts:
+            half = sources._text_width(element.text or "", 12) / 2
+            self.assertLessEqual(2 * half, sources._BOX_W - 16, element.text)
+            self.assertLessEqual(float(element.get("x")) + half, width, element.text)
+        # a glyph is about one em wide, so no line holds more than (250 - 16) / 12 = 19 of them
+        for element in texts:
+            self.assertLessEqual(sum(1 for c in element.text if ord(c) > 0x2E80), 19, element.text)
+        self.assertGreater(len([e for e in texts if "症" in e.text or "病" in e.text]), 2)
+
     def test_empty_study_svg(self):
         counts = sources.prisma_counts(self.study)
         self.assertEqual((counts["identified"], counts["included"]), (0, 0))

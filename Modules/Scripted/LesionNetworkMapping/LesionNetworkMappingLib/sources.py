@@ -1024,7 +1024,9 @@ def _text_width(text, size=12, bold=False):
     """Estimated width in px of ``text`` in a Helvetica/Arial-like font (no font library needed; slightly generous)."""
     em = 0.0
     for char in text:
-        if char in _WIDE_CHARS:
+        if unicodedata.east_asian_width(char) in ("W", "F"):
+            em += 1.0  # Chinese, Japanese and Korean glyphs and full-width forms are about one em wide
+        elif char in _WIDE_CHARS:
             em += 0.85
         elif char in _NARROW_CHARS:
             em += 0.31
