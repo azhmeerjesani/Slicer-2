@@ -260,6 +260,19 @@ def _temporaryPng(stem):
     return path
 
 
+def _pngPixels(pixels):
+    """Pixels Pillow can write as PNG: 8 and 16 bit data stay; float and other integer data scale (min..max) to 8 bit."""
+    pixels = np.ascontiguousarray(pixels)
+    if pixels.dtype in (np.uint8, np.uint16):
+        return pixels
+    data = pixels.astype(np.float64)
+    finite = data[np.isfinite(data)]
+    low, high = (float(finite.min()), float(finite.max())) if finite.size else (0.0, 0.0)
+    data = np.nan_to_num(data, nan=low, posinf=high, neginf=low)
+    scale = 255.0 / (high - low) if high > low else 0.0
+    return np.clip(np.rint((data - low) * scale), 0, 255).astype(np.uint8)
+
+
 def _atomicCopy(source, target):
     temporary = f"{target}.{os.getpid()}.tmp"
     try:
@@ -1361,7 +1374,7 @@ class FigureSession:
         figureNode = panel.figure()
         array = slicer.util.arrayFromVolume(figureNode)
         pixels = array[0]
-        image = Image.fromarray(np.ascontiguousarray(pixels))
+        image = Image.fromarray(_pngPixels(pixels))
         cropped = image.crop((x, y, x + width, y + height))
         path = _temporaryPng(f"figure-{panel.index}")
         cropped.save(path, format="PNG")
@@ -1495,7 +1508,7 @@ class FigureSession:
         from PIL import Image
 
         path = _temporaryPng(f"figure-{panel.index}")
-        Image.fromarray(np.ascontiguousarray(slicer.util.arrayFromVolume(panel.figure())[0])).save(path, format="PNG")
+        Image.fromarray(_pngPixels(slicer.util.arrayFromVolume(panel.figure())[0])).save(path, format="PNG")
         panel.cropPath = path
         return path
 

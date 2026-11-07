@@ -6522,3 +6522,22 @@ class StudioRegressionTest(unittest.TestCase):
             self.assertEqual(studyObject.subject(sid), row, f"{sid} was changed in memory")
             self.assertEqual(rules.status_of(studyObject.subject(sid)), "none")
         self.assertEqual(FakeSession.flushes, 0)
+
+    def test_figure_crop_png_accepts_float_pixels(self):
+        """A 32-bit float figure (ImageJ TIFF) cropped to PNG scales to 8 bit instead of raising 'cannot write mode F as PNG'."""
+        import numpy as np
+        from PIL import Image
+        from StudioLib import figure
+
+        floats = np.linspace(-2.0, 6.0, 60, dtype=np.float32).reshape(6, 10)
+        pixels = figure._pngPixels(floats)
+        self.assertEqual(pixels.dtype, np.uint8)
+        self.assertEqual((int(pixels.min()), int(pixels.max())), (0, 255))
+        path = os.path.join(tempfile.mkdtemp(), "f.png")
+        self.addCleanup(shutil.rmtree, os.path.dirname(path), True)
+        Image.fromarray(pixels).crop((1, 1, 5, 4)).save(path, format="PNG")
+        self.assertTrue(os.path.getsize(path) > 0)
+        flat = figure._pngPixels(np.full((3, 3), 7.0, dtype=np.float32))
+        self.assertEqual(int(flat.max()), 0)
+        sixteen = np.arange(4, dtype=np.uint16).reshape(2, 2)
+        self.assertIs(figure._pngPixels(sixteen).dtype, np.dtype(np.uint16))
