@@ -1060,6 +1060,22 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
 
     # init
 
+    def test_init_bad_score_column_leaves_nothing(self):
+        source = os.path.join(self.tmp, "score lesions")
+        os.makedirs(source)
+        study = Study.open(self.fx["study"])
+        sid = self.mapped_sids()[0]
+        shutil.copyfile(study.abspath(study.subject(sid)["lesion"]), os.path.join(source, f"{sid}_lesion.nii.gz"))
+        csv = os.path.join(self.tmp, "score table.csv")
+        with open(csv, "w", encoding="utf-8") as f:
+            f.write(f"participant_id,group,aphasia_score\n{sid},case,3\n")
+        for column, text in (("nosuch", "is not a column of the participants table (columns: group, aphasia_score)"), ("group", "is the group column, not a score")):
+            target = os.path.join(self.tmp, f"refused {column}")
+            with self.assertRaises(ValueError) as caught:
+                pipeline.init_study(source, target, participants=csv, score_columns=[column])
+            self.assertIn(text, str(caught.exception))
+            self.assertFalse(os.path.exists(target), "a refused score column leaves no study behind")
+
     def test_init(self):
         source = os.path.join(self.tmp, "folder of lesions")
         os.makedirs(source)

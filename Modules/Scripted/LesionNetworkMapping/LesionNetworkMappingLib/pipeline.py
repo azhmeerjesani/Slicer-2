@@ -3697,6 +3697,20 @@ def _study_group_values(columns, rows, id_column, group_column, group_map):
     return out_rows
 
 
+def _check_score_columns(score_columns, available):
+    """Refuse a --score-columns value that is no column, or whose role is fixed otherwise, before a study is created or changed."""
+    from . import schema
+
+    available = list(dict.fromkeys(available))
+    for column in score_columns or ():
+        standard = schema.STANDARD_ROLES.get(column)
+        if standard is not None and standard.role != "score":
+            raise ValueError(f"--score-columns {column!r} is the {standard.role} column, not a score")
+        if column not in available:
+            listed = ", ".join(available) or "none"
+            raise ValueError(f"--score-columns {column!r} is not a column of the participants table (columns: {listed})")
+
+
 def init_study(source, study_path, participants=None, name=None, score_columns=(), group_column=None, group_map=None, lesion_rule=None, id_regex=None):
     """Create (or extend) a study from a folder of lesion files and an optional spreadsheet; return a summary dict.
 
@@ -3729,7 +3743,9 @@ def init_study(source, study_path, participants=None, name=None, score_columns=(
         if live:
             raise jobs.Locked(f"study open in Slicer (process {live.get('pid')} on {live.get('host')})", holder=live)
         study = Study.open(study_path)
+        _check_score_columns(score_columns, list(study.columns) + [c for c in (columns or ()) if c != id_column])
     else:
+        _check_score_columns(score_columns, [c for c in (columns or ()) if c != id_column])
         study = Study.create(study_path, name=name)
     report = study.add_files([source], lesion_rule=lesion_rule, id_regex=id_regex)
     imported = None
