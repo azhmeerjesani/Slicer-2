@@ -116,11 +116,16 @@ def _relativeTime(seconds):
         return _clock(seconds)
 
 
-def message(text, level="info", action=None, actionText=None, ms=3000, toolTip=None):
-    """A toast in Studio, a status bar message in Classic."""
+def message(text, level="info", action=None, actionText=None, ms=3000, toolTip=None, sticky=False):
+    """A toast in Studio, a status bar message in Classic. ``sticky``: the toast stays until the next input (a consequence
+    the user must know about, USABILITY 6.3), so a later confirmation ("Loaded x") does not replace it at once.
+    """
     shell = _shell()
     if shell is not None:
-        shell.toast(text, ms=ms, action=action, actionText=actionText, level=level, toolTip=toolTip)
+        if sticky:
+            shell.toast(text, ms=ms, action=action, actionText=actionText, level=level, toolTip=toolTip, sticky=True)
+        else:
+            shell.toast(text, ms=ms, action=action, actionText=actionText, level=level, toolTip=toolTip)
         return
     mainWindow = slicer.util.mainWindow()
     statusBar = mainWindow.statusBar() if mainWindow is not None else None
@@ -2325,8 +2330,10 @@ def announce(event, project, **info):
         else:
             message(_("Continuing {project}").format(project=name), ms=2500)
     elif event == "locked":
+        # Shown once per project, and edits are then autosaved only privately: it stays until the next input (sticky), so
+        # the "Loaded scan.mrml" of the same load does not replace it before it is read
         message(_("{name} is open in another Slicer Studio: changes made here are not saved to it.").format(name=project.name if project else ""),
-                level="warning", ms=8000)
+                level="warning", ms=8000, sticky=True)
     elif event == "read-only":
         # The folder of the project cannot be written (a read-only share or medium): not "open in another Slicer Studio"
         original = project.name if project else ""

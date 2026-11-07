@@ -7676,6 +7676,55 @@ class StudioProjectsTest(unittest.TestCase):
         finally:
             self.autosave._service = running
 
+    def test_98_locked_project_warning_is_seen_when_opened_early_or_with_a_load_toast(self):
+        """BB-1: a project that another Slicer Studio has open, opened in this window. (1) From the command line the scene is
+        loaded before the service installs its user interface (no announcer yet): the "open in another Slicer Studio"
+        warning, given once per project, was dropped and never shown. It is now given to the announcer once it is set.
+        (2) With Open... the warning was a plain 8 s toast that the "Loaded scan.mrml" of the same load replaced 0.2 s later.
+        It now stays until the next input, so the load confirmation does not replace it.
+        """
+        from types import SimpleNamespace
+
+        from StudioLib import importer, projects_ui, shell
+
+        projects = self.projects
+        self._userVolume()
+        first = self._service()
+        project = self._projectFor(first)
+        self._save(first)
+        first.releaseProject()
+        other = projects.Project(project.path)
+        self.assertTrue(other.lock())
+        running = self.autosave._service
+        studioShell = shell.Shell(force=True)
+        try:
+            # (1) No announcer yet: the warning waits for it
+            service = self._service()
+            service.poll()
+            self.assertIsNone(service.project, "the project is held by the other window")
+            self.assertTrue(service._lockedAnnounced, "the warning was given")
+            announced = []
+            service.setProjectAnnouncer(lambda event, opened, **info: announced.append((event, opened.name if opened else None)))
+            self.assertEqual(announced, [("locked", project.name)])
+            service.setProjectAnnouncer(lambda event, opened, **info: announced.append(event))
+            self.assertEqual(len(announced), 1, "given once")
+            # (2) The warning in Studio, then the load confirmation of the same load: the warning stays
+            self.autosave._service = service
+            studioShell.apply()
+            slicer.app.processEvents()
+            projects_ui.announce("locked", other)
+            warning = f"{project.name} is open in another Slicer Studio: changes made here are not saved to it."
+            self.assertEqual(studioShell.toastText(), warning)
+            loaded = SimpleNamespace(segmentations=[], nodes=lambda: [], alreadyOpen=[], scenes=[project.scenePath])
+            importer._loadToast(loaded, studioShell)
+            slicer.app.processEvents()
+            self.assertEqual(studioShell.toastText(), warning, "not replaced by 'Loaded <scene>'")
+        finally:
+            other.unlock()
+            self.autosave._service = running
+            studioShell.dispose()
+            slicer.app.processEvents()
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

@@ -48,6 +48,8 @@ from slicer.i18n import tr as _
 INSTALL_DELAY_MS = 1000
 #: Delay after startupCompleted before the autosave folder is scanned for sessions to recover
 SCAN_DELAY_MS = 1500
+#: project messages that are given once (``_announceLockedOnce``, ``_announceRootFailedOnce``): kept until there is an announcer
+_ANNOUNCED_ONCE = ("locked", "root-failed")
 POLL_INTERVAL_MS = 3000
 #: Poll interval while the scene is modified and the service waits for the user to be idle: changes and input are
 #: then timed to about 1 s, and the generation starts IdleSeconds after the last one (acceptance: within IdleSeconds + 3 s)
@@ -316,6 +318,10 @@ class AutosaveService:
         self.studioActiveOverride = None
         self._closeSummaryConnected = False
         self._projectAnnouncer = None
+        #: warnings of the project engine given once (``_ANNOUNCED_ONCE``) before ``setProjectAnnouncer()`` (a scene opened
+        #: from the command line is loaded before the service installs its user interface): [(event, project, info)], shown
+        #: once it is set
+        self._pendingAnnouncements = []
         self._pendingSceneSource = None
         self._forceProjectOpen = False
         #: the scene file that the last scene load could not read (damaged): openProject does not open its project
@@ -1315,8 +1321,16 @@ class AutosaveService:
     def setProjectAnnouncer(self, announcer):
         """``announcer(event, project, **info)``: "created", "copy", "copy-incomplete", "opened", "locked", "read-only",
         "conflict", "failed", "not-opened", "saved".
+
+        The warnings given once (``_ANNOUNCED_ONCE``: "locked" per project, "root-failed" per folder) before it was set (a
+        scene opened from the command line or by Open With is loaded within the first second, before ``_install()``) are
+        given to it now: dropped, they would never be seen.
         """
         self._projectAnnouncer = announcer
+        pending, self._pendingAnnouncements = self._pendingAnnouncements, []
+        if announcer is not None:
+            for event, project, info in pending:
+                self._announce(event, project, **info)
 
     def pendingProjectRecoveries(self):
         """Projects of a session that closed unexpectedly (found at startup), as ``projects.ProjectInfo``."""
@@ -1345,6 +1359,12 @@ class AutosaveService:
         if announcer is None:
             if event in ("failed", "conflict"):
                 logging.warning(f"Slicer Studio: {event} {info}")
+            # A warning given once (per project, per folder) is kept for the announcer: dropped now, it would never be
+            # shown (the last few only: a service that never gets an announcer does not grow it)
+            pending = getattr(self, "_pendingAnnouncements", None)
+            if pending is not None and event in _ANNOUNCED_ONCE:
+                pending.append((event, project if project is not None else self.project, dict(info)))
+                del pending[:-8]
             return
         try:
             announcer(event, project if project is not None else self.project, **info)
