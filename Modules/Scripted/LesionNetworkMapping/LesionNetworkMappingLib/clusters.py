@@ -35,7 +35,7 @@ from . import thresholds
 
 SIGNS = ("pos", "neg")
 CONNECTIVITY_RANK = {6: 1, 18: 2, 26: 3}  # ndimage.generate_binary_structure(3, rank)
-MIDLINE_MM = 0.5  # |x| below this is "midline"
+MIDLINE_MM = 0.5  # |x| below this is "midline" when the grid is not known; with a grid: half the voxel width along x
 DESCRIPTIVE_NOTE = "Extents are descriptive (no cluster-extent inference)."
 SIGN_LABELS = {"pos": "+", "neg": "-"}  # ASCII, so that the TSV reads anywhere
 
@@ -108,8 +108,13 @@ def _as_volume(values, grid, mask_indices):
     return volume.reshape(grid.shape), positions
 
 
-def _hemisphere(x):
-    if abs(x) < MIDLINE_MM:
+def _hemisphere(x, half_width=MIDLINE_MM):
+    """"midline" for the voxel column that contains x = 0 (|x| < half the voxel width along x), else "L" or "R".
+
+    A fixed 0.5 mm never matched the 2 mm MNI152NLin2009cAsym grid (voxel centres at -2.5, -0.5, 1.5 mm), whose
+    midline column is centred at x = -0.5. A voxel that merely touches x = 0 with its edge is not midline.
+    """
+    if abs(x) < half_width - 1e-9:
         return "midline"
     return "R" if x > 0 else "L"
 
@@ -247,6 +252,7 @@ def cluster_table(values, grid, mask_indices, threshold, sign="both", connectivi
                 mask = np.zeros(grid.shape, dtype=bool)
                 mask[region][cluster] = True
                 labels_of, network = _label_rows(labeler(mask, grid), table)
+            half_x = 0.5 * float(np.abs(grid.affine[0, :3]).sum())
             for peak, (voxel, xyz) in enumerate(zip(ijk, world, strict=True)):
                 index = tuple(int(v) for v in voxel)
                 main = peak == 0
@@ -262,7 +268,7 @@ def cluster_table(values, grid, mask_indices, threshold, sign="both", connectivi
                         "extra": {name: float(extra[index]) for name, extra in extras.items()},
                         "ijk": index,
                         "xyz": tuple(float(v) for v in xyz),
-                        "hemisphere": _hemisphere(float(xyz[0])),
+                        "hemisphere": _hemisphere(float(xyz[0]), half_x),
                         "cog": tuple(float(v) for v in cog) if main else None,
                         "labels": labels_of if main else [],
                         "network": network if main else None,

@@ -106,6 +106,23 @@ class TwoBlobTest(unittest.TestCase):
         self.assertEqual(sorted(np.unique(table.cluster_vector).tolist()), [0, 1, 2])
         self.assertEqual(int((table.cluster_vector == 2).sum()), 16)
 
+    def test_midline_column_on_2009c_and_fsl_2mm_grids(self):
+        from LesionNetworkMappingLib.geometry import GRID_BY_ID
+
+        def sides(grid_id):
+            spec = GRID_BY_ID[grid_id]
+            g = Grid(spec.shape, spec.affine)
+            xyz = g.voxel_to_world(np.indices(spec.shape).reshape(3, -1).T).reshape(*spec.shape, 3)
+            d2 = xyz[..., 0] ** 2 + (xyz[..., 1] + 60) ** 2 + (xyz[..., 2] - 40) ** 2
+            volume = 8.0 * np.exp(-d2 / 32.0) + 1e-6 * np.sign(xyz[..., 0])
+            return [row["hemisphere"] for row in clusters.cluster_table(volume, g, None, 5.0)]
+
+        self.assertEqual(sides("NLin6-2mm"), ["midline"])
+        self.assertEqual(sides("TF2009-2mm"), ["midline"])  # the midline column is centred at x = -0.5
+        self.assertEqual(clusters._hemisphere(-2.5, 1.0), "L")
+        self.assertEqual(clusters._hemisphere(1.5, 1.0), "R")
+        self.assertEqual(clusters._hemisphere(1.0, 1.0), "R")  # a voxel that only touches x = 0 is not midline
+
     def test_one_sided(self):
         self.assertEqual([row["sign"] for row in clusters.cluster_table(self.volume, grid(), None, 2.0, sign="pos")], ["pos"])
         negative = clusters.cluster_table(self.volume, grid(), None, 2.0, sign="neg")
