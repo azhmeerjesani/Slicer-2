@@ -917,6 +917,7 @@ def main(argv=None):
         raise jobs.JobError("Give --target or --target-lesion, not both", code="usage", exit_code=jobs.EXIT_USAGE)
     if args.no_fwer and args.no_planted and not args.sensitivity:
         raise jobs.JobError("Nothing to calibrate (--no-fwer and --no-planted without --sensitivity)", code="usage", exit_code=jobs.EXIT_USAGE)
+    jobs.check_input_files(args, "maps", "participants", "mask", "pool_maps", "target")
     return _run_cli(args, argv, _floats(args.effects))
 
 

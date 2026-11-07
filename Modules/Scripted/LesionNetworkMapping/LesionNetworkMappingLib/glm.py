@@ -1346,6 +1346,7 @@ def main(argv=None):
         raise jobs.JobError(f"--seed must not be negative, got {args.seed}", code="usage", exit_code=jobs.EXIT_USAGE)
     if args.desc is not None and not re.fullmatch(r"[A-Za-z0-9]+", args.desc):
         raise jobs.JobError(f"--desc must contain only letters and digits, got {args.desc!r}", code="usage", exit_code=jobs.EXIT_USAGE)
+    jobs.check_input_files(args, "maps", "participants", "mask")
     return _run_cli(args, argv)
 
 

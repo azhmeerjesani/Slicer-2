@@ -330,6 +330,19 @@ class JsonArgumentParser(argparse.ArgumentParser):
         self.exit(EXIT_USAGE)
 
 
+def check_input_files(args, *options):
+    """Raise a usage error (exit 2) naming the first option of ``options`` that is given and is not an existing file.
+
+    ``options`` are attribute names of ``args`` (``"maps"`` for ``--maps``, ``"pool_maps"`` for ``--pool-maps``); an option
+    that is ``None`` (not given) is skipped. Without this check the missing file would end as an unexpected exception
+    (code "exception", a traceback, exit code 1) that never says which option was wrong.
+    """
+    for option in options:
+        path = getattr(args, option, None)
+        if path is not None and not os.path.isfile(path):
+            raise JobError(f"The file of --{option.replace('_', '-')} does not exist: {path}", code="usage", exit_code=EXIT_USAGE)
+
+
 def positive_int(text):
     """argparse type: an integer of at least 1."""
     try:

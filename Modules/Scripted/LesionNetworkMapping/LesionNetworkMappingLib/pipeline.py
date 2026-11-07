@@ -3952,6 +3952,9 @@ def _main(argv):
         if problem:
             jobs.emit("error", code="usage", message=problem)
             return EXIT_USAGE
+        if not os.path.isfile(os.path.join(args.out, "pipeline.json")):
+            jobs.emit("error", code="usage", message=f"The --out folder has no pipeline.json (run the pipeline first, or check the path): {args.out}")
+            return EXIT_USAGE
         report = importlib.import_module(f"{PACKAGE}.report")
         path = report.render_report(os.path.abspath(args.out), jobs.emit, None, atlas=args.atlas, atlas_labels=args.atlas_labels, template=args.template, convention=args.figure_convention)
         jobs.emit("done", outputs=[path] if path else [], elapsed=round(jobs.elapsed(), 3))

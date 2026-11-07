@@ -302,6 +302,39 @@ class CommandLineTest(_CalibrateTestCase):
         self.assertEqual(code, 2)
         self.assertEqual(events[-1]["code"], "design_blocked")
 
+    def test_missing_input_file_is_a_usage_error_naming_the_option(self):
+        # A missing --maps/--participants/--mask/--target (calibrate, glm, slnm) or a --out without pipeline.json (pipeline
+        # report) is a usage error (exit 2) that names the option, not an "exception" event with a traceback (exit 1).
+        missing = self.path("nonexistent", "x.tsv")
+        here = {"maps": self.path("maps.tsv"), "participants": self.path("participants.tsv"), "mask": self.path("mask.nii.gz")}
+        for path in here.values():
+            open(path, "w", encoding="utf-8").close()
+        extra = {"glm": [], "slnm": ["--score", "s"], "calibrate": []}
+
+        def run(module, args):
+            process = subprocess.run([sys.executable, "-m", f"LesionNetworkMappingLib.{module}", *args], cwd=MODULE_DIR, env=_env(), capture_output=True, text=True, timeout=600, check=False)
+            events = [json.loads(line) for line in process.stdout.splitlines() if line.startswith("{")]
+            return process.returncode, events[-1]
+
+        cases = []
+        for module, tail in extra.items():
+            for option in here:
+                given = {**here, option: missing}
+                cases.append((module, option, [arg for key, value in given.items() for arg in (f"--{key}", value)] + tail))
+        cases.append(("calibrate", "target", [arg for key, value in here.items() for arg in (f"--{key}", value)] + ["--target", missing]))
+        for module, option, args in cases:
+            label = f"{module} --{option}"
+            code, event = run(module, [*args, "--out", self.path("out")])
+            self.assertEqual(code, 2, label)
+            self.assertEqual(event["code"], "usage", label)
+            self.assertNotIn("traceback", event, label)
+            self.assertIn(f"--{option} does not exist", event["message"], label)
+        code, event = run("pipeline", ["report", "--out", self.path("nowhere")])
+        self.assertEqual(code, 2)
+        self.assertEqual(event["code"], "usage")
+        self.assertNotIn("traceback", event)
+        self.assertIn("--out", event["message"])
+
     def test_sensitivity_overlap_out_of_range_is_refused(self):
         # An overlap outside 50-100 % (or nan) is a usage error: a rule of at least -1 % passes every voxel and would be
         # written as a calibrated 0 % false-positive rate.

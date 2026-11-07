@@ -843,6 +843,7 @@ def main(argv=None):
     for column in controls:
         if column == args.score or column in (covariates if covariates is not None else [designlib.VOLUME_COLUMN]):
             raise jobs.JobError(f"The control score {column} is the main score or a covariate", code="usage", exit_code=jobs.EXIT_USAGE)
+    jobs.check_input_files(args, "maps", "participants", "mask")
     return _run_cli(args, argv, controls, covariates)
 
 
