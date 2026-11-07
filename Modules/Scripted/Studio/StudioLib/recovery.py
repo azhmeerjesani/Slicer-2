@@ -869,6 +869,10 @@ def _classicMessage(text, details, report=None):
         # Not only in the details: data of these files is not in the recovered scene
         text += "\n\n" + _("These original files no longer exist and were not loaded: {files}").format(
             files=", ".join(os.path.basename(p) for p in report["missing"][:5]))
+    if report and report.get("changed"):
+        # Also in the main text: the recovered work was made on the earlier version of these files
+        text += "\n\n" + _("These original files changed on disk since the autosave, so the recovered work may not fit them: {files}").format(
+            files=", ".join(os.path.basename(p) for p in report["changed"][:5]))
     # slicer.util.messageBox treats the mere presence of the detailedText keyword as "has details" (it pads the
     # window title and sets the text, None becoming the string "None"), so pass it only when there is something to show.
     kwargs = {"detailedText": "\n".join(details)} if details else {}

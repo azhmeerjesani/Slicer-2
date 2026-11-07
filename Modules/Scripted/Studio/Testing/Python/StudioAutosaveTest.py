@@ -572,14 +572,16 @@ class StudioAutosaveTest(unittest.TestCase):
             recovery._classicMessage("Recovered 2 items.", [])
             recovery._classicMessage("Recovered 2 items.", ["Changed on disk since the autosave: a.nrrd"])
             recovery._classicMessage("Recovered 2 items.", [], {"missing": [os.path.join(self.root, "b.nrrd")]})
+            recovery._classicMessage("Recovered 2 items.", [], {"changed": [os.path.join(self.root, "c.nrrd")]})
         finally:
             slicer.util.infoDisplay = realInfoDisplay
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 4)
         self.assertNotIn("detailedText", calls[0][1])
         self.assertTrue(calls[0][1]["windowTitle"].strip())
         self.assertIn("a.nrrd", calls[1][1]["detailedText"])
         self.assertNotIn("detailedText", calls[2][1])
         self.assertIn("b.nrrd", calls[2][0])
+        self.assertIn("c.nrrd", calls[3][0])  # a scan changed since the autosave is named in the main text
 
     def test_f_largeVolume(self):
         scene = slicer.mrmlScene
