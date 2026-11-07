@@ -748,7 +748,7 @@ def closeScene():
     project), so 3D Slicer does not ask "Save before closing scene?" about saved work; else the official action.
     """
     service = _service()
-    if service is not None and service.currentProject() is not None:
+    if service is not None and (service.currentProject() is not None or service.ensureProject() is not None):
         service.newProject()
         return True
     mainWindow = slicer.util.mainWindow()

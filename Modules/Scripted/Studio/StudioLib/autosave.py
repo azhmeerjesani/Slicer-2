@@ -1918,7 +1918,8 @@ class AutosaveService:
 
     def flushForClose(self):
         """The application is closing: save the project now (nothing is asked when this succeeds). Return the result."""
-        if self.project is None:
+        if self.ensureProject() is None:
+            # Data opened less than one poll ago has its project now (as for Ctrl+S): quitting asks nothing then
             self.closeFlushResult = None
             return None
         try:
@@ -2448,7 +2449,8 @@ class AutosaveService:
 
     def newProject(self):
         """New project (Ctrl+N): save and close the open project; the next data creates the next project."""
-        saved = self.project is not None and self.saveNow("new project", progress=True)
+        # Data opened less than one poll ago becomes its project first (as for Ctrl+S), or it would be discarded or asked about
+        saved = self.ensureProject() is not None and self.saveNow("new project", progress=True)
         scene = slicer.mrmlScene
         mainWindow = slicer.util.mainWindow()
         action = mainWindow.findChild(qt.QAction, "FileCloseSceneAction") if mainWindow is not None else None

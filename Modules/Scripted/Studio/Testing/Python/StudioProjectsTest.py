@@ -3226,6 +3226,51 @@ class StudioProjectsTest(unittest.TestCase):
             real.setObjectName("FileSaveSceneAction")
         self.assertEqual(len(self.projects.listProjects()), 1, "one project, made once")
 
+    def test_47c_new_project_close_scene_and_quit_right_after_opening_a_scan_save_the_project(self):
+        """Ctrl+N, Ctrl+W and quit in the first second after a scan was opened (BB-1). No project existed before the next
+        autosave poll, so they fell back to the official "Save before closing scene?" / "Save before exit?" question. They
+        make the project first, as Ctrl+S does, and save into it (D-A16). Here the official Close Scene action is replaced
+        by one that only counts (the question would block the test).
+        """
+        from StudioLib import projects_ui
+
+        mainWindow = slicer.util.mainWindow()
+        real = mainWindow.findChild("QAction", "FileCloseSceneAction")
+        self.assertIsNotNone(real)
+        real.setObjectName("FileCloseSceneActionHidden")
+        standIn = qt.QAction(mainWindow)
+        standIn.setObjectName("FileCloseSceneAction")
+        official = []
+        standIn.connect("triggered()", lambda: official.append(1))
+        running = self.autosave._service
+        studio = self._service()
+        try:
+            self.autosave._service = studio
+            for key in ("quit", "newProject", "closeScene"):
+                self._userVolume()
+                self.assertIsNone(studio.project, "no poll has run: the project does not exist yet")
+                if key == "quit":
+                    self.assertTrue(studio.flushForClose(), "quitting saves into a project made now")
+                elif key == "newProject":
+                    studio.newProject()
+                else:
+                    self.assertTrue(projects_ui.closeScene())
+                self.io.backgroundWriter().drain(30.0)
+                self.assertEqual(len(self.projects.listProjects()), 1 if key == "quit" else {"newProject": 2, "closeScene": 3}[key],
+                                 key + ": the data became a project")
+                studio.releaseProject()
+                slicer.mrmlScene.Clear(0)
+            # New project and Close scene close through the official action only after the save (it asks nothing then)
+            closedAfterSave = len(official)
+            # An empty scene keeps the official action
+            self.assertTrue(projects_ui.closeScene())
+            self.assertEqual(len(official), closedAfterSave + 1)
+        finally:
+            self.autosave._service = running
+            standIn.setObjectName("")
+            standIn.deleteLater()
+            real.setObjectName("FileCloseSceneAction")
+
     def test_46_root_move_across_two_mounts_of_one_disk_copies(self):
         """Change folder > Move from a bind mount (the web build's /data, a Docker volume) to a folder of the same disk
         (BB-1). Both have one st_dev, so the move took the rename path only, and rename(2) refuses to cross mount points
