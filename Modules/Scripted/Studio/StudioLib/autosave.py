@@ -1682,6 +1682,22 @@ class AutosaveService:
             modified.append(node)
         return modified
 
+    def isProjectClean(self):
+        """True if the open project has nothing to save (the same test as ``projectNeedsSave``, without the migration)."""
+        return self.project is not None and self.projectWriter is not None and not self.projectNeedsSave()
+
+    def adoptFingerprintAfterExport(self, wasClean):
+        """An export (Save a copy as…) is not an edit. Writing a bundle changes and restores the storage nodes' file names,
+        which bumps their MTimes: if the project was up to date before the export, the new fingerprint is the saved one,
+        so that the next save or quit does not rewrite the project and move "Last edited".
+        """
+        if not wasClean or self.project is None or self.plan is not None or self._modifiedProjectNodes(slicer.mrmlScene):
+            return
+        io = _io()
+        fingerprint = io.sceneFingerprint(slicer.mrmlScene, io.sentinelIds())
+        self._savedFingerprint = fingerprint
+        self._lastPolledFingerprint = fingerprint
+
     def projectNeedsSave(self, fingerprint=None, includeScene=False):
         """True if the open project is not up to date on disk. ``includeScene`` (Save now, leaving, quitting): also files of
         the project that a save would bring up to date though nothing was edited (``ProjectWriter.needsMigration``).

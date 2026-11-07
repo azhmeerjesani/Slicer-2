@@ -661,6 +661,7 @@ def saveCopyAs(path=None):
         path += ".mrb"
     if project is not None:
         service.saveNow("copy", progress=True)
+    wasClean = project is not None and service.isProjectClean()
     scene = slicer.mrmlScene
     url, rootDirectory = scene.GetURL(), scene.GetRootDirectory()
     written = False
@@ -671,6 +672,8 @@ def saveCopyAs(path=None):
         # Writing a .mrb points the scene at the bundle: the scene stays in its project
         scene.SetURL(url)
         scene.SetRootDirectory(rootDirectory)
+        if project is not None:
+            service.adoptFingerprintAfterExport(wasClean)  # exporting a copy is not an edit
     # Success is what the writer returns: an older file of that name is still there when the write failed
     if written and os.path.isfile(path):
         message(_("Saved a copy as {name}").format(name=os.path.basename(path)), action=lambda: projects.showInFileManager(os.path.dirname(path)),

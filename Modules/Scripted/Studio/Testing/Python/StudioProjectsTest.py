@@ -3807,6 +3807,33 @@ class StudioProjectsTest(unittest.TestCase):
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
 
 
+    def test_33b_save_a_copy_of_an_unedited_project_is_not_an_edit(self):
+        """Exporting a copy changes and restores the storage nodes' file names (their MTimes change), but it is not an
+        edit: a project that was up to date stays up to date, the next save does not rewrite the scene file and "Last
+        edited" stays. An edit made after the copy still counts.
+        """
+        from StudioLib import projects_ui
+
+        service = self._service()
+        volume, _scanPath = self._userVolume()
+        self._lesion(volume)
+        project = self._projectFor(service)
+        self._save(service)
+        self.assertFalse(service.projectNeedsSave(includeScene=True))
+        sceneBefore = os.stat(project.scenePath).st_mtime_ns
+        copyPath = os.path.join(self.tempDir, "Unedited copy.mrb")
+        running = self.autosave._service
+        self.autosave._service = service
+        try:
+            self.assertEqual(projects_ui.saveCopyAs(copyPath), copyPath)
+        finally:
+            self.autosave._service = running
+        self.assertFalse(service.projectNeedsSave(includeScene=True), "a copy is not an edit")
+        self._save(service)
+        self.assertEqual(os.stat(project.scenePath).st_mtime_ns, sceneBefore, "the scene file is not rewritten")
+        volume.SetName("Renamed after the copy")
+        self.assertTrue(service.projectNeedsSave(), "a real edit after the copy is still saved")
+
     def test_54_scene_saved_inside_a_project_folder_opens_as_a_copy(self):
         """A scene that official 3D Slicer saved into a subfolder of a project (Projects/<name>/Exports/variant/) is not the
         project (BB-1): opening it (Open…/drop with or without a project open, or Load Scene in Classic followed by Studio)
