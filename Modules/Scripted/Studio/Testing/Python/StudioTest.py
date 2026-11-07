@@ -423,6 +423,43 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             self.layoutManager.disconnect("layoutChanged(int)", onLayoutChanged)
 
+    def test_3b_dicom_module_layout_not_remembered_by_draw(self):
+        """The DICOM module shows its browser layout on enter(), before it is marked as transient: leaving it returns
+        Draw (and Library after it) to the slice views, and a DICOM browser layout already saved is not used.
+        """
+        from StudioLib import layouts
+
+        if not hasattr(slicer.modules, "dicom"):
+            self.skipTest("DICOM module not loaded")
+        settings = qt.QSettings()
+        studioShell = self._applyStudio()
+        try:
+            studioShell.switchTo("draw")
+            self._pump()
+            self.assertEqual(self.layoutManager.layout, layouts.FOCUS_LAYOUT_ID)
+            # Module finder, File > Add DICOM Data or Search route
+            slicer.util.selectModule("DICOM")
+            self._pump()
+            self.assertIsNone(studioShell.currentWorkspace())
+            self.assertEqual(slicer.util.settingsValue("Studio/Draw/Layout", layouts.FOCUS_LAYOUT_ID, converter=int),
+                             layouts.FOCUS_LAYOUT_ID)
+            # The back button
+            studioShell.closeTransientModule()
+            self._pump()
+            self.assertEqual(studioShell.currentWorkspace(), "draw")
+            self.assertEqual(self.layoutManager.layout, layouts.FOCUS_LAYOUT_ID)
+            studioShell.switchTo("library")
+            self._pump()
+            self.assertNotEqual(self.layoutManager.layout, slicer.vtkMRMLLayoutNode.SlicerLayoutDicomBrowserView)
+
+            # A profile that already saved the DICOM browser layout for Draw recovers its default
+            settings.setValue("Studio/Draw/Layout", slicer.vtkMRMLLayoutNode.SlicerLayoutDicomBrowserView)
+            studioShell.switchTo("draw")
+            self._pump()
+            self.assertEqual(self.layoutManager.layout, layouts.FOCUS_LAYOUT_ID)
+        finally:
+            settings.remove("Studio/Draw/Layout")
+
     def test_4_no_key_collisions(self):
         """Studio shortcuts are disjoint from the view and Segment Editor keys, and not ambiguous (SPEC 9.6)."""
         from StudioLib import workspaces

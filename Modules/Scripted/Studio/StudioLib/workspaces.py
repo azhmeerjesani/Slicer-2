@@ -236,6 +236,10 @@ class WorkspaceController:
         if ws.defaultLayout is None:
             return None
         value = slicer.util.settingsValue(ws.layoutSettingsKey, ws.defaultLayout, converter=int)
+        if value == slicer.vtkMRMLLayoutNode.SlicerLayoutDicomBrowserView:
+            # The DICOM module's own browser layout is never a workspace layout (profiles that saved it while the
+            # DICOM module was being entered recover the workspace's default)
+            return ws.defaultLayout
         node = layouts.layoutNode()
         if node is not None and value >= layouts.STUDIO_LAYOUT_ID_FIRST and not node.IsLayoutDescription(value):
             return ws.defaultLayout
@@ -376,7 +380,11 @@ class WorkspaceController:
         if self._switching or self.current is None or self.transientModule is not None:
             return
         ws = workspace(self.current)
-        if ws.defaultLayout is None:
+        if ws.defaultLayout is None or layoutId == slicer.vtkMRMLLayoutNode.SlicerLayoutDicomBrowserView:
+            return
+        # A module being selected (for example DICOM, whose enter() shows its browser layout) changes the layout before
+        # onModuleSelected() marks it as transient: that layout is not the workspace's choice
+        if self.shell.currentModuleName() != ws.moduleName:
             return
         settings = qt.QSettings()
         if slicer.util.settingsValue(ws.layoutSettingsKey, ws.defaultLayout, converter=int) != layoutId:
