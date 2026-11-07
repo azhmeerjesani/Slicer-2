@@ -535,6 +535,23 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             else:
                 settings.setValue("Studio/Mode", savedMode)
 
+    def test_5b_reset_window_keeps_inspector_right(self):
+        """View > Appearance > Reset to default docks the Studio inspector on the right again."""
+        mainWindow = self.mainWindow
+        action = mainWindow.findChild("QAction", "WindowToolbarsResetToDefaultAction")
+        self.assertIsNotNone(action)
+        studioShell = self._applyStudio()
+        try:
+            dock = mainWindow.findChild("QDockWidget", "PanelDockWidget")
+            self.assertEqual(mainWindow.dockWidgetArea(dock), qt.Qt.RightDockWidgetArea)
+            action.trigger()
+            self._pump(8)
+            self.assertEqual(mainWindow.dockWidgetArea(dock), qt.Qt.RightDockWidgetArea)
+            self.assertTrue(dock.isVisible())
+        finally:
+            studioShell.dispose()
+            self._pump()
+
     def test_5_toolbar_toggle_honoured(self):
         """View > Toolbars shows a toolbar in Studio and remembers it; Classic is unchanged (NAV-03, CM-08)."""
         mainWindow = self.mainWindow

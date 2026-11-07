@@ -2045,6 +2045,11 @@ class Shell:
             # F11 and Ctrl+6 (the Hide panels action of the main window) do not pass through setFocusMode() here
             self._connect(mainWindow, "focusModeChanged(bool)", self._onMainWindowFocusModeChanged)
         self._connect(modulePanel, "moduleAdded(QString)", self._onModuleAdded)
+        # View > Appearance > Reset to default restores the window state of the start of the session, which
+        # has the inspector on the left: dock it on the right again (this slot runs after the main window's)
+        resetAction = mainWindow.findChild("QAction", "WindowToolbarsResetToDefaultAction")
+        if resetAction is not None:
+            self._connect(resetAction, "triggered()", self._onWindowStateReset)
         layoutManager = slicer.app.layoutManager()
         if layoutManager is not None:
             self.workspaces.resetLayoutChoice()
@@ -2530,6 +2535,17 @@ class Shell:
         if self.focusMode():
             self.setFocusMode(False)
         self.setInspectorVisible(True)
+
+    def _onWindowStateReset(self):
+        """Dock the inspector on the right again after the main window restored its startup state."""
+        if not self._active:
+            return
+        dock = self._panelDock()
+        if self.mainWindow.dockWidgetArea(dock) != qt.Qt.RightDockWidgetArea:
+            visible = dock.isVisible()
+            self.mainWindow.addDockWidget(qt.Qt.RightDockWidgetArea, dock)
+            dock.setVisible(visible)
+        self._updatePanelWidth(shrink=True)
 
     def _onModuleAdded(self, moduleName):
         if moduleName == "SegmentEditor":
