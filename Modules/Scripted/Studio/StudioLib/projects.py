@@ -1470,6 +1470,22 @@ def isSamePath(first, second):
         return os.path.normcase(os.path.realpath(first)) == os.path.normcase(os.path.realpath(second))
 
 
+def nameTaken(parent, name, ownPath=None):
+    """True when ``parent`` holds a folder or file called ``name``, compared case-insensitively (as ``uniqueName`` does).
+
+    ``ownPath`` (the project being renamed) does not count, so a change of letter case alone stays possible.
+    """
+    newPath = os.path.join(parent, name)
+    if os.path.exists(newPath) and not (ownPath and isSamePath(newPath, ownPath)):
+        return True
+    try:
+        entries = os.listdir(parent)
+    except OSError:
+        return False
+    own = os.path.basename(os.path.normpath(ownPath)) if ownPath else None
+    return any(entry.lower() == name.lower() and entry != own for entry in entries)
+
+
 def renameFolder(path, newName):
     """Rename a project folder (not the open one: see ``AutosaveService.renameProject``) and its scene file.
 
@@ -1482,7 +1498,7 @@ def renameFolder(path, newName):
     if isLockedByOther(path):
         raise ProjectError(_("{name} is open in another Slicer Studio.").format(name=os.path.basename(path)))
     newPath = os.path.join(parent, newName)
-    if os.path.exists(newPath) and not isSamePath(newPath, path):
+    if nameTaken(parent, newName, path):
         raise ProjectError(_("A project named {name} already exists.").format(name=newName))
     scene = sceneFile(path)
     try:

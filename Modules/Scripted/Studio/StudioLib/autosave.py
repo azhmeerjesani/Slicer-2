@@ -2202,7 +2202,7 @@ class AutosaveService:
             return project.path
         parent = os.path.dirname(project.path)
         newPath = os.path.join(parent, newName)
-        if os.path.exists(newPath) and not projects.isSamePath(newPath, project.path):
+        if projects.nameTaken(parent, newName, project.path):
             raise projects.ProjectError(_("A project named {name} already exists.").format(name=newName))
         self.saveNow("rename", progress=True)
         _io().backgroundWriter().drain(10.0)

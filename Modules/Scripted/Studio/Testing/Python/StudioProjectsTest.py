@@ -569,6 +569,29 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertNotIn("Study", os.listdir(os.path.dirname(lowerPath)))
         # Case-sensitive file system: two projects whose names differ only in case stay two projects
         self.assertFalse(projects.isSamePath(lowerPath, closedPath))
+        # ... but a rename never creates such a pair, even where the file system tells them apart (Linux)
+        with self.assertRaises(projects.ProjectError):
+            service.renameProject("OTHER")
+        with self.assertRaises(projects.ProjectError):
+            projects.renameFolder(closedPath, "STUDY")
+
+    def test_07c_rename_refuses_a_name_that_differs_only_in_letter_case(self):
+        """No rename leaves two project folders whose names differ only in case (they cannot coexist on macOS or Windows)."""
+        projects = self.projects
+        root = tempfile.mkdtemp(dir=os.environ.get("TMPDIR") or None)
+        try:
+            for name in ("MRHead", "Other"):
+                os.makedirs(os.path.join(root, name))
+                with open(os.path.join(root, name, "project.json"), "w") as handle:
+                    handle.write('{"name": "%s"}' % name)
+            with self.assertRaises(projects.ProjectError):
+                projects.renameFolder(os.path.join(root, "Other"), "MRHEAD")
+            self.assertEqual(sorted(os.listdir(root)), ["MRHead", "Other"])
+            self.assertTrue(projects.nameTaken(root, "mrhead"))
+            self.assertFalse(projects.nameTaken(root, "mrhead", os.path.join(root, "MRHead")))
+            self.assertFalse(projects.nameTaken(root, "Fresh"))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_08_move_root(self):
         projects = self.projects
