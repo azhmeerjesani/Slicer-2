@@ -329,11 +329,12 @@ node attributes. After saving the lesion, start a new lesion (it asks, with Undo
 
 ## Appearance
 
-**Application Settings > Appearance** has three choices, applied as soon as you make them (density after a restart):
+**Application Settings > Appearance** has four choices, applied as soon as you make them (density after a restart):
 
 - **Theme:** System, Dark or Light. Dark is the default. System follows the operating system.
 - **Accent color:** the colour of selected items, links and highlighted controls (a reset button restores the default).
 - **Density:** Comfortable (default) or Compact, which uses the spacing of earlier 3D Slicer versions.
+- **Font and size:** the interface font, Inter by default.
 
 The font is Inter, applied when you have not chosen another font. These choices are saved only in the Studio's own
 settings keys (`Appearance/Theme`, `Appearance/Accent`, `Appearance/Density`, `Appearance/Font`); the settings that

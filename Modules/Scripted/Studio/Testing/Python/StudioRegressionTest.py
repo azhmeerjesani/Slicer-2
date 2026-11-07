@@ -6659,3 +6659,24 @@ class StudioRegressionTest(unittest.TestCase):
             tip = str(card.binaryButton.toolTip)
             self.assertIn(f"({voxels} voxels at 1 mm)", tip, tip)
             self.assertEqual(len(re.findall(r"\d+ voxels at 1 mm", tip)), 1)
+
+    def test_88_docs_appearance_font_keys_and_four_choices(self):
+        """settings.md does not claim that nothing is written for the default font (an empty Appearance/Font and the
+        ForkDefaultFont keys are written on a first start), and studio.md counts the four Appearance choices.
+        """
+        root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        names = ("Docs/user_guide/settings.md", "Docs/user_guide/modules/studio.md")
+        paths = {name: os.path.join(root, *name.split("/")) for name in names}
+        if not all(os.path.isfile(path) for path in paths.values()):
+            self.skipTest("the documentation is not next to this build")
+        texts = {}
+        for name, path in paths.items():
+            with open(path, encoding="utf-8") as stream:
+                texts[name] = " ".join(stream.read().replace("*", "").split())
+        settings, studio = (texts[name] for name in names)
+        self.assertNotIn("nothing is written to the settings", settings)
+        self.assertIn("Appearance/ForkDefaultFontFamily", settings)
+        self.assertIn("Appearance/ForkDefaultFontPointSize", settings)
+        self.assertIn("Appearance has four choices", studio)
+        self.assertNotIn("Appearance has three choices", studio)
+        self.assertIn("Font and size:", studio)

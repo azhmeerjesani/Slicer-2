@@ -92,8 +92,9 @@ reads, so other 3D Slicer installations that share your settings file keep their
 - **Density** (`Appearance/Density`): *Comfortable* (default) or *Compact*, which uses the spacing of earlier
   3D Slicer versions. Takes effect after a restart.
 - **Font and size** (`Appearance/Font`): the interface font is *Inter*. While you have not chosen another font, Inter
-  is applied when the application starts and nothing is written to the settings; the `font` key that official 3D Slicer uses
-  is not changed. A font that you choose here is saved under `Appearance/Font` and applied by Slicer Studio only.
+  is applied when the application starts. On a first start Slicer Studio writes an empty `Appearance/Font` and its
+  own defaults `Appearance/ForkDefaultFontFamily` and `Appearance/ForkDefaultFontPointSize`; the `font` key that
+  official 3D Slicer uses is never written or changed. A font that you choose here is saved under `Appearance/Font` and applied by Slicer Studio only.
   In the classic interface and with `--testing`, the standard font setting of 3D Slicer is used as before.
 
 These choices have no effect when Slicer is started with `--testing`, which always uses the light theme and
