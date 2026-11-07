@@ -304,6 +304,29 @@ class LesionNetworkMappingCatalogDialogTest(unittest.TestCase):
         self.assertNotIn("subject", texts[0])
 
 
+    def test_docs_quote_the_checkbox_labels_of_the_dialog(self):
+        """lnm_data.md quoted labels ("I accept these data use terms", "keep archives") that the dialog does not use."""
+        root = os.path.abspath(__file__)
+        for _ in range(6):
+            root = os.path.dirname(root)
+        docs = {}
+        for name in ("lnm_data.md", "lesionnetworkmapping.md"):
+            path = os.path.join(root, "Docs", "user_guide", "modules", name)
+            if not os.path.isfile(path):
+                self.skipTest("no source tree")
+            with open(path, encoding="utf-8") as f:
+                docs[name] = " ".join(f.read().split())
+        dialog = self.makeDialog(None)
+        accept = dialog.acceptCheck.text
+        keep = dialog.keepCheck.text
+        self.assertTrue(accept.startswith("I have read and accept these terms"), accept)
+        self.assertTrue(keep.startswith("Also keep the downloaded archives"), keep)
+        self.assertIn('"I have read and accept these terms"', docs["lnm_data.md"])
+        self.assertIn('"Also keep the downloaded archives"', docs["lnm_data.md"])
+        self.assertIn('"I have read and accept these terms"', docs["lesionnetworkmapping.md"])
+        self.assertNotIn('tick "I accept these data use terms"', docs["lnm_data.md"])
+        self.assertNotIn('"keep archives"', docs["lnm_data.md"])
+
     def test_failed_terms_fetch_keeps_the_failure_text(self):
         dialog = self.makeDialog(None)
         dialog.entry = {"id": "demo-entry"}

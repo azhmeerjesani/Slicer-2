@@ -192,7 +192,7 @@ PythonSlicer -m LesionNetworkMappingLib.manager estimate --source nifti --input 
 one used for most lesion network mapping papers. GSP1000 is **not** included with Slicer Studio and is **never downloaded
 by itself**. You can fetch it from the Harvard Dataverse (doi:[10.7910/DVN/ILXIKS](https://doi.org/10.7910/DVN/ILXIKS)) with
 **Get a connectome…** (in the Connectome card, or in **Manage…** when a connectome is already registered), only after you
-have clicked "Load terms", read the provider's current Data Use Terms and ticked "I accept". Or obtain it yourself and
+have clicked "Load terms", read the provider's current Data Use Terms and ticked "I have read and accept these terms". Or obtain it yourself and
 convert it once. Time series that are already preprocessed for Lead-DBS
 (doi:[10.7910/DVN/KKTJQC](https://doi.org/10.7910/DVN/KKTJQC)) can be converted or fetched too. For trying the module,
 **Use the demo** in the Connectome card (**Create synthetic demo** in the connectome manager) builds a small connectome of
