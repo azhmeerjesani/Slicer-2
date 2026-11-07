@@ -671,10 +671,17 @@ def volume_summary(volumes):
         return {"n": 0, "median": None, "q1": None, "q3": None, "iqr": None, "mean": None, "min": None, "max": None, "skew": None, "suggest_log": False}
     q1, median, q3 = (float(q) for q in np.percentile(values, (25, 50, 75)))
     skew = None
-    if n >= 3 and float(values.std()) > 0:
+    # Volumes that differ only by floating-point noise have no skew: scipy would warn about catastrophic cancellation
+    # (logged as Critical) and return nan.
+    if n >= 3 and float(values.std()) > 1e-9 * max(abs(float(values.mean())), 1e-12):
+        import warnings
+
         from scipy import stats
 
-        skew = float(stats.skew(values, bias=False))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            value = float(stats.skew(values, bias=False))
+        skew = value if math.isfinite(value) else None
     return {
         "n": n,
         "median": median,

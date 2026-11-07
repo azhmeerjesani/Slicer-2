@@ -144,6 +144,17 @@ class DiceTest(unittest.TestCase):
 
 
 class VolumeAndTallyTest(unittest.TestCase):
+    def test_volume_summary_equal_volumes_no_warning(self):
+        import warnings
+
+        for values in ([0.98, 0.98, 0.98000000000000001, 0.9800000000000001], [0.984123456789] * 3):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                summary = lesionset.volume_summary(values)
+            self.assertEqual([str(w.message) for w in caught], [])
+            self.assertIsNone(summary["skew"])
+            self.assertFalse(summary["suggest_log"])
+
     def test_volume_summary_and_log_suggestion(self):
         summary = lesionset.volume_summary([1.0, 2.0, 3.0, 4.0, 100.0])
         self.assertEqual(summary["median"], 3.0)
