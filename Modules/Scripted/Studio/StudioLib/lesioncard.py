@@ -543,7 +543,8 @@ class LesionCard:
         readoutLayout.addWidget(self.statsFrame)
         # The fixes that the stat cells call for ("2 parts · Keep largest")
         self.fixesLabel = self._label("StudioLesionFixes", 12, links=True)
-        self.saveStateLabel = self._label("StudioLesionSaveState", 12)
+        # One line, elided ("Saved · sub-21_space-MNI152NL…"): a long BIDS name has no break point and was cut mid-letter
+        self.saveStateLabel = ui.elideLabel(self._label("StudioLesionSaveState", 12))
         self.spaceLabel = self._label("StudioLesionSpaceLine", 12)
         self.hintLabel = ui.elideLabel(self._label("StudioLesionHint", 12))
         # Row 3: the save state, and "New lesion" once the lesion is saved (the next case starts on a new lesion and
@@ -724,8 +725,7 @@ class LesionCard:
         self._setStats(stats)
         self._setReadout(state.get("readoutHtml"), stats)
         self._setText(self.fixesLabel, fixesHtml(stats) if stats else None, "text2")
-        self._setText(self.saveStateLabel, state.get("saveState"), "text3")
-        self.saveStateLabel.setToolTip(state.get("saveStateToolTip") or "")
+        self._setSaveStateText(state.get("saveState"), state.get("saveStateToolTip") or "")
         self.saveRow.setVisible(bool(state.get("saveState")))
         self._setSaveStateIcon(state.get("saveState"))
         self.newLesionButton.setVisible(bool(state.get("offerNewLesion")) and enabled)
@@ -767,6 +767,19 @@ class LesionCard:
                 label.setStyleSheet(styleSheet)
         if not label.isVisibleTo(self.widget):
             label.show()
+
+    def _setSaveStateText(self, text, toolTip):
+        """The save state line: one line, elided to its width; the tooltip is the given one, else the whole text while elided."""
+        if not text:
+            if not self.saveStateLabel.isHidden():
+                self.saveStateLabel.hide()
+            return
+        styleSheet = f"QLabel {{ color: {ui.token('text3').name()}; background: transparent; border: none; }}"
+        if self.saveStateLabel.styleSheet != styleSheet:
+            self.saveStateLabel.setStyleSheet(styleSheet)
+        ui.setElidedText(self.saveStateLabel, text, toolTip)
+        if not self.saveStateLabel.isVisibleTo(self.widget):
+            self.saveStateLabel.show()
 
     def _setHint(self, text):
         """The hint of the tool: one caption line, elided to its width (the whole text is the tooltip)."""

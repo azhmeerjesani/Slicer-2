@@ -297,6 +297,33 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         foreground = max(pixels, key=lambda p: sum(abs(p[i] - background[i]) for i in range(3)))
         return qt.QColor(*foreground), qt.QColor(*background)
 
+    def test_lesion_card_save_state_elides_long_file_name(self):
+        """The "Saved \u00b7 <file>" line of the Lesion card is one elided line next to "New lesion": a long BIDS name has no
+        break point and was cut mid-letter at the right edge (VISUAL 6: no clipped text).
+        """
+        from StudioLib import lesioncard
+
+        name = "sub-21_space-MNI152NLin6Asym_lesion.nii.gz"
+        card = lesioncard.LesionCard(lesioncard._NullController())
+        try:
+            card.widget.resize(300, 300)
+            card.widget.show()
+            card.refresh({"saveState": f"Saved \u00b7 {name}", "saveStateToolTip": "", "offerNewLesion": True, "enabled": True})
+            self._pump(8)
+            label = card.saveStateLabel
+            self.assertTrue(label.isVisible())
+            self.assertFalse(label.wordWrap)
+            shown = str(label.text)
+            self.assertTrue(shown.endswith("\u2026"), shown)
+            self.assertLess(label.fontMetrics().horizontalAdvance(shown), label.width + 1)
+            self.assertIn(name, str(label.toolTip))
+            # Wide enough: the whole text, no tooltip
+            card.widget.resize(900, 300)
+            self._pump(8)
+            self.assertEqual(str(label.text), f"Saved \u00b7 {name}")
+        finally:
+            card.widget.deleteLater()
+
     def test_role_text_on_transparent_background(self):
         """A stylesheet "background: transparent" (a parent panel's QLabel rule) must not make the light theme paint role
         text with the dark tokens: the transparent window brush is black, which isDark() read as a dark palette.

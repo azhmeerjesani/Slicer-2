@@ -934,7 +934,7 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertEqual(segmentationNode.GetAttribute(draw.SAVED_FILE_ATTRIBUTE), "sub-07_lesion.nii.gz")
             self.assertEqual(draw.lesionSaveState(segmentationNode)[:2], ("saved", written))
             self._pump(4)
-            self.assertTrue(draw.extension().card.saveStateLabel.text.startswith("Saved · sub-07_lesion.nii.gz"))
+            self.assertTrue(str(draw.extension().card.saveStateLabel.property("studioFullText")).startswith("Saved · sub-07_lesion.nii.gz"))
 
             labelmapNode = slicer.util.loadLabelVolume(written, {"show": False})
             try:
@@ -962,7 +962,7 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self._pump(4)
             slicer.app.processEvents()
             self._wait(draw.METRICS_DEBOUNCE_MS + 100)
-            self.assertTrue(draw.extension().card.saveStateLabel.text.startswith("Unsaved changes"))
+            self.assertTrue(str(draw.extension().card.saveStateLabel.property("studioFullText")).startswith("Unsaved changes"))
             # Notes and source just typed in the card (the notes debounce pending, the source field still being
             # edited) reach the sidecar of a save by shortcut
             card = draw.extension().card
