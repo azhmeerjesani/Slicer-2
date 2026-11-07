@@ -1311,6 +1311,33 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         text = str(self._drawEmptyState().findChild("QLabel", "StudioDrawEmptyStateText").text)
         self.assertEqual(text, "Open a scan in Library or start on the MNI template")
 
+    def test_colour_volume_draw_says_why(self):
+        """A 3D colour (vector) volume is shown but never a Draw source: no empty lesion is created for it, Draw says why
+        and "Save lesion" has nothing to save.
+        """
+        import numpy as np
+        import SimpleITK as sitk
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        array = np.zeros((6, 20, 24, 3), dtype=np.uint8)
+        array[..., 0] = 200
+        image = sitk.GetImageFromArray(array, isVector=True)
+        path = os.path.join(self.directory, "atlas_rgb.mha")
+        sitk.WriteImage(image, path)
+        importer.loadFiles([path], studioShell)
+        self._pump(8)
+        self.assertEqual(len(list(slicer.util.getNodesByClass("vtkMRMLVectorVolumeNode"))), 1)
+        self.assertEqual(len(list(slicer.util.getNodesByClass("vtkMRMLSegmentationNode"))), 0)
+        studioShell.switchTo("draw")
+        self._pump(4)
+        text = str(self._drawEmptyState().findChild("QLabel", "StudioDrawEmptyStateText").text)
+        self.assertIn("atlas_rgb", text)
+        self.assertIn("colour image", text)
+        self.assertNotIn("Open a scan in Library", text)
+        saveButton = self.mainWindow.findChild("QPushButton", "StudioSaveLesionButton")
+        self.assertFalse(saveButton.isEnabled())
+
     def test_lesion_only_native(self):
         """A lesion in scan space alone is never shown on the template; its sidecar's scan is offered and opens with it."""
         from StudioLib import importer

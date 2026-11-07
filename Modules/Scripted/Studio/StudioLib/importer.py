@@ -1705,7 +1705,11 @@ def _showLoaded(result, shell, scans, openScans, openLesions):
         lesions = [lesion for lesion in lesions if not any(_sameNode(lesion, other) for other in otherSubject)]
         for lesion in otherSubject:
             _setLesionVisible(lesion, False)
-    if sourceVolume is not None and (scans or lesions or openScans):
+    if sourceVolume is not None and sourceVolume.IsA("vtkMRMLVectorVolumeNode") and not lesions:
+        # A 3D colour image is shown but never traced (SegmentEditor.isEditableSourceVolume): no empty lesion is created
+        # for it, and Draw says why
+        shell.switchTo("draw")
+    elif sourceVolume is not None and (scans or lesions or openScans):
         # Draw edits the loaded lesion, else a segmentation bound to the scan (never the segmentation of a previous
         # scan or of the template, which may hold another subject's lesion)
         if segmentEditorWidget() is not None:
