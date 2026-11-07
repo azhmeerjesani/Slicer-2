@@ -856,6 +856,33 @@ class StudioUpdatesTest(unittest.TestCase):
         self.assertIsNone(service.finishInstall())
         self.assertIsNotNone(install.readRecord(self.stateDir)[0])
 
+    def test_FailedInstallToastKeepsLogPathReachable(self):
+        """The sticky toast is one elided line: the failed-install message must carry the full text as its tooltip and
+        a "Show log" action, so the log path ("Details: ...") is never only a cut-off tail.
+        """
+        calls = []
+
+        class FakeShell:
+            def toast(self, text, ms=1600, action=None, actionText=None, sticky=False, level="info", toolTip=None):
+                calls.append(dict(text=text, action=action, actionText=actionText, sticky=sticky, toolTip=toolTip))
+
+        service = self._service()
+        log = os.path.join(self.tempDir, "a-long-folder-name", "StudioUpdate", "install.log")
+        service._finishedMessage = ("warn", "The update to 1.2.0 could not be installed. Details: " + log)
+        service._finishedLog = log
+        updates = self.updates
+        original = updates._shell
+        updates._shell = FakeShell
+        try:
+            service._showFinishedMessage()
+        finally:
+            updates._shell = original
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0]["sticky"])
+        self.assertIn(log, calls[0]["toolTip"])
+        self.assertTrue(callable(calls[0]["action"]))
+        self.assertTrue(calls[0]["actionText"])
+
     def test_LinuxFailedInstallRelaunchesKeptVersion(self):
         """Restart now promises a restart: when the helper fails after the application exited, it still starts the kept
         previous version (so the failure message shows at once); when the application never exits it starts nothing.

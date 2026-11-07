@@ -1038,6 +1038,7 @@ class UpdateService:
         #: Staged copies of dropped updates, removed by the next download (``_discardPrepared()``)
         self._staleStaging = []
         self._finishedMessage = None
+        self._finishedLog = None  # the install log of a failed install (the toast's "Show log" action opens it)
         self._startTime = time.monotonic()
         #: How long the startup waited for the check before going on (ms; None until then, or when a required
         #: update is shown)
@@ -2054,6 +2055,7 @@ class UpdateService:
             logging.info("Updates: the update to {} is still being installed by another Slicer Studio".format(record.get("version")))
             return None
         updates_install.clearRecord(stateDir)
+        self._finishedLog = None
         newVersion = str(record.get("version") or "")
         succeeded = result == "ok" and versionModule.tryParse(newVersion) is not None and versionModule.compare(newVersion, currentVersion()) == 0
         if succeeded:
@@ -2069,6 +2071,7 @@ class UpdateService:
             self._finishedMessage = ("warn", _("The update to {version} could not be installed: {reason}. Slicer Studio {current} was kept. "
                                                "Details: {log}").format(version=newVersion or "?", reason=reason, current=currentVersion(),
                                                                       log=record.get("log") or ""))
+            self._finishedLog = record.get("log") or None
         package = record.get("package")
         if package and os.path.isfile(package) and os.path.dirname(os.path.abspath(package)) == os.path.abspath(downloadDirectory()):
             _removeQuietly(package)
@@ -2106,13 +2109,28 @@ class UpdateService:
         logging.info(f"Updates: {text}")
         shell = _shell()
         if shell is not None:
-            shell.toast(text, 6000, sticky=level == "warn", level="consequence" if level == "warn" else "info")
+            log, self._finishedLog = self._finishedLog, None
+            if level == "warn" and log:
+                # The toast is one elided line, so the log path would be cut: the full text is its tooltip, and the
+                # action opens the log (the folder when the log is gone)
+                shell.toast(text, 6000, sticky=True, level="consequence", action=lambda: _openLog(log), actionText=_("Show log"),
+                            toolTip=text)
+            else:
+                shell.toast(text, 6000, sticky=level == "warn", level="consequence" if level == "warn" else "info")
         elif level == "warn":
             slicer.util.warningDisplay(text, windowTitle=_("Update"))
         else:
             mainWindow = _mainWindow()
             if mainWindow is not None and mainWindow.statusBar() is not None:
                 mainWindow.statusBar().showMessage(text, 6000)
+
+
+def _openLog(path):
+    """Open the install log of a failed update in the system's viewer (its folder when the file is gone)."""
+    import qt
+
+    target = path if os.path.exists(path) else os.path.dirname(path)
+    return bool(qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(target)))
 
 
 #
