@@ -1097,6 +1097,14 @@ class TopBar:
         # Once the new layout has its geometry, the view under the pointer takes the keys
         qt.QTimer.singleShot(0, lambda focusBefore=focusBefore: self._focusHoveredViewAfterLayout(focusBefore))
 
+    def runLayoutChange(self, callback):
+        """Run ``callback`` (it changes the layout, e.g. triggers a layout action of the View menu) and, once the new
+        layout settled, give the keys to the view under the pointer (see ``_focusHoveredViewAfterLayout``).
+        """
+        focusBefore = qt.QApplication.focusWidget()
+        callback()
+        qt.QTimer.singleShot(0, lambda focusBefore=focusBefore: self._focusHoveredViewAfterLayout(focusBefore))
+
     def _focusHoveredViewAfterLayout(self, focusBefore):
         """Give the keys to the slice view under the pointer after a layout key (Alt+1..5) or a Search entry.
 
@@ -1189,11 +1197,14 @@ class TopBar:
             return
         if layouts.isStudioLayout(layoutId):
             layouts.register()
+        focusBefore = qt.QApplication.focusWidget()
         self._userLayoutRequests += 1
         try:
             layoutManager.setLayout(layoutId)
         finally:
             self._userLayoutRequests -= 1
+        # The pointer has not moved: the view under it takes the keys once the new layout has its geometry
+        qt.QTimer.singleShot(0, lambda focusBefore=focusBefore: self._focusHoveredViewAfterLayout(focusBefore))
 
     def _updateMoreLayoutsMenu(self):
         self._moreLayoutsMenuOpen = True

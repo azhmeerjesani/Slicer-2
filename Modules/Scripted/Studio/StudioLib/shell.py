@@ -3983,7 +3983,10 @@ class Shell:
         layoutNode = layoutManager.layoutLogic().GetLayoutNode() if layoutManager is not None else None
         if layoutNode is not None and layoutNode.GetNumberOfMaximizedViewNodes() > 0:
             viewNode = layoutNode.GetMaximizedViewNode(layoutNode.GetNumberOfMaximizedViewNodes() - 1)
+            focusBefore = qt.QApplication.focusWidget()
             layoutManager.removeMaximizedViewNode(viewNode)
+            # The pointer has not moved: the view under it takes the keys back once the layout is restored
+            qt.QTimer.singleShot(0, lambda: self._focusHoveredViewAfterLayout(focusBefore))
             return True
         if self.focusMode():
             self.setFocusMode(False)
@@ -4120,6 +4123,14 @@ class Shell:
         if view is None or not hovered.isVisible():
             return None, None
         return hovered, view
+
+    def _focusHoveredViewAfterLayout(self, focusBefore):
+        if not self._active:
+            return
+        if self.topBar is not None:
+            self.topBar._focusHoveredViewAfterLayout(focusBefore)
+        else:
+            self.focusHoveredView()
 
     def focusHoveredView(self):
         """Give the keyboard focus to the slice view under the pointer. Return True if the view has it afterwards.

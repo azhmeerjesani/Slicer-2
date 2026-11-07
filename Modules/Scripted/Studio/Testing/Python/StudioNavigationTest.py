@@ -2325,6 +2325,67 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         slicer.mrmlScene.RemoveNode(segmentation)
         slicer.mrmlScene.RemoveNode(volume)
 
+    def test_25d_search_layout_and_esc_restore_keep_the_keys(self):
+        """A layout chosen in Search (setLayoutByUser) and Esc restoring a maximized view leave the keys with the view
+        under the still pointer (BB-1): the focus used to land on an inspector button or on another view.
+        """
+        from StudioLib import layouts, shell
+
+        volume, segmentation = self._loadScanAndSegmentation()
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        slicer.util.setSliceViewerLayers(background=volume, fit=True)
+        studioShell.setLayoutFromPicker("focus")
+        self._pump(10)
+        self.mainWindow.activateWindow()
+        self._pump()
+        if not self.mainWindow.isActiveWindow:
+            self.skipTest("the main window cannot be activated on this display")
+
+        def pointAtRed():
+            sliceView = self.layoutManager.sliceWidget("Red").sliceView()
+            qt.QCursor.setPos(sliceView.mapToGlobal(qt.QPoint(int(sliceView.width * 0.3), int(sliceView.height * 0.3))))
+            self._pump()
+            _hovered, view = shell.Shell._hoveredSliceView()
+            if view != sliceView:
+                self.skipTest("the pointer cannot be put over the view on this display")
+            studioShell.hoverTracker._onEnter("Red")
+            sliceView.VTKWidget().setFocus(qt.Qt.MouseFocusReason)
+            self._pump()
+
+        def assertFocusOnHoveredView(context):
+            self._pump(10)
+            _hovered, view = shell.Shell._hoveredSliceView()
+            self.assertIsNotNone(view, context)
+            focusWidget = slicer.app.focusWidget()
+            self.assertEqual(focusWidget, view.VTKWidget(),
+                             f"{context}: the focus is on {focusWidget.className() if focusWidget else None}")
+
+        pointAtRed()
+        # Search runs the layout actions of the View menu ("Four-Up") and the Studio layouts (setLayoutByUser)
+        from StudioLib import palette
+
+        layoutMenu = self.mainWindow.findChild("QMenu", "LayoutMenu")
+        fourUp = next(action for path, action in palette._menuActions(layoutMenu) if str(action.text).replace("&", "") == "Four-Up")
+        palette._triggerLayoutAction(studioShell, fourUp)
+        assertFocusOnHoveredView("Search Four-Up")
+        studioShell.setLayoutFromPicker("focus")
+        self._pump(10)
+        pointAtRed()
+        studioShell.topBar.setLayoutByUser(layouts.ROW_LAYOUT_ID)
+        assertFocusOnHoveredView("Search Row")
+        studioShell.setLayoutFromPicker("focus")
+        self._pump(10)
+        pointAtRed()
+        studioShell.setLayoutFromPicker("single")
+        self._pump(10)
+        pointAtRed()
+        self.assertTrue(studioShell.handleEscape())
+        self.assertEqual(layouts.maximizedViewNames(), [])
+        assertFocusOnHoveredView("Esc restores the layout")
+        slicer.mrmlScene.RemoveNode(segmentation)
+        slicer.mrmlScene.RemoveNode(volume)
+
     def test_25_page_keys_step_the_hovered_view(self):
         """PageUp and PageDown step the slice view under the pointer also when the focus is on a tool tile of Draw (they
         used to scroll the inspector); over the inspector they scroll it as before; a text input keeps them. A view

@@ -1059,7 +1059,7 @@ class Index:
                 submenu = path[-1]
                 entryId = f"layout.{_slug(submenu)}.{_slug(text)}"
                 title = f"{submenu}: {text}"
-                entries.append(Entry(entryId, title, layoutTitle, action.trigger, KIND_LAYOUT, synonyms=(submenu.lower(),), group=finder.GROUP_OTHER,
+                entries.append(Entry(entryId, title, layoutTitle, lambda action=action: _triggerLayoutAction(shell, action), KIND_LAYOUT, synonyms=(submenu.lower(),), group=finder.GROUP_OTHER,
                                      iconName="layout-grid"))
                 continue
             data = action.data()
@@ -1075,7 +1075,7 @@ class Index:
             synonyms = ("four up", "2x2", "four views") if layoutId == slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView else ()
             # The classic layouts that the picker does not offer ("Tabbed 3D", "Triple 3D") come after the core modules and
             # commands of the same tier: "t" is Transforms, not a rarely used layout
-            entries.append(Entry(f"layout.{layoutId}" if layoutId is not None else f"layout.{_slug(text)}", text, layoutTitle, action.trigger,
+            entries.append(Entry(f"layout.{layoutId}" if layoutId is not None else f"layout.{_slug(text)}", text, layoutTitle, lambda action=action: _triggerLayoutAction(shell, action),
                                  KIND_LAYOUT, key, synonyms=synonyms, aliases=(title,) if title and title.lower() != text.lower() else (),
                                  priority=1 if key else 0, group=finder.GROUP_CORE if key else finder.GROUP_OTHER, iconName="layout-grid"))
         return entries
@@ -1217,6 +1217,15 @@ def _menuActions(menu, path=()):
         elif action.text:
             result.append((path, action))
     return result
+
+
+def _triggerLayoutAction(shell, action):
+    """Run a layout action of the View menu from Search; the view under the pointer keeps the keys afterwards."""
+    topBar = getattr(shell, "topBar", None) if shell is not None else None
+    if topBar is not None and hasattr(topBar, "runLayoutChange"):
+        topBar.runLayoutChange(action.trigger)
+    else:
+        action.trigger()
 
 
 def _setLayout(shell, layoutId):
