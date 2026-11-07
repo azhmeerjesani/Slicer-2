@@ -1729,6 +1729,7 @@ class Shell:
         # The layout may change in Classic, where _onLayoutChanged is not connected
         self._viewTabStops = None
         self._uninstallPlugins()
+        self._reattachSegmentEditorNode()
         self._setSegmentEditorPresentation("classic")
         self._setMapPresentation(False)
         self._setSliceAnnotationsPresentation(False)
@@ -2630,6 +2631,23 @@ class Shell:
                 sliceAnnotations.refreshAnnotations()
             except Exception:
                 logging.error(f"Studio: cannot refresh the corner text of the slice views:\n{traceback.format_exc()}")
+
+    @staticmethod
+    def _reattachSegmentEditorNode():
+        """A scene loaded while Draw was not shown left the Segment Editor without its parameter node (draw.py,
+        ``_onSceneStartImport``): Classic gives it the scene's node back before the presentation changes, else the editor
+        logs "Invalid segment editor parameter set node" (the red badge) while it updates its sections.
+        """
+        widget = getattr(slicer.modules, "SegmentEditorWidget", None)
+        editor = getattr(widget, "editor", None)
+        if editor is None or editor.mrmlSegmentEditorNode() is not None or slicer.mrmlScene is None:
+            return
+        if slicer.mrmlScene.GetSingletonNode("SegmentEditor", "vtkMRMLSegmentEditorNode") is None:
+            return
+        try:
+            widget.selectParameterNode()
+        except Exception:
+            logging.error(f"Studio: cannot restore the Segment Editor parameter node:\n{traceback.format_exc()}")
 
     @staticmethod
     def _setSegmentEditorPresentation(name):

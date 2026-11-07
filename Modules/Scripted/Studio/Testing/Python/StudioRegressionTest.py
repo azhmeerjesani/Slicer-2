@@ -6541,3 +6541,56 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertEqual(int(flat.max()), 0)
         sixteen = np.arange(4, dtype=np.uint16).reshape(2, 2)
         self.assertIs(figure._pngPixels(sixteen).dtype, np.dtype(np.uint16))
+
+    def test_86_classic_after_a_scene_load_outside_draw_logs_no_editor_error(self):
+        """A scene loaded from the Library leaves the Segment Editor without its parameter node (draw._onSceneStartImport):
+        Classic straight afterwards gives it back before the presentation changes, so no "Invalid segment editor
+        parameter set node" is logged (the red badge) and the editor follows the scene's node.
+        """
+        import numpy as np
+        from StudioLib import draw, shell
+
+        if slicer.util.mainWindow() is None or not hasattr(slicer.modules, "segmenteditor"):
+            self.skipTest("needs the main window and the Segment Editor")
+        slicer.mrmlScene.Clear(0)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+
+        def pump():
+            for _ in range(10):
+                slicer.app.processEvents()
+
+        try:
+            image = np.zeros((20, 24, 28), np.int16)
+            image[5:15, 6:18, 7:21] = 200
+            volumeNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "sub-01_T1w")
+            slicer.util.updateVolumeFromArray(volumeNode, image)
+            volumeNode.CreateDefaultDisplayNodes()
+            segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "lesion")
+            segmentationNode.CreateDefaultDisplayNodes()
+            segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
+            segmentationNode.GetSegmentation().AddEmptySegment("bright")
+            studioShell.switchTo("draw")
+            pump()
+            editor = slicer.modules.SegmentEditorWidget.editor
+            self.assertIsNotNone(editor.mrmlSegmentEditorNode())
+            studioShell.switchTo("library")
+            pump()
+            draw._onSceneStartImport()
+            self.assertIsNone(editor.mrmlSegmentEditorNode())
+            model = slicer.app.errorLogModel()
+            rowsBefore = model.rowCount()
+            studioShell.classic(persist=False)
+            pump()
+            texts = [
+                str(model.index(row, 4).data()) for row in range(rowsBefore, model.rowCount())
+                if model.index(row, 2).data() in ("Error", "Critical", "Fatal")
+            ]
+            self.assertEqual([text for text in texts if "parameter set node" in text], [])
+            self.assertIsNotNone(editor.mrmlSegmentEditorNode())
+        finally:
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
