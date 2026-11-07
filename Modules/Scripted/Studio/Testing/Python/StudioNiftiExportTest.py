@@ -882,6 +882,24 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertEqual(self.export.maskBaseName("sub-01_desc-lesion", "Lesion"), "sub-01_label-Lesion_desc-lesion_mask")
         self.assertEqual(self.export.maskBaseName("lesions", "Left"), "lesions_label-Left_mask")
 
+    def test_06ca_second_lesion_masks_keep_desc_last(self):
+        """Two lesions of one subject: the second gets ``desc-lesion2``, not ``_2`` in the middle of the entities."""
+        scan = self._volume("scan", np.zeros((30, 30, 30), np.int16), np.eye(4))
+        nodes = []
+        for name in ("rater1", "rater2"):
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", name)
+            node.CreateDefaultDisplayNodes()
+            node.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+            segmentId = node.GetSegmentation().AddEmptySegment("", "Lesion")
+            data = np.zeros((30, 30, 30), np.uint8)
+            data[5, 5, 5] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(data, node, segmentId, scan)
+            nodes.append(node)
+        names = {node.GetID(): "sub-07_desc-lesion" for node in nodes}
+        jobs = self.export.planExport(nodes, self.out, segmentationMode=self.export.SEGMENTATION_MASKS, names=names)
+        masks = sorted(os.path.basename(path) for job in jobs for path in job.images())
+        self.assertEqual(masks, ["sub-07_label-Lesion_desc-lesion2_mask.nii.gz", "sub-07_label-Lesion_desc-lesion_mask.nii.gz"])
+
     def test_06d_mask_names_never_equal_another_segments_name(self):
         """Names that differ only by punctuation or case: a suffix never makes a file name that is another segment's name."""
         scan = self._volume("scan", np.zeros((30, 30, 30), np.int16), np.eye(4))

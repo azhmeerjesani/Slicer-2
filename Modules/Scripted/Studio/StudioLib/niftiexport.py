@@ -1344,6 +1344,19 @@ def maskBaseName(base, segment):
     return f"{base}_label-{segment}_mask"
 
 
+def bumpedBase(base, index, kind=None, segmentationMode=None):
+    """``base`` for the ``index``-th try of a name that is taken (1 = unchanged).
+
+    The number goes into the ``desc`` value of mask names (``sub-01_desc-lesion2``) so that ``desc`` stays the last
+    entity (BIDS) and ``maskBaseName`` still recognises it; other names get ``_2``, ``_3``...
+    """
+    if index == 1:
+        return base
+    if kind == KIND_SEGMENTATION and segmentationMode == SEGMENTATION_MASKS and re.match(r"^.+_desc-[A-Za-z0-9]+$", base):
+        return f"{base}{index}"
+    return f"{base}_{index}"
+
+
 def uniquePath(path, reserved):
     """``path``, or ``<base>_2<ext>``... when another job of the same export already writes it (case-insensitive)."""
     base, extension = splitExtension(path)
@@ -1393,8 +1406,7 @@ def planExport(nodes, folder, extension=".nii.gz", segmentationMode=SEGMENTATION
         # per-segment masks (an earlier scan may be named like one of them). Bump the base name (_2, _3...) until none is taken.
         index = 1
         while True:
-            suffix = "" if index == 1 else f"_{index}"
-            path = os.path.join(folder, f"{base}{suffix}{extension}")
+            path = os.path.join(folder, f"{bumpedBase(base, index, kind, segmentationMode)}{extension}")
             job = Job(node, kind, path, options)
             if not any(os.path.normcase(other).lower() in reserved for other in job.files()):
                 break
