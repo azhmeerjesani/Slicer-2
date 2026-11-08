@@ -1565,6 +1565,77 @@ def _dropExtrusion(study, session, sid, row, values, tracedPath, probPath, resul
         _commit(study, session, sid, values, {"event": "lesion_dimensionality", "dimensionality": values.get("dimensionality")})
 
 
+def extrudeDrawn(drawn, affine, policy, normal=None):
+    """Extrude a 2D tracing (``drawn`` indexed [i, j, k]) by an extruding ``storedPolicy``, on a crop around it.
+
+    Return ``(out, subAffine, low, record)``: ``out`` (float, 0..1, [i, j, k]) on the crop whose first voxel is ``low`` of
+    ``drawn`` and whose IJK→RAS matrix is ``subAffine``; ``record`` is ``lesionops.extrude``'s.
+    """
+    ops = _lnm("lesionops")
+    total = float(policy["total_mm"] or DEFAULT_EXTRUDE_MM)
+    spacing = np.sqrt((np.asarray(affine, dtype=float)[:3, :3] ** 2).sum(axis=0))
+    pad = math.ceil(total / float(spacing.min())) + 3
+    found = np.argwhere(drawn)
+    low = np.maximum(found.min(axis=0) - pad, 0)
+    high = np.minimum(found.max(axis=0) + pad + 1, np.array(drawn.shape))
+    sub = drawn[low[0]:high[0], low[1]:high[1], low[2]:high[2]]
+    shift = np.eye(4)
+    shift[:3, 3] = low
+    subAffine = np.asarray(affine, dtype=float) @ shift
+    out, record = ops.extrude(sub, subAffine, total, normal=normal, mode=policy["mode"])
+    return out, subAffine, low, record
+
+
+def analysisBinary(values, mode):
+    """``desc-lesion`` of an extruded tracing: the fractional slab at ``lesionops.LESION_THRESHOLD``, the binary one above 0."""
+    return (values >= _lnm("lesionops").LESION_THRESHOLD if mode == MODE_FRACTIONAL else values > 0).astype(np.uint8)
+
+
+def analysisSeed(segmentationNode, data, affine):
+    """The study's analysis lesion (``desc-lesion``) for the Map seed of the subject open in a study, or None.
+
+    A 2D or multi2D tracing of the open subject is shown as drawn (``restoreTraced``), but the study analyses it as
+    extruded by ``trace_policy.extrude_2d`` (``regenerate`` writes ``desc-lesion``, which the cohort maps). This applies the
+    same extrusion to the segment as it is now (``data`` [i, j, k], ``affine`` IJK→RAS) so that a single-subject map uses
+    the study's analysis mask. Return ``(binary uint8 [i, j, k] on the same grid, info)`` with ``info`` =
+    ``{mode, total_mm, effective_mm, description, drawnVoxels}``; None when the segmentation is not the open subject's,
+    the study keeps 2D tracings as a single slice (or has no policy), the lesion file is not one the study regenerates
+    (outside ``lesions/``) or the segment is not a 2D tracing (it was edited into a 3D one).
+    """
+    session = _session()
+    if session is None or segmentationNode is None:
+        return None
+    sid = session.current()
+    current = session.segmentationNode()
+    if sid is None or sid not in session.study or current is None or current.GetID() != segmentationNode.GetID():
+        return None
+    study = session.study
+    policy = storedPolicy(study)
+    row = study.subject(sid)
+    if policy is None or policy["mode"] == MODE_SINGLE or _missing(row.get("lesion")):
+        return None
+    lesionsFolder = os.path.join(os.path.abspath(study.path), _lnm("study").LESIONS_DIR)
+    lesionPath = os.path.abspath(study.abspath(row["lesion"]))
+    if os.path.commonpath([lesionPath, lesionsFolder]) != lesionsFolder:
+        return None  # regenerate never extrudes a lesion file of the user's: the analysis lesion is the file as it is
+    drawn = np.asarray(data) > 0
+    if not drawn.any():
+        return None
+    try:
+        sidecar = study.read_lesion_sidecar(sid) or {}
+        normal = ((sidecar.get(_lnm("schema").FORK_KEY) or {}).get("extrude") or {}).get("normal")
+    except Exception:
+        normal = None
+    ops = _lnm("lesionops")
+    if ops.detect_dimensionality(drawn, affine, normal)["dimensionality"] not in ("2D", "multi2D"):
+        return None
+    out, _subAffine, low, record = extrudeDrawn(drawn, affine, policy, normal)
+    binary = np.zeros(drawn.shape, np.uint8)
+    binary[low[0]:low[0] + out.shape[0], low[1]:low[1] + out.shape[1], low[2]:low[2] + out.shape[2]] = analysisBinary(out, policy["mode"])
+    return binary, {"mode": policy["mode"], "total_mm": policy["total_mm"], "effective_mm": float(record["effective_mm"]),
+                    "description": record["description"], "drawnVoxels": int(np.count_nonzero(drawn))}
+
+
 def regenerate(study, sid, session=None, source="lesion", normal=None):
     """Write the analysis files of a 2D tracing from the drawn one and update the row, the sidecar and the audit log.
 
@@ -1632,22 +1703,12 @@ def regenerate(study, sid, session=None, source="lesion", normal=None):
         if "fractional_sum" in row:
             values["fractional_sum"] = None
     else:
-        total = float(policy["total_mm"] or DEFAULT_EXTRUDE_MM)
-        spacing = np.sqrt((np.asarray(affine, dtype=float)[:3, :3] ** 2).sum(axis=0))
-        pad = math.ceil(total / float(spacing.min())) + 3
-        found = np.argwhere(drawn)
-        low = np.maximum(found.min(axis=0) - pad, 0)
-        high = np.minimum(found.max(axis=0) + pad + 1, np.array(drawn.shape))
-        sub = drawn[low[0]:high[0], low[1]:high[1], low[2]:high[2]]
-        shift = np.eye(4)
-        shift[:3, 3] = low
-        subAffine = np.asarray(affine, dtype=float) @ shift
-        out, record = ops.extrude(sub, subAffine, total, normal=normal, mode=mode)
+        out, subAffine, _low, record = extrudeDrawn(drawn, affine, policy, normal)
         if source == "lesion":
             _writeAtomic(tracedPath, lambda temporary: shutil.copy2(lesionPath, temporary))
         files["traced"] = tracedPath
         kji = np.ascontiguousarray(out.transpose(2, 1, 0))
-        binary = (kji >= ops.LESION_THRESHOLD if mode == MODE_FRACTIONAL else kji > 0).astype(np.uint8)
+        binary = analysisBinary(kji, mode)
         _writeAtomic(lesionPath, lambda temporary: nifti.write_like(temporary, binary, subAffine, tracedPath, dtype=np.uint8, descrip="Slicer Studio lesion (extruded)"))
         files["lesion"] = lesionPath
         voxelMl = abs(float(np.linalg.det(np.asarray(affine, dtype=float)[:3, :3]))) / 1000.0

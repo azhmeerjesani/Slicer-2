@@ -1080,6 +1080,77 @@ class StudioRegressionTest(unittest.TestCase):
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
 
+    def test_6b_map_seed_of_2d_study_subject_follows_the_extrusion_policy(self):
+        """BB-1: Map's lesion seed of an open 2D study subject is the study's analysis lesion (desc-lesion), not the drawn slice."""
+        from LesionNetworkMappingLib import geometry, nifti
+
+        import LesionNetworkMapping
+        from StudioLib import lesionqc, shell, study_ui
+
+        if slicer.util.mainWindow() is None:
+            self.skipTest("needs the main window")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Extruded study")
+        os.makedirs(folder)
+        traced = np.zeros(grid.shape, np.uint8)
+        traced[40:50, 50:60, 40] = 1  # one axial slice
+        cube = np.zeros(grid.shape, np.uint8)
+        cube[40:44, 50:54, 40:44] = 1
+        paths = [os.path.join(folder, "sub-01_lesion.nii.gz"), os.path.join(folder, "sub-02_lesion.nii.gz")]
+        nifti.write_nifti(paths[0], traced, grid.affine)
+        nifti.write_nifti(paths[1], cube, grid.affine)
+        logic = LesionNetworkMapping.LesionNetworkMappingLogic()
+
+        def slices(data):
+            return int(np.unique(np.nonzero(data)[2]).size)
+
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        try:
+            session = study_ui.createStudy(paths, studioShell, folder=folder)
+            # The lesion as Done writes it, in lesions/ (an adopted file outside lesions/ is never extruded)
+            relative = session.study.lesion_relpath("sub-01")
+            os.makedirs(os.path.dirname(session.study.abspath(relative)), exist_ok=True)
+            shutil.copyfile(paths[0], session.study.abspath(relative))
+            session.study.set("sub-01", {"lesion": relative})
+            lesionqc.setPolicy(session.study, lesionqc.MODE_FRACTIONAL, 6.0)  # 6 mm on 2 mm voxels: 3 whole slices
+            session.flush()
+            self.assertIsNotNone(lesionqc.regenerate(session.study, "sub-01", session, source="lesion"))
+            lesionPath = session.study.abspath(session.study.subject("sub-01")["lesion"])
+            analysis = np.squeeze(nifti.read_nifti(lesionPath)[0]) > 0
+            self.assertEqual(slices(analysis), 3)
+            self.assertTrue(session.open("sub-02", switchToDraw=True))
+            self.assertTrue(session.open("sub-01", switchToDraw=True))
+            for _ in range(4):
+                slicer.app.processEvents()
+            segmentationNode, segmentId = logic.defaultSeed()
+            self.assertEqual(segmentationNode.GetID(), session.segmentationNode().GetID())
+            drawn, _affine = logic.seedArray(segmentationNode, segmentId)
+            self.assertEqual(slices(drawn), 1, "Draw shows the tracing as drawn (desc-traced)")
+            data, _seedAffine, extrusion = logic.analysisSeedArray(segmentationNode, segmentId)
+            self.assertIsNotNone(extrusion)
+            self.assertEqual(extrusion["mode"], lesionqc.MODE_FRACTIONAL)
+            self.assertEqual(slices(data), 3)
+            self.assertEqual(int(np.count_nonzero(data)), int(np.count_nonzero(analysis)))
+            check = logic.checkSeed(segmentationNode, segmentId)
+            self.assertAlmostEqual(check["volumeMl"], np.count_nonzero(analysis) * 8.0 / 1000.0, places=6)
+            self.assertTrue(check["extrusionNotice"])
+            exported = logic.exportSeedLesion(segmentationNode, segmentId, os.path.join(self.directory, "seed", "lesion.nii.gz"))
+            self.assertEqual(slices(np.squeeze(nifti.read_nifti(exported)[0])), 3, "the single-subject map uses the study's analysis lesion")
+            # A study that keeps 2D tracings as a single slice maps the slice as drawn
+            lesionqc.setPolicy(session.study, lesionqc.MODE_SINGLE)
+            data, _seedAffine, extrusion = logic.analysisSeedArray(segmentationNode, segmentId)
+            self.assertIsNone(extrusion)
+            self.assertEqual(slices(data), 1)
+            self.assertFalse(logic.checkSeed(segmentationNode, segmentId)["extrusionNotice"])
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
     # Adopted participants.tsv with columns named like the study's (BB-1)
 
     def _adopt(self, name, header, values, dictionary=None):

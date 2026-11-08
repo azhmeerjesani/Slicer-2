@@ -927,11 +927,34 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
                 slicer.mrmlScene.RemoveNode(displayNode.GetColorNode())
             slicer.mrmlScene.RemoveNode(labelmap)
 
+    @classmethod
+    def analysisSeedArray(cls, segNode, segmentId):
+        """``(data, affine, extrusion)``: the lesion that Map analyses for a segment (``seedArray``).
+
+        A 2D tracing of the subject open in a Slicer Studio study is shown as drawn, but the study analyses it extruded by its
+        2D policy (``desc-lesion``, which the cohort maps): the seed is then that extruded mask and ``extrusion`` describes
+        it (``lesionqc.analysisSeed``: mode, total_mm, effective_mm, description, drawnVoxels). Otherwise ``extrusion`` is
+        None and the seed is the segment as it is (also in official 3D Slicer, without Studio).
+        """
+        data, affine = cls.seedArray(segNode, segmentId)
+        try:
+            from StudioLib import lesionqc
+        except ImportError:
+            return data, affine, None
+        try:
+            found = lesionqc.analysisSeed(segNode, data, affine)
+        except Exception:
+            logging.exception("Lesion network mapping: the study's extrusion of the 2D lesion could not be applied")
+            found = None
+        if found is None:
+            return data, affine, None
+        return found[0], affine, found[1]
+
     def exportSeedLesion(self, segNode, segmentId, path):
-        """Write the segment as a NIfTI mask at its own geometry (``nifti.write_nifti``); return the path."""
+        """Write the analysed seed (``analysisSeedArray``) as a NIfTI mask at the segment's own geometry; return the path."""
         from LesionNetworkMappingLib import nifti
 
-        data, affine = self.seedArray(segNode, segmentId)
+        data, affine, _extrusion = self.analysisSeedArray(segNode, segmentId)
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         nifti.write_nifti(path, data, affine, descrip="Lesion mask (Slicer Studio Map seed)")
         return path
@@ -992,18 +1015,23 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
 
         Keys: ``ok`` (bool), ``reason`` (why it cannot be mapped, or ""), ``kind`` ("", "empty", "native",
         "outside", "small"), ``space`` ((name, resolution) or None), ``volumeMl``, ``notice`` (a lesion on a template
-        of another MNI family than the connectome, e.g. one of the user's own templates: it maps, with this note), and
-        with a bundle ``qc`` (``engine.prepare_lesion``'s voxels_in_mask, weight_total, ...).
+        of another MNI family than the connectome, e.g. one of the user's own templates: it maps, with this note),
+        ``extrusion`` and ``extrusionNotice`` (a 2D tracing of a study subject mapped as the study's extruded analysis lesion,
+        ``analysisSeedArray``; None and "" otherwise), and with a bundle ``qc`` (``engine.prepare_lesion``'s voxels_in_mask, weight_total, ...).
         """
         import numpy as np
 
-        result = {"ok": False, "reason": "", "kind": "", "space": None, "volumeMl": 0.0, "qc": None, "notice": ""}
+        result = {"ok": False, "reason": "", "kind": "", "space": None, "volumeMl": 0.0, "qc": None, "notice": "", "extrusion": None, "extrusionNotice": ""}
         if segNode is None or not segmentId or segNode.GetSegmentation().GetSegment(segmentId) is None:
             result.update(reason=_("Choose the lesion segment."), kind="none")
             return result
-        data, affine = self.seedArray(segNode, segmentId)
+        data, affine, extrusion = self.analysisSeedArray(segNode, segmentId)
         voxels = int(np.count_nonzero(data))
         result["volumeMl"] = voxels * abs(float(np.linalg.det(affine[:3, :3]))) / 1000.0
+        if extrusion is not None:
+            result["extrusion"] = extrusion
+            result["extrusionNotice"] = _("2D tracing mapped as the study's analysis lesion, not only the drawn slice: {description}.").format(
+                description=extrusion.get("description") or "")
         if voxels == 0:
             result.update(reason=_("The lesion segment is empty: trace it in Draw first."), kind="empty")
             return result
@@ -2606,6 +2634,10 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.seedFamilyLabel.setWordWrap(True)
         self.seedFamilyLabel.hide()
         layout.addWidget(self.seedFamilyLabel)
+        self.seedExtrusionLabel = self._label("", role="secondaryText", objectName="LNMSeedExtrusionNotice")
+        self.seedExtrusionLabel.setWordWrap(True)
+        self.seedExtrusionLabel.hide()
+        layout.addWidget(self.seedExtrusionLabel)
         self.seedErrorBanner = self.widgets.banner("", (), level="warn")
         self.seedErrorBanner.hide()
         layout.addWidget(self.seedErrorBanner)
@@ -3997,6 +4029,10 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         notice = check.get("notice") or ""
         self.seedFamilyLabel.setText(notice)
         self.seedFamilyLabel.setVisible(bool(notice))
+        extrusionNotice = check.get("extrusionNotice") or ""
+        self.seedExtrusionLabel.setText(extrusionNotice)
+        self.seedExtrusionLabel.setVisible(bool(extrusionNotice))
+        self.seedNameLabel.setToolTip(extrusionNotice)
         self._updateFamilyNotice()
         reason = check.get("reason") if not check.get("ok") and check.get("kind") not in ("none",) else ""
         self.widgets.setBannerText(self.seedErrorBanner, reason or "")
