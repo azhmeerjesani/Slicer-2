@@ -6814,6 +6814,9 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
             self.tearDown()
             self.setUp()
             self.test_LesionNetworkMapping_debiasedLegend()
+            self.tearDown()
+            self.setUp()
+            self.test_LesionNetworkMapping_stopOutcome()
         finally:
             self.tearDown()
 
@@ -6836,6 +6839,23 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
         segmentation.GetSegment(segmentId).SetName("Lesion")
         segNode.SetReferenceImageGeometryParameterFromVolumeNode(volume)
         return segNode, segmentId, int(sphere.sum())
+
+    def _stopOutcomeIsCancelled(self, job):
+        """True when a stopped job ended cancelled; False when it finished before it noticed the request (also allowed); anything else fails."""
+        self.assertIn(job.state, ("cancelled", "done"))
+        return job.state == "cancelled"
+
+    def test_LesionNetworkMapping_stopOutcome(self):
+        """Stop after a snapshot: a run that finished before it noticed the request ("done") is not a failure."""
+
+        class FakeJob:
+            def __init__(self, state):
+                self.state = state
+
+        self.assertTrue(self._stopOutcomeIsCancelled(FakeJob("cancelled")))
+        self.assertFalse(self._stopOutcomeIsCancelled(FakeJob("done")))
+        with self.assertRaises(AssertionError):
+            self._stopOutcomeIsCancelled(FakeJob("failed"))
 
     def _waitFor(self, condition, timeoutS, tick=None):
         deadline = time.monotonic() + timeoutS
@@ -7606,8 +7626,8 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
                 job.stop()
 
         self.assertTrue(self._waitFor(job.isFinished, 300, tick=stopAfterSnapshot))
-        if stopped:
-            self.assertEqual(job.state, "cancelled")
+        # The engine may finish before it notices the cancel request (jobrunner: "done" then): only a cancelled run keeps a partial map
+        if stopped and self._stopOutcomeIsCancelled(job):
             self.assertTrue(widget.runPartial)
             self.assertIn("(partial)", node.resultVolume.GetName())
             self.assertIn(f"N={widget.runN}", node.resultVolume.GetName())
