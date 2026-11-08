@@ -660,8 +660,7 @@ def checkSurface(path):
         return False, str(error)
     allowed = [(low - SURFACE_TOLERANCE_MM, high + SURFACE_TOLERANCE_MM) for low, high in MNI_BRAIN_BOX]
     inside = all(allowed[axis][0] <= bounds[2 * axis] and bounds[2 * axis + 1] <= allowed[axis][1] for axis in range(3))
-    large = all(bounds[2 * axis + 1] - bounds[2 * axis] >= 20.0 for axis in range(3))
-    if not inside or not large:
+    if not inside:
         return False, _("{name} does not lie in MNI space (bounds {bounds} mm).").format(
             name=os.path.basename(path), bounds=", ".join(f"{value:.0f}" for value in bounds))
     return True, ""

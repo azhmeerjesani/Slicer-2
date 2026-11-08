@@ -766,6 +766,9 @@ class StudioTemplatesTest(unittest.TestCase):
         # A small left-anterior structure on a template: its model is where the file says, not mirrored
         blob = writeObj(os.path.join(folder, "left_blob.obj"), ellipsoid((-55.0, 5.0, 5.0), (-25.0, 35.0, 35.0)))
         self.assertEqual(templates.checkSurface(blob), (True, ""))
+        # A small subcortical structure (amygdala-sized, under 20 mm in one direction) in the MNI box is accepted
+        amygdala = writeObj(os.path.join(folder, "left_amygdala.obj"), ellipsoid((-32.0, -12.0, -28.0), (-14.0, 3.0, -8.0)))
+        self.assertEqual(templates.checkSurface(amygdala), (True, ""), "a small surface inside the MNI box is accepted")
         template = self._add(surfaces=(blob,), space="MNI152NLin6Asym")
         importer.startOnTemplate(shell=self._shell(), templateId=template.id)
         models = [node for node in slicer.util.getNodesByClass("vtkMRMLModelNode") if node.GetAttribute("Studio.Role") == templates.ROLE_SURFACE]
