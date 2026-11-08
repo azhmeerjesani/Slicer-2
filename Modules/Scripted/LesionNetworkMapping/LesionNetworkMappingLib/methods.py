@@ -88,7 +88,7 @@ LESIONSET_JSON = ("derivatives", "lnm", "lesionset.json")
 SOURCE_TYPE_LABELS = {"own_scan": "own scans", "case_report": "published case reports", "dataset": "shared datasets", "control_db": "control lesion databases"}
 EXTRUSION_SEMANTICS = {
     "fractional": "fractional, exact total thickness of {total} mm (edge slices fractional)",
-    "binary": "binary ±1 mm (3 voxels at 1 mm)",
+    "binary": "binary ±{half} mm, whole voxels on each lesion's grid",
     "single": "kept as a single slice",
 }
 # Registry kinds reported in the statistics section, in this order (other kinds follow in registry order)
@@ -861,7 +861,7 @@ def lesions_section(records, used):
         items.append(f"Figure left-right convention: {_counts([None if _missing(row.get('fig_convention')) else row['fig_convention'] for row in figure_rows or rows])}")
     items.append(f"Dimensionality: {_counts(column('dimensionality'))}")
     extrude = policy.get("extrude_2d")
-    items.append(f"2D extrusion policy: {_extrusion_text(extrude)}")
+    items.append(f"2D extrusion policy: {_extrusion_text(extrude, rows)}")
     flipped = [value for value in column("flipped") if value is not None]
     mirrored = sum(1 for value in flipped if str(value) == "1")
     items.append(f"Mirrored left-right: {mirrored} lesion(s) (approximate: templates are asymmetric)" if flipped else f"Mirrored left-right: {NOT_RECORDED}")
@@ -905,20 +905,32 @@ def lesions_section(records, used):
     return section
 
 
-def _extrusion_text(extrude):
+def _extrusion_text(extrude, rows=()):
+    """The study's 2D policy; for binary, the thickness each extruded lesion got (whole voxels on its own grid).
+
+    The binary sentence is rebuilt from the mode and thickness: older studies stored one counted at the template
+    resolution, which is not the grid the lesions were extruded on.
+    """
     if not extrude:
         return NOT_RECORDED
     if isinstance(extrude, str):
         extrude = {"mode": extrude}
     if not isinstance(extrude, dict):
         return str(extrude)
-    if extrude.get("semantics"):
-        return str(extrude["semantics"])
     mode = str(extrude.get("mode") or "")
     key = "fractional" if mode.startswith("frac") else "binary" if mode.startswith("bin") else "single" if mode.startswith(("single", "keep", "none")) else None
+    if key != "binary" and extrude.get("semantics"):
+        return str(extrude["semantics"])
     if key is None:
         return f"{mode or NOT_RECORDED}"
-    return EXTRUSION_SEMANTICS[key].format(total=_number(extrude.get("total_mm")) or "2")
+    total = _as_float(extrude.get("total_mm")) or 2.0
+    text = EXTRUSION_SEMANTICS[key].format(total=_number(total), half=_number(total / 2.0))
+    if key == "binary":
+        effective = [_number(row.get("extrude_mm")) for row in rows if str(row.get("dimensionality") or "").lower() in ("2d", "multi2d")]
+        effective = [f"{value} mm" for value in effective if value is not None]
+        if effective:
+            text += f"; effective thickness per lesion: {_counts(effective)}"
+    return text
 
 
 def normalization_paragraph(normalizations, rows=()):

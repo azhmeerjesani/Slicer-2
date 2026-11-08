@@ -101,8 +101,10 @@ OPEN_SCAN_DELAY_MS = 2500
 SEMANTICS = {
     MODE_SINGLE: "kept as a single slice",
     MODE_FRACTIONAL: "fractional, exact total thickness of {total:g} mm (edge slices fractional)",
-    MODE_BINARY: "binary ±{half:g} mm ({voxels} voxels at {step:g} mm)",
+    MODE_BINARY: "binary ±{half:g} mm, whole voxels on each lesion's grid",
 }
+#: The binary policy on one known grid (a lesion's own extrusion)
+SEMANTICS_BINARY_ON_GRID = "binary ±{half:g} mm ({voxels} voxels at {step:g} mm)"
 
 
 def _lnm(name):
@@ -292,13 +294,21 @@ def policyText(policy, spacing=None):
     return _("{mm:g} mm").format(mm=total)
 
 
-def policySemantics(mode, totalMm=DEFAULT_EXTRUDE_MM, step=1.0):
-    """The sentence stored in ``study.json`` ``trace_policy.extrude_2d.semantics`` (and shown in the methods)."""
+def policySemantics(mode, totalMm=DEFAULT_EXTRUDE_MM, step=None):
+    """The sentence stored in ``study.json`` ``trace_policy.extrude_2d.semantics`` (and shown in the methods).
+
+    The policy belongs to the study, whose lesions can be on different grids: without ``step`` the binary sentence does
+    not depend on a grid (the voxel count is recorded per lesion, in its sidecar); with ``step`` (mm) it counts the voxels
+    on that grid.
+    """
     if mode == MODE_SINGLE:
         return SEMANTICS[MODE_SINGLE]
+    if mode == MODE_BINARY and not step:
+        return SEMANTICS[MODE_BINARY].format(half=float(totalMm) / 2.0)
     if mode == MODE_BINARY:
+        step = float(step)
         voxels = 2 * _lnm("lesionops")._round_half_down((float(totalMm) / 2.0) / step) + 1
-        return SEMANTICS[MODE_BINARY].format(half=float(totalMm) / 2.0, voxels=voxels, step=step)
+        return SEMANTICS_BINARY_ON_GRID.format(half=float(totalMm) / 2.0, voxels=voxels, step=step)
     return SEMANTICS[MODE_FRACTIONAL].format(total=float(totalMm))
 
 
@@ -899,9 +909,8 @@ def storedPolicy(study):
 def setPolicy(study, mode, totalMm=DEFAULT_EXTRUDE_MM):
     """Store the 2D policy in the study (``trace_policy.extrude_2d``; the other keys of the policy are kept)."""
     stored = dict(study.metadata.get("trace_policy") or {})
-    resolution = (study.trace_policy or {}).get("res") or 1
-    step = float(resolution) if isinstance(resolution, (int, float)) else 1.0
-    stored["extrude_2d"] = {"mode": mode, "total_mm": None if mode == MODE_SINGLE else float(totalMm), "semantics": policySemantics(mode, totalMm, step)}
+    # Not counted at the template resolution (trace_policy.res): each lesion is extruded on its own grid
+    stored["extrude_2d"] = {"mode": mode, "total_mm": None if mode == MODE_SINGLE else float(totalMm), "semantics": policySemantics(mode, totalMm)}
     study.trace_policy = stored
     return stored["extrude_2d"]
 
@@ -1510,6 +1519,9 @@ class QcCore:
         done = [item for item in applied if item.get("mode")]
         if done:
             text += " · " + (_("applied to 1 lesion already in the study") if len(done) == 1 else _("applied to {count} lesions already in the study").format(count=len(done)))
+            effective = sorted({float(item["record"]["effective_mm"]) for item in done if isinstance(item.get("record"), dict) and item["record"].get("effective_mm")})
+            if stored["mode"] == MODE_BINARY and effective:
+                text += " " + _("(effective {mm} mm)").format(mm=" / ".join(f"{value:g}" for value in effective))
         _toast(text, ms=4000, level="consequence")
         self._changed()
         if resume:
@@ -1882,7 +1894,7 @@ def regenerate(study, sid, session=None, source="lesion", normal=None):
     result["files"] = sorted(files.values())
     result["values"] = values
     try:
-        sidecar = {"mode": mode, "total_mm": policy["total_mm"], "semantics": policy.get("semantics") or policySemantics(mode, policy["total_mm"] or DEFAULT_EXTRUDE_MM),
+        sidecar = {"mode": mode, "total_mm": policy["total_mm"], "semantics": policySemantics(mode, policy["total_mm"] or DEFAULT_EXTRUDE_MM),
                    "traced": os.path.basename(tracedPath) if mode != MODE_SINGLE else None, "prob": os.path.basename(probPath) if mode == MODE_FRACTIONAL else None}
         if "record" in result:
             sidecar.update({key: result["record"][key] for key in ("effective_mm", "voxels_per_side", "description", "planes", "normal", "oblique", "clipped")})

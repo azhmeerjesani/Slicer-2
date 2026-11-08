@@ -623,6 +623,56 @@ class StudioRegressionTest(unittest.TestCase):
         # and on reopening the study
         self.assertAlmostEqual(float(Study.open(study.path).subject("sub-01")["volume_ml"]), 0.169, places=6)
 
+    def test_1c_binary_policy_semantics_follow_the_lesion_grid(self):
+        """BB-1: the binary 2D policy's stored sentence (study.json, toast, methods "Lesion intake") counted the voxels at the
+        template resolution (trace_policy.res, 2 mm by default) while each lesion is extruded on its own grid (1 mm here):
+        "binary ±2 mm (3 voxels at 2 mm)" was recorded for an extrusion of 5 voxels at 1 mm, and the methods misreported it.
+        """
+        from LesionNetworkMappingLib import methods, nifti
+        from LesionNetworkMappingLib.study import Study
+
+        from StudioLib import lesionqc
+
+        study = Study.create(os.path.join(self.directory, "binary study"))
+        study.trace_policy = {**(study.trace_policy or {}), "space": "MNI152NLin2009cAsym", "res": 2}
+        traced = np.zeros((40, 40, 40), np.uint8)
+        traced[10:23, 10:23, 20] = 1  # one axial slice on a 1 mm grid
+        study.add_subject("sub-01", space="MNI152NLin2009cAsym")
+        relative = study.lesion_relpath("sub-01")
+        path = study.abspath(relative)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        nifti.write_nifti(path, traced, np.diag([1.0, 1.0, 1.0, 1.0]))
+        study.set("sub-01", {"lesion": relative, "dimensionality": "2D"})
+        study.save()
+
+        stored = lesionqc.setPolicy(study, lesionqc.MODE_BINARY, 4.0)
+        self.assertNotIn("at 2 mm", stored["semantics"])
+        self.assertIn("±2 mm", stored["semantics"])
+        result = lesionqc.regenerate(study, "sub-01", None, source="lesion")
+        self.assertEqual(result["record"]["description"], "binary ±2 mm (5 voxels at 1 mm)")
+        self.assertEqual(float(study.subject("sub-01")["extrude_mm"]), 5.0)
+        sidecar = study.read_lesion_sidecar("sub-01")["SlicerStudio"]["extrude"]
+        self.assertNotIn("voxels at 2 mm", sidecar["semantics"])
+        self.assertIn("5 voxels at 1 mm", sidecar["description"])
+        study.save()
+
+        def methodsLine():
+            text = methods.lesions_section(methods.Records(study.path, study=Study.open(study.path)), set()).text()
+            return next(line for line in text.splitlines() if "2D extrusion policy" in line)
+
+        line = methodsLine()
+        self.assertNotIn("at 2 mm", line)
+        self.assertIn("binary ±2 mm", line)
+        self.assertIn("effective thickness per lesion: 5 mm 1", line)
+        # A study saved before the fix keeps its sentence counted at the template resolution: the methods do not repeat it
+        study.trace_policy = {**study.trace_policy, "extrude_2d": {**stored, "semantics": "binary ±2 mm (3 voxels at 2 mm)"}}
+        study.save()
+        line = methodsLine()
+        self.assertNotIn("3 voxels at 2 mm", line)
+        self.assertIn("effective thickness per lesion: 5 mm 1", line)
+        # The sentence on one known grid still counts the voxels there
+        self.assertEqual(lesionqc.policySemantics(lesionqc.MODE_BINARY, 4.0, 1.0), "binary ±2 mm (5 voxels at 1 mm)")
+
     # Atlas download failure (BB-1)
 
     def test_atlas_download_failure_chip_is_one_readable_line(self):
