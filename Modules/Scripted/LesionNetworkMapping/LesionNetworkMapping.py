@@ -1082,7 +1082,8 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
         The folder is created here, exclusively (``os.mkdir``), so that it belongs to this run alone: another window or
         process that asks in the same second for the same lesion name gets the next ``<time>-<N>_<lesion>`` folder
         instead of sharing (and overwriting) this one. When the folder cannot be created (for example a read-only
-        study), the path is returned unreserved and the step that writes into it reports the error, as before.
+        study), the path is returned unreserved and the step that writes into it reports the error (Map network shows it in
+        the Compute card, ``_refuseRunFolder``).
         """
         from LesionNetworkMappingUI import jobrunner
 
@@ -5029,7 +5030,11 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         lesionName = _safeName(self._subjectLabel() or _lesionFallbackLabel(segNode, segmentName))
         runDir = self.logic.runDirectory(self.ctx, lesionName)
         lesionPath = os.path.join(runDir, "lesion", f"{lesionName}.nii.gz")
-        self.logic.exportSeedLesion(segNode, segmentId, lesionPath)
+        try:
+            self.logic.exportSeedLesion(segNode, segmentId, lesionPath)
+        except OSError as exc:  # e.g. a read-only study: say so in the Compute card, not as a traceback
+            self._refuseRunFolder(exc, runDir)
+            return None
         previewN = self.plannedN() if node.subjectsMode == "preview" and self.plannedN() < self.bundle.n_subjects else None
         rule = self.currentRule()
         # The shown result is kept, untouched, until the new run has a map; it comes back if the run ends without one
@@ -5065,6 +5070,26 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.progress.widget.show()
         self.updateComputeState()
         return self.job
+
+    def _refuseRunFolder(self, exc, runDir):
+        """Show in the Compute card that the run folder cannot be written (``exc``, an OSError); nothing is started."""
+        try:
+            os.rmdir(runDir)  # the folder reserved by runDirectory() stays empty: do not leave it behind
+        except OSError:
+            pass
+        study = getattr(self.ctx, "study", None)
+        if isinstance(exc, PermissionError) and study is not None:
+            message = _("The study {name} is read-only, so the run cannot be written into it: ask for write access, or open a copy of the study folder.").format(
+                name=getattr(study, "name", "") or os.path.basename(os.fspath(getattr(study, "path", "") or "")))
+        else:
+            message = _("The run folder cannot be written ({reason}): {path}").format(reason=exc.strerror or type(exc).__name__, path=runDir)
+        logging.warning(f"Lesion network mapping: {message}")
+        self.widgets.setBannerText(self.computeBanner, message)
+        self.computeBanner.show()
+        # The step needs the user (not "Ready" or "Done" from an earlier map) and its card opens on the banner
+        self._seedSetRefusal = (self.seedMode(), message)
+        self._updateSteps()
+        self._openComputeCard()
 
     #
     # Compute: cohort

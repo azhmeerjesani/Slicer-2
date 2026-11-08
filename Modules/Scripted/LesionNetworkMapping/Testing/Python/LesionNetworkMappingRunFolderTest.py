@@ -111,5 +111,96 @@ class LesionNetworkMappingRunFolderTest(unittest.TestCase):
         self.assertFalse(os.path.exists(path))
 
 
+class _Study:
+    name = "shared-study"
+
+    def __init__(self, path):
+        self.path = path
+
+
+class _MapContext(_StudyContext):
+    """The part of the Map context that ``compute()`` reads before it starts a run."""
+
+    def __init__(self, root, seed):
+        super().__init__(root)
+        self.study = _Study(os.path.dirname(os.path.dirname(root)))
+        self._seed = seed
+
+    def seed(self):
+        return self._seed
+
+
+class LesionNetworkMappingRunFolderRefusalTest(unittest.TestCase):
+    """Map network with a run folder that cannot be written (a read-only study, a file in the way) shows a plain message
+    in the Compute card and starts nothing; it does not escape as a traceback (bug bash BB-1,
+    map-network-readonly-study-silent-traceback).
+    """
+
+    def setUp(self):
+        import LesionNetworkMapping
+
+        self.module = LesionNetworkMapping
+        self.tmp = tempfile.mkdtemp(prefix="lnm run folder refusal ")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def fakeWidget(self, root):
+        """A stand-in for the Map widget with the members ``compute()`` and ``_refuseRunFolder()`` use; return it and its banner texts."""
+        import numpy as np
+
+        widgetClass = self.module.LesionNetworkMappingWidget
+        segment = mock.Mock()
+        segment.GetName.return_value = "Lesion"
+        segNode = mock.Mock()
+        segNode.GetSegmentation.return_value.GetSegment.return_value = segment
+        logic = self.module.LesionNetworkMappingLogic()
+        # The seed array itself is not under test: the real export then creates <run>/lesion and writes the file
+        logic.analysisSeedArray = lambda *args: (np.zeros((2, 2, 2), dtype=np.uint8), np.eye(4), None)
+        banners = []
+        fake = mock.Mock()
+        fake.ctx = _MapContext(root, (segNode, "Lesion"))
+        fake.logic = logic
+        fake._subjectLabel.return_value = "sub-01"
+        fake.seedMode.return_value = "lesion"
+        fake._seedSetRefusal = None
+        fake.widgets.setBannerText.side_effect = lambda banner, text: banners.append(text)
+        fake._refuseRunFolder = lambda exc, runDir: widgetClass._refuseRunFolder(fake, exc, runDir)
+        return fake, banners, (lambda: widgetClass.compute(fake))
+
+    def test_blocked_run_root_is_a_plain_message(self):
+        study = os.path.join(self.tmp, "study")
+        os.makedirs(os.path.join(study, "derivatives"))
+        with open(os.path.join(study, "derivatives", "lnm"), "w") as f:
+            f.write("not a folder")
+        fake, banners, compute = self.fakeWidget(os.path.join(study, "derivatives", "lnm"))
+        startRun = mock.Mock()
+        fake.logic.startRun = startRun
+        with self.assertLogs(level="WARNING"):
+            self.assertIsNone(compute())
+        self.assertEqual(len(banners), 1, banners)
+        self.assertIn("The run folder cannot be written (Not a directory)", banners[0])
+        self.assertNotIn("[Errno", banners[0])
+        fake.computeBanner.show.assert_called_once()
+        fake._openComputeCard.assert_called_once()
+        self.assertEqual(fake._seedSetRefusal, ("lesion", banners[0]))
+        startRun.assert_not_called()
+        self.assertTrue(os.path.isfile(os.path.join(study, "derivatives", "lnm")))
+
+    def test_read_only_study_names_the_study(self):
+        root = os.path.join(self.tmp, "study", "derivatives", "lnm")
+        fake, banners, compute = self.fakeWidget(root)
+        startRun = mock.Mock()
+        fake.logic.startRun = startRun
+        denied = PermissionError(13, "Permission denied", root)
+        with mock.patch.object(self.module.os, "makedirs", side_effect=denied), mock.patch.object(self.module.os, "mkdir", side_effect=denied), self.assertLogs(level="WARNING"):
+            self.assertIsNone(compute())
+        startRun.assert_not_called()
+        self.assertEqual(len(banners), 1, banners)
+        self.assertIn("The study shared-study is read-only", banners[0])
+        self.assertNotIn("[Errno", banners[0])
+        fake._openComputeCard.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
