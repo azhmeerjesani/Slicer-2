@@ -2305,7 +2305,8 @@ def openCommandLineArguments(arguments, shell=None):
     4D image one frame, and a folder an error box. The Studio module takes them over when Studio applies at startup
     (``Studio.takeOverCommandLineArguments()``) and opens them here: the existing paths with ``handleDrop()``, and the
     other arguments (``slicer://`` URLs, which the DICOM module receives) with the core handler; an argument that is not
-    an existing path (moved file, typo) is also reported with a "moved or deleted" message. In Classic (no live shell) all of them take the core route, as in 3D Slicer. Return what ``handleDrop()`` returned,
+    an existing path (moved file, typo) is also reported with a "moved or deleted" message and a web address (http, https, ftp)
+    with a "cannot open web addresses" message, all in one box. In Classic (no live shell) all of them take the core route, as in 3D Slicer. Return what ``handleDrop()`` returned,
     or None.
     """
     arguments = [str(argument) for argument in arguments if argument]
@@ -2316,22 +2317,37 @@ def openCommandLineArguments(arguments, shell=None):
         slicer.app.handleURIArguments(arguments)
         return None
     scheme = str(slicer.app.applicationName).lower()
-    paths, others, missing = [], [], []
+    paths, others, missing, webAddresses = [], [], [], []
     for argument in arguments:
-        isUrl = str(qt.QUrl(argument).scheme()).lower() == scheme
+        urlScheme = str(qt.QUrl(argument).scheme()).lower()
+        isUrl = urlScheme == scheme
         if not isUrl and os.path.exists(argument):
             paths.append(argument)
         else:
             others.append(argument)
-            if not isUrl:
+            if urlScheme in ("http", "https", "ftp") and "://" in argument:
+                webAddresses.append(argument)
+            elif not isUrl:
                 missing.append(argument)
     if others:
         slicer.app.handleURIArguments(others)
-    for argument in missing:
-        # The core handler only logs an ignored argument: say that the file cannot be opened, as loadRecentFile() does
+    # The core handler only logs an ignored argument: say once what cannot be opened (a web address is not a moved file)
+    messages, details = [], []
+    if missing:
+        names = ", ".join(os.path.basename(argument) or argument for argument in missing)
+        if len(missing) == 1:
+            messages.append(_("{name} was moved or deleted, so it cannot be opened.").format(name=names))
+        else:
+            messages.append(_("These files were moved or deleted, so they cannot be opened: {names}.").format(names=names))
+        details.extend(missing)
+    if webAddresses:
+        messages.append(_("Slicer Studio cannot open web addresses given on the command line. Download the file first, then open it: {names}.").format(
+            names=", ".join(webAddresses)))
+        details.extend(webAddresses)
+    if messages:
         slicer.util.warningDisplay(
-            _("{name} was moved or deleted, so it cannot be opened.").format(name=os.path.basename(argument) or argument),
-            windowTitle=_("File not found"), detailedText=argument)
+            "\n\n".join(messages),
+            windowTitle=_("File not found") if not webAddresses else _("Cannot open"), detailedText="\n".join(details))
     if not paths:
         return None
     return handleDrop([os.path.abspath(path) for path in paths], shell=shell)

@@ -1652,6 +1652,26 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(slicer.mrmlScene.GetNodeByID(self._composite("Red").GetBackgroundVolumeID()).GetName(), "sub-01_T1w")
         self.assertEqual(slicer.util.selectedModule(), "SegmentEditor")
         self.assertEqual(self._editor().segmentationNode().GetName(), "sub-01_lesion")
+        # A web address is not "moved or deleted", and several problems are one box (not one modal each)
+        warnings = []
+        slicer.util.warningDisplay = lambda text, *args, **kwargs: warnings.append(str(text))
+        try:
+            importer.openCommandLineArguments(["does_not_exist.nii.gz", "https://example.org/data/scan.nii.gz"], studioShell)
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("does_not_exist.nii.gz was moved or deleted", warnings[0])
+            self.assertIn("web addresses", warnings[0])
+            self.assertNotIn("scan.nii.gz was moved or deleted", warnings[0])
+            warnings[:] = []
+            importer.openCommandLineArguments(["https://example.org/a.nii.gz"], studioShell)
+            self.assertEqual(len(warnings), 1)
+            self.assertNotIn("moved or deleted", warnings[0])
+            warnings[:] = []
+            importer.openCommandLineArguments(["a_missing.nii.gz", "b_missing.nii.gz"], studioShell)
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("a_missing.nii.gz", warnings[0])
+            self.assertIn("b_missing.nii.gz", warnings[0])
+        finally:
+            slicer.util.warningDisplay = warningDisplay
         # A folder takes the Open folder... route (not the core loader's "Adding data failed" box)
         slicer.mrmlScene.Clear(0)
         self._pump()
