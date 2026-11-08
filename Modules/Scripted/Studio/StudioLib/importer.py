@@ -666,6 +666,64 @@ def _imageValueRange(path):
     return low, high
 
 
+def _niftiDataShortfall(path):
+    """``(have, need)`` in bytes if the data of the NIfTI file ``path`` is shorter than its header says, None if it is
+    complete or cannot be judged (not NIfTI, unreadable header: the readers report those). The ITK reader zero-fills the
+    missing voxels and reports success, so a file cut short opened as a whole image.
+    """
+    if not isNiftiFile(path) or not os.path.isfile(path):
+        return None
+    header = _niftiHeader(path, 540)
+    if header is None or len(header) < 348:
+        return None
+    for byteOrder in ("<", ">"):
+        sizeOfHeader = struct.unpack(byteOrder + "i", header[0:4])[0]
+        if sizeOfHeader == 348:
+            dims = struct.unpack(byteOrder + "8h", header[40:56])
+            bitpix = struct.unpack(byteOrder + "h", header[72:74])[0]
+            offset = max(int(struct.unpack(byteOrder + "f", header[108:112])[0]), 352)
+            break
+        if sizeOfHeader == 540 and len(header) >= 540:
+            dims = struct.unpack(byteOrder + "8q", header[16:80])
+            bitpix = struct.unpack(byteOrder + "h", header[14:16])[0]
+            offset = max(struct.unpack(byteOrder + "q", header[168:176])[0], 544)
+            break
+    else:
+        return None
+    if not 1 <= dims[0] <= 7 or bitpix <= 0 or any(size < 1 for size in dims[1:dims[0] + 1]):
+        return None
+    voxels = 1
+    for size in dims[1:dims[0] + 1]:
+        voxels *= size
+    need = offset + (voxels * bitpix + 7) // 8
+    if _extension(path) == ".nii":
+        have = os.path.getsize(path)
+    else:
+        have = 0
+        try:
+            with gzip.open(path, "rb") as f:
+                while have < need:
+                    chunk = f.read(min(1 << 22, need - have))
+                    if not chunk:
+                        break
+                    have += len(chunk)
+        except (OSError, EOFError, zlib.error):
+            return None  # damaged in another way: the reader reports it
+    return (have, need) if have < need else None
+
+
+def _checkNiftiComplete(path):
+    """Raise ``RuntimeError`` (a message for the user) if the data of the NIfTI file ``path`` stops before the end that its
+    header promises: the voxels that are missing would be read as 0, and a lesion would lose part of its volume.
+    """
+    shortfall = _niftiDataShortfall(path)
+    if shortfall is not None:
+        raise RuntimeError(
+            _("{name} is damaged: its image data stops after {have:,} of the {need:,} bytes that its header announces "
+              "(the file was probably cut short by a failed copy or download). It was not opened; copy it again from "
+              "its source.").format(name=os.path.basename(str(path)), have=shortfall[0], need=shortfall[1]))
+
+
 def _checkLesionValueRange(path):
     """Raise ``RuntimeError`` (a message for the user) if the voxel values of the label image ``path`` are beyond what the
     segmentation reader reads (``LESION_LABEL_VALUE_LIMIT``): it would crash (values beyond the int range) or fail to
@@ -694,6 +752,7 @@ def loadLesion(path):
     An image whose values are beyond ``LESION_LABEL_VALUE_LIMIT`` is refused (``RuntimeError``) before it is read.
     A failed load leaves no node in the scene.
     """
+    _checkNiftiComplete(path)
     _checkLesionValueRange(path)
     segmentationClasses = ("vtkMRMLSegmentationNode", "vtkMRMLSegmentationStorageNode")
     existing = set().union(*(_sceneNodeIds(className) for className in segmentationClasses))
@@ -1532,8 +1591,10 @@ def loadFiles(paths, shell=None, pairedLesion=None):
                             continue  # not opened (for example a project locked by another computer): already announced
                         result.scenes.append(path)
                     elif kind == "volume":
+                        _checkNiftiComplete(path)
                         result.volumes.append(slicer.util.loadVolume(path, {"singleFile": True}))
                     elif kind == "sequence":
+                        _checkNiftiComplete(path)
                         result.volumes.append(loadSequence(path))
                     else:
                         segmentationNode = loadLesion(path)

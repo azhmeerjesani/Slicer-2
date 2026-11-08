@@ -576,6 +576,51 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(len(result.errors), 1)
         self.assertEqual(result.volumes, [])
 
+    def test_truncated_nifti_is_refused_as_damaged(self):
+        """BB-1: a NIfTI file whose data stops before the end that its header announces (gzip or plain) is a load error in
+        plain words, for a scan and for a lesion: the reader zero-fills the missing voxels and reports success.
+        """
+        from StudioLib import importer
+
+        def niftiBytes(dims, data):
+            header = bytearray(348)
+            struct.pack_into("<i", header, 0, 348)
+            struct.pack_into("<8h", header, 40, 3, *dims, 1, 1, 1, 1)
+            struct.pack_into("<hh", header, 70, 2, 8)  # uint8
+            struct.pack_into("<8f", header, 76, 1, 1, 1, 1, 1, 0, 0, 0)
+            struct.pack_into("<f", header, 108, 352)
+            header[344:348] = b"n+1\0"
+            return bytes(header) + bytes(4) + data
+
+        dims = (8, 8, 6)
+        data = bytes([1]) * (8 * 8 * 6)
+        complete = niftiBytes(dims, data)
+        cut = complete[: len(complete) - 100]
+        paths = {}
+        for name, content in (
+            ("sub-01_T1w.nii", complete), ("sub-02_T1w.nii.gz", gzip.compress(complete)),
+            ("sub-03_T1w.nii", cut), ("sub-04_T1w.nii.gz", gzip.compress(cut)),
+            ("sub-05_lesion.nii.gz", gzip.compress(cut)),
+        ):
+            paths[name] = os.path.join(self.directory, name)
+            with open(paths[name], "wb") as f:
+                f.write(content)
+        for name in ("sub-01_T1w.nii", "sub-02_T1w.nii.gz"):
+            self.assertIsNone(importer._niftiDataShortfall(paths[name]), name)
+        for name in ("sub-03_T1w.nii", "sub-04_T1w.nii.gz", "sub-05_lesion.nii.gz"):
+            have, need = importer._niftiDataShortfall(paths[name])
+            self.assertEqual((have, need), (len(complete) - 100, len(complete)), name)
+            result = importer.loadFiles([paths[name]], self._applyStudio())
+            self._pump()
+            self.assertEqual(len(result.errors), 1, name)
+            self.assertIn("damaged", result.errors[0][1], name)
+            self.assertEqual(result.volumes + result.segmentations, [], name)
+            self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLVolumeNode")), 0, name)
+        result = importer.loadFiles([paths["sub-02_T1w.nii.gz"]], self._applyStudio())
+        self._pump()
+        self.assertEqual(result.errors, [])
+        self.assertEqual(len(result.volumes), 1)
+
     def test_damaged_seg_nrrd_leaves_nothing_in_the_scene(self):
         """BB-1: a ``.seg.nrrd`` that the reader only partly reads (truncated, header only) is a load error like a damaged
         ``.nii.gz``: the segmentation reader raises but leaves a half-created segmentation node and its storage node, which
