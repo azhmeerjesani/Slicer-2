@@ -87,12 +87,35 @@ class _FileOpenFilter(qt.QObject):
 
 
 def installFileOpenFilter():
-    """Install the QFileOpenEvent handling on the application (once). Return the filter."""
+    """Install the QFileOpenEvent handling on the application (once). Return the filter.
+
+    The filter is removed when the application quits: a Python event filter must not stay on the application while the
+    Python interpreter is finalized (the widgets owned by Python objects are deleted then, their destruction sends
+    events through the application event filters, and the half-finalized filter crashes the process on every quit).
+    """
     global _fileOpenFilter
     if _fileOpenFilter is None:
         _fileOpenFilter = _FileOpenFilter(slicer.app)
         slicer.app.installEventFilter(_fileOpenFilter)
+        slicer.app.connect("aboutToQuit()", removeFileOpenFilter)
     return _fileOpenFilter
+
+
+def removeFileOpenFilter():
+    """Remove the QFileOpenEvent handling from the application (done when the application quits)."""
+    global _fileOpenFilter
+    fileOpenFilter = _fileOpenFilter
+    if fileOpenFilter is None:
+        return
+    _fileOpenFilter = None
+    try:
+        slicer.app.disconnect("aboutToQuit()", removeFileOpenFilter)
+    except Exception:
+        pass
+    try:
+        slicer.app.removeEventFilter(fileOpenFilter)
+    except Exception:
+        pass
 
 
 def openFileFromSystem(path):

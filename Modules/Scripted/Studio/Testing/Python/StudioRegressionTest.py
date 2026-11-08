@@ -462,6 +462,31 @@ except Exception:
 """
 
 
+#: Child process of test_89: a normal start (Studio installs its QFileOpenEvent filter), then slicer.app.exit(0)
+QUIT_FILE_OPEN_FILTER_SCRIPT = r"""
+import sys
+
+import qt
+import slicer
+
+
+def quit():
+    try:
+        import Studio
+
+        print("QUITTEST READY filter=%s" % (Studio._fileOpenFilter is not None), flush=True)
+        slicer.app.exit(0)
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
+        sys.stdout.flush()
+        slicer.app.exit(3)
+
+
+qt.QTimer.singleShot(3000, quit)
+"""
+
 class _MoveRecorder(qt.QObject):
     """Event filter that appends the global y of ``widget`` to ``positions`` at each of its moves."""
 
@@ -6801,3 +6826,32 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertIn("Appearance has four choices", studio)
         self.assertNotIn("Appearance has three choices", studio)
         self.assertIn("Font and size:", studio)
+
+    def test_89_quit_with_the_file_open_filter_exits_cleanly(self):
+        """A normal start (not ``--testing``, so Studio installs its QFileOpenEvent filter on the application) quits with
+        exit code 0: the Python filter is removed on ``aboutToQuit``, before the interpreter is finalized (BB-1: every quit
+        ended in a segmentation fault when the widgets owned by Python sent their destruction events through it).
+        """
+        launcher = slicer.app.launcherExecutableFilePath
+        launcher = launcher() if callable(launcher) else launcher
+        if not launcher or not os.path.isfile(launcher):
+            self.skipTest("no Slicer launcher")
+        script = os.path.join(self.directory, "quit_with_file_open_filter.py")
+        with open(script, "w") as stream:
+            stream.write(QUIT_FILE_OPEN_FILTER_SCRIPT)
+        home = os.path.join(self.directory, "quit_fileopen_home")
+        os.makedirs(os.path.join(home, "tmp"))
+        environment = dict(os.environ)
+        environment.update({"HOME": home, "XDG_CONFIG_HOME": os.path.join(home, ".config"), "TMPDIR": os.path.join(home, "tmp"),
+                            "SLICER_STUDIO_PROJECTS_ROOT": os.path.join(self.directory, "quit_fileopen_projects")})
+        for key in ("SLICERRC", "SLICER_STUDIO_WEB"):
+            environment.pop(key, None)
+        process = subprocess.run([launcher, "--no-splash", "--python-script", script], env=environment, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, timeout=QUIT_TIMEOUT_S, check=False)
+        output = process.stdout.decode("utf-8", "replace")
+        ready = [line for line in output.splitlines() if line.startswith("QUITTEST READY")]
+        self.assertTrue(ready, output[-3000:])
+        self.assertIn("filter=True", ready[0], ready[0])
+        self.assertNotIn("Traceback", output, output[-3000:])
+        self.assertNotIn("exit abnormally", output, output[-3000:])
+        self.assertEqual(process.returncode, 0, json.dumps(output[-3000:]))
