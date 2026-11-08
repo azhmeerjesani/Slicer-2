@@ -427,10 +427,26 @@ class TutorialsDialog:
     def folder(self):
         return str(self.folderEdit.text).strip()
 
+    @staticmethod
+    def _typedPath(text):
+        """``text`` of a folder field as the absolute path the job is given (``~`` expanded), "" when empty, None when relative.
+
+        The job runs in the module folder (``jobrunner``): a relative path, or a ``~`` left as typed, would put the study
+        inside the application, so the dialog refuses it (``_pathProblem``) and checks the same path that the job gets.
+        """
+        from LesionNetworkMappingUI import widgets
+
+        return widgets.typedPath(text)
+
+    @staticmethod
+    def _pathProblem(text):
+        from LesionNetworkMappingUI import widgets
+
+        return widgets.relativePathProblem(text)
+
     def _options(self):
-        """What a build is made from: the study folder, the subject limit and the scans option."""
-        folder = self.folder()
-        return (os.path.normpath(folder) if folder else "", self.limit(), self.scans())
+        """What a build is made from: the study folder (absolute; None when relative), the subject limit and the scans option."""
+        return (self._typedPath(self.folder()), self.limit(), self.scans())
 
     def _onOptionChanged(self):
         self._refreshSize()
@@ -441,14 +457,17 @@ class TutorialsDialog:
         busy = self.isBusy()
         # "Built" only while the dialog still describes that build: another folder, size or scans option offers a new build.
         built = self.resultPath is not None and os.path.isdir(self.resultPath) and getattr(self, "_resultId", None) == (entry or {}).get("id") and self._resultOptions == self._options()
-        folder = self.folder()
+        folder = self._typedPath(self.folder())
         needsSource = entry is not None and entry["source"]["type"] == "folder"
+        source = self._typedPath(self.sourceEdit.text) if needsSource else ""
         reason = ""
         if not folder:
-            reason = _("Choose a folder for the new study")
+            reason = _("Choose a folder for the new study") if folder == "" else self._pathProblem(self.folder())
         elif os.path.isfile(folder) or (os.path.isdir(folder) and os.listdir(folder)):
             reason = _("This folder is not empty: choose a new one")
-        elif needsSource and not os.path.isdir(str(self.sourceEdit.text).strip()):
+        elif needsSource and source is None:
+            reason = self._pathProblem(self.sourceEdit.text)
+        elif needsSource and not os.path.isdir(source):
             reason = _("Choose the folder you downloaded")
         self.downloadButton.setText(_("Build study") if needsSource else _("Download and build"))
         self.downloadButton.setEnabled(not busy and not reason)
@@ -471,7 +490,7 @@ class TutorialsDialog:
             projects.openLink(link)
 
     def browse(self):
-        start = os.path.dirname(self.folder()) or library._importer().dialogStartFolder(os.path.expanduser("~"))
+        start = os.path.dirname(self._typedPath(self.folder()) or "") or library._importer().dialogStartFolder(os.path.expanduser("~"))
         chosen = qt.QFileDialog.getExistingDirectory(self.dialog, _("Folder of the new study"), start)
         if chosen:
             entry = self.entry()
@@ -499,9 +518,11 @@ class TutorialsDialog:
         except ImportError:
             self.statusLabel.setText(_("The job runner is not available in this build."))
             return False
-        dest = self.folder()
+        dest = self._typedPath(self.folder())
+        if not dest:  # the button checks this too: never let a relative path reach the job (it would build inside the application)
+            return False
         self._startOptions = self._options()
-        sourceDir = str(self.sourceEdit.text).strip() or None
+        sourceDir = (self._typedPath(self.sourceEdit.text) or None) if entry["source"]["type"] == "folder" else None
         args = buildArguments(entry, dest, self.limit(), self.scans(), sourceDir, catalog=catalogPath)
         spec = jobrunner.JobSpec("LesionNetworkMappingLib.tutorials", args, title=_("Tutorial cohort"), heavy=False, kind="tutorial", runRoot=self.tutorials.cache_root(cacheFolder()),
                                  onEvent=self._onEvent, onDone=self._onDone, name="tutorial")

@@ -1847,6 +1847,61 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertNotEqual(label.font.capitalization(), qt.QFont.AllUppercase, text)
             self.assertEqual(label.font.letterSpacing(), 0.0, text)
 
+    def test_tutorials_relative_or_tilde_folder_never_builds_inside_the_application(self):
+        """Tutorial cohorts: "~/name" is expanded to the home folder and a relative folder is refused, for the new study and for
+        the downloaded folder. The build job runs in the module folder, so both were built inside the application before.
+        """
+        import types
+
+        from LesionNetworkMappingUI import jobrunner
+        from StudioLib import libcard_tutorials
+
+        home = os.path.realpath(os.path.expanduser("~"))
+        work = tempfile.mkdtemp()
+        self.cleanup.append(lambda: shutil.rmtree(work, ignore_errors=True))
+        submitted = []
+        fakeJob = types.SimpleNamespace(isFinished=lambda: True)
+        savedInstance = jobrunner.instance
+        jobrunner.instance = lambda: types.SimpleNamespace(submit=lambda spec: submitted.append(spec) or fakeJob)
+        self.cleanup.append(lambda: setattr(jobrunner, "instance", savedInstance))
+        tutorialsDialog = libcard_tutorials.TutorialsDialog()
+        self.cleanup.append(tutorialsDialog.dialog.deleteLater)
+        button = tutorialsDialog.downloadButton
+        tutorialsDialog.select("joutsa2022_addiction")
+        name = "studio-test-tilde-%d" % os.getpid()
+
+        tutorialsDialog.folderEdit.setText("relstudy")
+        self.assertFalse(button.enabled, "a relative study folder must not start a build")
+        self.assertIn("not a full path", button.toolTip)
+        self.assertFalse(tutorialsDialog.start())
+        self.assertEqual(submitted, [])
+
+        tutorialsDialog.folderEdit.setText("~/" + name)
+        self.assertTrue(button.enabled, button.toolTip)
+        self.assertEqual(tutorialsDialog._options()[0], os.path.join(home, name))
+        self.assertTrue(tutorialsDialog.start())
+        self.assertEqual(len(submitted), 1)
+        dest = submitted[0].args[submitted[0].args.index("--dest") + 1]
+        self.assertEqual(os.path.realpath(dest), os.path.join(home, name))
+        self.assertFalse(os.path.exists(os.path.join(home, name)), "the fake job builds nothing")
+
+        # The "not empty" check reads the folder that the job gets
+        os.makedirs(os.path.join(work, "full"))
+        open(os.path.join(work, "full", "file.txt"), "w").close()
+        tutorialsDialog.job = None
+        tutorialsDialog.folderEdit.setText(os.path.join(work, "full"))
+        self.assertFalse(button.enabled)
+        self.assertIn("not empty", button.toolTip)
+
+        # A cohort only linked (LESYMAP): the downloaded folder is refused when relative
+        tutorialsDialog.select("lesymap_groundtruth")
+        tutorialsDialog.folderEdit.setText(os.path.join(work, "new"))
+        tutorialsDialog.sourceEdit.setText("downloaded")
+        self.assertFalse(button.enabled)
+        self.assertIn("not a full path", button.toolTip)
+        tutorialsDialog.sourceEdit.setText(work)
+        self.assertTrue(button.enabled, button.toolTip)
+
     def test_control_sets_list_elides_long_rows_without_a_scroll_bar(self):
         """A row of the Control sets list that does not fit is elided with an ellipsis: the list has no horizontal scroll bar (the
         row was as wide as its text, so it was cut mid-word at the panel edge and the bar took height from the fixed-height list).
