@@ -277,6 +277,25 @@ def user_template_folders(dirs=()):
     return folders
 
 
+def _user_template_fields_ok(record):
+    """True when the fields read from a template.json have the types they are used with (as templates._recordIsUsable
+    in Studio): a record edited by hand with, say, ``"sha256": "abc"`` is skipped like an unreadable one.
+    """
+    for key in ("sha256", "files", "grid"):
+        if record.get(key) is not None and not isinstance(record[key], dict):
+            return False
+    for key in ("name", "space"):
+        if record.get(key) is not None and not isinstance(record[key], str):
+            return False
+    if not isinstance(record.get("id"), str):
+        return False
+    for key in ("sha256", "files"):
+        for value in (record.get(key) or {}).values():
+            if value is not None and not isinstance(value, (str, list)):
+                return False
+    return True
+
+
 def read_user_template(folder):
     """The template.json of a user template folder (with "folder" added), or None when it is missing or not one."""
     try:
@@ -285,6 +304,8 @@ def read_user_template(folder):
     except (OSError, ValueError):
         return None
     if not isinstance(record, dict) or record.get("schema") != USER_TEMPLATE_FORMAT or not record.get("id"):
+        return None
+    if not _user_template_fields_ok(record):
         return None
     record["folder"] = os.path.abspath(folder)
     return record

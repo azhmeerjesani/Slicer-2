@@ -229,6 +229,29 @@ class TemplatesNormalizeTest(unittest.TestCase):
             json.dump(record, f)
         self.assertTrue(normalize.find_template("user:changed", dirs=[changed_dir])["warnings"])
 
+    def test_damaged_template_json_is_skipped(self):
+        """A template.json edited by hand with a field of the wrong type is skipped like an unreadable one (as the GUI does):
+        the study's own template is still found, and a requested damaged template is plainly "missing", not an AttributeError.
+        """
+        from LesionNetworkMappingLib.study import Study
+
+        damaged_dir = os.path.join(self.tmp, "damaged-templates")
+        shutil.copytree(self.templates_dir, damaged_dir)
+        for name, change in (("Damaged sha", {"sha256": "abc"}), ("Damaged files", {"files": "x"}), ("Damaged grid", {"grid": []})):
+            folder = os.path.join(damaged_dir, name)
+            os.makedirs(folder)
+            with open(os.path.join(folder, normalize.USER_TEMPLATE_JSON), "w", encoding="utf-8") as f:
+                json.dump(dict(self.record, id=name.lower().replace(" ", "-"), **change), f)
+            self.assertIsNone(normalize.read_user_template(folder))
+        record = {"id": "MNI152NLin2009bAsym", "res": 2, "source": "user:my-2009b-brain", "name": "My 2009b brain",
+                  "space": "MNI152NLin2009bAsym", "sha256": self.record["sha256"]["image"]}
+        own = Study.create(os.path.join(self.tmp, "studies", "own-damaged"), name="own-damaged", template=record)
+        self.assertEqual(normalize._study_template(own, "auto", [damaged_dir]), ("user:my-2009b-brain", None))
+        for slug in ("damaged-sha", "damaged-files"):
+            with self.assertRaises(jobs.JobError) as caught:
+                normalize.find_template(f"user:{slug}", dirs=[damaged_dir])
+            self.assertEqual(caught.exception.code, "template_missing")
+
     def test_study_auto_template(self):
         """A study made on a user template normalizes to it ("auto"), found by checksum; else the built-in fallback."""
         from LesionNetworkMappingLib.study import Study
