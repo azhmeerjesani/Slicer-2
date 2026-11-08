@@ -126,6 +126,59 @@ class LesionNetworkMappingNetworksUITest(unittest.TestCase):
             slicer.app.processEvents()
             shutil.rmtree(folder, ignore_errors=True)
 
+    def test_top_pct_rule_is_resolved_for_the_card_sign(self):
+        """A top-x% Result rule with the card's sign set to the other tail ("Result rule" ticked): the card used the rule's
+        cut for the Result card's tail on the other tail, under the rule's "Top x%" caption. It must use that tail's own
+        top-x% cut, in the source and in the "Result rule" check box, for both directions.
+        """
+        import os
+        import shutil
+        import tempfile
+
+        import numpy as np
+
+        from LesionNetworkMappingLib import nifti, thresholds
+
+        widget = slicer.modules.LesionNetworkMappingWidget
+        card = self.card
+        model = card.model
+        folder = tempfile.mkdtemp(prefix="lnm-networks-toppct-")
+        try:
+            affine = np.diag([2.0, 2.0, 2.0, 1.0])
+            affine[:3, 3] = -20.0
+            values = np.random.default_rng(1).normal(0.0, 1.0, (16, 16, 16))
+            values[values > 0] *= 3.0  # asymmetric tails: the positive cut is about three times the negative one
+            data = np.zeros((20, 20, 20), dtype=np.float32)
+            data[2:18, 2:18, 2:18] = values
+            path = os.path.join(folder, "synth_conn-Test_desc-T_funcmap.nii.gz")
+            nifti.write_nifti(path, data, affine)
+            inMask = data[data != 0].astype(np.float64)
+
+            widget.showMapFile(path)
+            card.widget.collapsed = True
+            for resultSign, cardSign, tail in (("pos", "neg", -inMask), ("neg", "pos", inMask)):
+                widget.signGroup.button(("both", "pos", "neg").index(resultSign)).click()
+                widget.setRule({"kind": "top_pct", "value": 1.0, "statistic": "T", "sign": resultSign})
+                model.setUseRule(True)
+                model.setSignChoice(cardSign)
+                slicer.app.processEvents()
+                source = model.source()
+                kept = float((tail >= source.value).mean())
+                self.assertEqual(source.sign, cardSign)
+                self.assertTrue(source.fromRule)
+                self.assertAlmostEqual(kept, 0.01, delta=0.002, msg=f"rule {resultSign}, card {cardSign}: {source.value:.3f} keeps {100 * kept:.2f} % of the tail, not the rule's 1 %")
+                self.assertNotAlmostEqual(source.value, widget.resolved.value, places=2)
+                card.sourceBar.sync()
+                self.assertIn(f"{source.value:.4g}", str(card.sourceBar.ruleCheck.text))
+        finally:
+            model.setSignChoice("rule")
+            model.setUseRule(True)
+            widget.signGroup.button(0).click()
+            widget.setRule(thresholds.DEFAULT_RULE)
+            card.schedule()
+            slicer.app.processEvents()
+            shutil.rmtree(folder, ignore_errors=True)
+
     def test_header_counts_the_suprathreshold_voxels_when_no_network_is_listed(self):
         """With no unit (no atlas for the map, no ROI) the table is empty, but the header still gives the real counts."""
         import os

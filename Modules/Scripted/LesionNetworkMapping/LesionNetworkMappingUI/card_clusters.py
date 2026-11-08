@@ -517,6 +517,32 @@ class SourceModel:
             logging.exception("Lesion network mapping: the Result rule could not be read")
             return None, None
 
+    def ruleForCard(self, widget, statistic):
+        """(Resolved, sign) of the Result card's rule for the card's sign, else (None, None).
+
+        A top-x% rule's cut depends on its sign (the top x% of T, -T or |T|): when the card shows another tail than the
+        Result card, the rule is re-resolved for the card's sign, as the Result card's sign buttons do (onSignClicked);
+        the other rules are symmetric and keep their value.
+        """
+        resolved, ruleSign = self._ruleThreshold(widget, statistic)
+        if resolved is None or self.signChoice == "rule":
+            return resolved, ruleSign
+        sign = self.signChoice
+        rule = resolved.rule or {}
+        if rule.get("kind") != "top_pct" or rule.get("sign", "both") == sign:
+            return resolved, sign
+        try:
+            values = widget._mapValues(widget._ruleStatistic(rule))
+            if values is None:
+                return None, None
+            other = widget._resolveRule(dict(rule, sign=sign), resolved.n or None, values, None)
+        except Exception:
+            logging.exception("Lesion network mapping: the Result rule could not be resolved for the card's sign")
+            return None, None
+        if other is None or not math.isfinite(other.value) or other.value <= 0:
+            return None, None
+        return other, sign
+
     def _resultSource(self, node, volume, grid, indices, widget, token):
         statistic = "T"
         n = None
@@ -530,12 +556,11 @@ class SourceModel:
         run = self.ctx.currentRun
         if run is not None and widget is not None and getattr(widget, "loadedMap", None) is None and not getattr(run, "partial", False):
             runDir = run.runDir
-        resolved, ruleSign = self._ruleThreshold(widget, statistic)
+        # The rule for the card's sign: a top-x% rule is re-resolved for the tail the card shows
+        resolved, ruleSign = self.ruleForCard(widget, statistic)
         notes = []
         if resolved is not None and self.useRule:
             threshold, sign, fromRule = resolved, ruleSign or "both", True
-            if self.signChoice != "rule":
-                sign = self.signChoice
         else:
             threshold = self.custom if self.custom is not None else (resolved.value if resolved is not None else self._fallbackThreshold(statistic))
             sign = self.signChoice if self.signChoice != "rule" else (ruleSign or "both")
@@ -793,7 +818,7 @@ class SourceBar:
             fromRule = source is not None and source.fromRule
             ruleApplies = False
             if model.resolvedChoice() == "result" and source is not None:
-                resolved, _sign = model._ruleThreshold(mapWidget(), source.statistic)
+                resolved, _sign = model.ruleForCard(mapWidget(), source.statistic)
                 ruleApplies = resolved is not None
                 if ruleApplies:
                     self.ruleCheck.setText(_("Result rule: {text}").format(text=MapSource.thresholdText(MapSource("r", "", source.statistic, None, None, None, resolved, _sign or "both"))))
