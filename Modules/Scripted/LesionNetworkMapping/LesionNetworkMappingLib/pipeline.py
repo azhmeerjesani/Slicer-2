@@ -234,6 +234,16 @@ UNIVERSAL_NOTE = "Group maps of the pipeline are descriptive unless they carry a
 _DESC = re.compile(r"[^A-Za-z0-9]")
 
 
+READ_ONLY_STUDY = "The study folder is read-only ({path}): ask for write access, or open a copy of the study, or give an output folder (--out)."
+
+
+def study_read_only(path):
+    """True when this user cannot write results into the study folder (or its derivatives folder, when that exists)."""
+    folder = os.path.join(path, "derivatives")
+    folder = folder if os.path.isdir(folder) else path
+    return not os.access(folder, os.W_OK | os.X_OK)
+
+
 class PipelineError(jobs.JobError):
     """An expected failure of the run (error event, exit code)."""
 
@@ -1629,7 +1639,12 @@ class Runner:
             self.emit("error", code="terms_not_accepted", message=f"The data use terms of the connectome {bundle.name} must be accepted (--accept-terms).", data_use_terms=bundle.data_use_terms, connectome=bundle.name)
             return EXIT_TERMS
         self.out = default_out(config, bundle.name)
-        os.makedirs(self.private(STAGES_DIR), exist_ok=True)
+        if not config.out and study_read_only(config.study):
+            raise PipelineError(READ_ONLY_STUDY.format(path=config.study), code="read_only", exit_code=EXIT_USAGE)
+        try:
+            os.makedirs(self.private(STAGES_DIR), exist_ok=True)
+        except OSError as exc:
+            raise PipelineError(f"The output folder cannot be written ({exc.strerror or exc}): {self.out}", code="read_only", exit_code=EXIT_USAGE) from None
         held = self.held_lock
         if held is not None and held.acquired and os.path.abspath(held.path) == os.path.abspath(self.private(LOCK_NAME)):
             self.lock = held

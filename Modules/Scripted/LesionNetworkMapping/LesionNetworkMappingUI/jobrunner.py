@@ -851,6 +851,12 @@ class JobRunner:
             job.proc = slicer.util.launchConsoleProcess(
                 job.args, useStartupEnvironment=False, updateEnvironment=env, cwd=moduleDir(), blocking=False,
                 logCallback=job._onLine, completedCallback=job._onCompleted)
+        except OSError as exc:  # e.g. a read-only study folder: a plain sentence, not a traceback
+            logging.warning(f"Lesion network mapping: could not start {job.title}: {exc.strerror or exc}")
+            reason = f"could not start: {exc.strerror or type(exc).__name__} (is the study folder read-only?)"
+            qt.QTimer.singleShot(0, lambda: job.isRunning() and job._finish(FAILED, [reason]))
+            self._updateStatus()
+            return
         except Exception as exc:
             logging.exception(f"Lesion network mapping: could not start {job.title}")
             reason = f"could not start: {exc}"

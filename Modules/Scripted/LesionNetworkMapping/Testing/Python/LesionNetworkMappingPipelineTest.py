@@ -427,6 +427,33 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertEqual(pipeline.progress_fields("maps", "maps", {})["unit"], "subject passes")
         self.assertEqual(pipeline.progress_fields("maps", "maps", {"unit": "batches"})["unit"], "batches")
 
+    def test_read_only_study_is_a_plain_usage_error(self):
+        """A study the user cannot write fails with code read_only and exit 2 (no traceback), also when only creating the folder fails."""
+        tmp = tempfile.mkdtemp(prefix="lnm-pipeline-ro-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        fx = fixture.make_fixture(os.path.join(tmp, "f"))
+        shutil.rmtree(fx["out"], ignore_errors=True)
+        for patches in ({"study_read_only": True}, {"makedirs": True}):
+            with self.subTest(patches=patches):
+                if "makedirs" in patches:
+                    error = PermissionError(13, "Permission denied", os.path.join(fx["study"], "derivatives", "lnm"))
+                    patcher = mock.patch("os.makedirs", side_effect=error)
+                    flag = mock.patch.object(pipeline, "study_read_only", return_value=False)
+                else:
+                    patcher = mock.patch.object(pipeline, "study_read_only", return_value=True)
+                    flag = mock.patch.dict(os.environ, {})
+                with flag, patcher:
+                    parser = pipeline._parser()
+                    config = pipeline.config_from_args(parser.parse_args(run_args(fx)))
+                    config.out = None
+                    events = []
+                    code = pipeline.run(config, emit=pipeline.Emitter("json", sink=lambda event, record, sink=events: sink.append(record)))
+                self.assertEqual(code, jobs.EXIT_USAGE)
+                errors = [e for e in events if e.get("event") == "error"]
+                self.assertEqual([e.get("code") for e in errors], ["read_only"], events)
+                self.assertNotIn("traceback", errors[0])
+                self.assertNotIn("[Errno", errors[0]["message"])
+
     def test_resume_scenarios(self):
         fx = fixture.make_fixture(os.path.join(self.tmp, "f2"))
         code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST))

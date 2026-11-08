@@ -55,6 +55,13 @@ from . import ORDER_RUN_EVERYTHING, jobrunner, widgets
 
 #: The job module (A-04's command line)
 PIPELINE_MODULE = "LesionNetworkMappingLib.pipeline"
+
+
+def studyReadOnly(path):
+    """True when this user cannot write the study's results folder (said before the run, not as a failure after it)."""
+    from LesionNetworkMappingLib import pipeline
+
+    return pipeline.study_read_only(path)
 #: Kind of the runner's pipeline jobs (``JobSpec.kind``)
 JOB_KIND = "pipeline"
 #: Fork-only settings (SPEC Appendix B, D-S1): the options of the dialog (JSON, written) and the memory budget (read only)
@@ -1482,6 +1489,8 @@ class PipelineCard:
             return False, _("Open a study with traced lesions (Seed card).")
         if bundle is None:
             return False, _("Choose a connectome (Connectome card).")
+        if studyReadOnly(study.path):
+            return False, _("The study {name} is read-only: ask for write access, or open a copy of the study folder.").format(name=study.name)
         if self.eligibleCount() < 2:
             return False, _("The analysis needs at least 2 lesions that can be mapped.")
         if not self._termsAccepted(bundle):

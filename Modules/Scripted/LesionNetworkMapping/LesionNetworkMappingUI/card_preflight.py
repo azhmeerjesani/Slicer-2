@@ -383,6 +383,11 @@ class PreflightCard:
                 self.progressLabel.show()
                 widgets.setChipLevel(self.chip, "warn", _("Not checked"))
                 return
+        if not os.access(folder, os.W_OK | os.X_OK):  # a read-only study: say so, do not let the check fail with a traceback
+            self.progressLabel.setText(_("The study is read-only, so it was not checked."))
+            self.progressLabel.show()
+            widgets.setChipLevel(self.chip, "warn", _("Not checked"))
+            return
         outPath = os.path.join(folder, "preflight-live.json")
         try:
             os.remove(outPath)
