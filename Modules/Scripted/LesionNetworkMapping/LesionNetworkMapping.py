@@ -2250,6 +2250,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.runDescSuffix = ""
         #: {"runDir", "reason", "outputsFailed"} of the last run that failed after a map ("_shownRunFailure()")
         self._runFailure = None
+        #: (seed mode, message) of a seed set refused before its run (``computeSeedSet()``): the Compute step needs the user
+        self._seedSetRefusal = None
         #: The connectome the shown run was computed with: its V, mask and name belong to the run, not to the one selected later
         self._runBundle = None
         #: The lesion seed the shown run mapped (``_seedKey()``): its map belongs to that lesion, not to a segment chosen later
@@ -3636,8 +3638,13 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         try:
             lesionsTsv = self.prepareSeedSet(runDir)
         except (OSError, ValueError) as exc:
-            self.widgets.setBannerText(self.computeBanner, _("The seeds cannot be made: {error}").format(error=exc))
+            message = _("The seeds cannot be made: {error}").format(error=exc)
+            self.widgets.setBannerText(self.computeBanner, message)
             self.computeBanner.show()
+            # The seed set was never mapped: its step is not "Done" (from an earlier map) and its card opens on the banner
+            self._seedSetRefusal = (mode, message)
+            self._updateSteps()
+            self._openComputeCard()
             return None
         previewN = self.plannedN() if node.subjectsMode == "preview" and self.plannedN() < self.bundle.n_subjects else None
         args = coords.cohortmaps_arguments(lesionsTsv, self.bundle.path, runDir, previewN, node.previewSeed)
@@ -3647,6 +3654,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                                  name="cohortmaps", statusText=_mappingStatusText, nice=ENGINE_NICE)
         self.widgets.setBannerText(self.computeBanner, "")
         self.computeBanner.hide()
+        self._seedSetRefusal = None
         self.cohortJob = self.ctx.submit(spec)
         self.progress.setJob(self.cohortJob)
         self.progress.widget.show()
@@ -4896,7 +4904,11 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             connectomeSummary = _("{name} · accept the data use terms").format(name=str(self.connectomeCombo.currentText))
         hasResult = self.loadedMap is not None or bool(getattr(self, "runOutputs", None)) or (
             self._parameterNode is not None and self._parameterNode.resultVolume is not None)
-        if self.loadedMap is not None and not getattr(self, "runOutputs", None):
+        refusal = getattr(self, "_seedSetRefusal", None)
+        if refusal is not None and refusal[0] == self.seedMode():
+            # The seeds of this seed set were refused before a run: the shown map is not theirs, the step needs the user
+            computeState, computeSummary = "action", refusal[1]
+        elif self.loadedMap is not None and not getattr(self, "runOutputs", None):
             # A map opened from a file was not computed here: Compute is not "Done"
             computeState, computeSummary = "", _("Opened from a file")
         elif self._shownRunFailure() is not None:
@@ -4994,7 +5006,18 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         for message, fix in failures:
             actions = [fix] if fix else []
             self.preflightLayout.addWidget(self.widgets.banner(message, actions, level="warn"))
+        if failures:
+            self._openComputeCard()
         return not failures
+
+    def _openComputeCard(self):
+        """Open the Compute card so a refusal or failure shown in it (its banner, the preflight banners) is seen: Studio
+        collapses the card to its title row once a map is done (``_applyStepCollapse()``), and the primary button stays in
+        the sticky footer, so a message inside the collapsed card would not be visible.
+        """
+        card = self._cardWidgets.get("compute", (None, None))[1]
+        if card is not None and card.property("collapsed") is not None and bool(card.collapsed):
+            card.collapsed = False
 
     def compute(self):
         """Export the seed lesion and start the engine (non-blocking); return the job."""
@@ -5025,6 +5048,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self._valuesCache.clear()
         self.widgets.setBannerText(self.computeBanner, "")
         self.computeBanner.hide()
+        self._seedSetRefusal = None
         config = {"bundlePath": self.bundle.path, "lesionPath": lesionPath, "runDir": runDir, "previewN": previewN, "previewSeed": node.previewSeed,
                   "nullRelocations": node.nullRelocations, "rule": thresholds.normalize_rule(rule),
                   # The lesion's template space (also one of the user's templates): run.json, qa.json and the sidecar record it
@@ -5079,6 +5103,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                   "previewN": previewN, "previewSeed": node.previewSeed}
         self.widgets.setBannerText(self.computeBanner, "")
         self.computeBanner.hide()
+        self._seedSetRefusal = None
         self.cohortJob = self.logic.startCohortMaps(config, onEvent=self.onCohortEvent, onDone=self.onCohortDone, context=self.ctx)
         self.progress.setJob(self.cohortJob)
         self.progress.widget.show()
@@ -5260,6 +5285,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         reason = job.failureReason or _("unknown error")
         self.widgets.setBannerText(self.computeBanner, _("Run failed: {reason}").format(reason=reason) + (f"\n{_('Log')}: {job.logPath}" if job.logPath else ""))
         self.computeBanner.show()
+        self._seedSetRefusal = None
+        self._openComputeCard()
 
     def _restorePreviousRun(self):
         """Undo ``compute()`` for a run that ended without a map: remove its temporary volume and show the
@@ -6827,7 +6854,12 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
             widget.prepareSeedSet(os.path.join(self.tempDir, "coords outside"))
         self.assertEqual(caught.exception.labels, ["Out 2021"])
         widget.acceptTermsCheckBox.setChecked(True)
+        computeCard = widget._cardWidgets["compute"][1]
+        computeCard.collapsed = True  # as Studio leaves it after an earlier map is done: the refusal must open it again
         self.assertIsNone(widget.computeSeedSet())  # refused before a run: no job, no all-zero map failing the whole set
+        self.assertFalse(computeCard.collapsed)
+        self.assertEqual(computeCard.property("studioStepState"), "action")  # not "Done": this seed set was never mapped
+        self.assertIn("The seeds cannot be made", computeCard.property("studioStepSummary"))
         bannerText = widget.computeBanner.findChild(qt.QLabel, "LNMBannerText").text
         self.assertIn("Out 2021 lies outside the connectome's brain mask", bannerText)
         self.assertTrue(widget.computeBanner.isVisibleTo(widget.parent))
