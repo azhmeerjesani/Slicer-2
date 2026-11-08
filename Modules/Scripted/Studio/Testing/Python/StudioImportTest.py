@@ -1872,6 +1872,18 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(metrics["gaps"], [])  # along k (left-right): none
         self.assertEqual(metrics["gaps_by_axis"], ([], [16, 17], []))
 
+    def test_lesion_card_volume_is_never_in_exponent_notation(self):
+        """One 0.4 mm voxel (6.4e-05 mL) reads "0.000064 mL", not "6.4e-05 mL"."""
+        from StudioLib import lesioncard
+
+        self.assertEqual(lesioncard.formatMl(0.4**3 / 1000.0), "0.000064 mL")
+        self.assertEqual(lesioncard.formatMl(0.042), "0.042 mL")
+        self.assertEqual(lesioncard.formatMl(2.274), "2.27 mL")
+        self.assertEqual(lesioncard.formatMl(0.0), "0 mL")
+        self.assertEqual(lesioncard.formatMl(1e-9), "<0.000001 mL")
+        for ml in (0.099, 0.0099, 1e-4, 9.96e-5, 2.7e-5, 1.5e-6, 1e-6):
+            self.assertNotIn("e", lesioncard.formatMl(ml), ml)
+
     def test_gaps_follow_the_shown_view_when_red_is_hidden(self):
         """With the Sagittal view maximized the Red view is hidden: N moves the Sagittal view to a gap slice that the
         card counts, along the x axis of that view (not the hidden Axial view, not S).

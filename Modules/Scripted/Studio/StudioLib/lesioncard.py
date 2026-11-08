@@ -25,6 +25,7 @@ strip, policy card) add their rows and ⋯ items without editing this file.
 
 import html
 import logging
+import math
 import re
 import traceback
 
@@ -180,12 +181,20 @@ def computeLesionMetrics(array_kji, spacing, ijkToRAS, axis=0, brainMask=None):
 
 
 def formatMl(ml):
-    """Volume text: "2.27 mL", "0.042 mL" (three significant digits below 0.1 mL)."""
+    """Volume text: "2.27 mL", "0.042 mL" (two significant digits below 0.1 mL), always plain decimals.
+
+    Never exponent notation: one 0.4 mm voxel is "0.000064 mL"; below a millionth of a mL it is "<0.000001 mL".
+    """
     if ml >= 100:
         return f"{ml:.0f} mL"
     if ml >= 0.1:
         return f"{ml:.2f} mL"
-    return f"{ml:.2g} mL" if ml > 0 else "0 mL"
+    if ml <= 0:
+        return "0 mL"
+    if ml < 1e-6:
+        return "<0.000001 mL"
+    decimals = 1 - math.floor(math.log10(ml))
+    return f"{ml:.{decimals}f} mL"
 
 
 def readoutHtml(metrics, sideWord=None, sideLevel="neutral", outsideKnown=False):
