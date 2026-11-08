@@ -41,13 +41,18 @@ faster, auditable and free of silent left-right flips, with standard MRML nodes 
   ``trace_method`` += figure through the ``StudySession`` (``record_id`` is never written); a draft
   (``.studio/figure/<sid>/``) is written while you work, for recovery. ``showSource(json)`` rebuilds the overlay from a
   fit file (≤ 300 ms).
+- **Reopen** (``resumeFromScene()``): a project or scene opened again with figure nodes resumes the tracing when Draw is
+  shown (or when the same figure is dropped again): the panels are rebuilt from the saved nodes (``Studio.FigureState``
+  and the figure volume's node references to its placement transform and landmark lists), nothing is loaded again, and
+  the trace views come back when they were shown. "Close figure" keeps the nodes but they are not resumed.
 - **Done** (a study Done hook, order 20): a figure whose convention is not confirmed blocks Done with an inline required
   choice in the Figure card, never a modal; otherwise the fit is saved and the columns are returned. The plane normals go
   to later hooks as ``ctx["figure_plane_normal"]`` / ``ctx["figure_plane_normals"]`` (L-28's dimensionality).
 - **Classic**: ``showClassicCard()`` hosts the same card in a non-modal window ("Trace from figure…").
 
 Settings (fork-only): ``Studio/Figure/LastFolder``. Node attributes: ``StudioFigure``, ``Studio.Role`` = figure,
-``Studio.FigureConvention``, ``Studio.FigurePanel``, ``Studio.FigureState`` (JSON without any path).
+``Studio.FigureConvention``, ``Studio.FigurePanel``, ``Studio.FigureState`` (JSON without any path). Node references of
+the figure volume: ``StudioFigureTransform``, ``StudioFigureLandmarks``, ``StudioFigureTemplateLandmarks``.
 """
 
 import contextlib
@@ -72,6 +77,11 @@ from . import space
 FIGURE_ATTRIBUTE = "StudioFigure"
 PANEL_ATTRIBUTE = "Studio.FigurePanel"
 STATE_ATTRIBUTE = "Studio.FigureState"
+#: Node references of a panel's figure volume to its other nodes (saved with the scene: a reopened project or scene
+#: resumes the panel with them, ``resumeFromScene()``)
+TRANSFORM_REFERENCE = "StudioFigureTransform"
+FIGURE_LANDMARKS_REFERENCE = "StudioFigureLandmarks"
+TEMPLATE_LANDMARKS_REFERENCE = "StudioFigureTemplateLandmarks"
 #: Markups lists of a panel
 FIGURE_LANDMARKS_NAME = "FigureLandmarks"
 TEMPLATE_LANDMARKS_NAME = "TemplateLandmarks"
@@ -492,11 +502,14 @@ class Panel:
                           for name, pixel, point in zip(names, pixels, points, strict=True)],
         }
 
-    def storeState(self):
+    def storeState(self, tracing=None):
+        """``tracing``: whether the trace views are shown (default: the session's)."""
         figureNode = self.figure()
         if figureNode is not None:
             state = self.state()
             state.pop("landmarks")
+            # A reopened project or scene shows the trace views again when they were shown (``resumeFromScene()``)
+            state["tracing"] = bool(self.session.tracing if tracing is None else tracing)
             figureNode.SetAttribute(STATE_ATTRIBUTE, json.dumps(state, ensure_ascii=False))
 
 
@@ -658,6 +671,9 @@ class FigureSession:
                 panel.figureLandmarksId = markups.GetID()
             else:
                 panel.templateLandmarksId = markups.GetID()
+        for role, nodeId in ((TRANSFORM_REFERENCE, panel.transformId), (FIGURE_LANDMARKS_REFERENCE, panel.figureLandmarksId),
+                             (TEMPLATE_LANDMARKS_REFERENCE, panel.templateLandmarksId)):
+            figureNode.SetNodeReferenceID(role, nodeId)
         # The convention confirmed for this record (or this session) is not asked again
         confirmed = self.confirmedConvention()
         if confirmed is not None and not panel.confirmed:
@@ -1625,6 +1641,78 @@ class FigureSession:
             self.selectPanel(self.panels.index(panel))
         return panel
 
+    def panelFromNodes(self, figureNode, state, claimed):
+        """A panel rebuilt from the nodes of the scene (a reopened project or scene): the figure volume, its placement
+        transform and landmark lists are reused, nothing is loaded. ``claimed``: IDs of nodes that other panels use.
+        """
+        references = {role: figureNode.GetNodeReference(role) for role in (TRANSFORM_REFERENCE, FIGURE_LANDMARKS_REFERENCE, TEMPLATE_LANDMARKS_REFERENCE)}
+        savedIndex = figureNode.GetAttribute(PANEL_ATTRIBUTE)
+
+        def candidates(className, test=lambda node: True):
+            # Scenes saved before the node references: the nodes tagged with the same panel number
+            return [node for node in slicer.util.getNodesByClass(className)
+                    if isFigureNode(node) and node.GetID() not in claimed and node.GetAttribute(PANEL_ATTRIBUTE) == savedIndex and test(node)]
+
+        transform = references[TRANSFORM_REFERENCE]
+        if transform is None:
+            parent = figureNode.GetParentTransformNode()
+            if parent is not None and isFigureNode(parent) and parent.GetID() not in claimed:
+                transform = parent
+            else:
+                found = candidates("vtkMRMLLinearTransformNode")
+                transform = next((node for node in found if node.GetName().startswith(figureNode.GetName())), found[0] if found else None)
+        if transform is None:
+            return None
+        figureList = references[FIGURE_LANDMARKS_REFERENCE]
+        if figureList is None:
+            found = candidates("vtkMRMLMarkupsFiducialNode", lambda node: node.GetName().startswith(FIGURE_LANDMARKS_NAME))
+            figureList = next((node for node in found if node.GetTransformNodeID() == transform.GetID()), found[0] if found else None)
+        templateList = references[TEMPLATE_LANDMARKS_REFERENCE]
+        if templateList is None:
+            found = candidates("vtkMRMLMarkupsFiducialNode", lambda node: node.GetName().startswith(TEMPLATE_LANDMARKS_NAME))
+            suffix = figureList.GetName()[len(FIGURE_LANDMARKS_NAME):] if figureList is not None else ""
+            templateList = next((node for node in found if node.GetName() == TEMPLATE_LANDMARKS_NAME + suffix), found[0] if found else None)
+        if figureList is None or templateList is None:
+            return None
+        index = int(savedIndex) if savedIndex and savedIndex.isdigit() and int(savedIndex) > 0 else 0
+        if index <= 0 or index in {panel.index for panel in self.panels}:
+            index = self._nextIndex()
+        panel = Panel(self, index, figureNode)
+        panel.transformId = transform.GetID()
+        panel.figureLandmarksId = figureList.GetID()
+        panel.templateLandmarksId = templateList.GetID()
+        for node in (transform, figureList, templateList):
+            _tag(node, panel.index)
+        for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
+            # The edge image of the figure (a crop ROI is not kept: "Crop" makes a new one)
+            if isFigureNode(node) and node is not figureNode and node.GetID() not in claimed and node.GetTransformNodeID() == transform.GetID():
+                panel.edgesId = node.GetID()
+                _tag(node, panel.index)
+                break
+        for role, nodeId in ((TRANSFORM_REFERENCE, panel.transformId), (FIGURE_LANDMARKS_REFERENCE, panel.figureLandmarksId),
+                             (TEMPLATE_LANDMARKS_REFERENCE, panel.templateLandmarksId)):
+            figureNode.SetNodeReferenceID(role, nodeId)
+        panel.plane = state.get("plane") if state.get("plane") in PLANE_TITLES else "axial"
+        panel.z = float(state.get("z_mm", 0.0))
+        panel.pitch = float(state.get("pitch_deg", 0.0))
+        panel.roll = float(state.get("roll_deg", 0.0))
+        panel.model = str(state.get("model") or "similarity")
+        if isinstance(state.get("crop_px"), list) and len(state["crop_px"]) == 4:
+            panel.cropPx = [int(value) for value in state["crop_px"]]
+        panel.label = str(state.get("figure") or "")
+        panel.panelLabel = str(state.get("panel") or "")
+        panel.sourceName = str(state.get("source_name") or panel.sourceName)
+        self._updating = True
+        try:
+            panel.refit()
+            panel.place()
+        finally:
+            self._updating = False
+        self.panels.append(panel)
+        self._observePanel(panel)
+        claimed.update(node.GetID() for node in panel.nodes())
+        return panel
+
     # Changes
 
     def changed(self):
@@ -1666,14 +1754,78 @@ def session(create=False, shell=None):
     return _session
 
 
-def closeFigure(removeNodes=False):
-    """Leave the trace views and forget the panels (``removeNodes``: remove the figure nodes from the scene too)."""
+def closeFigure(removeNodes=False, resumable=False):
+    """Leave the trace views and forget the panels (``removeNodes``: remove the figure nodes from the scene too).
+
+    Figure nodes that stay in the scene are not resumed by ``resumeFromScene()`` unless ``resumable`` (the scene closes).
+    """
     global _session
     current, _session = _session, None
     if current is not None:
+        if not removeNodes and not resumable:
+            for panel in current.panels:
+                figureNode = panel.figure()
+                if figureNode is not None:
+                    figureNode.RemoveAttribute(STATE_ATTRIBUTE)
         current.dispose(removeNodes=removeNodes)
     if _card is not None:
         _card.refresh()
+
+
+def resumeFromScene(shell=None, enterTrace=True):
+    """Resume the figure tracing saved with the scene (a reopened project or scene): the panels are rebuilt from the
+    figure nodes that have a saved state (``Studio.FigureState``), nothing is loaded again, and the trace views are shown
+    again when they were shown at the save (``enterTrace``). Return the number of panels resumed.
+    """
+    current = session()
+    if current is not None and current.panels:
+        return 0
+    figures = []
+    for node in slicer.util.getNodesByClass("vtkMRMLVolumeNode"):
+        if not isFigureNode(node) or not node.GetAttribute(STATE_ATTRIBUTE) or node.GetImageData() is None:
+            continue
+        try:
+            state = json.loads(node.GetAttribute(STATE_ATTRIBUTE))
+        except ValueError:
+            continue
+        if isinstance(state, dict):
+            figures.append((node, state))
+    if not figures:
+        return 0
+
+    def panelNumber(item):
+        value = item[0].GetAttribute(PANEL_ATTRIBUTE) or ""
+        return int(value) if value.isdigit() else 0
+
+    figures.sort(key=panelNumber)
+    current = session(create=True, shell=shell)
+    claimed = set()
+    tracing = False
+    for figureNode, state in figures:
+        try:
+            if current.panelFromNodes(figureNode, state, claimed) is not None:
+                tracing = tracing or bool(state.get("tracing"))
+        except Exception:
+            logging.error(f"Studio: the figure {figureNode.GetName()} could not be resumed:\n{traceback.format_exc()}")
+    if not current.panels:
+        return 0
+    current.selectPanel(0)
+    if enterTrace and tracing and current.templateNode() is not None:
+        try:
+            current.enterTrace()
+        except Exception:
+            logging.error(f"Studio: the figure trace views could not be shown again:\n{traceback.format_exc()}")
+    _ensureCard()
+    return len(current.panels)
+
+
+def _resumedPanelOf(path):
+    """The panel (not traced in the views) whose figure was opened from a file with the name of ``path``, or None."""
+    current = session()
+    if current is None or not path:
+        return None
+    name = os.path.basename(path)
+    return next((panel for panel in current.panels if panel.sourceName == name and panel.figure() is not None), None)
 
 
 #
@@ -1691,7 +1843,17 @@ def openFigure(path, shell=None, result=None):
     importer = _importer()
     if result is None:
         result = importer.LoadResult()
+    if shell is not None and canTrace():
+        # A figure saved with a reopened project or scene is resumed first: the same figure is not loaded again
+        resumeFromScene(shell)
     current = session()
+    existing = _resumedPanelOf(path) if current is not None and not current.tracing else None
+    if existing is not None:
+        current.selectPanel(current.panels.index(existing))
+        result.alreadyOpen.append(existing.figure())
+        _toast(shell, _("{name} is already open").format(name=existing.figure().GetName()))
+        _ensureCard()
+        return existing.figure()
     if current is not None and current.tracing and current.panels:
         try:
             with importer._ownLoad(), slicer.util.WaitCursor():
@@ -2504,6 +2666,8 @@ def _onModuleSelected(moduleName):
 
 def _afterDrawShown():
     _updatePasteShortcut()
+    if canTrace():
+        resumeFromScene(_installedShell)
     _ensureCard()
 
 
@@ -2538,14 +2702,31 @@ def install(shell):
     except Exception:
         logging.error(f"Studio: the figure Done hook could not be installed:\n{traceback.format_exc()}")
     scene = slicer.mrmlScene
-    global _sceneObserver
+    global _sceneObserver, _importObserver
     if _sceneObserver is None:
         _sceneObserver = scene.AddObserver(scene.StartCloseEvent, _onSceneClosing)
+    if _importObserver is None:
+        _importObserver = scene.AddObserver(scene.EndImportEvent, _onSceneImported)
     _updatePasteShortcut()
     _ensureCard()
 
 
 _sceneObserver = None
+_importObserver = None
+
+
+def _onSceneImported(caller=None, event=None):
+    # A scene opened while Draw is shown: its figure tracing is resumed once the load has finished (else on Draw entry)
+    qt.QTimer.singleShot(0, _resumeInDraw)
+
+
+def _resumeInDraw():
+    shell = _installedShell
+    try:
+        if shell is not None and shell.currentWorkspace() == "draw" and canTrace():
+            resumeFromScene(shell)
+    except Exception:
+        logging.error(f"Studio: the figure tracing could not be resumed:\n{traceback.format_exc()}")
 
 
 def _onSceneClosing(caller=None, event=None):
@@ -2556,9 +2737,12 @@ def _onSceneClosing(caller=None, event=None):
         # with their nodes
         if current.tracing:
             current.leaveTrace()
+            # A project saves its scene once more when it closes: it is reopened in the trace views (resumeFromScene)
+            for panel in current.panels:
+                panel.storeState(tracing=True)
         current.tracing = False
         current.saved = None
-        closeFigure()
+        closeFigure(resumable=True)
 
 
 def uninstall(shell):
@@ -2567,6 +2751,9 @@ def uninstall(shell):
     current = session()
     if current is not None and current.tracing:
         current.leaveTrace()
+        # Saved (when quitting) as traced: the project is reopened in the trace views (resumeFromScene)
+        for panel in current.panels:
+            panel.storeState(tracing=True)
     if shell is not None:
         with contextlib.suppress(Exception):
             shell.removeWorkspaceShortcut("draw", PASTE_SHORTCUT)

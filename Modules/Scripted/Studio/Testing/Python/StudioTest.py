@@ -2732,6 +2732,87 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 problems.append((label.text, "width", label.width))
         self.assertEqual(problems, [])
 
+    def test_33c_figure_tracing_resumes_after_the_scene_is_opened_again(self):
+        """A figure traced in a scene that is saved, closed and opened again (a project reopened from the Library) is
+        resumed from its saved nodes: the same figure volume, crop, plane, convention, landmarks and fit, and the trace
+        views. Dropping the same figure again reuses it (no second copy); "Close figure" is not undone by Draw.
+        """
+        import os
+        import tempfile
+
+        import vtk
+
+        if not _hasFigureTracing():
+            self.skipTest("figure tracing is not in this build")
+        from StudioLib import figure, importer, layouts
+
+        studioShell = self._applyStudio()
+        self._startOnTemplate(studioShell)
+        self.addCleanup(lambda: figure.closeFigure(removeNodes=True))
+        directory = tempfile.mkdtemp(prefix="StudioTestFigureResume", dir=slicer.app.temporaryPath)
+        image = qt.QImage(200, 160, qt.QImage.Format_RGB32)
+        image.fill(qt.QColor(20, 20, 20))
+        painter = qt.QPainter(image)
+        painter.fillRect(40, 30, 60, 40, qt.QColor(230, 230, 230))
+        painter.end()
+        path = os.path.join(directory, "case-9_fig1.png")
+        self.assertTrue(image.save(path))
+        importer.handleDrop([path], shell=studioShell)
+        self._pump(10)
+        session = figure.session()
+        panel = session.panel()
+        session.applyCrop([10, 10, 180, 140])
+        session.setPlane("axial")
+        session.setCut(z=12.0)
+        session.setConvention("radiological")
+        for pixel, ras in (((20, 20), (-60.0, 60.0, 12.0)), ((160, 20), (60.0, 60.0, 12.0)), ((90, 130), (0.0, -80.0, 12.0)), ((90, 70), (0.0, -5.0, 12.0))):
+            panel.figureLandmarks().AddControlPoint(vtk.vtkVector3d(*panel.localOf(pixel)))
+            panel.templateLandmarks().AddControlPointWorld(vtk.vtkVector3d(*ras))
+        session.updateFit()
+        session.enterTrace()
+        self._pump(6)
+        self.assertIsNotNone(panel.fit, panel.fitError)
+        rms, cropPx = panel.fit.rms_mm, list(panel.cropPx)
+        nodeNames = sorted(node.GetName() for node in figure.figureNodes())
+        scenePath = os.path.join(directory, "traced.mrb")
+        self.assertTrue(slicer.util.saveScene(scenePath))
+        slicer.mrmlScene.Clear(0)
+        self._pump(4)
+        self.assertIsNone(figure.session())
+        # Opened again while Draw is shown: the tracing goes on where it was
+        slicer.util.loadScene(scenePath)
+        self._wait(300)
+        figure._afterDrawShown()
+        self._pump(6)
+        resumed = figure.session()
+        self.assertIsNotNone(resumed, "the figure tracing is resumed from the scene")
+        self.assertEqual(len(resumed.panels), 1)
+        panel = resumed.panel()
+        self.assertEqual(panel.figure().GetName(), "case-9_fig1")
+        self.assertEqual(panel.sourceName, "case-9_fig1.png")
+        self.assertEqual((panel.plane, panel.z, panel.convention, panel.cropPx), ("axial", 12.0, "radiological", cropPx))
+        self.assertEqual(panel.pairCount(), 4)
+        self.assertIsNotNone(panel.fit)
+        self.assertAlmostEqual(panel.fit.rms_mm, rms, places=4)
+        self.assertTrue(resumed.tracing)
+        self.assertEqual(self.layoutManager.layout, layouts.FOCUS_LAYOUT_ID)
+        self.assertEqual(self.layoutManager.sliceWidget("Red").mrmlSliceCompositeNode().GetForegroundVolumeID(), panel.figureId)
+        card = self.mainWindow.findChild("QFrame", "StudioFigureCard")
+        self.assertTrue(card.isVisible())
+        self.assertEqual(sorted(node.GetName() for node in figure.figureNodes()), nodeNames)
+        # The same figure dropped again (outside the trace views) is the resumed one, not a second copy
+        resumed.leaveTrace()
+        self._pump(4)
+        importer.handleDrop([path], shell=studioShell)
+        self._pump(10)
+        self.assertEqual(len(figure.session().panels), 1)
+        self.assertEqual(sorted(node.GetName() for node in figure.figureNodes()), nodeNames)
+        # "Close figure" keeps the nodes but is not undone the next time Draw is shown
+        figure.closeFigure(removeNodes=False)
+        figure._afterDrawShown()
+        self._pump(4)
+        self.assertIsNone(figure.session())
+
 
 def _hasFigureTracing():
     """True when this build has trace-from-figure (StudioLib.figure, L-29)."""
