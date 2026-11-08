@@ -52,7 +52,7 @@ Comparison
 Command line (downloads run as a light job of the Map module)::
 
     python -m LesionNetworkMappingLib.refmaps list [--root DIR]
-    python -m LesionNetworkMappingLib.refmaps add-neurovault (--image ID | --collection ID) [--condition TEXT] [--root DIR]
+    python -m LesionNetworkMappingLib.refmaps add-neurovault (--image ID | --collection ID [--file NAME]) [--condition TEXT] [--root DIR]
     python -m LesionNetworkMappingLib.refmaps add-url --url URL [--title T] [--licence L] [--citation C] [--condition TEXT]
     python -m LesionNetworkMappingLib.refmaps add-vdh --accepted-terms-sha256 SHA [--entry degree] [--commit ca410e6]
     python -m LesionNetworkMappingLib.refmaps remove --id ID
@@ -641,15 +641,27 @@ def _known_space(label):
     return space_family(label) not in ("unknown", "native")
 
 
-def add_neurovault(image_id=None, collection_id=None, condition=None, root=None, session=None, progress=None, cancel=None, offline=None):
+def _neurovault_file_name(url):
+    """The file name of a NeuroVault image file link (``.../media/images/<collection>/<name>``), URL-decoded."""
+    from urllib.parse import unquote
+
+    return unquote(os.path.basename(str(url or "").split("?")[0].split("#")[0].rstrip("/")))
+
+
+def add_neurovault(image_id=None, collection_id=None, condition=None, root=None, session=None, progress=None, cancel=None, offline=None,
+                   file_name=None):
     """Download NeuroVault image(s) through the public API (on the user's click); return the new entries.
 
-    Give ``image_id`` (one image) or ``collection_id`` (its images, at most 100). The licence is NeuroVault's CC0.
+    Give ``image_id`` (one image) or ``collection_id`` (its images, at most 100). With ``collection_id``, ``file_name``
+    keeps only the image whose file has that name: a NeuroVault download link (``/media/images/<collection>/<name>``)
+    names the collection and the file, not the image id. The licence is NeuroVault's CC0.
     """
     from . import fetch
 
     if (image_id is None) == (collection_id is None):
         raise RefmapsError("Give a NeuroVault image id or a collection id")
+    if file_name and collection_id is None:
+        raise RefmapsError("A NeuroVault file name needs its collection id")
     session = session or fetch.make_session()
     if image_id is not None:
         images = [neurovault_image(image_id, session)]
@@ -661,6 +673,12 @@ def add_neurovault(image_id=None, collection_id=None, condition=None, root=None,
     else:
         collection = neurovault_collection(collection_id, session)
         images = list(collection.get("images") or [])
+        if file_name:
+            wanted = _neurovault_file_name(file_name)
+            images = [image for image in images if _neurovault_file_name(image.get("file")) == wanted]
+            if not images:
+                raise RefmapsError(f"NeuroVault collection {collection_id} has no image with the file {wanted} (only its first "
+                                   f"{NEUROVAULT_MAX_COLLECTION} images are listed). Paste the image's page link (neurovault.org/images/<id>/) instead.")
     citation = _neurovault_citation(collection) if collection else ""
     out = []
     for index, image in enumerate(images):
@@ -1526,6 +1544,7 @@ def _add_main(command, argv):
         group = parser.add_mutually_exclusive_group(required=True)
         group.add_argument("--image", type=int, default=None, help="NeuroVault image id")
         group.add_argument("--collection", type=int, default=None, help="NeuroVault collection id (its images, at most 100)")
+        parser.add_argument("--file", default=None, help="with --collection: only the image with this file name (from a NeuroVault download link)")
     elif command == "add-url":
         parser.add_argument("--url", required=True)
     elif command == "add-file":
@@ -1545,7 +1564,8 @@ def _add_main(command, argv):
     jobs.emit("start", job=f"refmaps-{command}", argv=argv)
     progress = _cli_progress()
     if command == "add-neurovault":
-        added = _wrap(add_neurovault, image_id=args.image, collection_id=args.collection, condition=args.condition, root=args.root, progress=progress, cancel=cancel)
+        added = _wrap(add_neurovault, image_id=args.image, collection_id=args.collection, condition=args.condition, root=args.root, progress=progress, cancel=cancel,
+                      file_name=args.file)
     elif command == "add-url":
         added = [_wrap(add_url, args.url, title=args.title, licence=args.licence, citation=args.citation, condition=args.condition, space=args.space, root=args.root,
                        progress=progress, cancel=cancel)]

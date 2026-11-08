@@ -137,6 +137,38 @@ class MapSource:
         self.vector = vector
 
 
+def neurovaultArgs(value):
+    """``--image ID``, ``--collection ID`` or ``--collection ID --file NAME`` for the text of the NeuroVault field.
+
+    A download link (``/media/images/<collection>/<file>``) names the collection and the file, not the image: its
+    number is the collection id, so it is never read as an image id.
+    """
+    text = str(value or "").strip()
+    match = re.match(r"^(?:c|collection[: ]?)(\d+)$", text, re.IGNORECASE)
+    if match:
+        return ["--collection", match.group(1)]
+    match = re.match(r"^#?(\d+)$", text)
+    if match:
+        return ["--image", match.group(1)]
+    match = re.search(r"(?:^|/)media/images/(\d+)/([^/?#]+)", text, re.IGNORECASE)
+    if match:
+        from urllib.parse import unquote
+
+        return ["--collection", match.group(1), "--file", unquote(match.group(2))]
+    match = re.search(r"(?:^|(?<!media)/)images/(\d+)(?:[/?#]|$)", text, re.IGNORECASE)
+    if match:
+        return ["--image", match.group(1)]
+    match = re.search(r"(?:^|/)collections/(\d+)(?:[/?#]|$)", text, re.IGNORECASE)
+    if match:
+        return ["--collection", match.group(1)]
+    if "/" not in text and "neurovault" not in text.lower():
+        match = re.search(r"(\d+)", text)
+        if match:
+            return ["--image", match.group(1)]
+    raise ValueError(_("Give a NeuroVault image id (12345), c<id> for a collection, or the link of an image or collection page "
+                       "(neurovault.org/images/12345/)"))
+
+
 class CompareCard:
     """Controller of the Compare card (``widget`` is a collapsible card)."""
 
@@ -1090,15 +1122,7 @@ class CompareCard:
         if values.get("condition"):
             args += ["--condition", values["condition"]]
         if kind == "neurovault":
-            text = str(values.get("id") or "").strip().lower()
-            match = re.match(r"^(?:c|collection[: ]?)(\d+)$", text) or re.search(r"collections/(\d+)", text)
-            if match:
-                args += ["--collection", match.group(1)]
-            else:
-                match = re.search(r"(\d+)", text)
-                if not match:
-                    raise ValueError(_("Give a NeuroVault image id (or c<id> for a collection)"))
-                args += ["--image", match.group(1)]
+            args += neurovaultArgs(values.get("id"))
         elif kind == "url":
             args += ["--url", values["url"]]
         elif kind == "vdh":

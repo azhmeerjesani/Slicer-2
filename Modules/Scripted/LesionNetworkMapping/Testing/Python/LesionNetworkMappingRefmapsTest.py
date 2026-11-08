@@ -688,6 +688,27 @@ class SourcesTest(RefmapsTestBase):
         self.assertTrue(any(call.startswith(refmaps.NEUROVAULT_API) for call in session.calls))
         self.assertEqual(refmaps.resample_to(entry, self.bundle, root=self.root).shape, (self.bundle.n_voxels,))
 
+    def test_neurovault_download_link_adds_the_linked_image(self):
+        """A NeuroVault download link (/media/images/<collection>/<file>) adds the image with that file, not image <collection>."""
+        path = self.writeMap("zstat1.nii.gz", _smooth_field(self.rng, SHAPE))
+        url = "https://neurovault.org/media/images/457/tfMRI_EMOTION_FACES-SHAPES_zstat1.nii.gz"
+        other = {"id": 3127, "name": "Other map", "file": "http://neurovault.org/media/images/457/other.nii.gz", "collection_id": 457}
+        image = {"id": 3128, "name": "tfMRI EMOTION FACES minus SHAPES zstat1", "file": url.replace("https", "http"), "collection_id": 457,
+                 "target_template_image": "GenericMNI", "file_size": os.path.getsize(path)}
+        collection = {"id": 457, "name": "HCP", "authors": "Doe J"}
+        resource = fetch.Resource({"id": "neurovault/3128", "urls": [url], "filename": os.path.basename(url), "checksum": fetch.RECORD_ON_FIRST_DOWNLOAD})
+        fetch.adopt(resource, path, cache=self.root)
+        session = _FakeSession({"id": 457, "name": "task003 003 rating all", "collection_id": 98}, collection, [other, image])
+        added = refmaps.add_neurovault(collection_id=457, file_name=os.path.basename(url), root=self.root, session=session, offline=True)
+        self.assertEqual([entry["id"] for entry in added], ["nv-3128"])
+        self.assertEqual(added[0]["source"]["collection_id"], "457")
+        with self.assertRaises(refmaps.RefmapsError) as raised:
+            refmaps.add_neurovault(collection_id=457, file_name="missing.nii.gz", root=self.root, session=session, offline=True)
+        self.assertIn("missing.nii.gz", str(raised.exception))
+        self.assertIn("neurovault.org/images/", str(raised.exception))
+        with self.assertRaises(refmaps.RefmapsError):
+            refmaps.add_neurovault(image_id=457, file_name="x.nii.gz", root=self.root, session=session, offline=True)
+
     def test_neurovault_read_failures_are_short(self):
         import requests
 

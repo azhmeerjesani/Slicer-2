@@ -111,6 +111,21 @@ class LesionNetworkMappingCompareUITest(unittest.TestCase):
         self.assertEqual(item["status"], "done", item)
         self.assertEqual(item["evidence"], [self.card.lastRunId])
 
+    def test_3_neurovault_field_reads_links(self):
+        """The number of a NeuroVault download link (/media/images/<collection>/<file>) is the collection, never the image id."""
+        from LesionNetworkMappingUI.card_compare import neurovaultArgs
+
+        args = self.card.additionArgs("neurovault", {"id": "https://neurovault.org/media/images/457/tfMRI_EMOTION_FACES-SHAPES_zstat1.nii.gz"})
+        self.assertNotIn("--image", args)
+        self.assertEqual(args[args.index("--collection"):], ["--collection", "457", "--file", "tfMRI_EMOTION_FACES-SHAPES_zstat1.nii.gz"])
+        cases = {"https://neurovault.org/images/3128/": ["--image", "3128"], "3128": ["--image", "3128"], "C457": ["--collection", "457"],
+                 "https://neurovault.org/collections/457/": ["--collection", "457"], "neurovault.org/media/images/457/a%20b.nii.gz": ["--collection", "457", "--file", "a b.nii.gz"]}
+        for text, expected in cases.items():
+            self.assertEqual(neurovaultArgs(text), expected, text)
+        for text in ("https://neurovault.org/media/images/457/", "https://neurovault.org/collections/ABCDEF/", ""):
+            with self.assertRaises(ValueError, msg=text):
+                neurovaultArgs(text)
+
 
 if __name__ == "__main__":
     unittest.main()
