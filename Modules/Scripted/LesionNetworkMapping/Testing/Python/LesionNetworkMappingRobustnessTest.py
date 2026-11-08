@@ -626,6 +626,67 @@ class LabelsAndCommandLineTest(RobustnessTestBase):
         self.assertEqual(code, 1)
         self.assertEqual(events[-1]["event"], "error")
 
+    def test_command_line_fz_rules_threshold_the_mean_fz_maps(self):
+        """An Fz rule (|Fz| ≥ x, top x% on Fz) thresholds the mean Fz (AvgFz) maps, as the Overlap tab does
+        (``cohort.rule_statistic``), in every analysis of the Robust card (bug map-robust-card:robust-fz-rule-thresholds-t-maps:
+        the maps were always the T maps, so |Fz| ≥ 0.05 became |T| ≥ 0.05, nearly the whole mask).
+        """
+        from LesionNetworkMappingLib import cohort as cohort_lib
+
+        maps = os.path.join(self.maps_a_dir, cohortmaps.MAPS_TSV)
+        fz = robustness.load_cohort(maps, column=robustness.rule_column({"kind": "fz_abs", "value": 0.1}))
+        self.assertEqual(fz.statistic, "Fz")
+        self.assertEqual((robustness.rule_column(FWE), robustness.rule_column(TOP10), robustness.rule_column({**TOP10, "statistic": "Fz"})), ("T", "T", "AvgFz"))
+        self.assertGreater(float(np.abs(self.cohort_a.maps).mean()), 3 * float(np.abs(fz.maps).mean()))  # T and Fz maps differ in scale
+        value = float(np.quantile(np.abs(fz.maps), 0.75))  # a cut that keeps part of the Fz maps and nearly all of the T maps
+        fz_rule = {"kind": "fz_abs", "value": round(value, 4)}
+        for rule in (fz_rule, {"kind": "top_pct", "value": 10, "statistic": "Fz", "sign": "both"}):
+            expected = cohort_lib.group_maps(fz.maps, rule, None, 50, "both", n=fz.n)  # the Overlap tab
+            want = int(np.count_nonzero(expected.maps[cohort_lib.sensitivity_desc(50)]))
+            out = self.path(f"cli-fz-{rule['kind']}")
+            code, events, stderr = self.run_cli("sweep", "--maps", maps, "--rule", json.dumps(rule), "--overlap", "50", "--out", out, "--run-root", out)
+            self.assertEqual(code, 0, (stderr, events[-1:]))
+            _columns, rows = read_tsv(os.path.join(out, robustness.SWEEP_TSV))
+            primary = next(row for row in rows if row["primary"] == "true")
+            self.assertEqual(int(primary["voxels"]), want, f"{rule}: the primary row is not the Overlap tab's sensitivity map of the mean Fz maps")
+            # the secondary rows are of the same maps: the T rules are not applied to Fz maps
+            fwe = next(row for row in rows if row["setting"].startswith("FWE"))
+            self.assertEqual((fwe["voxels"], fwe["note"]), ("n/a", "needs T maps; these are Fz maps"))
+        on_t = int(np.count_nonzero(robustness._overlap_binary(robustness._threshold_maps(self.cohort_a.maps, fz_rule, self.cohort_a.n, self.cohort_a.v, "both", None)[0].sum(axis=0), 6, 50)))
+        self.assertNotEqual(want, on_t)  # (the last rule) the check above tells the Fz maps from the T maps
+        # a rule is never applied to maps of another statistic
+        with self.assertRaises(ValueError):
+            robustness.threshold_sweep(self.cohort_a.maps, self.cohort_a.n, self.cohort_a.v, fz_rule, 50)
+        with self.assertRaises(ValueError):
+            robustness.lesion_split_half(self.cohort_a, n_splits=2, rule=fz_rule)
+        with self.assertRaises(ValueError):
+            robustness.leave_one_lesion_out(self.cohort_a, rule=fz_rule)
+        with self.assertRaises(ValueError):
+            robustness.compare_cohorts(self.cohort_a, fz, FWE)
+        # split-half, influence and replication threshold the same mean Fz maps
+        binary, _resolved = robustness._threshold_maps(fz.maps, fz_rule, fz.n, fz.v, "both", fz.gsr)
+        full = robustness._sensitivity(binary.sum(axis=0), 6, 50)
+        out = self.path("cli-fz-influence")
+        code, events, stderr = self.run_cli("influence", "--maps", maps, "--rule", json.dumps(fz_rule), "--overlap", "50", "--top-k", "2", "--out", out, "--run-root", out)
+        self.assertEqual(code, 0, (stderr, events[-1:]))
+        direct = robustness.leave_one_lesion_out(fz, rule=fz_rule, overlap_pct=50, top_k=2)
+        _columns, rows = read_tsv(os.path.join(out, robustness.INFLUENCE_TSV))
+        self.assertEqual({row["participant_id"]: row["dice_vs_full"] for row in rows},
+                         {row["participant_id"]: robustness._tsv_cell(row["dice_vs_full"]) for row in direct["rows"]})
+        self.assertTrue(full.any())
+        out = self.path("cli-fz-splithalf")
+        code, events, stderr = self.run_cli("splithalf", "--maps", maps, "--rule", json.dumps(fz_rule), "--overlap", "50", "--n-splits", "4", "--out", out, "--run-root", out)
+        self.assertEqual(code, 0, (stderr, events[-1:]))
+        got = np.load(os.path.join(out, robustness.SPLITHALF_NPZ))["dice_sensitivity"]
+        want_split = robustness.lesion_split_half(fz, n_splits=4, rule=fz_rule, overlap_pct=50)["dice_sensitivity"]
+        np.testing.assert_allclose(got, want_split, equal_nan=True)
+        out = self.path("cli-fz-replicate")
+        code, events, stderr = self.run_cli("replicate", "--maps", maps, "--bundle-b", self.meta_b["path"], "--rule", json.dumps(fz_rule), "--overlap", "50",
+                                            "--cache", self.path("cache"), "--out", out, "--run-root", out)
+        self.assertEqual(code, 0, (stderr, events[-1:]))
+        with open(os.path.join(out, "replicate.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["summary"]["thresholds"][fz.label], f"Fz {fz_rule['value']:.4g}")
+
     def test_command_line_glm_uses_the_design_input_maps(self):
         """Influence and split-half with --design fit the Contrast tab's GLM: on the maps of design.json's input
         (AvgFz for "Fz", the default), not on the T maps that the overlap and sensitivity maps threshold.

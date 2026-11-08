@@ -1240,7 +1240,7 @@ class RobustCard:
         try:
             from LesionNetworkMappingLib import robustness
 
-            cohort = robustness.load_cohort(mapsTsv)
+            cohort = robustness.load_cohort(mapsTsv, column=robustness.rule_column(self.rule()))  # the maps the sweep thresholded
             if cohort.maps.nbytes > TILE_MAX_BYTES:
                 self.tileNote.setText(_("The maps are too large to redraw as tiles here; the table is the result."))
                 return
