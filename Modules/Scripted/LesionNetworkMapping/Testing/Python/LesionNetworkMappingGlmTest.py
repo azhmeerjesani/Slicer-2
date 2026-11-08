@@ -448,6 +448,49 @@ class DesignRunTest(_StudyTestCase):
             np.testing.assert_array_equal(r32.p_fwe, r64.p_fwe, f"mean {mean}")
             self.assertGreaterEqual(r32.p_unc.min(), 2 / 1024)  # the all -1 flip always ties
 
+    def test_perfect_separation_voxel_gets_the_smallest_p(self):
+        # A voxel lesioned in every case and in no control fits the groups exactly: SSE sits at its
+        # floor, kappa is about 1 / SSE_RTOL and the tie tolerance (TIE_RTOL * kappa) is far above 1.
+        # Its threshold must stay positive: it has the most extreme statistic, so p_unc = p_fwe = 1 / (K + 1)
+        n1, n0 = 16, 10
+        group = np.r_[np.ones(n1), np.zeros(n0)]
+        Y = np.zeros((n1 + n0, 3))
+        Y[:, 0] = group  # perfect separation
+        Y[:, 1] = group
+        Y[[0, 1], 1] = 0.0
+        Y[n1, 1] = 1.0  # strong but imperfect
+        Y[:, 2] = self.rng.integers(0, 2, n1 + n0)
+        volume = self.rng.uniform(5.0, 60.0, n1 + n0)
+        for X, C in ((np.c_[group, 1 - group], np.array([[1.0, -1.0]])), (np.c_[group, 1 - group, volume - volume.mean()], np.array([[1.0, -1.0, 0.0]]))):
+            for dtype, tails, stat in ((np.float32, 1, "t"), (np.float64, 2, "t"), (np.float64, 1, "v")):
+                rng = np.random.default_rng(3)
+                perms = [np.arange(n1 + n0)] + [rng.permutation(n1 + n0) for _ in range(199)]
+                groups = group.astype(int) if stat == "v" else None
+                r = glm.permutation_test(Y, X, C, perms, stat=stat, tails=tails, dtype=dtype, variance_groups=groups)
+                label = f"{X.shape[1]} columns, {np.dtype(dtype).name}, tails {tails}, {stat}"
+                self.assertGreater(r.stat[0], r.stat[1], label)
+                self.assertEqual(r.p_unc[0], 1 / 200, label)
+                self.assertEqual(r.p_fwe[0], 1 / 200, label)
+                self.assertLessEqual(r.p_fwe[0], r.p_fwe[1], label)
+        # v with one variance group constant (its SSE at the floor, kappa 1e12): the tolerance is capped,
+        # so p matches a count with a tight tolerance
+        Yv = np.zeros((n1 + n0, 1))
+        Yv[:n1, 0] = 1.0
+        Yv[[0, 3, 5, 9], 0] = 0.0
+        rng = np.random.default_rng(5)
+        perms = [np.arange(n1 + n0)] + [rng.permutation(n1 + n0) for _ in range(199)]
+        X, C = np.c_[group, 1 - group], np.array([[1.0, -1.0]])
+        r = glm.permutation_test(Yv, X, C, perms, stat="v", tails=1, dtype=np.float64, variance_groups=group.astype(int))
+        engine = glm.FreedmanLane(X, C, "v", group.astype(int), "permutation", np.float64)
+        prepared = engine.prepare(Yv)
+        self.assertGreater(prepared.kappa[0], 1e10)
+        null = engine.null_statistics(prepared, perms[1:])[:, 0]
+        self.assertEqual(r.p_unc[0], (1 + np.sum(null >= r.stat[0] * (1 - 1e-6))) / 200)
+        # The bound keeps the threshold positive for any conditioning, and below the observed value
+        threshold = glm._threshold(np.array([5.0, -5.0]), np.float64, False, np.array([1e15, 1e15]))
+        self.assertTrue(0 < threshold[0] < 5.0)
+        self.assertLess(threshold[1], -5.0)
+
     def test_type_one_error_is_calibrated(self):
         # Null data with a nuisance (volume) effect: the FWE rate over 200 simulations is within the
         # binomial 95% interval of alpha = 0.05

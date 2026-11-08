@@ -115,6 +115,12 @@ CHUNK_VOXELS = 32768
 #: two-group design, the all -1 sign flip) still counts when the effect is strong.
 TIE_RTOL = {np.dtype(np.float32): 1e-5, np.dtype(np.float64): 1e-9}
 TIE_ATOL = {np.dtype(np.float32): 1e-6, np.dtype(np.float64): 1e-12}
+#: Largest relative tie tolerance, however large kappa is. kappa is at most 1 / SSE_RTOL (the SSE floor),
+#: where float64 rounding of the null SSE (unit roundoff times kappa times the length of the sums) stays
+#: far below it; float32 runs never get near it (KAPPA_MAX_FLOAT32). Without the cap a voxel fitted almost
+#: exactly (a lesion present in every case and in no control) had a tolerance of 1000 times its
+#: statistic, so every null counted as an exceedance and the strongest voxel got p = 1.
+TIE_RTOL_MAX = 0.1
 #: Largest kappa a float32 run accepts: beyond it (tie tolerance above 1%; |t| above about
 #: 30 sqrt(df)) the permutations are computed in float64 instead
 KAPPA_MAX_FLOAT32 = 1e3
@@ -562,11 +568,18 @@ def _threshold(observed, dtype, two_sided, kappa=None):
 
     :param kappa: per-voxel conditioning of the null SSE (:attr:`Prepared.kappa`) that scales the
       relative tolerance (default 1).
+
+    A null statistic that ties the observed one has its SSE known to a relative error r = TIE_RTOL * kappa
+    (at most :data:`TIE_RTOL_MAX`), so it is at least observed / (1 + r) (t and v scale with SSE^-1/2,
+    F with SSE^-1). The threshold therefore stays above 0 for a positive observed value, also for a voxel
+    fitted almost exactly (kappa about 1 / SSE_RTOL, for example a lesion present in every case and in no
+    control), which has the smallest p instead of p = 1. For small r it equals observed * (1 - r) to
+    first order. A negative one-sided observed value moves away from 0 by the factor 1 + r.
     """
     magnitude = _magnitude(observed, two_sided)
     dtype = np.dtype(dtype)
-    rtol = TIE_RTOL[dtype] if kappa is None else TIE_RTOL[dtype] * np.maximum(np.asarray(kappa, dtype=np.float64), 1.0)
-    return magnitude - (rtol * np.abs(magnitude) + TIE_ATOL[dtype])
+    rtol = TIE_RTOL[dtype] if kappa is None else np.minimum(TIE_RTOL[dtype] * np.maximum(np.asarray(kappa, dtype=np.float64), 1.0), TIE_RTOL_MAX)
+    return np.where(magnitude >= 0, magnitude / (1.0 + rtol), magnitude * (1.0 + rtol)) - TIE_ATOL[dtype]
 
 
 def fdr_bh(p):
