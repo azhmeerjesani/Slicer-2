@@ -261,6 +261,21 @@ class GsrAndReadoutTest(unittest.TestCase):
         top = thresholds.resolve({"kind": "top_pct", "value": 10, "statistic": "T", "sign": "pos"}, 312, 4, values=[1.0, 2.0, 3.0, 4.0])
         self.assertEqual(thresholds.describe(top, fraction=top.fraction), "⇒ top 10% of T (≥ 3.7) at N=312, V=4 · rank rule (no p-value) · 25% of in-mask voxels")
 
+    def test_describe_one_tail_follows_the_display_sign(self):
+        """With + or - shown, the derived line states that tail (like the legend), not |T|, and its share."""
+        values = np.concatenate([np.zeros(900), np.full(60, 6.0), np.full(30, -6.0), np.full(10, 0.5)])
+        fwe = thresholds.resolve({"kind": "fwe_bonferroni"}, 120, values.size, values=values)
+        both, pos, neg = (thresholds.fraction_connected(values, fwe, s) for s in ("both", "pos", "neg"))
+        self.assertEqual((both, pos, neg), (0.09, 0.06, 0.03))
+        cut = thresholds.format_value(fwe)
+        self.assertIn(f"⇒ |T| ≥ {cut} at", thresholds.describe(fwe, both, "both"))
+        self.assertIn(f"⇒ T ≥ {cut} at", thresholds.describe(fwe, pos, "pos"))
+        self.assertTrue(thresholds.describe(fwe, pos, "pos").endswith(" · 6.0% of in-mask voxels"))
+        self.assertIn(f"⇒ T ≤ -{cut} at", thresholds.describe(fwe, neg, "neg"))
+        self.assertTrue(thresholds.describe(fwe, neg, "neg").endswith(" · 3.0% of in-mask voxels"))
+        top = thresholds.resolve({"kind": "top_pct", "value": 10, "statistic": "T", "sign": "pos"}, 120, values.size, values=values)
+        self.assertEqual(thresholds.describe(top, top.fraction, "neg"), thresholds.describe(top, top.fraction))
+
 
 class FormatValueTest(unittest.TestCase):
     """The threshold value as the derived line, the Map legend and the sidecar Rule write it (BB-1: never one decimal)."""

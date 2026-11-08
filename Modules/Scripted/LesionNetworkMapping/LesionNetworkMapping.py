@@ -5873,7 +5873,13 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                 self.derivedLabel.setText(str(exc))
             if self.resolved is not None:
                 fraction = self.resolved.fraction
-                line = thresholds.describe(self.resolved, fraction)
+                sign = self._sign()
+                if sign in ("pos", "neg") and rule["kind"] != "top_pct" and values is not None:
+                    # One tail shown (legend "T ≥ x"): the share is that tail's, as in the figure captions
+                    fraction = thresholds.fraction_connected(values, self.resolved, sign)
+                    line = thresholds.describe(self.resolved, fraction, sign)
+                else:
+                    line = thresholds.describe(self.resolved, fraction)
                 if not hasMap:
                     line = _("Planned: {line}").format(line=line)
                 self.derivedLabel.setText(line)

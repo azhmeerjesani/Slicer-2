@@ -446,13 +446,23 @@ def format_value(resolved):
     return f"{value:.2f}"
 
 
-def describe(resolved, fraction=None):
+def describe(resolved, fraction=None, sign=None):
     """The derived line shown under the threshold controls, e.g.
     "⇒ |T| ≥ 5.27 at N=1000 (df=999), V=292,019 · p_unc ≤ 1.7e-7".
 
     :param fraction: optional fraction (0-1) of in-mask voxels that pass (:func:`fraction_connected`),
       appended as " · 63% of in-mask voxels".
+    :param sign: the display sign "pos" or "neg" (one tail shown): the quantity reads "T ≥ x" or "T ≤ -x" like the
+      legend, and ``fraction`` must be that tail's share (``fraction_connected(values, resolved, sign)``). Ignored
+      for "both"/None and for top-x% rules (they carry their own sign).
     """
+    if sign in ("pos", "neg") and resolved.rule.get("kind") != "top_pct" and math.isfinite(resolved.value):
+        line = describe(resolved, fraction)
+        quantity = f"|{resolved.statistic}| ≥ {format_value(resolved)}"
+        if quantity in line:
+            one_tail = f"{resolved.statistic} ≥ {format_value(resolved)}" if sign == "pos" else f"{resolved.statistic} ≤ -{format_value(resolved)}"
+            return line.replace(quantity, one_tail, 1)
+        return line
     suffix = "" if fraction is None or not math.isfinite(fraction) else f" · {_format_fraction(fraction)} of in-mask voxels"
     unknown_n = N_UNKNOWN_NOTE in resolved.notes
     at_n = "N unknown" if unknown_n else f"N={resolved.n}"
