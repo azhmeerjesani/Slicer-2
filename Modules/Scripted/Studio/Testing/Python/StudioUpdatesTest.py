@@ -1642,6 +1642,80 @@ fi
         self.assertEqual(dialog3.title.text, "Slicer Studio 1.3.0")
         self.assertIn("1.4.0", dialog3.text.text)
 
+    def test_UpdateNowAfterNewerReleaseReplacesRunningDownload(self):
+        """1.2.0 downloads, then a later check finds 1.3.0: Update now (Update to 1.3.0) stops the 1.2.0 download and
+        downloads, checks and prepares 1.3.0; it never prepares 1.2.0.
+        """
+        updates, install = self.updates, self.install
+        if updates.platformKey() != "linux-x86_64":
+            self.skipTest("the Linux package path is tested on Linux")
+        old = self._publish("1.2.0")
+        oldPath = "/" + old["assets"]["linux-x86_64"]["name"]
+        _Handler.stallPaths = {oldPath}  # the 1.2.0 download is still running when 1.3.0 is found
+        self.addCleanup(_Handler.stallRelease.set)
+        target = self._fakeLinuxInstall("0.9.0")
+        updates._installableOverride = True
+        updates.installTargetOverride = target
+        service = self._service()
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        dialog = service.updateNow()
+        self.assertEqual(dialog.state, "downloading")
+        oldJob = service.job
+        self.assertIsNotNone(oldJob)
+        self.assertTrue(self._waitFor(lambda: oldJob.progress[0] >= 100, 10), "the 1.2.0 download has started")
+        # A later check finds 1.3.0 while 1.2.0 downloads
+        new = self._publish("1.3.0")
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        self.assertEqual(service.status.version, "1.3.0")
+        dialog2 = service.updateNow()
+        self.assertIs(dialog2, dialog)
+        self.assertEqual(dialog2.title.text, "Slicer Studio 1.3.0")
+        self.assertTrue(oldJob.cancelled(), "the 1.2.0 download is stopped")
+        self.assertTrue(self._waitFor(lambda: service.job is not None and service.job is not oldJob, 15),
+                        "1.3.0 is downloaded once the 1.2.0 download has stopped")
+        self.assertEqual(service.job.version, "1.3.0")
+        self.assertTrue(self._waitFor(lambda: dialog2.state in ("ready", "failed"), 30), dialog2.state)
+        self.assertEqual(dialog2.state, "ready", dialog2.text.text)
+        self.assertIn("1.3.0", dialog2.text.text)
+        self.assertNotIn("1.2.0", dialog2.text.text)
+        self.assertEqual(service.prepared.version, "1.3.0")
+        self.assertEqual(install.linuxPackageVersion(service.prepared.staged), "1.3.0")
+        self.assertEqual(sorted(os.listdir(updates.downloadDirectory())), [new["assets"]["linux-x86_64"]["name"]],
+                         "the partial 1.2.0 download is removed")
+        self.assertEqual(install.linuxPackageVersion(target), "0.9.0", "nothing installed before the restart")
+        # Update now again for the same version only shows the dialog (no new download)
+        self.assertIs(service.updateNow(), dialog2)
+        self.assertIsNone(service.job)
+        self.assertEqual(dialog2.state, "ready")
+
+    def test_CancelWhileReplacingRunningDownloadStartsNothing(self):
+        """Cancel pressed while Update now stops an older download for a newer one: nothing is downloaded after it."""
+        updates = self.updates
+        if updates.platformKey() != "linux-x86_64":
+            self.skipTest("the Linux package path is tested on Linux")
+        old = self._publish("1.2.0")
+        _Handler.stallPaths = {"/" + old["assets"]["linux-x86_64"]["name"]}
+        self.addCleanup(_Handler.stallRelease.set)
+        target = self._fakeLinuxInstall("0.9.0")
+        updates._installableOverride = True
+        updates.installTargetOverride = target
+        service = self._service()
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        dialog = service.updateNow()
+        oldJob = service.job
+        self._publish("1.3.0")
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        service.updateNow()
+        self.assertEqual(dialog.state, "downloading")
+        dialog.secondaryButton.click()  # Cancel
+        self.assertTrue(self._waitFor(lambda: dialog.state != "downloading", 15), dialog.state)
+        self._pump(0.5)
+        self.assertIsNone(service.job, "no download starts after Cancel")
+        self.assertIsNone(service.prepared)
+        self.assertTrue(oldJob.cancelled())
+        self.assertEqual(dialog.state, "failed")
+        self.assertIn("cancelled", dialog.text.text)
+
     def _prepareStaged(self, target):
         """A prepared update as the service leaves it: the staged copy next to the installation and the package in the
         download folder (nothing is installed).

@@ -1660,7 +1660,10 @@ class UpdateService:
         else:
             self.updateDialog.setParentWindow(parent)
         self.updateDialog.show()
-        if self.job is None and self.prepared is None:
+        if self.job is not None and getattr(self.job, "version", status.version) != status.version:
+            # A later check found another version while an older one downloads: stop that download and get this one
+            self.updateDialog.replaceJob()
+        elif self.job is None and self.prepared is None:
             self.updateDialog.begin()
         elif stale and self.job is None:
             # Its install helper already runs (administrator rights given): it cannot be taken back, so say so
@@ -1833,6 +1836,8 @@ class UpdateService:
 
         job = self.job = _Task(run, done)
         job.phase = "download"
+        #: The version this job downloads: Update now compares it with the version a later check found
+        job.version = manifest.version
         return job.start()
 
     def installOnQuit(self, relaunch=True):
@@ -2424,6 +2429,8 @@ class UpdateDialog:
         self.state = "idle"
         #: The user pressed Cancel during the download: its end is then not announced
         self._cancelRequested = False
+        #: Update now named a newer version while an older one downloads: the stopped job is followed by a new download
+        self._replaceRequested = False
         #: Open (shown and not closed by the user), also while hidden along with its parent window
         self.wanted = False
         #: Classic: the message that says how a download ended after the dialog was closed (Studio uses a toast)
@@ -2513,6 +2520,7 @@ class UpdateDialog:
             self._setState("unavailable", reason)
             return
         self._cancelRequested = False
+        self._replaceRequested = False
         try:
             self.task = self.service.startJob(self._onJobDone)
         except updates_install.InstallError as error:
@@ -2548,8 +2556,35 @@ class UpdateDialog:
             self.progress.setValue(int(received * 1000 / total))
             self._setText(_progressText(received, total))
 
+    def replaceJob(self):
+        """A later check found another version while this dialog downloads an older one: stop that download, then
+        download, check and prepare the version found (``_onJobDone()`` starts it once the stopped job has ended).
+        """
+        task = self.task
+        if task is None or task is not self.service.job:
+            if self.service.job is not None:
+                # Not this dialog's job (cannot happen in the application): stop it, it is not offered any more
+                self.service.job.cancel()
+                return
+            self.begin()
+            return
+        status = self.service.status
+        oldVersion = getattr(task, "version", "?")
+        if status is not None:
+            self.title.setText(_("Slicer Studio {version}").format(version=status.version))
+        self._replaceRequested = True
+        self._cancelRequested = False
+        task.cancel()
+        self._setState("downloading", _("Stopping the download of Slicer Studio {version}…").format(version=oldVersion))
+        self.progress.setRange(0, 0)
+
     def _onJobDone(self, prepared, error):
         self.task = None
+        if self._replaceRequested:
+            # The stopped download of an older version ended (its files are removed): download the version found
+            self._replaceRequested = False
+            self.begin()
+            return
         if error is not None:
             manual = getattr(error, "manualSteps", None)
             self._setState("failed", sentence(error) + (" " + manual if manual else "") + " " + _("Slicer Studio was not changed."))
@@ -2644,6 +2679,7 @@ class UpdateDialog:
             if self.task is not None:
                 # The job stops at its next check (the preparation removes what it extracted)
                 self._cancelRequested = True
+                self._replaceRequested = False
                 self.task.cancel()
                 self.secondaryButton.setEnabled(False)
                 self._setText(_("Cancelling…"))
