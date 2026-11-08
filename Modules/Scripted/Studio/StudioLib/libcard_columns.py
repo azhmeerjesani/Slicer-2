@@ -735,21 +735,28 @@ def levelLabel(level, description):
 
 
 class _CaseEscFilter(qt.QObject):
-    """Event filter of a Case field's line edit: Esc with unsent edits puts the stored value back (the shell leaves Esc to a
+    """Event filter of a Case field: Esc with unsent edits puts the stored value back (the shell leaves Esc to a
     modified line edit); without unsent edits the key goes on to the Esc ladder of the shell.
+
+    ``field`` is the widget that takes the focus: the line edit, or the editable combo box. A combo box keeps the focus
+    itself (its line edit has it as focus proxy) and passes key events to the line edit by calling its event() directly,
+    so a filter on the line edit alone never sees Esc there and the shell took the field for a closed combo box: it
+    moved the focus out, and that focus-out wrote the typed value (BB-1).
     """
 
-    def __init__(self, lineEdit, stored):
-        qt.QObject.__init__(self, lineEdit)
+    def __init__(self, field, lineEdit, stored, restore):
+        qt.QObject.__init__(self, field)
+        self._field = field
         self._edit = lineEdit
-        self._stored = stored
+        self._stored = stored  # the text the field shows for the stored value
+        self._restore = restore  # shows the stored value again
 
     def eventFilter(self, obj, event):
         eventType = event.type()
         if eventType in (qt.QEvent.ShortcutOverride, qt.QEvent.KeyPress) and event.key() == qt.Qt.Key_Escape:
-            if self._edit.hasFocus() and str(self._edit.text) != self._stored():
+            if (self._field.hasFocus() or self._edit.hasFocus()) and str(self._edit.text) != self._stored():
                 if eventType == qt.QEvent.KeyPress:
-                    self._edit.setText(self._stored())
+                    self._restore()
                     self._edit.setModified(False)
                     self._edit.selectAll()
                 event.accept()
@@ -868,7 +875,7 @@ class CaseSection:
                 combo.setEditable(True)
                 combo.lineEdit().setPlaceholderText("—")
                 combo.lineEdit().connect("editingFinished()", lambda column=column, combo=combo: self._commitCombo(column, combo, typed=True))
-                self._escFilter(column, combo.lineEdit())
+                self._escFilter(column, combo)
             combo.connect("activated(int)", lambda index, column=column, combo=combo: self._commitCombo(column, combo))
             return combo
         edit = qt.QLineEdit()
@@ -881,10 +888,41 @@ class CaseSection:
             edit.connect("textChanged(QString)", lambda text: self._updateDoiButton())
         return edit
 
-    def _escFilter(self, column, lineEdit):
-        """Esc in a field with unsent edits gives them up (USABILITY 3 rung 0), so the next focus-out writes nothing."""
-        escFilter = _CaseEscFilter(lineEdit, lambda: self._storedText(column))
-        lineEdit.installEventFilter(escFilter)
+    def _escFilter(self, column, field):
+        """Esc in a field with unsent edits gives them up (USABILITY 3 rung 0), so the next focus-out writes nothing.
+
+        ``field`` is a line edit or an editable combo box; for a combo box the filter watches the combo box (which has
+        the focus and gets the keys) and its line edit.
+        """
+        if hasattr(field, "itemData"):
+            lineEdit = field.lineEdit()
+            escFilter = _CaseEscFilter(field, lineEdit, lambda: self._comboText(column, field), lambda: self._restoreCombo(column, field))
+            field.installEventFilter(escFilter)
+            lineEdit.installEventFilter(escFilter)
+            return
+        escFilter = _CaseEscFilter(field, field, lambda: self._storedText(column), lambda: field.setText(self._storedText(column)))
+        field.installEventFilter(escFilter)
+
+    def _comboText(self, column, combo):
+        """The text an editable combo box shows for the stored value: the label of its level ("Male" for "M")."""
+        text = self._storedText(column)
+        index = combo.findData(text) if text else 0
+        return str(combo.itemText(index)) if index >= 0 else text
+
+    def _restoreCombo(self, column, combo):
+        text = self._storedText(column)
+        index = combo.findData(text) if text else 0
+        wasLoading = self._loading
+        self._loading = True
+        try:
+            if index >= 0:
+                combo.setCurrentIndex(index)
+                combo.setEditText(combo.itemText(index))
+            else:
+                combo.setCurrentIndex(0)
+                combo.setEditText(text)
+        finally:
+            self._loading = wasLoading
 
     def _storedText(self, column):
         session = _session()

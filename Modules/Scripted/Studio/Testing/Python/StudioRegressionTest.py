@@ -4730,6 +4730,68 @@ class StudioRegressionTest(unittest.TestCase):
             if host is not None:
                 host.deleteLater()
 
+    def test_48c_case_combo_field_esc_gives_up_the_typed_value(self):
+        """Esc in an editable choice field of the Case section (Sex, Image quality) kept the typed value, and the shell
+        moved the focus out, which wrote it to participants.tsv (BB-1): the combo box has the focus and passes keys to
+        its line edit directly, so the filter on the line edit never saw Esc. Esc now puts the stored level back.
+        """
+        from StudioLib import libcard_columns, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        study = self._study([("sub-01", {}, False), ("sub-02", {}, False)])
+        host = None
+        try:
+            session = study_ui.openStudy(study.path, showLibrary=False)
+            self.assertIsNotNone(session)
+            host = qt.QWidget()
+            hostLayout = qt.QVBoxLayout(host)
+            sectionWidget = libcard_columns._createSection(session)
+            section = libcard_columns._sections[sectionWidget]
+            hostLayout.addWidget(sectionWidget)
+            host.resize(306, 900)
+            host.show()
+            section.refresh("sub-02")
+            for button, _container, _columns in section.groups.values():
+                if not button.isChecked():
+                    button.click()
+            slicer.app.processEvents()
+            self.assertTrue(section.setField("sex", "M"))
+            self.assertTrue(section.setField("image_quality", "2"))
+            section.refresh("sub-02")
+
+            def press(widget, eventType):
+                event = qt.QKeyEvent(eventType, qt.Qt.Key_Escape, qt.Qt.NoModifier)
+                qt.QApplication.sendEvent(widget, event)
+                return event.isAccepted()
+
+            host.activateWindow()
+            host.raise_()
+            for column, stored, typed in (("sex", "M", "Female"), ("image_quality", "2", "3")):
+                combo = section.editors[column]
+                self.assertTrue(combo.isEditable(), column)
+                shown = str(combo.currentText)
+                combo.setFocus(qt.Qt.OtherFocusReason)
+                for _ in range(10):
+                    slicer.app.processEvents()
+                if not combo.hasFocus():
+                    self.skipTest("the window cannot take the keyboard focus here")
+                self.assertFalse(press(combo, qt.QEvent.ShortcutOverride), f"{column}: without unsent edits Esc goes on to the shell")
+                combo.setEditText(typed)
+                combo.lineEdit().setModified(True)
+                # The keys go to the combo box, which has the focus (its line edit has it as focus proxy)
+                self.assertTrue(press(combo, qt.QEvent.ShortcutOverride), f"{column}: Esc with unsent edits stays with the field")
+                self.assertTrue(press(combo, qt.QEvent.KeyPress))
+                self.assertEqual(str(combo.currentText), shown, f"{column}: Esc puts the stored level back")
+                self.assertEqual(combo.itemData(combo.currentIndex), stored)
+                self.assertFalse(press(combo, qt.QEvent.ShortcutOverride), f"{column}: after Esc the next Esc goes on to the shell")
+                combo.clearFocus()
+                slicer.app.processEvents()
+                self.assertEqual(str(session.study.subject("sub-02")[column]), stored, f"{column}: the abandoned value is not written")
+        finally:
+            if host is not None:
+                host.deleteLater()
+
     def test_48_case_doi_field_is_as_wide_as_the_other_source_fields(self):
         """The Case section's DOI field was 53 px wide in a 137 px field: the flat "Open" button next to it keeps a minimum
         width of about 80 px, so no DOI could be read (BB-1). The edit now has the width of the other fields and the link
