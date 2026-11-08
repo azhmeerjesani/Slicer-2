@@ -1643,39 +1643,53 @@ def exportSegmentation(node, path, mode=SEGMENTATION_LABELMAP, reference=None, o
     return runJobs([Job(node, KIND_SEGMENTATION, path, {"mode": mode, "reference": referenceId})], overwrite=overwrite)
 
 
+def _readmeDescription(sidecar):
+    """"<kind>, <space>, code <n>[, segment <name>]" from the .json sidecar of an image ("" without one)."""
+    try:
+        with open(sidecar, encoding="utf-8") as f:
+            content = json.load(f)
+        description = f"{content.get('Kind', '')}, {content.get('Space', '')}, code {content.get('SformCode', '')}"
+        if content.get("Segment"):
+            description += f", segment {content['Segment']}"
+        return description
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
 def writeReadme(path, jobs, result, title):
     """README.txt of a project export: what each file is, its space and codes, and how to use the files."""
     lines = [title, "=" * len(title), "", _("Written by {version} on {date}.").format(version=studioVersion(), date=_nowIso()), "",
              _("Every image is a NIfTI-1 file whose affine (sform = qform) is 3D Slicer's IJK to RAS matrix: FSL, SPM, AFNI, nibabel"),
              _("and official 3D Slicer show left and right as Slicer Studio shows them. Each image has a .json sidecar."),
              _("sform/qform codes: 4 = MNI152 (a template grid), 2 = aligned (a transform was applied), 1 = scanner."), "", _("Files:")]
+    folder = os.path.dirname(path) or "."
+    # Images that the README being replaced lists (written by an earlier export) and that this export did not write
+    # again because it was stopped or failed: they stay listed as files of an export (a line "- <name>: ..."), so that
+    # a later export still removes them when they are no longer part of the project (``earlierExportFiles``)
+    earlierNames = readmeImages(path)
     written = set(result.images)
+    writtenNames = {os.path.basename(image) for image in written}
     for job in jobs:
         for image in job.images():
             if image not in written:
                 continue
-            name = os.path.basename(image)
-            sidecar = sidecarPath(image)
-            description = ""
-            try:
-                with open(sidecar, encoding="utf-8") as f:
-                    content = json.load(f)
-                description = f"{content.get('Kind', '')}, {content.get('Space', '')}, code {content.get('SformCode', '')}"
-                if content.get("Segment"):
-                    description += f", segment {content['Segment']}"
-            except (OSError, ValueError):
-                pass
-            lines.append(f"- {name}: {job.nodeName} ({description})")
+            lines.append(f"- {os.path.basename(image)}: {job.nodeName} ({_readmeDescription(sidecarPath(image))})")
+    carried = [name for name in earlierNames
+               if name not in writtenNames and os.path.isfile(os.path.join(folder, name))
+               and _writtenByStudio(sidecarPath(os.path.join(folder, name)))]
+    if carried:
+        lines += ["", _("Written by an earlier export and not written again by this one:")]
+        lines += [f"- {name}: {_('earlier export')} ({_readmeDescription(sidecarPath(os.path.join(folder, name)))})" for name in carried]
     if result.notes:
         lines += ["", _("Notes:")] + [f"- {note}" for note in result.notes]
     if result.errors:
         lines += ["", _("Not exported:")] + [f"- {error}" for error in result.errors]
-    # Any other image in the folder (put there by hand, or left by an export that was stopped) is named, so that the
-    # README describes the whole folder; these lines have no ": ", so a later export does not take them for its own files
-    writtenNames = {os.path.basename(image) for image in written}
+    # Any other image in the folder (put there by hand) is named, so that the README describes the whole folder; these
+    # lines have no ": ", so a later export does not take them for its own files
+    listed = writtenNames | set(carried)
     try:
-        others = sorted(name for name in os.listdir(os.path.dirname(path) or ".")
-                        if splitExtension(name)[1] and name not in writtenNames and os.path.isfile(os.path.join(os.path.dirname(path), name)))
+        others = sorted(name for name in os.listdir(folder)
+                        if splitExtension(name)[1] and name not in listed and os.path.isfile(os.path.join(folder, name)))
     except OSError:
         others = []
     if others:

@@ -1781,6 +1781,57 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertNotIn("1 files", notice)
         self.assertTrue(os.path.isdir(folder))
 
+    def test_09ab_stopped_reexport_keeps_earlier_masks_removable(self):
+        """A project export that is stopped after the scan keeps the masks of the earlier export listed as Studio files, so
+        that a later export still removes the mask of a segment deleted in between (Exports/nifti matches the project).
+        """
+        from StudioLib import autosave_io, niftiexport_ui, projects
+
+        project = projects.createProject("NIfTI stopped re-export")
+        projects.setCurrentProject(project)
+        folder = self.export.projectExportFolder(create=True)
+        scan = self._phantom("sub-06_T1w", np.array([[-1.0, 0, 0, 10], [0, -1.0, 0, 10], [0, 0, 1.0, -10], [0, 0, 0, 1]]))
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions (sub-06_T1w)")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        mask = (slicer.util.arrayFromVolume(scan) > 0).astype(np.uint8)
+        for name in ("Lesion", "Edema", "Core"):
+            segmentId = segmentation.GetSegmentation().AddEmptySegment(name, name)
+            slicer.util.updateSegmentBinaryLabelmapFromArray(mask, segmentation, segmentId, scan)
+        edema = ["sub-06_label-Edema_desc-lesion_mask.json", "sub-06_label-Edema_desc-lesion_mask.nii.gz"]
+
+        def export(stop=False):
+            dialog = niftiexport_ui.exportProjectDialog(show=False, executor=autosave_io.InlineExecutor(), mapOptions={})
+            try:
+                stale = sorted(os.path.basename(path) for path in dialog._stale)
+                runner = dialog.export(confirm=lambda files: True)
+                if stop:
+                    runner.cancel()
+                self.assertTrue(runner.wait(60))
+            finally:
+                dialog.close()
+            return runner, stale
+
+        export()
+        self.assertTrue(all(os.path.exists(os.path.join(folder, name)) for name in edema))
+        runner, _stale = export(stop=True)
+        self.assertTrue(runner.cancelled)
+        self.assertEqual([os.path.basename(path) for path in runner.result.images], ["sub-06_T1w.nii.gz"])
+        readmePath = os.path.join(folder, "README.txt")
+        with open(readmePath, encoding="utf-8") as f:
+            readme = f.read()
+        self.assertNotIn("not written by this export", readme, "the masks of the earlier export are not files the user put there")
+        self.assertIn("sub-06_label-Edema_desc-lesion_mask.nii.gz", self.export.readmeImages(readmePath))
+        # Delete Edema: the next export names its mask among the files of an earlier export and removes it
+        segmentation.GetSegmentation().RemoveSegment(segmentation.GetSegmentation().GetSegmentIdBySegmentName("Edema"))
+        runner, stale = export()
+        self.assertEqual(stale, edema)
+        self.assertEqual(sorted(os.path.basename(path) for path in runner.result.removed), edema)
+        names = os.listdir(folder)
+        self.assertFalse(any("Edema" in name for name in names))
+        self.assertIn("sub-06_label-Core_desc-lesion_mask.nii.gz", names)
+        self._assertNoAbsolutePaths(project.path)
+
     def test_10_entry_points(self):
         """Library's Open now ⋯, Draw's lesion ⋯ and Search list the exports; a figure is not exportable."""
         from StudioLib import draw, library, niftiexport_ui
