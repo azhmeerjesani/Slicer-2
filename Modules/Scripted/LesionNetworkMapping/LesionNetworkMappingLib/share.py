@@ -679,7 +679,7 @@ def _cell(value):
 
 
 def _tsv(columns, rows):
-    """TSV text; a cell that starts with a double quote is quoted (inner quotes doubled) so that pandas, R and the csv module read it back as written."""
+    """TSV text that official 3D Slicer, pandas, R and the csv module read alike (``study._tsv_field``: typographic quotes, quoted tabs)."""
     lines = ["\t".join(_tsv_field(column) for column in columns)]
     for row in rows:
         lines.append("\t".join(_tsv_field(_cell(row.get(column, NA))) for column in columns))

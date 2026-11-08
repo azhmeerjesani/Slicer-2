@@ -161,24 +161,26 @@ class ExclusionTest(ShareTestBase):
             self.assertEqual(item["status"], "ok", item)
 
     def test_cells_that_start_with_a_quote_read_back_as_written(self):
-        """A citation or title that starts with a double quote is quoted in participants.tsv and sources/records.tsv, so that
-        pandas, R and the csv module (which treat a leading quote as an opening quote) read the same text back.
+        """A citation or title with double quotes is written with typographic quotes in participants.tsv and
+        sources/records.tsv, so that official 3D Slicer (which takes every straight quote as a string delimiter),
+        pandas, R and the csv module all read the same text back.
         """
         citation = '"Pure alexia" after stroke, Smith et al. 2019'
         title = '"Pure alexia" without agraphia: a case report'
+        typographic = {citation: "\u201cPure alexia\u201d after stroke, Smith et al. 2019", title: "\u201cPure alexia\u201d without agraphia: a case report"}
         self.study.set("sub-02", citation=citation)
         self.study.save()
         with open(os.path.join(self.root, "sources", "records.tsv"), "w", encoding="utf-8") as f:
             f.write("record_id\tdoi\ttitle\tyear\nR1\t10.1/xyz\t" + '"' + title.replace('"', '""') + '"' + "\t2019\n")
         self.study = Study.open(self.root)
-        self.assertEqual(self.study.subject("sub-02")["citation"], citation)
+        self.assertEqual(self.study.subject("sub-02")["citation"], typographic[citation])
         result, out = self.export("quotes", columns=["citation"])
         for path, column, expected in (("participants.tsv", "citation", citation), ("sources/records.tsv", "title", title)):
             with open(os.path.join(out, *path.split("/")), encoding="utf-8", newline="") as f:
                 text = f.read()
-            self.assertIn('"' + expected.replace('"', '""') + '"', text, path)
+            self.assertNotIn('"', text, path)
             rows = list(csv.DictReader(io.StringIO(text), delimiter="\t"))  # the usual quoting rules, as pandas
-            self.assertIn(expected, [row[column] for row in rows], path)
+            self.assertIn(typographic[expected], [row[column] for row in rows], path)
         self.assertEqual(result["validation"], {})
 
     def test_default_columns_leave_out_free_text_names_and_dates(self):

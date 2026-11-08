@@ -247,13 +247,15 @@ class StudyTest(unittest.TestCase):
         self.assertEqual([opened.subject(sid)["notes"] for sid in opened.subject_ids], expected)
         self.assertEqual([opened.subject(sid)["mRS"] for sid in opened.subject_ids], ["0", "1", "2", "3"])
 
-        # The same edit made while the study is open is merged by the next save
+        # The same edit made while the study is open is merged by the next save, which writes
+        # typographic quotes (official 3D Slicer misreads straight ones) and holds what it wrote
         created.set("sub-01", rater="AB")
         rewrite(folder, notes)
         created.save()
         self.assertEqual([created.subject(sid)["mRS"] for sid in created.subject_ids], ["0", "1", "2", "3"])
         self.assertEqual(created.subject("sub-01")["rater"], "AB")
-        self.assertEqual(created.subject("sub-04")["notes"], '"large" infarct')
+        self.assertEqual(created.subject("sub-04")["notes"], "\u201clarge\u201d infarct")
+        expected = ["left MCA second line", "tab here", "size 2\u201d lesion", "\u201clarge\u201d infarct"]
 
         # What Studio writes stays one row per line and reads back the same in Studio and in a CSV reader
         reopened = Study.open(folder)
@@ -271,6 +273,51 @@ class StudyTest(unittest.TestCase):
         old = Study.open(folder)
         self.assertEqual([(row["participant_id"], row["notes"], row["group"]) for row in old.subjects],
                          [("sub-01", '"unclosed note', "case"), ("sub-02", 'size 2"', "control"), ("sub-03", '"a" b', "n/a")])
+
+    def test_quotes_typed_in_cells_read_alike_in_official_slicer(self):
+        """Straight double quotes in cells are written as typographic quotes in participants.tsv and
+        supplementary_lesions.tsv, so that official 3D Slicer (VTK's delimited text reader, which takes every
+        straight quote as a string delimiter and knows no escaped quote) reads every cell as Studio does.
+        """
+        try:
+            import mrml
+        except ImportError:
+            mrml = None
+        from LesionNetworkMappingLib import export
+
+        typed = {"sub-01": 'Müller "et al." 2020', "sub-02": 'a"quote', "sub-03": 'lesion 5" wide', "sub-04": '"Pure alexia" (Smith, "2019")'}
+        shown = {"sub-01": "Müller \u201cet al.\u201d 2020", "sub-02": "a\u201dquote", "sub-03": "lesion 5\u201d wide",
+                 "sub-04": "\u201cPure alexia\u201d (Smith, \u201c2019\u201d)"}
+        self.assertEqual(study.typographic_quotes("plain text"), "plain text")
+        folder = self.path("quotes")
+        created = Study.create(folder)
+        for sid, text in typed.items():
+            created.add_subject(sid, citation=text, notes=text, rater="AB")
+        self.assertEqual({sid: created.subject(sid)["citation"] for sid in typed}, shown)  # held as written
+        created.save()
+        tables = [os.path.join(folder, study.PARTICIPANTS_TSV), export.supplementary_lesions_tsv(created, self.path("supplementary_lesions.tsv"))]
+        for path in tables:
+            with open(path, encoding="utf-8") as f:
+                self.assertNotIn('"', f.read(), path)
+            columns, rows = study.read_tsv(path)
+            self.assertEqual({row["participant_id"]: row["citation"] for row in rows}, shown, path)
+            if mrml is None:
+                continue
+            # What official 3D Slicer's table reader makes of the file: the same columns and cells
+            scene = mrml.vtkMRMLScene()
+            storage = mrml.vtkMRMLTableStorageNode()
+            table = mrml.vtkMRMLTableNode()
+            scene.AddNode(storage)
+            scene.AddNode(table)
+            storage.SetFileName(path)
+            self.assertTrue(storage.ReadData(table), path)
+            vtable = table.GetTable()
+            read = [vtable.GetColumn(index).GetName() for index in range(vtable.GetNumberOfColumns())]
+            self.assertEqual(read, columns, path)
+            for number, row in enumerate(rows):
+                self.assertEqual([vtable.GetValue(number, index).ToString() for index in range(len(columns))],
+                                 [row[column] for column in columns], path)
+        self.assertEqual({row["participant_id"]: row["notes"] for row in Study.open(folder).subjects}, shown)
 
     def test_tsv_import_export(self):
         created = Study.create(self.path("s"))

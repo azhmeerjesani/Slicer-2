@@ -323,9 +323,39 @@ def write_tsv(path, columns, rows):
     _write_text_atomic(path, _tsv_text(columns, rows))
 
 
+#: Characters that open a quotation: a straight double quote after one of them (or at the start) becomes an opening quote
+_OPENING_CONTEXT = "([{<\u2018\u201c-\u2013\u2014/"
+
+
+def typographic_quotes(text):
+    """``text`` with each straight double quote (") replaced by a typographic one (“ or ”).
+
+    Official 3D Slicer reads tables with VTK's delimited text reader, which takes every straight double
+    quote as the start or end of a quoted string and knows no escaped quote: "Müller "et al." 2020"
+    comes back as "et al. 2020", and an odd number of quotes merges the rest of the row into one cell.
+    No spelling of a straight quote reads the same there and in BIDS tools (pandas, R, the csv module),
+    so Studio writes the typographic quote, which all of them keep as it is. A quote at the start or
+    after a space or an opening bracket opens (“), any other closes (” also serves as an inch mark).
+    """
+    if '"' not in text:
+        return text
+    out = []
+    for index, char in enumerate(text):
+        if char == '"':
+            before = text[index - 1] if index else ""
+            char = "“" if not before or before.isspace() or before in _OPENING_CONTEXT else "”"
+        out.append(char)
+    return "".join(out)
+
+
 def _tsv_field(text):
-    """A TSV cell: in double quotes (inner quotes doubled) when a reader would otherwise take it apart."""
-    if text.startswith('"') or "\t" in text or "\n" in text or "\r" in text:
+    """A TSV cell that official 3D Slicer and BIDS tools read alike.
+
+    Straight double quotes become typographic ones (:func:`typographic_quotes`); a cell with a tab or a
+    line break is put in double quotes (both readers keep it whole then).
+    """
+    text = typographic_quotes(text)
+    if "\t" in text or "\n" in text or "\r" in text:
         return '"' + text.replace('"', '""') + '"'
     return text
 
@@ -677,6 +707,10 @@ class Study:
         # The baseline is the digest of the text written (not of the file afterwards), so that a file
         # replaced by a lockless writer right after this write is still merged by the next save
         digests = dict(self._digests)
+        for row in self._rows:  # memory holds what the file holds (_tsv_field writes typographic quotes)
+            for column, value in row.items():
+                if type(value) is str and '"' in value and column != "participant_id":  # ids index the rows
+                    row[column] = typographic_quotes(value)
         text = _tsv_text(self._columns, self._rows)
         _write_text_atomic(tsv_path, text)
         digests[PARTICIPANTS_TSV] = _digest(text)
@@ -985,7 +1019,7 @@ class Study:
         texts = {}
         warnings = []
         for column, value in updates.items():
-            text = format_value(value)
+            text = typographic_quotes(format_value(value))  # as written to participants.tsv (_tsv_field)
             texts[column], warning = _normalize(column, text)
             if warning:
                 warnings.append((sid, column, text, warning))

@@ -1154,7 +1154,7 @@ class CaseSection:
         if column in library._hiddenColumns(session.study):
             return False  # a blinded field is not shown, so it is not written either
         current = session.study.subject(self.sid).get(column)
-        text = str(text).strip()
+        text = _lnm("study").typographic_quotes(str(text).strip())  # as Study.set stores it, so an unchanged field is not rewritten
         if column == "doi" and doiOf(text):
             text = doiOf(text)  # "doi:10.1000/x" and the doi.org address are stored as the bare DOI
         if text == ("" if _missing(current) else str(current)):

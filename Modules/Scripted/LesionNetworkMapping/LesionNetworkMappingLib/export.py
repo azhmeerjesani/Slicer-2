@@ -1186,7 +1186,7 @@ def supplementary_lesions_tsv(study, out, order=None):
       in participants.tsv, and repeats, are skipped.
     :return: the TSV path.
     """
-    from .study import Study, is_missing
+    from .study import Study, is_missing, typographic_quotes
 
     if not hasattr(study, "subjects"):
         study = Study.open(study)
@@ -1200,7 +1200,7 @@ def supplementary_lesions_tsv(study, out, order=None):
         for column in columns:
             text = row.get(column)
             if not is_missing(text) and str(text).strip():
-                return str(text).replace("\t", " ").replace("\n", " ")
+                return typographic_quotes(str(text).replace("\t", " ").replace("\n", " "))  # official Slicer misreads straight quotes
         return NOT_RECORDED
 
     lines = ["\t".join(SUPPLEMENTARY_COLUMNS)]
