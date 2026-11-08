@@ -2,7 +2,8 @@
 
 Both are *states* of Draw, like review (``StudioLib.review``), not workspaces. Each has an inspector notice ("where am
 I", with **Exit**), a footer in place of "Done → next" (Ctrl+Enter), and ends at the end of its queue, on Exit, when
-Draw is left or when a subject outside the queue is opened (Alt+←/→, the switcher). The decisions are kept.
+Draw is left or when a subject outside the queue is opened (the switcher). Alt+←/→ step through the pass (L-45: they
+follow the active queue), without wrapping. The decisions are kept.
 
 **Second tracing** (``startSecondTracing()``; Library "Second tracing N →", Search, the case strip's "Second tracing"
 queue): the subjects assigned a second tracing (``LesionNetworkMappingLib.agreement.assign``) open one by one *blind*:
@@ -347,6 +348,34 @@ class _AgreementState:
         self.install()
         _autosaveSoon(self.title())
         return True
+
+    def stepTarget(self, delta):
+        """The subject Alt+→ (``delta`` 1) or Alt+← (-1) opens in this pass: the next or previous subject of its order that is
+        still to do, without wrapping (None at the ends).
+        """
+        remaining = self.remaining()
+        if self.current in self.sids:
+            index = self.sids.index(self.current) + delta
+        else:
+            index = 0 if delta > 0 else len(self.sids) - 1
+        while 0 <= index < len(self.sids):
+            if self.sids[index] != self.current and self.sids[index] in remaining:
+                return self.sids[index]
+            index += delta
+        return None
+
+    def step(self, delta):
+        """Alt+←/→ while this state is active (``StudySession.next()``/``previous()``): they follow this pass (L-45), so
+        that a blind second tracing never opens a subject of the table (and its first tracing) by accident. Work in
+        progress is kept, as with Skip. Return the subject opened, or None.
+        """
+        target = self.stepTarget(delta)
+        if target is None:
+            text = _("Last case in {queue}") if delta > 0 else _("First case in {queue}")
+            _toast(text.format(queue=self.title()), ms=2000)
+            return None
+        self.saveQuietly()
+        return target if self.open(target) else None
 
     def openNext(self, message):
         following = self.following()

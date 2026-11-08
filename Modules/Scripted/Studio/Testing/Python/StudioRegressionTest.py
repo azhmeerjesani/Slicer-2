@@ -6926,3 +6926,106 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertNotIn("Traceback", output, output[-3000:])
         self.assertNotIn("exit abnormally", output, output[-3000:])
         self.assertEqual(process.returncode, 0, json.dumps(output[-3000:]))
+
+    def test_90_alt_arrows_follow_a_second_tracing_pass(self):
+        """Alt+←/→ during a blind second tracing step through the pass (L-45: they follow the active queue). The study
+        session has no subject during the pass, so they opened the first or last row of the table instead: the pass went
+        backwards or ended, and the next Alt+→ showed the first rater's tracing of a subject still assigned to the second
+        rater (BB-1).
+        """
+        from LesionNetworkMappingLib import agreement, geometry, nifti
+
+        from StudioLib import adjudicate, draw, review, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Second alt study")
+        os.makedirs(folder)
+        sids = ("sub-01", "sub-02", "sub-03")
+        scans = []
+        for sid in sids:
+            scans.append(os.path.join(folder, f"{sid}_T1w.nii.gz"))
+            nifti.write_nifti(scans[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        toasts = []
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: toasts.append(text)
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        originalAdjudicateToast = adjudicate._toast
+        adjudicate._toast = lambda text, ms=3000, **kwargs: toasts.append(text)
+        self.addCleanup(setattr, adjudicate, "_toast", originalAdjudicateToast)
+        self.addCleanup(review.setRaterName, review.storedRaterName())
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+
+        def pump():
+            for _ in range(6):
+                slicer.app.processEvents()
+
+        def paint(segmentationNode, volumeNode):
+            segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode)
+            array[20:23, 30:33, 20:23] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, volumeNode)
+            pump()
+
+        def firstTracingShown():
+            node = session.segmentationNode()
+            return node is not None and node.GetDisplayNode() is not None and node.GetDisplayNode().GetVisibility()
+
+        try:
+            session = study_ui.createStudy(scans, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            review.setRaterName("Alice")
+            for sid in sids:
+                session.open(sid, switchToDraw=False)
+                paint(session.segmentationNode(), session.volumeNode())
+                self.assertIsNotNone(session.done())
+                pump()
+            agreement.assign(session.study, sids=list(sids), rater="Bob", who="Alice")
+            session.flush()
+            review.setRaterName("Bob")
+            state = adjudicate.startSecondTracing(shell=studioShell)
+            self.assertIsNotNone(state)
+            pump()
+            self.assertEqual(state.current, "sub-01")
+
+            # Bob saves sub-01; the pass opens sub-02 blind
+            paint(state.segmentationNode(), slicer.mrmlScene.GetNodeByID(state._nodeIds[0]))
+            self.assertTrue(state.saveNext())
+            pump()
+            self.assertEqual(state.current, "sub-02")
+
+            # Alt+→ opens sub-03 in the same pass, never a subject of the table with Alice's tracing
+            draw.stepSubject(1, studioShell)
+            pump()
+            self.assertIs(adjudicate.state(), state, f"Alt+→ ended the pass: {toasts[-3:]}")
+            self.assertEqual(state.current, "sub-03")
+            self.assertIsNone(session.current(), "the study session opened a subject (and its first tracing)")
+            self.assertFalse(firstTracingShown())
+
+            # At the end of the pass Alt+→ stays (a toast); Alt+← goes back to sub-02, still blind
+            draw.stepSubject(1, studioShell)
+            pump()
+            self.assertIs(adjudicate.state(), state)
+            self.assertEqual(state.current, "sub-03")
+            self.assertIn("Last case in Second tracing", toasts)
+            draw.stepSubject(-1, studioShell)
+            pump()
+            self.assertIs(adjudicate.state(), state)
+            self.assertEqual(state.current, "sub-02")
+            self.assertIsNone(session.current())
+            self.assertFalse(firstTracingShown())
+            # sub-01 is saved: Alt+← does not open it (it is no longer in the pass)
+            draw.stepSubject(-1, studioShell)
+            pump()
+            self.assertIs(adjudicate.state(), state)
+            self.assertEqual(state.current, "sub-02")
+            self.assertTrue(adjudicate.secondTodo(session.study.subject("sub-02")))
+        finally:
+            if adjudicate.state() is not None:
+                adjudicate.state().exit(quiet=True, keepScene=True)
+            study_ui.closeStudy()
+            studioShell.dispose()
+            pump()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)

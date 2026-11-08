@@ -4169,6 +4169,12 @@ class StudySession:
             self._swallowNext = False
             return self._current
         self._swallowNext = False
+        if status is None and queue is None:
+            # Alt+←/→ in a second tracing or an adjudication follow that pass: the session has no subject then (L-44)
+            adjudicate = sys.modules.get("StudioLib.adjudicate")
+            agreement = adjudicate.state() if adjudicate is not None else None
+            if agreement is not None and agreement.session is self:
+                return agreement.step(delta)
         if status is None and queue is None and self._queue is not None:
             # Alt+←/→ follow the active trace queue (L-45)
             spec = self.queue()
