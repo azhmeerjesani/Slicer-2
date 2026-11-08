@@ -37,6 +37,7 @@ import json
 import os
 import re
 import unicodedata
+import urllib.parse
 from xml.sax.saxutils import escape
 
 from . import study as study_module
@@ -65,7 +66,10 @@ LOOKUP_TIMEOUT_S = 10
 CROSSREF_URL = "https://api.crossref.org/works/"
 ESUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 
-_DOI = re.compile(r"10\.\d{4,9}/[^\s\"<>]+", re.IGNORECASE)
+#: A DOI in text. Its suffix stops at white space, quotes and angle brackets, except for a bracketed segment with a colon,
+#: such as the "<111::aid-jsc318>" of a SICI-style DOI (10.1002/(sici)1099-1697(199803/04)7:2<111::aid-jsc318>3.0.co;2-q),
+#: so that an HTML tag after a DOI is not taken into it.
+_DOI = re.compile(r"10\.\d{4,9}/(?:[^\s\"<>]|<[^\s\"<>]*:[^\s\"<>]*>)+", re.IGNORECASE)
 _PMID = re.compile(r"^\d{1,9}$")
 
 
@@ -91,11 +95,11 @@ def _blank(value):
 
 def normalize_doi(value):
     """The DOI of a text ("https://doi.org/10.1000/ABC.", "doi:10.1000/abc" and the like) in lower case, or ""."""
-    text = _clean(value)
+    text = re.sub(r"%3c", "<", re.sub(r"%3e", ">", _clean(value), flags=re.IGNORECASE), flags=re.IGNORECASE)
     match = _DOI.search(text)
     if not match:
         return ""
-    return match.group(0).rstrip(".,;)]}>\"'").lower()
+    return match.group(0).rstrip(".,;)]}\"'").lower()
 
 
 def normalize_pmid(value):
@@ -825,7 +829,7 @@ def lookup(doi="", pmid="", get=None):
     doi, pmid = normalize_doi(doi), normalize_pmid(pmid)
     try:
         if doi:
-            data = get(CROSSREF_URL + doi, None)
+            data = get(CROSSREF_URL + urllib.parse.quote(doi, safe="/:;()"), None)  # "<", ">" and "#" of a SICI DOI escaped
             message = data.get("message") if isinstance(data, dict) else None
             if not isinstance(message, dict):
                 raise SourcesError("Crossref sent no record for this DOI")

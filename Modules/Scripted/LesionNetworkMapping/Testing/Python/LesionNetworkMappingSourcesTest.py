@@ -306,6 +306,27 @@ class SourcesTest(unittest.TestCase):
 
     # Lookup (mocked)
 
+    def test_sici_dois_are_kept_whole(self):
+        """A SICI-style DOI holds "<...>": it is not cut there (the cut DOI is not found and merges different papers)."""
+        full = "10.1002/(sici)1099-1697(199803/04)7:2<111::aid-jsc318>3.0.co;2-q"
+        for text in (full, "https://doi.org/" + full, "doi:" + full.upper(), "https://doi.org/10.1002/(SICI)1099-1697(199803/04)7:2%3C111::AID-JSC318%3E3.0.CO;2-Q"):
+            self.assertEqual(sources.normalize_doi(text), full, text)
+        self.assertEqual(sources.normalize_doi('<a href="https://doi.org/10.1000/xyz">10.1000/xyz</a>'), "10.1000/xyz")  # a tag is not part of it
+        self.assertEqual([r["doi"] for r in sources.parse_identifiers(full + "\n")], [full])
+        calls = []
+
+        def get(url, params):
+            calls.append(url)
+            return LOOKUP_CROSSREF
+
+        self.assertEqual(sources.lookup(doi=full, get=get)["doi"], full)
+        self.assertEqual(calls, [sources.CROSSREF_URL + "10.1002/(sici)1099-1697(199803/04)7:2%3C111::aid-jsc318%3E3.0.co;2-q"])
+        records = sources.Records.open(self.study)
+        a = "10.1002/(sici)1099-1085(199805)12:6<821::aid-hyp668>3.0.co;2-y"
+        b = "10.1002/(sici)1099-1085(199805)12:6<835::aid-hyp657>3.0.co;2-p"
+        report = records.add([sources.draft(doi=a, title="Paper A on page 821"), sources.draft(doi=b, title="A different paper on page 835")])
+        self.assertEqual((len(report["added"]), report["merged"], [r["doi"] for r in records.rows]), (2, [], [a, b]))
+
     def test_lookup_crossref_and_esummary(self):
         calls = []
 
