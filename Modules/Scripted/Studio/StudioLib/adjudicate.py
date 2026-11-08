@@ -209,6 +209,19 @@ def _readOnlyText():
     return _("A and B are read-only: pick a result below, or Edit… to correct the union")
 
 
+def _saveFailureReason(session, error):
+    """The plain reason of an ``OSError`` from a save, with the first-tracing wording for a study folder that cannot be
+    written ("the study folder is read-only (Permission denied)"): never the error number or the absolute path. A
+    permission error also marks the session read-only (its notice is shown once; the top bar says so).
+    """
+    reason = _studyUi()._plainOSError(error)
+    if isinstance(error, PermissionError):
+        if hasattr(session, "_markReadOnly"):
+            session._markReadOnly()
+        return _("the study folder is read-only ({reason})").format(reason=reason)
+    return reason
+
+
 def _setReadOnly(segmentationNode, reason):
     """Show ``segmentationNode`` read-only in Draw while ``reason`` is set (``draw.READ_ONLY_ATTRIBUTE``), editable without."""
     draw = review._draw()
@@ -831,8 +844,12 @@ class SecondTracingState(_AgreementState):
         rules = _rules()
         try:
             result = rules.save_second_tracing(self.session.study, sid, mask[0], mask[1], self.reference, self.rater, extra=self._figureExtra(sid), final=final)
-        except (rules.AgreementError, ValueError, OSError) as e:
+        except (rules.AgreementError, ValueError) as e:
             _toast(str(e), ms=6000, level="warning")
+            return False
+        except OSError as e:
+            _toast(_("The second tracing of {sid} could not be saved: {reason}").format(sid=sid, reason=_saveFailureReason(self.session, e)),
+                   ms=6000, level="warning")
             return False
         self._stamp = _studyUi()._contentStamp(node)
         self._edited = False
@@ -1050,8 +1067,12 @@ class AdjudicationState(_AgreementState):
                 record = rules.adjudicate(studyObject, sid, choice, self.who, array_kji=mask[0], ijk_to_ras=mask[1])
             else:
                 record = rules.adjudicate(studyObject, sid, choice, self.who)
-        except (rules.AgreementError, ValueError, OSError) as e:
+        except (rules.AgreementError, ValueError) as e:
             _toast(str(e), ms=6000, level="warning")
+            return False
+        except OSError as e:
+            _toast(_("The consensus of {sid} could not be saved: {reason}").format(sid=sid, reason=_saveFailureReason(self.session, e)),
+                   ms=6000, level="warning")
             return False
         _afterConsensus(self.session, sid)
         self.finished.append(sid)

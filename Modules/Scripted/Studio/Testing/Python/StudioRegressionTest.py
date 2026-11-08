@@ -7014,6 +7014,102 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertNotIn("exit abnormally", output, output[-3000:])
         self.assertEqual(process.returncode, 0, json.dumps(output[-3000:]))
 
+    def test_91_second_tracing_in_a_read_only_study_is_refused_plainly(self):
+        """A blind second tracing in a study folder that cannot be written (BB-1): the journal timer slot returns False
+        (the journal folder rater-<label>/ cannot be made) and marks the session read-only instead of raising an uncaught
+        PermissionError, and Save second tracing says in plain words that the study folder is read-only (no errno, no
+        absolute path), keeps the strokes and returns False. Root ignores chmod, so the permission errors are injected.
+        """
+        from LesionNetworkMappingLib import agreement, geometry, nifti
+
+        from StudioLib import adjudicate, journal, review, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Read only second study")
+        os.makedirs(folder)
+        scan = os.path.join(folder, "sub-01_T1w.nii.gz")
+        nifti.write_nifti(scan, np.zeros(grid.shape, np.uint8), grid.affine)
+        toasts = []
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: toasts.append(str(text))
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        originalAdjudicateToast = adjudicate._toast
+        adjudicate._toast = lambda text, ms=3000, **kwargs: toasts.append(str(text))
+        self.addCleanup(setattr, adjudicate, "_toast", originalAdjudicateToast)
+        self.addCleanup(review.setRaterName, review.storedRaterName())
+        originalMakedirs = journal.os.makedirs
+        originalSave = agreement.save_second_tracing
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+
+        def pump():
+            for _ in range(6):
+                slicer.app.processEvents()
+
+        def paint(segmentationNode, volumeNode):
+            segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode)
+            array[20:23, 30:33, 20:23] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, volumeNode)
+            pump()
+            return segmentId
+
+        def denied(path, *args, **kwargs):
+            raise PermissionError(13, "Permission denied", str(path))
+
+        try:
+            session = study_ui.createStudy([scan], studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            review.setRaterName("Alice")
+            session.open("sub-01", switchToDraw=False)
+            paint(session.segmentationNode(), session.volumeNode())
+            self.assertIsNotNone(session.done())
+            pump()
+            agreement.assign(session.study, sids=["sub-01"], rater="Bob", who="Alice")
+            session.flush()
+            review.setRaterName("Bob")
+            state = adjudicate.startSecondTracing(sid="sub-01", shell=studioShell)
+            self.assertIsNotNone(state)
+            pump()
+            segmentationNode = state.segmentationNode()
+            volumeNode = slicer.mrmlScene.GetNodeByID(state._nodeIds[0])
+            segmentId = paint(segmentationNode, volumeNode)
+            secondJournal = state.journal()
+            self.assertIsNotNone(secondJournal)
+            self.assertFalse(session.readOnly)
+
+            # The journal timer slot: the folder rater-Bob/ cannot be made
+            journal.os.makedirs = denied
+            toasts.clear()
+            self.assertFalse(secondJournal.writeNow())  # raised PermissionError before the fix
+            self.assertTrue(session.readOnly)
+            self.assertTrue(any("read-only" in text for text in toasts), toasts)
+            self.assertFalse(secondJournal.writeNow(), "the second attempt is quiet too")
+
+            # Save second tracing: lesions/rater-Bob/ cannot be made
+            agreement.save_second_tracing = lambda *args, **kwargs: denied(os.path.join(folder, "lesions", "rater-Bob"))
+            toasts.clear()
+            self.assertFalse(state.save())
+            self.assertIs(adjudicate.state(), state)
+            self.assertEqual(len(toasts), 1, toasts)
+            self.assertIn("could not be saved: the study folder is read-only (Permission denied)", toasts[0])
+            self.assertNotIn("Errno", toasts[0])
+            self.assertNotIn(folder, toasts[0])
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode)
+            self.assertEqual(int(array.sum()), 27, "the strokes are kept")
+        finally:
+            journal.os.makedirs = originalMakedirs
+            agreement.save_second_tracing = originalSave
+            if adjudicate.state() is not None:
+                adjudicate.state().exit(quiet=True, keepScene=True)
+            study_ui.closeStudy()
+            studioShell.dispose()
+            pump()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
     def test_90_alt_arrows_follow_a_second_tracing_pass(self):
         """Alt+←/→ during a blind second tracing step through the pass (L-45: they follow the active queue). The study
         session has no subject during the pass, so they opened the first or last row of the table instead: the pass went

@@ -102,6 +102,7 @@ class Journal:
         self.segmentationNodeId = None
         self._generation = 0
         self._lastWriteTime = None
+        self._writeFailureSaid = False
         self._notice = None
         self._timer = qt.QTimer()
         self._timer.setSingleShot(True)
@@ -202,7 +203,17 @@ class Journal:
             mask, matrix = cropped
             dataIjk = np.ascontiguousarray(np.transpose(mask, (2, 1, 0))).astype(np.uint8)
         path = self.path(self.sid)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        except OSError as error:
+            # The journal folder cannot be made (a read-only study, a full disk): no journal, and no traceback from
+            # the timer slot either. A read-only study is announced once by the session (its first-tracing wording).
+            if isinstance(error, PermissionError) and hasattr(self.session, "_markReadOnly"):
+                self.session._markReadOnly()
+            if not self._writeFailureSaid:
+                self._writeFailureSaid = True
+                logging.warning(f"Studio: the study journal could not be written: {error}")
+            return False
         generation = self._generation
         _io().backgroundWriter().submit(writeJournalFile, path, dataIjk, np.array(matrix, dtype=float),
                                         onDone=lambda result: self._onWritten(generation, result),
