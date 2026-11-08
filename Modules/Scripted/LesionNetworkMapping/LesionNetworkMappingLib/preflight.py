@@ -1608,6 +1608,8 @@ def assert_run_outputs(run_json_or_outputs, expected_n, kind="map", reference_he
             if not finite.all():
                 failures.append(_failure("non_finite", f"{os.path.basename(path)} has {int(values.size - np.count_nonzero(finite))} non-finite values.", path, count=int(values.size - np.count_nonzero(finite))))
             elif (found["value_maps"] is None or path in found["value_maps"]) and (values.size == 0 or float(values.max()) == float(values.min())):
+                if n is not None and n < 2 and "_desc-T_" in os.path.basename(path) and values.size and not values.any():
+                    continue  # a T map needs 2 subjects: it is all zero at N=1 by design (no T threshold), not an error
                 owner = owners.get(os.path.normpath(path))
                 what = f"The map of {owner} ({os.path.basename(path)})" if owner else os.path.basename(path)
                 failures.append(_failure("constant_map", f"{what} has the same value everywhere (zero variance).", path))

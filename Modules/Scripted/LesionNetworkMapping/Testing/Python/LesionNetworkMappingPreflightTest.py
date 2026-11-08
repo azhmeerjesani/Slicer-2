@@ -735,6 +735,23 @@ class AssertRunOutputsTest(_Fixture):
         nifti.write_nifti(path, np.zeros_like(data), affine)
         self.assertEqual(self.codes(preflight.assert_run_outputs(folder, self.bundle.n_subjects, reference_header=self.bundle)), ["constant_map"])
 
+    def test_one_subject_t_map_is_not_a_constant_map_failure(self):
+        """At N=1 the T map is all zero by design (no T threshold): it must not fail the run; Fz and r still must vary."""
+        folder = os.path.join(self.tmp, "one subject")
+        os.makedirs(folder)
+        shape = (4, 4, 4)
+        varied = np.arange(64, dtype=np.float32).reshape(shape)
+        affine = np.eye(4)
+        paths = {}
+        for key, data in (("AvgR", varied), ("AvgRFz", varied * 0.5), ("T", np.zeros(shape, dtype=np.float32))):
+            paths[key] = os.path.join(folder, f"Lesion_conn-LocalN1_desc-{key}_funcmap.nii.gz")
+            nifti.write_nifti(paths[key], data, affine)
+        self.assertEqual(preflight.assert_run_outputs({"maps": list(paths.values()), "n": 1}, 1), [])
+        # With 2 subjects a constant T map is still an error, and so is a constant Fz map at N=1
+        self.assertEqual(self.codes(preflight.assert_run_outputs({"maps": list(paths.values()), "n": 2}, 2)), ["constant_map"])
+        nifti.write_nifti(paths["AvgRFz"], np.zeros(shape, dtype=np.float32), affine)
+        self.assertEqual(self.codes(preflight.assert_run_outputs({"maps": list(paths.values()), "n": 1}, 1)), ["constant_map"])
+
     def test_wrong_n(self):
         failures = preflight.assert_run_outputs(os.path.join(self.run_dir, "run.json"), 100)
         self.assertEqual(self.codes(failures), ["wrong_n"])
