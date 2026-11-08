@@ -31,6 +31,7 @@ per subject. Network maps are never shown in Draw.
 """
 
 import logging
+import math
 import os
 import re
 import traceback
@@ -622,7 +623,7 @@ class MapOverlay:
         window = float(state["window"] or 0.0)
         level = float(state.get("level") or 0.0)
         for tick, value in zip(self.tickLabels, (level - window, level, level + window), strict=True):
-            tick.setText(_tickText(value))
+            tick.setText(_tickText(value, window))
         self._paintBar()
         opacity = round(100 * float(state["opacity"]))
         self.chipLabels["network"].setText(_("Network {statistic} · {pct}%").format(statistic=statistic, pct=opacity))
@@ -766,12 +767,23 @@ class MapOverlay:
         self._moveToasts()
 
 
-def _tickText(value):
-    """A tick of the legend: "-12", "0", "12" (one decimal below 10)."""
+def _tickText(value, scale=None):
+    """A tick of the legend: "-12", "0", "12".
+
+    The decimals come from `scale` (the window of the map, default the value itself) so that all ticks
+    of one legend read alike: none from 10 up, one from 1 up, below 1 two significant digits of the scale
+    (a window of 0.0389 gives "-0.039", "0", "0.039").
+    """
     if abs(value) < 1e-9:
         return "0"
-    text = f"{value:.0f}" if abs(value) >= 10 else f"{value:.1f}"
-    return text.replace("-", "\u2212")
+    reference = abs(scale) if scale else abs(value)
+    if reference >= 10:
+        decimals = 0
+    elif reference >= 1:
+        decimals = 1
+    else:
+        decimals = min(6, math.ceil(-math.log10(reference)) + 1)
+    return f"{value:.{decimals}f}".replace("-", "\u2212")
 
 
 def _sliceWidgets():

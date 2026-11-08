@@ -1225,6 +1225,16 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
             widget._updateSteps()
             connectome.collapsed = False
 
+    def test_map_legend_ticks_readable_for_small_windows(self):
+        """The legend ticks keep enough decimals to show a window below 0.05 (a Debiased view reads -0.039, 0, 0.039)."""
+        from StudioLib import mappage
+
+        window = 0.0389
+        ticks = [mappage._tickText(v, window) for v in (-window, 0.0, window)]
+        self.assertEqual(ticks, ["\u22120.039", "0", "0.039"])
+        self.assertEqual([mappage._tickText(v, 5.0) for v in (-5.0, 0.0, 5.0)], ["\u22125.0", "0", "5.0"])
+        self.assertEqual(mappage._tickText(-12.0, 12.0), "\u221212")
+
     def test_map_overlay_follows_layout(self):
         """The map legend and layer chips hide while a layout hides the main view and come back with it (V-03 review)."""
         from StudioLib import mappage
