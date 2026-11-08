@@ -41,7 +41,8 @@ folder "Slicer Studio tést" (spaces and non-ASCII characters). The tests cover:
   continues the project in place;
 - a lesion that was cleared (or has one voxel) is saved so that the project opens again, also in official 3D Slicer;
 - leaving or quitting a project that was only looked at saves nothing and keeps "Last edited" (an edit made just before
-  leaving is saved).
+  leaving is saved);
+- SIGTERM (stopping the web build) quits as File > Exit does: an edit made after the last save is in the project.
 """
 
 import contextlib
@@ -8077,6 +8078,52 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(elsewhere)), ["Pts.mrk.json", "Scan.nrrd"], "the user's other folder is untouched")
         for node in (volume, points):
             self.assertTrue(os.path.abspath(node.GetStorageNode().GetFileName()).startswith(os.path.abspath(project.path)))
+
+    @unittest.skipUnless(os.name == "posix", "SIGTERM is POSIX")
+    def test_101_sigterm_saves_an_edit_made_after_the_last_save(self):
+        """Stopping the web build (Ctrl+C of the local launcher, docker stop) sends SIGTERM to Slicer, which had no handler: the
+        process ended before aboutToQuit saved the project, so a paint stroke made less than IntervalMinutes after the last
+        save was lost while the top bar said "Saved" (BB-1). SIGTERM now quits as File > Exit does: the stroke is in the
+        project's lesion file and project.json says "closed". The private recovery session still counts as a crash.
+        """
+        import signal
+
+        service = self._service()
+        volume, _path = self._userVolume("Scan", shape=(12, 14, 16), extension=".nrrd")
+        lesion, segmentId, array = self._lesion(volume)
+        project = self._projectFor(service)
+        self._save(service)
+        lesionFile = os.path.join(project.path, "Segmentations", "Lesions.seg.nrrd")
+        savedVoxels = int(array.sum())
+        array[1:3, 1:3, 1:3] = 1  # a paint stroke after the save
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, lesion, segmentId, volume)
+        paintedVoxels = int(array.sum())
+        self.assertGreater(paintedVoxels, savedVoxels)
+        exits = []
+        # The test application keeps running: the quit is what aboutToQuit does
+        service._exitApplication = lambda: (exits.append(True), service._onAboutToQuit())
+        self.assertTrue(service.installStopSignalHandler(), "SIGTERM is handled")
+        handler = signal.getsignal(signal.SIGTERM)
+        self.assertTrue(callable(handler) and handler not in (signal.SIG_DFL, signal.SIG_IGN))
+        os.kill(os.getpid(), signal.SIGTERM)
+        end = time.time() + 10
+        while not exits and time.time() < end:
+            slicer.app.processEvents()
+            time.sleep(0.01)
+        self.assertEqual(exits, [True], "SIGTERM quits the application once")
+        self.assertTrue(service._stoppedBySignal)
+        self.io.backgroundWriter().drain(30.0)
+        self.assertIsNone(service.project, "the project is released")
+        self.assertEqual(self.projects.readJson(os.path.join(project.path, ".studio", "project.json")).get("state"), "closed")
+        saved = slicer.util.loadSegmentation(lesionFile)
+        try:
+            savedId = saved.GetSegmentation().GetNthSegmentID(0)
+            self.assertEqual(int(slicer.util.arrayFromSegmentBinaryLabelmap(saved, savedId, volume).sum()), paintedVoxels,
+                             "the paint stroke made after the last save is in the project")
+        finally:
+            slicer.mrmlScene.RemoveNode(saved)
+        service.dispose()
+        self.assertIs(signal.getsignal(signal.SIGTERM), signal.SIG_DFL, "dispose() restores the default SIGTERM action")
 
 
 def _sphere(center=(0, 0, 0)):

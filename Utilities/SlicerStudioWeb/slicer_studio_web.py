@@ -1344,11 +1344,20 @@ class LocalSession:
         except ProcessLookupError:
             pass
 
-    def stop(self):
-        self.terminate(self.slicer_process)
+    def stop(self, timeout=15):
+        # Slicer saves the open project when it gets SIGTERM: wait for it to exit before the display goes away
+        self.terminate(self.slicer_process, timeout)
         for pid in self.slicer_instances():
             try:
                 os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        deadline = time.monotonic() + timeout
+        while self.slicer_instances() and time.monotonic() < deadline:
+            time.sleep(0.2)
+        for pid in self.slicer_instances():
+            try:
+                os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
         for _, process in reversed(self.services):

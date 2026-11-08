@@ -128,6 +128,11 @@ def onStartupCompleted():
         return
     _service = AutosaveService()
     _service.start()
+    from StudioLib import projects
+
+    if projects.isWebBuild():
+        # The web launcher (Ctrl+C) and the container (docker stop) stop Slicer with SIGTERM: quit as File > Exit does
+        _service.installStopSignalHandler()
     # The Studio surfaces were installed before the service existed (the folder chooser, A-09, or the update check came
     # first): connect them now
     for name in ("StudioLib.autosave_ui", "StudioLib.projects_ui"):
@@ -138,6 +143,102 @@ def onStartupCompleted():
                 plugin.attach()
             except Exception:
                 logging.error(f"Autosave: {name} could not be connected:\n" + traceback.format_exc())
+
+
+class StopSignalHandler:
+    """Calls ``onStop()`` on the main thread when the process receives SIGTERM (POSIX; nothing elsewhere).
+
+    Python runs a signal handler only when it next executes Python code, and the Qt event loop may run no Python code for
+    minutes: the signal number is therefore also written to a socket (``signal.set_wakeup_fd``) that a
+    ``QSocketNotifier`` watches, which wakes the event loop at once. Without a notifier (its signal cannot be connected),
+    a timer looks for the signal twice a second.
+    """
+
+    POLL_MS = 500
+
+    def __init__(self, onStop):
+        self._onStop = onStop
+        self._sockets = None
+        self._notifier = None
+        self._timer = None
+        self._previousHandler = None
+        self._previousWakeupFd = -1
+        self._pending = False
+        self._installed = False
+
+    def install(self):
+        """Return True if the handler is installed (False on Windows or outside the main thread)."""
+        import signal
+        import socket
+
+        if self._installed or not hasattr(signal, "SIGTERM") or not hasattr(socket, "socketpair") or os.name != "posix":
+            return self._installed
+        try:
+            reader, writer = socket.socketpair()
+            reader.setblocking(False)
+            writer.setblocking(False)
+            self._previousWakeupFd = signal.set_wakeup_fd(writer.fileno(), warn_on_full_buffer=False)
+            self._previousHandler = signal.signal(signal.SIGTERM, self._onSignal)
+        except (ValueError, OSError):  # not the main thread of the main interpreter
+            logging.warning("Slicer Studio: SIGTERM cannot be handled:\n" + traceback.format_exc())
+            return False
+        self._sockets = (reader, writer)
+        self._installed = True
+        try:
+            self._notifier = qt.QSocketNotifier(reader.fileno(), qt.QSocketNotifier.Read)
+            self._notifier.activated.connect(lambda *args: self._onReadable())
+        except Exception:
+            self._notifier = None
+            self._timer = qt.QTimer()
+            self._timer.setInterval(self.POLL_MS)
+            self._timer.connect("timeout()", self._onReadable)
+            self._timer.start()
+        return True
+
+    def uninstall(self):
+        import signal
+
+        if not self._installed:
+            return
+        self._installed = False
+        if self._notifier is not None:
+            self._notifier.setEnabled(False)
+            self._notifier = None
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+        try:
+            signal.signal(signal.SIGTERM, self._previousHandler if self._previousHandler is not None else signal.SIG_DFL)
+            signal.set_wakeup_fd(self._previousWakeupFd)
+        except (ValueError, OSError):
+            pass
+        for sock in self._sockets:
+            sock.close()
+        self._sockets = None
+
+    def _onSignal(self, signum, frame):
+        # Runs between two Python statements on the main thread: the stop itself is left to the event loop
+        self._pending = True
+
+    def _onReadable(self):
+        import signal
+
+        received = b""
+        try:
+            while True:
+                data = self._sockets[0].recv(256)
+                if not data:
+                    break
+                received += data
+        except (BlockingIOError, InterruptedError, OSError, TypeError):
+            pass
+        if not (self._pending or signal.SIGTERM in received):
+            return
+        self._pending = False
+        try:
+            self._onStop()
+        except Exception:
+            logging.error("Slicer Studio: stopping after SIGTERM failed:\n" + traceback.format_exc())
 
 
 @contextlib.contextmanager
@@ -299,6 +400,9 @@ class AutosaveService:
         self._planObservations = []
         self._installed = False
         self._quitting = False
+        #: True when SIGTERM stopped the application (``installStopSignalHandler()``)
+        self._stoppedBySignal = False
+        self._stopSignalHandler = None
         #: the open project (A-09) and its writer; None without a project
         self.project = None
         self.projectWriter = None
@@ -380,8 +484,32 @@ class AutosaveService:
         self._pollTimer.start()
         self._heartbeatTimer.start()
 
+    def installStopSignalHandler(self):
+        """SIGTERM quits the application as File > Exit does, so ``aboutToQuit`` saves the open project (web build: the
+        launcher's Ctrl+C and ``docker stop`` send SIGTERM). The private recovery session is left as after a crash (SPEC
+        9.9: ``docker stop`` counts as a crash). Return True if the handler is installed.
+        """
+        if self._stopSignalHandler is None:
+            self._stopSignalHandler = StopSignalHandler(self._onStopSignal)
+        return self._stopSignalHandler.install()
+
+    def _onStopSignal(self):
+        if self._quitting:
+            return
+        logging.info("Slicer Studio: SIGTERM received; quitting (the open project is saved).")
+        self._stoppedBySignal = True
+        self._exitApplication()
+
+    @staticmethod
+    def _exitApplication():
+        # exit(), not quit(): no window is asked to close (Qt 6 quit() would show the close prompt of the main window)
+        slicer.app.exit(0)
+
     def dispose(self):
         """Stop the timers and remove the observers (tests)."""
+        if self._stopSignalHandler is not None:
+            self._stopSignalHandler.uninstall()
+            self._stopSignalHandler = None
         for timer in (self._pollTimer, self._tickTimer, self._heartbeatTimer):
             timer.stop()
         if self.plan is not None and self._planWriter(self.plan) is not None:
@@ -1129,6 +1257,14 @@ class AutosaveService:
         if self.plan is not None:
             self._abortGeneration("exit")
         writer.drain(3.0)
+        if self._stoppedBySignal:
+            # SIGTERM (docker stop) counts as a crash for the private recovery session (SPEC 9.9): its session.json stays
+            # "running", so the next start offers its last autosave
+            self._removeObservers()
+            if self._lock is not None:
+                self._lock.unlock()
+                self._lock = None
+            return
         scene = slicer.mrmlScene
         unsaved = bool(scene.GetStorableNodesModifiedSinceRead()) and self._hasStorableData(scene)
         if unsaved and self.enabled():
