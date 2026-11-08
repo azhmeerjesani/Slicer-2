@@ -605,10 +605,14 @@ def buildChips(result, row=None, mni=False, duplicates=(), policy=None, studyOpe
     if parts:
         chips.append({"key": "location", "level": "neutral", "badge": _("Where"), "text": " | ".join(parts),
                       "tooltip": _("Where the lesion is, from the Harvard-Oxford atlases, next to what the paper says. Only the side gives a verdict."), "actions": []})
-    elif mni and missingAtlases and resourcesState != "loading" and result.get("voxels"):
+    # A missing atlas is offered even next to a location: the location may come from the paper only, or from a partial atlas set
+    # (the cortical atlas saved, the subcortical one not), and "Get atlases" is the only way to fetch the rest
+    if mni and missingAtlases and resourcesState != "loading" and result.get("voxels"):
         running = atlasJob == "running"
         failed = atlasJob if atlasJob not in (None, "running") else None
-        text = _("Getting atlases…") if running else (_("Atlases could not be downloaded: {reason}").format(reason=failed) if failed else _("The location of the lesion needs atlases"))
+        partial = bool(mni and locationRows)
+        missingText = _("The traced location is incomplete: an atlas is missing") if partial else _("The location of the lesion needs atlases")
+        text = _("Getting atlases…") if running else (_("Atlases could not be downloaded: {reason}").format(reason=failed) if failed else missingText)
         chips.append({"key": "atlases", "level": "busy" if running else ("warn" if failed else "neutral"), "badge": _("Where"), "text": text,
                       "tooltip": _("Harvard-Oxford cortical and subcortical atlases (CC BY-SA 4.0) and a CSF prior, a few MB from TemplateFlow, downloaded only when you click"),
                       "actions": [] if running else [{"id": "getAtlases", "text": _("Get atlases (HOCPAL/HOSPA, CC BY-SA 4.0)"),

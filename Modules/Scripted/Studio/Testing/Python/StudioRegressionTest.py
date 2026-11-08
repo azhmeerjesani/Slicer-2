@@ -600,6 +600,31 @@ class StudioRegressionTest(unittest.TestCase):
                 self.assertTrue(reason.endswith("\u2026") or reason.endswith("."), reason)
                 self.assertNotIn("amazonaws.c ", reason + " ")
 
+    def test_missing_atlas_is_offered_next_to_a_location(self):
+        """After a partial atlas download (the cortical atlas saved, the subcortical one not: disk full), or with only the paper's
+        location, the Where chip still offers "Get atlases" and says the traced location is incomplete or why the last job failed.
+        """
+        from StudioLib import lesionqc
+
+        cortical = [("Left Planum Temporale", 18.0)]
+        for rows, row, job, expectedText in (
+            (cortical, None, None, "incomplete"),
+            (None, {"reported_location": "left thalamus"}, None, "needs atlases"),
+            (cortical, None, "The disk is full", "The disk is full"),
+        ):
+            result = {"voxels": 100, "location": rows}
+            chips = lesionqc.buildChips(result, row, mni=True, resourcesState="ready", missingAtlases=True, atlasJob=job)
+            byKey = {chip["key"]: chip for chip in chips}
+            self.assertIn("location", byKey)
+            self.assertIn("atlases", byKey, [chip["key"] for chip in chips])
+            self.assertIn(expectedText, byKey["atlases"]["text"])
+            self.assertEqual([action["id"] for action in byKey["atlases"]["actions"]], ["getAtlases"])
+        # Running: no button; all atlases present: no atlas chip
+        chips = lesionqc.buildChips({"voxels": 100, "location": cortical}, mni=True, missingAtlases=True, atlasJob="running")
+        self.assertEqual([chip["actions"] for chip in chips if chip["key"] == "atlases"], [[]])
+        chips = lesionqc.buildChips({"voxels": 100, "location": cortical}, mni=True, missingAtlases=False)
+        self.assertNotIn("atlases", [chip["key"] for chip in chips])
+
     # Damaged lesion file in the duplicate scan (BB-1)
 
     def test_82_truncated_lesion_file_does_not_stop_the_duplicate_scan(self):
