@@ -354,7 +354,12 @@ def readHeader(path):
     if extension in (".nii", ".nii.gz"):
         from LesionNetworkMappingLib import nifti
 
-        header = nifti.read_nifti_header(path)
+        try:
+            header = nifti.read_nifti_header(path)
+        except ValueError as error:
+            if "NIfTI-2" in str(error):  # the reader's text ends in the file's full path
+                raise ValueError(_("NIfTI-2 files are not supported: save the image as NIfTI-1")) from None
+            raise
         shape = tuple(int(value) for value in header["shape"])
         frames = 1
         for value in shape[3:]:

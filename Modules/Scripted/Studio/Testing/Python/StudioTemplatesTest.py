@@ -1810,6 +1810,30 @@ class StudioTemplatesTest(unittest.TestCase):
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
+    def test_32b_nifti2_is_refused_in_plain_words_without_the_path(self):
+        """BB-1: a NIfTI-2 template image was refused with the reader's developer text, which ends in the file's full
+        local path, in the add dialog's detection line.
+        """
+        import struct
+
+        templates = self.templates
+        work = os.path.join(self.tempDir, "nifti2-plain")
+        os.makedirs(work, exist_ok=True)
+        header = bytearray(544)
+        header[0:4] = struct.pack("<i", 540)
+        header[16:80] = struct.pack("<8q", 3, 10, 10, 10, 1, 1, 1, 1)
+        path = os.path.join(work, "mni_nifti2.nii")
+        with open(path, "wb") as f:
+            f.write(bytes(header))
+        detection = templates.identify(path)
+        self.assertEqual(detection.status, "error")
+        self.assertIn("NIfTI-2", detection.message)
+        self.assertNotIn(work, detection.message)
+        self.assertNotIn("mni_nifti2", detection.message)
+        ok, reason = templates.checkCompanion(None, path)
+        self.assertFalse(ok)
+        self.assertNotIn(work, reason)
+
     def test_32_nifti_pixdim_that_disagrees_with_the_sform_is_refused(self):
         """BB-1: a NIfTI file with an MNI sform and no qform (qform_code 0) whose voxel sizes (pixdim) do not match the
         sform was checked at the sform and added, but Slicer (ITK) loads it with the sform's directions and origin and
