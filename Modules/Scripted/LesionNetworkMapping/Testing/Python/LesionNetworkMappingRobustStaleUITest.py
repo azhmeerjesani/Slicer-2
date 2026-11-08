@@ -127,7 +127,7 @@ class RobustStaleUITest(unittest.TestCase):
         self.assertIn("previous cohort maps", stale["splithalf"] or "", "a result of other maps is shown as current")
         self.assertIn("3 lesion maps now", stale["splithalf"])
         self.assertIn("previous cohort maps", stale["influence"] or "", "an older result (no recorded maps) of earlier maps is shown as current")
-        self.assertIn("2 of them belong to earlier cohort maps or lesions: run them again.", status)
+        self.assertIn("2 of them belong to earlier cohort maps or lesions, or to another primary: run them again.", status)
         self.assertNotEqual(header, "Methods sentences")
 
         # split-half run again on the current maps: current again; the old influence stays marked
@@ -153,6 +153,56 @@ class RobustStaleUITest(unittest.TestCase):
         _write(self.lesions["sub-02"], "lesion of sub-02")
         _touch(self.lesions["sub-02"], 60)
         self.assertEqual(self.card()[0]["splithalf"], None)
+
+    def test_results_of_another_primary_are_marked_stale(self):
+        """Bug map-robust-card:robust-results-of-other-rule-shown-as-current: split-half, influence and replicate results
+        record the primary they were computed for (rule, sensitivity, sign); after the primary changes they are not current.
+        """
+        from LesionNetworkMappingLib import robustness, thresholds
+
+        identity = robustness.maps_tsv_sha256(self.maps)
+        fwe = {"kind": "fwe_bonferroni", "alpha": 0.05}
+        self.writeSplitHalf(identity, -50)
+        path = os.path.join(self.conn, "robustness", "splithalf", "splithalf.json")
+        with open(path, encoding="utf-8") as f:
+            record = json.load(f)
+        record.update(rule=fwe, overlap_pct=90.0, sign="both")
+        _write(path, json.dumps(record))
+        self.writeInfluence(-50)
+        path = os.path.join(self.conn, "robustness", "influence", "influence.json")
+        _write(path, json.dumps({"analysis": "influence", "influence": "1 - Dice", "rule": fwe, "overlap_pct": 90.0, "sign": "both", "cohort_maps": {"maps_sha256": identity}}))
+        replicate = os.path.join(self.conn, "robustness", "replicate_B")
+        _write(os.path.join(replicate, "replicate.json"), json.dumps({"analysis": "replicate", "rule": fwe, "overlap_pct": 90.0, "sign": "both", "cohort_maps": {"maps_sha256": identity}}))
+
+        primary = {"rule": fwe, "pct": 90.0, "sign": "both"}
+        with mock.patch.object(self.robust, "rule", lambda: thresholds.normalize_rule(primary["rule"])), mock.patch.object(self.robust, "overlapPct", lambda: primary["pct"]), \
+                mock.patch.object(self.robust, "sign", lambda: primary["sign"]), mock.patch.object(self.robust, "currentMapsTsv", return_value=self.maps):
+            stale, status, header = self.card()
+            self.assertEqual(stale, {"splithalf": None, "influence": None}, "results of the current primary are not marked")
+            self.assertEqual(self.robust.staleReason("replicate", replicate), "")
+            self.assertEqual(header, "Methods sentences")
+
+            for change, value, word in (("rule", {"kind": "top_pct", "value": 10}, "Top 10%"), ("sign", "neg", "negative sign"), ("pct", 70.0, "sensitivity ≥ 70%")):
+                primary.update(rule=fwe, pct=90.0, sign="both")
+                primary[change] = value
+                stale, status, header = self.card()
+                for kind in ("splithalf", "influence"):
+                    self.assertIn("Computed for the primary FWE (Bonferroni), both signs, sensitivity ≥ 90%", stale[kind] or "", f"{kind} of another {change} shown as current")
+                    self.assertIn(word, stale[kind])
+                self.assertIn("Computed for the primary FWE", self.robust.staleReason("replicate", replicate), change)
+                self.assertIn("2 of them belong", status)
+                self.assertNotEqual(header, "Methods sentences")
+
+            # back to the primary they were computed for: current again
+            primary.update(rule=fwe, pct=90.0, sign="both")
+            stale, status, header = self.card()
+            self.assertEqual(stale, {"splithalf": None, "influence": None})
+            self.assertNotIn("run them again", status)
+
+            # a record written before the sign was recorded is not marked for the sign
+            _write(path, json.dumps({"analysis": "influence", "influence": "1 - Dice", "rule": fwe, "overlap_pct": 90.0, "cohort_maps": {"maps_sha256": identity}}))
+            primary["sign"] = "neg"
+            self.assertEqual(self.card()[0]["influence"], None)
 
     def test_seed_variants_and_consolidation_are_marked_stale_after_a_lesion_edit(self):
         """Bug map-robust-card:robust-seeds-consolidation-not-stale-after-lesion-edit: their manifests record each source_sha256."""

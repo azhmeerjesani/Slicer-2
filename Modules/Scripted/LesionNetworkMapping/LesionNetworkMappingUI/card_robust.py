@@ -832,7 +832,7 @@ class RobustCard:
         text = _("{n} of {total} analyses have results for this connectome.").format(n=len(done), total=len(KINDS))
         stale = self.staleKinds()
         if stale:
-            text += " " + _("{n} of them belong to earlier cohort maps or lesions: run them again.").format(n=len(stale))
+            text += " " + _("{n} of them belong to earlier cohort maps or lesions, or to another primary: run them again.").format(n=len(stale))
         return text
 
     def staleKinds(self):
@@ -930,7 +930,7 @@ class RobustCard:
         return changed
 
     def staleReason(self, kind, folder):
-        """Why the result in ``folder`` does not belong to the current cohort maps (a sentence), or "" when it does.
+        """Why the result in ``folder`` does not belong to the current cohort maps or primary (a sentence), or "" when it does.
 
         A result records the maps it used (``cohort_maps.maps_sha256``); a result written before that was recorded is
         stale when the maps.tsv is newer than it. The analyses of the cohort maps (``MAP_KINDS``) are checked against the maps;
@@ -961,7 +961,39 @@ class RobustCard:
         if changed:
             names = ", ".join(changed[:3]) + (" …" if len(changed) > 3 else "")
             return _("A lesion changed after the lesions were mapped ({names}): map the lesions again (Cohort card), then run this again; until then this is not the current result.").format(names=names)
-        return ""
+        return self.otherPrimaryReason(kind, record)
+
+    def recordedPrimary(self, record):
+        """(rule label, overlap %, sign) that a result recorded, each None when the record does not name it (results written before it was recorded)."""
+        from LesionNetworkMappingLib import robustness
+
+        ruleLabel = None
+        if isinstance(record.get("rule"), dict):
+            try:
+                ruleLabel = robustness.sweep_label(record["rule"])
+            except (KeyError, TypeError, ValueError):
+                ruleLabel = None
+        pct = _float(record.get("overlap_pct"))
+        sign = record.get("sign") if record.get("sign") in SIGN_WORDS else None
+        return ruleLabel, pct, sign
+
+    def otherPrimaryReason(self, kind, record):
+        """Why a result of the cohort maps belongs to another primary (rule, sensitivity or sign) than the current one, or "".
+
+        The sweep is compared with the current primary where it is shown (its own line above the table), so it is not checked here.
+        Only what the result recorded is compared: an older record that does not name its sign is not marked for the sign.
+        """
+        if kind == "sweep":
+            return ""
+        ruleLabel, pct, sign = self.recordedPrimary(record)
+        nowLabel, nowPct, nowSign = self.primaryKey()
+        differs = (ruleLabel is not None and ruleLabel != nowLabel) or (pct is not None and abs(pct - float(nowPct)) > 1e-6) or (sign is not None and sign != nowSign)
+        if not differs:
+            return ""
+        old = ", ".join(part for part in (ruleLabel, _signText(sign) if sign is not None else None,
+                                           _("sensitivity ≥ {pct:g}%").format(pct=pct) if pct is not None else None) if part)
+        new = ", ".join((nowLabel, _signText(nowSign), _("sensitivity ≥ {pct:g}%").format(pct=float(nowPct))))
+        return _("Computed for the primary {old}; the primary is now {new}. Run it again to update; until then this is not the current result.").format(old=old, new=new)
 
     def showSettings(self):
         from LesionNetworkMappingLib import robustness

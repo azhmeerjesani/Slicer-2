@@ -1382,7 +1382,7 @@ def leave_one_lesion_out(maps, design=None, ids=None, rule=None, n=None, v=None,
         rows[index]["top_k"] = rank <= top_k and _has_influence(rows[index]["influence"])
     top = [rows[index]["participant_id"] for index in order[:top_k] if rows[index]["top_k"]]
     return {"label": INFLUENCE_LABEL, "rows": rows, "top": top, "peak": peak, "rule": rule,
-            "overlap_pct": float(overlap_pct), "influence": "|Δt at the GLM peak|" if stats_ is not None else "1 - Dice of the sensitivity map"}
+            "overlap_pct": float(overlap_pct), "sign": sign, "influence": "|Δt at the GLM peak|" if stats_ is not None else "1 - Dice of the sensitivity map"}
 
 
 def write_influence_tsv(result, path):
