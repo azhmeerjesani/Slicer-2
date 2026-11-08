@@ -31,8 +31,9 @@ the process and in ``<study>/.studio/cache/lesion_sha256.json``; a preflight has
   auto-segmented unreviewed lesions, native-space lesions and normalized lesions with norm_qc != pass
   (all excluded unless overridden with ``overrides``); a normalized lesion whose native lesion
   changed since normalization (stale); flipped lesions; a 2D-share difference > 20 points between
-  groups; missing score values; case reports without record_id and doi; an N-dependent threshold
-  rule mismatch; the GSR banner of symmetric |T| rules; warn-level design checks.
+  groups; 2D tracings in a study that has not chosen how they are used (trace_policy.extrude_2d: they
+  are mapped as drawn); missing score values; case reports without record_id and doi; an N-dependent
+  threshold rule mismatch; the GSR banner of symmetric |T| rules; warn-level design checks.
 - Information: radiological (left-handed) storage; ambiguous grids (2009c/2009a); lesions of unknown
   space against a known connectome; lesions stored as floating point (possibly non-binary); non-ASCII
   paths (official Slicer 5.12.4 needs a UTF-8 locale to read them); rows that are not included
@@ -108,6 +109,7 @@ FIX_ACCEPT_TERMS = "accept-terms"  # scroll to the Connectome card's terms
 FIX_INCLUDE = "include-anyway"  # override a warn-level exclusion (recorded in provenance)
 FIX_PROBABILISTIC = "probabilistic"  # map fractional lesions with --probabilistic
 FIX_FREE_DISK = "free-disk"
+FIX_TWO_D_POLICY = "two-d-policy"  # choose how 2D tracings are used in the study (study.json trace_policy.extrude_2d)
 
 # Assertion failure codes (assert_run_outputs)
 SIDECAR_FIELDS = {
@@ -224,7 +226,8 @@ def measure_lesion(path, connectome_grid=None, connectome_mask=None, header=None
     :return: (values, hygiene): values holds volume_ml, n_parts, fractional_sum (the lesion's sum on the
       connectome grid; None without ``connectome_grid``, since a sum on another grid would later be
       trusted against the connectome), qc_flags codes (list), lesion_mtime and lesion_size; hygiene is
-      ``lesionops.hygiene``'s result (outside_pct relative to ``connectome_mask``).
+      ``lesionops.hygiene``'s result (outside_pct relative to ``connectome_mask``) with "dimensionality",
+      that of ``lesionops.detect_dimensionality`` (of the file: an extruded tracing is 3D).
     """
     stat = os.stat(path)
     data, affine, file_header = nifti.read_nifti(path)
@@ -233,6 +236,7 @@ def measure_lesion(path, connectome_grid=None, connectome_mask=None, header=None
             raise ValueError(f"The lesion is not a 3D image (shape {data.shape})")
         data = data.reshape(data.shape[:3])
     result = lesionops.hygiene(data, affine, header=header or file_header, connectome_grid=connectome_grid, brain_mask=connectome_mask, multifocal=multifocal)
+    result["dimensionality"] = _dimensionality(data, affine)
     fractional_sum = None
     if connectome_grid is not None:
         fractional_sum = result["connectome_sum"] if result["connectome_sum"] is not None else 0.0  # None: an empty lesion
@@ -247,6 +251,19 @@ def measure_lesion(path, connectome_grid=None, connectome_mask=None, header=None
     return values, result
 
 
+def _dimensionality(data, affine):
+    """``lesionops.detect_dimensionality`` of a lesion (on its bounding box): "2D", "multi2D", "3D" or None (empty)."""
+    occupied = np.asarray(data) > 0
+    found = np.argwhere(occupied)
+    if len(found) == 0:
+        return None
+    low, high = found.min(axis=0), found.max(axis=0) + 1
+    shift = np.eye(4)
+    shift[:3, 3] = low
+    crop = occupied[low[0] : high[0], low[1] : high[1], low[2] : high[2]]
+    return lesionops.detect_dimensionality(crop, np.asarray(affine, dtype=np.float64) @ shift)["dimensionality"]
+
+
 def remeasure(study, sids, bundle=None, post=False, outside=False):
     """The "re-measure" fix: measure the lesions of ``sids`` again (voxel reads).
 
@@ -256,7 +273,8 @@ def remeasure(study, sids, bundle=None, post=False, outside=False):
       session merges them (single-writer rule: this never writes participants.tsv).
     :param outside: also give outside_brain_pct, the share of the lesion outside the connectome's mask (needs ``bundle``).
     :return: {sid: values} (qc_flags joined with ";", keeping the row's flags that the hygiene checks
-      do not compute, such as side_mismatch, csf and duplicate); unreadable files are left out.
+      do not compute, such as side_mismatch, csf and duplicate; dimensionality when the row has none, as
+      for a lesion file that was not drawn in Draw); unreadable files are left out.
     """
     study = _as_study(study)
     bundle = _as_bundle(bundle)
@@ -280,6 +298,8 @@ def remeasure(study, sids, bundle=None, post=False, outside=False):
             continue
         if mask is not None:
             values["outside_brain_pct"] = None if result["outside_pct"] is None else round(result["outside_pct"], 2)
+        if schema.is_missing(row.get("dimensionality")) and result.get("dimensionality"):
+            values["dimensionality"] = result["dimensionality"]  # never over Draw's (an extruded tracing's file is 3D)
         kept = [code for code in _flags(row) if code not in hygiene_codes]
         codes = set(kept) | set(values["qc_flags"])
         values["qc_flags"] = ";".join(code for code in lesionops.QC_FLAGS if code in codes) or None
@@ -580,6 +600,7 @@ def run_preflight(
     outside_against = {}  # sid -> "brain" or "connectome": the mask of the row's outside share
     hasher = _Hasher(study.path, hash_budget)
     deferred = {}  # sid -> what waits for a hash ("duplicates", "normalization")
+    dimensionality = {}  # sid -> dimensionality of a row that has none, from the voxels a stale row's measurement read
 
     def exclude(sid, reason):
         excluded.setdefault(sid, reason)
@@ -658,6 +679,8 @@ def run_preflight(
                 collector.items["lesion_unreadable"]["details"][sid] = f"{type(exc).__name__}: {exc}"
                 continue
             measured[sid] = {**values, "qc_flags": ";".join(values["qc_flags"]) or None}
+            if schema.is_missing(row.get("dimensionality")) and result.get("dimensionality"):
+                dimensionality[sid] = result["dimensionality"]
             volume_ml, fractional_sum = values["volume_ml"], values["fractional_sum"]
             flags = sorted(set(flags) - {"nonbinary", "empty", "subvoxel", "outside", "xform", "grid", "multipart"} | set(values["qc_flags"]))
             if result["outside_pct"] is not None:
@@ -912,6 +935,7 @@ def run_preflight(
     design_checks = _design_checks(study, included, design_spec, measured)
     if design_spec is None:
         run_checks.extend(_dimensionality_share(study, included_rows))
+    run_checks.extend(_two_d_policy(study, included_rows, dimensionality))
     run_checks.extend(design_checks)
 
     all_checks = checks + run_checks
@@ -1171,6 +1195,35 @@ def _dimensionality_share(study, rows):
         text = ", ".join(f"{level} {share:.0f}%" for level, share in shares.items())
         return [Check("dimensionality_share", "warn", [], f"The share of 2D tracings differs between groups by more than {designlib.DIMENSIONALITY_SHARE_LIMIT:.0f} points ({text}): consider dimensionality as a covariate.", None, "run", detail=shares)]
     return []
+
+
+def two_d_policy_chosen(study):
+    """True when the study says how 2D tracings are used (study.json ``trace_policy.extrude_2d``)."""
+    value = (study.trace_policy or {}).get("extrude_2d")
+    if isinstance(value, dict):
+        value = value.get("mode")
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _two_d_policy(study, rows, found=None):
+    """2D and multi2D tracings in a study that has not chosen how they are used: they are mapped as drawn (single slices).
+
+    The 2D extrusion is a study-level forced choice (SPEC_LNM_ADDENDUM 3.10); Draw asks for it on Done, but lesion files
+    imported into a study were never drawn there. ``found``: {sid: dimensionality} of rows without the column (measured now).
+    """
+    if two_d_policy_chosen(study):
+        return []
+    found = found or {}
+    sids = [row["participant_id"] for row in rows if (found.get(row["participant_id"]) if schema.is_missing(row.get("dimensionality")) else row.get("dimensionality")) in designlib.TWO_D_LEVELS]
+    if not sids:
+        return []
+    many = len(sids) != 1
+    message = (
+        f"{_count(len(sids), 'lesion')} {'are' if many else 'is'} 2D (single-slice) {'tracings' if many else 'a tracing'} ({_listed(sids)}) and the study "
+        f"has not chosen how 2D tracings are used: {'they are' if many else 'it is'} mapped as {'single slices' if many else 'a single slice'}. "
+        "Choose once: keep single-slice or extrude."
+    )
+    return [Check("two_d_no_policy", "warn", sids, message, _fix(FIX_TWO_D_POLICY, "Choose how 2D tracings are used", subjects=sids), "run")]
 
 
 def _report(study, bundle, checks, included, excluded, measured, settings, started):

@@ -1222,6 +1222,90 @@ class StudioRegressionTest(unittest.TestCase):
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
 
+    def test_6c_imported_2d_lesions_get_the_extrusion_choice(self):
+        """BB-1: 2D lesion files imported into a study (never drawn in Draw, where Done asks for the 2D policy) get their
+        dimensionality, the 2D filter lists them, a toast asks for the study-level choice, the preflight warns while there is
+        none, and the choice applies to them (the study's own copy in lesions/; the imported files are never modified).
+        Before, they were mapped as single slices with no choice, no warning, and a policy chosen later had no effect.
+        """
+        import hashlib
+
+        from LesionNetworkMappingLib import geometry, nifti, preflight
+
+        import LesionNetworkMapping
+        from StudioLib import libcard_flags, lesionqc, shell, study_ui
+
+        if slicer.util.mainWindow() is None:
+            self.skipTest("needs the main window")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Imported 2D study")
+        os.makedirs(folder)
+        one = np.zeros(grid.shape, np.uint8)
+        one[40:50, 50:60, 40] = 1  # one axial slice
+        two = np.zeros(grid.shape, np.uint8)
+        two[40:50, 50:60, 40] = 1
+        two[40:50, 50:60, 48] = 1  # two separate axial slices
+        cube = np.zeros(grid.shape, np.uint8)
+        cube[40:44, 50:54, 40:44] = 1
+        paths = [os.path.join(folder, f"sub-0{index}_lesion.nii.gz") for index in (1, 2, 3)]
+        for path, data in zip(paths, (one, two, cube), strict=True):
+            nifti.write_nifti(path, data, grid.affine)
+
+        def digest(path):
+            with open(path, "rb") as f:
+                return hashlib.sha256(f.read()).hexdigest()
+
+        original = {path: digest(path) for path in paths}
+
+        def seedSlices(study):
+            info = LesionNetworkMapping.LesionNetworkMappingLogic.cohortSeeds(study)
+            return {sid: int(np.unique(np.nonzero(np.squeeze(nifti.read_nifti(path)[0]))[2]).size) for sid, path in info["lesions"]}
+
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        try:
+            session = study_ui.createStudy(paths, studioShell, folder=folder)
+            study = session.study
+            core = lesionqc.core()
+            core.requestDimensions(session)
+            self.assertTrue(core.waitIdle(30))
+            self.assertEqual({sid: study.subject(sid).get("dimensionality") for sid in ("sub-01", "sub-02", "sub-03")},
+                             {"sub-01": "2D", "sub-02": "multi2D", "sub-03": "3D"})
+            self.assertEqual([row["participant_id"] for row in study.subjects if libcard_flags.isTwoD(row)], ["sub-01", "sub-02"])
+            self.assertIsNone(lesionqc.storedPolicy(study))
+            messages = [text for _when, text, _level in lesionqc._shell().recentMessages()]  # the application's shell
+            self.assertTrue(any(text.startswith("2 lesions are single-slice (2D) tracings") for text in messages), messages)
+            # The preflight of Map and Cohort says that they would be mapped as single slices
+            found = [check for check in preflight.run_preflight(study)["checks"] if check["id"] == "two_d_no_policy"]
+            self.assertEqual(len(found), 1)
+            self.assertEqual(found[0]["level"], "warn")
+            self.assertEqual(found[0]["subjects"], ["sub-01", "sub-02"])
+            self.assertEqual(found[0]["fix"]["id"], preflight.FIX_TWO_D_POLICY)
+            self.assertEqual(seedSlices(study), {"sub-01": 1, "sub-02": 2, "sub-03": 4})
+            # The choice (the same card as on Done in Draw) applies to the imported lesions
+            card = core.askImportedPolicy(session)
+            self.assertIsNotNone(card)
+            card.spin.setValue(6.0)  # 6 mm on 2 mm voxels: 3 whole slices
+            card._onFractional()
+            self.assertEqual(lesionqc.storedPolicy(study)["mode"], lesionqc.MODE_FRACTIONAL)
+            self.assertEqual(seedSlices(study), {"sub-01": 3, "sub-02": 6, "sub-03": 4})
+            for sid in ("sub-01", "sub-02"):
+                self.assertTrue(study.subject(sid)["lesion"].startswith("lesions/"), study.subject(sid)["lesion"])
+            self.assertEqual(study.subject("sub-03")["lesion"], "sub-03_lesion.nii.gz")
+            self.assertEqual({path: digest(path) for path in paths}, original, "the imported files are never modified")
+            self.assertEqual([check["id"] for check in preflight.run_preflight(study)["checks"] if check["id"] == "two_d_no_policy"], [])
+            # Changing the policy again re-applies it from the copy of the imported file (desc-traced)
+            core.choosePolicy(session, lesionqc.MODE_SINGLE)
+            self.assertEqual(seedSlices(study), {"sub-01": 1, "sub-02": 2, "sub-03": 4})
+        finally:
+            lesionqc.core().hidePolicyCard()
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
     # Adopted participants.tsv with columns named like the study's (BB-1)
 
     def _adopt(self, name, header, values, dictionary=None):

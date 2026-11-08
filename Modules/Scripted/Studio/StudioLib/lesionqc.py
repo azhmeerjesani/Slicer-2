@@ -23,7 +23,10 @@ Catch tracing errors while the case is still open (LNM addendum 3.10, 7.2, 7.3; 
   the drawn mask is kept as ``desc-traced``, ``desc-lesion`` is the analysis mask and ``desc-lesionProb`` the fractional
   one; ``dimensionality``, ``planes``, ``n_slices``, ``extrude_mm`` and ``volume_ml`` of the row and the ``extrude``
   record of the sidecar follow. ``reapplyExtrusionPolicy(study)`` regenerates everything from ``desc-traced`` (Search:
-  "Re-apply extrusion policy").
+  "Re-apply extrusion policy"). Lesion files that were not drawn in Draw (a study made from files, files added to it) are
+  read in the worker (``requestDimensions``) for their ``dimensionality``; when the study then holds 2D lesions and has no
+  policy, a toast says so with "Choose…" (the same card), and the LNM preflight warns (``two_d_no_policy``). An imported
+  file (outside ``lesions/``) is never modified: an extruding policy writes the study's own copy in ``lesions/``.
 - ``qc_flags`` (``lesionops.qc_flags``) are written through the ``StudySession`` on the main thread: by the Done hook, after a
   fix, when the duplicate scan finds a pair and when the checks change for a saved lesion.
 
@@ -816,6 +819,29 @@ class _Worker:
         pairs = [(a, b, dice) for a, b, dice in index.all_pairs() if frozenset((a, b)) not in dismissed]
         return {"studyPath": studyPath, "pairs": pairs, "indexed": len(index)}
 
+    def _do_dimensions(self, studyPath, entries, tag=None):
+        """The dimensionality of lesion files that were not drawn in Draw (imported): ``[(sid, file key, detect_dimensionality)]``."""
+        ops = _lnm("lesionops")
+        nifti = _lnm("nifti")
+        found = []
+        for sid, path, key in entries:
+            try:
+                data, affine, _header = nifti.read_nifti(path)
+            except UNREADABLE_FILE_ERRORS:
+                found.append((sid, key, None))  # said by the file hygiene check; not read again until the file changes
+                continue
+            drawn = np.asarray(data[..., 0] if data.ndim > 3 else data) > 0
+            occupied = np.argwhere(drawn)
+            if len(occupied) == 0:
+                found.append((sid, key, None))
+                continue
+            low, high = occupied.min(axis=0), occupied.max(axis=0) + 1
+            shift = np.eye(4)
+            shift[:3, 3] = low
+            crop = drawn[low[0]:high[0], low[1]:high[1], low[2]:high[2]]
+            found.append((sid, key, ops.detect_dimensionality(crop, np.asarray(affine, dtype=float) @ shift)))
+        return {"studyPath": studyPath, "found": found}
+
     def _do_current(self, studyPath, sid, values, affine, dismissed, tag=None):
         index = self._index(studyPath)
         index.update(sid, values, affine, key=None)
@@ -987,6 +1013,9 @@ class QcCore:
         self._atlasError = None
         self._atlasFailed = False
         self.policyCard = None
+        self._dimensionsAsked = {}  # sid -> file key of the lesion whose dimensionality was asked of the worker
+        self._askedImported = None  # study path whose imported 2D lesions were pointed out (once per opening)
+        self._dimensionsChecked = None  # study path whose lesions were looked at for a missing dimensionality since it was opened
         self.listeners = []
         self.brainMaskPath = None
         self._downloadedTried = {}  # family -> path of the downloaded brain mask given to the last resources job
@@ -1000,12 +1029,17 @@ class QcCore:
         self._scanTimer.setSingleShot(True)
         self._scanTimer.setInterval(SCAN_DELAY_MS)
         self._scanTimer.connect("timeout()", self.requestScan)
+        self._dimensionsTimer = qt.QTimer()
+        self._dimensionsTimer.setSingleShot(True)
+        self._dimensionsTimer.setInterval(SCAN_DELAY_MS)
+        self._dimensionsTimer.connect("timeout()", self.requestDimensions)
         with contextlib.suppress(Exception):
             slicer.app.connect("aboutToQuit()", self.dispose)
 
     def dispose(self):
         self._timer.stop()
         self._scanTimer.stop()
+        self._dimensionsTimer.stop()
         self.worker.stop()
 
     def addListener(self, callback):
@@ -1029,7 +1063,7 @@ class QcCore:
             self._timer.start()
 
     def idle(self):
-        return self.worker.pending == 0 and not self._scanTimer.isActive()
+        return self.worker.pending == 0 and not self._scanTimer.isActive() and not self._dimensionsTimer.isActive()
 
     def waitIdle(self, timeoutS=20.0):
         """Process events until the worker has no job left and its results are drained (tests). Return True when idle."""
@@ -1099,6 +1133,9 @@ class QcCore:
         self.fileHygiene = {}
         self.lastSeen = {}
         self.pendingDone = {}
+        self._dimensionsAsked = {}
+        self._askedImported = None
+        self._dimensionsChecked = None
         self.dismissed = dismissedPairs(session.study)
         self.scheduleScan(OPEN_SCAN_DELAY_MS)  # not while the study page is being built: the worker shares the interpreter lock
 
@@ -1112,6 +1149,9 @@ class QcCore:
         self.fileHygiene = {}
         self.lastSeen = {}
         self.pendingDone = {}
+        self._dimensionsAsked = {}
+        self._askedImported = None
+        self._dimensionsChecked = None
         self._changed()
 
     def scheduleScan(self, delayMs=SCAN_DELAY_MS):
@@ -1128,6 +1168,89 @@ class QcCore:
                    if sid in study and _rowSpaceFamily(study, study.subject(sid)) is not None]
         self._scanStarted = time.perf_counter()
         self._submit("scan", studyPath=study.path, entries=entries, dismissed=frozenset(self.dismissed))
+
+    def _dimensionEntries(self, study):
+        """``[(sid, path, file key)]`` of the lesion files whose dimensionality the study does not know and that were not asked yet."""
+        entries = []
+        for row in study.subjects:
+            if _missing(row.get("lesion")) or not _missing(row.get("dimensionality")):
+                continue
+            sid = row["participant_id"]
+            path = study.abspath(row["lesion"])
+            key = _stat(path)
+            if key is not None and self._dimensionsAsked.get(sid) != key:
+                entries.append((sid, path, key))
+        return entries
+
+    def scheduleDimensions(self, session):
+        """Soon find the dimensionality of lesions that were not drawn in Draw (a study made from files, files added to it)."""
+        if session is None:
+            return
+        opened = self._dimensionsChecked != session.study.path
+        if not self._dimensionsTimer.isActive() and (opened or self._dimensionEntries(session.study)):
+            self._dimensionsTimer.setInterval(OPEN_SCAN_DELAY_MS if opened else SCAN_DELAY_MS)  # not while the study page is being built
+            self._dimensionsTimer.start()
+
+    def requestDimensions(self, session=None):
+        """Ask the worker for the dimensionality of the study's lesions that do not have it (imported lesion files).
+
+        Draw records it on Done; a lesion file that comes from elsewhere is read here, so that the 2D filter, the 2D policy
+        (a study-level forced choice, ``trace_policy.extrude_2d``) and the preflight see it.
+        """
+        session = session or _session()
+        if session is None:
+            return
+        self._dimensionsChecked = session.study.path
+        entries = self._dimensionEntries(session.study)
+        if not entries:
+            self._askImported(session)
+            return
+        for sid, _path, key in entries:
+            self._dimensionsAsked[sid] = key
+        self._submit("dimensions", studyPath=session.study.path, entries=entries)
+
+    def _applyDimensions(self, result):
+        session = _session()
+        if session is None or result["studyPath"] != self.studyPath or session.study.path != self.studyPath:
+            return False
+        study = session.study
+        written = []
+        for sid, key, info in result["found"]:
+            if info is None or sid not in study:
+                continue
+            row = study.subject(sid)
+            if not _missing(row.get("dimensionality")) or _missing(row.get("lesion")) or _stat(study.abspath(row["lesion"])) != key:
+                continue  # Done recorded it meanwhile, or the file changed (it is asked again)
+            values = dimensionColumns(info, figure=figureOwnsPlanes(row))
+            session.setValues([sid], values)
+            written.append((sid, values["dimensionality"]))
+        if written:
+            session.flush(lockTimeout=0.5)
+            for sid, dim in written:
+                _appendAudit(study, {"at": _now(), "by": "lesionqc", "event": "lesion_dimensionality", "sid": sid, "dimensionality": dim, "source": "file"})
+        self._askImported(session)
+        return bool(written)
+
+    def _askImported(self, session):
+        """A study without a 2D policy that holds 2D lesions which were not drawn in Draw (where Done asks): say so, with Choose."""
+        study = session.study
+        if storedPolicy(study) is not None or self._askedImported == study.path or self.policyCard is not None:
+            return
+        included = _lnm("study").is_included
+        twoD = [row["participant_id"] for row in study.subjects if row.get("dimensionality") in ("2D", "multi2D") and included(row)]
+        if not twoD:
+            return
+        self._askedImported = study.path
+        text = (_("1 lesion is a single-slice (2D) tracing: choose once how 2D tracings are used in this study") if len(twoD) == 1
+                else _("{n} lesions are single-slice (2D) tracings: choose once how 2D tracings are used in this study").format(n=len(twoD)))
+        _toast(text, ms=12000, level="warning", action=lambda: self.askImportedPolicy(session), actionText=_("Choose…"))
+
+    def askImportedPolicy(self, session):
+        """The policy card for the 2D lesions of a study (not the one being drawn)."""
+        if _session() is not session or storedPolicy(session.study) is not None:
+            return None
+        return self.askPolicy(session, intro=_("Some lesions of this study are single slices. Choose once how 2D tracings are used in this study. "
+                                               "The tracing as drawn is always kept (desc-traced)."))
 
     def requestCurrent(self, session, sid, values, affine):
         if sid not in session.study or _rowSpaceFamily(session.study, session.study.subject(sid)) is None:
@@ -1207,6 +1330,11 @@ class QcCore:
             elif kind == "filehygiene":
                 self.fileHygiene[result["sid"]] = (result["key"], result["hygiene"])
                 changed = True
+            elif kind == "dimensions":
+                try:
+                    changed = self._applyDimensions(result) or changed
+                except Exception:
+                    logging.error(f"Studio: the dimensionality of the lesions could not be recorded:\n{traceback.format_exc()}")
         if self.worker.pending <= 0:
             self._timer.stop()
         if changed:
@@ -1358,11 +1486,13 @@ class QcCore:
 
     # The 2D policy
 
-    def askPolicy(self, session, resume=False, change=False):
-        """Show the non-modal forced-choice card (``resume``: Done continues once the choice is made; ``change``: a policy exists)."""
+    def askPolicy(self, session, resume=False, change=False, intro=None):
+        """Show the non-modal forced-choice card (``resume``: Done continues once the choice is made; ``change``: a policy exists;
+        ``intro``: another first sentence).
+        """
         if self.policyCard is not None:
             self.policyCard.dispose()
-        self.policyCard = PolicyCard(self, session, resume=resume, change=change)
+        self.policyCard = PolicyCard(self, session, resume=resume, change=change, intro=intro)
         self.policyCard.show()
         return self.policyCard
 
@@ -1654,6 +1784,10 @@ def regenerate(study, sid, session=None, source="lesion", normal=None):
 
     Only 2D and multi2D tracings are extruded. The row always gets ``dimensionality`` (and for 2D the planes, ``n_slices`` and
     ``extrude_mm``). Return ``{sid, dimensionality, mode, files, values}`` or None when there was nothing to read.
+
+    A lesion file of the user's (outside ``lesions/``, as a study made from imported files has them) is never modified and nothing
+    is written next to it: its row gets the dimensionality, and an extruding policy writes the study's own files in ``lesions/``
+    (``desc-traced`` a copy of the imported file, ``desc-lesion`` the extruded one) and points the row's ``lesion`` to them.
     """
     nifti = _lnm("nifti")
     ops = _lnm("lesionops")
@@ -1663,7 +1797,7 @@ def regenerate(study, sid, session=None, source="lesion", normal=None):
     lesionPath = study.abspath(row["lesion"])
     lesionsFolder = os.path.join(os.path.abspath(study.path), _lnm("study").LESIONS_DIR)
     if os.path.commonpath([os.path.abspath(lesionPath), lesionsFolder]) != lesionsFolder:
-        return None  # a lesion file of the user's (outside lesions/) is never modified, and nothing is written next to it
+        return _regenerateImported(study, sid, session, lesionPath, normal)
     tracedPath, probPath = descPath(lesionPath, "traced"), descPath(lesionPath, "lesionProb")
     if source == "traced" and not os.path.isfile(tracedPath):
         source = "lesion"  # never extruded: the lesion file is the tracing as drawn
@@ -1759,6 +1893,43 @@ def regenerate(study, sid, session=None, source="lesion", normal=None):
     return result
 
 
+def _regenerateImported(study, sid, session, importedPath, normal=None):
+    """``regenerate`` for a lesion file of the user's (outside ``lesions/``): the file is read, never written or written next to.
+
+    Its dimensionality goes to the row. A 2D or multi2D lesion with an extruding policy gets the study's own lesion in
+    ``lesions/`` (``Study.lesion_relpath``): ``desc-traced`` is a copy of the imported file, ``desc-lesion`` is extruded from it,
+    and the row's ``lesion`` points to it (``regenerate`` then works as for a lesion drawn in Draw).
+    """
+    if not os.path.isfile(importedPath):
+        return None
+    data, affine, _header = _lnm("nifti").read_nifti(importedPath)
+    data = data[..., 0] if data.ndim > 3 else data
+    row = study.subject(sid)
+    info = _lnm("lesionops").detect_dimensionality(np.asarray(data) > 0, affine, normal)
+    dim = info["dimensionality"]
+    if dim is None:
+        return None
+    values = dimensionColumns(info, normal, figure=figureOwnsPlanes(row))
+    policy = storedPolicy(study)
+    result = {"sid": sid, "dimensionality": dim, "mode": None, "files": [], "values": values, "info": info}
+    if dim not in ("2D", "multi2D") or policy is None or policy["mode"] == MODE_SINGLE:
+        if dim in ("2D", "multi2D") and policy is not None:
+            result["mode"] = MODE_SINGLE  # the analysis lesion is the imported file as it is
+        if values != {key: row.get(key) for key in values}:
+            _commit(study, session, sid, values, {"event": "lesion_dimensionality", "dimensionality": dim})
+        return result
+    lesionPath = study.abspath(study.lesion_relpath(sid))
+    os.makedirs(os.path.dirname(lesionPath), exist_ok=True)
+    tracedPath = descPath(lesionPath, "traced")
+    _writeAtomic(tracedPath, lambda temporary: shutil.copy2(importedPath, temporary))
+    imported = study.relpath(importedPath)
+    imported = os.path.basename(importedPath) if os.path.isabs(imported) else imported  # no absolute path in the audit log
+    if _core is not None:
+        _core.lastSeen[sid] = None  # the row points to a file not yet written: the listener must not take it for a drawn lesion
+    _commit(study, session, sid, {"lesion": study.relpath(lesionPath)}, {"event": "lesion_imported_copy", "imported": imported, "traced": study.relpath(tracedPath)})
+    return regenerate(study, sid, session, source="traced", normal=normal)
+
+
 def reapplyExtrusionPolicy(study=None):
     """Regenerate the analysis lesions of every 2D and multi2D subject from ``desc-traced`` with the study's policy.
 
@@ -1775,8 +1946,8 @@ def reapplyExtrusionPolicy(study=None):
     results = []
     for row in list(study.subjects):
         sid = row["participant_id"]
-        if row.get("dimensionality") not in ("2D", "multi2D") or _missing(row.get("lesion")):
-            continue
+        if _missing(row.get("lesion")) or not (row.get("dimensionality") in ("2D", "multi2D") or _missing(row.get("dimensionality"))):
+            continue  # a lesion not yet checked (an imported file) is read: regenerate finds its dimensionality
         if session is not None and session.study is study and session.isDirty(sid):
             results.append({"sid": sid, "skipped": "unsaved edits"})
             continue
@@ -1938,6 +2109,7 @@ def _onStudyChanged(studySession=None):
     _busy = True
     try:
         c.afterNotify(session)
+        c.scheduleDimensions(session)
     except Exception:
         logging.error(f"Studio: the lesion QC could not follow the study:\n{traceback.format_exc()}")
     finally:
@@ -1985,7 +2157,7 @@ class PolicyCard:
     blocked) Done continues once the choice is made; with ``change`` (a policy exists) there is a Cancel button.
     """
 
-    def __init__(self, qcCore, session, resume=False, change=False):
+    def __init__(self, qcCore, session, resume=False, change=False, intro=None):
         self.core = qcCore
         self.session = session
         self.resume = resume
@@ -1999,7 +2171,7 @@ class PolicyCard:
         self.widget = frame
         current = storedPolicy(session.study) if session is not None else None
         intro = (_("Now: {semantics}. Choosing another re-applies it to the 2D lesions of the study from the tracings as drawn.").format(semantics=policySemantics(current["mode"], current["total_mm"] or DEFAULT_EXTRUDE_MM))
-                 if change and current else _("This lesion is a single slice. Choose once how 2D tracings are used in this study. The tracing as drawn is always kept (desc-traced)."))
+                 if change and current else intro or _("This lesion is a single slice. Choose once how 2D tracings are used in this study. The tracing as drawn is always kept (desc-traced)."))
         self.intro = qt.QLabel(intro)
         self.intro.setObjectName("StudioExtrusionPolicyIntro")
         self.intro.setWordWrap(True)

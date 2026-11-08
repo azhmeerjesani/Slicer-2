@@ -500,6 +500,31 @@ class WarningTest(_Fixture):
         with_design = self.preflight(design_spec={"test": "two_group", "levels": ["case", "control"]})
         self.assertNotIn("dimensionality_share", _ids(with_design))
 
+    def test_two_d_tracings_without_a_policy(self):
+        """BB-1: 2D tracings in a study that has not chosen how they are used (trace_policy.extrude_2d) are mapped as single
+        slices: a warning says so, also for lesion files that were never drawn in Draw (no dimensionality column yet, read
+        from the voxels of a stale row), and remeasure() gives such a row its dimensionality.
+        """
+        self.add_many(3)
+        slab = np.zeros(self.bundle.shape, np.uint8)
+        slab[5:9, 6:10, 7] = 1  # one axial slice
+        self.add("sub-2dfile", data=slab, fresh=False)  # an imported file: measured now, no dimensionality column
+        self.add("sub-2drow", data=slab, dimensionality="2D")  # drawn in Draw (column recorded)
+        self.add("sub-3drow", dimensionality="3D")
+        report = self.preflight()
+        check = _check(report, "two_d_no_policy")
+        self.assertEqual((check["level"], check["scope"]), ("warn", "run"))
+        self.assertEqual(check["subjects"], ["sub-2dfile", "sub-2drow"])
+        self.assertEqual(check["fix"]["id"], preflight.FIX_TWO_D_POLICY)
+        self.assertIn("mapped as single slices", check["message"])
+        self.assertFalse(report["blocked"])
+        values = preflight.remeasure(self.study, ["sub-2dfile", "sub-2drow"])
+        self.assertEqual(values["sub-2dfile"]["dimensionality"], "2D")
+        self.assertNotIn("dimensionality", values["sub-2drow"])  # never over Draw's (an extruded tracing's file is 3D)
+        for policy in ({"mode": "single"}, {"mode": "fractional", "total_mm": 2.0}, "binary_pm"):
+            self.study.trace_policy = {**self.study.trace_policy, "extrude_2d": policy}
+            self.assertNotIn("two_d_no_policy", _ids(self.preflight()))
+
     def test_rule_checks(self):
         self.add_many(3)
         report = self.preflight(recipe_rule={"kind": "t_convention", "value": 7})

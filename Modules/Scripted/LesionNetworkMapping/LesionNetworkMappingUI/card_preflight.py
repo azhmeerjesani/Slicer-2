@@ -755,6 +755,7 @@ class PreflightCard:
             "include-anyway": lambda: self.setOverride(check["id"], True),
             "probabilistic": self.setProbabilistic,
             "free-disk": self.explainDisk,
+            "two-d-policy": lambda: self.chooseTwoDPolicy(check),
         }.get(fix["id"])
         if handler is None:
             logging.warning(f"Lesion network mapping: the preflight fix {fix['id']!r} is not known")
@@ -891,6 +892,20 @@ class PreflightCard:
             self.ctx.study.apply_inbox()
         if shell is not None and hasattr(shell, "refreshLibrary"):
             shell.refreshLibrary()
+
+    def chooseTwoDPolicy(self, check):
+        """The 2D policy card of the open study (Draw asks for it on Done; lesion files imported into a study were never drawn there)."""
+        study = self.ctx.study
+        try:
+            from StudioLib import lesionqc, study_ui
+
+            session = study_ui.session()
+        except Exception:
+            lesionqc = session = None
+        if lesionqc is None or session is None or study is None or os.path.normcase(os.path.abspath(session.study.path)) != os.path.normcase(os.path.abspath(study.path)):
+            self.openLibrary(check["subjects"], check["id"])  # the study opens there, and its 2D lesions are pointed out with Choose
+            return
+        lesionqc.core().askImportedPolicy(session)
 
     def offerTransform(self, fix, check):
         """Offer the template-family transform of the lesions (the Library's warp, ``transforms warp`` jobs)."""
