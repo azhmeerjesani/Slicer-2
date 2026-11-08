@@ -577,6 +577,52 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertNotIn("planes", lesionqc.dimensionColumns(info, figure=True))
         self.assertNotIn("planes", lesionqc.dimensionColumns(info, planeNormal=[0.0, 1.0, 0.0]))
 
+    def test_1b_keep_single_slice_reapply_measures_the_drawn_volume(self):
+        """BB-1: changing the 2D policy back to "Keep single-slice" rewrites desc-lesion to the drawn slice, and volume_ml (the
+        lesion-volume covariate) follows it. It kept the previous extrusion's volume, and the refreshed lesion_mtime and
+        lesion_size made that stale value look current.
+        """
+        from LesionNetworkMappingLib import nifti
+        from LesionNetworkMappingLib.study import Study
+
+        from StudioLib import lesionqc
+
+        study = Study.create(os.path.join(self.directory, "single study"))
+        affine = np.diag([1.0, 1.0, 1.0, 1.0])
+        traced = np.zeros((40, 40, 40), np.uint8)
+        traced[10:23, 10:23, 20] = 1  # 169 voxels of 1 mm on one axial slice
+        study.add_subject("sub-01", space="MNI152NLin2009cAsym")
+        relative = study.lesion_relpath("sub-01")
+        path = study.abspath(relative)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        nifti.write_nifti(path, traced, affine)
+        study.set("sub-01", {"lesion": relative})
+        study.save()
+
+        def volume():
+            return float(study.subject("sub-01")["volume_ml"])
+
+        def analysisMl():
+            return float(np.count_nonzero(np.squeeze(nifti.read_nifti(path)[0]))) / 1000.0
+
+        lesionqc.setPolicy(study, lesionqc.MODE_BINARY, 4.0)  # ± 2 mm: 5 slices
+        self.assertIsNotNone(lesionqc.regenerate(study, "sub-01", None, source="lesion"))
+        self.assertAlmostEqual(analysisMl(), 0.845, places=6)
+        self.assertAlmostEqual(volume(), 0.845, places=6)
+        lesionqc.setPolicy(study, lesionqc.MODE_SINGLE)
+        self.assertIsNotNone(lesionqc.regenerate(study, "sub-01", None, source="traced"))
+        self.assertAlmostEqual(analysisMl(), 0.169, places=6)
+        self.assertAlmostEqual(volume(), 0.169, places=6, msg="volume_ml follows the single-slice desc-lesion")
+        # The same after a fractional extrusion
+        lesionqc.setPolicy(study, lesionqc.MODE_FRACTIONAL, 2.0)
+        lesionqc.regenerate(study, "sub-01", None, source="traced")
+        self.assertNotAlmostEqual(volume(), 0.169, places=6)
+        lesionqc.setPolicy(study, lesionqc.MODE_SINGLE)
+        lesionqc.regenerate(study, "sub-01", None, source="traced")
+        self.assertAlmostEqual(volume(), 0.169, places=6)
+        # and on reopening the study
+        self.assertAlmostEqual(float(Study.open(study.path).subject("sub-01")["volume_ml"]), 0.169, places=6)
+
     # Atlas download failure (BB-1)
 
     def test_atlas_download_failure_chip_is_one_readable_line(self):

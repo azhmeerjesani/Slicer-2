@@ -1692,8 +1692,12 @@ def regenerate(study, sid, session=None, source="lesion", normal=None):
     removed = []
     files = {}
     audit = {"event": "lesion_extrude", "mode": mode, "total_mm": policy["total_mm"], "dimensionality": dim, "source": source}
+    voxelMl = abs(float(np.linalg.det(np.asarray(affine, dtype=float)[:3, :3]))) / 1000.0
     if mode == MODE_SINGLE:
         values["extrude_mm"] = None
+        # desc-lesion is the drawn tracing again: its volume replaces an earlier extrusion's (lesion_mtime and lesion_size are
+        # refreshed below, so the metrics would otherwise look current)
+        values["volume_ml"] = round(float(drawn.sum()) * voxelMl, 6)
         if source == "traced":
             _writeAtomic(lesionPath, lambda temporary: shutil.copy2(tracedPath, temporary))
             files["lesion"] = lesionPath
@@ -1715,7 +1719,6 @@ def regenerate(study, sid, session=None, source="lesion", normal=None):
         binary = analysisBinary(kji, mode)
         _writeAtomic(lesionPath, lambda temporary: nifti.write_like(temporary, binary, subAffine, tracedPath, dtype=np.uint8, descrip="Slicer Studio lesion (extruded)"))
         files["lesion"] = lesionPath
-        voxelMl = abs(float(np.linalg.det(np.asarray(affine, dtype=float)[:3, :3]))) / 1000.0
         if mode == MODE_FRACTIONAL:
             _writeAtomic(probPath, lambda temporary: nifti.write_like(temporary, kji.astype(np.float32), subAffine, tracedPath, dtype=np.float32, descrip="Slicer Studio lesion probability"))
             files["lesionProb"] = probPath
