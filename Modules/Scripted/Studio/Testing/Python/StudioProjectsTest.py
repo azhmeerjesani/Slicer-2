@@ -1227,6 +1227,40 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertIsNotNone(reloaded)
         self.assertTrue(np.array_equal(slicer.util.arrayFromVolume(reloaded), expected))
 
+    def test_15a_image_pair_data_file_from_outside(self):
+        """A volume opened from the .img of a NIfTI pair (.hdr + .img) outside the folder is written into the project as a
+        self-contained file: copying the .img alone left the scene pointing at a file without its header, which neither
+        Slicer Studio nor official 3D Slicer can read.
+        """
+        for name in ("Head.img", "Head.IMG", "Head.img.gz", "Head.hdr", "Head.hdr.gz", "Head.nhdr"):
+            self.assertTrue(self.io.ProjectWriter._hasDataFiles(os.path.join(self.userDir, name)), name)
+        for name in ("Head.nrrd", "Head.nii.gz", "Head.nii", ".img"):
+            self.assertFalse(self.io.ProjectWriter._hasDataFiles(os.path.join(self.userDir, name)), name)
+        service = self._service()
+        volume, _path = self._userVolume("Pair", extension=".hdr")
+        slicer.mrmlScene.RemoveNode(volume)
+        imagePath = os.path.join(self.userDir, "Pair.img")
+        self.assertTrue(os.path.isfile(imagePath), os.listdir(self.userDir))
+        volume = slicer.util.loadVolume(imagePath)
+        self.assertTrue(volume.GetStorageNode().GetFileName().endswith("Pair.img"))
+        name = volume.GetName()
+        expected = slicer.util.arrayFromVolume(volume).copy()
+        project = self._projectFor(service)
+        self._save(service)
+        files = self._projectFiles(project)
+        self.assertFalse([name for name in files if name.lower().endswith((".img", ".hdr"))], files)
+        self.assertIn(f"Images/{name}.nrrd", files)
+        self.assertEqual(volume.GetStorageNode().GetFileName(), os.path.join(project.path, "Images", f"{name}.nrrd"))
+        self.assertFalse(volume.GetModifiedSinceRead())
+        projectPath = project.path
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertTrue(service.openProject(projectPath))
+        reloaded = slicer.mrmlScene.GetFirstNodeByName(name)
+        self.assertIsNotNone(reloaded)
+        self.assertIsNotNone(reloaded.GetImageData())
+        self.assertTrue(np.array_equal(slicer.util.arrayFromVolume(reloaded), expected))
+
     def test_15b_color_table_taken_over_names_no_local_path(self):
         """A colour table that 3D Slicer saved as .ctbl names the absolute path of its file on its first line: the project's
         copy (opened from outside, or moved from next to the scene file) names its own file only, and the privacy check

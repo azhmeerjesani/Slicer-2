@@ -1938,9 +1938,10 @@ def summarizeScene(scene, entries=None):
 PROJECT_TEMPORARY_PREFIX = ".studio-tmp-"
 #: Suffix of the name of the file Studio writes when another program changed the file of a node since Studio wrote it
 CONFLICT_SUFFIX = " (Slicer Studio)"
-#: Files that refer to data files next to them (NRRD and MetaImage detached headers, Analyze headers, multi-block
-#: surfaces): a node read from one of these outside the project is written into the project, never copied file by file
-DETACHED_EXTENSIONS = (".nhdr", ".seg.nhdr", ".seq.nhdr", ".mhd", ".hdr", ".vtm", ".seg.vtm")
+#: Files that are one half of a pair or refer to data files next to them (NRRD and MetaImage detached headers, the
+#: header and the image file of a NIfTI or Analyze pair, multi-block surfaces): a node read from one of these outside the
+#: project is written into the project, never copied file by file (the other half would be missing)
+DETACHED_EXTENSIONS = (".nhdr", ".seg.nhdr", ".seq.nhdr", ".mhd", ".hdr", ".hdr.gz", ".img", ".img.gz", ".vtm", ".seg.vtm")
 #: Files that official Slicer saved next to the scene file and that a generation moves into their kind folder (single
 #: files only: a .nhdr, a table and its schema or a DICOM series stay where they are)
 MOVABLE_EXTENSIONS = (".nrrd", ".nii", ".nii.gz", ".mha", ".seg.nrrd", ".mrk.json", ".vtk", ".vtp", ".stl", ".obj", ".ply", ".h5", ".tfm",
@@ -2426,8 +2427,8 @@ class ProjectWriter(SlotWriter):
         """True for a file that refers to other files (a detached header, a multi-block surface file): copying it alone
         would break it, so its node is written into the project by its storage node instead.
         """
-        _base, extension = _projects().splitExtension(os.path.basename(path))
-        return extension.lower() in DETACHED_EXTENSIONS
+        name = os.path.basename(path).lower()
+        return any(name.endswith(extension) and len(name) > len(extension) for extension in DETACHED_EXTENSIONS)
 
     def _writtenAgain(self, storageNode, files, inside):
         """True if a generation writes the node of these files although it is not modified: a 4D NIfTI (written as
