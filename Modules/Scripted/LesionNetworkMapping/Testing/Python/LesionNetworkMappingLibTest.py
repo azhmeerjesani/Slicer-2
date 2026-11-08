@@ -897,6 +897,45 @@ class BundleTest(_TempDirTestCase):
         with self.assertRaisesRegex(ValueError, "not on the mask grid"):
             connectome.from_nifti_timeseries(self.path("sub-*_bold.nii.gz"), mask_path, self.path("bad.lnmc"))
 
+    def test_resume_only_continues_an_interrupted_conversion_of_the_same_inputs(self):
+        """Bug BB-1 convert-resume-into-finished-bundle-duplicates-subjects: a resume into a finished bundle appended its
+        subjects again under other ids, renamed it and erased its terms (and the manager reported success).
+        """
+        from LesionNetworkMappingLib import manager
+
+        mask_path = self.path("mask.nii.gz")
+        nifti.write_nifti(mask_path, self.mask.astype(np.uint8), RAS_AFFINE)
+        for name in ("sub-01_bld001", "sub-02_bld001", "sub-03_bld001"):
+            nifti.write_nifti(self.path(f"{name}.nii.gz"), self.rng.standard_normal((*self.mask.shape, 6)).astype(np.float32), RAS_AFFINE)
+        runs = self.path("sub-*_bld001.nii.gz")
+        grouping = r"(?P<subject>sub-\d+)_bld"
+        out = self.path("finished.lnmc")
+        connectome.from_nifti_timeseries(runs, mask_path, out, runs_grouping=grouping, name="Finished", citation="Cite me", data_use_terms="Research use only.")
+        manifest = os.path.join(out, connectome.MANIFEST_NAME)
+        with open(manifest, encoding="utf-8") as f:
+            before = f.read()
+        # A finished bundle has nothing to resume: refused (with other ids, or with the same inputs), and left unchanged
+        for kwargs in ({}, {"runs_grouping": grouping}):
+            with self.assertRaisesRegex(FileExistsError, "finished connectome bundle"):
+                connectome.from_nifti_timeseries(runs, mask_path, out, name="Other", resume=True, **kwargs)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(jobs.JobError) as context:
+                manager.main(["convert", "--source", "nifti", "--input", self.tmp, "--mask", mask_path, "--out", out, "--name", "Other", "--resume"])
+        self.assertEqual(context.exception.code, "exists")
+        with open(manifest, encoding="utf-8") as f:
+            self.assertEqual(f.read(), before)
+        self.assertEqual(sorted(os.listdir(os.path.join(out, "subjects"))), sorted(f"sub-0{i}.{ext}.npy" for i in (1, 2, 3) for ext in ("f16", "norms")))
+        # An interrupted conversion resumed with other subjects (another runs grouping) is refused too
+        partial = self.path("partial.lnmc")
+        writer = connectome.ConnectomeWriter(partial, self.mask, RAS_AFFINE, name="Partial", citation="Cite me", data_use_terms="Research use only.")
+        writer.add_subject("sub-01", [self.rng.standard_normal((self.n_voxels, 6))])
+        with self.assertRaisesRegex(ValueError, "not in these inputs"):
+            connectome.from_nifti_timeseries(runs, mask_path, partial, resume=True)
+        # Resumed with the same inputs and no texts, it keeps its name, citation and terms
+        bundle = connectome.ConnectomeBundle.open(connectome.from_nifti_timeseries(runs, mask_path, partial, runs_grouping=grouping, resume=True))
+        self.assertEqual(bundle.subject_ids, ["sub-01", "sub-02", "sub-03"])
+        self.assertEqual((bundle.name, bundle.citation, bundle.data_use_terms), ("Partial", "Cite me", "Research use only."))
+
     def test_from_leaddbs(self):
         shape = (6, 7, 8)
         spm_mat = np.array([[-2.0, 0, 0, 92], [0, 2, 0, -128], [0, 0, 2, -74], [0, 0, 0, 1]])

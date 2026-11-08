@@ -393,7 +393,10 @@ def _convert_main(argv):
     cancel = jobs.CancelToken(args.cancel_file)
     out = os.path.abspath(args.out)
     if os.path.isfile(os.path.join(out, "connectome.json")) and not (args.resume or args.overwrite):
-        raise jobs.JobError(f"A connectome bundle already exists at {out} (use --overwrite or --resume)", code="exists")
+        raise jobs.JobError(f"A connectome bundle already exists at {out} (use --overwrite to replace it)", code="exists")
+    if args.resume and os.path.isfile(os.path.join(out, "connectome.json")) and not os.path.isfile(os.path.join(out, "connectome.partial.json")):
+        # Resume only continues an interrupted conversion: into a finished bundle it would add its subjects again
+        raise jobs.JobError(f"{out} is a finished connectome bundle: there is no interrupted conversion to resume (use --overwrite to replace it, or choose another folder)", code="exists")
     terms = ""
     if args.terms_file:
         with open(args.terms_file, encoding="utf-8") as f:

@@ -818,7 +818,8 @@ class ConnectomeWriter:
         }
         self._suffix, self._dtype = SUBJECT_DTYPES[dtype]
         if resume:
-            self._resume()
+            # Text left empty here is taken from the conversion being resumed (a resume without --terms-file keeps its terms)
+            self._resume(given={"name": bool(name), "description": bool(description), "citation": bool(citation), "dataUseTerms": bool(data_use_terms)})
         else:
             self._remove_previous()
         write_nifti(os.path.join(self.path, "mask.nii.gz"), self.mask.astype(np.uint8), self.affine, descrip="LNM connectome mask")
@@ -835,7 +836,7 @@ class ConnectomeWriter:
                     if _STALE_TMP_PATTERN.match(name):
                         _remove_quietly(os.path.join(folder, name))
 
-    def _resume(self):
+    def _resume(self, given=None):
         self._remove_stale_temporary_files()
         for name in (PARTIAL_MANIFEST_NAME, MANIFEST_NAME):
             path = os.path.join(self.path, name)
@@ -851,6 +852,9 @@ class ConnectomeWriter:
             if isinstance(saved, dict):
                 saved = {key: value for key, value in saved.items() if key in PROVENANCE_KEYS and key != "subjectsSha256"}
                 self.provenance = {**saved, **self.provenance}
+            for key, was_given in (given or {}).items():
+                if not was_given and isinstance(previous.get(key), str) and previous[key]:
+                    self.metadata[key] = previous[key]
             for entry in previous.get("subjects", []):
                 if all(os.path.isfile(p) for p in self._subject_files(entry["id"])):
                     self.metadata["subjects"].append(entry)
@@ -1017,6 +1021,35 @@ def normalize_run(run, out=None, block=8192):
 # Converters
 
 
+def check_resumable(out_dir, subject_ids):
+    """Refuse a ``resume`` that would not continue an interrupted conversion of the same inputs into ``out_dir``.
+
+    A finished bundle (connectome.json without connectome.partial.json) has nothing to resume: converting into it
+    would add its subjects again under other ids, rename it and replace its terms. Subjects already written by the
+    interrupted conversion must all be among ``subject_ids`` (the subjects of the inputs), otherwise the inputs or the
+    runs grouping changed and the bundle would mix two conversions. Nothing to resume (an empty folder) is fine.
+    :raises FileExistsError: a finished bundle is at ``out_dir``.
+    :raises ValueError: the written subjects are not subjects of the inputs.
+    """
+    path = os.path.abspath(os.fspath(out_dir))
+    partial = os.path.join(path, PARTIAL_MANIFEST_NAME)
+    if not os.path.isfile(partial):
+        if os.path.isfile(os.path.join(path, MANIFEST_NAME)):
+            raise FileExistsError(f"{path} is a finished connectome bundle: there is no interrupted conversion to resume (overwrite it or choose another folder)")
+        return
+    try:
+        with open(partial, encoding="utf-8") as f:
+            written = [entry.get("id") for entry in json.load(f).get("subjects", []) if isinstance(entry, dict)]
+    except (OSError, ValueError, AttributeError):
+        return  # unreadable: the writer reports it
+    wanted = set(subject_ids)
+    foreign = [subject_id for subject_id in written if subject_id not in wanted]
+    if foreign:
+        shown = ", ".join(map(str, foreign[:3])) + (", ..." if len(foreign) > 3 else "")
+        raise ValueError(f"Cannot resume: the interrupted conversion at {path} holds subjects that are not in these inputs ({shown}); "
+                         "resume with the same inputs and runs grouping, or overwrite it")
+
+
 def _default_name(out_dir):
     return os.path.splitext(os.path.basename(os.path.abspath(os.fspath(out_dir))))[0]
 
@@ -1096,6 +1129,8 @@ def from_nifti_timeseries(
         if not Grid(header["shape"][:3], header["affine"]).matches(mask_grid, atol=1e-3):
             raise ValueError(f"{path} is not on the mask grid (shape {header['shape'][:3]} vs {mask_grid.shape}, or different affine); resample it first")
 
+    if resume:
+        check_resumable(out_dir, groups)
     provenance = dict(provenance or {})
     if participants is not None:
         if not os.path.isfile(participants):
@@ -1105,7 +1140,7 @@ def from_nifti_timeseries(
         out_dir,
         mask,
         mask_affine,
-        name=name or _default_name(out_dir),
+        name=name,
         description=description,
         citation=citation,
         data_use_terms=data_use_terms,
@@ -1338,11 +1373,13 @@ def from_leaddbs(dataset_dir, out_dir, name=None, description="", citation="", d
     :return: bundle path, or None if cancelled.
     """
     dataset = _read_leaddbs_dataset(dataset_dir, max_subjects)
+    if resume:
+        check_resumable(out_dir, dataset.subject_ids)
     writer = ConnectomeWriter(
         out_dir,
         dataset.mask,
         dataset.affine,
-        name=name or _default_name(out_dir),
+        name=name,
         description=description,
         citation=citation or _leaddbs_citation_text(dataset.info),
         data_use_terms=data_use_terms,
