@@ -158,6 +158,20 @@ class LesionNetworkMappingSeedModeMapUITest(unittest.TestCase):
         self.assertIn("choose that segment in Seed", text)
         self.assertNotIn("segmentation", text)
 
+    def test_parked_run_hint_names_no_segment_that_is_gone(self):
+        """BB-1 map-single:parked-run-hint-names-segment-of-closed-lesion: when the mapped segmentation was closed, the
+        hint does not tell the user to choose a segment that no longer exists.
+        """
+        widget = self.widget
+        scene = slicer.mrmlScene
+        mapped = scene.AddNewNodeByClass("vtkMRMLSegmentationNode", "sub-nlin6")
+        mappedSegment = mapped.GetSegmentation().AddEmptySegment("lesion-a", "sub-nlin6")
+        parked = {"runSeed": (mapped.GetID(), mappedSegment), "state": ("sub-nlin6",), "runBundle": None}
+        scene.RemoveNode(mapped)
+        text = widget._parkedSeedHint(parked, "sub-nlin6")
+        self.assertEqual(text, "No map of this lesion yet: Map network computes it.")
+        self.assertNotIn("choose", text)
+
 
 if __name__ == "__main__":
     unittest.main()

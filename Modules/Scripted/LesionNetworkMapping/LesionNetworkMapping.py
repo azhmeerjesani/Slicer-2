@@ -4479,7 +4479,10 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         """What to choose in Seed to show the map of a parked run (same connectome) again: its segment, and its segmentation
         when the chosen seed is a segment of another segmentation (a segment of the same name would not be a hint to act on).
         """
-        segment = self._parkedSegmentName(parked) or lesion
+        segment = self._parkedSegmentName(parked)
+        if not segment:
+            # The segment (or its segmentation) was closed: there is nothing to choose to show that map again
+            return _("No map of this lesion yet: Map network computes it.")
         nodeId = (parked.get("runSeed") or ("", ""))[0]
         segNode = slicer.mrmlScene.GetNodeByID(nodeId) if nodeId else None
         if segNode is not None and nodeId != self._seedKey()[0]:
