@@ -709,6 +709,32 @@ class SourcesTest(RefmapsTestBase):
         with self.assertRaises(refmaps.RefmapsError):
             refmaps.add_neurovault(image_id=457, file_name="x.nii.gz", root=self.root, session=session, offline=True)
 
+    def test_neurovault_collection_stop_or_failure_adds_nothing(self):
+        """Stop or a failure part-way through a collection leaves no map of that add in the library."""
+        from LesionNetworkMappingLib import jobs
+
+        images = []
+        for number in (1, 2, 3):
+            path = self.writeMap(f"m{number}.nii.gz", _smooth_field(self.rng, SHAPE))
+            url = f"https://neurovault.org/media/images/900/m{number}.nii.gz"
+            images.append({"id": 900 + number, "name": f"Map {number}", "file": url.replace("https", "http"), "collection_id": 900,
+                           "target_template_image": "GenericMNI", "file_size": os.path.getsize(path)})
+            if number < 3:  # image 3 is not cached: offline, it fails
+                fetch.adopt(fetch.Resource({"id": f"neurovault/{900 + number}", "urls": [url], "filename": f"m{number}.nii.gz",
+                                            "checksum": fetch.RECORD_ON_FIRST_DOWNLOAD}), path, cache=self.root)
+        session = _FakeSession(images[0], {"id": 900, "name": "C"}, images)
+
+        class StopAfterOne:
+            def is_set(inner):
+                return len(refmaps.entries(self.root)) >= 1
+
+        with self.assertRaises(jobs.Cancelled):
+            refmaps.add_neurovault(collection_id=900, root=self.root, session=session, offline=True, cancel=StopAfterOne())
+        self.assertEqual(refmaps.entries(self.root), [])
+        with self.assertRaises((refmaps.RefmapsError, fetch.OfflineError)):
+            refmaps.add_neurovault(collection_id=900, root=self.root, session=session, offline=True)
+        self.assertEqual(refmaps.entries(self.root), [])
+
     def test_neurovault_read_failures_are_short(self):
         import requests
 

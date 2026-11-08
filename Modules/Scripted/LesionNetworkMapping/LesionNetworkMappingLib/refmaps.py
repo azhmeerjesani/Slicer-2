@@ -681,6 +681,25 @@ def add_neurovault(image_id=None, collection_id=None, condition=None, root=None,
                                    f"{NEUROVAULT_MAX_COLLECTION} images are listed). Paste the image's page link (neurovault.org/images/<id>/) instead.")
     citation = _neurovault_citation(collection) if collection else ""
     out = []
+    known = {item.get("id") for item in entries(root)}
+    try:
+        _add_neurovault_images(images, collection_id, citation, condition, root, session, progress, cancel, offline, out)
+    except BaseException:  # Stop or a failure part-way: the add is all or nothing, so the maps this call registered go again
+        for entry in out:
+            if entry["id"] not in known:
+                try:
+                    remove_entry(entry["id"], root)
+                except Exception:  # noqa: BLE001 - keep the original error
+                    pass
+        raise
+    if not out:
+        raise RefmapsError("No volumetric NIfTI image was found")
+    return out
+
+
+def _add_neurovault_images(images, collection_id, citation, condition, root, session, progress, cancel, offline, out):
+    from . import fetch
+
     for index, image in enumerate(images):
         fetch._raise_if_cancelled(cancel, index)
         url = _https(image.get("file"))
@@ -699,9 +718,6 @@ def add_neurovault(image_id=None, collection_id=None, condition=None, root=None,
                             licence=NEUROVAULT_LICENCE, licence_note=NEUROVAULT_LICENCE_NOTE, citation=citation, condition=condition or None,
                             kind="map", space=template if _known_space(template) else None)
         out.append(_register(entry, root))
-    if not out:
-        raise RefmapsError("No volumetric NIfTI image was found")
-    return out
 
 
 def vdh_catalog(path=None):
