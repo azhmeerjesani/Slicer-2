@@ -341,6 +341,28 @@ class FreedmanLane:
             denominator += ek / (w1 * dk + w2 * (1.0 - dk))
         return self.psi_scale * u[..., 0, :] / np.sqrt(np.maximum(denominator, _TINY))
 
+    def _v_kappa(self, ss, sse, sse1, floor):
+        """Conditioning of v: ||Yr||² times the relative change of its denominator D per unit of group SSE error.
+
+        The group SSEs of a null are known to an absolute error of about eps * ||Yr||², so D (v = psi / sqrt(D))
+        is known to a relative error eps * kappa with kappa = ||Yr||² (|dD/dsse1| + |dD/dsse2|) / D. A group
+        with no residual variance (a lesion in no control, or in every case) has sse1 -> 0, but D keeps a
+        finite limit and so does kappa; ||Yr||² / min(sse1, sse2) (about 1 / SSE_RTOL there) overstated it and
+        widened the tie tolerance to TIE_RTOL_MAX, inflating p.
+        """
+        sse1 = np.maximum(sse1, floor)
+        sse2 = np.maximum(sse - sse1, floor)
+        w1 = self.v_trace[0] / sse1
+        w2 = self.v_trace[1] / sse2
+        D = np.zeros_like(ss)
+        slope = np.zeros_like(ss)
+        for dk, ek in zip(self.v_d, self.v_e2, strict=True):
+            den = w1 * dk + w2 * (1.0 - dk)
+            den = np.maximum(den, _TINY)
+            D += ek / den
+            slope += ek * (w1 * dk / sse1 + w2 * (1.0 - dk) / sse2) / (den * den)
+        return np.maximum(ss * slope / np.maximum(D, _TINY), 1.0)
+
     def prepare(self, Y, chunk=CHUNK_VOXELS):
         """Residualize the data once: Yr = Rz Y (compute precision), ||Yr||², and the observed fit (float64).
 
@@ -377,12 +399,11 @@ class FreedmanLane:
                 extra = (self.v_mask @ (yr * yr), (self.Q * self.v_mask[:, None]).T @ yr)
             stat[part] = self._statistic(u, ss, floor, extra)
             sse_out[part] = np.maximum(ss - np.einsum("pv,pv->v", u, u), floor)
-            smallest = sse_out[part]
             if self.stat == "v":  # the group SSEs are also differences of ||Yr||²-sized terms
                 residual = yr - self.Q @ u
-                sse1 = self.v_mask @ (residual * residual)
-                smallest = np.maximum(np.minimum(sse1, smallest - sse1), floor)
-            kappa[part] = np.maximum(ss / np.maximum(smallest, _TINY), 1.0)
+                kappa[part] = self._v_kappa(ss, sse_out[part], self.v_mask @ (residual * residual), floor)
+            else:
+                kappa[part] = np.maximum(ss / np.maximum(sse_out[part], _TINY), 1.0)
             if psi is not None:
                 psi[part] = self.psi_scale * u[0]
             yy[part] = ss

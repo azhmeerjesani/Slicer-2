@@ -472,8 +472,8 @@ class DesignRunTest(_StudyTestCase):
                 self.assertEqual(r.p_unc[0], 1 / 200, label)
                 self.assertEqual(r.p_fwe[0], 1 / 200, label)
                 self.assertLessEqual(r.p_fwe[0], r.p_fwe[1], label)
-        # v with one variance group constant (its SSE at the floor, kappa 1e12): the tolerance is capped,
-        # so p matches a count with a tight tolerance
+        # v with one variance group constant (its SSE at the floor): v keeps a finite limit, so kappa stays
+        # small and p matches a count with a tight tolerance
         Yv = np.zeros((n1 + n0, 1))
         Yv[:n1, 0] = 1.0
         Yv[[0, 3, 5, 9], 0] = 0.0
@@ -483,13 +483,42 @@ class DesignRunTest(_StudyTestCase):
         r = glm.permutation_test(Yv, X, C, perms, stat="v", tails=1, dtype=np.float64, variance_groups=group.astype(int))
         engine = glm.FreedmanLane(X, C, "v", group.astype(int), "permutation", np.float64)
         prepared = engine.prepare(Yv)
-        self.assertGreater(prepared.kappa[0], 1e10)
+        self.assertLess(prepared.kappa[0], glm.KAPPA_MAX_FLOAT32)
         null = engine.null_statistics(prepared, perms[1:])[:, 0]
         self.assertEqual(r.p_unc[0], (1 + np.sum(null >= r.stat[0] * (1 - 1e-6))) / 200)
         # The bound keeps the threshold positive for any conditioning, and below the observed value
         threshold = glm._threshold(np.array([5.0, -5.0]), np.float64, False, np.array([1e15, 1e15]))
         self.assertTrue(0 < threshold[0] < 5.0)
         self.assertLess(threshold[1], -5.0)
+
+    def test_v_with_one_constant_group_keeps_a_tight_tie_tolerance(self):
+        # VLSM voxels that no control covers: the control group has no residual variance. Welch v stays
+        # finite there, so its conditioning kappa must not come from that group's (floored) SSE: kappa about
+        # 1e12 widened the tie tolerance to TIE_RTOL_MAX and nulls 10% below the observed v counted as
+        # exceedances (a voxel with p = 0.0005 got p = 0.11). p must match a count with a tight tolerance.
+        rng = np.random.default_rng(2)
+        n1, n0 = 16, 10
+        n = n1 + n0
+        group = np.r_[np.ones(n1), np.zeros(n0)]
+        Y = np.zeros((n, 60))
+        Y[:n1] = rng.uniform(0, 1, (n1, 60)) * (rng.uniform(0, 1, (n1, 60)) < 0.5)
+        Y[:n1] += rng.normal(0, 0.05, (1, 60))
+        Y[n1:, 30:] = 1.0  # cases vary, controls constant at 1 (also the A<B side)
+        Y[:n1, 30:] = 1.0 + Y[:n1, :30]
+        X, C = np.c_[group, 1 - group], np.array([[1.0, -1.0]])
+        perms = [np.arange(n)] + [rng.permutation(n) for _ in range(999)]
+        engine = glm.FreedmanLane(X, C, "v", group.astype(int), "permutation", np.float64)
+        prepared = engine.prepare(Y)
+        self.assertLess(float(prepared.kappa.max()), glm.KAPPA_MAX_FLOAT32)
+        null = engine.null_statistics(prepared, perms[1:])
+        for dtype in (np.float32, np.float64):
+            for tails in (1, 2):
+                r = glm.permutation_test(Y, X, C, perms, stat="v", tails=tails, dtype=dtype, variance_groups=group.astype(int))
+                observed = np.abs(r.stat) if tails == 2 else r.stat
+                values = np.abs(null) if tails == 2 else null
+                tight = (1 + np.sum(values >= observed * (1 - 1e-4), axis=0)) / len(perms)
+                np.testing.assert_allclose(r.p_unc, tight, atol=1e-12, err_msg=f"{np.dtype(dtype).name}, tails {tails}")
+                self.assertLess(float(np.min(r.p_unc)), 0.01)
 
     def test_type_one_error_is_calibrated(self):
         # Null data with a nuisance (volume) effect: the FWE rate over 200 simulations is within the
