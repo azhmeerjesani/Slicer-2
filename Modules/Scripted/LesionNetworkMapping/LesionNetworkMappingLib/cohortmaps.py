@@ -18,6 +18,9 @@ maps go to a cache entry keyed by everything they depend on::
     key = sha256(canonical JSON of {lesion_sha256, manifest_sha256, subject_ids_sha256, supersample,
                                     probabilistic, engine: {library version, output keys, RMAX, MIN_WEIGHT}})
 
+    (probabilistic is true for a fractional seed, a ``desc-lesionProb`` file, whatever the run's flag:
+    ``engine.is_fractional_seed``; :func:`study_lesions` maps a fractionally extruded 2D tracing from that file)
+
 An entry is built in a temporary folder and published with one ``os.replace`` of the folder; its
 files are never modified afterwards (QA for other settings is a new file). Consumers copy the map
 files (D-A21). An entry whose files are missing or have another size is recomputed. The lesion
@@ -526,8 +529,35 @@ def read_lesions_tsv(path):
     return _normalize_lesions(out)
 
 
+def _fractional_seed(study, row):
+    """The ``desc-lesionProb`` file of a 2D tracing that the study extrudes fractionally, or None.
+
+    With the fractional 2D policy (``trace_policy.extrude_2d`` mode "fractional"), Slicer Studio writes the extruded slab
+    twice: ``desc-lesion`` (the slab binarized at 0.5, the mask that is displayed and opened in official 3D Slicer) and
+    ``desc-lesionProb`` (edge slices fractional, so that thickness x area is the exact total thickness). The analysis
+    maps the fractional slab, with its values as weights (``engine.is_fractional_seed``), as the methods text states.
+    The lesion sidecar (``SlicerStudio.extrude``, written with both files) names it.
+    """
+    from .schema import FORK_KEY
+
+    try:
+        sidecar = study.read_lesion_sidecar(row["participant_id"]) or {}
+    except (OSError, ValueError, KeyError):
+        return None
+    studio = sidecar.get(FORK_KEY) if isinstance(sidecar, dict) else None
+    extrude = studio.get("extrude") if isinstance(studio, dict) else None
+    if not isinstance(extrude, dict) or extrude.get("mode") != "fractional" or not isinstance(extrude.get("prob"), str):
+        return None
+    name = os.path.basename(extrude["prob"])
+    path = os.path.join(os.path.dirname(study.abspath(row["lesion"])), name)
+    return path if name and engine.is_fractional_seed(path) and os.path.isfile(path) else None
+
+
 def study_lesions(study, include_unreviewed=False, lesions=None):
     """The lesions of a study that an analysis may use, and the excluded subjects.
+
+    A 2D tracing extruded with the study's fractional policy is mapped from its ``desc-lesionProb`` file (with its values
+    as weights, :func:`_fractional_seed`) instead of the binarized ``desc-lesion``.
 
     :param study: a :class:`study.Study` or its folder.
     :param include_unreviewed: also use lesions that review has not approved when the study requires review.
@@ -545,7 +575,7 @@ def study_lesions(study, include_unreviewed=False, lesions=None):
         rows, excluded = study.analysis_rows(columns=("lesion",), require_review=require_review)
         out = []
         for row in rows:
-            path = study.abspath(row["lesion"])
+            path = _fractional_seed(study, row) or study.abspath(row["lesion"])
             if not os.path.isfile(path):
                 excluded.setdefault(EXCLUDED_MISSING, []).append(row["participant_id"])
                 continue
@@ -638,11 +668,12 @@ class _Context:
         self.budget_bytes = default_budget_bytes() if budget_bytes is None else int(budget_bytes)
         self.batch_size = batch_size(self.bundle.n_voxels, self.budget_bytes, self.null_k, None if self.null_voxels is None else len(self.null_voxels))
 
-    def key(self, lesion_sha256):
-        return cache_key(lesion_sha256, self.manifest_sha256, self.subject_ids_sha256, self.supersample, self.probabilistic)
+    def key(self, lesion_sha256, path=None):
+        """The cache key of a lesion; a fractional seed (``engine.is_fractional_seed``) is always mapped probabilistically."""
+        return cache_key(lesion_sha256, self.manifest_sha256, self.subject_ids_sha256, self.supersample, engine.seed_probabilistic(path, self.probabilistic))
 
-    def key_fields(self, lesion_sha256):
-        return cache_key_fields(lesion_sha256, self.manifest_sha256, self.subject_ids_sha256, self.supersample, self.probabilistic)
+    def key_fields(self, lesion_sha256, path=None):
+        return cache_key_fields(lesion_sha256, self.manifest_sha256, self.subject_ids_sha256, self.supersample, engine.seed_probabilistic(path, self.probabilistic))
 
 
 def _check_lesion_header(path):
@@ -678,7 +709,7 @@ def _lookup_items(context, lesions):
         if expected and expected != sha:
             excluded.setdefault(EXCLUDED_SHA, []).append(sid)
             continue
-        key = context.key(sha)
+        key = context.key(sha, path)
         entry = read_entry(context.cache_dir, key)
         shared = False
         for folder in context.shared_cache_dirs if entry is None else ():
@@ -1222,7 +1253,7 @@ def _prepare_item(context, item):
         return None, (EXCLUDED_CHANGED, None)
     try:
         volume, affine, header = _load_lesion(item["lesion"], data)
-        weights, qc = engine.prepare_lesion((volume, affine), context.bundle, supersample=context.supersample, binarize=not context.probabilistic)
+        weights, qc = engine.prepare_lesion((volume, affine), context.bundle, supersample=context.supersample, binarize=not engine.seed_probabilistic(item["lesion"], context.probabilistic))
         qc["xform_disagreement_mm"] = float(xform_disagreement(header))  # reported by _lesion_warnings, not stored
     except LESION_ERRORS as exc:
         return None, (EXCLUDED_UNREADABLE, _unreadable_detail(item["lesion"], exc))
@@ -1337,7 +1368,7 @@ def _compute_batches(context, work, batches, state, cancel, emit, started):
                 build = functools.partial(
                     _write_entry_files,
                     key=item["key"],
-                    key_fields=context.key_fields(item["lesion_sha256"]),
+                    key_fields=context.key_fields(item["lesion_sha256"], item["lesion"]),
                     maps=maps,
                     index=column,
                     bundle=bundle,

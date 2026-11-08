@@ -639,6 +639,44 @@ class StudyGatingTest(CohortMapsTestBase):
         self.assertEqual([sid for sid, _, _ in lesions], self.sids[:5])
         self.assertEqual(excluded, {EXCLUDED_REVIEW: ["sub-06", "sub-07"], cohortmaps.EXCLUDED_NO_STUDY_ROW: ["sub-99"]})
 
+    def test_fractional_extrusion_maps_desc_lesionProb_with_weights(self):
+        """A 2D tracing extruded with the fractional policy is mapped from desc-lesionProb with its fractional weights
+        (WP L-13: exact total thickness), not from the desc-lesion slab binarized at 0.5; other lesions are unchanged.
+        """
+        study = self._study(approved=N_LESIONS)
+        lesion = study.abspath(study.subject("sub-01")["lesion"])
+        prob = lesion.replace("desc-lesion_mask", "desc-lesionProb_mask")
+        data, affine, _header = nifti.read_nifti(lesion)
+        nifti.write_nifti(prob, (np.asarray(data) > 0).astype(np.float32) * 0.5, affine)  # every voxel half a voxel
+        study.write_lesion_sidecar("sub-01", studio={"extrude": {"mode": "fractional", "total_mm": 2.0, "prob": os.path.basename(prob)}})
+        # sub-02 has a stale desc-lesionProb but a binary extrusion, sub-03 one with no sidecar (a normalized lesion): both keep desc-lesion
+        for sid, extrude in (("sub-02", {"mode": "binary", "total_mm": 2.0, "prob": None}), ("sub-03", None)):
+            other = study.abspath(study.subject(sid)["lesion"])
+            shutil.copyfile(prob, other.replace("desc-lesion_mask", "desc-lesionProb_mask"))
+            if extrude:
+                study.write_lesion_sidecar(sid, studio={"extrude": extrude})
+        lesions, excluded = cohortmaps.study_lesions(study)
+        self.assertEqual(excluded, {})
+        paths = {sid: path for sid, path, _ in lesions}
+        self.assertEqual(paths["sub-01"], prob)
+        self.assertEqual(paths["sub-02"], study.abspath(study.subject("sub-02")["lesion"]))
+        self.assertEqual(paths["sub-03"], study.abspath(study.subject("sub-03")["lesion"]))
+        self.assertTrue(engine.is_fractional_seed(prob))
+        self.assertFalse(engine.is_fractional_seed(lesion))
+        record = cohortmaps.run(lesions[:3], self.bundle, self.path("out"), study=study, budget_bytes=self.budget3, emit=_Events())
+        rows = {row["participant_id"]: row for row in cohortmaps.read_maps_tsv(self.path("out", "maps.tsv"))}
+        weighted = engine.prepare_lesion(prob, self.bundle, binarize=False)[1]["weight_total"]
+        binary = engine.prepare_lesion(lesion, self.bundle, binarize=True)[1]["weight_total"]
+        self.assertAlmostEqual(weighted, binary / 2, places=4)
+        self.assertAlmostEqual(float(rows["sub-01"]["fractional_sum"]), weighted, places=4)
+        # sub-03's stray desc-lesionProb is not used: its seed is its binary lesion
+        self.assertAlmostEqual(float(rows["sub-03"]["fractional_sum"]), engine.prepare_lesion(paths["sub-03"], self.bundle)[1]["weight_total"], places=4)
+        # The cache key of the fractional seed is the probabilistic one (shared with a --probabilistic run)
+        self.assertFalse(record["probabilistic"])
+        context = cohortmaps._Context(self.bundle, cache_root=record["cache_dir"].rsplit(os.sep, 1)[0])
+        self.assertEqual(rows["sub-01"]["key"], cohortmaps.cache_key(rows["sub-01"]["lesion_sha256"], context.manifest_sha256, context.subject_ids_sha256, 2, True))
+        self.assertEqual(rows["sub-03"]["key"], cohortmaps.cache_key(rows["sub-03"]["lesion_sha256"], context.manifest_sha256, context.subject_ids_sha256, 2, False))
+
     def test_missing_volume_posts_inbox_and_never_writes_participants(self):
         study = self._study(approved=N_LESIONS, volumes={"sub-01": 9.5, "sub-02": 7})
         tsv = os.path.join(study.path, "participants.tsv")

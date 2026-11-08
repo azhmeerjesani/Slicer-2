@@ -1010,7 +1010,7 @@ def load_cohort(maps_tsv, bundle, participants=None, group_column="group", emit=
                 raise ValueError(f"The cache entry of {sid} has {stored} voxels, the connectome has {bundle.n_voxels}")
             column = _sparse_columns([(indices, values)], bundle.n_voxels)[0]
         elif not _na(row.get("lesion")) and os.path.isfile(row["lesion"]):
-            weights, _qc = engine.prepare_lesion(row["lesion"], bundle, supersample=int(record.get("supersample") or 2), binarize=not record.get("probabilistic"))
+            weights, _qc = engine.prepare_lesion(row["lesion"], bundle, supersample=int(record.get("supersample") or 2), binarize=not engine.seed_probabilistic(row["lesion"], record.get("probabilistic")))
             column = _sparse_columns(weights, bundle.n_voxels)[0]
         if column is None:
             cohort.excluded.append({"participant_id": sid, "reason": "the lesion weights are not available (cache entry and lesion file missing)"})

@@ -244,6 +244,23 @@ def prepare_lesion(source, bundle, supersample=2, binarize=True, min_weight=MIN_
     return weights, lesion_qc(volume, bundle.mask_indices, min_weight, bundle.grid.voxel_volume, source_volume)
 
 
+_FRACTIONAL_SEED_NAME = re.compile(r"_desc-lesionProb(_[A-Za-z0-9]+)?\.nii(\.gz)?$", re.IGNORECASE)
+
+
+def is_fractional_seed(path):
+    """True for a ``desc-lesionProb`` lesion file (a fractional lesion, e.g. the fractional extrusion of a 2D tracing).
+
+    Its values are fractions of a voxel, so it is always mapped with its values as weights (``binarize=False``): binarizing
+    every non-zero voxel would map whole voxels where the lesion has fractional edges.
+    """
+    return path is not None and isinstance(path, (str, os.PathLike)) and _FRACTIONAL_SEED_NAME.search(os.path.basename(os.fspath(path))) is not None
+
+
+def seed_probabilistic(path, probabilistic=False):
+    """Whether a lesion file is mapped with its values as weights: the run's ``probabilistic`` flag or a fractional seed."""
+    return bool(probabilistic) or is_fractional_seed(path)
+
+
 # Core computation
 
 
@@ -1258,7 +1275,7 @@ def main(argv=None):
         spaces = _lesion_spaces(args.lesion, args.lesion_space, bundle)
         for path in args.lesion:
             cancel.raise_if_cancelled(done=0)
-            lesion_weights_vector, lesion_qc_values = prepare_lesion(path, bundle, supersample=args.supersample, binarize=not args.probabilistic)
+            lesion_weights_vector, lesion_qc_values = prepare_lesion(path, bundle, supersample=args.supersample, binarize=not seed_probabilistic(path, args.probabilistic))
             name = _unique_name(_lesion_name(path), names)
             names.append(name)
             weights.append(lesion_weights_vector)
