@@ -655,7 +655,16 @@ def writeNct(source, folder, prefix="networks_nct"):
     """Write the NCT-compatible volumes and ``<prefix>.json`` into ``folder``; return the written paths."""
     from LesionNetworkMappingLib import nifti
 
-    volumes = nctVolumes(source)
+    try:
+        volumes = nctVolumes(source)
+    except ValueError:
+        # Refused (a map of another template family): an earlier export into the same folder may have left the NCT volumes and sidecar of another map,
+        # which must not sit beside this map's networks.tsv/json
+        for name in (f"{prefix}.json", *(f"{prefix}_desc-{desc}.nii.gz" for desc in ("supra", "suprapos", "supraneg", "thresholded"))):
+            stale = os.path.join(folder, name)
+            if os.path.isfile(stale):
+                os.remove(stale)
+        raise
     target = nctGrid()
     os.makedirs(folder, exist_ok=True)
     written = []

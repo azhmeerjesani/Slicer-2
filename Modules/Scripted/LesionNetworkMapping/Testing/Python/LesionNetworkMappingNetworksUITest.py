@@ -209,6 +209,37 @@ class LesionNetworkMappingNetworksUITest(unittest.TestCase):
         finally:
             shutil.rmtree(folder, ignore_errors=True)
 
+    def test_refused_nct_export_into_a_used_folder_removes_the_earlier_nct_files(self):
+        """A map of the 2009 family exported into a folder that holds the NCT volumes of an FSL map: the refusal removes them and their sidecar."""
+        import os
+        import shutil
+        import tempfile
+        from types import SimpleNamespace
+
+        import numpy as np
+
+        from LesionNetworkMappingLib import geometry
+
+        grid = self.cn.nctGrid()
+        volume = np.zeros(grid.shape, dtype=np.float32)
+        volume[10, 10, 10] = 8.0
+        volume[20, 20, 20] = -8.0
+        other = next(spec for spec in geometry.GRID_REGISTRY if spec.grid_id == "TF2009-2mm").grid
+        otherVolume = np.zeros(other.shape, dtype=np.float32)
+        otherVolume[10, 10, 10] = 8.0
+        folder = tempfile.mkdtemp(prefix="lnm-nct-")
+        try:
+            self.cn.writeNct(SimpleNamespace(grid=grid, volume=volume, value=5.0, sign="both", statistic="T", space=None), folder)
+            self.assertEqual(len([name for name in os.listdir(folder) if name.startswith("networks_nct")]), 5)
+            with open(os.path.join(folder, "networks.tsv"), "w", encoding="utf-8") as f:
+                f.write("kept\n")
+            with self.assertRaises(ValueError):
+                self.cn.writeNct(SimpleNamespace(grid=other, volume=otherVolume, value=4.0, sign="both", statistic="T", space=None), folder)
+            # No NCT volume or sidecar of the earlier map is left; other files in the folder are not touched
+            self.assertEqual(sorted(os.listdir(folder)), ["networks.tsv"])
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
     def test_roi_rows_leave_the_not_in_these_networks_row_unchanged(self):
         """An ROI is an extra row: the voxels in it but in no network stay in "not in these networks" (rows add up to 100 %)."""
         import numpy as np
