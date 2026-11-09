@@ -302,6 +302,32 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
         finally:
             slicer.util.confirmYesNoDisplay = original
 
+    def test_hubness_and_reference_on_a_read_only_connectome_say_so_before_any_job_or_question(self):
+        # A lab share: no raw errno text, no confirmation that ends in a failure, no job (same wording as Build fast index…)
+        widget = self.widget
+        manager = widget.openManager()
+        _pump(100)
+        self._select(manager, self.paths[0])
+        asked = []
+        original, originalAccess = slicer.util.confirmYesNoDisplay, os.access
+        slicer.util.confirmYesNoDisplay = lambda text, **kwargs: asked.append(text) and False
+        target = os.path.normpath(self.paths[0])
+        os.access = lambda p, mode, *a, **k: False if (mode & os.W_OK and os.path.normpath(str(p)) == target) else originalAccess(p, mode, *a, **k)
+        try:
+            self.assertIsNone(manager.buildHubness())
+            self.assertIn("read-only", manager.statusLabel.text)
+            self.assertNotIn("Errno", manager.statusLabel.text)
+            self.assertIsNone(manager.job)
+            manager.statusLabel.setText("")
+            self.assertIsNone(manager.buildReference())
+            self.assertIn("read-only", manager.statusLabel.text)
+            self.assertIsNone(manager.job)
+            _pump(200)
+            self.assertEqual(asked, [])
+        finally:
+            os.access = originalAccess
+            slicer.util.confirmYesNoDisplay = original
+
     def test_import_dialog_label_count_uses_the_singular_for_one_lesion(self):
         from LesionNetworkMappingUI import manager_parity
 

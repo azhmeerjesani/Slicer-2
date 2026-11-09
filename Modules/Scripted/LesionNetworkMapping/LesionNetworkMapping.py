@@ -2144,12 +2144,22 @@ class ConnectomeManagerDialog(qt.QDialog):
             retry()
         return True
 
+    def _readOnlyReason(self, path, what):
+        """A plain sentence when the connectome folder cannot be written (a lab share), else "" (before any question or job)."""
+        if os.access(path, os.W_OK | os.X_OK):
+            return ""
+        return _("The connectome folder is read-only: {what} is stored in it.").format(what=what)
+
     def buildHubness(self):
         """The degree ("hubness") map of the selected connectome (``qa degree``)."""
         from LesionNetworkMappingUI import jobrunner
 
         path = self.selectedPath()
         if not path:
+            return None
+        reason = self._readOnlyReason(path, _("the hubness map"))
+        if reason:
+            self.statusLabel.setText(reason)
             return None
         self.statusLabel.setText(_("Building the hubness map…"))
 
@@ -2167,6 +2177,10 @@ class ConnectomeManagerDialog(qt.QDialog):
 
         path = self.selectedPath()
         if not path or (self.job is not None and not self.job.isFinished()):
+            return None
+        reason = self._readOnlyReason(path, _("the reference maps"))
+        if reason:
+            self.statusLabel.setText(reason)
             return None
         self.statusLabel.setText(_("Estimating the reference build…"))
 
