@@ -1764,6 +1764,9 @@ class ConvertConnectomeDialog(qt.QDialog):
         if paths["out"]:
             args += ["--out", paths["out"]]
         self.estimateLabel.setText(_("Estimating…"))
+        status = getattr(self.manager, "statusLabel", None)
+        if status is not None and status.text.startswith(_("The conversion failed: {reason}").split("{")[0]):
+            status.setText("")  # the failure of the last attempt is not the state of this one
 
         def onDone(job):
             self.estimateJob = None
