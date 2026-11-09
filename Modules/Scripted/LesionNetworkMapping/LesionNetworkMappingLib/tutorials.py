@@ -48,6 +48,7 @@ Command line (one JSON event per line, see ``jobs``; the Library card runs it as
 import concurrent.futures
 import contextlib
 import csv
+import errno
 import gzip
 import io
 import json
@@ -801,6 +802,38 @@ def _sweep_stale(parent):
         shutil.rmtree(os.path.join(parent, name), ignore_errors=True)
 
 
+_TARGET_ERRNOS = (errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC), errno.EROFS, errno.EACCES, errno.EPERM, errno.ENAMETOOLONG)
+
+
+def _target_error(exc, parent):
+    """A TutorialError that says in a sentence why the folder ``parent`` cannot take the study (no errno, no temporary name)."""
+    number = getattr(exc, "errno", None)
+    if number in (errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)):
+        text = f"The disk of {parent} is full. Free some space or choose another folder."
+    elif number in (errno.EROFS, errno.EACCES, errno.EPERM):
+        text = f"The folder {parent} cannot be written (read-only or not allowed). Choose another folder."
+    elif number == errno.ENAMETOOLONG:
+        text = f"The path {parent} is too long. Choose a shorter folder."
+    else:
+        text = f"The study cannot be written in {parent} ({exc.strerror or 'the folder is not usable'}). Choose another folder."
+    return TutorialError(text, code="dest_not_writable")
+
+
+def check_target(dest):
+    """Raise a TutorialError, before anything is downloaded, if the study folder ``dest`` cannot be created.
+
+    Creates the parent folder when it is missing and tries a small folder in it.
+    """
+    parent = os.path.dirname(os.path.abspath(os.fspath(dest)))
+    try:
+        os.makedirs(parent, exist_ok=True)
+        probe = os.path.join(parent, f".write-test-{os.getpid()}")
+        os.mkdir(probe)
+        os.rmdir(probe)
+    except OSError as exc:
+        raise _target_error(exc, parent) from None
+
+
 def build_study(entry, dest, items, table_path=None, warnings=None, cancel=None, progress=None, known=None):
     """Build the study of a tutorial from local files; returns the report.
 
@@ -822,7 +855,7 @@ def build_study(entry, dest, items, table_path=None, warnings=None, cancel=None,
         raise TutorialError(f"{dest} is a file; choose a new folder.", code="dest_exists")
     if not items:
         raise TutorialError(f"{entry['title']}: no lesion masks were found.", code="empty")
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    check_target(dest)
     _sweep_stale(os.path.dirname(dest))
     work = f"{dest}.building-{os.getpid()}"
     shutil.rmtree(work, ignore_errors=True)
@@ -914,9 +947,21 @@ def build_study(entry, dest, items, table_path=None, warnings=None, cancel=None,
         os.replace(work, dest)
         report["path"] = dest
         return report
-    except BaseException:
+    except BaseException as exc:
         shutil.rmtree(work, ignore_errors=True)
+        if isinstance(exc, OSError) and getattr(exc, "errno", None) in _TARGET_ERRNOS:
+            raise _target_error(exc, os.path.dirname(dest)) from None
         raise
+
+
+def _check_dest_free(dest):
+    """The checks of build_study that need no files, so that they fail before the download."""
+    path = os.path.abspath(os.fspath(dest))
+    if os.path.isfile(path):
+        raise TutorialError(f"{path} is a file; choose a new folder.", code="dest_exists")
+    if os.path.isdir(path) and os.listdir(path):
+        raise TutorialError(f"The folder {path} is not empty; choose a new folder for the tutorial study.", code="dest_exists")
+    check_target(path)
 
 
 def build_tutorial(tutorial_id, dest, cache=None, progress=None, cancel=None, limit=None, with_scans=False, offline=None, catalog=None, source_dir=None, workers=DEFAULT_WORKERS, session=None):
@@ -937,6 +982,7 @@ def build_tutorial(tutorial_id, dest, cache=None, progress=None, cancel=None, li
     problems = validate_entry(entry)
     if problems:
         raise TutorialError(f"The recipe {tutorial_id} is not valid: {'; '.join(problems)}", code="recipe")
+    _check_dest_free(dest)
     if progress:
         progress("plan", 0, 1)
     source = entry["source"]

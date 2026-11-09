@@ -481,6 +481,43 @@ class DataverseBuildTest(TutorialsTestBase):
         report = self.build(catalog, "joutsa_like")  # an empty existing folder is fine
         self.assertEqual(report["subjects"], 5)
 
+    def test_unwritable_or_full_target_is_a_sentence_before_any_download(self):
+        import errno
+        from unittest import mock
+
+        catalog = self.dataverse_catalog()
+        real_mkdir = os.mkdir
+        for number, words in ((errno.EPERM, "cannot be written"), (errno.EROFS, "cannot be written"), (errno.ENOSPC, "is full")):
+
+            def failing(path, *args, number=number, **kwargs):
+                if ".write-test-" in os.fspath(path):
+                    raise OSError(number, os.strerror(number), os.fspath(path))
+                return real_mkdir(path, *args, **kwargs)
+
+            self.server.log.clear()
+            with mock.patch("os.mkdir", failing), self.assertRaises(tutorials.TutorialError) as caught:
+                self.build(catalog, "joutsa_like")
+            message = caught.exception.message
+            self.assertIn(words, message)
+            self.assertIn(os.path.dirname(self.dest), message)
+            self.assertNotIn("Errno", message)
+            self.assertNotIn(".building", message)
+            self.assertEqual(caught.exception.code, "dest_not_writable")
+            self.assertEqual([path for path in self.server.log if "/api/access/datafile/" in path], [])
+        # a disk that fills up while the study is written
+        real_replace = os.replace
+
+        def full(source, *args, **kwargs):
+            if ".building-" in os.fspath(source):
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real_replace(source, *args, **kwargs)
+
+        with mock.patch("os.replace", full), self.assertRaises(tutorials.TutorialError) as caught:
+            self.build(catalog, "joutsa_like")
+        self.assertIn("is full", caught.exception.message)
+        self.assertNotIn("Errno", caught.exception.message)
+        self.assertNoPartialBuild()
+
     def test_checksum_mismatch_stops_the_build(self):
         catalog = self.dataverse_catalog(md5_wrong="1" * 32)
         with self.assertRaises(fetch.ChecksumError):
