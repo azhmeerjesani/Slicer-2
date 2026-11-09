@@ -1172,7 +1172,12 @@ class CompareCard:
             self._setNotice(_("The reference map was not added: {reason}").format(reason=job.failureReason or job.state))
         else:
             added = [event.get("entry") or {} for event in job.results if event.get("kind") == "refmap"]
-            self._setNotice(_("Added {titles} to the reference library.").format(titles=", ".join(str(entry.get("title")) for entry in added)))
+            text = _("Added {titles} to the reference library.").format(titles=", ".join(str(entry.get("title")) for entry in added))
+            for event in job.results:
+                if event.get("kind") == "refmap_limit":
+                    text = _("Only the first {listed} of {total} images of the collection were added (NeuroVault lists at most {listed}). "
+                             "Paste an image's page link to add another.").format(listed=event.get("listed"), total=event.get("total")) + " " + text
+            self._setNotice(text)
             self.refreshSources()
             self.setChecked([*self.checkedKeys(), *(f"reference:{entry.get('id')}" for entry in added)])
         self.updateState()

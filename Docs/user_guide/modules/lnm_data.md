@@ -92,7 +92,8 @@ starts. The same page lists **Build reference maps**, **Build fast index…** an
 
 The **Compare** card keeps a library of reference maps in `<LNM data folder>/ReferenceMaps/` (a registry with the licence,
 the citation, the sha256 and the space of each map; paths are relative, so the folder can be moved). Maps are added on a
-click, from NeuroVault (a public image or collection; the licence is recorded as CC0), from a URL or a file (the licence
+click, from NeuroVault (a public image or collection; the licence is recorded as CC0; a collection adds at most its first 100
+images, and the notice says when it has more), from a URL or a file (the licence
 you state, default "unknown", grey), or the van den Heuvel degree map from its pinned commit. The last one is derived from
 GSP data, so it needs the GSP terms to have been shown and accepted, is never redistributed and is recorded as such.
 

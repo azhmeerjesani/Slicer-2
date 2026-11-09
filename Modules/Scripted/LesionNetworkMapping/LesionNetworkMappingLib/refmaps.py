@@ -623,6 +623,10 @@ def neurovault_collection(collection_id, session=None, timeout=30.0):
     except Exception as exc:
         raise _neurovault_problem(f"NeuroVault collection {collection_id}", exc) from None
     collection["images"] = images.get("results", images) if isinstance(images, dict) else images
+    total = images.get("count") if isinstance(images, dict) else None
+    if not isinstance(total, int):
+        total = collection.get("number_of_images")
+    collection["image_total"] = total if isinstance(total, int) else len(collection["images"])
     return collection
 
 
@@ -649,8 +653,11 @@ def _neurovault_file_name(url):
 
 
 def add_neurovault(image_id=None, collection_id=None, condition=None, root=None, session=None, progress=None, cancel=None, offline=None,
-                   file_name=None):
+                   file_name=None, info=None):
     """Download NeuroVault image(s) through the public API (on the user's click); return the new entries.
+
+    ``info`` (a dict, optional) receives ``listed`` and ``total`` when a collection has more images than the 100 that are
+    listed, so the caller can say that only the first ``listed`` of ``total`` were added.
 
     Give ``image_id`` (one image) or ``collection_id`` (its images, at most 100). With ``collection_id``, ``file_name``
     keeps only the image whose file has that name: a NeuroVault download link (``/media/images/<collection>/<name>``)
@@ -673,6 +680,8 @@ def add_neurovault(image_id=None, collection_id=None, condition=None, root=None,
     else:
         collection = neurovault_collection(collection_id, session)
         images = list(collection.get("images") or [])
+        if info is not None and not file_name and collection.get("image_total", 0) > len(images):
+            info.update(listed=len(images), total=collection["image_total"])
         if file_name:
             wanted = _neurovault_file_name(file_name)
             images = [image for image in images if _neurovault_file_name(image.get("file")) == wanted]
@@ -1523,7 +1532,9 @@ def _root_argument(parser):
     parser.add_argument("--condition", default=None, help="condition of the map(s), for the cross-condition note")
 
 
-def _emit_entries(added):
+def _emit_entries(added, info=None):
+    if info:
+        jobs.emit("result", kind="refmap_limit", listed=info.get("listed"), total=info.get("total"))
     for entry in added:
         jobs.emit("result", kind="refmap", entry=_entry_summary(entry))
 
@@ -1579,9 +1590,10 @@ def _add_main(command, argv):
     cancel = jobs.CancelToken(args.cancel_file)
     jobs.emit("start", job=f"refmaps-{command}", argv=argv)
     progress = _cli_progress()
+    info = {}
     if command == "add-neurovault":
         added = _wrap(add_neurovault, image_id=args.image, collection_id=args.collection, condition=args.condition, root=args.root, progress=progress, cancel=cancel,
-                      file_name=args.file)
+                      file_name=args.file, info=info)
     elif command == "add-url":
         added = [_wrap(add_url, args.url, title=args.title, licence=args.licence, citation=args.citation, condition=args.condition, space=args.space, root=args.root,
                        progress=progress, cancel=cancel)]
@@ -1590,7 +1602,7 @@ def _add_main(command, argv):
     else:
         added = [_wrap(add_vdh, commit=args.commit, entry=args.entry, accepted_terms_sha256=args.accepted_terms_sha256, condition=args.condition, root=args.root,
                        progress=progress, cancel=cancel)]
-    _emit_entries(added)
+    _emit_entries(added, info)
     jobs.emit("done", outputs=[], elapsed=round(jobs.elapsed(), 3), run_id=None)
     return 0
 

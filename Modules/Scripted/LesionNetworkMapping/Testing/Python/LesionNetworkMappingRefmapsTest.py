@@ -418,8 +418,8 @@ class _FakeResponse:
 class _FakeSession:
     """Answers the NeuroVault API calls; the image file itself is already in the cache (adopted), so nothing is downloaded."""
 
-    def __init__(self, image, collection, images):
-        self.image, self.collection, self.images = image, collection, images
+    def __init__(self, image, collection, images, count=None):
+        self.image, self.collection, self.images, self.count = image, collection, images, count
         self.calls = []
 
     def get(self, url, params=None, timeout=None, **kwargs):
@@ -427,7 +427,7 @@ class _FakeSession:
         if "/images/" in url and "/collections/" not in url:
             return _FakeResponse(self.image)
         if url.endswith("/images/"):
-            return _FakeResponse({"results": self.images})
+            return _FakeResponse({"results": self.images} if self.count is None else {"results": self.images, "count": self.count})
         return _FakeResponse(self.collection)
 
 
@@ -708,6 +708,24 @@ class SourcesTest(RefmapsTestBase):
         self.assertIn("neurovault.org/images/", str(raised.exception))
         with self.assertRaises(refmaps.RefmapsError):
             refmaps.add_neurovault(image_id=457, file_name="x.nii.gz", root=self.root, session=session, offline=True)
+
+    def test_neurovault_large_collection_reports_the_limit(self):
+        """A collection with more images than the listed 100 says so (info), instead of silently adding only the first ones."""
+        path = self.writeMap("m1.nii.gz", _smooth_field(self.rng, SHAPE))
+        url = "https://neurovault.org/media/images/950/m1.nii.gz"
+        image = {"id": 951, "name": "Map 1", "file": url.replace("https", "http"), "collection_id": 950, "target_template_image": "GenericMNI",
+                 "file_size": os.path.getsize(path)}
+        fetch.adopt(fetch.Resource({"id": "neurovault/951", "urls": [url], "filename": "m1.nii.gz", "checksum": fetch.RECORD_ON_FIRST_DOWNLOAD}),
+                    path, cache=self.root)
+        info = {}
+        session = _FakeSession(image, {"id": 950, "name": "C", "number_of_images": 6573}, [image], count=6573)
+        added = refmaps.add_neurovault(collection_id=950, root=self.root, session=session, offline=True, info=info)
+        self.assertEqual(len(added), 1)
+        self.assertEqual(info, {"listed": 1, "total": 6573})
+        info = {}
+        session = _FakeSession(image, {"id": 950, "name": "C"}, [image], count=1)
+        refmaps.add_neurovault(collection_id=950, root=self.root, session=session, offline=True, info=info)
+        self.assertEqual(info, {})
 
     def test_neurovault_collection_stop_or_failure_adds_nothing(self):
         """Stop or a failure part-way through a collection leaves no map of that add in the library."""
