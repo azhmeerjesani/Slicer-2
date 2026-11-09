@@ -4398,6 +4398,11 @@ def answerFigureConvention(convention, figureId=None):
     if controller is not None and controller.figureId == figure.GetID():
         controller.mirror(convention == "neurological")
     _withdrawNotice("figure-convention")
+    # The Draw Figure card shows the confirmation state (read from the attribute): refresh it now
+    module = _figureModule()
+    card = getattr(module, "_card", None) if module is not None else None
+    if card is not None:
+        card.refresh()
     return True
 
 

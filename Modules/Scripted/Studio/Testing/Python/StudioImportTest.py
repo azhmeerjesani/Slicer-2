@@ -788,7 +788,16 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         importer.selectInSegmentEditor(self._editor().segmentationNode(), figure)
         self.assertEqual(self._editor().sourceVolumeNode().GetID(), template.GetID())
         # A second figure replaces the first in Yellow and asks again
+        importer.answerFigureConvention("neurological")
+        # The Draw Figure card shows the answer at once (confirmed, the answered side)
+        from StudioLib import figure as figureLib
+
+        figureCard = figureLib._card
+        self.assertIsNotNone(figureCard)
+        self.assertEqual(figureCard.conventionState.text, "Confirmed for this paper")
+        self.assertTrue(figureCard.conventionGroup.button(1).checked)
         importer.answerFigureConvention("radiological")
+        self.assertTrue(figureCard.conventionGroup.button(0).checked)
         second = self._routeFigure(studioShell, fromLibrary=False)
         self.assertEqual(self._background("Yellow").GetID(), second.GetID())
         self.assertEqual(studioShell.inspectorNoticeKey(), "figure-convention")
