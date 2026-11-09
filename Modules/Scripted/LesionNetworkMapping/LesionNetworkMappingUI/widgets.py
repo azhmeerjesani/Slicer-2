@@ -64,6 +64,25 @@ def relativePathProblem(text):
     return _("{path} is not a full path: type one that starts with / or ~ (for example {example}), or choose the folder with the browse button.").format(path=text, example=example)
 
 
+def notAFolderProblem(path):
+    """Why an absolute destination cannot be a folder (it, or the nearest existing part of it, is a file), or None.
+
+    Without this the job fails later with a raw ``[Errno 17] File exists`` (or ``[Errno 20]``) from ``os.makedirs``.
+    """
+    path = str(path or "")
+    if not path:
+        return None
+    probe = path
+    while probe and not os.path.lexists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            return None
+        probe = parent
+    if probe and os.path.exists(probe) and not os.path.isdir(probe):
+        return _("{path} is a file, not a folder: choose a folder, or type a new folder name.").format(path=probe)
+    return None
+
+
 def _studioUi():
     """``StudioLib.ui``, or None when the Studio module is not available."""
     try:

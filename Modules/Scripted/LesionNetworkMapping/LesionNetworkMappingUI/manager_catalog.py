@@ -154,7 +154,7 @@ class FetchController:
             return _("Choose a destination folder.")
         if not os.path.isabs(os.path.expanduser(str(request["dest"]))):  # the job runs in the module folder: never write inside the application
             return widgets.relativePathProblem(request["dest"])
-        return None
+        return widgets.notAFolderProblem(os.path.normpath(os.path.expanduser(str(request["dest"]))))
 
     def checkResumeSubset(self, request):
         """Why the interrupted download of ``request`` cannot be resumed with its subset (it leaves out converted archives), or None."""

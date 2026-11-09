@@ -405,6 +405,48 @@ class LesionNetworkMappingCatalogDialogTest(unittest.TestCase):
             self.assertIn("is not a full path", controller.lastRequestError or "")
             runner.assert_not_called()
 
+    def test_destination_that_is_a_file_is_refused_with_a_plain_hint(self):
+        """A file typed as the destination left Download enabled and the job failed with a raw '[Errno 17] File exists'."""
+        from LesionNetworkMappingLib import catalog
+        from LesionNetworkMappingUI import manager_catalog
+
+        entry = catalog.load_catalog().get("gsp1000-ilxiks")
+        dialog = self.makeDialog(None)
+        dialog.entry = entry
+        dialog.terms[entry["id"]] = {"text": "terms", "display": "terms", "sha": "a" * 64}
+        wasBlocked = dialog.acceptCheck.blockSignals(True)
+        dialog.acceptCheck.setChecked(True)
+        dialog.acceptCheck.blockSignals(wasBlocked)
+        controller = dialog.controller
+        saved = (controller.state, controller.request, controller.errorEvent, controller.job)
+        self.addCleanup(lambda: (setattr(controller, "state", saved[0]), setattr(controller, "request", saved[1]), setattr(controller, "errorEvent", saved[2]),
+                                 setattr(controller, "job", saved[3])))
+        controller.job = None
+        controller.state = "idle"
+        controller.errorEvent = None
+        patcher = mock.patch.object(manager_catalog, "termsAccepted", return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        filePath = os.path.join(self.tmp, "a file.txt")
+        with open(filePath, "w") as handle:
+            handle.write("x")
+        for text in (filePath, os.path.join(filePath, "sub")):
+            dialog.destEdit.setText(text)
+            dialog.updateState()
+            self.assertFalse(dialog.downloadButton.enabled, text)
+            self.assertIn("is a file, not a folder", dialog.hintLabel.text, text)
+        # The controller refuses it too (Resume of a saved request)
+        with mock.patch.object(controller, "entry", return_value=entry), mock.patch.object(manager_catalog, "fetchEnabled", return_value=True), \
+                mock.patch.object(manager_catalog.jobrunner, "instance") as runner:
+            self.assertIsNone(controller.start({"entry": entry["id"], "dest": filePath, "termsSha": "a" * 64}))
+            self.assertIn("is a file, not a folder", controller.lastRequestError or "")
+            runner.assert_not_called()
+        # A folder (existing or new) is still accepted
+        for text in (self.tmp, os.path.join(self.tmp, "new folder")):
+            dialog.destEdit.setText(text)
+            dialog.updateState()
+            self.assertNotIn("is a file", dialog.hintLabel.text, text)
+
 
 if __name__ == "__main__":
     unittest.main()

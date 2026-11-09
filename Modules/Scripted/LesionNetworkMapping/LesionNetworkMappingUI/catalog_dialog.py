@@ -705,7 +705,9 @@ class CatalogDialog(qt.QDialog):
             problem = widgets.relativePathProblem(self.destEdit.text)
             self.planLabel.setText("")
         elif destination:
-            text, problem = planSummary(entry, subset, self.keepCheck.checked, destination, None if self.mismatchHere() else self.unfinishedHere())
+            problem = widgets.notAFolderProblem(destination)
+            text, planProblem = planSummary(entry, subset, self.keepCheck.checked, destination, None if self.mismatchHere() else self.unfinishedHere())
+            problem = problem or planProblem
             self.planLabel.setText(text)
         else:
             self.planLabel.setText("")
