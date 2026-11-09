@@ -1105,6 +1105,107 @@ def _bytesText(value):
         return str(value).strip()
 
 
+#: A project lock written on another computer is stale when the project shows no sign of life for this long: the open
+#: project writes a heartbeat into its project.json every 10 minutes (``autosave.HEARTBEAT_S``), as a session does for
+#: its own lock (``recovery.STALE_HEARTBEAT_S``). QLockFile cannot check a process of another computer, so without this
+#: the lock of a project that was open on a computer that crashed (or of a folder copied while it was open) holds forever.
+FOREIGN_LOCK_STALE_S = 2 * 3600
+
+
+def _readLockLines(lockPath):
+    """The lines of a QLockFile lock file (PID, application name, host name, machine ID, boot ID), or None."""
+    try:
+        with open(lockPath, encoding="utf-8", errors="replace") as f:
+            return [line.strip() for line in f.read().split("\n")]
+    except OSError:
+        return None
+
+
+def _lockOnOtherHost(lines):
+    """True if the lock file lines name another computer, as QLockFile decides it: the machine ID when the lock has one,
+    else the host name.
+    """
+    hostName = lines[2] if len(lines) > 2 else ""
+    hostId = lines[3] if len(lines) > 3 else ""
+    ownHostId = _bytesText(qt.QSysInfo.machineUniqueId())
+    if hostId and ownHostId:
+        return hostId != ownHostId
+    return bool(hostName) and hostName != str(qt.QSysInfo.machineHostName())
+
+
+def _projectLastAlive(projectPath):
+    """When the project last showed a sign of life (seconds since the epoch): the heartbeat in its project.json (copied
+    with the folder, unlike file times), else the time of its lock file; None if neither can be read.
+    """
+    data = readProjectJson(projectPath) or {}
+    for key in ("heartbeat", "modified"):
+        seconds = parseTime(data.get(key)) if data.get(key) else None
+        if seconds is not None:
+            return seconds
+    try:
+        return os.path.getmtime(_lockPath(projectPath))
+    except OSError:
+        return None
+
+
+def lockHolder(projectPath):
+    """Who holds the lock of the project folder ``projectPath`` when another Slicer Studio has it open (``isLockedByOther``):
+    ``{"host": <host name>, "otherComputer": bool, "lastAlive": <seconds or None>}``, or None when nobody else holds it.
+    """
+    if not isLockedByOther(projectPath):
+        return None
+    lines = _readLockLines(_lockPath(projectPath)) or []
+    otherComputer = _lockOnOtherHost(lines) if lines else False
+    return {"host": lines[2] if len(lines) > 2 else "", "otherComputer": otherComputer, "lastAlive": _projectLastAlive(projectPath)}
+
+
+def lockedText(projectPath):
+    """Why the project ``projectPath`` cannot be changed here: another Slicer Studio, on this computer or another one,
+    has it open (for messages; ``isLockedByOther`` is True).
+    """
+    name = os.path.basename(os.path.normpath(projectPath))
+    holder = lockHolder(projectPath)
+    if holder is not None and holder["otherComputer"]:
+        host = holder["host"] or _("another computer")
+        return _("{name} was open on {host} and was not closed there. If it is not open there any more, open it and "
+                 "choose Open here.").format(name=name, host=host)
+    return _("{name} is open in another Slicer Studio.").format(name=name)
+
+
+def takeOverLock(projectPath):
+    """Open here: delete the lock that another computer left on the project (the user says it is not open there any
+    more). Return True if the project can now be locked here. A lock of a live process on this computer is never taken.
+    """
+    lockPath = _lockPath(projectPath)
+    holder = lockHolder(projectPath)
+    if holder is None:
+        return True
+    if not holder["otherComputer"]:
+        return False
+    lines = _readLockLines(lockPath)
+    try:
+        # Only the lock that was read: not one that a Slicer Studio of this computer took in the meantime
+        if lines is not None and _lockOnOtherHost(lines):
+            os.remove(lockPath)
+    except OSError as error:
+        logging.warning(f"Slicer Studio: the lock of {os.path.basename(projectPath)} could not be removed: {error}")
+        return False
+    return not isLockedByOther(projectPath)
+
+
+def _lockAbandonedOnOtherHost(lockPath, lastAlive):
+    """True if the lock file was written on another computer and its project shows no sign of life for
+    ``FOREIGN_LOCK_STALE_S`` (``lastAlive()``: seconds since the epoch, or None).
+    """
+    if lastAlive is None or _lockKey(lockPath) in _heldLocks:
+        return False
+    lines = _readLockLines(lockPath)
+    if not lines or not _lockOnOtherHost(lines):
+        return False
+    seen = lastAlive()
+    return seen is not None and time.time() - seen > FOREIGN_LOCK_STALE_S
+
+
 def _lockLeftByEarlierProcess(lockPath):
     """True if the lock file names this process (its PID, on this host as QLockFile sees it) but this process does not hold it.
 
@@ -1114,39 +1215,34 @@ def _lockLeftByEarlierProcess(lockPath):
     """
     if _lockKey(lockPath) in _heldLocks:
         return False
-    try:
-        with open(lockPath, encoding="utf-8", errors="replace") as f:
-            lines = [line.strip() for line in f.read().split("\n")]
-    except OSError:
+    lines = _readLockLines(lockPath)
+    if lines is None:
         return False
     try:
         if int(lines[0]) != os.getpid():
             return False
     except (ValueError, IndexError):
         return False
-    # "This host" as QLockFile decides it: the machine ID when the lock has one, else the host name
-    hostName = lines[2] if len(lines) > 2 else ""
-    hostId = lines[3] if len(lines) > 3 else ""
-    sameHost = not hostName or hostName == str(qt.QSysInfo.machineHostName())
-    ownHostId = _bytesText(qt.QSysInfo.machineUniqueId())
-    if hostId and ownHostId:
-        sameHost = hostId == ownHostId
-    return sameHost
+    return not _lockOnOtherHost(lines)
 
 
 def _tryLock(projectPath):
     """Take the lock of the project: the locked QLockFile, or None if another running Slicer Studio holds it."""
-    return _tryLockAt(_lockPath(projectPath))
+    return _tryLockAt(_lockPath(projectPath), lastAlive=lambda: _projectLastAlive(projectPath))
 
 
-def _tryLockAt(lockPath):
-    """Take the lock file ``lockPath``: the locked QLockFile, or None if another running Slicer Studio holds it."""
+def _tryLockAt(lockPath, lastAlive=None):
+    """Take the lock file ``lockPath``: the locked QLockFile, or None if another running Slicer Studio holds it.
+
+    ``lastAlive()``: when the holder last showed a sign of life, for a lock written on another computer (whose process
+    QLockFile cannot check): such a lock is stale after ``FOREIGN_LOCK_STALE_S``. Without it, it is never stale.
+    """
     lock = qt.QLockFile(lockPath)
     # Never stale by age: a lock is stale only when its process is gone (QLockFile checks the process on this host)
     lock.setStaleLockTime(0)
     if lock.tryLock(0):
         return lock
-    if not _lockLeftByEarlierProcess(lockPath):
+    if not _lockLeftByEarlierProcess(lockPath) and not _lockAbandonedOnOtherHost(lockPath, lastAlive):
         return None
     lock.removeStaleLockFile()
     return lock if lock.tryLock(0) else None
@@ -1497,7 +1593,7 @@ def renameFolder(path, newName):
     if newName == os.path.basename(os.path.normpath(path)):
         return path
     if isLockedByOther(path):
-        raise ProjectError(_("{name} is open in another Slicer Studio.").format(name=os.path.basename(path)))
+        raise ProjectError(lockedText(path))
     newPath = os.path.join(parent, newName)
     if nameTaken(parent, newName, path):
         raise ProjectError(_("A project named {name} already exists.").format(name=newName))
@@ -1911,7 +2007,7 @@ def trashRefusal(path):
     if current is not None and os.path.normcase(os.path.realpath(current.path)) == os.path.normcase(os.path.realpath(path)):
         return _("{name} is open. Close it first (New project).").format(name=os.path.basename(os.path.normpath(path)))
     if isLockedByOther(path):
-        return _("{name} is open in another Slicer Studio.").format(name=os.path.basename(os.path.normpath(path)))
+        return lockedText(path)
     # A project in a read-only place (a share where Projects/ is locked) can be neither moved to the trash nor deleted:
     # say so and change nothing, rather than offer to delete it for good as if there were no trash and then stop half way
     return _removalRefusal(path, wholeTree=False)

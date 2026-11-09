@@ -8188,6 +8188,105 @@ class StudioProjectsTest(unittest.TestCase):
                 self.assertTrue(projects.trashFolder(folder, confirmDelete=lambda: True))
                 self.assertFalse(os.path.exists(folder))
 
+    def test_103_lock_left_on_another_computer_can_be_taken_over(self):
+        """BB-1: a project whose .studio/lock was written by QLockFile on another computer (it crashed there, or the
+        folder was copied while open) could never be opened, renamed or trashed, and Open said it "is open in another
+        Slicer Studio: changes made here are not saved to it" although nothing was opened. QLockFile cannot check a process
+        of another computer, so the lock never became stale. Now: a recent one is refused with a message that names the
+        computer and offers Open here (which takes the lock); one whose project shows no heartbeat for
+        ``FOREIGN_LOCK_STALE_S`` is stale. A lock of a live process on this computer is never taken.
+        """
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        service = self._service()
+        self._userVolume()
+        project = self._projectFor(service)
+        self._save(service)
+        path = project.path
+        service.releaseProject()
+        projects.setCurrentProject(None)
+        self.io.backgroundWriter().drain(10.0)
+        slicer.mrmlScene.Clear(0)
+        lockPath = os.path.join(path, ".studio", "lock")
+        self.assertFalse(os.path.exists(lockPath))
+        variants = {
+            "machine id": "4242\nSlicerApp-real\nlab-laptop\n0123456789abcdef0123456789abcdef\n11111111-2222-3333-4444-555555555555\n",
+            "host name only": "4242\nSlicerApp-real\nlab-laptop\n",
+        }
+        announced = []
+        service.setProjectAnnouncer(lambda event, project, **info: announced.append((event, info)))
+        messages = []
+        realMessage = projects_ui.message
+        projects_ui.message = lambda text, **kwargs: messages.append((text, kwargs))
+        try:
+            for variant, text in variants.items():
+                with self.subTest(variant=variant):
+                    # A recent lock of another computer: refused, with the computer named and a way out
+                    with open(lockPath, "w") as f:
+                        f.write(text)
+                    self.assertTrue(projects.isLockedByOther(path))
+                    holder = projects.lockHolder(path)
+                    self.assertTrue(holder["otherComputer"])
+                    self.assertEqual(holder["host"], "lab-laptop")
+                    refusal = projects.trashRefusal(path)
+                    self.assertIn("lab-laptop", refusal)
+                    self.assertIn("Open here", refusal)
+                    announced.clear()
+                    self.assertFalse(service.openProject(path))
+                    self.assertEqual([event for event, _info in announced], ["locked"])
+                    info = announced[0][1]
+                    self.assertIs(info["opened"], False)
+                    messages.clear()
+                    projects_ui.announce("locked", projects.Project(path), **info)
+                    self.assertEqual(len(messages), 1)
+                    toast, options = messages[0]
+                    self.assertIn("was not opened", toast)
+                    self.assertIn("lab-laptop", toast)
+                    self.assertNotIn("changes made here are not saved", toast)
+                    self.assertEqual(options.get("actionText"), "Open here")
+                    # Open here: the lock is taken and the project opens
+                    self.assertTrue(projects.takeOverLock(path))
+                    self.assertTrue(service.openProject(path))
+                    self.assertIsNotNone(service.project)
+                    self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("sub-012_T1w"))
+                    service.releaseProject()
+                    projects.setCurrentProject(None)
+                    self.io.backgroundWriter().drain(10.0)
+                    slicer.mrmlScene.Clear(0)
+                    # A lock of another computer whose project has shown no heartbeat for hours is stale: it opens
+                    with open(lockPath, "w") as f:
+                        f.write(text)
+                    data = projects.readJson(projects.projectFile(path))
+                    old = projects._isoTime(time.time() - projects.FOREIGN_LOCK_STALE_S - 60)
+                    data.update(heartbeat=old, state="open")
+                    self.io.atomicWriteJson(projects.projectFile(path), data)
+                    self.assertFalse(projects.isLockedByOther(path))
+                    self.assertIsNone(projects.trashRefusal(path))
+                    self.assertTrue(service.openProject(path))
+                    self.assertIsNotNone(service.project)
+                    service.releaseProject()
+                    projects.setCurrentProject(None)
+                    self.io.backgroundWriter().drain(10.0)
+                    slicer.mrmlScene.Clear(0)
+            # A live Slicer Studio of this computer (the same process stands for it) is never taken over, however old
+            other = projects.Project(path)
+            self.assertTrue(other.lock())
+            try:
+                data = projects.readJson(projects.projectFile(path))
+                data.update(heartbeat=projects._isoTime(time.time() - 10 * projects.FOREIGN_LOCK_STALE_S))
+                self.io.atomicWriteJson(projects.projectFile(path), data)
+                self.assertTrue(projects.isLockedByOther(path))
+                self.assertFalse(projects.lockHolder(path)["otherComputer"])
+                self.assertFalse(projects.takeOverLock(path))
+                self.assertTrue(os.path.isfile(lockPath), "the lock of this computer is kept")
+                self.assertNotIn("Open here", projects.lockedText(path))
+            finally:
+                other.unlock()
+        finally:
+            projects_ui.message = realMessage
+
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 

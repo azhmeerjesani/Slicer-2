@@ -2332,6 +2332,27 @@ def announce(event, project, **info):
                     toolTip=project.path if project is not None else None)
         else:
             message(_("Continuing {project}").format(project=name), ms=2500)
+    elif event == "locked" and info.get("opened") is False:
+        # Open project refused (nothing was loaded): say who has it. A lock that another computer left (it crashed there,
+        # or the folder was copied while it was open) can be taken over: the user knows whether it is still open there.
+        holder = info.get("holder") or {}
+        projectName = project.name if project else ""
+        if holder.get("otherComputer") and project is not None:
+            path = project.path
+
+            def openHere(*_args):
+                if projects.takeOverLock(path):
+                    openProject(path)
+                else:
+                    message(projects.lockedText(path), level="warning", ms=8000)
+
+            host = holder.get("host") or _("another computer")
+            message(_("{name} was not opened: it was open on {host} and was not closed there. If it is not open there any "
+                      "more, choose Open here; to keep it as it is, Duplicate it and open the copy.").format(name=projectName, host=host),
+                    level="warning", ms=15000, sticky=True, action=openHere, actionText=_("Open here"))
+        else:
+            message(_("{name} was not opened: it is open in another Slicer Studio. Close it there, or Duplicate it and open "
+                      "the copy.").format(name=projectName), level="warning", ms=8000, sticky=True)
     elif event == "locked":
         # Shown once per project, and edits are then autosaved only privately: it stays until the next input (sticky), so
         # the "Loaded scan.mrml" of the same load does not replace it before it is read

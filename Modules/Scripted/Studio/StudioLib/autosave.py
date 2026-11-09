@@ -2141,7 +2141,8 @@ class AutosaveService:
                 self._announce("not-opened", None, name=name, missing=False, reason=_("{name} has no scene file").format(name=name))
             return False
         if projects.isLockedByOther(path):
-            self._announce("locked", projects.Project(path))
+            # Nothing is opened: the message says who has it (another computer: "Open here" takes the lock it left)
+            self._announce("locked", projects.Project(path), opened=False, holder=projects.lockHolder(path))
             return False
         if self._studyOpen():
             # Opening a project is an explicit choice of the user: the study is closed first (its subject's edits are written),

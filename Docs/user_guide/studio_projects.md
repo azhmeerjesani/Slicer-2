@@ -142,6 +142,10 @@ next to the `.mrml` file into their folders.
   file anywhere. The project itself stays where it is and keeps saving there.
 - Scene files hold no absolute paths of your computer, so a copied project opens
   on another computer.
+- A project that was still open on another computer when it was copied (or when
+  that computer crashed) says so when you open it: if it is not open there any
+  more, choose **Open here**. After two hours without a sign of the other
+  computer it opens without asking.
 - **Use the images in FSL, SPM, AFNI or Python**: **Export project as NIfTI…**
   (the save status menu of the top bar, the project's card in Library, or
   Search) writes every image, lesion and map of the project as NIfTI files into
