@@ -3675,7 +3675,7 @@ def _read_table(path):
 
 
 def _group_map(text):
-    """Parse ``--group-map 'patient=case,HC=control'`` (keys case-insensitive); an item without '=' is a ValueError."""
+    """Parse ``--group-map 'patient=case,HC=control'`` (keys case-insensitive); an item without '=', or a value given two different groups, is a ValueError."""
     mapping = {}
     for item in (text or "").split(","):
         if not item.strip():
@@ -3683,7 +3683,10 @@ def _group_map(text):
         if "=" not in item:
             raise ValueError(f"--group-map item {item.strip()!r} is not 'value=case' or 'value=control'; write it like --group-map 'patient=case,HC=control'")
         key, value = item.split("=", 1)
-        mapping[key.strip().lower()] = value.strip()
+        name, group = key.strip().lower(), value.strip()
+        if name in mapping and mapping[name] != group:
+            raise ValueError(f"--group-map gives the value {key.strip()!r} two groups ({mapping[name]!r} and {group!r}); each value maps to one group")
+        mapping[name] = group
     return mapping
 
 

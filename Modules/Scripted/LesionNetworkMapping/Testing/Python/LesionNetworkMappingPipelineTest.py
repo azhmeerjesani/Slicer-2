@@ -411,6 +411,17 @@ class PipelineChecks:
         self.assertLessEqual(seconds, 5.0)
 
 
+class GroupMapParseTest(unittest.TestCase):
+    """--group-map parsing needs no pipeline run."""
+
+    def test_a_value_mapped_to_two_groups_is_refused(self):
+        for text in ("patient=case,patient=control,HC=control", "patient=case,Patient=control"):
+            with self.assertRaises(ValueError) as caught:
+                pipeline._group_map(text)
+            self.assertIn("patient", str(caught.exception).lower())
+        self.assertEqual(pipeline._group_map("patient=case,Patient=case,HC=control"), {"patient": "case", "hc": "control"})
+
+
 @unittest.skipIf(ENV_BASELINE, "the full suite runs without LNM_PIPELINE_PROVIDERS=baseline")
 class PipelineTest(PipelineChecks, unittest.TestCase):
     """The full suite (preferred providers), plus the scenarios that need their own runs."""
