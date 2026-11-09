@@ -766,6 +766,33 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertEqual(len(chips), 1)
         self.assertIn("could not be read", chips[0]["text"])
 
+    def test_83_closed_study_is_not_written_by_a_running_scan(self):
+        """A duplicate scan that finishes after its study was closed (or the folder moved) writes nothing and recreates no folder."""
+        from LesionNetworkMappingLib import lesionops
+
+        from StudioLib import lesionqc
+
+        study = self._study([("sub-01", {}, False), ("sub-02", {}, False)])
+        entries = [(sid, study.abspath(study.subject(sid)["lesion"])) for sid in ("sub-01", "sub-02")]
+        indexFile = lesionops.index_path(study.path)
+        # Closed: no index file is written
+        worker = lesionqc._Worker()
+        worker.setClosed(study.path)
+        worker._do_scan(study.path, entries, frozenset())
+        self.assertFalse(os.path.exists(indexFile))
+        # Reopened: it is written again
+        worker.setClosed(study.path, False)
+        worker._do_scan(study.path, entries, frozenset())
+        self.assertTrue(os.path.isfile(indexFile))
+        # A moved study folder is not recreated, closed or not
+        gone = study.path + "-moved-away"
+        os.rename(study.path, gone)
+        try:
+            lesionqc._Worker()._do_scan(study.path, entries, frozenset())
+            self.assertFalse(os.path.exists(study.path))
+        finally:
+            os.rename(gone, study.path)
+
     # Quit (W4-I1)
 
     def test_2_quit_with_chips_pending(self):

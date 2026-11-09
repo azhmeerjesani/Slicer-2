@@ -695,6 +695,16 @@ class _Worker:
         self.pending = 0
         self._indexes = {}  # study path -> LesionIndex (used by the thread only)
         self._unreadable = {}  # lesion path -> file key of the unreadable version already said (used by the thread only)
+        self._closed = set()  # study paths that are closed: their jobs write nothing (guarded by the lock)
+
+    def setClosed(self, studyPath, closed=True):
+        """A closed study is not written into by jobs that are still running (nor are its folders recreated)."""
+        with self._lock:
+            (self._closed.add if closed else self._closed.discard)(studyPath)
+
+    def isClosed(self, studyPath):
+        with self._lock:
+            return studyPath in self._closed
 
     def submit(self, kind, **payload):
         with self._lock:
@@ -812,6 +822,8 @@ class _Worker:
                 continue
             if index.is_current(sid, path):
                 continue
+            if self.isClosed(studyPath):
+                break  # the study was closed: the rest of the scan is not wanted (the result is dropped by the main thread)
             try:
                 data, affine, _header = nifti.read_nifti(path)
                 index.update(sid, data[..., 0] if data.ndim > 3 else data, affine, key=key)
@@ -824,7 +836,7 @@ class _Worker:
                     self._unreadable[path] = key
                     logging.warning(f"Studio: the lesion of {sid} could not be read, so it is not compared with the others for duplicates "
                                     f"(the file may be damaged or incompletely copied: {str(exc) or type(exc).__name__})")
-        if changed:
+        if changed and not self.isClosed(studyPath) and os.path.isdir(studyPath):  # never into a closed, moved or deleted study
             index.save(ops.index_path(studyPath))
         pairs = [(a, b, dice) for a, b, dice in index.all_pairs() if frozenset((a, b)) not in dismissed]
         return {"studyPath": studyPath, "pairs": pairs, "indexed": len(index)}
@@ -1136,6 +1148,7 @@ class QcCore:
             return
         if self.policyCard is not None and self.policyCard.session is not session:
             self.hidePolicyCard()
+        self.worker.setClosed(path, False)
         self.studyPath = path
         self.pairs = []
         self.current = {}
@@ -1152,6 +1165,7 @@ class QcCore:
         self.hidePolicyCard()  # its choice belongs to the study that was closed
         if self.studyPath is None:
             return
+        self.worker.setClosed(self.studyPath)  # a scan still running must not write into the closed study
         self.studyPath = None
         self.pairs = []
         self.current = {}
