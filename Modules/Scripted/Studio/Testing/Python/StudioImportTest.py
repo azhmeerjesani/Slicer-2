@@ -1727,9 +1727,32 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertEqual([node.GetName() for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")], ["sub-01_T1w"])
             # With the scan open, a lesion is a lesion segmentation on it (the routing of Open...)
             self.assertTrue(qt.QApplication.sendEvent(slicer.app, qt.QFileOpenEvent(lesion)))
-            self._pump(8)
+            self._wait(Studio._FILE_OPEN_BATCH_MS + 400)
             self.assertIn("sub-01_lesion", [node.GetName() for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode")])
             self.assertEqual([node.GetName() for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")], ["sub-01_T1w"])
+        finally:
+            Studio._startupCompleted = wasStarted
+            del Studio._pendingFileOpens[:]
+            studioShell.dispose()
+            self._pump()
+
+    def test_file_open_events_of_one_selection_open_as_one_batch(self):
+        """Finder sends one QFileOpenEvent per selected file: a scan and its lesion open together, with no empty lesion."""
+        import Studio
+
+        scan = self._writeVolume("sub-01_T1w.nii.gz", GRID_SHIFTED)
+        lesion = self._writeMask("sub-01_lesion.nii.gz", GRID_SHIFTED)
+        studioShell = self._applyStudio()
+        wasStarted = Studio._startupCompleted
+        Studio.installFileOpenFilter()
+        try:
+            Studio._startupCompleted = True
+            self.assertTrue(qt.QApplication.sendEvent(slicer.app, qt.QFileOpenEvent(scan)))
+            self.assertTrue(qt.QApplication.sendEvent(slicer.app, qt.QFileOpenEvent(lesion)))
+            self._wait(Studio._FILE_OPEN_BATCH_MS + 800)
+            self.assertEqual(Studio._pendingFileOpens, [])
+            self.assertEqual([node.GetName() for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")], ["sub-01_T1w"])
+            self.assertEqual([node.GetName() for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode")], ["sub-01_lesion"])
         finally:
             Studio._startupCompleted = wasStarted
             del Studio._pendingFileOpens[:]

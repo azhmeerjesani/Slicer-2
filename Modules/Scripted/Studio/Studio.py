@@ -118,12 +118,24 @@ def removeFileOpenFilter():
         pass
 
 
+#: Events of one selection (Finder gives one QFileOpenEvent per selected file) arrive within a few milliseconds: they are
+#: collected for this long and opened as one batch, like the files of Ctrl+O (a scan opened alone would get an empty
+#: lesion segmentation before its lesion file is opened).
+_FILE_OPEN_BATCH_MS = 250
+_fileOpenTimerScheduled = False
+
+
 def openFileFromSystem(path):
-    """Open a file that the system gave to the running application (QFileOpenEvent): at once, or after startup."""
+    """Open a file that the system gave to the running application (QFileOpenEvent): after startup, with the files
+    that arrive together with it.
+    """
+    global _fileOpenTimerScheduled
+    _pendingFileOpens.append(path)
     if not _startupCompleted:
-        _pendingFileOpens.append(path)
         return
-    _openFiles([path])
+    if not _fileOpenTimerScheduled:
+        _fileOpenTimerScheduled = True
+        qt.QTimer.singleShot(_FILE_OPEN_BATCH_MS, _openPendingFileOpens)
 
 
 def _openFiles(paths):
@@ -139,6 +151,10 @@ def _openFiles(paths):
 
 
 def _openPendingFileOpens():
+    global _fileOpenTimerScheduled
+    _fileOpenTimerScheduled = False
+    if not _startupCompleted:
+        return
     paths = list(_pendingFileOpens)
     del _pendingFileOpens[:]
     if paths:
