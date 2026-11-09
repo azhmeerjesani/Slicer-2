@@ -356,6 +356,21 @@ class CommandLineTest(_CalibrateTestCase):
         self.assertIn("--rule", events[-1]["message"])
         self.assertEqual([e for e in events if e.get("event") in ("stage", "progress", "result")], [])
 
+    def test_target_is_validated_before_any_work(self):
+        # A --target on another grid, or not a NIfTI, is a usage error at the start, not after the empirical FWER stage.
+        study = self.make_study(4, 4)
+        Y = _maps(self.rng, 8, self.degree, self.networks)
+        maps_tsv = self.write_maps(study, Y)
+        common = ["--maps", maps_tsv, "--participants", os.path.join(study.path, "participants.tsv"), "--mask", self.path("mask.nii.gz"), "--out", self.path("out")]
+        nifti.write_nifti(self.path("wrong.nii.gz"), np.ones((SHAPE[0] + 1, SHAPE[1], SHAPE[2]), np.uint8), AFFINE)
+        for target in (self.path("wrong.nii.gz"), maps_tsv):
+            code, events, _ = self.run_cli(*common, "--target", target)
+            self.assertEqual(code, 2, target)
+            self.assertEqual(events[-1]["event"], "error", target)
+            self.assertEqual(events[-1]["code"], "usage", target)
+            self.assertIn("target", events[-1]["message"], target)
+            self.assertEqual([e for e in events if e.get("event") in ("stage", "progress", "result")], [], target)
+
 
 if __name__ == "__main__":
     unittest.main()

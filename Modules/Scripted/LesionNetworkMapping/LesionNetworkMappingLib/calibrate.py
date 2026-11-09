@@ -924,6 +924,8 @@ def main(argv=None):
     if args.no_fwer and args.no_planted and not args.sensitivity:
         raise jobs.JobError("Nothing to calibrate (--no-fwer and --no-planted without --sensitivity)", code="usage", exit_code=jobs.EXIT_USAGE)
     jobs.check_input_files(args, "maps", "participants", "mask", "pool_maps", "target")
+    if args.target:
+        _check_target_grid(args.target, args.mask)  # before any work: the target is read after the empirical FWER stage
     return _run_cli(args, argv, _floats(args.effects))
 
 
@@ -955,6 +957,22 @@ def _median_volume_lesion(study, sids):
         return sorted(sids)[len(sids) // 2] if sids else None
     volumes.sort()
     return volumes[len(volumes) // 2][1]
+
+
+def _check_target_grid(target, mask_path):
+    """Refuse a --target that is not a NIfTI image on the grid of the connectome mask (headers only, so it is cheap)."""
+    try:
+        header = nifti.read_nifti_header(target)
+        mask_header = nifti.read_nifti_header(mask_path)
+    except (OSError, ValueError, EOFError) as exc:
+        raise jobs.JobError(f"The target {target} cannot be read: {exc}", code="usage", exit_code=jobs.EXIT_USAGE) from None
+    shape = tuple(header["shape"])
+    if len(shape) > 3 and int(np.prod(shape[3:])) != 1:
+        shape = None
+    elif shape:
+        shape = shape[:3]
+    if shape != tuple(mask_header["shape"][:3]) or not np.allclose(header["affine"], mask_header["affine"], atol=1e-4, rtol=0):
+        raise jobs.JobError(f"The target {target} is not on the grid of the connectome mask (shape {tuple(header['shape'])})", code="usage", exit_code=jobs.EXIT_USAGE)
 
 
 def _read_mask(path, mask_shape, mask_affine, indices):
