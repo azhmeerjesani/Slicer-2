@@ -572,7 +572,7 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
             self.assertLessEqual(stats.geometry.bottom(), readout.height - 1)
 
     def test_lesion_stat_caption_is_elided_when_cut(self):
-        """A stat caption that does not fit its cell ("Side · scanner space") ends with an ellipsis (VISUAL 6: no clipped
+        """A stat caption that does not fit its cell ("scanner space" in a 180 px row) ends with an ellipsis (VISUAL 6: no clipped
         text); the whole caption is its tool tip, and it shows whole again in a wide cell.
         """
         from StudioLib import draw, importer
@@ -590,7 +590,7 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         card = draw.lesionCard()
         card._setStats({"ml": 1.2, "parts": 1, "gaps": 0, "side": None, "sideNote": "scanner space", "sideLevel": "warn"})
         caption = card.statValues["side"][1]
-        whole = "Side · scanner space"
+        whole = "scanner space"
         self.assertEqual(str(caption.property("studioFullText")), whole)
         card.statsFrame.setFixedWidth(600)
         self._pump(6)
@@ -605,6 +605,35 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         card.statsFrame.setMinimumWidth(0)
         self._pump(4)
         draw.session(studioShell).refreshPanel(computeMetrics=True)
+
+    def test_lesion_card_scanner_space_qualifier_fits_default_width(self):
+        """At the default 340 px inspector the Side cell keeps its whole "scanner space" qualifier (studio.md: "Unknown" with
+        "scanner space" under it), not "Side · scan…", and the Volume value ("1.44 mL") and the Parts caption stay whole
+        too: the cells share the row by what their texts need, not in equal thirds (or a fixed 2:3:4).
+        """
+        from StudioLib import draw, importer
+
+        studioShell = self._applyStudio()
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(1920, 1080)
+        self._wait(lambda: self.mainWindow.width >= 1900, 2000)
+        importer.startOnTemplate(shell=studioShell)
+        self._restores.append(importer._closeTemplateBanner)
+        self._pump(10)
+        self._paintLesion((-30.0, -10.0, 20.0), 10.0)
+        draw.session(studioShell).refreshPanel(computeMetrics=True)
+        self._pump(10)
+        card = draw.lesionCard()
+        card._setStats({"ml": 1.44, "parts": 1, "gaps": 0, "side": None, "sideNote": "scanner space", "sideLevel": "warn"})
+        self._pump(6)
+        self.assertEqual(str(card.statValues["volume"][0].property("studioFullText")), "1.44 mL")
+        self.assertEqual(str(card.statValues["side"][1].property("studioFullText")), "scanner space")
+        for key in ("volume", "parts", "side"):
+            value, caption = card.statValues[key]
+            self.assertEqual(str(value.text), str(value.property("studioFullText")), f"{key} value is cut: {value.text!r}")
+            self.assertEqual(str(caption.text), str(caption.property("studioFullText")), f"{key} caption is cut: {caption.text!r}")
+            self.assertLessEqual(self._textWidth(value, str(value.text)), value.width, f"{key} value overflows its cell")
+            self.assertLessEqual(self._textWidth(caption, str(caption.text)), caption.width, f"{key} caption overflows its cell")
 
     def test_list_row_text_is_elided_when_cut(self):
         """The text of a ``ui.listRow()`` ("Normalize scan only" next to the "Native space" value at a 125 % font) that does

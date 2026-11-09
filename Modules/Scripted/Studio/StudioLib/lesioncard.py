@@ -415,6 +415,27 @@ class _SwitcherFilter(qt.QObject):
         return False
 
 
+def _textWidth(label):
+    """Width (px) of the whole text of an ``ui.elideLabel()`` in its font."""
+    text = str(label.property("studioFullText") or "")
+    metrics = label.fontMetrics()
+    advance = getattr(metrics, "horizontalAdvance", None)
+    return int(advance(text) if advance is not None else metrics.width(text))
+
+
+class _StatCellsFitter(qt.QObject):
+    """Shares the stat row of a ``LesionCard`` between its cells again when the row is resized (``_fitStatCells()``)."""
+
+    def __init__(self, card):
+        qt.QObject.__init__(self)
+        self._card = card
+
+    def eventFilter(self, obj, event):
+        if event.type() == qt.QEvent.Resize:
+            self._card._fitStatCells()
+        return False
+
+
 class LesionCard:
     """The Lesion card. ``controller`` implements the callbacks (``StudioLib.draw``):
 
@@ -528,14 +549,19 @@ class LesionCard:
             # The value is elided too ("Both hemispheres" -> "Both hem…"): an unelided value keeps its size hint and
             # squeezes the other cells (their captions were cut to "Pa")
             value = ui.elideLabel(ui.label("", "number", "text", "StudioLesionStatValue"))
-            # Elided ("Side · scanner sp…") when the cell is too narrow for its caption: never cut off mid-letter
+            # Elided ("Part · 0 ga…") when the cell is too narrow for its caption: never cut off mid-letter
             captionText = caption
             caption = ui.elideLabel(ui.label("", "small", "text3", "StudioLesionStatCaption"))
             ui.setElidedText(caption, captionText)
             cellLayout.addWidget(value)
             cellLayout.addWidget(caption)
+            # The stretch factors are the widths the cells need for their texts (``_fitStatCells()``), so at the default
+            # 340 px inspector "1.44 mL", "Part · 0 gaps" and "scanner space" all fit whole
             statsLayout.addWidget(cell, 1)
             self.statValues[key] = (value, caption)
+        self.statsLayout = statsLayout
+        self._statCellsFitter = _StatCellsFitter(self)
+        self.statsFrame.installEventFilter(self._statCellsFitter)
         ui.bindStyleSheet(self.statsFrame, lambda: (
             f"QFrame#StudioLesionStats {{ background-color: {ui.token('card-low').name()}; border: 1px solid {ui.token('hairline').name()}; border-radius: 8px; }}"
             f"QFrame#StudioLesionStatCell {{ background: transparent; border: none; border-left: 1px solid {ui.token('hairline').name()}; border-radius: 0px; }}"
@@ -854,7 +880,7 @@ class LesionCard:
                 gaps=_("1 gap") if gaps == 1 else _("{count} gaps").format(count=gaps)), parts > 1 or gaps > 0),
             # In scanner space: "Unknown" with the reason under it, compactly (VISUAL 4.4)
             "side": ((stats.get("side") or (_("Unknown") if stats.get("sideNote") else "\u2013")),
-                     _("Side · {note}").format(note=stats["sideNote"]) if stats.get("sideNote") and not stats.get("side") else _("Side"),
+                     stats["sideNote"] if stats.get("sideNote") and not stats.get("side") else _("Side"),
                      stats.get("sideLevel") == "warn"),
         }
         for key, (valueText, captionText, warn) in values.items():
@@ -866,6 +892,7 @@ class LesionCard:
             styleSheet = f"QLabel {{ color: {ui.token('warning').name()}; }}" if warn else ""
             if value.styleSheet != styleSheet:
                 value.setStyleSheet(styleSheet)
+        self._fitStatCells()
         # A fixed height from the fonts: in a short inspector (1366 x 768) the scroll area lays the panel out at its
         # minimum size, which would squeeze the value onto the caption
         value, caption = self.statValues["volume"]
@@ -873,6 +900,26 @@ class LesionCard:
         if self.statsFrame.minimumHeight != height or self.statsFrame.maximumHeight != height:
             self.statsFrame.setFixedHeight(height)
         self.statsFrame.show()
+
+    def _fitStatCells(self):
+        """Share the width of the stat row so that every cell gets the width its value and caption need, and the width
+        left over is shared equally; when the row is too narrow for all three texts (a narrow inspector), the cells
+        shrink in proportion to what they need and their labels elide. Equal thirds cut "scanner space" (and "Side ·
+        scanner space") at the default 340 px inspector, where the Volume cell had room to spare.
+        """
+        available = self.statsFrame.contentsRect().width()
+        if available <= 0:
+            return
+        needs = []
+        for key in ("volume", "parts", "side"):
+            value, caption = self.statValues[key]
+            margins = value.parent().contentsMargins()
+            needs.append(max(_textWidth(value), _textWidth(caption)) + margins.left() + margins.right() + 2)
+        spare = available - sum(needs)
+        widths = [need + (spare // len(needs) if spare > 0 else 0) for need in needs]
+        for index, width in enumerate(widths):
+            if self.statsLayout.stretch(index) != width:
+                self.statsLayout.setStretch(index, width)
 
     def _setSaveStateIcon(self, text):
         saved = bool(text) and str(text).startswith(_("Saved"))
