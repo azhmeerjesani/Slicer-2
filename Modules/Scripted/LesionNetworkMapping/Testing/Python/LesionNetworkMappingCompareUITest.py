@@ -126,6 +126,30 @@ class LesionNetworkMappingCompareUITest(unittest.TestCase):
             with self.assertRaises(ValueError, msg=text):
                 neurovaultArgs(text)
 
+    def test_4_constant_map_is_excluded_with_a_reason(self):
+        """A map with no variance over the connectome voxels (a ROI mask) is left out with a reason, never the anchor."""
+        import numpy as np
+
+        from LesionNetworkMappingUI.card_compare import MapSource
+
+        rng = np.random.default_rng(2)
+        data = {"constant": np.ones(200), "a": rng.standard_normal(200), "b": rng.standard_normal(200)}
+        data["constant"][:5] = np.nan
+        card = self.card
+        saved = (card.sources, card.checkedKeys, card.runState, card.vector)
+        try:
+            card.sources = {name: MapSource(name, name, "other", None, {"kind": "map"}) for name in data}
+            card.checkedKeys = lambda: list(data)
+            card.runState = lambda: (True, "")
+            card.vector = lambda source: data[source.key].copy()
+            comparison = card.compare()
+        finally:
+            card.sources, card.checkedKeys, card.runState, card.vector = saved
+        self.assertIsNotNone(comparison)
+        self.assertEqual(list(comparison.names), ["a", "b"])
+        self.assertIn("constant", card.notice)
+        self.assertIn("no variance", card.notice)
+
 
 if __name__ == "__main__":
     unittest.main()

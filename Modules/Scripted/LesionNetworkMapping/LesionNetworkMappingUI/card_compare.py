@@ -815,6 +815,10 @@ class CompareCard:
                 if np.count_nonzero(np.isfinite(values)) < 3:
                     problems.append(_("{label}: does not cover this connectome's voxels").format(label=source.label))
                     continue
+                finite = values[np.isfinite(values)]
+                if not float(np.ptp(finite)) > 0:
+                    problems.append(_("{label}: has no variance over this connectome's voxels (every value is the same)").format(label=source.label))
+                    continue
                 name = source.name
                 while name in maps:
                     name += "\u2032"
