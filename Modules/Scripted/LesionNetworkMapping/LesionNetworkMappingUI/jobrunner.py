@@ -818,6 +818,7 @@ class JobRunner:
             env[name] = str(threads)
         env[_jobs.MAX_THREADS_ENV] = str(threads)  # jobs.budget_threads() of nested workers
         env.setdefault("PYTHONUNBUFFERED", "1")
+        env[_jobs.APP_JOB_ENV] = "1"  # the hints of the job name the app's controls
         # A job that reads the download cache without --cache (cached atlases of the pipeline) uses the application's
         # cache, where the cards download, not the library's default folder
         if not os.environ.get(_fetch.CACHE_ENV):

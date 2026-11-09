@@ -672,6 +672,29 @@ class CommandLineTest(unittest.TestCase):
         bundle.close()
         self.assertNotIn("python -m", hinted)
 
+        # Calibrate names the app's control only in a job of the app; a command-line run names the command
+        from LesionNetworkMappingLib import calibrate, pipeline
+
+        bundle = connectome.ConnectomeBundle.open(bundle_path)
+        mask_shape, indices = tuple(bundle.shape), bundle.mask_indices
+        bundle.close()
+        previous = os.environ.pop(jobs.APP_JOB_ENV, None)
+        try:
+            self.assertFalse(jobs.in_app_job())
+            _, _, cli_reason = calibrate._reference(args, None, None, indices, mask_shape)
+            self.assertIn("reference build", cli_reason)
+            self.assertNotIn("Connectome card", cli_reason)
+            self.assertIn("--score-columns aphasia", pipeline.UNCONFIRMED_SCORE_CLI.format(column="aphasia"))
+            os.environ[jobs.APP_JOB_ENV] = "1"
+            self.assertTrue(jobs.in_app_job())
+            _, _, app_reason = calibrate._reference(args, None, None, indices, mask_shape)
+            self.assertIn("Manage… > Build reference maps", app_reason)
+            self.assertNotIn("python -m", app_reason)
+        finally:
+            os.environ.pop(jobs.APP_JOB_ENV, None)
+            if previous is not None:
+                os.environ[jobs.APP_JOB_ENV] = previous
+
     def _rewrite_datasets(self, participants, filler):
         with open(participants, encoding="utf-8") as f:
             lines = f.read().splitlines()

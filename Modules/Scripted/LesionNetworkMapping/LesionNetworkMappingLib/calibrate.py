@@ -989,7 +989,7 @@ def _reference(args, cohort, subjects_sha, indices, mask_shape):
     """(covariate maps (2, V) or None, info dict or None, reason or None) from the bundle's reference maps."""
     if not (args.bundle or ((cohort or {}).get("bundle") or {}).get("path")):
         return None, None, "no connectome bundle (--bundle)"
-    ref, reason, info = slnm._reference_for(args, cohort, subjects_sha, indices, mask_shape, build_hint=slnm.REFERENCE_BUILD_HINT)
+    ref, reason, info = slnm._reference_for(args, cohort, subjects_sha, indices, mask_shape, build_hint=slnm.REFERENCE_BUILD_HINT if jobs.in_app_job() else None)
     if ref is None:
         return None, None, reason
     return ref.covariates(slnm.REFERENCE_COVARIATES), info, None

@@ -291,6 +291,16 @@ def _app_prog():
     return getattr(module, "APP_PROG", None)
 
 
+#: Set to "1" in the environment of the jobs that the app's job runner starts, so that the hints of a run name the app's controls
+#: there and the command-line options in a terminal or a ``slicer-lnm`` run
+APP_JOB_ENV = "SLICER_LNM_APP_JOB"
+
+
+def in_app_job():
+    """True in a job that the app's job runner started (its messages are read in the app), False on a command line."""
+    return os.environ.get(APP_JOB_ENV) == "1"
+
+
 def command_text(text):
     """``text`` with the library-command form ``python -m LesionNetworkMappingLib.<name>`` written as ``slicer-lnm <name>``
     while ``app.run_library_command`` runs a command (the app's wrapper and the pip wheel have no ``python`` that can import

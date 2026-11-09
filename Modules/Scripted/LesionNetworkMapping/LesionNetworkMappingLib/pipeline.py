@@ -217,6 +217,7 @@ NULLS_TOO_LONG = "Null models not run: the exact pooled null would take ≈ {} o
 REFERENCE_MISSING = "Reference maps not built: they are built only when asked (--build-references; about {})"
 REFERENCE_READ_ONLY = "Reference maps not computed: the connectome folder is read-only (build them in Connectome ▸ Manage…)"
 UNCONFIRMED_SCORE = "confirm the column role in Library ▸ Columns"
+UNCONFIRMED_SCORE_CLI = "confirm it with --score-columns {column}"
 NORM_NEEDS_REVIEW = "normalized; needs review in Library (norm_qc)"
 NATIVE_UNAVAILABLE = "native space: normalization not available in this build"
 NATIVE_SKIPPED = "native space: skipped (--native skip)"
@@ -1369,7 +1370,7 @@ def plan(config, hash_lesions=True, providers=None):
             if confirmed:
                 score_columns.append(column)
             else:
-                infos.append({"code": "unconfirmed_score", "message": f"The column {column} is not used as a score: {UNCONFIRMED_SCORE}."})
+                infos.append({"code": "unconfirmed_score", "message": f"The column {column} is not used as a score: {UNCONFIRMED_SCORE if jobs.in_app_job() else UNCONFIRMED_SCORE_CLI.format(column=column)}."})
     elif isinstance(config.scores, list):
         for column in config.scores:
             if column not in study.columns:
