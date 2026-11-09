@@ -73,6 +73,14 @@ def _rules():
     return importlib.import_module("LesionNetworkMappingLib.agreement")
 
 
+def noticeTitle(title, sid, index, total):
+    """The notice title '<title> · <sid> · <index> of <total>'. The position uses no-break spaces, so that the
+    word-wrapped title label never leaves a lone total on a line of its own.
+    """
+    position = _("{index} of {total}").format(index=index, total=total).replace(" ", "\u00a0")
+    return f"{title} · {sid} · {position}"
+
+
 def jump_center(maskA, maskB, affine):
     """World point to centre the views on when a pair opens: the centroid of both tracings when it lies
     on one of them, else the centroid of the first tracing (the second when A is empty), so that an outline
@@ -583,7 +591,7 @@ class _AgreementState:
         if self.notice is None or not _isAlive(self.notice):
             self._buildNotice()
         index, total = self.position()
-        self.titleLabel.setText(_("{title} · {sid} · {index} of {total}").format(title=self.title(), sid=self.current, index=index, total=total))
+        self.titleLabel.setText(noticeTitle(self.title(), self.current, index, total))
         self.detailLabel.setText("\n".join(self.lines))
         if self.shell.inspectorNotice() is not self.notice:
             self.shell.setInspectorNotice(self.notice, NOTICE_KEY, "draw")

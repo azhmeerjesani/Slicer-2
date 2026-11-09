@@ -2261,6 +2261,8 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(libcard_agreement.assigned_text(6), "6 second tracings assigned")
         self.assertEqual(libcard_agreement.written_text(1), "Agreement of 1 pair written to derivatives/qc/interrater.tsv")
         self.assertEqual(libcard_agreement.written_text(2), "Agreement of 2 pairs written to derivatives/qc/interrater.tsv")
+        # The position of the notice title never breaks across lines (no-break spaces)
+        self.assertEqual(adjudicate.noticeTitle("Adjudicate", "sub-01", 1, 1), "Adjudicate · sub-01 · 1\u00a0of\u00a01")
         self.assertEqual(adjudicate.left_out_text(1, "why"), "1 second tracing left out: why")
         self.assertEqual(adjudicate.left_out_text(2, "why"), "2 second tracings left out: why")
         # The pair opens on a tracing even when the two do not overlap (the union centroid lies between them)
