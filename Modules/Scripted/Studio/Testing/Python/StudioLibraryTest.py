@@ -1872,6 +1872,30 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertNotEqual(label.font.capitalization(), qt.QFont.AllUppercase, text)
             self.assertEqual(label.font.letterSpacing(), 0.0, text)
 
+    def test_tutorials_options_form_has_no_empty_row_when_scans_do_not_apply(self):
+        """Tutorial cohorts: for a cohort without the scans option, "New study in" sits one normal form spacing under "Subjects".
+        The scans checkbox and its note used to be two rows with an empty label that stayed visible and kept the spacing.
+        """
+        from StudioLib import libcard_tutorials
+
+        tutorialsDialog = libcard_tutorials.TutorialsDialog()
+        self.cleanup.append(tutorialsDialog.dialog.deleteLater)
+        tutorialsDialog.dialog.show()
+        self.cleanup.append(tutorialsDialog.dialog.hide)
+        for row in range(tutorialsDialog.listWidget.count):
+            tutorialsDialog.listWidget.setCurrentRow(row)
+            slicer.app.processEvents()
+            entry = tutorialsDialog.entry()
+            if entry["source"]["type"] == "folder":
+                continue
+            applies = bool(entry.get("native"))
+            self.assertEqual(tutorialsDialog.scansRow.isVisibleTo(tutorialsDialog.dialog), applies, entry["id"])
+            if not applies:
+                top = tutorialsDialog.limitCombo.mapTo(tutorialsDialog.dialog, qt.QPoint(0, 0)).y()
+                rowAfter = tutorialsDialog.folderRow.mapTo(tutorialsDialog.dialog, qt.QPoint(0, 0)).y()
+                gap = rowAfter - (top + tutorialsDialog.limitCombo.height)
+                self.assertLessEqual(gap, tutorialsDialog.limitRow.verticalSpacing() + 2, "%s: gap %d" % (entry["id"], gap))
+
     def test_tutorials_relative_or_tilde_folder_never_builds_inside_the_application(self):
         """Tutorial cohorts: "~/name" is expanded to the home folder and a relative folder is refused, for the new study and for
         the downloaded folder. The build job runs in the module folder, so both were built inside the application before.
