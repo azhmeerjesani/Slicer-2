@@ -8126,6 +8126,68 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertIs(signal.getsignal(signal.SIGTERM), signal.SIG_DFL, "dispose() restores the default SIGTERM action")
 
 
+    def test_102_project_in_a_read_only_folder_is_not_half_removed(self):
+        """BB-1: Move to Trash of a project in a read-only Projects folder (a share where only Projects/ is locked) asked
+        "This system has no Trash. Delete the project permanently?" (there is a Trash; the folder is read-only), then
+        deleted every file of the project but not its folder and showed "[Errno 13] Permission denied". It now says the
+        folder is read-only, asks nothing and deletes nothing. Read-only is simulated (root may write anywhere).
+        """
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        realAccess, realTrash = os.access, projects.moveToTrash
+        realQuestion, realNotice = projects_ui._question, projects_ui._notice
+        for case in ("Projects folder", "project folder", "folder inside, no trash"):
+            with self.subTest(case=case):
+                parent = os.path.join(self.tempDir, "Read only ü " + str(len(case)), "Projects")
+                folder = os.path.join(parent, "MRHead")
+                inside = os.path.join(folder, "Data")
+                os.makedirs(inside)
+                for name in ("MRHead.mrml", os.path.join("Data", "scan.nrrd")):
+                    with open(os.path.join(folder, name), "w") as file:
+                        file.write("x")
+                readOnly = {"Projects folder": parent, "project folder": folder}.get(case, inside)
+                before = sorted(os.path.relpath(os.path.join(d, n), folder) for d, _f, ns in os.walk(folder) for n in ns)
+                questions, notices = [], []
+
+                def access(path, mode, *args, readOnly=readOnly, **kwargs):
+                    if mode & os.W_OK and os.path.normpath(str(path)) == os.path.normpath(readOnly):
+                        return False
+                    return realAccess(path, mode, *args, **kwargs)
+
+                def question(parent, title, text, buttons, default=0, questions=questions):
+                    questions.append(text)
+                    return 0  # "Move to Trash", then "Delete"
+
+                os.access = access
+                projects_ui._question = question
+                projects_ui._notice = lambda parent, title, text, notices=notices: notices.append(text)
+                if case == "folder inside, no trash":
+                    projects.moveToTrash = lambda path: False
+                try:
+                    with self.assertRaises(projects.ProjectError) as context:
+                        projects.trashFolder(folder, confirmDelete=lambda questions=questions: questions.append("delete") or True)
+                    self.assertFalse(projects_ui.moveToTrash(folder))
+                finally:
+                    os.access, projects.moveToTrash = realAccess, realTrash
+                    projects_ui._question, projects_ui._notice = realQuestion, realNotice
+                text = str(context.exception)
+                self.assertIn("read-only", text)
+                self.assertIn("Nothing was deleted", text)
+                self.assertNotIn("Errno", text)
+                self.assertNotIn("Trash", text)
+                self.assertEqual(notices, [text])
+                if case == "folder inside, no trash":
+                    # Found only when the move failed: after "Move to Trash?", never "This system has no Trash"
+                    self.assertEqual(len(questions), 1)
+                    self.assertNotIn("no Trash", questions[0])
+                else:
+                    self.assertEqual(questions, [], "said before any question")
+                after = sorted(os.path.relpath(os.path.join(d, n), folder) for d, _f, ns in os.walk(folder) for n in ns)
+                self.assertEqual(after, before, "nothing deleted")
+                self.assertTrue(projects.trashFolder(folder, confirmDelete=lambda: True))
+                self.assertFalse(os.path.exists(folder))
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 

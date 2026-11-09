@@ -1904,30 +1904,67 @@ def moveToTrash(path):
 
 
 def trashRefusal(path):
-    """Why the project folder ``path`` cannot be moved to the trash now (it is the open project, or open in another Slicer
-    Studio), in plain words; None if it can.
+    """Why the project folder ``path`` cannot be moved to the trash now (it is the open project, open in another Slicer
+    Studio, or in a read-only folder), in plain words; None if it can.
     """
     current = currentProject()
     if current is not None and os.path.normcase(os.path.realpath(current.path)) == os.path.normcase(os.path.realpath(path)):
         return _("{name} is open. Close it first (New project).").format(name=os.path.basename(os.path.normpath(path)))
     if isLockedByOther(path):
         return _("{name} is open in another Slicer Studio.").format(name=os.path.basename(os.path.normpath(path)))
-    return None
+    # A project in a read-only place (a share where Projects/ is locked) can be neither moved to the trash nor deleted:
+    # say so and change nothing, rather than offer to delete it for good as if there were no trash and then stop half way
+    return _removalRefusal(path, wholeTree=False)
+
+
+def _removalRefusal(path, wholeTree):
+    """Why the project folder ``path`` cannot be moved to the trash (or deleted, when ``wholeTree``) because a folder is
+    read-only, in plain words; None if it can. Moving or deleting a folder needs write access to the folder that holds
+    it and to the folder itself (and, to delete it, to every folder inside it). Windows does not use the read-only
+    attribute of a folder for this (see ``isWritable``).
+    """
+    folder = os.path.normpath(path)
+    if os.name == "nt" or not os.path.isdir(folder):
+        return None
+    access = os.W_OK | os.X_OK
+    parent = os.path.dirname(folder)
+    readOnly = None
+    if not os.access(parent, access):
+        readOnly = parent
+    elif not os.access(folder, access):
+        readOnly = folder
+    elif wholeTree:
+        for directory, _folders, _files in os.walk(folder):
+            if not os.access(directory, access):
+                readOnly = directory
+                break
+    if readOnly is None:
+        return None
+    return _("The project {name} cannot be removed: the folder {folder} is read-only. Nothing was deleted.").format(
+        name=os.path.basename(folder), folder=readOnly)
 
 
 def trashFolder(path, confirmDelete=None):
     """Move a project to the trash; where there is no trash, delete it after ``confirmDelete()`` returns True.
 
-    Return True if the project is gone. Raise ProjectError for the open project or one open elsewhere.
+    Return True if the project is gone. Raise ProjectError for the open project or one open elsewhere, and for a project
+    in a read-only folder (nothing is asked or deleted then).
     """
     refusal = trashRefusal(path)
     if refusal:
         raise ProjectError(refusal)
     if moveToTrash(path):
         return True
+    refusal = _removalRefusal(path, wholeTree=True)
+    if refusal:
+        raise ProjectError(refusal)
     if confirmDelete is not None and not confirmDelete():
         return False
-    shutil.rmtree(path)
+    try:
+        shutil.rmtree(path)
+    except OSError as error:
+        raise ProjectError(_("The project {name} could not be deleted completely ({reason}).").format(
+            name=os.path.basename(os.path.normpath(path)), reason=error.strerror or str(error))) from error
     return not os.path.exists(path)
 
 
