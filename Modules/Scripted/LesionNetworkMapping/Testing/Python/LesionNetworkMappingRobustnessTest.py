@@ -408,6 +408,30 @@ class SeedsTest(RobustnessTestBase):
         dice = [float(row["dice"]) for row in lesions if row["changed"] == "true"]
         self.assertAlmostEqual(comparison["median_lesion_dice"], float(np.median(dice)), places=5)
 
+    def test_sphere_outside_connectome_is_left_out(self):
+        """A sphere with no voxel in the connectome keeps its primary seed and is left out of the medians; unknown participants are listed.
+
+        Bug map-robust-card:robust-seeds-sphere-outside-connectome-silent: a coordinate outside the brain gave an empty
+        sphere that was counted as a changed lesion with Dice 0 (median Dice 0.50), and a participant that is not in the
+        study was ignored without a word.
+        """
+        out = self.path("seeds-outside")
+        centre_b = tuple(self.meta_a["blobs"]["B"]["center_world"])
+        coordinates = {self.sids[0]: [(500.0, 0.0, 0.0)], self.sids[3]: [centre_b], "sub-99": [(0.0, 0.0, 0.0)]}
+        events = []
+        record = robustness.seed_variants(self.study_dir, ("sphere4",), out, bundle=self.bundle_a, coordinates=coordinates, rule=TOP10, overlap_pct=50,
+                                          emit=lambda *a, **k: events.append((a, k)), cohortmaps_options={"cache_root": self.path("cache")}, run_root=out, register=False)
+        entries = {entry["participant_id"]: entry for entry in record["variants"]["sphere4"]["lesions"]}
+        self.assertEqual(entries[self.sids[0]]["action"], "kept")
+        self.assertIn("no voxel", entries[self.sids[0]]["warning"])
+        self.assertEqual(entries[self.sids[3]]["action"], "derived")
+        self.assertEqual(record["comparisons"]["sphere4"]["n_changed"], 1)
+        self.assertEqual(record["coordinates_not_in_study"], ["sub-99"])
+        self.assertTrue(any(k.get("code") == "coordinates_not_in_study" for _a, k in events))
+        _columns, rows = read_tsv(os.path.join(out, robustness.SEEDS_TSV))
+        row = next(row for row in rows if row["variant"] == "sphere4" and row["kind"] == "lesion" and row["map"] == self.sids[0])
+        self.assertEqual(row["changed"], "false")
+
     def test_consolidation_manifest(self):
         lesions_dir = os.path.join(self.study_dir, "lesions")
         before = _tree_state(lesions_dir)

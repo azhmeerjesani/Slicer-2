@@ -1496,8 +1496,26 @@ def read_coordinates(path):
     return out
 
 
-def _build_variant(variant, sid, source, folder, coordinates, primary_probabilistic):
-    """Write one variant file of a lesion into ``folder``; return (entry, path or None for the unchanged source, probabilistic)."""
+def _sphere_in_mask(volume, affine, bundle):
+    """Whether any voxel of the sphere volume (local grid ``affine``) falls on a voxel of the connectome's brain mask."""
+    np = _np()
+    points = np.argwhere(np.asarray(volume) > 0)
+    if not len(points):
+        return False
+    world = points @ np.asarray(affine)[:3, :3].T + np.asarray(affine)[:3, 3]
+    ijk = np.rint((world - np.asarray(bundle.affine)[:3, 3]) @ np.linalg.inv(np.asarray(bundle.affine)[:3, :3]).T).astype(int)
+    mask = bundle.mask
+    ok = np.all((ijk >= 0) & (ijk < np.asarray(mask.shape)), axis=1)
+    ijk = ijk[ok]
+    return bool(len(ijk) and mask[ijk[:, 0], ijk[:, 1], ijk[:, 2]].any())
+
+
+def _build_variant(variant, sid, source, folder, coordinates, primary_probabilistic, bundle=None):
+    """Write one variant file of a lesion into ``folder``; return (entry, path or None for the unchanged source, probabilistic).
+
+    With ``bundle``, a sphere that has no voxel in the connectome's brain mask is not used: the lesion keeps its primary
+    seed (action "kept", with a "warning"), so the empty seed is not counted as a changed lesion with Dice 0.
+    """
     np = _np()
     from . import lesionops, nifti
 
@@ -1509,6 +1527,10 @@ def _build_variant(variant, sid, source, folder, coordinates, primary_probabilis
             return entry, None, primary_probabilistic
         radius = float(variant[len("sphere"):])
         volume, affine = _sphere_volume(centres, radius)
+        if bundle is not None and not _sphere_in_mask(volume, affine, bundle):
+            warning = "the sphere has no voxel in the connectome's brain mask (check the coordinates and their space); the primary seed is kept"
+            entry.update(action="kept", note=warning, warning=warning)
+            return entry, None, primary_probabilistic
         path = os.path.join(folder, _variant_name(sid, variant))
         nifti.write_nifti(path, volume, affine)
         entry["note"] = f"{len(centres)} coordinate(s), radius {radius:g} mm"
@@ -1610,13 +1632,23 @@ def seed_variants(study, variants=DEFAULT_VARIANTS, out=None, bundle=None, lesio
     os.makedirs(out, exist_ok=True)
     manifest = {}
     variant_lesions = {}
+    mask_bundle = None
+    if bundle is not None and any(name.startswith("sphere") for name in variants):
+        from .connectome import ConnectomeBundle
+
+        mask_bundle = ConnectomeBundle.open(bundle) if isinstance(bundle, (str, os.PathLike)) else bundle
+    in_run = {sid for sid, _path in lesions}
+    not_in_study = sorted(sid for sid in (coordinates or {}) if sid not in in_run) if any(name.startswith("sphere") for name in variants) else []
+    if not_in_study:
+        emit("warning", code="coordinates_not_in_study",
+             message=f"{len(not_in_study)} participant(s) of the coordinates file are not among the study's analysed lesions and are ignored: {', '.join(not_in_study[:20])}{' ...' if len(not_in_study) > 20 else ''}")
     for variant in variants:
         _check_cancel(cancel)
         folder = os.path.join(out, "variants", variant)
         os.makedirs(folder, exist_ok=True)
         entries, seeds, kinds = [], [], []
         for sid, source in lesions:
-            entry, path, prob = _build_variant(variant, sid, source, folder, coordinates, probabilistic)
+            entry, path, prob = _build_variant(variant, sid, source, folder, coordinates, probabilistic, mask_bundle)
             used = path or source
             entry.update(source=_relative(source, out), source_sha256=file_sha256(source), output=_relative(used, out), probabilistic=prob)
             if entry.get("source_traced"):
@@ -1663,7 +1695,7 @@ def seed_variants(study, variants=DEFAULT_VARIANTS, out=None, bundle=None, lesio
     record = _record("seeds", out, run_id, study=_relative(study.path, out), rule=rule, sign=sign, overlap_pct=overlap_pct, primary_probabilistic=probabilistic,
                      primary_binarization=PRIMARY_FRACTIONAL if probabilistic else PRIMARY_NONZERO,
                      note="Derived seed files only; the study's lesions/ folder is never modified.", mirror_note=None if "flipped" not in variants else _mirror_caveat(),
-                     variants=manifest, comparisons=comparisons)
+                     variants=manifest, comparisons=comparisons, coordinates_not_in_study=not_in_study)
     _write_json(os.path.join(out, VARIANTS_JSON), record)
     record["rows"] = rows
     return record

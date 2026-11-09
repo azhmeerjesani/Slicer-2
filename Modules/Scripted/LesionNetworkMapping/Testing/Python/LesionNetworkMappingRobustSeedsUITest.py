@@ -99,6 +99,22 @@ class RobustSeedsUITest(unittest.TestCase):
             for column in range(table.columnCount):
                 self.assertNotIn(description, table.item(row, column).toolTip())
 
+    def test_caption_names_empty_spheres_and_unknown_participants(self):
+        # bug map-robust-card:robust-seeds-sphere-outside-connectome-silent
+        import json
+
+        rows = [("sphere4", "sub-01", "lesion", "false", 1.0, 1.0, "3/3", "n/a"), ("sphere4", "sub-02", "lesion", "true", 0.9, 0.8, "3/3", "n/a")]
+        self.writeSeeds(rows)
+        record = {"coordinates_not_in_study": ["sub-99"],
+                  "variants": {"sphere4": {"lesions": [{"participant_id": "sub-01", "action": "kept", "warning": "the sphere has no voxel"}, {"participant_id": "sub-02", "action": "derived"}]}}}
+        with open(os.path.join(self.tmp, "variants.json"), "w", encoding="utf-8") as f:
+            json.dump(record, f)
+        self.robust.showSeeds(self.tmp)
+        caption = self.robust.seedsNote.text
+        self.assertIn("sub-99", caption)
+        self.assertIn("sub-01: the sphere has no voxel in the connectome", caption)
+        self.assertIn("sub-01", self.robust.seedsTable.item(0, 0).toolTip())
+
 
 if __name__ == "__main__":
     unittest.main()

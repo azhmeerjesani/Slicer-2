@@ -1378,6 +1378,11 @@ class RobustCard:
         order = [variant for variant in VARIANT_ORDER if any(row["variant"] == variant for row in rows)]
         self.seedsTable.setRowCount(len(order))
         notes = []
+        record = _readJson(os.path.join(folder, "variants.json")) or {}
+        variantRecords = record.get("variants") or {}
+        missing = [str(sid) for sid in record.get("coordinates_not_in_study") or []]
+        if missing:
+            notes.append(_("Not in the study, so their coordinates were ignored: {ids}").format(ids=", ".join(missing[:10]) + (" ..." if len(missing) > 10 else "")))
         for index, variant in enumerate(order):
             mine = [row for row in rows if row["variant"] == variant]
             items = [row for row in mine if row.get("kind") == "lesion"]
@@ -1391,6 +1396,9 @@ class RobustCard:
             # Only the variant's own notes (its lesion rows, or the "not applicable" row): the group rows carry the generic
             # column descriptions of the Compare tables ("mean of the lesion maps ...") that are not about the variant
             own = {str(row["note"]).strip() for row in mine if row.get("kind") in ("lesion", "variant") and row.get("note") not in ("n/a", "", None)}
+            empty = [str(entry.get("participant_id")) for entry in (variantRecords.get(variant) or {}).get("lesions") or [] if entry.get("warning")]
+            if empty:
+                own.add(_("{ids}: the sphere has no voxel in the connectome, so the primary seed is kept and the lesion is left out of the medians").format(ids=", ".join(empty[:10]) + (" ..." if len(empty) > 10 else "")))
             tooltip = "; ".join(sorted(own)) or None
             if tooltip:
                 notes.append(f"{text}: {tooltip}")
