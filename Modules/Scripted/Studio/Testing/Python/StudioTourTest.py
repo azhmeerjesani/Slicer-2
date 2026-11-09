@@ -1315,3 +1315,35 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             studioShell.classic()
             self._pump()
+
+    def test_24_library_tour_not_offered_while_a_study_is_open(self):
+        """With a study open Library shows the study page, which none of the Library tour steps point at: the tour is then not
+        offered (Search, Help) instead of doing nothing; without a study it is offered and starts (bug bash).
+        """
+        from StudioLib import library, tour
+
+        studioShell = self._applyStudio()
+        original = library._studySession
+
+        def _fakeStudySession():
+            return object()
+
+        try:
+            studioShell.switchTo("library")
+            self._pump()
+            self.assertIn("library", [t["id"] for t in tour.availableTours()])
+            library._studySession = _fakeStudySession
+            self.assertNotIn("library", [t["id"] for t in tour.availableTours()])
+            self.assertFalse(tour.startTour("library"))
+            # The Help item falls back to the whole-app tour, which starts
+            self.assertTrue(tour.startWorkspaceTour())
+            self.assertEqual(tour.activeTour(), "studio")
+            tour.stopTour()
+            library._studySession = original
+            self.assertTrue(tour.startTour("library"))
+            self.assertEqual(tour.activeTour(), "library")
+        finally:
+            library._studySession = original
+            tour.stopTour()
+            studioShell.classic()
+            self._pump()

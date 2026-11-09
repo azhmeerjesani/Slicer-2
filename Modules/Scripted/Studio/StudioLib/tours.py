@@ -120,6 +120,16 @@ def _workspaceAvailable(key):
     return ws is not None and workspaces.isAvailable(ws)
 
 
+def _libraryAvailable(shell=None):
+    """False while a study is open: Library then shows the study page, none of whose controls the Library tour points at."""
+    from . import library
+
+    try:
+        return library._studySession() is None
+    except Exception:
+        return True
+
+
 def _mapAvailable(shell=None):
     return _workspaceAvailable("map")
 
@@ -423,7 +433,8 @@ TOURS = (
     Tour("studio", _("Slicer Studio in 2 minutes"), _("The top bar, the three workspaces, Search, layouts and the Classic interface."), _STUDIO_STEPS),
     Tour("from-slicer", _("Coming from 3D Slicer"), _("What stays the same, what moved, and where to find it now."), _FROM_SLICER_STEPS,
          finishText=_("Open the map")),
-    Tour("library", _("Library tour"), _("Opening data, the MNI template, files opened from elsewhere and sample data."), _LIBRARY_STEPS, workspace="library"),
+    Tour("library", _("Library tour"), _("Opening data, the MNI template, files opened from elsewhere and sample data."), _LIBRARY_STEPS, workspace="library",
+         available=_libraryAvailable),
     Tour("draw", _("Draw tour"), _("Your lesion, the tools, the brush, Overlay, Undo and Save lesion."), _DRAW_STEPS, workspace="draw"),
     Tour("map", _("Map tour"), _("Lesion network mapping: the lesion, the connectome, Map network, the result and its threshold."), _MAP_STEPS,
          workspace="map", available=_mapAvailable),
