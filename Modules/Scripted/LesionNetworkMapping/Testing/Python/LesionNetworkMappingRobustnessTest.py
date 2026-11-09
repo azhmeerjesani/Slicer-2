@@ -264,6 +264,16 @@ class SplitHalfInfluenceTest(unittest.TestCase):
         self.assertIn("no single lesion changes the result", text)
         self.assertNotIn("most influential lesions", text)
 
+    def test_leave_one_lesion_out_ties_across_the_cut_are_all_listed(self):
+        maps = np.zeros((10, 1000), dtype=np.float32)
+        for index in range(10):
+            maps[index, index] = 10.0  # each lesion alone supports its own voxel: exactly equal influence
+        result = robustness.leave_one_lesion_out(maps, rule={"kind": "top_pct", "value": 1.0}, overlap_pct=10.0, sign="positive", top_k=5)
+        values = [item["influence"] for item in result["rows"]]
+        self.assertTrue(all(abs(value - values[0]) < 1e-9 for value in values) and values[0] > 0)
+        self.assertEqual(len(result["top"]), 10)
+        self.assertTrue(all(item["top_k"] for item in result["rows"]))
+
     def path_tsv(self):
         folder = tempfile.mkdtemp(prefix="lnm-robustness-influence-")
         self.addCleanup(shutil.rmtree, folder, True)

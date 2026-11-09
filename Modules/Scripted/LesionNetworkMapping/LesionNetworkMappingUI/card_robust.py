@@ -1341,10 +1341,14 @@ class RobustCard:
 
     def showInfluence(self, folder):
         record = _readJson(os.path.join(folder, "influence.json")) or {}
-        rows = sorted(_readTsv(os.path.join(folder, "influence.tsv")), key=lambda row: _float(row.get("rank")) or 1e9)[:TOP_K]
-        influential = [row for row in rows if str(row.get("top_k", "")).lower() == "true"] if rows and "top_k" in rows[0] else rows
+        ranked = sorted(_readTsv(os.path.join(folder, "influence.tsv")), key=lambda row: _float(row.get("rank")) or 1e9)
+        influential = [row for row in ranked if str(row.get("top_k", "")).lower() == "true"] if ranked and "top_k" in ranked[0] else ranked[:TOP_K]
+        # Lesions tied with the cut-off are all shown: the table never cuts equally influential lesions by id order
+        rows = ranked[:max(TOP_K, len(influential))]
         if rows and not influential:
             self.influenceLabel.setText(_("No single lesion changes the result: removing any one lesion leaves it unchanged, so none is more influential than the others (influence by {measure}).").format(measure=record.get("influence", "")))
+        elif len(influential) > TOP_K:
+            self.influenceLabel.setText(_("{k} lesions share the same influence at the cut-off, so all {k} are listed as most influential, ranked by {measure}. Influence alone is not a reason to remove a lesion.").format(k=len(influential), measure=record.get("influence", "")))
         else:
             self.influenceLabel.setText(_("The {k} most influential lesions, ranked by {measure}. Influence alone is not a reason to remove a lesion.").format(k=len(influential), measure=record.get("influence", "")))
         self.influenceTable.setRowCount(len(rows))

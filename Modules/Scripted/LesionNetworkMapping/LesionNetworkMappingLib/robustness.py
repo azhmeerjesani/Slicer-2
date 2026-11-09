@@ -1320,7 +1320,7 @@ def leave_one_lesion_out(maps, design=None, ids=None, rule=None, n=None, v=None,
     ``glm_maps`` (the maps of the design's input, AvgFz for input "Fz"; rows as ``maps``), default ``maps``.
 
     :return: {"rows" (one per lesion, in map order; keys of :data:`INFLUENCE_COLUMNS`), "top" (the ``top_k`` most
-      influential participant ids, ranked by |Δt at the peak| with a design, else by 1 - Dice; lesions with no influence are never listed, so
+      influential participant ids, plus any lesion with the same influence as the last one, ranked by |Δt at the peak| with a design, else by 1 - Dice; lesions with no influence are never listed, so
       empty when no single lesion changes the result), "peak" (full GLM peak)}.
     """
     np = _np()
@@ -1376,11 +1376,15 @@ def leave_one_lesion_out(maps, design=None, ids=None, rule=None, n=None, v=None,
             item["influence"] = None if dice_value is None else 1.0 - dice_value
         rows.append(item)
     order = sorted(range(n_lesions), key=lambda index: -(rows[index]["influence"] if rows[index]["influence"] is not None else -1.0))
+    cut = rows[order[min(top_k, n_lesions) - 1]]["influence"] if top_k >= 1 else None
     for rank, index in enumerate(order, start=1):
         rows[index]["rank"] = rank
-        # A lesion is only "most influential" if removing it changes something: tied zeros keep map order and must not be listed
-        rows[index]["top_k"] = rank <= top_k and _has_influence(rows[index]["influence"])
-    top = [rows[index]["participant_id"] for index in order[:top_k] if rows[index]["top_k"]]
+        # A lesion is only "most influential" if removing it changes something: tied zeros keep map order and must not be listed.
+        # Lesions with the same influence as the one at the cut-off are all listed (the order among ties is arbitrary).
+        value = rows[index]["influence"]
+        tied = cut is not None and value is not None and math.isclose(value, cut, rel_tol=1e-9, abs_tol=1e-12)
+        rows[index]["top_k"] = (rank <= top_k or tied) and _has_influence(value)
+    top = [rows[index]["participant_id"] for index in order if rows[index]["top_k"]]
     return {"label": INFLUENCE_LABEL, "rows": rows, "top": top, "peak": peak, "rule": rule,
             "overlap_pct": float(overlap_pct), "sign": sign, "influence": "|Δt at the GLM peak|" if stats_ is not None else "1 - Dice of the sensitivity map"}
 
