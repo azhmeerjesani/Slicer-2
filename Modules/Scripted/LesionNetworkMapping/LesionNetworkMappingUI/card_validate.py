@@ -1476,7 +1476,7 @@ class ValidateCard:
         symbol = "ΔAUC" if primary == "auc" else "ΔR²"
         text = incremental.get("text") or ""
         delta = f"Δ {_num(incremental.get('delta'))}"
-        table.setItem(last, 0, _tableItem(_("Δ vs volume alone"), f"{symbol}: " + _("volume + circuit minus volume alone") + (f"\n{text}" if text else ""), right=False, bold=True))
+        table.setItem(last, 0, _tableItem(_("Δ vs volume"), f"{symbol}: " + _("volume + circuit minus volume alone") + (f"\n{text}" if text else ""), right=False, bold=True))
         table.setItem(last, 1, _tableItem(delta if primary == "auc" else "—", text, bold=True))
         table.setItem(last, 2, _tableItem(delta if primary != "auc" else "—", text, bold=True))
         table.setItem(last, 3, _tableItem("—", text))

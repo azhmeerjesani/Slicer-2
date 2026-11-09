@@ -82,6 +82,28 @@ class ValidateTableNamesUITest(unittest.TestCase):
                 except AttributeError:
                     pass
 
+    def test_delta_row_label_is_not_elided(self):
+        """The bold last row 'Δ vs volume' read 'Δ vs v... alone' on the narrow inspector (bug validate-delta-row-label-elided-1366)."""
+        card = self.card
+        for name in ("showSummary", "showNotes", "showFigure"):
+            setattr(card, name, lambda *args, **kwargs: None)
+        try:
+            card.showResult("", self.record("a", "b"))
+            _pump(50)
+            table = card.tableWidget
+            item = table.item(table.rowCount - 1, 0)
+            font = qt.QFont(table.font)
+            font.setBold(True)
+            # The name column is about 105 px of text on a 1366x768 inspector (the label was cut at that width)
+            shown = qt.QFontMetrics(font).elidedText(item.text(), table.textElideMode, 105)
+            self.assertEqual(shown, item.text(), "the last row label is cut")
+        finally:
+            for name in ("showSummary", "showNotes", "showFigure"):
+                try:
+                    delattr(card, name)
+                except AttributeError:
+                    pass
+
 
 if __name__ == "__main__":
     unittest.main()
