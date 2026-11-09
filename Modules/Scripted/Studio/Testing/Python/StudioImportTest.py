@@ -1728,6 +1728,28 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(scalars(), ["sub-01_T1w", "sub-01_lesion"])
         self.assertFalse(slicer.util.getNodesByClass("vtkMRMLSegmentationNode"))
 
+    def test_studio_folder_argument_shows_the_library(self):
+        """The Slicer Studio folder or its Projects folder as an argument is recognised, not offered to Add Data empty."""
+        from StudioLib import importer
+        from StudioLib import projects as studioProjects
+
+        studioShell = self._applyStudio()
+        rootPath = os.path.join(self.directory, "StudioRoot")
+        os.makedirs(os.path.join(rootPath, "Projects", "p one"), exist_ok=True)
+        calls = []
+        openAddData = importer.openAddDataDialog
+        root = studioProjects.root
+        importer.openAddDataDialog = lambda paths=None, *a, **k: calls.append(paths)
+        studioProjects.root = lambda: rootPath
+        try:
+            for folder in (rootPath, os.path.join(rootPath, "Projects")):
+                self.assertEqual(importer.loadFolder(folder, studioShell), "library")
+                self.assertEqual(studioShell.currentWorkspace(), "library")
+        finally:
+            importer.openAddDataDialog = openAddData
+            studioProjects.root = root
+        self.assertEqual(calls, [])
+
     def test_file_open_event_opens_the_file(self):
         """macOS gives Finder's Open With, a double click and a Dock drop as QFileOpenEvent: the file opens like Open... does."""
         import Studio

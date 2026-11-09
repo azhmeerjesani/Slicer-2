@@ -2042,17 +2042,38 @@ def loadRecentFile(properties, action=None, shell=None):
     return result
 
 
+def _isStudioFolder(path):
+    """True if ``path`` is the Slicer Studio folder or its Projects, Studies or Templates subfolder."""
+    try:
+        from . import projects
+
+        rootPath = projects.root()
+        candidates = [rootPath, projects.projectsFolder(rootPath), projects.studiesFolder(rootPath),
+                      os.path.join(rootPath, getattr(projects, "TEMPLATES_DIR", "Templates"))]
+        target = os.path.normcase(os.path.realpath(path))
+        return any(os.path.normcase(os.path.realpath(candidate)) == target for candidate in candidates)
+    except Exception:
+        return False
+
+
 def loadFolder(path, shell=None):
     """Load a folder: a study folder opens the study, DICOM goes to the DICOM module, several NIfTI files are offered in a
     card (with Create study), else the Add Data dialog.
 
-    Return "study", "dicom", "nifti" or "addData".
+    The Slicer Studio folder itself (or its Projects, Studies or Templates folder) shows the Library with a short hint.
+
+    Return "study", "library", "dicom", "nifti" or "addData".
     """
     shell = _currentShell(shell)
     studyUi = _studyUiModule()
     if studyUi is not None and os.path.isfile(os.path.join(path, "study.json")):
         studyUi.openStudy(path, shell)
         return "study"
+    if shell is not None and _isStudioFolder(path):
+        shell.switchTo("library")
+        shell.toast(_("This is the Slicer Studio folder. Open a project from the Library, or drag a project's folder or "
+                      "scene file into the window."), 8000)
+        return "library"
     sceneFile = _folderScene(path)
     if sceneFile is not None:
         # A scene folder (a Slicer Studio project, or a scene that 3D Slicer saved with its data): open its scene
