@@ -1825,7 +1825,8 @@ def load_data(maps_tsv, participants, outcome, outcome_type, covariates=(), mask
         if data.ndim > 3:
             data = data.reshape(data.shape[:3])
         if tuple(data.shape) != mask_shape or not np.allclose(affine, mask_affine, atol=1e-4, rtol=0):
-            raise ValueError(f"The reference map {os.path.basename(path)} is not on the connectome grid (resample it first)")
+            emit("warning", code="refmap_grid", message=f"The reference map {os.path.basename(path)} is not on the connectome grid (resample it first): it is left out")
+            continue
         vector = data.reshape(-1)[indices]
         if not np.all(np.isfinite(vector)):
             raise ValueError(f"The reference map {os.path.basename(path)} has non-finite values inside the mask")

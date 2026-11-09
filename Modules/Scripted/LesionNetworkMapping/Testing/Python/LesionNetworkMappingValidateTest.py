@@ -767,6 +767,20 @@ class CommandLineTest(unittest.TestCase):
         self.assertIn("1 map(s) have |Fz| above 10", ranges[0])
         self.assertIn("sub-03", ranges[0])
 
+    def test_off_grid_refmap_is_left_out(self):
+        fixture = self._write_fixture(self.tmp, n=12)
+        good = os.path.join(self.tmp, "good_map.nii.gz")
+        nifti.write_nifti(good, np.random.default_rng(1).standard_normal(self.SHAPE).astype(np.float32), fixture["affine"])
+        wrong = os.path.join(self.tmp, "wronggrid.nii.gz")
+        nifti.write_nifti(wrong, np.zeros((3, 3, 3), dtype=np.float32), fixture["affine"])
+        events = []
+        loaded = validate.load_data(fixture["maps_tsv"], fixture["participants"], "group", "binary", mask=fixture["mask"], refmaps=[good, wrong], emit=lambda event, **fields: events.append(fields))
+        data = loaded["data"]
+        self.assertEqual(list(data.refmaps), ["good_map"])
+        warned = [fields["message"] for fields in events if fields.get("code") == "refmap_grid"]
+        self.assertEqual(len(warned), 1)
+        self.assertIn("wronggrid.nii.gz", warned[0])
+
     def test_frozen_and_usage(self):
         fixture = self._write_fixture(self.tmp)
         circuit = np.zeros(self.SHAPE, dtype=np.float32)
