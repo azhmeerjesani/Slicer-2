@@ -8,7 +8,7 @@ Catch tracing errors while the case is still open (LNM addendum 3.10, 7.2, 7.3; 
   duplicate and the dimensionality ("2D · axial · 1 slice → 2 mm"). They run 300 ms after the last edit, on the cropped
   labelmap on the main thread (``LesionQc.lastMs``; the budget is ``CHIP_BUDGET_MS``) and are cached by the labelmap
   content. Atlas and prior crops are cached; the atlases load in a worker thread. Without cached atlases a
-  "Get atlases (HOCPAL/HOSPA, CC BY-SA 4.0)" chip runs ``LesionNetworkMappingLib.fetch`` as a background job.
+  "Get atlases (CC BY-SA 4.0)" chip runs ``LesionNetworkMappingLib.fetch`` as a background job.
 - **Fixes**, each one undo step of the segment editor, with the original file kept (``desc-preflip``, ``desc-prebinarize``,
   ``desc-preclip``) and one line appended to ``<study>/.studio/audit.jsonl``: Mirror L↔R (world x → -x, approximate;
   toggles ``flipped``), Binarize at 0.5, Clip outside brain, Mark duplicate (``duplicate_of`` and ``include`` = 0) and
@@ -628,8 +628,9 @@ def buildChips(result, row=None, mni=False, duplicates=(), policy=None, studyOpe
         text = _("Getting atlases…") if running else (_("Atlases could not be downloaded: {reason}").format(reason=failed) if failed else missingText)
         chips.append({"key": "atlases", "level": "busy" if running else ("warn" if failed else "neutral"), "badge": _("Where"), "text": text,
                       "tooltip": _("Harvard-Oxford cortical and subcortical atlases (CC BY-SA 4.0) and a CSF prior, a few MB from TemplateFlow, downloaded only when you click"),
-                      "actions": [] if running else [{"id": "getAtlases", "text": _("Get atlases (HOCPAL/HOSPA, CC BY-SA 4.0)"),
-                                                      "tooltip": _("Download the Harvard-Oxford atlases (CC BY-SA 4.0) into the cache; nothing else is downloaded")}]})
+                      "actions": [] if running else [{"id": "getAtlases", "text": _("Get atlases (CC BY-SA 4.0)"),
+                                                      # the atlas names are in the tooltip: a longer label is cut in the middle in the default inspector width
+                                                      "tooltip": _("Download the Harvard-Oxford atlases (HOCPAL cortical, HOSPA subcortical; CC BY-SA 4.0) into the cache; nothing else is downloaded")}]})
     # CSF
     csf = result.get("csf")
     if csf is not None and getattr(csf, "flagged", False):

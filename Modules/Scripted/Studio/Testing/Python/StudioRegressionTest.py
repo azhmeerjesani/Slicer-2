@@ -721,6 +721,25 @@ class StudioRegressionTest(unittest.TestCase):
         chips = lesionqc.buildChips({"voxels": 100, "location": cortical}, mni=True, missingAtlases=False)
         self.assertNotIn("atlases", [chip["key"] for chip in chips])
 
+    def test_get_atlases_action_fits_the_default_inspector_width(self):
+        """The "Get atlases" button is not middle-elided in the default 340 px inspector (its row is 274 px wide): the label is short
+        enough for that row and the atlas names are in the tooltip (BB-1).
+        """
+        chips = self._atlasChips()
+        action = chips["atlases"]["actions"][0]
+        font = qt.QFont()
+        font.setPixelSize(12)
+        # 12 px horizontal padding on both sides of a ghost button
+        self.assertLessEqual(qt.QFontMetrics(font).horizontalAdvance(action["text"]) + 24, 274, action["text"])
+        self.assertIn("HOCPAL", action["tooltip"])
+        self.assertIn("HOSPA", action["tooltip"])
+
+    def _atlasChips(self):
+        from StudioLib import lesionqc
+
+        chips = lesionqc.buildChips({"voxels": 100, "location": [("Left Planum Temporale", 18.0)]}, mni=True, missingAtlases=True)
+        return {chip["key"]: chip for chip in chips}
+
     # Damaged lesion file in the duplicate scan (BB-1)
 
     def test_82_truncated_lesion_file_does_not_stop_the_duplicate_scan(self):
