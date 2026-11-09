@@ -2182,6 +2182,21 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             libcard_cohort._session, libcard_cohort.liveCard = original
 
+    def test_cohort_duplicates_row_lists_only_lesions_the_check_used(self):
+        """Intake duplicate flags of lesions left out of the check (not approved in review) are not listed in the Duplicates row."""
+        from types import SimpleNamespace
+
+        from StudioLib import libcard_cohort
+
+        rows = [{"participant_id": "sub-01", "qc_flags": "duplicate"}, {"participant_id": "sub-02", "qc_flags": ""},
+                {"participant_id": "sub-12", "qc_flags": "x;duplicate"}]
+        study = SimpleNamespace(subjects=rows)
+        thread = {"used": ["sub-01", "sub-02"], "excluded": {"not approved in review": ["sub-12"]}}
+        self.assertEqual(libcard_cohort.intakeDuplicateFlags(study, thread), ["sub-01"])
+        recorded = {"excluded": {"not approved in review": ["sub-12"]}}
+        self.assertEqual(libcard_cohort.intakeDuplicateFlags(study, recorded), ["sub-01"])
+        self.assertEqual(libcard_cohort.intakeDuplicateFlags(study, {"used": ["sub-12"]}), ["sub-12"])
+
     def test_cohort_subset_line_uses_singular_for_one(self):
         """The subset line says "1 case + 1 control" and "1 case without a control", not "1 cases + 1 controls"."""
         from StudioLib import libcard_cohort

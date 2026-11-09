@@ -269,7 +269,7 @@ def checkLesionSet(studyPath, includeUnreviewed=False, priors=None, overview=Fal
     note("load", 0, len(included))
     occ = lesionset.load_occupancies(study, require_review=False if includeUnreviewed else None, cancel=cancel, progress=lambda done, total: note("load", done, total))
     result = {"n": len(occ), "excluded": occ.excluded, "summary": None, "duplicates": [], "review": review, "path": None, "inbox": None, "overview": None, "source": "thread",
-              "inputs": inputs}
+              "inputs": inputs, "used": list(occ.sids)}
     if len(occ) == 0:
         result["seconds"] = round(time.monotonic() - started, 3)
         return result
@@ -324,6 +324,14 @@ def overviewWork(study, occ, maps, template, note, stop, outputs, extra, inputs=
                         "created": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"), "inputs": inputs}
     return {"count": countPath, "percent": percentPath, "gallery": gallery["dir"], "overlap": overlap["dir"], "table": table, "order": order,
             "pages": len(pages), "max_count": maps.max_count, "n": len(occ), "legend": maps.legend, "files": gallery["files"], "inputs": inputs}
+
+
+def intakeDuplicateFlags(study, result):
+    """Participant ids flagged ``duplicate`` at intake, limited to the lesions the check used (not those left out by review or exclusion)."""
+    used = result.get("used")
+    left = {sid for sids in (result.get("excluded") or (result.get("summary") or {}).get("excluded") or {}).values() for sid in sids}
+    return [row["participant_id"] for row in study.subjects if "duplicate" in str(row.get("qc_flags", "")).replace(",", ";").split(";")
+            and (row["participant_id"] in used if used is not None else row["participant_id"] not in left)]
 
 
 def recordedResult(studyPath):
@@ -1389,7 +1397,7 @@ class CohortCard:
         duplicates = result.get("duplicates") or []
         flagged = [f"{a} ~ {b} ({value:.2f})" for a, b, value in duplicates]
         if not flagged and study is not None:
-            flagged = [row["participant_id"] for row in study.subjects if "duplicate" in str(row.get("qc_flags", "")).replace(",", ";").split(";")]
+            flagged = intakeDuplicateFlags(study, result)
         self._setRow("duplicates", (listText(flagged) if flagged else _("none found")) if result.get("source") == "thread" or flagged else "")
         flags = lesionFlags(summary)
         self._setRow("flags", listText([f"{sid}: {text}" for sid, text in flags]) if flags else (_("none") if summary.get("tissue") else ""))
