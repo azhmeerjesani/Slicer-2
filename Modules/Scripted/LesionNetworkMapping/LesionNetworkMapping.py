@@ -1691,11 +1691,19 @@ class ConvertConnectomeDialog(qt.QDialog):
         self.estimate = None
         self.estimateLabel.setText(_("Estimate the size before converting: a GSP1000-size bundle needs about 126 GB."))
         path = self.inputEdit.text.strip()
-        if path and not self.nameEdit.text.strip():
-            self.nameEdit.setText(os.path.basename(path.rstrip("/\\")) or "connectome")
-        if path and not self.outEdit.text.strip():
+        # Name and Bundle folder that were filled in here (not typed or browsed by the user) follow the folder chosen last
+        if path and self._isAutoFilled(self.nameEdit, "_autoName"):
+            self._autoName = os.path.basename(path.rstrip("/\\")) or "connectome"
+            self.nameEdit.setText(self._autoName)
+        if path and self._isAutoFilled(self.outEdit, "_autoOut"):
             name = LesionNetworkMappingLogic.connectomeIdentifierName(self.nameEdit.text.strip() or "connectome")
-            self.outEdit.setText(os.path.join(_dataDirectory(), "connectomes", f"{_safeName(name, 'connectome')}.lnmc"))
+            self._autoOut = os.path.join(_dataDirectory(), "connectomes", f"{_safeName(name, 'connectome')}.lnmc")
+            self.outEdit.setText(self._autoOut)
+
+    def _isAutoFilled(self, edit, attribute):
+        """True when the field is empty or still holds the text this dialog put there itself."""
+        text = edit.text.strip()
+        return not text or text == getattr(self, attribute, None)
 
     def onBrowseInput(self):
         path = qt.QFileDialog.getExistingDirectory(self, _("Choose the folder of the time series") if self.source() == "nifti" else _("Choose the Lead-DBS connectome folder"),

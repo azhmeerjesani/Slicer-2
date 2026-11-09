@@ -374,6 +374,30 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
         finally:
             dialog.hide()
 
+    def test_convert_name_and_bundle_follow_the_folder_chosen_last(self):
+        # Name and Bundle folder filled in automatically follow a second folder; typed or browsed values are kept
+        manager = self.widget.openManager()
+        dialog = manager.openConvert() or manager.convertDialog
+        _pump(100)
+        dialog = manager.convertDialog
+        try:
+            dialog.inputEdit.setText("/data/Cohort A")
+            dialog._inputsChanged()
+            self.assertEqual(dialog.nameEdit.text, "Cohort A")
+            self.assertEqual(os.path.basename(dialog.outEdit.text), "CohortA.lnmc")
+            dialog.inputEdit.setText("/data/Cohort B")
+            dialog._inputsChanged()
+            self.assertEqual(dialog.nameEdit.text, "Cohort B")
+            self.assertEqual(os.path.basename(dialog.outEdit.text), "CohortB.lnmc")
+            dialog.nameEdit.setText("My name")
+            dialog.outEdit.setText("/elsewhere/mine.lnmc")
+            dialog.inputEdit.setText("/data/Cohort C")
+            dialog._inputsChanged()
+            self.assertEqual(dialog.nameEdit.text, "My name")
+            self.assertEqual(dialog.outEdit.text, "/elsewhere/mine.lnmc")
+        finally:
+            dialog.hide()
+
     def test_buttons_show_their_full_text_at_the_smallest_size(self):
         # The seven actions of the selected connectome were one row: at 1366 x 768 their labels were cut. They wrap now:
         # as opened (the dialog fits the screen) and at the dialog's minimum size, every visible button is as wide as its
