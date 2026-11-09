@@ -28,6 +28,9 @@ accepted (addendum 4.1, never automatically, never bundled, no app-owned credent
   trusted: the next fetch, with or without ``--resume``, starts again from the first archive (warning ``bundle_missing``).
   A resume keeps the subjects already converted, so it may use the same subset or a larger one; a subset that leaves out
   an archive that is (partly) converted is refused before anything is changed (exit code 2, ``code: subset_changed``).
+  When the provider has replaced an archive that is (partly) converted (its listed MD5 differs: a new dataset version
+  published while the fetch was paused), the converted subjects are discarded and the fetch starts again from the first
+  archive (warning ``catalog_differs``), so the bundle never mixes two versions or records a checksum it did not read.
 - **Integrity.** The whole-archive MD5 is computed on the fly and compared with the one the provider lists whenever
   the stream was read from its first byte (reconnections in the same run keep the hash valid); a stream that was
   resumed from a member offset records "not verified (resumed); members verified by gzip CRC" (every member's gzip
@@ -846,6 +849,23 @@ def _forget_converted_archives(data):
     data.pop("subjects", None)
 
 
+def _converted_archives_changed(data, live):
+    """The names of the archives whose subjects are (partly) in the bundle (see :func:`_archive_has_data`) but whose MD5 the
+    provider lists now differs from the one they were read with: the provider replaced them (a new dataset version) while
+    the fetch was paused. The subjects converted from them are the old data, which the new listing does not describe.
+    """
+    live_md5 = {}
+    for item in live.get("files") or []:
+        live_md5.setdefault(item.get("name"), set()).add(item.get("md5"))
+    changed = []
+    for name, info in sorted((data.get("archives") or {}).items()):
+        published = (info or {}).get("md5Published")
+        now = live_md5.get(name)
+        if published and _archive_has_data(info) and now and len(now) == 1 and None not in now and published not in now:
+            changed.append(name)
+    return changed
+
+
 def unfinished_fetch(entry, dest):
     """A summary of an interrupted fetch (``{"done", "total", "fraction", "archives"}``), or None when none is waiting."""
     data = read_state(entry, dest)
@@ -1111,6 +1131,18 @@ def _run_fetch(entry, live, plan, terms_sha, state, work, bundle, dest, session,
                 data["checksumOverride"] = True
                 emit("warning", code="checksum_override", message=f"{item['name']}: the checksum did not match; the file was kept at your request (checksum_override).")
         results[item["name"]] = {"md5": item.get("md5"), "bytes": size, "verification": verification}
+        state.save()
+
+    changed = _converted_archives_changed(data, live)
+    if changed:
+        # The subjects already converted from a replaced archive are the old data; which ones they are (and the runs staged
+        # for a subject that continues in the next archive) is not known per archive, so the bundle is discarded and every
+        # archive is read again from its start: the bundle never mixes two versions or records a checksum it did not read
+        emit("warning", code="catalog_differs", message=f"{', '.join(changed)} {'has' if len(changed) == 1 else 'have'} changed at the provider since this download was paused: "
+             "the subjects already converted are discarded and the download starts again from the first archive.")
+        shutil.rmtree(bundle, ignore_errors=True)
+        _forget_converted_archives(data)
+        results = data["files"]
         state.save()
 
     def restart_if_changed(item):

@@ -703,6 +703,56 @@ class FetchStreamingTest(FetchConnectomeBase):
             self.fetch()
         self.assertEqual(ctx.exception.code, "exists")
 
+    def _replaced_archive(self, index, subject, source):
+        """Archive ``index`` as the provider republishes it: the run of ``subject`` holds the data of ``source``."""
+        with open(os.path.join(self.runs_dir, f"{source}.nii.gz"), "rb") as f:
+            other = f.read()
+        with tarfile.open(fileobj=io.BytesIO(self.archives[index])) as tar:
+            members = [(m.name, tar.extractfile(m).read()) for m in tar.getmembers() if m.isfile()]
+        return _tar([(name, other if name == GSP_RUN.format(s=subject, r=1) else data) for name, data in members])
+
+    def test_a_resume_after_the_provider_replaced_a_converted_archive_does_not_mix_versions(self):
+        # Paused with archive 00 converted and archive 01 partly converted; the provider then publishes version 3.1, in which
+        # one of them holds other data for one subject (a new MD5). The resumed bundle used to keep the old subject and record
+        # the new MD5 as verified at version 3.1: it must equal an uninterrupted fetch of version 3.1 instead
+        bundle = self.bundle()
+        for index, subject, source in ((0, "0001", "0002"), (1, "0003", "0004")):
+            with self.subTest(archive=index):
+                shutil.rmtree(self.dest, ignore_errors=True)
+                os.makedirs(self.dest)
+                self.server.reset()
+                self.events = []
+                with self.assertRaises(jobs.Cancelled):
+                    self.fetch(streams=1, cancel=lambda: os.path.isfile(os.path.join(bundle, "subjects", "sub-0003.f16.npy")))
+                state = fetchconnectome.read_state(self.entry, self.dest)
+                self.assertEqual(state["archives"]["GSP1000_v2_00.tar"]["status"], "done")
+                self.assertEqual(state["archives"]["GSP1000_v2_01.tar"]["status"], "partial")
+
+                replaced = self._replaced_archive(index, subject, source)
+                original = self.server.files[1000 + index]["data"]
+                self.server.files[1000 + index]["data"] = replaced
+                self.server.version = (3, 1)
+                try:
+                    summary = self.fetch(streams=1, resume=True)
+                    reference = os.path.join(self.root, "reference-v31.lnmc")
+                    shutil.rmtree(reference, ignore_errors=True)
+                    archives = [replaced if i == index else data for i, data in enumerate(self.archives)]
+                    import warnings
+
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", connectome.ConversionWarning)
+                        for i, data in enumerate(archives):
+                            list(connectome.from_tar_stream(io.BytesIO(data), reference, finalize=i == len(archives) - 1, name="reference"))
+                    self.assertSameSubjects(summary["path"], reference)
+                    source_files = {f["name"]: f for f in connectome.ConnectomeBundle.open(summary["path"]).provenance["source"]["files"]}
+                    name = f"GSP1000_v2_{index:02d}.tar"
+                    self.assertEqual(source_files[name]["md5"], _md5(replaced))
+                    self.assertEqual(source_files[name]["verification"], "md5")  # read in full from the new archive
+                    self.assertEqual(connectome.ConnectomeBundle.open(summary["path"]).provenance["source"]["version"], "3.1")
+                    self.assertEqual(len([w for w in self.warnings("catalog_differs") if "discarded" in w["message"]]), 1)
+                finally:
+                    self.server.files[1000 + index]["data"] = original
+
     def test_a_server_that_ignores_range_cannot_resume_mid_archive(self):
         bundle = self.bundle()
         with self.assertRaises(jobs.Cancelled):
