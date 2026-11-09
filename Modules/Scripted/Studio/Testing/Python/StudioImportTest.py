@@ -607,19 +607,59 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 f.write(content)
         for name in ("sub-01_T1w.nii", "sub-02_T1w.nii.gz"):
             self.assertIsNone(importer._niftiDataShortfall(paths[name]), name)
+        studioShell = self._applyStudio()  # once: every shell keeps its own toast widgets in the main window
         for name in ("sub-03_T1w.nii", "sub-04_T1w.nii.gz", "sub-05_lesion.nii.gz"):
             have, need = importer._niftiDataShortfall(paths[name])
             self.assertEqual((have, need), (len(complete) - 100, len(complete)), name)
-            result = importer.loadFiles([paths[name]], self._applyStudio())
+            result = importer.loadFiles([paths[name]], studioShell)
             self._pump()
             self.assertEqual(len(result.errors), 1, name)
             self.assertIn("damaged", result.errors[0][1], name)
             self.assertEqual(result.volumes + result.segmentations, [], name)
             self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLVolumeNode")), 0, name)
-        result = importer.loadFiles([paths["sub-02_T1w.nii.gz"]], self._applyStudio())
+        result = importer.loadFiles([paths["sub-02_T1w.nii.gz"]], studioShell)
         self._pump()
         self.assertEqual(result.errors, [])
         self.assertEqual(len(result.volumes), 1)
+
+    def test_cut_gzip_stream_nifti_is_refused_as_damaged(self):
+        """BB-1: a ``.nii.gz`` whose compressed stream is cut off (a stopped copy or download: no gzip end marker) is a
+        load error in plain words like a complete stream with short data, for a scan and for a lesion: Python's gzip
+        raises EOFError, but the ITK reader zero-fills the missing voxels and reports success.
+        """
+        from StudioLib import importer
+
+        dims = (32, 32, 20)
+        header = bytearray(348)
+        struct.pack_into("<i", header, 0, 348)
+        struct.pack_into("<8h", header, 40, 3, *dims, 1, 1, 1, 1)
+        struct.pack_into("<hh", header, 70, 4, 16)  # int16
+        struct.pack_into("<8f", header, 76, 1, 1, 1, 1, 1, 0, 0, 0)
+        struct.pack_into("<f", header, 108, 352)
+        header[344:348] = b"n+1\0"
+        rng = np.random.default_rng(7)
+        scan = rng.integers(100, 1000, size=dims[::-1], dtype="<i2")
+        lesion = np.zeros(dims[::-1], "<i2")
+        lesion[2:18, 4:28, 4:28] = 1
+        paths = {}
+        for name, data in (("sub-01_T1w.nii.gz", scan), ("sub-01_lesion.nii.gz", lesion)):
+            complete = gzip.compress(bytes(header) + bytes(4) + data.tobytes())
+            paths[name] = os.path.join(self.directory, name)
+            with open(paths[name], "wb") as f:
+                f.write(complete[: len(complete) * 6 // 10])
+        need = 352 + 2 * dims[0] * dims[1] * dims[2]
+        studioShell = self._applyStudio()  # once: every shell keeps its own toast widgets in the main window
+        for name, path in paths.items():
+            have, needed = importer._niftiDataShortfall(path)
+            self.assertEqual(needed, need, name)
+            self.assertLess(have, need, name)
+            result = importer.loadFiles([path], studioShell)
+            self._pump()
+            self.assertEqual(len(result.errors), 1, name)
+            self.assertIn("damaged", result.errors[0][1], name)
+            self.assertEqual(result.volumes + result.segmentations, [], name)
+            self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLVolumeNode")), 0, name)
+            self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")), 0, name)
 
     def test_damaged_seg_nrrd_leaves_nothing_in_the_scene(self):
         """BB-1: a ``.seg.nrrd`` that the reader only partly reads (truncated, header only) is a load error like a damaged

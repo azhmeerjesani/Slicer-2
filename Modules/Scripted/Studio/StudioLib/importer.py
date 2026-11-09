@@ -680,7 +680,8 @@ def _imageValueRange(path):
 def _niftiDataShortfall(path):
     """``(have, need)`` in bytes if the data of the NIfTI file ``path`` is shorter than its header says, None if it is
     complete or cannot be judged (not NIfTI, unreadable header: the readers report those). The ITK reader zero-fills the
-    missing voxels and reports success, so a file cut short opened as a whole image.
+    missing voxels and reports success, so a file cut short opened as a whole image. A ``.nii.gz`` whose compressed
+    stream itself is cut off (no gzip end marker) counts the data it holds.
     """
     if not isNiftiFile(path) or not os.path.isfile(path):
         return None
@@ -714,11 +715,15 @@ def _niftiDataShortfall(path):
         try:
             with gzip.open(path, "rb") as f:
                 while have < need:
-                    chunk = f.read(min(1 << 22, need - have))
+                    # read1: one decompression step per call, so a stream that is cut off (a stopped copy or download,
+                    # no end marker) raises EOFError only after all of its data was counted
+                    chunk = f.read1(min(1 << 22, need - have))
                     if not chunk:
                         break
                     have += len(chunk)
-        except (OSError, EOFError, zlib.error):
+        except EOFError:
+            pass  # the stream is cut off: the ITK reader zero-fills the rest and reports success, so it counts as short
+        except (OSError, zlib.error):
             return None  # damaged in another way: the reader reports it
     return (have, need) if have < need else None
 
