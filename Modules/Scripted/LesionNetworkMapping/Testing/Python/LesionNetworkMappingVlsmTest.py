@@ -266,6 +266,9 @@ class VlsmRunTest(unittest.TestCase):
             (("--study", os.path.join(self.tmp, "no-such-study"), "--grid", grid, "--space", SPACE), "The --study folder does not exist"),
             (("--study", self.tmp, "--grid", grid, "--space", SPACE), "The --study folder is not a study folder"),
             (("--study", self.study.path, "--grid", grid), "Pass --space for this grid: The grid \\(16 x 16 x 16 voxels, 2x2x2 mm\\)"),
+            (("--study", self.study.path, "--grid", os.path.join(self.tmp, "missing.nii.gz")), "The --grid .*missing.nii.gz does not exist \\(accepted: template2mm"),
+            (("--study", self.study.path, "--grid", "bogus"), "The --grid bogus cannot be used: .*\\(accepted: template2mm, a grid id"),
+            (("--study", self.study.path, "--grid", "user:no-such-template"), "The --grid user:no-such-template cannot be used"),
         )
         for arguments, pattern in cases:
             with self.subTest(arguments=arguments):

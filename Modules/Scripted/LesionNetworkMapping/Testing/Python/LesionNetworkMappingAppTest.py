@@ -402,6 +402,12 @@ class AppHelpersTest(unittest.TestCase):
                 self.assertEqual((code, events[-1]["code"]), (2, "usage"), output)
                 self.assertIn(text, events[-1]["message"])
                 self.assertNotIn("Traceback", err)
+            self.assertEqual(app.usage_message(ValueError("--x is bad")), "--x is bad")
+            self.assertTrue(app.usage_message(KeyError("k")).startswith("KeyError"))
+            code, events, _out, _err = cli("engine", "--bundle", os.path.join(tmp, "nope"), "--lesion", os.path.join(tmp, "l.nii.gz"), "--out", os.path.join(tmp, "e"))
+            self.assertEqual((code, events[-1]["code"]), (2, "usage"))
+            self.assertIn("--bundle", events[-1]["message"])
+            self.assertNotIn("FileNotFoundError", events[-1]["message"])
             code, _events_unused, out_text, err = cli(tmp, blocker, "group", "--connectome", tmp, "--events", "text")
             self.assertEqual(code, 2)
             self.assertIn("error (usage): The output folder is a file", out_text + err)
@@ -767,6 +773,19 @@ class AppLevelsTest(unittest.TestCase):
         self.assertEqual(code, jobs.EXIT_LOCKED)
         self.assertEqual(tree_digest(self.output), before)
         self.assertEqual(read_tsv(study_tsv)[1][0]["group"], "case")
+
+    def test_option_errors_are_plain_messages(self):
+        """Usage errors of option values read as plain messages, without the Python class name (ValueError:, RecipeError:)."""
+        output = os.path.join(self.tmp, "option errors out")
+        for option, value, text in (("--preview", "0", "--preview must be at least 1"), ("--perm", "999", "--perm must be at least"), ("--alpha", "1", "alpha"), ("--recipe", "nonexist", "ecipe")):
+            code, events, _stdout, stderr = cli(self.bids, output, "participant", "--connectome", self.fx["bundle"], "--accept-terms", option, value, "--events", "json")
+            self.assertEqual((code, events[-1]["code"]), (2, "usage"), (option, stderr[-500:]))
+            self.assertNotRegex(events[-1]["message"], r"^\w*(Error|Exception):", option)
+            self.assertIn(text, events[-1]["message"])
+        code, _events, out_text, err = cli(self.bids, output, "participant", "--connectome", self.fx["bundle"], "--accept-terms", "--preview", "0", "--events", "text")
+        self.assertEqual(code, 2)
+        self.assertIn("error (usage): --preview must be at least 1", out_text + err)
+        self.assertFalse(os.path.exists(output))
 
     def test_run_refused_before_its_first_stage_leaves_no_output_folder(self):
         """Without --accept-terms (exit 4) or with an unknown --participant-label (exit 2) the run stops before its first

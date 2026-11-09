@@ -736,6 +736,13 @@ def _events_option(argv):
     return value if value in pipeline.EVENT_MODES else "auto"
 
 
+def usage_message(exc):
+    """The text of a usage error: a ValueError (RecipeError, DesignError, ...) carries a message written for the user, so the
+    Python class name is left out; other exception types keep it (a bare KeyError text would be only a quoted key).
+    """
+    return str(exc) if isinstance(exc, ValueError) else f"{type(exc).__name__}: {exc}"
+
+
 def _main(argv):
     from . import jobs, pipeline
 
@@ -801,7 +808,7 @@ def _main(argv):
     try:
         config = build_config(args, study_path, emit)
     except (OSError, ValueError, TypeError, KeyError) as exc:
-        emit("error", code="usage", message=f"{type(exc).__name__}: {exc}")
+        emit("error", code="usage", message=usage_message(exc))
         return jobs.EXIT_USAGE
     if not config.accept_terms:  # refused before anything is written: the study of a BIDS input and the run folders are created only for a run that can start
         emit("error", code="terms_not_accepted", message=f"The data use terms of the connectome {bundle.name} must be accepted (--accept-terms).", data_use_terms=bundle.data_use_terms, connectome=bundle.name)
@@ -844,7 +851,7 @@ def _main(argv):
             emit("error", code="locked", message=exc.message)
             return jobs.EXIT_LOCKED
         except (OSError, ValueError, TypeError, KeyError) as exc:
-            emit("error", code="usage", message=f"{type(exc).__name__}: {exc}")
+            emit("error", code="usage", message=usage_message(exc))
             return jobs.EXIT_USAGE
         ran = True
         code = run_level(config, args.analysis_level, labels, emit=emit, cancel=args.cancel_file, argv=argv, lock=lock)

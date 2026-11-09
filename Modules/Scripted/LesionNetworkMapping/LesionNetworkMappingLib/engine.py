@@ -1254,7 +1254,10 @@ def main(argv=None):
         started = time.perf_counter()
         # Set by --cancel-file, SIGTERM/SIGINT or the orphan watchdog when run as a module (jobs.run_job)
         cancel = jobs.CancelToken(args.cancel_file, signals=False)
-        bundle = ConnectomeBundle.open(args.bundle)
+        try:
+            bundle = ConnectomeBundle.open(args.bundle)
+        except (OSError, ValueError) as exc:
+            raise jobs.JobError(f"--bundle {args.bundle} cannot be opened: {exc}", code="usage", exit_code=jobs.EXIT_USAGE) from None
         if bundle.kind != "timeseries":
             raise ValueError(f"The connectome {bundle.name!r} is a {bundle.kind!r} bundle; network maps need a time series connectome")
         subject_list = None
@@ -1444,7 +1447,7 @@ def main(argv=None):
             done["run_json"] = os.path.abspath(args.run_json)
         jobs.emit("done", **done)
         return 0
-    except jobs.Cancelled:
+    except (jobs.Cancelled, jobs.JobError):
         raise
     except Exception as exc:
         message = f"{type(exc).__name__}: {exc}"

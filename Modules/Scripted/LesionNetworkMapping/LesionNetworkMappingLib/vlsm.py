@@ -898,6 +898,23 @@ def _space_option_error(space, exc):
     return jobs.JobError(message, code="usage", exit_code=jobs.EXIT_USAGE)
 
 
+def _check_grid_option(grid, space):
+    """Refuse an unusable --grid up front (exit 2, naming the option and the accepted values) instead of the raw
+    FileNotFoundError / ValueError of reading it, which ended as exit 1 without saying which option was wrong.
+    """
+    if grid is None or grid == lesionset.TEMPLATE_GRID:
+        return
+    accepted = "template2mm, a grid id, a NIfTI image or a connectome bundle folder"
+    try:
+        lesionset.resolve_grid(None, grid, space)
+    except lesionset.GridSpaceError:
+        return  # reported with the --space remedy by main
+    except FileNotFoundError:
+        raise jobs.JobError(f"The --grid {grid} does not exist (accepted: {accepted})", code="usage", exit_code=jobs.EXIT_USAGE) from None
+    except (OSError, ValueError, KeyError) as exc:
+        raise jobs.JobError(f"The --grid {grid} cannot be used: {exc} (accepted: {accepted})", code="usage", exit_code=jobs.EXIT_USAGE) from None
+
+
 def main(argv=None):
     """Command-line entry point (see the module docstring); returns the exit code."""
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -914,6 +931,7 @@ def main(argv=None):
                 spec = designlib.DesignSpec.load(args.design) if args.design else designlib.DesignSpec()
             except (OSError, ValueError) as exc:
                 raise jobs.JobError(f"The design {args.design} cannot be read: {exc}", code="usage", exit_code=jobs.EXIT_USAGE) from None
+            _check_grid_option(args.grid, args.space)
             dtype = None if args.precision == "auto" else np.dtype(args.precision)
             record = vlsm(args.study, spec, grid=args.grid, space=args.space, min_lesions=args.min_lesions, min_percent=args.min_percent, n_perm=args.perm, seed=args.seed,
                           out_dir=args.out, tfce=True if args.tfce else None, batch=args.batch, dtype=dtype, run_root=args.run_root, parent_runs=args.parent_run,
