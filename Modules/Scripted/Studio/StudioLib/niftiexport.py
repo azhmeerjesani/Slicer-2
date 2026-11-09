@@ -1519,7 +1519,7 @@ def _pathKey(path):
 def earlierExportFiles(jobs, readmePath):
     """The files that an earlier project export wrote next to ``readmePath`` (the images its README lists and their
     sidecars) and that ``jobs`` do not write again: the masks of segments that were renamed, deleted or erased since,
-    images that were closed, or the other format (.nii and .nii.gz). A project export removes them (after the user
+    images that were closed, the label tables (.tsv, .txt) of a label map, or the other format (.nii and .nii.gz). A project export removes them (after the user
     confirms), so that ``<project>/Exports/nifti`` holds the project as it is now and a glob such as ``*_mask.nii.gz``
     finds no deleted segment.
     """
@@ -1530,7 +1530,11 @@ def earlierExportFiles(jobs, readmePath):
         image = os.path.join(folder, name)
         if _pathKey(image) in planned or not os.path.isfile(image) or not _writtenByStudio(sidecarPath(image)):
             continue
-        for path in (image, sidecarPath(image)):
+        paths = [image, sidecarPath(image)]
+        base = splitExtension(image)[0]
+        if base.endswith("_dseg"):  # a label map of a segmentation also wrote its label tables
+            paths += [base + ".tsv", base + ".txt"]
+        for path in paths:
             if os.path.isfile(path) and _pathKey(path) not in planned and path not in found:
                 found.append(path)
     return found

@@ -1781,6 +1781,31 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertNotIn("1 files", notice)
         self.assertTrue(os.path.isdir(folder))
 
+    def test_09ac_reexport_removes_label_tables_of_an_earlier_label_map(self):
+        """A label map export writes _dseg .nii.gz, .json, .tsv and .txt; a later export without it removes all four."""
+        from StudioLib import projects
+
+        project = projects.createProject("NIfTI label tables")
+        projects.setCurrentProject(project)
+        folder = self.export.projectExportFolder(create=True)
+        scan = self._phantom("sub-03_T1w", np.array([[-1.0, 0, 0, 10], [0, -1.0, 0, 10], [0, 0, 1.0, -10], [0, 0, 0, 1]]))
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions (sub-03_T1w)")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        segmentId = segmentation.GetSegmentation().AddEmptySegment("Core", "Core")
+        slicer.util.updateSegmentBinaryLabelmapFromArray((slicer.util.arrayFromVolume(scan) > 0).astype(np.uint8), segmentation, segmentId, scan)
+        readme = (os.path.join(folder, "README.txt"), "NIfTI export")
+        nodes = [scan, segmentation]
+        jobs = self.export.planExport(nodes, folder, segmentationMode=self.export.SEGMENTATION_LABELMAP, bids=True)
+        self.export.runJobs(jobs, readme=readme)
+        dseg = sorted(name for name in os.listdir(folder) if "_dseg" in name)
+        self.assertEqual(len(dseg), 4, dseg)
+        jobs = self.export.planExport(nodes, folder, segmentationMode=self.export.SEGMENTATION_MASKS, bids=True)
+        earlier = sorted(os.path.basename(path) for path in self.export.earlierExportFiles(jobs, readme[0]))
+        self.assertEqual(earlier, dseg)
+        self.export.runJobs(jobs, overwrite=True, readme=readme)
+        self.assertEqual([name for name in os.listdir(folder) if "_dseg" in name], [])
+
     def test_09ab_stopped_reexport_keeps_earlier_masks_removable(self):
         """A project export that is stopped after the scan keeps the masks of the earlier export listed as Studio files, so
         that a later export still removes the mask of a segment deleted in between (Exports/nifti matches the project).
