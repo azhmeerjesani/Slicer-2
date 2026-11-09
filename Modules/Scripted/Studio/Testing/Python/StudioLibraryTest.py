@@ -1893,6 +1893,12 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertFalse(button.enabled)
         self.assertIn("not empty", button.toolTip)
 
+        # A file typed as the study folder gets its own reason, not "not empty"
+        tutorialsDialog.folderEdit.setText(os.path.join(work, "full", "file.txt"))
+        self.assertFalse(button.enabled)
+        self.assertIn("is a file", button.toolTip)
+        self.assertNotIn("not empty", button.toolTip)
+
         # A cohort only linked (LESYMAP): the downloaded folder is refused when relative
         tutorialsDialog.select("lesymap_groundtruth")
         tutorialsDialog.folderEdit.setText(os.path.join(work, "new"))

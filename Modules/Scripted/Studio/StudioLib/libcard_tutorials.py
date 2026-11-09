@@ -463,7 +463,9 @@ class TutorialsDialog:
         reason = ""
         if not folder:
             reason = _("Choose a folder for the new study") if folder == "" else self._pathProblem(self.folder())
-        elif os.path.isfile(folder) or (os.path.isdir(folder) and os.listdir(folder)):
+        elif os.path.isfile(folder):
+            reason = _("This is a file: choose a folder")
+        elif os.path.isdir(folder) and os.listdir(folder):
             reason = _("This folder is not empty: choose a new one")
         elif needsSource and source is None:
             reason = self._pathProblem(self.sourceEdit.text)
