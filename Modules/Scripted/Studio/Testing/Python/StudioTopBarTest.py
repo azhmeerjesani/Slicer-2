@@ -389,6 +389,28 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertEqual(int(button.toolButtonStyle), int(qt.Qt.ToolButtonTextBesideIcon))
         self._assertCentred(topBar, "after compact")
 
+    def test_search_pill_minimum_scales_with_font(self):
+        """At a 125% font the pill keeps room for the icon, "Search" and the key chip (no text under the chip)."""
+        studioShell = self._applyStudio()
+        topBar = studioShell.topBar
+        original = qt.QApplication.font()
+        big = qt.QFont(original)
+        big.setPixelSize(18)
+        try:
+            qt.QApplication.setFont(big)
+            self._pump(4)
+            topBar.updateColumnMinimums()
+            font = qt.QFont(topBar.searchPlaceholder.font)
+            font.setPixelSize(18)
+            text = qt.QFontMetrics(font).horizontalAdvance("Search")
+            needed = 10 + 8 + 16 + 2 * topBar.pillLayout.spacing + text + topBar.searchKey.sizeHint.width()
+            self.assertGreaterEqual(topBar.searchPill.minimumWidth, needed)
+            self.assertGreater(topBar.searchPill.minimumWidth, 132)
+        finally:
+            qt.QApplication.setFont(original)
+            self._pump(4)
+            topBar.updateColumnMinimums()
+
     def test_narrow_window_is_compact(self):
         """U-03 narrow mode: the top bar is compact below 1100 px of window width, and normal again above.
 

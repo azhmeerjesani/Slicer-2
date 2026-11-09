@@ -399,9 +399,26 @@ class TopBar:
         for child in (self.searchIcon, self.searchPlaceholder, self.searchKey):
             child.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
         ui.bindStyleSheet(pill, self._searchPillStyleSheet)
+        pill.ensurePolished()
+        self.searchPlaceholder.ensurePolished()
+        self.searchKey.ensurePolished()
         ui.installButtonKeys(pill)
         pill.connect("clicked()", self.shell.openPalette)
         return pill
+
+    def _searchPillMinimumWidth(self):
+        """The pill's minimum width: at least SEARCH_PILL_MIN_WIDTH, and enough for the icon, the short placeholder and
+        the key chip at the current font size (the fixed minimum alone let "Search" run under "Ctrl+K" at 125% font).
+        """
+        font = qt.QFont(self.searchPlaceholder.font)
+        font.setPixelSize(ui.fontPx(13))
+        textWidth = qt.QFontMetrics(font).horizontalAdvance(self._searchPlaceholderTexts[1])
+        needed = (10 + 8 + 16 + 2 * self.pillLayout.spacing + textWidth + self.searchKey.sizeHint.width() + 2)
+        return max(SEARCH_PILL_MIN_WIDTH, needed)
+
+    def _applySearchPillMinimum(self):
+        if not self._compact and getattr(self, "searchPill", None) is not None:
+            self.searchPill.setMinimumWidth(self._searchPillMinimumWidth())
 
     def _fitSearchPlaceholder(self):
         """The long placeholder ("Search actions, tools and data") when the pill has room for it, else "Search"."""
@@ -507,6 +524,7 @@ class TopBar:
         Called whenever a side changes (breadcrumb text, status chip shown or hidden, compact mode): the switcher stays
         centred, and the columns still give way when the window is narrow.
         """
+        self._applySearchPillMinimum()
         minimum = max(self.leftContainer.minimumSizeHint.width(), self.rightContainer.minimumSizeHint.width())
         self.grid.setColumnMinimumWidth(0, minimum)
         self.grid.setColumnMinimumWidth(2, minimum)
@@ -533,8 +551,8 @@ class TopBar:
         else:
             self.pillLayout.setContentsMargins(10, 0, 8, 0)
             self.searchIcon.setAlignment(qt.Qt.AlignLeft | qt.Qt.AlignVCenter)
-            self.searchPill.setMinimumWidth(SEARCH_PILL_MIN_WIDTH)
             self.searchPill.setMaximumWidth(SEARCH_PILL_WIDTH)
+            self._applySearchPillMinimum()
         style = qt.Qt.ToolButtonIconOnly if compact else qt.Qt.ToolButtonTextBesideIcon
         for button in self.workspaceButtons.values():
             button.setToolButtonStyle(style)
