@@ -1104,7 +1104,7 @@ def _family_checks(families, conn_family, transforms):
                 sids,
                 f"{_count(len(sids), 'lesion')} {'is' if len(sids) == 1 else 'are'} in the {family} template family but the connectome is {target}"
                 + (": a transform is available." if have else ": without a template-family transform the lesions are placed a few millimetres off in deep structures."),
-                _fix(FIX_TRANSFORM, "Transform the lesions to the connectome space", source=family, target=target, available=have),
+                _fix(FIX_TRANSFORM, "Transform the lesions", source=family, target=target, available=have),
                 "subject",
                 detail={"family": family, "connectome": target},
             ),

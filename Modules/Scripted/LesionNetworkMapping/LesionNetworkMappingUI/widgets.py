@@ -370,6 +370,9 @@ def breakableText(text, longest=24):
     return text if "<" in text else re.sub(r"\S+", fix, text)  # rich text (markup) is left alone
 
 
+_BANNER_BESIDE_MAX_CHARS = 16  # total length of the action labels that may sit beside the note
+
+
 def banner(text, actions=(), level="warn"):
     """Return a notice frame: a word-wrapped text and one button per ``(label, callback)`` of ``actions``.
 
@@ -380,7 +383,10 @@ def banner(text, actions=(), level="warn"):
     frame.setObjectName("LNMBanner")
     frame.setProperty("bannerLevel", level)
     frame.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
-    layout = qt.QHBoxLayout(frame)
+    # Long button texts would squeeze the word-wrapped note into a narrow column (a button cannot wrap), so the
+    # buttons go on their own row under the note then; short ones sit beside it.
+    stacked = sum(len(buttonText) for buttonText, _callback in actions) > _BANNER_BESIDE_MAX_CHARS
+    layout = qt.QVBoxLayout(frame) if stacked else qt.QHBoxLayout(frame)
     layout.setContentsMargins(10, 6, 6, 6)
     layout.setSpacing(6)
     label = qt.QLabel(breakableText(text))
@@ -388,6 +394,12 @@ def banner(text, actions=(), level="warn"):
     label.setWordWrap(True)
     label.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
     layout.addWidget(label, 1)
+    buttonRow = qt.QHBoxLayout() if stacked else layout
+    if stacked:
+        buttonRow.setContentsMargins(0, 0, 0, 0)
+        buttonRow.setSpacing(6)
+        buttonRow.addStretch(1)
+        layout.addLayout(buttonRow)
     for buttonText, callback in actions:
         button = qt.QToolButton()
         button.setObjectName("LNMBannerButton")
@@ -396,7 +408,10 @@ def banner(text, actions=(), level="warn"):
         button.setToolButtonStyle(qt.Qt.ToolButtonTextOnly)
         button.setProperty("slicerRole", "ghost")
         button.connect("clicked()", callback)
-        layout.addWidget(button, 0, qt.Qt.AlignTop)
+        if stacked:
+            buttonRow.addWidget(button)
+        else:
+            layout.addWidget(button, 0, qt.Qt.AlignTop)
     ui = _studioUi()
     if ui is not None:
         ui.bindStyleSheet(frame, lambda: _bannerStyleSheet(level))  # follows theme changes

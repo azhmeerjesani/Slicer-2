@@ -704,6 +704,38 @@ class LesionNetworkMappingNetworksUITest(unittest.TestCase):
         self.assertIn("templateflow.\u200bs3.\u200bamazonaws.\u200bcom", broken)
         self.assertEqual(broken.replace("\u200b", ""), manager.message)
 
+    def test_banner_with_a_long_action_label_keeps_the_note_wide_and_the_button_whole(self):
+        """A banner whose action label is long puts the button under the note: the note is not squeezed into a
+        narrow column beside it and the button text is not elided (the template-family check of the preflight).
+        """
+        from LesionNetworkMappingUI import widgets
+
+        note = "6 lesions are in the fsl6 template family but the connectome is 2009: the maps would not line up."
+        host = qt.QWidget()
+        host.setLayout(qt.QVBoxLayout())
+        frame = widgets.banner(note, [("Transform the lesions", lambda: None)], level="warn")
+        host.layout().addWidget(frame)
+        host.resize(300, 400)
+        host.show()
+        slicer.app.processEvents()
+        try:
+            label = frame.findChild(qt.QLabel, "LNMBannerText")
+            button = frame.findChild(qt.QToolButton, "LNMBannerButton")
+            self.assertGreater(label.width, 200, label.width)
+            self.assertGreaterEqual(button.width, button.sizeHint.width())
+            self.assertGreaterEqual(button.y, label.y + label.height)  # under the note
+            # A short label stays beside the note
+            short = widgets.banner(note, [("Get atlases", lambda: None)], level="neutral")
+            host.layout().addWidget(short)
+            slicer.app.processEvents()
+            shortButton = short.findChild(qt.QToolButton, "LNMBannerButton")
+            shortLabel = short.findChild(qt.QLabel, "LNMBannerText")
+            self.assertLess(shortButton.x, host.width)
+            self.assertLess(shortButton.y, shortLabel.y + shortLabel.height)
+        finally:
+            host.hide()
+            host.deleteLater()
+
     def test_cohort_roi_chart_reads_lesion_maps_with_the_result_rule_for_a_percent_group_map(self):
         """The cohort ROI chart reads each lesion's T map. With a count or percentage group map in the cards (the overlapPct
         map shown after a cohort run), the map's threshold (overlapPct >= 25) is not on the T scale: each lesion's map is
