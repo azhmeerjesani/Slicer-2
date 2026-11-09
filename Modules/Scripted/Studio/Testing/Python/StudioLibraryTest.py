@@ -2217,6 +2217,19 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(libcard_agreement.written_text(2), "Agreement of 2 pairs written to derivatives/qc/interrater.tsv")
         self.assertEqual(adjudicate.left_out_text(1, "why"), "1 second tracing left out: why")
         self.assertEqual(adjudicate.left_out_text(2, "why"), "2 second tracings left out: why")
+        # The pair opens on a tracing even when the two do not overlap (the union centroid lies between them)
+        import numpy as np
+        maskA = np.zeros((20, 20, 40), dtype=bool)
+        maskB = np.zeros_like(maskA)
+        maskA[8:12, 8:12, 4:8] = True
+        maskB[8:12, 8:12, 30:34] = True
+        affine = np.diag([1.0, 1.0, 1.0, 1.0])
+        center = adjudicate.jump_center(maskA, maskB, affine)
+        self.assertTrue(maskA[tuple(np.rint(center).astype(int))] or maskB[tuple(np.rint(center).astype(int))], center)
+        maskB[8:12, 8:12, 8:30] = True
+        center = adjudicate.jump_center(maskA, maskB, affine)
+        self.assertTrue(maskB[tuple(np.rint(center).astype(int))], center)
+        self.assertIsNone(adjudicate.jump_center(np.zeros_like(maskA), np.zeros_like(maskA), affine))
         for module in (libcard_review, libcard_agreement, adjudicate):
             with open(module.__file__) as f:
                 source = f.read()

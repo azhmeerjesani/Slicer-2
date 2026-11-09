@@ -73,6 +73,21 @@ def _rules():
     return importlib.import_module("LesionNetworkMappingLib.agreement")
 
 
+def jump_center(maskA, maskB, affine):
+    """World point to centre the views on when a pair opens: the centroid of both tracings when it lies
+    on one of them, else the centroid of the first tracing (the second when A is empty), so that an outline
+    is visible even for two tracings that do not overlap. maskB is on the grid of maskA.
+    """
+    rules = _rules()
+    union = maskA | maskB
+    center = rules.centroid_mm(union, affine)
+    if center is not None:
+        ijk = np.rint(np.linalg.solve(np.asarray(affine, dtype=np.float64), np.append(center, 1.0))[:3]).astype(int)
+        if all(0 <= ijk[i] < union.shape[i] for i in range(3)) and union[tuple(ijk)]:
+            return center
+    return rules.centroid_mm(maskA, affine) if maskA.any() else center
+
+
 def _studyUi():
     return review._studyUi()
 
@@ -973,7 +988,7 @@ class AdjudicationState(_AgreementState):
         _setReadOnly(segmentationNode, _readOnlyText())
         importer.setViewLayers(background=volume, fit=True)
         with contextlib.suppress(Exception):
-            center = rules.centroid_mm((a >= 0.5) | (rules._to_grid(b, affineB, rules.geometry.Grid(a.shape, affineA))), affineA)
+            center = jump_center(a >= 0.5, rules._to_grid(b, affineB, rules.geometry.Grid(a.shape, affineA)) >= 0.5, affineA)
             if center is not None:
                 slicer.modules.markups.logic().JumpSlicesToLocation(float(center[0]), float(center[1]), float(center[2]), True)
         self.editing = False
