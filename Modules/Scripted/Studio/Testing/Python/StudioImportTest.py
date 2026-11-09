@@ -1693,6 +1693,30 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             importer.loadFolder = loadFolder
         self.assertEqual(calls, [os.path.join(self.directory, "cli folder")])
+        # Files that sit in a Slicer Studio project (a double-click on its scan) open that project, not a duplicate
+        from StudioLib import projects as studioProjects
+        projectFolder = os.path.join(self.directory, "Projects", "held project")
+        os.makedirs(os.path.join(projectFolder, "Images"), exist_ok=True)
+        for name in ("held project.mrml", os.path.join("Images", "held.nii.gz")):
+            open(os.path.join(projectFolder, name), "w").close()
+        calls = []
+        loadFolder = importer.loadFolder
+        handleDrop = importer.handleDrop
+        projectsFolder = studioProjects.projectsFolder
+        importer.loadFolder = lambda path, shell=None: calls.append(("folder", path))
+        importer.handleDrop = lambda paths, addData=False, shell=None: calls.append(("drop", paths))
+        studioProjects.projectsFolder = lambda rootPath=None: os.path.join(self.directory, "Projects")
+        try:
+            inside = os.path.join(projectFolder, "Images", "held.nii.gz")
+            importer.openCommandLineArguments([inside], studioShell)
+            importer.openCommandLineArguments([scan, inside], studioShell)
+        finally:
+            importer.loadFolder = loadFolder
+            importer.handleDrop = handleDrop
+            studioProjects.projectsFolder = projectsFolder
+        self.assertEqual(calls[0], ("folder", projectFolder))
+        self.assertEqual(calls[1][0], "drop")  # a mix with a file from elsewhere is not one project
+
         studioShell.dispose()
         self._pump()
 

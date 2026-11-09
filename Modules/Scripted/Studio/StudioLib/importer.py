@@ -2350,7 +2350,28 @@ def openCommandLineArguments(arguments, shell=None):
             windowTitle=_("File not found") if not webAddresses else _("Cannot open"), detailedText="\n".join(details))
     if not paths:
         return None
-    return handleDrop([os.path.abspath(path) for path in paths], shell=shell)
+    paths = [os.path.abspath(path) for path in paths]
+    projectFolder = _projectHoldingAll(paths)
+    if projectFolder is not None:
+        # Files of one Slicer Studio project (a double-click on its scan or lesion): open that project, as its folder or
+        # scene file does, never a second project with copies of its files
+        return loadFolder(projectFolder, shell)
+    return handleDrop(paths, shell=shell)
+
+
+def _projectHoldingAll(paths):
+    """The project folder (with a scene file) that holds every file of ``paths``, or None."""
+    if not paths or any(os.path.isdir(path) for path in paths):
+        return None
+    try:
+        from . import projects
+
+        folders = [projects.projectOfPath(path) for path in paths]
+        if None in folders or len({os.path.normcase(os.path.realpath(folder)) for folder in folders}) != 1:
+            return None
+        return folders[0] if projects.sceneFile(folders[0]) is not None else None
+    except (ImportError, OSError):
+        return None
 
 
 #
