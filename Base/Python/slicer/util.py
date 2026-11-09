@@ -516,9 +516,11 @@ import types
 # prefetch) waits until the classes are copied, instead of finding the module "imported" but empty or
 # iterating a dictionary that another thread changes. Re-entrant because importing a wrapper can read
 # ``slicer.<Class>`` in the same thread.
-_lazyWrapperLock = threading.RLock()
+# A reload of this module (importlib.reload) must keep the existing lock and state: the prefetch timer and
+# the wrapper registry hold on to them, and a new empty state would lose the classes not imported yet.
+_lazyWrapperLock = globals().get("_lazyWrapperLock") or threading.RLock()
 
-_lazyWrapperState = {
+_lazyWrapperState = globals().get("_lazyWrapperState") or {
     "indexes": [],  # registered (directory, index path)
     "classes": {},  # class name -> wrapper module name, for classes not copied into slicer yet
     "kinds": {},  # wrapper module name -> "vtk" or "qt"

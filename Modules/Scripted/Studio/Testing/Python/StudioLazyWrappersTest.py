@@ -145,6 +145,23 @@ class StudioLazyWrappersTest(unittest.TestCase):
         with self.assertRaises(AttributeError):
             delattr(slicer, _CLASS)
 
+    def test_reload_of_util_keeps_pending_wrappers(self):
+        """importlib.reload(slicer.util) keeps the lazy wrapper state and lock: a class that is not imported yet
+        stays available, and the idle prefetch (which holds the state) can still finish.
+        """
+        import importlib
+
+        self.assertTrue(slicer.util._registerLazyWrapperIndex(self.directory, self.indexPath))
+        state = slicer.util._lazyWrapperState
+        lock = slicer.util._lazyWrapperLock
+        self.assertIn(_MODULE, state["pending"])
+        importlib.reload(slicer.util)
+        self.assertIs(slicer.util._lazyWrapperState, state, "the reload replaced the lazy wrapper state")
+        self.assertIs(slicer.util._lazyWrapperLock, lock)
+        self.assertIn(_CLASS, slicer.util._lazyWrapperClassNames())
+        self.assertTrue(hasattr(slicer, _CLASS))
+        self.assertNotIn(_MODULE, state["pending"])
+
     def test_index_generator_skips_object_factory_initialize_helpers(self):
         """The index lists only classes that slicer.<Class> can resolve: the "<Class>Initialize" helper types that
         VTK wraps for object factories (not vtkObjectBase subclasses) are left out, so dir(slicer) has no phantom.
