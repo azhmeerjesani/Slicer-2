@@ -15,6 +15,7 @@ Run without Slicer's GUI:
 import contextlib
 import csv
 import io
+import itertools
 import json
 import os
 import shutil
@@ -587,6 +588,24 @@ class FiguresTest(unittest.TestCase):
             self.assertTrue(any(full.startswith(text[:-1]) for full in longs))
         short = figures.gallery(lesions, self.template, labels=["A1", "A2", "A3"], **SMALL)[0]
         self.assertEqual(sorted(item.text for item in short.annotations if item.role == "case"), ["A1", "A2", "A3"])
+
+    def test_long_panel_titles_and_figure_title_are_elided_inside_their_space(self):
+        # At 89 mm the triptych companion titles overprinted each other and a long --title ran off the edge
+        long_title = "Lesion network map of post-stroke aphasia, discovery cohort (N = 41), GSP1000 connectome"
+        figure = figures.montage(self.tmap, self.template, "A 0", threshold=4.0, title=long_title, **SMALL)
+        fonts = figure.fonts
+        width = figure.meta["size_px"][0]
+        heading = next(item for item in figure.annotations if item.bold and item.text.startswith("Lesion network"))
+        self.assertTrue(heading.text.endswith("\u2026"))
+        self.assertLessEqual(heading.x + fonts.width(heading.text, heading.size, True), width)
+        trip = figures.triptych(self.tmap, self.tmap, self.tmap, self.template, "A 0", threshold=4.0, **SMALL)
+        titles = [item for item in trip.annotations if item.role == "panel title"]
+        self.assertGreaterEqual(len(titles), 3)
+        for row_y in sorted({item.y for item in titles}):
+            boxes = sorted((item.x, item.x + fonts.width(item.text, item.size)) for item in titles if item.y == row_y)
+            for (_, right), (left, _) in itertools.pairwise(boxes):
+                self.assertLessEqual(right, left)
+            self.assertLessEqual(boxes[-1][1], trip.meta["size_px"][0])
 
     def test_gallery_tiles_have_the_same_size_on_every_page(self):
         # The tile size is set by the column count, not by how many tiles a page holds: a last page with

@@ -1170,6 +1170,7 @@ def _compose(panels, options, fonts, colorbars=(), panel_columns=1, heading=None
     # Heading line
     y = margin
     annotations = []
+    heading = _elide(heading, fonts, text_px, available, bold=True) if heading else heading
     if heading:
         annotations.append(Annotation("text", margin, y, text=heading, size=text_px, anchor="lt", bold=True))
         y += round(text_px * 1.6)
@@ -1196,9 +1197,11 @@ def _compose(panels, options, fonts, colorbars=(), panel_columns=1, heading=None
             panel_h = ty - gap - y
             if panel.letter or panel.title:
                 annotations.append(Annotation("text", x, y + header_h * 0.82, text=panel.letter, size=letter_px, anchor="ls", bold=True, role="panel letter"))
-                if panel.title:
-                    offset = fonts.width(panel.letter + "  ", letter_px, bold=True) if panel.letter else 0
-                    annotations.append(Annotation("text", x + offset, y + header_h * 0.82, text=panel.title, size=text_px, anchor="ls", role="panel title"))
+                offset = fonts.width(panel.letter + "  ", letter_px, bold=True) if panel.letter else 0
+                # A title wider than its panel would print over the next panel's letter and title (or run off the figure)
+                title = _elide(panel.title, fonts, text_px, panel_w - offset) if panel.title else ""
+                if title:
+                    annotations.append(Annotation("text", x + offset, y + header_h * 0.82, text=title, size=text_px, anchor="ls", role="panel title"))
             panel.meta["bbox"] = [x, y, x + panel_w, y + panel_h]
             x += panel_w + panel_gap
             row_height = max(row_height, panel_h)
