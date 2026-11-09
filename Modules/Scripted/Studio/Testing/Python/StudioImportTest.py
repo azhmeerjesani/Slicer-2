@@ -2842,6 +2842,77 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertFalse(lesion.GetAttribute(importer.LESION_FRACTIONAL_ATTRIBUTE))
         self.assertEqual(draw.lesionSaveState(lesion)[0], "saved")
 
+    def test_probabilistic_lesion_is_mapped_with_its_weights(self):
+        """BB-1: Map analyses a probabilistic lesion file (``desc-lesionProb``) opened in Studio with its values as
+        weights, as the engine command line and a cohort map it (``engine.is_fractional_seed``), not the binary mask of
+        every voxel above 0 that is shown: the exported seed keeps the values, the run gets --probabilistic and the Seed
+        line shows the weighted volume. Once the lesion is edited, or for a fractional file with another name, it is mapped
+        as its (binary) segment and the Seed card says so.
+        """
+        import LesionNetworkMapping
+        from LesionNetworkMappingLib import nifti
+        from StudioLib import importer
+
+        dims = GRID_2009C_2MM[0]
+        values = np.zeros((dims[2], dims[1], dims[0]), np.float32)
+        values[36:45, 46:55, 41:50] = 0.05
+        values[38:43, 48:53, 43:48] = 1.0
+        voxelMl = 8.0 / 1000.0
+        logic = LesionNetworkMapping.LesionNetworkMappingLogic()
+        path = self._writeVolume("sub-21_space-MNI152NLin2009cAsym_desc-lesionProb_mask.nii.gz", GRID_2009C_2MM, values)
+        lesion = importer.loadLesion(path)
+        self._pump()
+        # A project autosave stores the lesion as a .seg.nrrd: the values are still read from the file it was opened from
+        lesion.GetStorageNode().SetFileName(os.path.join(self.directory, "Untitled project", "Segmentations", "sub-21.seg.nrrd"))
+        segmentId = lesion.GetSegmentation().GetNthSegmentID(0)
+        data, _affine, extrusion = logic.analysisSeedArray(lesion, segmentId)
+        self.assertIsNone(extrusion)
+        self.assertEqual(data.dtype.kind, "f")
+        np.testing.assert_allclose(data, values.transpose(2, 1, 0), atol=1e-6)
+        check = logic.checkSeed(lesion, segmentId)
+        self.assertTrue(check["ok"], check)
+        self.assertTrue(check["weighted"])
+        self.assertIn("weights", check["weightNotice"])
+        self.assertAlmostEqual(check["volumeMl"], float(values.sum(dtype=np.float64)) * voxelMl, places=4)
+        self.assertLess(check["volumeMl"], np.count_nonzero(values) * voxelMl / 2)
+        exported = logic.exportSeedLesion(lesion, segmentId, os.path.join(self.directory, "run", "lesion", "sub-21.nii.gz"))
+        written, _affine, _header = nifti.read_nifti(exported)
+        np.testing.assert_allclose(written, values.transpose(2, 1, 0), atol=1e-6)
+        self.assertTrue(LesionNetworkMapping.LesionNetworkMappingWidget._seedFileIsWeighted(exported))
+        self.assertIn("--probabilistic", logic.engineArguments("bundle", exported, self.directory, probabilistic=True))
+        self.assertNotIn("--probabilistic", logic.engineArguments("bundle", exported, self.directory))
+        # Edited: the segment is the lesion now (binary), and the Seed card says so
+        reference = slicer.util.loadVolume(path, {"show": False})
+        array = slicer.util.arrayFromSegmentBinaryLabelmap(lesion, segmentId, reference)
+        array[0, 0, 0] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, lesion, segmentId, reference)
+        slicer.mrmlScene.RemoveNode(reference)
+        self._pump()
+        data, _affine, _extrusion = logic.analysisSeedArray(lesion, segmentId)
+        self.assertEqual(data.dtype, np.uint8)
+        check = logic.checkSeed(lesion, segmentId)
+        self.assertFalse(check["weighted"])
+        self.assertIn("binary mask", check["weightNotice"])
+        self.assertAlmostEqual(check["volumeMl"], (np.count_nonzero(values) + 1) * voxelMl, places=4)
+        exported = logic.exportSeedLesion(lesion, segmentId, os.path.join(self.directory, "run2", "lesion", "sub-21.nii.gz"))
+        self.assertFalse(LesionNetworkMapping.LesionNetworkMappingWidget._seedFileIsWeighted(exported))
+        slicer.mrmlScene.RemoveNode(lesion)
+        # A fractional file not named desc-lesionProb: the command line binarizes it, and so does Map (with the note)
+        path = self._writeVolume("sub-22_lesion.nii.gz", GRID_2009C_2MM, values)
+        lesion = importer.loadLesion(path)
+        self._pump()
+        self.assertTrue(lesion.GetAttribute(importer.LESION_FRACTIONAL_ATTRIBUTE))
+        check = logic.checkSeed(lesion, lesion.GetSegmentation().GetNthSegmentID(0))
+        self.assertFalse(check["weighted"])
+        self.assertIn("binary mask", check["weightNotice"])
+        self.assertAlmostEqual(check["volumeMl"], np.count_nonzero(values) * voxelMl, places=4)
+        slicer.mrmlScene.RemoveNode(lesion)
+        # An ordinary 0/1 lesion has no note
+        lesion = importer.loadLesion(self._writeMask("sub-23_lesion.nii.gz", GRID_2009C_2MM))
+        check = logic.checkSeed(lesion, lesion.GetSegmentation().GetNthSegmentID(0))
+        self.assertFalse(check["weighted"])
+        self.assertEqual(check["weightNotice"], "")
+
     def test_sidecar_notes_reopen(self):
         """The Notes and SourceReference of a lesion's sidecar are on the lesion opened again (the Lesion card shows
         them), and Save lesion to the same file keeps them; a value cleared in the card is written cleared.

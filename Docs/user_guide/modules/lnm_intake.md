@@ -102,7 +102,10 @@ keep the original file, and are recorded in the study (an audit line each). The 
 is labelled **approximate**. The Library shows a **Flags** column and the filters "Has flags" and "2D".
 
 A lesion file with fractional values (a probabilistic mask such as `desc-lesionProb`) opens with every voxel above 0 as the
-lesion; the file itself is not changed. In a study, the Mask hygiene chip then offers **Binarize at 0.5**.
+lesion; the file itself is not changed. In a study, the Mask hygiene chip then offers **Binarize at 0.5**. Map maps a
+`desc-lesionProb` file with its values as weights, as a cohort and the command line do (the Seed line shows the weighted
+volume); once the lesion is edited, or for a fractional file with another name, it is mapped as the binary mask shown, and
+the Seed card says so.
 
 ## Review, blinding and agreement
 

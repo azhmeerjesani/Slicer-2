@@ -513,7 +513,7 @@ def _applyLesionNaming(segmentationNode, path):
     styleLesionSegment(segmentationNode, segmentId)
 
 
-#: Lesions whose voxels ``loadLesion()`` set after the reader (a fractional file): {node ID: (weak reference, voxel stamp)}.
+#: Lesions whose voxels ``loadLesion()`` set after the reader (a fractional file): {node ID: (weak reference, voxel stamp, file)}.
 #: The storage node's read time is older than these voxels, which are still the file as read (``unchangedSinceLoad()``).
 _convertedOnLoad = {}
 
@@ -538,6 +538,17 @@ def unchangedSinceLoad(segmentationNode):
     if record is None or record[0].Get() is not segmentationNode:
         return False
     return record[1] == _voxelStamp(segmentationNode)
+
+
+def fractionalSourceFile(segmentationNode):
+    """The fractional lesion file (a probabilistic mask) that this lesion is unchanged from (``unchangedSinceLoad()``), else None.
+
+    The storage node's file name is not it once the lesion is saved elsewhere (a project autosave writes a .seg.nrrd):
+    Map reads the file's values from here (``LesionNetworkMappingLogic.fractionalSeedWeights``).
+    """
+    if not unchangedSinceLoad(segmentationNode):
+        return None
+    return _convertedOnLoad[segmentationNode.GetID()][2]
 
 
 def _fractionalMask(path):
@@ -795,7 +806,7 @@ def loadLesion(path):
         # The mask is how the file reads as a lesion, not an edit: Draw says "Saved · <file>" as for a 0/1 file
         reference = vtk.vtkWeakReference()
         reference.Set(segmentationNode)
-        _convertedOnLoad[segmentationNode.GetID()] = (reference, _voxelStamp(segmentationNode))
+        _convertedOnLoad[segmentationNode.GetID()] = (reference, _voxelStamp(segmentationNode), os.path.abspath(str(path)))
     return segmentationNode
 
 

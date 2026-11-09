@@ -947,8 +947,53 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
             logging.exception("Lesion network mapping: the study's extrusion of the 2D lesion could not be applied")
             found = None
         if found is None:
-            return data, affine, None
+            weights = cls.fractionalSeedWeights(segNode, data, affine)
+            return (data if weights is None else weights), affine, None
         return found[0], affine, found[1]
+
+    @staticmethod
+    def fractionalSeedWeights(segNode, data, affine):
+        """The values of the probabilistic lesion file (``desc-lesionProb``) the segment was opened from, as the seed's
+        weights (float32 [i, j, k], 0 outside the lesion), else None.
+
+        Studio shows such a file with every voxel above 0 as the lesion (``importer.loadLesion``), but the engine and a
+        cohort map a ``desc-lesionProb`` file with its values as weights (``engine.is_fractional_seed``): Map does the same
+        while the segment is the file as opened (``importer.unchangedSinceLoad``) and the file still has those voxels on the
+        segment's grid. A lesion that was edited, or a fractional file with another name, is mapped as its segment (binary).
+        """
+        import numpy as np
+
+        try:
+            from StudioLib import importer
+        except ImportError:
+            return None
+        if segNode is None or not segNode.GetAttribute(importer.LESION_FRACTIONAL_ATTRIBUTE):
+            return None
+        # The file it was opened from (a project autosave stores the lesion as a .seg.nrrd: not the storage node's file)
+        path = importer.fractionalSourceFile(segNode)
+        from LesionNetworkMappingLib import engine, nifti
+
+        if not path or not engine.is_fractional_seed(path) or not os.path.isfile(path):
+            return None
+        try:
+            values, fileAffine, _header = nifti.read_nifti(path)
+        except Exception:
+            logging.exception(f"Lesion network mapping: the values of {path} could not be read; the lesion is mapped as a binary mask")
+            return None
+        values = np.nan_to_num(np.asarray(values, dtype=np.float32))
+        if values.ndim > 3 and all(n == 1 for n in values.shape[3:]):
+            values = values.reshape(values.shape[:3])
+        if (values.shape != np.shape(data) or not np.allclose(np.asarray(fileAffine, dtype=np.float64), affine, atol=1e-3)
+                or not np.array_equal(values > 0, np.asarray(data) != 0)):
+            return None
+        return np.where(values > 0, values, 0).astype(np.float32)
+
+    @staticmethod
+    def seedIsWeighted(data):
+        """True for a seed of fractional weights (``fractionalSeedWeights``): it is mapped with ``--probabilistic``."""
+        import numpy as np
+
+        return np.asarray(data).dtype.kind == "f"
 
     def exportSeedLesion(self, segNode, segmentId, path):
         """Write the analysed seed (``analysisSeedArray``) as a NIfTI mask at the segment's own geometry; return the path."""
@@ -956,8 +1001,18 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
 
         data, affine, _extrusion = self.analysisSeedArray(segNode, segmentId)
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        nifti.write_nifti(path, data, affine, descrip="Lesion mask (Slicer Studio Map seed)")
+        # A probabilistic lesion keeps its values (float): the run maps it with --probabilistic (``compute``)
+        nifti.write_nifti(path, data, affine, descrip="Lesion weights (Slicer Studio Map seed)" if self.seedIsWeighted(data) else "Lesion mask (Slicer Studio Map seed)")
         return path
+
+    @staticmethod
+    def _fractionalAttribute(segNode):
+        """True when Studio opened the segmentation from a lesion file with fractional values (``importer.loadLesion``)."""
+        try:
+            from StudioLib import importer
+        except ImportError:
+            return False
+        return segNode is not None and bool(segNode.GetAttribute(importer.LESION_FRACTIONAL_ATTRIBUTE))
 
     @staticmethod
     def seedSpace(segNode, data_shape, affine):
@@ -1021,13 +1076,22 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
         """
         import numpy as np
 
-        result = {"ok": False, "reason": "", "kind": "", "space": None, "volumeMl": 0.0, "qc": None, "notice": "", "extrusion": None, "extrusionNotice": ""}
+        result = {"ok": False, "reason": "", "kind": "", "space": None, "volumeMl": 0.0, "qc": None, "notice": "", "extrusion": None, "extrusionNotice": "",
+                  "weighted": False, "weightNotice": ""}
         if segNode is None or not segmentId or segNode.GetSegmentation().GetSegment(segmentId) is None:
             result.update(reason=_("Choose the lesion segment."), kind="none")
             return result
         data, affine, extrusion = self.analysisSeedArray(segNode, segmentId)
         voxels = int(np.count_nonzero(data))
-        result["volumeMl"] = voxels * abs(float(np.linalg.det(affine[:3, :3]))) / 1000.0
+        weighted = self.seedIsWeighted(data)
+        # The volume of a probabilistic lesion is the sum of its weights (the engine's source volume), not its voxel count
+        result["volumeMl"] = float(np.clip(data, 0, None).sum(dtype=np.float64)) * abs(float(np.linalg.det(affine[:3, :3]))) / 1000.0
+        result["weighted"] = weighted
+        if weighted:
+            result["weightNotice"] = _("Probabilistic lesion (desc-lesionProb): mapped with its values as weights, as a cohort and the command line map it.")
+        elif self._fractionalAttribute(segNode):
+            result["weightNotice"] = _("The lesion file has fractional values, but this lesion is mapped as a binary mask (every voxel above 0): "
+                                       "it was edited, or its file is not named desc-lesionProb.")
         if extrusion is not None:
             result["extrusion"] = extrusion
             result["extrusionNotice"] = _("2D tracing mapped as the study's analysis lesion, not only the drawn slice: {description}.").format(
@@ -1059,7 +1123,7 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
                 result.update(reason=_("The lesion lies outside the connectome's grid: it is not in the connectome's space."), kind="outside")
                 return result
         result["notice"] = self.familyNotice(result["space"], connectomeSpace[0] if connectomeSpace else declaredSpace)
-        qc = engine.prepare_lesion((data, affine), bundle)[1]
+        qc = engine.prepare_lesion((data, affine), bundle, binarize=not weighted)[1]
         result["qc"] = qc
         if qc.get("weight_total", 0.0) < 1.0:
             result.update(reason=_("Lesion smaller than one connectome voxel."), kind="small")
@@ -1108,11 +1172,13 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
                 return path
 
     @staticmethod
-    def engineArguments(bundlePath, lesionPath, runDir, previewN=None, previewSeed=0, nullRelocations=50, rule=None, snapshotEvery=SNAPSHOT_EVERY, lesionSpace=None):
+    def engineArguments(bundlePath, lesionPath, runDir, previewN=None, previewSeed=0, nullRelocations=50, rule=None, snapshotEvery=SNAPSHOT_EVERY, lesionSpace=None,
+                        probabilistic=False):
         """Arguments of ``LesionNetworkMappingLib.engine`` for one lesion (the job runner adds --threads).
 
         ``lesionSpace`` is the lesion's template space (a name, or ``checkSeed``'s (name, resolution)): the engine
         records it, with its template-family notice, in run.json and qa.json (and the export in the sidecar).
+        ``probabilistic``: the lesion file holds weights (a probabilistic lesion, ``fractionalSeedWeights``), mapped as such.
         """
         from LesionNetworkMappingLib import thresholds
 
@@ -1123,6 +1189,8 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
             lesionSpace = lesionSpace[0] if lesionSpace else None
         if lesionSpace:
             args += ["--lesion-space", str(lesionSpace)]
+        if probabilistic:
+            args.append("--probabilistic")
         if previewN:
             args += ["--subjects", str(int(previewN)), "--random", "--seed", str(int(previewSeed)), "--desc-suffix", f"PreviewN{int(previewN)}"]
         return args
@@ -1131,12 +1199,14 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
         """Start the engine for one lesion through the shared job runner; return the ``jobrunner.Job``.
 
         ``config`` keys: bundlePath, lesionPath, runDir, previewN (None for all subjects), previewSeed,
-        nullRelocations, rule, lesionSpace (the lesion's template space, optional). Stop is ``job.stop()`` (cancel file, then the worker is terminated).
+        nullRelocations, rule, lesionSpace (the lesion's template space, optional), probabilistic (the lesion file holds
+        weights, optional). Stop is ``job.stop()`` (cancel file, then the worker is terminated).
         """
         from LesionNetworkMappingUI import jobrunner
 
         args = self.engineArguments(config["bundlePath"], config["lesionPath"], config["runDir"], config.get("previewN"), config.get("previewSeed", 0),
-                                    config.get("nullRelocations", 50), config.get("rule"), lesionSpace=config.get("lesionSpace"))
+                                    config.get("nullRelocations", 50), config.get("rule"), lesionSpace=config.get("lesionSpace"),
+                                    probabilistic=config.get("probabilistic", False))
         os.makedirs(config["runDir"], exist_ok=True)
         spec = jobrunner.JobSpec(
             "LesionNetworkMapping", ["job", "LesionNetworkMappingLib.engine", *args], title=_("Mapping"), heavy=True, kind="engine",
@@ -4064,9 +4134,11 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.seedFamilyLabel.setText(notice)
         self.seedFamilyLabel.setVisible(bool(notice))
         extrusionNotice = check.get("extrusionNotice") or ""
-        self.seedExtrusionLabel.setText(extrusionNotice)
-        self.seedExtrusionLabel.setVisible(bool(extrusionNotice))
-        self.seedNameLabel.setToolTip(extrusionNotice)
+        # How the lesion is analysed: the study's extrusion of a 2D tracing, or the weights of a probabilistic lesion
+        seedNotice = " ".join(text for text in (extrusionNotice, check.get("weightNotice") or "") if text)
+        self.seedExtrusionLabel.setText(seedNotice)
+        self.seedExtrusionLabel.setVisible(bool(seedNotice))
+        self.seedNameLabel.setToolTip(seedNotice)
         self._updateFamilyNotice()
         reason = check.get("reason") if not check.get("ok") and check.get("kind") not in ("none",) else ""
         self.widgets.setBannerText(self.seedErrorBanner, reason or "")
@@ -5085,7 +5157,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         config = {"bundlePath": self.bundle.path, "lesionPath": lesionPath, "runDir": runDir, "previewN": previewN, "previewSeed": node.previewSeed,
                   "nullRelocations": node.nullRelocations, "rule": thresholds.normalize_rule(rule),
                   # The lesion's template space (also one of the user's templates): run.json, qa.json and the sidecar record it
-                  "lesionSpace": self._lesionFileSpace(segNode, lesionPath)}
+                  "lesionSpace": self._lesionFileSpace(segNode, lesionPath),
+                  # A probabilistic lesion is written with its values (``exportSeedLesion``): it is mapped with them as weights
+                  "probabilistic": self._seedFileIsWeighted(lesionPath)}
         self._prepareResultVolume()
         self.ctx.setCurrentRun(None)
         self.refreshResult()  # the Result card waits for the new map (no title, rule or Export of the previous run)
@@ -5098,6 +5172,16 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.progress.widget.show()
         self.updateComputeState()
         return self.job
+
+    @staticmethod
+    def _seedFileIsWeighted(lesionPath):
+        """True when the exported seed holds weights (a float image, ``exportSeedLesion`` of a probabilistic lesion)."""
+        from LesionNetworkMappingLib import nifti
+
+        try:
+            return nifti.read_nifti_header(lesionPath)["dtype"].kind == "f"
+        except Exception:
+            return False
 
     def _refuseRunFolder(self, exc, runDir):
         """Show in the Compute card that the run folder cannot be written (``exc``, an OSError); nothing is started."""
