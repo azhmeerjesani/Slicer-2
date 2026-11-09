@@ -1238,6 +1238,15 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertIn("\u2318+left-drag", gestures)
             self.assertFalse([key for key in gestures if key.startswith("Ctrl+")], gestures)
             holder.deleteLater()
+            # Texts that join several keys name each one natively: the Redo tooltip and the Draw "?" key table
+            from StudioLib import draw
+
+            redoTip = str(studioShell.topBar.redoButton.toolTip)
+            self.assertIn("\u2318Y or \u21e7\u2318Z", redoTip)
+            self.assertIsNone(re.search(r"\b(Ctrl|Alt)\+", redoTip), redoTip)
+            drawHelp = draw.helpHtml(studioShell)[1]
+            self.assertIn("\u2325\u2190 \u00b7 \u2325\u2192", drawHelp)
+            self.assertIsNone(re.search(r"\b(Ctrl|Alt)\+", drawHelp), drawHelp)
         finally:
             migration.keyText, ui.keyText, cheatsheet._isMacOS = originals
             if studioShell is not None:

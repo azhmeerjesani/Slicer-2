@@ -298,7 +298,7 @@ class TopBar:
         self.undoButton = _toolButton("StudioUndoButton", "undo-2", ui.tooltip(_("Undo"), "Ctrl+Z", _("Undo the last lesion edit")))
         self.undoButton.connect("clicked()", self._onUndo)
         rightLayout.addWidget(self.undoButton)
-        self.redoButton = _toolButton("StudioRedoButton", "redo-2", ui.tooltip(_("Redo"), "Ctrl+Y or Ctrl+Shift+Z", _("Redo the last undone edit")))
+        self.redoButton = _toolButton("StudioRedoButton", "redo-2", ui.tooltip(_("Redo"), ui.keyText("Ctrl+Y") + " " + _("or") + " " + ui.keyText("Ctrl+Shift+Z"), _("Redo the last undone edit")))
         self.redoButton.connect("clicked()", self._onRedo)
         rightLayout.addWidget(self.redoButton)
         self.undoRedoTimer = qt.QTimer(self.toolBar)

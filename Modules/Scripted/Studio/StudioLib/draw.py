@@ -4190,7 +4190,7 @@ def helpHtml(shell):
         ("Esc", _("Deselect the tool")),
         ("N · Shift+N", _("Next / previous gap slice")),
         ("C", _("Center on lesion")),
-        ("Alt+← · Alt+→", _("Previous / next lesion of a set or subject")),
+        (" · ".join(ui.keyText(key).replace("Left", "←").replace("Right", "→") for key in ("Alt+Left", "Alt+Right")), _("Previous / next lesion of a set or subject")),
         (ui.keyText(SAVE_LESION_SHORTCUT) + " · " + ui.keyText(PRIMARY_SHORTCUT), _("Save lesion")),
         (ui.keyText("Ctrl+Z") + " · " + ui.keyText(REDO_SHORTCUT), _("Undo · Redo")),
     ]
