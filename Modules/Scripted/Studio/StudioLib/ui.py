@@ -1598,6 +1598,7 @@ DIALOG_BACKDROP_ALPHA = 0.6
 PALETTE_BACKDROP_ALPHA = 0.5
 #: Width of the numeric fields of a settings page
 SETTINGS_NUMBER_WIDTH = 88
+SETTINGS_NUMBER_PADDING = 32  # frame, spin buttons and a small margin around the text of a numberField()
 
 
 class Backdrop(qt.QWidget):
@@ -1821,7 +1822,13 @@ def numberField(minimum, maximum, value, suffix="", objectName=None):
     spinBox.setValue(int(value))
     spinBox.setSuffix(suffix)
     spinBox.setAlignment(qt.Qt.AlignRight | qt.Qt.AlignVCenter)
-    spinBox.setFixedWidth(SETTINGS_NUMBER_WIDTH)
+    # 88 px at the default font; wider when the widest text (the larger of the maximum and the current value, with the
+    # unit) needs more at a larger app font, so the unit is never cut ("2048 M").
+    metrics = qt.QFontMetrics(spinBox.font)
+    widest = max(
+        (metrics.horizontalAdvance(text) if hasattr(metrics, "horizontalAdvance") else metrics.width(text))
+        for text in (f"{int(maximum)}{suffix}", f"{int(value)}{suffix}"))
+    spinBox.setFixedWidth(max(SETTINGS_NUMBER_WIDTH, widest + SETTINGS_NUMBER_PADDING))
     spinBox.setMinimumHeight(COMPACT_HEIGHT + 2)
     return spinBox
 

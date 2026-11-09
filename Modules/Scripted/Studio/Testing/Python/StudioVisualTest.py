@@ -1656,6 +1656,36 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         self.assertGreaterEqual(readout.width, needed())
         self.assertLessEqual(readout.width, widthBefore + 4, "the readout kept the room of the larger font")
 
+    def test_settings_number_field_shows_its_unit_at_large_font(self):
+        """A settings number field (``ui.numberField()``) shows its whole value and unit ("2048 MB") at a larger application
+        font and with a 5-digit value: the width was fixed at 88 px, which cut it to "2048 M" at 125% (BB-1).
+        """
+        from StudioLib import ui
+
+        base = qt.QFont(qt.QApplication.font())
+        self._restores.append(lambda: qt.QApplication.setFont(base))
+        basePx = round(ui.applicationFontPx())
+        for pixelSize in (basePx, basePx + 4, basePx + 8):
+            font = qt.QFont(base)
+            font.setPixelSize(pixelSize)
+            qt.QApplication.setFont(font)
+            for maximum, value, suffix in ((102400, 2048, " MB"), (365, 14, " days")):
+                spinBox = ui.numberField(1, maximum, value, suffix)
+                spinBox.show()
+                self._pump(4)
+                lineEdit = spinBox.lineEdit()
+                metrics = qt.QFontMetrics(lineEdit.font)
+                for number in (value, maximum):
+                    text = f"{number}{suffix}"
+                    spinBox.setValue(number)
+                    self.assertGreaterEqual(
+                        lineEdit.width, metrics.horizontalAdvance(text),
+                        f"'{text}' is cut at {pixelSize} px ({lineEdit.width} px of text room)")
+                self.assertGreaterEqual(spinBox.width, ui.SETTINGS_NUMBER_WIDTH)
+                spinBox.hide()
+                spinBox.deleteLater()
+        qt.QApplication.setFont(base)
+
     def test_flat_view_bar_figure_has_no_patient_direction(self):
         """A figure view bar never states a patient direction (U-04, USABILITY P6): the readout is the slice index only
         ("1 / 1"), without "S 0.0 mm" and without the origin caveat, while a scan view keeps its direction letter.
