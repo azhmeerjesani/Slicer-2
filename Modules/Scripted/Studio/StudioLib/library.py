@@ -1527,6 +1527,14 @@ class _LesionBlock:
         # Fixed (its width is set by ``relayout()``): the layout gives a label with an Ignored size policy no room of its own
         self.stateLabel.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Fixed)
         self._topRow.addWidget(self.nameLabel, 3)
+        # Takes the spare width of the name's line when the metrics and the chip are on the lines below (the name is capped at
+        # 220 px), so that the swatch and the name stay left-aligned instead of centred; hidden in a wide row
+        self._topFiller = qt.QWidget()
+        self._topFiller.setObjectName("StudioCurrentWorkLesionFiller")
+        self._topFiller.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
+        self._topFiller.setFixedHeight(0)
+        self._topFiller.hide()
+        self._topRow.addWidget(self._topFiller, 1)
         self._topRow.addWidget(self.metricsLabel, 1)
         self._topRow.addWidget(self.stateLabel, 0)
         self.mode = "wide"
@@ -1574,6 +1582,7 @@ class _LesionBlock:
                 self._lineThreeLayout.addWidget(self.stateLabel, 0, qt.Qt.AlignLeft)
         self._lineThree.setVisible(mode == "stacked")
         self._detailRow.setVisible(mode != "wide")
+        self._topFiller.setVisible(mode != "wide")
 
     @property
     def compact(self):

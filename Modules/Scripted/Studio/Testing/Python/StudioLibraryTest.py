@@ -649,6 +649,31 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(block.metricsLabel.text, str(block.metricsLabel.property("fullText")))
         self.assertEqual(block.metricsLabel.mapTo(block.widget, qt.QPoint(0, 0)).y(), block.nameLabel.mapTo(block.widget, qt.QPoint(0, 0)).y())
 
+    def test_lesion_row_narrow_is_left_aligned(self):
+        """In a compact or stacked row the swatch and the name start at the row's left edge (not centred in the spare width
+        of the name's line, which made the rows of the 1366 x 768 Continue card ragged).
+        """
+        studioShell = self._applyStudio()
+        _volumeNode, segmentationNode = self._template(studioShell, fill=True)
+        segmentationNode.SetName("L1")
+        canvas = self._library(studioShell)
+        card = canvas.currentWork
+        block = next(iter(card._blocks.values()))
+        checked = False
+        for width in (214, 260, 330, 400):
+            block.widget.setFixedWidth(width)
+            self._pump(6)
+            card.refresh()
+            self._pump(4)
+            if not block.compact:
+                continue
+            swatchX = block.swatch.mapTo(block.widget, qt.QPoint(0, 0)).x()
+            nameX = block.nameLabel.mapTo(block.widget, qt.QPoint(0, 0)).x()
+            self.assertEqual(swatchX, block.indent, (width, block.mode))
+            self.assertEqual(nameX, block.indent + block.SWATCH + block.SPACING, (width, block.mode))
+            checked = True
+        self.assertTrue(checked)
+
     #
     # Recent
     #
