@@ -2384,6 +2384,64 @@ fi
         self.assertTrue(self._waitFor(lambda: service.notice is not None, 5))
         self.assertEqual(service.notice.findChild("QLabel", "StudioNoticeText").text, "Update 1.3.0 available")
 
+    def test_NoNoticeWhileUpdateDownloadsOrWaits(self):
+        """A check during the download (or after it, before the choice in the dialog) finding the same version does not
+        bring the notice back: its Skip would not stop a download that is offered for install anyway.
+        """
+        from StudioLib import shell
+
+        updates = self.updates
+        if updates.platformKey() != "linux-x86_64":
+            self.skipTest("the Linux package path is tested on Linux")
+        self._publish("1.2.0")
+        target = self._fakeLinuxInstall("0.9.0")
+        mainWindow = slicer.util.mainWindow()
+        geometry = mainWindow.saveGeometry()
+
+        def restore():
+            live = shell._shell
+            if live is not None:
+                live.dispose()
+            mainWindow.restoreGeometry(geometry)
+            self._pump(0.3)
+
+        self.addCleanup(restore)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        self._pump(0.5)
+        studioShell.switchTo("library")
+        updates._installableOverride = True
+        updates.installTargetOverride = target
+        service = self._service()
+        previous = updates._service
+        updates._service = service
+        self.addCleanup(lambda: setattr(updates, "_service", previous))
+        service._startTime = time.monotonic() - 1000  # long after the startup: no delay for the notice
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        service._showAvailability()
+        self.assertTrue(self._waitFor(lambda: service.notice is not None, 5))
+        dialog = service.updateNow()
+        self.assertIsNone(service.notice)
+        self.assertIsNotNone(service.job, "the download of 1.2.0 runs")
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        service._showAvailability()
+        self._pump(0.5)
+        self.assertIsNone(service.notice, "1.2.0 downloads: nothing to offer")
+        service._tryNotice()
+        service.studioEntered()
+        self._pump(0.3)
+        self.assertIsNone(service.notice)
+        self.assertTrue(self._waitFor(lambda: dialog.state in ("ready", "failed"), 30), dialog.state)
+        self.assertEqual(dialog.state, "ready", dialog.text.text)
+        # Prepared but not yet chosen
+        self.assertFalse(service.installChosen("1.2.0"))
+        service._showAvailability()
+        service._tryNotice()
+        service.studioEntered()
+        self._pump(0.5)
+        self.assertIsNone(service.notice, "1.2.0 is ready: nothing to offer")
+        self.assertEqual(updates.settingsValue("SkippedVersion"), "")
+
     def test_NoticeAfterSwitchFromClassic(self):
         """A start in Classic gives up the notice (no Studio shell); entering Studio later announces the update."""
         from StudioLib import library, shell

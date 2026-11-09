@@ -1368,7 +1368,7 @@ class UpdateService:
             # manifest), checks off (cached manifest) or found after the startup
             self.hideNotice()
             self.showBanner(offline=offline)
-        elif not status.skipped and not self.installChosen(status.version):
+        elif not status.skipped and not self.updateUnderway(status.version):
             # The latest release is optional: the banner of an earlier required result (a release that is no longer
             # the latest, or no longer required) must not contradict the notice
             self.hideBanner()
@@ -1404,7 +1404,7 @@ class UpdateService:
         status = self.status
         if status is None or not status.available or status.kind != "optional" or status.skipped or self.notice is not None:
             return
-        if self.installChosen(status.version):
+        if self.updateUnderway(status.version):
             return
         if channel() != "release" and feedOverride() is None and _installableOverride is None:
             return
@@ -1435,9 +1435,9 @@ class UpdateService:
         status = self.status
         if shell is None or status is None or status.kind != "optional" or status.skipped or self.notice is not None:
             return
-        if self.installChosen(status.version):
-            # Its install is already chosen (Install when I quit): Skip could not take it back, so there is nothing
-            # to offer
+        if self.updateUnderway(status.version):
+            # Its download or preparation runs, it is ready, or its install is already chosen (Install when I quit):
+            # Skip could not take it back, so there is nothing to offer
             return
         if self.canInstall() and not self.releaseHasFile(status):
             # The release has no file for this computer yet: Update now could not work (Settings > Updates shows why)
@@ -1520,6 +1520,17 @@ class UpdateService:
         if prepared is None or not (self._quitConnected or prepared.launched):
             return False
         return version is None or prepared.version == version
+
+    def updateUnderway(self, version):
+        """True when ``version`` is already being downloaded or prepared, is prepared (waiting for the choice in the
+        update dialog) or has its install chosen: the notice offers nothing for it.
+        """
+        if self.job is not None and getattr(self.job, "version", None) == version:
+            return True
+        prepared = self.prepared
+        if prepared is not None and prepared.version == version:
+            return True
+        return self.installChosen(version)
 
     def skip(self):
         """Skip of the notice: this version is not offered again (Settings > Updates still shows it)."""
