@@ -537,7 +537,8 @@ order are kept, a backup is written once to `.studio/participants.orig.tsv`, and
   computed from the view's own orientation, so they stay right when you rotate or flip a view. Within
   25 degrees of an anatomical axis one letter is shown; otherwise the letters of the axes involved are
   combined (for example `RA`). The default display is radiological. `Studio/OrientationLetters`
-  (default true) turns them off. A figure is labelled as a figure and gets no patient letters.
+  (default true) turns them off. A figure is labelled as a figure: until its side is answered it shows
+  `Figure · side unknown` and no letters, and once answered it shows only R and L (never A, P, S or I).
 - **Thin sliders and scroll bars.** Sliders have a 4 px groove with an accent-colored fill and a round
   handle (also the range sliders and the slice offset slider), scroll bars are thin, combo and spin boxes are
   flat with working arrows, and progress bars (a 4 px bar with the text beside it), tabs, splitters and header

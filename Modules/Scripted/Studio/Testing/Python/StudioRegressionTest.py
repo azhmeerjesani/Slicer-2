@@ -7419,3 +7419,17 @@ class StudioRegressionTest(unittest.TestCase):
             studioShell.dispose()
             pump()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+
+    def test_92_readme_figure_letters_match_the_app(self):
+        """The README says a figure shows no letters until its side is answered and then only R and L (as studio.md and
+        orientation.py say), not that it gets no patient letters at all.
+        """
+        root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        path = os.path.join(root, "README.md")
+        if not os.path.isfile(path):
+            self.skipTest("the documentation is not next to this build")
+        with open(path, encoding="utf-8") as stream:
+            readme = " ".join(stream.read().replace("*", "").split())
+        self.assertNotIn("gets no patient letters", readme)
+        self.assertIn("until its side is answered it shows `Figure · side unknown` and no letters", readme)
+        self.assertIn("once answered it shows only R and L", readme)
