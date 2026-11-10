@@ -1063,6 +1063,40 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
             settings.remove(self.nc.LAST_OPTIONS_SETTING)
             self.card.refreshState()
 
+    def test_09d_edit_during_run_flags_result(self):
+        """BB-1: an edit of the native lesion while the job runs flags the result (made from the lesion as it was at the
+        start) as edited, as an edit after the result does, so Use for Map does not silently use the old lesion.
+        """
+        import numpy as np
+
+        self.ctx.setSeed(self.native, self.nativeSegmentId)
+        self._setOptions(quality="affine")
+        self.assertTrue(self._cardVisible())
+        controller = self.card.controller
+        original = slicer.util.arrayFromSegmentBinaryLabelmap(self.native, self.nativeSegmentId, self.scan).copy()
+        self.assertTrue(original.any())
+        done = []
+        controller.resultReady.append(done.append)
+        try:
+            self.assertTrue(controller.start(self.card.request(outDir=os.path.join(self.tmp, "edit-during-run"), reuse=False)))
+            self.assertTrue(controller.isBusy(), controller.state)
+            # The lesion has been exported: erase its upper half while the job runs (inside the original: an update)
+            array = original.copy()
+            slices = np.nonzero(array.any(axis=(1, 2)))[0]
+            array[slices[len(slices) // 2]:] = 0
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, self.native, self.nativeSegmentId, self.scan)
+            self.assertTrue(_wait(lambda: done or controller.state in ("cancelled", "failed"), 120.0), controller.state)
+        finally:
+            controller.resultReady.remove(done.append)
+        try:
+            self.assertTrue(done, controller.state)
+            self.assertTrue(_wait(lambda: controller.edited, 5.0), "an edit made during the run does not flag the result")
+            self.assertFalse(controller.needsReregister)
+        finally:
+            slicer.util.updateSegmentBinaryLabelmapFromArray(original, self.native, self.nativeSegmentId, self.scan)
+        # The lesion as it was normalized again: no longer edited
+        self.assertTrue(_wait(lambda: not controller.edited, 5.0))
+
     #
     # Scene close (last: it clears the scene)
     #

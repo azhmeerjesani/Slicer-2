@@ -1656,6 +1656,9 @@ class NormalizeController(VTKObservationMixin):
         self.fraction = 1.0
         self._setState(DONE)
         self._trackEdits(result)
+        # The result was made from the lesion as it was at the start: an edit made while the job ran (not observed then)
+        # must flag it too, so compare the native lesion once now (debounced, a worker does the voxel work)
+        self._editTimer.start()
         # The cards build their QC panel in the next event-loop turn: node creation and layout are two short pauses, not one long one
         qt.QTimer.singleShot(0, lambda: self.result is result and self._notify("resultReady", result))
 
