@@ -593,7 +593,10 @@ def add_url(url, title=None, licence="unknown", citation="", condition=None, spa
     url = str(url or "").strip()
     if not re.match(r"^https?://", url):
         raise RefmapsError("Give an http(s) URL of a NIfTI map")
-    filename = os.path.basename(url.split("?")[0]) or "map.nii.gz"
+    # URL-decoded like the NeuroVault link names: 'r%C3%A9al%20map.nii.gz' is the file 'réal map.nii.gz' (title, id and stored name).
+    filename = os.path.basename(_neurovault_file_name(url).replace("\\", "/")).strip()
+    if filename in ("", ".", ".."):
+        filename = "map.nii.gz"
     # A link without a .nii/.nii.gz name (figshare, OSF) says nothing about compression: the file is downloaded under a
     # neutral name and named by what it is (gzip magic bytes or not) once it is here.
     sniffed = not re.search(r"\.nii(\.gz)?$", filename)

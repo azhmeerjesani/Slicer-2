@@ -525,6 +525,32 @@ class SourcesTest(RefmapsTestBase):
         np.testing.assert_allclose(new, -old, atol=1e-5)
         self.assertNotEqual(again["sha256"], entry["sha256"])
 
+    def test_url_title_is_url_decoded(self):
+        """A link with %-escapes in its file name gives the decoded name as title and stored file name."""
+        import functools
+        import http.server
+        import threading
+        from unittest import mock
+
+        served = os.path.join(self.tmp, "served-pct")
+        os.makedirs(served)
+        nifti.write_nifti(os.path.join(served, "réal map.nii.gz"), _smooth_field(self.rng, SHAPE).astype(np.float32), self.bundle.affine)
+
+        class QuietHandler(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(QuietHandler, directory=served))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{server.server_address[1]}/r%C3%A9al%20map.nii.gz"
+        with mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}):
+            entry = refmaps.add_url(url, root=self.root, offline=False)
+        self.assertEqual(entry["title"], "réal map.nii.gz")
+        self.assertNotIn("%", entry["id"])
+        self.assertTrue(entry["file"].endswith("réal map.nii.gz"), entry["file"])
+
     def test_unreadable_download_is_refused(self):
         """A download that is not a complete NIfTI image (a gzip of something else, a truncated .nii.gz, with or
         without Content-Length, a .nii with cut image data) is refused: no entry, no file and no recorded checksum.
