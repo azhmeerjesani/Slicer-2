@@ -85,13 +85,23 @@ def _setting(key, default=""):
 
 
 def defaultFolder():
-    """``<project>/Exports/nifti`` of the open project, else the last export folder, else Documents (or the home folder)."""
+    """``<project>/Exports/nifti`` of the open project, else the last export folder, else (web build) the folder its file
+    dialogs start in (/data, which the host sees; not the container HOME), else Documents (or the home folder).
+    """
     projectFolder = niftiexport.projectExportFolder(create=False)
     if projectFolder:
         return projectFolder
     last = _setting(niftiexport.LAST_FOLDER_KEY)
     if last and os.path.isdir(last):
         return last
+    try:
+        from .importer import webStartFolder
+
+        webFolder = webStartFolder()
+    except Exception:
+        webFolder = ""
+    if webFolder:
+        return webFolder
     home = qt.QDir.homePath()
     documents = os.path.join(home, "Documents")
     return documents if os.path.isdir(documents) else home

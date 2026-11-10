@@ -3067,20 +3067,38 @@ def dialogStartFolder(fallback=""):
     the folder of the last dialog to Qt, so a folder that was chosen stays. Everywhere else ``fallback`` is returned unchanged.
     """
     global _webStartFolderGiven
-    try:
-        from . import projects
-
-        if not projects.isWebBuild():
-            return fallback
-    except Exception:
+    if not _isWebBuild():
         return fallback
     if _webStartFolderGiven:
         return ""
+    directory = webStartFolder()
+    if directory:
+        _webStartFolderGiven = True
+        return directory
+    return fallback
+
+
+def _isWebBuild():
+    try:
+        from . import projects
+
+        return bool(projects.isWebBuild())
+    except Exception:
+        return False
+
+
+def webStartFolder():
+    """In the web build, the folder its file dialogs start in (``Studio/LastOpenDirectory``, else /data) when it exists, else "".
+
+    Unlike ``dialogStartFolder()`` this gives the folder on every call: for a dialog of Studio's own that proposes a folder
+    (for example the NIfTI export) rather than leaving it to Qt. "" outside the web build.
+    """
+    if not _isWebBuild():
+        return ""
     for directory in (str(slicer.util.settingsValue("Studio/LastOpenDirectory", "") or ""), "/data"):
         if directory and os.path.isdir(directory):
-            _webStartFolderGiven = True
             return directory
-    return fallback
+    return ""
 
 
 def _rememberDirectory(path):

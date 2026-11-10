@@ -1452,6 +1452,60 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertEqual(len([name for name in os.listdir(out) if name.endswith(".nii.gz")]), len(runner.result.images))
         self.assertEqual(dialog.progress.maximum, count)
 
+    def test_08ag_web_build_without_a_project_proposes_the_data_folder(self):
+        """Web build, no project open (projects off, or a study): the export proposes the folder its file dialogs start in
+        (Studio/LastOpenDirectory, /data), which the host sees, and Change... starts there; never the container HOME.
+        """
+        from StudioLib import autosave_io, importer, niftiexport_ui, projects
+
+        settings = qt.QSettings()
+        savedOpen = settings.value("Studio/LastOpenDirectory")
+        savedWeb = os.environ.get("SLICER_STUDIO_WEB")
+        savedGiven = importer._webStartFolderGiven
+        realGetExistingDirectory = qt.QFileDialog.getExistingDirectory
+        data = os.path.join(self.tempDir, "data")
+        os.makedirs(data, exist_ok=True)
+        starts = []
+        try:
+            projects.setCurrentProject(None)
+            settings.remove(self.export.LAST_FOLDER_KEY)
+            settings.setValue("Studio/LastOpenDirectory", data)
+            os.environ["SLICER_STUDIO_WEB"] = "1"
+            # Another dialog was opened first: the export still proposes the data folder
+            importer._webStartFolderGiven = False
+            self.assertEqual(importer.dialogStartFolder("~"), data)
+            self.assertEqual(os.path.normpath(niftiexport_ui.defaultFolder()), os.path.normpath(data))
+            scan = self._phantom("scan", np.array([[1.0, 0, 0, -10], [0, 1.0, 0, -10], [0, 0, 1.0, -10], [0, 0, 0, 1]]))
+            dialog = niftiexport_ui.exportNodesDialog([scan], show=False, executor=autosave_io.InlineExecutor())
+            self.assertEqual(os.path.normpath(dialog.folder), os.path.normpath(data))
+            qt.QFileDialog.getExistingDirectory = lambda parent, caption, start, *args: starts.append(str(start)) or ""
+            dialog.chooseFolder()
+            self.assertEqual([os.path.normpath(start) for start in starts], [os.path.normpath(data)])
+            runner = dialog.export(confirm=lambda existing: self.fail(f"{existing} exist"))
+            self.assertTrue(runner.wait(60))
+            self.assertEqual(runner.result.errors, [])
+            self.assertEqual([os.path.dirname(path) for path in runner.result.images], [data])
+            dialog.close()
+            # A folder chosen for an earlier export is still proposed first
+            settings.setValue(self.export.LAST_FOLDER_KEY, self.out)
+            self.assertEqual(os.path.normpath(niftiexport_ui.defaultFolder()), os.path.normpath(self.out))
+            # The desktop build is unchanged: no data folder is proposed
+            if not os.path.exists("/.dockerenv"):
+                settings.remove(self.export.LAST_FOLDER_KEY)
+                os.environ.pop("SLICER_STUDIO_WEB", None)
+                self.assertNotEqual(os.path.normpath(niftiexport_ui.defaultFolder()), os.path.normpath(data))
+        finally:
+            qt.QFileDialog.getExistingDirectory = realGetExistingDirectory
+            importer._webStartFolderGiven = savedGiven
+            if savedWeb is None:
+                os.environ.pop("SLICER_STUDIO_WEB", None)
+            else:
+                os.environ["SLICER_STUDIO_WEB"] = savedWeb
+            if savedOpen is None:
+                settings.remove("Studio/LastOpenDirectory")
+            else:
+                settings.setValue("Studio/LastOpenDirectory", savedOpen)
+
     def test_08aa_dialog_grows_when_the_summary_wraps(self):
         """Select all makes the summary wrap onto more lines: the dialog grows and the image list stays above the folder card."""
         from StudioLib import autosave_io, niftiexport_ui
