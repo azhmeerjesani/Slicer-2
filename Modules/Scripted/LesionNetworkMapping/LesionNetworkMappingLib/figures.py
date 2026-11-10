@@ -109,6 +109,8 @@ AXIS_NAMES = "xyz"
 JOURNAL_WIDTHS_MM = {"single": 89.0, "double": 183.0}
 DPIS = (300, 450, 600)
 DEFAULT_WIDTH_MM = JOURNAL_WIDTHS_MM["double"]
+MIN_WIDTH_PX = 50  # narrower figures cannot hold a single panel (Pillow then fails with "x1 must be >= x0")
+MAX_WIDTH_MM = 100000.0  # keeps the pixel count finite; memory limits are a separate matter
 DEFAULT_DPI = 300
 FORMATS = ("png", "tiff", "svg", "pdf")
 #: Sequential colour stops of count and percent maps (SPEC §4.12)
@@ -402,6 +404,12 @@ def symmetric_window(arrays, percentile=WINDOW_PERCENTILE):
 # Slices
 
 
+def _finite_slices(values, text):
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError(f"--slices {text!r} must use finite numbers in mm (not inf or nan), e.g. 'A -20 -10 0 10 20 30'")
+    return values
+
+
 def parse_slices(text, default_plane="axial"):
     """Parse a slice specification: ``"A -20 -10 0 10 20 30"``, ``"C 0"``, ``"S -40 40"``, ``"z=-20,0,20"``,
     ``"auto"`` or ``"A auto 6"``.
@@ -435,9 +443,10 @@ def parse_slices(text, default_plane="axial"):
             raise ValueError(f"The number of automatic slices must be at least 1, got {count}")
         return plane, None, count
     try:
-        return plane, [float(token) for token in tokens], None
+        values = [float(token) for token in tokens]
     except ValueError:
         raise ValueError(f"Cannot read the slice specification {text!r} (expected e.g. 'A -20 -10 0 10 20 30')") from None
+    return plane, _finite_slices(values, text), None
 
 
 def auto_slices(values, grid, plane, count=6, threshold=None, sign="both", min_separation_mm=8.0):
@@ -959,8 +968,13 @@ class Options:
             raise ValueError(f"convention must be neurological or radiological, got {self.convention!r}")
         if self.sign is not None and self.sign not in thresholds.SIGNS:
             raise ValueError(f"sign must be one of {', '.join(thresholds.SIGNS)}, got {self.sign!r}")
-        if not self.width_mm > 0 or int(self.dpi) < 30:
-            raise ValueError("width_mm must be positive and dpi at least 30")
+        if not (math.isfinite(float(self.width_mm)) and float(self.width_mm) > 0) or int(self.dpi) < 30:
+            raise ValueError(f"--width-mm must be a finite number of mm above 0 and the dpi at least 30, got width {self.width_mm} mm and dpi {self.dpi}")
+        if float(self.width_mm) / 25.4 * int(self.dpi) < MIN_WIDTH_PX or float(self.width_mm) > MAX_WIDTH_MM:
+            raise ValueError(
+                f"--width-mm {self.width_mm:g} is out of range at {int(self.dpi)} dpi: the figure must be at least {MIN_WIDTH_PX} pixels "
+                f"({MIN_WIDTH_PX / int(self.dpi) * 25.4:.0f} mm at this dpi) and at most {MAX_WIDTH_MM:g} mm wide",
+            )
         if self.window is not None and not (math.isfinite(float(self.window)) and float(self.window) > 0):
             raise ValueError(f"The window must be positive, got {self.window}")
         if self.columns is not None and int(self.columns) < 1:
@@ -2603,6 +2617,8 @@ def main(argv=None, cancel=None):
                 raise ValueError(f"--point needs three numbers x,y,z (for example 10,-20,30), got {args.point!r}") from None
             if point is not None and len(point) != 3:
                 raise ValueError("--point needs x,y,z")
+            if point is not None and not all(math.isfinite(v) for v in point):
+                raise ValueError(f"--point needs three finite numbers x,y,z in mm (not inf or nan), got {args.point!r}")
             figure = ortho(args.map[0], point, args.template, **options)
         elif preset == "overlap":
             for key in ("rule", "n", "v", "threshold", "sign", "statistic", "units", "companion", "window", "mask"):

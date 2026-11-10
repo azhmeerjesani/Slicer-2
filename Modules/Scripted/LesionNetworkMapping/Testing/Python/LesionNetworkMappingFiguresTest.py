@@ -434,6 +434,27 @@ class FiguresTest(unittest.TestCase):
             self.assertEqual(events[-1]["code"], "input", n)
             self.assertFalse(os.path.exists(os.path.join(out, "figures")), n)
 
+    def test_nonfinite_width_point_slices_are_input_errors(self):
+        # inf/nan reached int() (OverflowError traceback); a tiny width reached Pillow ("x1 must be >= x0")
+        map_path = os.path.join(self.tmp, "nonfinite-map.nii.gz")
+        nifti.write_nifti(map_path, self.tmap[0], self.affine)
+        cases = [
+            (["--preset", "montage", "--width-mm", "inf"], "--width-mm"),
+            (["--preset", "montage", "--width-mm", "1e308"], "--width-mm"),
+            (["--preset", "glass", "--width-mm", "1", "--dpi", "30"], "--width-mm"),
+            (["--preset", "ortho", "--point", "inf,0,0"], "--point"),
+            (["--preset", "ortho", "--point", "nan,0,0"], "--point"),
+            (["--preset", "montage", "--slices", "A inf"], "--slices"),
+            (["--preset", "montage", "--slices", "A nan"], "--slices"),
+        ]
+        for args, option in cases:
+            out = os.path.join(self.tmp, "o-nonfinite")
+            code, events = self._cli(args + ["--map", map_path, "--threshold", "3", "--out", out, "--formats", "png"])
+            self.assertNotEqual(code, 0, args)
+            self.assertEqual(events[-1]["code"], "input", args)
+            self.assertNotIn("traceback", events[-1], args)
+            self.assertIn(option, events[-1]["message"], args)
+
     def test_window_must_be_positive_and_finite(self):
         # A negative window inverted the colour bar while the tiles silently used 1.0 (zero fell back to auto)
         for bad in (-2.0, 0.0, float("nan"), float("inf")):
