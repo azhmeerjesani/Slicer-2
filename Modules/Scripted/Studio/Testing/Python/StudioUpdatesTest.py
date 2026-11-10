@@ -41,6 +41,7 @@ import json
 import os
 import plistlib
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
@@ -2752,6 +2753,40 @@ fi
             web.check_for_updates("0.9.0")
         self.assertIn("is a required update", str(raised.exception))
         self.assertIn("--no-update-check", str(raised.exception))
+
+    def test_WebLauncherPlainErrorTexts(self):
+        """The web launcher's update check says what the app says for the same feeds, without the parser's, the error
+        number's, the exception class's or the server's own text.
+        """
+        web = self._importScript(os.path.join("Utilities", "SlicerStudioWeb", "slicer_studio_web.py"), "slicer_studio_web_plain")
+        raw = ("Expecting value", "Errno", "IncompleteRead", "NOT HTTP", "Connection refused", "char 0")
+
+        def failure(feed):
+            with self.assertRaises(web.LauncherError) as raised:
+                web.fetch_update_manifest(feed)
+            for text in raw:
+                self.assertNotIn(text, str(raised.exception))
+            return str(raised.exception)
+
+        # A proxy or login page: HTML where the manifest should be
+        with open(os.path.join(self.feedDir, "login.json"), "w") as f:
+            f.write("<html><body>Sign in to the Wi-Fi</body></html>")
+        self.assertIn("a proxy or login page may be in the way", failure(self.root + "login.json"))
+        # No server (a port that was just closed)
+        closed = socket.socket()
+        closed.bind(("127.0.0.1", 0))
+        port = closed.getsockname()[1]
+        closed.close()
+        self.assertIn("Cannot reach the update server (no connection)", failure(f"http://127.0.0.1:{port}/studio-update.json"))
+        # A reply that is not HTTP, and a download that is cut off
+        _Handler.notHttpPaths = {"/garbage.json"}
+        _Handler.cutChunkedPaths = {"/cut.json"}
+        try:
+            self.assertIn("did not send a valid answer", failure(self.root + "garbage.json"))
+            self.assertIn("the connection was interrupted", failure(self.root + "cut.json"))
+        finally:
+            _Handler.notHttpPaths = set()
+            _Handler.cutChunkedPaths = set()
 
     def test_WebLauncher(self):
         web = self._importScript(os.path.join("Utilities", "SlicerStudioWeb", "slicer_studio_web.py"), "slicer_studio_web_test")

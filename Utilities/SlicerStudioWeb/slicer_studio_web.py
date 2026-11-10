@@ -672,6 +672,22 @@ class _UpdateRedirectHandler(urllib.request.HTTPRedirectHandler):
         return urllib.request.HTTPRedirectHandler.redirect_request(self, req, fp, code, msg, headers, newurl)
 
 
+def _network_failure(error):
+    """A failed connection in plain words (like the app's), never the error number or the library's text."""
+    import ssl
+
+    reason = getattr(error, "reason", None)  # URLError wraps the OSError
+    if isinstance(reason, BaseException):
+        error = reason
+    if isinstance(error, (socket.timeout, TimeoutError)):
+        return "no answer in time"
+    if isinstance(error, ssl.SSLError):
+        return "the secure connection failed"
+    if isinstance(error, ValueError):
+        return "the address is not valid"
+    return "no connection"
+
+
 def _update_open(url, feed, timeout):
     if not _update_url_allowed(url, feed):
         raise LauncherError(f"Refused to download {url}: updates come only from GitHub over HTTPS.")
@@ -681,16 +697,19 @@ def _update_open(url, feed, timeout):
         return opener.open(request, timeout=timeout)
     except urllib.error.HTTPError as error:
         raise LauncherError(f"{url}: the server answered {error.code} {error.reason}")
-    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as error:
-        raise LauncherError(f"Cannot reach the update server: {getattr(error, 'reason', error)}")
+    except http.client.HTTPException:
+        # not an OSError: a reply that is not HTTP (BadStatusLine echoes the server's own line), cut off or malformed
+        raise LauncherError("Cannot reach the update server (it did not send a valid answer). Try again later.")
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        raise LauncherError(f"Cannot reach the update server ({_network_failure(error)}). Check your internet connection and try again.")
 
 
 def _update_read(response, size, what):
     """response.read(size); a connection that drops or stalls becomes a LauncherError, not a traceback."""
     try:
         return response.read(size)
-    except (http.client.HTTPException, OSError) as error:
-        raise LauncherError(f"{what}: the download was interrupted ({error.__class__.__name__}: {error}).")
+    except (http.client.HTTPException, OSError):
+        raise LauncherError(f"{what}: the connection was interrupted. Check your internet connection and try again.")
 
 
 def fetch_update_manifest(feed=None, timeout=UPDATE_CHECK_TIMEOUT):
@@ -721,8 +740,12 @@ def fetch_update_manifest(feed=None, timeout=UPDATE_CHECK_TIMEOUT):
             if (not _ASSET_NAME_PATTERN.match(str(asset.get("name"))) or ".." in asset["name"] or not isinstance(asset.get("size"), int)
                     or asset["size"] <= 0 or not re.match(r"^[0-9a-f]{64}$", str(asset.get("sha256", "")).lower())):
                 raise ValueError(f"assets.{key}")
-    except (ValueError, KeyError, TypeError, UnicodeDecodeError) as error:
-        raise LauncherError(f"The update manifest is not valid ({error}).")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        # not JSON at all: a proxy block page, a login page or an empty answer; the parser's text would only confuse
+        raise LauncherError("The update server did not send an update manifest (a proxy or login page may be in the way). "
+                            "Check your internet connection, try another network, and try again.")
+    except (ValueError, KeyError, TypeError):
+        raise LauncherError("The update manifest is not valid.")
     return manifest
 
 
