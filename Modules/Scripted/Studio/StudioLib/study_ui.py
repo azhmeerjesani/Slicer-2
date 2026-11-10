@@ -876,6 +876,11 @@ def adoptFolder(folder, name=None, groupColumn=None, groupMapping=None, template
             added.append(GROUP_ORIGINAL_COLUMN)
             for row in rows:
                 row.setdefault(GROUP_ORIGINAL_COLUMN, studyModule.NA)
+    for row in rows:  # file paths that point inside the folder are stored relative to it (the study stays movable)
+        for column in ("scan", "lesion"):
+            value = row.get(column)
+            if not studyModule.is_missing(value) and os.path.isabs(value) and studyModule._is_relative_to(os.path.abspath(value), folder):
+                row[column] = os.path.relpath(os.path.abspath(value), folder).replace(os.sep, "/")
     columns = [column for column in columns if column != "participant_id"]
     renamed = _keepClashingColumns(studyModule, columns + added, rows, dictionary, folder)
     columns = [renamed.get(column, column) for column in columns]

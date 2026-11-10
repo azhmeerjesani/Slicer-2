@@ -940,6 +940,13 @@ class Study:
             return resolve_path(path, self.controlset_root)
         return path if os.path.isabs(path) else os.path.normpath(os.path.join(self.path, *path.split("/")))
 
+    def _same_file(self, a, b):
+        """Whether two table paths (relative or absolute) name one file."""
+        if a == b:
+            return True
+        pa, pb = self.abspath(a), self.abspath(b)
+        return pa is not None and pb is not None and os.path.normcase(os.path.normpath(pa)) == os.path.normcase(os.path.normpath(pb))
+
     def relpath(self, path):
         """Table path of a file: relative to the study with "/" separators (absolute if on another drive)."""
         path = os.path.abspath(os.fspath(path))
@@ -1850,7 +1857,7 @@ class Study:
             if updates.get("lesion") and row.get("status") == "untraced":
                 updates["status"] = "traced"
             for column, value in values.items():
-                if value is not None and not is_missing(row.get(column)) and row[column] != value:
+                if value is not None and not is_missing(row.get(column)) and not self._same_file(row[column], value):
                     report["skipped"].append({"path": self.abspath(value), "reason": f"{sid} already has a {column}"})
             if updates and source_id and is_missing(row.get("source_id")):
                 updates.update(source_id)

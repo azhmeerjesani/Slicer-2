@@ -1508,6 +1508,25 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertNotIn("lesion_original", study.columns)
         self.assertEqual([study.subject(sid)["lesion"] for sid in study.subject_ids], ["sub-01_lesion.nii.gz", "lesions/gone.nii.gz", "n/a"])
 
+    def test_7d_adopted_absolute_scan_paths_made_relative(self):
+        """Absolute scan paths inside the adopted folder stayed absolute in participants.tsv, and the same files found
+        by name were reported as skipped ("already has a scan") (BB-1). They are stored relative to the study.
+        """
+        from LesionNetworkMappingLib.study import read_tsv
+
+        folder = os.path.join(self.directory, "Absolute scans")
+        header = ["participant_id", "scan"]
+        values = [[f"sub-0{n}", os.path.join(folder, f"sub-0{n}_T1w.nii.gz")] for n in (1, 2, 3)]
+        folder, study = self._adopt("Absolute scans", header, values)
+        self.assertEqual([study.subject(sid)["scan"] for sid in study.subject_ids], [f"sub-0{n}_T1w.nii.gz" for n in (1, 2, 3)])
+        study.save()
+        _, saved = read_tsv(os.path.join(folder, "participants.tsv"))
+        self.assertEqual([row["scan"] for row in saved], [f"sub-0{n}_T1w.nii.gz" for n in (1, 2, 3)])
+        # An absolute cell that names the same file is not a different scan
+        study.set("sub-01", scan=os.path.join(folder, "sub-01_T1w.nii.gz"))
+        report = study.add_files([os.path.join(folder, f"sub-0{n}_T1w.nii.gz") for n in (1, 2, 3)])
+        self.assertEqual(report["skipped"], [])
+
     def test_7c_adopted_user_space_column_kept(self):
         """A participants.tsv with a user "space" column (field strength 1.5T / 3T) became the study's space column: traced
         lesions were named space-3T, no brain mask applied (outside_brain_pct n/a) and the share export left the lesions out
