@@ -2209,6 +2209,77 @@ class StudioRegressionTest(unittest.TestCase):
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
 
+    def test_16bb_read_only_study_refuses_a_table_and_files_plainly(self):
+        """Importing a participants table or adding files into a read-only study says the study is read-only and nothing
+        was imported: no errno, no temporary file name, no traceback; the drop path toasts the same words (BB-1).
+        """
+        from unittest import mock
+
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import importer, library, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Shared read-only table study")
+        os.makedirs(folder)
+        paths = [os.path.join(folder, f"sub-0{index}_T1w.nii.gz") for index in (1, 2)]
+        for path in paths:
+            nifti.write_nifti(path, np.zeros(grid.shape, np.uint8), grid.affine)
+        table = os.path.join(self.directory, "ro-clinical.tsv")
+        with open(table, "w", encoding="utf-8") as f:
+            f.write("participant_id\tscore\nsub-01\t3\nsub-02\t4\n")
+        toasts = []
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: toasts.append(str(text))
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        try:
+            with mock.patch.object(study_ui.StudySession, "_studyWritable", return_value=False):
+                session = study_ui.createStudy(paths, studioShell, folder=folder)
+            self.assertTrue(session.readOnly)
+            with mock.patch.object(study_ui.StudySession, "_studyWritable", return_value=False):
+                with self.assertRaises(study_ui.ReadOnlyStudyError) as caught:
+                    session.importTable(table)
+                self.assertIn("read-only", str(caught.exception))
+                self.assertIn("not imported", str(caught.exception))
+                self.assertNotIn("Errno", str(caught.exception))
+                self.assertNotIn(".tmp", str(caught.exception))
+                with self.assertRaises(study_ui.ReadOnlyStudyError):
+                    session.addFiles(paths)
+                # The Library handler shows the message without a traceback (a user problem, not a program error)
+                records = []
+
+                class Recorder(logging.Handler):
+                    def emit(self, record):
+                        records.append(record)
+
+                handler = Recorder(level=logging.DEBUG)
+                logging.getLogger().addHandler(handler)
+                try:
+                    self.assertIsNone(library._runAction(lambda: session.importTable(table), "Failed to import the table."))
+                    # Open… / drop
+                    toasts[:] = []
+                    shellToasts = []
+                    with mock.patch.object(studioShell, "toast", lambda text, **kwargs: shellToasts.append(str(text))):
+                        importer._openParticipantsTable(table, studioShell)
+                finally:
+                    logging.getLogger().removeHandler(handler)
+                self.assertEqual([record for record in records if record.levelno >= logging.ERROR], [])
+                self.assertFalse([record for record in records if record.exc_info or "Traceback" in record.getMessage()])
+                self.assertTrue([text for text in shellToasts if "read-only" in text and "ro-clinical.tsv" in text], shellToasts)
+                self.assertFalse([text for text in shellToasts if "Errno" in text or ".tmp" in text], shellToasts)
+            self.assertFalse(os.path.exists(os.path.join(folder, ".studio", f"import-{os.getpid()}.tsv")))
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
     def test_16c_closing_a_read_only_study_does_not_try_to_keep_the_changes(self):
         """Closing a read-only study with changes that cannot be saved says nothing more (no inbox is posted to) and
         logs no error or traceback (BB-1).

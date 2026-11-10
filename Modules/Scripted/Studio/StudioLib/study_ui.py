@@ -1158,6 +1158,12 @@ def skippedText(report):
     return text
 
 
+class ReadOnlyStudyError(ValueError):
+    """The study folder cannot be written: the message says so (a problem with the user's setup, not a program error)."""
+
+    user_problem = True
+
+
 def _importTable(studyObject, path, groupColumn=None, groupMapping=None):
     """Merge a participants table into ``studyObject`` (not saved): ``StudySession.importTable()`` without a session."""
     columns, rows = readTable(path)
@@ -2549,6 +2555,14 @@ class StudySession:
             folder = private
         return os.access(folder, os.W_OK | os.X_OK)
 
+    def _requireWritable(self, notDone):
+        """A change that needs the study folder is refused with a plain message (``ReadOnlyStudyError``) when the folder
+        cannot be written, before anything is written (no temporary file name, no errno).
+        """
+        if self.readOnly or not self._studyWritable():
+            self.readOnly = True
+            raise ReadOnlyStudyError(f"{self.readOnlyText()} {notDone}")
+
     def readOnlyText(self):
         return _("The study {name} is read-only: you can look at it and trace, but changes cannot be saved. Ask for write access, "
                  "or open a copy of the study folder.").format(name=self.study.name)
@@ -2889,6 +2903,7 @@ class StudySession:
         folder keeps it: the study's own column is not changed, except include, which takes the values that keep their
         meaning (yes / no, 1.0 / 0.0). A table that still cannot be imported raises ValueError with a reason that names it.
         """
+        self._requireWritable(_("The table was not imported."))
         result = _importTable(self.study, path, groupColumn, groupMapping)
         self.flush()
         _notify(self)
@@ -2896,6 +2911,7 @@ class StudySession:
 
     def addFiles(self, paths):
         """Add scans and lesions to the study (header-only); return the ``Study.add_files`` report."""
+        self._requireWritable(_("The files were not added."))
         report = self.study.add_files(paths)
         gridRows = _gridCandidates(self.study)
         _applyGridAnswers(self.study, gridRows)
