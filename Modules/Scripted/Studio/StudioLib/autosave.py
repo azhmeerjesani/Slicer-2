@@ -2614,6 +2614,14 @@ class AutosaveService:
         """New project (Ctrl+N): save and close the open project; the next data creates the next project."""
         # Data opened less than one poll ago becomes its project first (as for Ctrl+S), or it would be discarded or asked about
         saved = self.ensureProject() is not None and self.saveNow("new project", progress=True)
+        # A study that is open is closed (its subject's edits are written first; a study saves its own files, and the
+        # project that was open before it was saved and released when it opened): what its scene still holds is saved
+        # work, so the scene is closed unasked as for a saved project
+        if self._studyOpen():
+            from StudioLib import study_ui
+
+            study_ui.closeStudy()
+            saved = True
         scene = slicer.mrmlScene
         mainWindow = slicer.util.mainWindow()
         action = mainWindow.findChild(qt.QAction, "FileCloseSceneAction") if mainWindow is not None else None

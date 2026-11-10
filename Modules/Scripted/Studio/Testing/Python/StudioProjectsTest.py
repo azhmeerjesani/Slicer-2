@@ -8140,6 +8140,70 @@ class StudioProjectsTest(unittest.TestCase):
             slicer.app.setProperty(firstrun.DISCLAIMER_HANDLED_PROPERTY, handled)
             mainWindow.setProperty(firstrun.CLOSE_MODE_PROPERTY, "")
 
+    def test_104_new_project_and_close_scene_with_a_study_open_ask_nothing(self):
+        """A study opened from Library while a project was open saved and released the project but kept its scan and lesion
+        in the scene (the lesion hidden, which marks the scene modified): with no project, Ctrl+N and Ctrl+W fell back to
+        3D Slicer's File > Close Scene and asked "Save before closing scene?" about saved work, with a "Save scene" that
+        writes outside the project model (BB-1). They now close the study (its subject's edits are written first) and the
+        scene unasked.
+        """
+        from unittest import mock
+
+        from StudioLib import projects_ui, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("studies are not part of this build")
+        mainWindow = slicer.util.mainWindow()
+        if mainWindow is None or mainWindow.findChild(qt.QAction, "FileCloseSceneAction") is None:
+            self.skipTest("the main window has no Close Scene action")
+        projects = self.projects
+        service = self._service()
+        studyFolder = os.path.join(projects.studiesFolder(), "Plain")
+        os.makedirs(studyFolder)
+        _volume, scanPath = self._userVolume("sub-01_T1w", shape=(12, 14, 16))
+        slicer.mrmlScene.Clear(0)
+        shutil.copy(scanPath, os.path.join(studyFolder, "sub-01_T1w.nii.gz"))
+        asked = []
+
+        def closeQuestion():
+            dialog = slicer.app.activeModalWidget()
+            if dialog is not None:
+                asked.append(str(dialog.windowTitle))
+                dialog.reject()
+
+        timer = qt.QTimer()
+        timer.setInterval(100)
+        timer.connect("timeout()", closeQuestion)
+        timer.start()
+        self.addCleanup(timer.stop)
+        self.addCleanup(study_ui.closeStudy)
+        patch = mock.patch.object(self.autosave, "instance", return_value=service)  # (the one study_ui and projects_ui use)
+        patch.start()
+        self.addCleanup(patch.stop)
+        for key in ("newProject", "closeScene"):
+            volume, _path = self._userVolume("Scan", shape=(12, 14, 16), extension=".nrrd")
+            self._lesion(volume)
+            self._projectFor(service)
+            self._save(service)
+            session = study_ui.createStudy([os.path.join(studyFolder, "sub-01_T1w.nii.gz")], folder=studyFolder)
+            self.assertIs(study_ui.session(), session)
+            self.assertIsNone(service.project, "the study released the project")
+            slicer.mrmlScene.GetNodeByID("vtkMRMLSliceNodeRed").Modified()
+            slicer.mrmlScene.GetSubjectHierarchyNode().Modified()
+            self.assertTrue(slicer.mrmlScene.GetModifiedSinceRead())
+            if key == "newProject":
+                service.newProject()
+            else:
+                self.assertTrue(projects_ui.closeScene())
+            for _step in range(5):
+                slicer.app.processEvents()
+                time.sleep(0.05)
+            self.assertEqual(asked, [], key + " asks nothing with a study open")
+            self.assertIsNone(study_ui.session(), key + " closes the study")
+            self.assertEqual(slicer.mrmlScene.GetNumberOfNodesByClass("vtkMRMLSegmentationNode"), 0, "the scene was closed")
+            self.io.backgroundWriter().drain(10.0)
+        timer.stop()
+
     def test_100_files_saved_elsewhere_come_back_under_their_plain_names(self):
         """Classic "Save Data" into another folder points every node at the new files; the project's old files leave in the
         same save, so the re-imported copies keep "Scan.nrrd" etc. instead of "Scan 2.nrrd" (BB-1).

@@ -744,11 +744,11 @@ def newProject():
 
 
 def closeScene():
-    """Close scene in Studio (Ctrl+W, File > Close Scene, Search): with a project open, it is saved first and closed (as New
+    """Close scene in Studio (Ctrl+W, File > Close Scene, Search): with a project or a study open, it is saved first and closed (as New
     project), so 3D Slicer does not ask "Save before closing scene?" about saved work; else the official action.
     """
     service = _service()
-    if service is not None and (service.currentProject() is not None or service.ensureProject() is not None):
+    if service is not None and (service.currentProject() is not None or service._studyOpen() or service.ensureProject() is not None):
         service.newProject()
         return True
     mainWindow = slicer.util.mainWindow()
@@ -773,7 +773,7 @@ class _CloseSceneMenuFilter(qt.QObject):
         if action is None or action.property("objectName") != "FileCloseSceneAction" or not action.isEnabled():
             return False
         service = _service()
-        if service is None or service.currentProject() is None:
+        if service is None or (service.currentProject() is None and not service._studyOpen()):
             return False
         for _attempt in range(5):
             popup = qt.QApplication.activePopupWidget()
