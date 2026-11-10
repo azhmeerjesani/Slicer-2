@@ -475,6 +475,40 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
             dialog.hide()
             shutil.rmtree(out, ignore_errors=True)
 
+    def test_convert_into_a_finished_bundle_is_refused_in_the_dialog_s_words(self):
+        """Bug BB-1 convert-into-finished-bundle-message-names-overwrite-option: Convert… into a finished bundle failed with the
+        command line's "use --overwrite" hint. The dialog refuses up front now, with or without Resume, and starts no job.
+        """
+        from unittest import mock
+
+        out = os.path.join(self.tmp, "Finished convert.lnmc")
+        os.makedirs(out, exist_ok=True)
+        with open(os.path.join(out, "connectome.json"), "w", encoding="utf-8") as f:
+            f.write("{}")
+        manager = self.widget.openManager()
+        dialog = manager.openConvert() or manager.convertDialog
+        try:
+            dialog.sourceCombo.setCurrentIndex(dialog.sourceCombo.findData("nifti"))
+            dialog.inputEdit.setText(self.tmp)
+            dialog.maskEdit.setText(os.path.join(self.tmp, "mask.nii.gz"))
+            dialog.outEdit.setText(out)
+            for ticked in (False, True):
+                dialog.resumeCheckBox.setChecked(ticked)
+                dialog.estimate = {"enough": True}
+                with mock.patch("slicer.util.errorDisplay") as show, mock.patch.object(manager, "startConversion") as start:
+                    dialog.onConvert()
+                start.assert_not_called()
+                show.assert_called_once()
+                text = show.call_args[0][0]
+                self.assertIn("already exists in this folder", text)
+                self.assertNotIn("--overwrite", text)
+        finally:
+            dialog.hide()
+            dialog.outEdit.setText("")
+            dialog.inputEdit.setText("")
+            dialog.maskEdit.setText("")
+            shutil.rmtree(out, ignore_errors=True)
+
     def test_buttons_show_their_full_text_at_the_smallest_size(self):
         # The seven actions of the selected connectome were one row: at 1366 x 768 their labels were cut. They wrap now:
         # as opened (the dialog fits the screen) and at the dialog's minimum size, every visible button is as wide as its

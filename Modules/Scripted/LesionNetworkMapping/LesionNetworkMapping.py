@@ -1872,6 +1872,11 @@ class ConvertConnectomeDialog(qt.QDialog):
         if problem:
             self.estimateLabel.setText(problem)
             return
+        if paths["out"] and os.path.isfile(os.path.join(paths["out"], "connectome.json")) and not os.path.isfile(os.path.join(paths["out"], "connectome.partial.json")):
+            # A finished bundle (Resume ticked or not): the job refuses with command-line wording, so say it in terms of this dialog
+            slicer.util.errorDisplay(_("A connectome bundle already exists in this folder: choose another Bundle folder (or remove it first)."),
+                                     windowTitle=_("Convert into a connectome bundle"), parent=self)
+            return
         if self.estimate is None:
             self.runEstimate(then=self.onConvert)
             return
