@@ -734,6 +734,48 @@ class FolderBuildTest(TutorialsTestBase):
         self.assertEqual(self.server.log, [])  # nothing is downloaded for a folder source
 
 
+    def lesymap_folder(self, values, count=4):
+        """A folder in the layout of the LESYMAP package: inst/extdata/lesions/Subject_NNN.nii.gz and behavior/behavior.txt (one number per line, no header)."""
+        folder = self.local("LESYMAP")
+        extdata = os.path.join(folder, "inst", "extdata")
+        os.makedirs(os.path.join(extdata, "lesions"))
+        for index in range(count):
+            blob(os.path.join(extdata, "lesions", f"Subject_{index + 1:03d}.nii.gz"), COLIN_GRID, (60 + index * 8, 100, 80), radius=4)
+        os.makedirs(os.path.join(extdata, "template"))
+        blob(os.path.join(extdata, "template", "ch2.nii.gz"), COLIN_GRID, (90, 100, 90), radius=30)
+        if values is not None:
+            os.makedirs(os.path.join(extdata, "behavior"))
+            with open(os.path.join(extdata, "behavior", "behavior.txt"), "w", encoding="utf-8") as f:
+                f.write("".join(f"{value}\n" for value in values))
+        return folder
+
+    def test_lesymap_behavior_txt_gives_the_score(self):
+        # The shipped recipe on the real package layout: behavior.txt has no header and no ids (read.table(header=FALSE)$V1)
+        folder = self.lesymap_folder(["0.25", "1.5", "-2", "3.75"])
+        report = tutorials.build_tutorial("lesymap_groundtruth", self.dest, cache=self.cache, source_dir=folder)
+        self.assertEqual(report["subjects"], 4)
+        built = study.Study.open(self.dest)
+        self.assertEqual(built.subject_ids, ["sub-001", "sub-002", "sub-003", "sub-004"])
+        self.assertEqual(built.score_columns(), [("behavior", True)])
+        self.assertEqual(report["score_columns"], ["behavior"])
+        self.assertEqual([built.value(sid, "behavior", float) for sid in built.subject_ids], [0.25, 1.5, -2.0, 3.75])
+        self.assertEqual(report["warnings"], [])
+
+    def test_lesymap_without_a_usable_score_says_so(self):
+        # no score file at all
+        folder = self.lesymap_folder(None)
+        report = tutorials.build_tutorial("lesymap_groundtruth", self.dest, cache=self.cache, source_dir=folder)
+        self.assertEqual(report["score_columns"], [])
+        self.assertTrue(any("no score" in text for text in report["warnings"]), report["warnings"])
+        # a list without ids that does not have one value per mask is not matched by order
+        shutil.rmtree(self.dest)
+        shutil.rmtree(folder)
+        folder = self.lesymap_folder(["1", "2", "3"])
+        report = tutorials.build_tutorial("lesymap_groundtruth", self.dest, cache=self.cache, source_dir=folder)
+        self.assertEqual(report["score_columns"], [])
+        self.assertTrue(any("has 3 scores but the folder has 4 lesion masks" in text for text in report["warnings"]), report["warnings"])
+
+
 class CommandLineTest(TutorialsTestBase):
     def run_cli(self, *args):
         process = subprocess.run([sys.executable, "-m", "LesionNetworkMappingLib.tutorials", *args], cwd=MODULE_DIR, capture_output=True, text=True, timeout=300, check=False)

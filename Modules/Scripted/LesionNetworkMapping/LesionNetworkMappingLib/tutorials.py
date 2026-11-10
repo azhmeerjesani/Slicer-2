@@ -23,7 +23,8 @@ Sources (``source.type``):
   A single-part ETag is the md5 of the file and is used to verify it.
 - ``folder``: not downloaded by the app (the package is only linked): the user chooses the folder that they downloaded.
   The masks are the NIfTI files that are not templates, the grid is checked against the registry (``geometry``) and the
-  scores come from the first table that matches ``table_regex``.
+  scores come from the first table that matches ``table_regex`` (a csv or tsv with a header, or a headerless list of
+  numbers such as LESYMAP's ``behavior.txt``, matched to the masks in natural file order).
 
 The built study (a folder the caller chooses, written in one step and renamed into place, so a failure leaves nothing)
 has ``lesions/<sid>_space-<space>_desc-lesion_mask.nii.gz`` with BIDS sidecars, ``participants.tsv`` with the cohort's
@@ -506,14 +507,68 @@ def folder_candidates(entry, source_dir):
 
 
 def folder_table(entry, source_dir):
-    """The path of the score table of a ``folder`` source (the first that matches ``table_regex``), else None."""
+    """The path of the score table of a ``folder`` source (the first that matches ``table_regex``, a csv or tsv before a txt), else None."""
     pattern = re.compile(entry["source"].get("table_regex") or r"\.(csv|tsv)$", re.IGNORECASE)
+    found = []
     for folder, subfolders, files in os.walk(source_dir):
         subfolders[:] = sorted(name for name in subfolders if not name.startswith("."))
         for name in sorted(files):
             if pattern.search(name) and not name.startswith("."):
-                return os.path.join(folder, name)
-    return None
+                found.append(os.path.join(folder, name))
+    tables = [path for path in found if not path.lower().endswith(".txt")]
+    return (tables or found or [None])[0]
+
+
+def _number(text):
+    try:
+        float(text)
+    except ValueError:
+        return False
+    return True
+
+
+def read_value_list(path):
+    """``(name, values)`` of a headerless list of numbers, one per line (LESYMAP's ``behavior.txt``), else None.
+
+    A first line with a single word is taken as the name of the column; otherwise the name comes from the file name.
+    Missing values ("NA", "n/a") keep their place in the list and become "".
+    """
+    with open(path, encoding="utf-8-sig") as f:
+        lines = [line.strip() for line in f if line.strip()]
+    if not lines or any(len(line.split()) != 1 or "," in line or ";" in line for line in lines):
+        return None
+    name = None
+    if not _number(lines[0]) and lines[0].lower() not in ("na", "n/a"):
+        name, lines = lines[0].strip("\"'"), lines[1:]
+    values = ["" if line.lower() in ("na", "n/a") else line for line in lines]
+    if not values or not all(value == "" or _number(value) for value in values):
+        return None
+    if not name:
+        name = os.path.basename(path).split(".", 1)[0]
+    name = re.sub(r"[^A-Za-z0-9_]+", "_", name).strip("_").lower()
+    if not name or name[0].isdigit() or name in RESERVED_COLUMNS or name in ID_COLUMNS:
+        name = "score"
+    return name, values
+
+
+def load_folder_table(path, candidates, warnings):
+    """``(columns, rows)`` of the score table of a ``folder`` source, else None (a warning says why).
+
+    A csv or tsv is read with its header; a headerless list of numbers (one per line, no ids) is matched to the masks
+    in natural file order (Subject_001, Subject_002, ...), as LESYMAP does, when it has one value per mask.
+    """
+    listed = read_value_list(path)
+    if listed is None:
+        if path.lower().endswith(".txt"):
+            warnings.append(f"{os.path.basename(path)} is not a list of scores (one number per line), so the study has no score from it.")
+            return None
+        return read_table(path)
+    name, values = listed
+    if len(values) != len(candidates):
+        warnings.append(f"{os.path.basename(path)} has {len(values)} scores but the folder has {len(candidates)} lesion masks; a list without ids is matched by order, so the scores were not used.")
+        return None
+    ordered = sorted(candidates, key=lambda item: natural_key(item.get("rel") or item["name"]))
+    return ["participant_id", name], [{"participant_id": item["sid"], name: value} for item, value in zip(ordered, values, strict=True)]
 
 
 def table_resource(entry):
@@ -725,13 +780,14 @@ def _readme(entry, report):
     return "\n".join(lines) + "\n"
 
 
-def _apply_table(study, entry, table_path, warnings, known=None):
+def _apply_table(study, entry, table_path, warnings, known=None, table=None):
     """Merge the cohort's table into the rows of the study.
 
     :param known: ids of every mask the source offers (the study may hold only the first N of them).
+    :param table: the table already read, ``(columns, rows)`` (default: ``read_table(table_path)``).
     :return: (number of table rows that have no mask at the source, the table's columns without the id).
     """
-    columns, rows = read_table(table_path)
+    columns, rows = table if table is not None else read_table(table_path)
     id_column = _id_column(columns, (entry.get("study") or {}).get("id_column"))
     value_map = (entry.get("study") or {}).get("value_map") or {}
     kept = [column for column in columns if column != id_column and column.lower() not in RESERVED_COLUMNS]
@@ -834,13 +890,14 @@ def check_target(dest):
         raise _target_error(exc, parent) from None
 
 
-def build_study(entry, dest, items, table_path=None, warnings=None, cancel=None, progress=None, known=None):
+def build_study(entry, dest, items, table_path=None, warnings=None, cancel=None, progress=None, known=None, table=None):
     """Build the study of a tutorial from local files; returns the report.
 
     :param items: ``[{"sid", "path", "scan_path" (optional), "scan_rel" (optional)}]``, the masks to put into the study.
     :param table_path: the cohort's table (csv or tsv), or None.
     :param dest: the study folder; it must not exist or be empty. The study is written next to it and renamed into place.
     :param known: ids of all masks of the source (default: those of ``items``), to count table rows that have no mask.
+    :param table: the cohort's table already read, ``(columns, rows)`` (default: ``table_path`` is read).
     """
     import numpy as np
 
@@ -903,9 +960,11 @@ def build_study(entry, dest, items, table_path=None, warnings=None, cancel=None,
         if not len(study):
             raise TutorialError(f"{entry['title']}: none of the masks could be read.", code="empty", skipped=skipped)
         unmatched, table_columns = 0, []
-        if table_path:
-            unmatched, table_columns = _apply_table(study, entry, table_path, warnings, known)
-        _apply_roles(study, entry, table_columns, table_path, warnings)
+        if table is not None or table_path:
+            unmatched, table_columns = _apply_table(study, entry, table_path, warnings, known, table)
+        _apply_roles(study, entry, table_columns, table_path or table is not None, warnings)
+        if entry["source"]["type"] == "folder" and entry["source"].get("score_columns") and not any(confirmed for _name, confirmed in study.score_columns()):
+            warnings.append("No score table was found in the folder (a csv, tsv or a list of numbers named like behavior or scores), so the study has no score: add a score column to its participants table before running VLSM.")
         common = next(iter(spaces)) if len(spaces) == 1 else None
         if common and common != "native":
             study.metadata["space"] = common
@@ -1007,9 +1066,13 @@ def build_tutorial(tutorial_id, dest, cache=None, progress=None, cancel=None, li
     if not candidates:
         raise TutorialError(f"{entry['title']}: no lesion masks were found at the source.", code="empty")
     candidates = unique_candidates(candidates, warnings)
-    rows, id_column = [], None
-    if table_path:
-        columns, rows = read_table(table_path)
+    rows, id_column, table = [], None, None
+    if table_path and source["type"] == "folder":
+        table = load_folder_table(table_path, candidates, warnings)
+    elif table_path:
+        table = read_table(table_path)
+    if table is not None:
+        columns, rows = table
         id_column = _id_column(columns, (entry.get("study") or {}).get("id_column"))
     chosen = select_subjects(entry, candidates, rows, id_column, limit)
     if progress:
@@ -1030,7 +1093,7 @@ def build_tutorial(tutorial_id, dest, cache=None, progress=None, cancel=None, li
                 job["item"]["path"] = job["path"]
     if _cancelled(cancel):
         raise jobs.Cancelled(done=0)
-    return build_study(entry, dest, chosen, table_path, warnings, cancel, progress, known=[item["sid"] for item in candidates])
+    return build_study(entry, dest, chosen, table_path if table is not None else None, warnings, cancel, progress, known=[item["sid"] for item in candidates], table=table)
 
 
 # Command line

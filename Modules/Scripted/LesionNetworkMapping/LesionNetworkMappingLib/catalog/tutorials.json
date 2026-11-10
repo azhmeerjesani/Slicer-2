@@ -419,7 +419,7 @@
     "grid": "SPM-1mm",
     "grid_space": "MNIColin27",
     "exclude_regex": "(template|colin|atlas|brain|aal|mask_of)",
-    "table_regex": "(behaviou?r|scores?|participants|symptom)[^/]*\\.(csv|tsv)$",
+    "table_regex": "(behaviou?r|scores?|participants|symptom)[^/]*\\.(csv|tsv|txt)$",
     "score_columns": [
      "score",
      "behavior",
