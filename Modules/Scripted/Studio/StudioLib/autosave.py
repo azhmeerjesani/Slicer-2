@@ -822,6 +822,11 @@ class AutosaveService:
         options.update(self.writerOptionsOverride)
         return options
 
+    def _pauseForOSError(self, error):
+        """Pause with the reason in plain words (no error number, no session path): the autosave folder cannot be written."""
+        reason = plainOSErrorIn(error, self.root)
+        self._pause(_("Autosave paused: the autosave folder cannot be written ({reason}).").format(reason=reason))
+
     def _startGeneration(self, reason, fingerprint, synchronous=False, mainThreadOnly=False, ignoreBusy=False):
         if self.project is not None:
             return self._startProjectGeneration(reason, fingerprint, synchronous=synchronous, ignoreBusy=ignoreBusy, force=synchronous)
@@ -837,7 +842,7 @@ class AutosaveService:
         except io.GenerationAborted:
             return False
         except OSError as error:
-            self._pause(_("Autosave paused: {error}").format(error=error))
+            self._pauseForOSError(error)
             return False
         except Exception:
             logging.error("Autosave: planning failed:\n" + traceback.format_exc())
@@ -932,7 +937,7 @@ class AutosaveService:
                 # A project that could not be saved (a full disk): "Not saved" with the reason, as for Save now
                 self._projectFailed(plainOSError(error))
             else:
-                self._pause(_("Autosave paused: {error}").format(error=error))
+                self._pauseForOSError(error)
             return
         except Exception:
             logging.error("Autosave: writing failed:\n" + traceback.format_exc())
@@ -982,7 +987,7 @@ class AutosaveService:
             self._projectFailed(message)
             return
         if isinstance(error, OSError):
-            self._pause(_("Autosave paused: {error}").format(error=message))
+            self._pauseForOSError(error)
         else:
             logging.error(f"Autosave generation failed: {message}")
             self._setState("error", _("Autosave failed (see the error log)."))

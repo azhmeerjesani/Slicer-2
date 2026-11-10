@@ -1957,6 +1957,30 @@ class StudioAutosaveTest(unittest.TestCase):
         hierarchy.SetItemAttribute(folder, "Group", "control")
         self.assertNotEqual(fingerprint(), after)
 
+    def test_zc2_pausedStatusIsPlainWhenFolderCannotBeWritten(self):
+        """BB-1: "Autosave paused" says why in plain words, not "[Errno 13] Permission denied: '<session path>'"."""
+        # The autosave folder is below a file, so its session folder cannot be created
+        blocker = os.path.join(self.tempDir, "a file")
+        with open(blocker, "w") as f:
+            f.write("not a folder")
+        self.root = os.path.join(blocker, "StudioAutosave")
+        service = self._service()
+        self._userVolume()
+        service.autosaveNow("test")
+        status = service.status()
+        self.assertEqual(status.state, "paused", status.message)
+        self.assertTrue(status.message.startswith("Autosave paused: the autosave folder cannot be written"), status.message)
+        self.assertNotIn("Errno", status.message)
+        self.assertNotIn(self.tempDir, status.message)
+        # Any OSError (writing step, failed background generation) says the same, with the folder named
+        service.root = os.path.join(self.tempDir, "StudioAutosave")
+        error = PermissionError(13, "Permission denied", os.path.join(service.root, "20261109-session"))
+        service._pauseForOSError(error)
+        self.assertEqual(
+            service.status().message,
+            "Autosave paused: the autosave folder cannot be written (Permission denied (in the folder StudioAutosave)).",
+        )
+
     def test_zd_discardConfirmationSaysTrash(self):
         """BB-1: Discard moves the session to the OS Trash, so its confirmation must not say "This cannot be undone"
         (a user who believes it is deleted will not empty the Trash); it names the Trash.
