@@ -60,9 +60,14 @@ HELPER_SCRIPT = r"""#!/bin/sh
 # Slicer Studio update helper (written by StudioLib/updates_install.py). It waits for the application to exit,
 # swaps the installed version with the new one, restores the previous version if anything fails, and relaunches (the
 # new version, or the kept previous one after a failure, so that the failure is shown at once).
-# Arguments: pid target staged backup result relaunch kind check [keepBackup]
+# Arguments: pid target staged backup result relaunch kind check [keepBackup [otherPid...]]
+# The swap waits for every other Slicer Studio window of this installation too: the otherPids that the application
+# found when it started the helper and, on Linux, every process whose executable is inside the installation.
 set -u
 pid="$1"; target="$2"; staged="$3"; backup="$4"; result="$5"; relaunch="$6"; kind="$7"; check="$8"; keep="${9:-1}"
+if [ "$#" -ge 9 ]; then shift 9; else shift "$#"; fi
+# The installation folder as a find -lname pattern (its own wildcard characters escaped)
+pattern="$(printf '%s' "$target" | sed 's/[][*?\\]/\\&/g')/*"
 
 log() { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*"; }
 # Starts the application again (the new version, or the previous one when the swap failed and it was kept)
@@ -98,6 +103,28 @@ while kill -0 "$pid" 2>/dev/null; do
   sleep 0.5
 done
 exited=1
+# Another window of this installation still runs: replacing the folder under it would mix two versions in one process
+others_running() {
+  for other in "$@"; do
+    [ "$other" = "$pid" ] && continue
+    kill -0 "$other" 2>/dev/null && return 0
+  done
+  if [ -d /proc/self ]; then
+    [ -n "$(find /proc/[0-9]*/exe -maxdepth 0 -lname "$pattern" 2>/dev/null | head -n 1)" ] && return 0
+  fi
+  return 1
+}
+if others_running "$@"; then
+  log "waiting for the other Slicer Studio windows of this installation to close"
+  waited=0
+  while others_running "$@"; do
+    waited=$((waited + 1))
+    if [ "$waited" -gt __EXIT_WAIT_TICKS__ ]; then
+      fail "another Slicer Studio window of this installation stayed open; nothing was changed"
+    fi
+    sleep 0.5
+  done
+fi
 log "installing $staged as $target"
 [ -e "$staged/$check" ] || fail "the new version is incomplete; nothing was changed"
 if [ -e "$backup" ]; then
@@ -135,6 +162,15 @@ class InstallError(Exception):
         Exception.__init__(self, message)
         #: Text that explains how to install the update by hand, or None
         self.manualSteps = manualSteps
+
+
+class OtherWindowsOpen(InstallError):
+    """Another Slicer Studio window runs from the installation: the update cannot replace it now (nothing was changed)."""
+
+    def __init__(self, message, pids=()):
+        InstallError.__init__(self, message)
+        #: The processes of the other windows
+        self.pids = list(pids)
 
 
 class InstallCancelled(InstallError):
@@ -217,6 +253,56 @@ def _removeTree(path):
         shutil.rmtree(path)
 
 
+def _parentPid(pid):
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as f:
+            return int(f.read().rsplit(")", 1)[1].split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def processesRunningFrom(target, ownPid=None):
+    """The processes whose executable is inside ``target`` (Linux: read from ``/proc``; elsewhere, and for the processes
+    of other users, nothing is found), except ``ownPid`` (default: this process), its parents (the launcher) and its
+    children.
+    """
+    if not target or not os.path.isdir("/proc/self"):
+        return []
+    ownPid = os.getpid() if ownPid is None else ownPid
+    prefix = os.path.realpath(target).rstrip(os.sep) + os.sep
+    family = {ownPid}
+    parent = ownPid
+    while parent and parent > 1:
+        parent = _parentPid(parent)
+        if parent:
+            family.add(parent)
+    found = []
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return []
+    for name in names:
+        if not name.isdigit() or int(name) in family:
+            continue
+        try:
+            executable = os.readlink(f"/proc/{name}/exe")
+        except OSError:
+            continue  # gone, a kernel thread, or the process of another user
+        if executable.startswith(prefix):
+            found.append(int(name))
+    # A child of this process (for example a PythonSlicer worker) ends with it
+    children = set()
+    for pid in found:
+        current, seen = pid, set()
+        while current and current > 1 and current not in seen:
+            if current == ownPid:
+                children.add(pid)
+                break
+            seen.add(current)
+            current = _parentPid(current)
+    return sorted(pid for pid in found if pid not in children)
+
+
 def removeInBackground(path, onDone=None):
     """Delete the folder ``path`` in a background thread (for example the previous version after an update)."""
 
@@ -256,17 +342,19 @@ class PreparedInstall:
         self.package = package
         self.launched = False
 
-    def helperArguments(self, pid, resultPath, relaunch):
+    def helperArguments(self, pid, resultPath, relaunch, waitFor=()):
         # With administrator rights the previous version belongs to root: the helper removes it after the swap
         keepBackup = "0" if self.needsAdmin else "1"
-        return [str(pid), self.target, self.staged, self.backup, resultPath, "1" if relaunch else "0", self.kind, self.check, keepBackup]
+        others = [str(other) for other in waitFor if isinstance(other, int) and other > 0 and other != pid]
+        return [str(pid), self.target, self.staged, self.backup, resultPath, "1" if relaunch else "0", self.kind, self.check, keepBackup] + others
 
-    def launch(self, stateDir, pid=None, relaunch=True, record=None, env=None, popen=subprocess.Popen):
+    def launch(self, stateDir, pid=None, relaunch=True, record=None, env=None, popen=subprocess.Popen, waitFor=()):
         """Write the helper and the install record to ``stateDir`` and start the helper, detached.
 
-        The helper waits for the process ``pid`` (default: this process) to exit. ``record`` is merged into the
-        install record (for example the autosave session to offer for recovery). Return the helper process (or
-        the ``osascript`` process that starts it with administrator rights).
+        The helper waits for the process ``pid`` (default: this process) to exit, and for the processes ``waitFor``
+        (other Slicer Studio windows of the installation; on Linux it also looks for them itself). ``record`` is merged
+        into the install record (for example the autosave session to offer for recovery). Return the helper process
+        (or the ``osascript`` process that starts it with administrator rights).
         """
         os.makedirs(stateDir, exist_ok=True)
         pid = os.getpid() if pid is None else pid
@@ -294,7 +382,7 @@ class PreparedInstall:
         }
         data.update(record or {})
         writeRecord(stateDir, data)
-        arguments = ["/bin/sh", scriptPath] + self.helperArguments(pid, resultPath, relaunch)
+        arguments = ["/bin/sh", scriptPath] + self.helperArguments(pid, resultPath, relaunch, waitFor)
         environment = cleanEnvironment(env)
         if self.needsAdmin:
             # The log belongs to this user (the helper appends to it as root)

@@ -826,6 +826,102 @@ class StudioUpdatesTest(unittest.TestCase):
         old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - install.EXIT_WAIT_S - updates.INSTALL_PENDING_GRACE_S - 60))
         self.assertFalse(updates._installPending(dict(alive, started=old), None), "a recorded pid long after the helper gave up")
 
+    def test_UpdateWaitsForOtherWindowOfInstallation(self):
+        """Window A of the installation stays open while window B installs the update (Install when I quit, Restart now)
+        and quits. The update must not be swapped in under A (it used to be: the helper waited for B only): Update now and
+        Install when I quit say that the other window must be closed first, and the helper waits for every window of the
+        installation (the windows the application names, and on Linux every process run from the installation).
+        """
+        updates, install = self.updates, self.install
+        if not sys.platform.startswith("linux"):
+            self.skipTest("the Linux package path is tested on Linux")
+        target = self._fakeLinuxInstall("0.9.0")
+        package = os.path.join(self.tempDir, "new.tar.gz")
+        _fakeLinuxPackage(package, "1.2.0")
+
+        def runFromInstallation(name, seconds):
+            # A process whose executable is inside the installation (window A on Linux), reaped when it ends
+            executable = os.path.join(target, "bin", name)
+            shutil.copy2(shutil.which("sleep"), executable)
+            process = subprocess.Popen([executable, str(seconds)], cwd=target)
+            self.addCleanup(process.kill)
+            threading.Thread(target=process.wait, daemon=True).start()
+            return process
+
+        # (1) The helper: window A runs from the installation folder, window B (the one that quits) exits
+        prepared = install.prepareLinux(package, target, "1.2.0")
+        windowA = runFromInstallation("app-a", 60)
+        windowB = self._sleeper(0.3)
+        prepared.launch(self.stateDir, pid=windowB.pid, relaunch=False, record={"from": "0.9.0"})
+        self.assertIsNone(install.waitForResult(self.stateDir, 2.5), "nothing is installed while window A runs")
+        self.assertEqual(install.linuxPackageVersion(target), "0.9.0", "the folder that window A runs from is untouched")
+        windowA.kill()
+        self.assertEqual(install.waitForResult(self.stateDir, 30), "ok", "installed once window A has closed")
+        self.assertEqual(install.linuxPackageVersion(target), "1.2.0")
+        with open(os.path.join(self.stateDir, install.LOG_FILE)) as f:
+            self.assertIn("waiting for the other Slicer Studio windows", f.read())
+        install.clearRecord(self.stateDir)
+        shutil.rmtree(prepared.backup)
+        # (2) The helper also waits for the windows that the application names (macOS has no /proc)
+        shutil.rmtree(target)
+        target09 = self._fakeLinuxInstall("0.9.0")
+        prepared = install.prepareLinux(package, target09, "1.2.0")
+        named = self._sleeper(60)
+        self.addCleanup(named.kill)
+        windowB = self._sleeper(0.3)
+        prepared.launch(self.stateDir, pid=windowB.pid, relaunch=False, record={"from": "0.9.0"}, waitFor=[named.pid])
+        self.assertIsNone(install.waitForResult(self.stateDir, 2.5), "nothing is installed while the named window runs")
+        named.kill()
+        self.assertEqual(install.waitForResult(self.stateDir, 30), "ok")
+        install.clearRecord(self.stateDir)
+        shutil.rmtree(prepared.backup)
+        # (3) The service: another registered window of this installation is open
+        updates._installableOverride = True
+        updates.installTargetOverride = target09
+        other = self._sleeper(60)
+        self.addCleanup(other.kill)
+        runningDir = os.path.join(self.stateDir, updates.RUNNING_DIRECTORY)
+        os.makedirs(runningDir, exist_ok=True)
+        with open(os.path.join(runningDir, f"{other.pid}.json"), "w") as f:
+            json.dump({"pid": other.pid, "target": target09, "token": updates._processStartToken(other.pid)}, f)
+        gone = self._sleeper(0.01)
+        gone.wait()
+        with open(os.path.join(runningDir, f"{gone.pid}.json"), "w") as f:
+            json.dump({"pid": gone.pid, "target": target09}, f)
+        self.assertIsNotNone(updates.registerRunning(target09), "this window registers itself")
+        self.assertEqual(updates.otherRunningWindows(target09), [other.pid], "this window and ended windows do not count")
+        self.assertFalse(os.path.exists(os.path.join(runningDir, f"{gone.pid}.json")), "the record of an ended window is removed")
+        self.assertEqual(updates.otherRunningWindows(os.path.join(self.tempDir, "elsewhere")), [], "another installation")
+        self._publish("1.3.0")
+        service = self._service()
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        dialog = service.updateNow()
+        self.assertTrue(self._waitFor(lambda: dialog.state in ("ready", "failed"), 30), dialog.state)
+        self.assertEqual(dialog.state, "failed", "Update now says that the other window must be closed first")
+        self.assertIn("Another Slicer Studio window is open", dialog.text.text)
+        self.assertFalse(os.path.exists(install.stagingRoot(target09)), "nothing was downloaded or prepared")
+        # A window opened while the update was prepared: Install when I quit and Restart now refuse, the update stays ready
+        service.prepared = install.prepareLinux(package, target09, "1.2.0")
+        dialog._setState("ready", "ready")
+        dialog.secondaryButton.click()
+        self.assertEqual(dialog.state, "ready")
+        self.assertIn("Another Slicer Studio window is open", dialog.text.text)
+        self.assertFalse(service._quitConnected, "no install at quit is registered")
+        dialog.primaryButton.click()
+        self.assertEqual(dialog.state, "ready")
+        self.assertFalse(service._quitConnected)
+        with self.assertRaises(install.OtherWindowsOpen):
+            service.installOnQuit(relaunch=False)
+        # The other window has closed: the update installs at quit
+        other.kill()
+        self.assertTrue(self._waitFor(lambda: updates.otherRunningWindows(target09) == [], 10))
+        self.assertTrue(service.installOnQuit(relaunch=False))
+        self.assertTrue(service._quitConnected)
+        updates.unregisterRunning()
+        self.assertEqual(os.listdir(runningDir), [])
+        updates.installTargetOverride = None
+        updates._installableOverride = None
+
     def test_LinuxSwapFailureRestores(self):
         updates, install = self.updates, self.install
         target = self._fakeLinuxInstall("0.9.0")

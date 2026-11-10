@@ -237,7 +237,9 @@ account or costs anything.
    autosaved and offered for recovery when the new version starts.
 4. After Slicer Studio has closed, the new version replaces the old one and
    starts. If anything goes wrong, the previous version is put back and starts
-   instead, and it says why.
+   instead, and it says why. While another Slicer Studio window of the same
+   installation is open, the update is not installed: Update now says so, and
+   you close the other window first.
 
 On macOS, if the Applications folder is not writable for you, macOS asks for an
 administrator password; you can instead quit, open the downloaded disk image and

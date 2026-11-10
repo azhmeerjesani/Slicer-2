@@ -736,6 +736,102 @@ def _processAlive(pid):
     return True
 
 
+#: Folder of the update state where every running Slicer Studio window names its process and installation (one file
+#: per process, removed at its exit): an update is not swapped in while another window of the installation runs
+RUNNING_DIRECTORY = "running"
+
+
+def _processStartToken(pid):
+    """When the process ``pid`` started, as a text that changes when the system gives the pid to another process, or
+    None when it cannot be read.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as f:
+            return f.read().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        pass
+    if sys.platform != "darwin":
+        return None
+    import subprocess
+
+    try:
+        result = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], stdin=subprocess.DEVNULL, capture_output=True, timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    text = result.stdout.decode(errors="replace").strip()
+    return text or None
+
+
+def _runningDirectory():
+    return os.path.join(stateDirectory(), RUNNING_DIRECTORY)
+
+
+def registerRunning(target):
+    """Name this process as a running window of the installation ``target`` (until ``unregisterRunning()``)."""
+    if not target:
+        return None
+    path = os.path.join(_runningDirectory(), f"{os.getpid()}.json")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        temporary = path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as f:
+            json.dump({"pid": os.getpid(), "target": os.path.realpath(target), "token": _processStartToken(os.getpid())}, f)
+        os.replace(temporary, path)
+    except OSError:
+        logging.warning("Updates: could not register the running window:\n" + traceback.format_exc())
+        return None
+    return path
+
+
+def unregisterRunning():
+    _removeQuietly(os.path.join(_runningDirectory(), f"{os.getpid()}.json"))
+
+
+def otherRunningWindows(target):
+    """The processes of the other Slicer Studio windows that run from the installation ``target``: those registered in
+    the update state folder (by this user), and on Linux every process whose executable is inside ``target``. The
+    records of windows that ended without removing theirs (a crash) are removed.
+    """
+    if not target:
+        return []
+    realTarget = os.path.realpath(target)
+    pids = set()
+    directory = _runningDirectory()
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        names = []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(directory, name)
+        try:
+            with open(path, encoding="utf-8") as f:
+                entry = json.load(f)
+        except (OSError, ValueError):
+            continue
+        pid = entry.get("pid") if isinstance(entry, dict) else None
+        if type(pid) is not int or pid <= 0 or pid == os.getpid():
+            continue
+        token = entry.get("token")
+        if not _processAlive(pid) or (token and _processStartToken(pid) not in (None, token)):
+            _removeQuietly(path)  # the window ended (the pid may now belong to another process)
+            continue
+        if os.path.realpath(str(entry.get("target") or "")) == realTarget:
+            pids.add(pid)
+    try:
+        pids.update(updates_install.processesRunningFrom(realTarget))
+    except Exception:
+        logging.warning("Updates: looking for other windows failed:\n" + traceback.format_exc())
+    return sorted(pids)
+
+
+def _otherWindowsError(pids):
+    return updates_install.OtherWindowsOpen(
+        _("Another Slicer Studio window is open from this installation. Close it, then try again: the update cannot "
+          "replace Slicer Studio while it runs."), pids)
+
+
 #: How long after the helper started an install without a result can still be pending: the helper waits at most
 #: ``updates_install.EXIT_WAIT_S`` for the application to exit, then swaps the folders (this bounds a recorded pid that
 #: the system gave to another process, for example after a restart)
@@ -1047,6 +1143,7 @@ class UpdateService:
         #: update is shown)
         self.startupWaitMs = None
         self._paletteRegistered = False
+        self._runningRegistered = False
         manifest = cachedManifest()
         if manifest is not None:
             self.status = evaluate(manifest, currentVersion(), settingsValue("SkippedVersion"))
@@ -1060,6 +1157,15 @@ class UpdateService:
         import qt
 
         self._then = then
+        try:
+            # Another window that installs an update waits for this one (and tells the user to close it)
+            if registerRunning(self.installTarget()) is not None:
+                import slicer
+
+                slicer.app.connect("aboutToQuit()", unregisterRunning)
+                self._runningRegistered = True
+        except Exception:
+            logging.error("Updates: registering the running window failed:\n" + traceback.format_exc())
         try:
             self.finishInstall()
         except Exception:
@@ -1108,6 +1214,15 @@ class UpdateService:
             except Exception:
                 pass
         self._disconnectQuit()
+        if self._runningRegistered:
+            import slicer
+
+            try:
+                slicer.app.disconnect("aboutToQuit()", unregisterRunning)
+            except Exception:
+                pass
+            unregisterRunning()
+            self._runningRegistered = False
         if _service is self:
             _service = None
 
@@ -1791,6 +1906,10 @@ class UpdateService:
             # replace (and the exit would delete) the copy that another running window may have chosen to install
             raise updates_install.InstallError(_("The update is already being prepared, or is prepared, in another Slicer Studio "
                                                  "window. Finish or close it there, then try again."))
+        others = otherRunningWindows(target)
+        if others:
+            # The swap would replace the folder that the other window runs from (two versions in one process)
+            raise _otherWindowsError(others)
         stale, self._staleStaging = self._staleStaging, []
         # From now on this run owns the download and staging folders: another Slicer Studio that starts with the same
         # state folder must not clean them up (the marker names this run until it ends or its update is registered)
@@ -1860,6 +1979,11 @@ class UpdateService:
         prepared = self.prepared
         if prepared is None:
             return False
+        if not prepared.launched:
+            # Another window of the installation opened while the update was prepared: it must be closed first
+            others = otherRunningWindows(prepared.target)
+            if others:
+                raise _otherWindowsError(others)
         self._relaunch = relaunch
         if prepared.needsAdmin and not prepared.launched:
             prepared.launch(stateDirectory(), relaunch=relaunch, record=self._installRecord())
@@ -2006,7 +2130,9 @@ class UpdateService:
         if prepared is None or prepared.launched:
             return
         try:
-            prepared.launch(stateDirectory(), relaunch=self._relaunch, record=self._installRecord())
+            # A window of the installation opened after the update was chosen: the helper also waits for it to close
+            prepared.launch(stateDirectory(), relaunch=self._relaunch, record=self._installRecord(),
+                            waitFor=otherRunningWindows(prepared.target))
         except Exception:
             logging.error("Updates: starting the install helper failed:\n" + traceback.format_exc())
 
@@ -2376,6 +2502,12 @@ class RequiredUpdateDialog:
     def _restart(self):
         try:
             self.service.installOnQuit(relaunch=True)
+        except updates_install.OtherWindowsOpen as error:
+            # The update stays ready: Restart now installs it once the other window is closed
+            self.state = "ready"
+            self.updateButton.setText(_("Restart now"))
+            self._setStatus(str(error), error=True)
+            return
         except updates_install.InstallError as error:
             self.state = "offer"
             self.updateButton.setText(_("Try again"))
@@ -2679,6 +2811,9 @@ class UpdateDialog:
             return
         try:
             closing = self.service.restartToUpdate()
+        except updates_install.OtherWindowsOpen as error:
+            self._setState("ready", str(error))  # still ready: Restart now installs it once the other window is closed
+            return
         except updates_install.InstallError as error:
             self._setState("failed", str(error))
             return
@@ -2698,6 +2833,9 @@ class UpdateDialog:
         if self.state == "ready":
             try:
                 self.service.installOnQuit(relaunch=False)
+            except updates_install.OtherWindowsOpen as error:
+                self._setState("ready", str(error))
+                return
             except updates_install.InstallError as error:
                 self._setState("failed", str(error))
                 return
