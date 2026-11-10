@@ -2666,8 +2666,7 @@ class StudySession:
             self._markReadOnly()
             self._lastSaveError = _("{name} is read-only").format(name=self.study.name)
             logging.warning(f"Studio: cannot save the study {self.study.path}: {e}")
-            _toast(self._shell, _("The study could not be saved: the study folder is read-only ({reason})").format(reason=_plainOSError(e)),
-                   ms=6000, level="warning")
+            # no toast here: _markReadOnly() announced it once (a repeat would replace the confirmation of each edit)
             _notifySaved(self)
             return False
         except Exception as e:

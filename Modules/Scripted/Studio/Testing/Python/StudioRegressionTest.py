@@ -2178,7 +2178,8 @@ class StudioRegressionTest(unittest.TestCase):
                 session.study.set("sub-01", notes="changed")
                 with mock.patch.object(session.study, "save", side_effect=error):
                     self.assertFalse(session.flush())
-                self.assertTrue([text for text in toasts if "read-only" in text], toasts)
+                # The read-only state was announced once when the study opened: no "could not be saved" toast on later saves
+                self.assertEqual(toasts, [])
                 for text in toasts:
                     self.assertNotIn("Errno", text)
                     self.assertNotIn("participants.lock", text)
