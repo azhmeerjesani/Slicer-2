@@ -2110,6 +2110,52 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 self.assertFalse(form.isOpen())
                 self.assertFalse(row.isHidden(), form.widget.objectName)
 
+    def test_compute_agreement_on_a_read_only_study_says_so_plainly(self):
+        """BB-1: Compute agreement on a read-only study toasted "[Errno 13] Permission denied: '.../derivatives/qc'" and logged
+        a traceback: it is refused up front with the plain read-only message, and a study that turns read-only while the
+        agreement is computed is told the same way.
+        """
+        import types
+
+        from StudioLib import libcard_agreement, review, study_ui
+
+        class _Session:
+            def __init__(self):
+                self.study = types.SimpleNamespace(path="/study", name="Study")
+                self.marked = False
+
+            def _requireWritable(self, notDone):
+                raise study_ui.ReadOnlyStudyError(f"The study is read-only. {notDone}")
+
+            def _markReadOnly(self):
+                self.marked = True
+
+        toasts = []
+        saved = (libcard_agreement._session, review._toast, libcard_agreement._rules)
+        session = _Session()
+        try:
+            libcard_agreement._session = lambda: session
+            review._toast = lambda text, *a, **k: toasts.append(text)
+            self.assertFalse(libcard_agreement.computeAgreement())
+            self.assertEqual(len(toasts), 1, toasts)
+            self.assertIn("read-only", toasts[0])
+            self.assertNotIn("Errno", toasts[0])
+
+            def denied(study, computed=None):
+                raise PermissionError(13, "Permission denied", "/study/derivatives/qc")
+
+            libcard_agreement._rules = lambda: types.SimpleNamespace(summary=denied)
+            session.setValues = session.flush = lambda *a, **k: None
+            del toasts[:]
+            libcard_agreement._computed("/study", {}, None)
+            self.assertEqual(len(toasts), 1, toasts)
+            self.assertIn("read-only", toasts[0])
+            self.assertNotIn("Errno", toasts[0])
+            self.assertNotIn("/study", toasts[0])
+            self.assertTrue(session.marked)
+        finally:
+            libcard_agreement._session, review._toast, libcard_agreement._rules = saved
+
     def test_compute_agreement_reads_no_mask_on_the_gui_thread(self):
         """"Compute agreement" reads the masks and computes the metrics in a worker thread, with its progress and Stop on the card;
         the main thread writes interrater.tsv and the rows when it has finished (BB-1: every pair was computed on the GUI thread,

@@ -625,12 +625,19 @@ def computeAgreement():
         review._toast(_("The agreement is being computed"))
         return None
     try:
+        # A read-only study cannot take interrater.tsv / .json: refuse before any work, with the plain message
+        require = getattr(session, "_requireWritable", None)
+        if require is not None:
+            require(_("The agreement was not computed."))
         prepared = _rules().prepare_summary(session.study)
         if _computation is None:
             _computation = _Computation(_computed)
         started = _computation.start(session.study.path, prepared)
     except Exception as e:
-        logging.error(f"Studio Library: the agreement could not be computed:\n{traceback.format_exc()}")
+        if getattr(e, "user_problem", False):
+            logging.warning(f"Studio Library: the agreement was not computed: {e}")
+        else:
+            logging.error(f"Studio Library: the agreement could not be computed:\n{traceback.format_exc()}")
         review._toast(str(e), ms=5000, level="warning")
         return None
     _refreshCards()
@@ -651,6 +658,12 @@ def _computed(studyPath, result, error):
             return
         try:
             data = _rules().summary(session.study, computed=result)
+        except PermissionError:
+            # The study became read-only while the agreement was computed: no errno, no traceback
+            if hasattr(session, "_markReadOnly"):
+                session._markReadOnly()
+            review._toast(_("The agreement was not computed: the study folder is read-only"), ms=5000, level="warning")
+            return
         except Exception as e:
             logging.error(f"Studio Library: the agreement could not be computed:\n{traceback.format_exc()}")
             review._toast(str(e), ms=5000, level="warning")
