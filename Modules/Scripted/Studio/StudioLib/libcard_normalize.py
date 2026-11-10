@@ -652,6 +652,7 @@ class _Manager:
         self.runs = []
         self.history = []
         self.unmerged = set()
+        self.waiting = set()
         self.stopped = False
         self.failures = {}
         self.lastSummary = ""
@@ -822,8 +823,18 @@ class _Manager:
         current = session.current()
         affected = current is not None and current in self.unmerged
         if affected and session.isDirty():
+            # Only the open subject's own result waits (the session holds it in the inbox, and its edits are written by
+            # Done): the results of the other subjects are merged now
             self._mergeTimer.start(MERGE_RETRY_MS)
-            return []
+            applied = session.applyInbox()
+            merged = {sid for _path, sids in applied for sid in sids}
+            self.unmerged -= merged
+            self.waiting = {current}
+            if applied:
+                self._snapshotQc()
+                _checker().schedule()
+            return applied
+        self.waiting = set()
         edited = {}
         for sid in self.unmerged:
             run = next((run for run in self._newestFirst() if sid in run.lesionAtStart), None)
@@ -884,6 +895,11 @@ class _Manager:
                 _toast(self.lastSummary + (f": {reason}" if reason else ""), 8000, level="warning")
             elif not run.auto or review:
                 _toast(self.lastSummary, 4000)
+            waiting = sorted(sid for sid in self.waiting if sid in run.sids and sid in self.unmerged)
+            if waiting:
+                note = _("{sids}: waiting until you finish it (Done)").format(sids=", ".join(waiting))
+                self.lastSummary += " · " + note
+                _toast(note, 6000, level="consequence")
         _refreshLists()
         self.scheduleUi()
 

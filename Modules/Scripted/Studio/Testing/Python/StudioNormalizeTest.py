@@ -724,6 +724,28 @@ class StudioNormalizeTest(unittest.TestCase):
         self.assertEqual(self.chips(["sub-01"]), {"sub-01": "Stale"})
         self.assertEqual(len(self.auditEvents(path, "norm_lesion_edited", "sub-01")), 1)
 
+    def test_07b2_dirty_open_subject_does_not_hold_back_others(self):
+        """Only the open subject with unsaved edits waits; the results of the other subjects are merged, and the summary says who waits."""
+        from StudioLib import libcard_normalize as ln
+
+        path = self.makeStudy("dirtyhold", native=3, templateRows=0)
+        session = self.openStudy(path)
+        self.assertTrue(session.open("sub-02", switchToDraw=False))
+        job = ln.normalizeSubjects(["sub-01", "sub-02", "sub-03"])
+        self.assertIsNotNone(job)
+        session.markDirty()  # sub-02 is edited while the batch runs
+        manager = ln._manager
+        self.assertTrue(_wait(job.isFinished, BATCH_TIMEOUT_S))
+        _pump(500)
+        self.assertEqual(manager.unmerged, {"sub-02"})
+        self.assertEqual(self.disk(path, "sub-01")["space"], TEMPLATE)
+        self.assertEqual(self.disk(path, "sub-03")["space"], TEMPLATE)
+        self.assertEqual(self.disk(path, "sub-02")["space"], "native")
+        self.assertIn("sub-02: waiting", manager.lastSummary)
+        self.assertTrue(session.open("sub-01", switchToDraw=False))  # leaving writes the edits
+        self.assertTrue(_wait(lambda: not manager.unmerged, 15), "the held result was not merged after the edits were written")
+        self.assertEqual(self.disk(path, "sub-02")["space"], TEMPLATE)
+
     def test_07c_skipped_open_subject_is_explained(self):
         """The button counts the open subject with unsaved edits; the batch leaves it out and the toast says why."""
         from StudioLib import libcard_normalize as ln
