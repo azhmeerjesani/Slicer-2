@@ -2486,7 +2486,10 @@ def main(argv=None, cancel=None):
     inputs and options (its files are reported again and no run is registered a second time).
     """
     argv = list(sys.argv[1:] if argv is None else argv)
-    args = _parser().parse_args(argv)
+    from .transforms import _join_point_values
+
+    # '--point -30,20,10' (every left-hemisphere point) would be refused by argparse: write it '--point=-30,20,10'
+    args = _parser().parse_args(_join_point_values(argv))
     cancel = cancel or jobs.CancelToken(args.cancel_file)
     jobs.emit("start", job=JOB, argv=argv)
     if args.out is None and args.study is None:

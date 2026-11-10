@@ -135,6 +135,13 @@ class FiguresTest(unittest.TestCase):
                         self.assertGreater(left, right)
                     self.assertIn(f"{convention.capitalize()} convention", figure.caption)
 
+    def test_point_with_negative_first_coordinate_is_parsed_in_the_plain_form(self):
+        from LesionNetworkMappingLib.transforms import _join_point_values
+
+        for point in ("-30,20,10", "-30,-20,-10", "30,20,10"):
+            args = figures._parser().parse_args(_join_point_values(["--preset", "ortho", "--point", point]))
+            self.assertEqual(args.point, point)
+
     def test_every_tile_has_stamps(self):
         figure = figures.ortho(self.tmap, None, self.template, rule={"kind": "custom_t", "value": 4.0}, n=100, **SMALL)
         stamps = [item for item in figure.annotations if item.role == "stamp"]
