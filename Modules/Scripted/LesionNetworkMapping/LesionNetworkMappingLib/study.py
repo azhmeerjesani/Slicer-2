@@ -436,6 +436,24 @@ def canonical_value(column, value):
     return next((v for v in allowed if v == text.lower()), None)
 
 
+#: Values of the space column besides "native": the BIDS standard template identifiers (BIDS appendix "Coordinate
+#: systems"), the TemplateFlow spellings Studio writes (MNI152NLin6Asym) and "MNI" (an MNI template of another family,
+#: Slicer Studio's own templates). A space column holding anything else ("3T", a field strength) is a user's column.
+SPACE_LABELS = (
+    "native", "MNI", "MNI152Lin", "MNI152NLin2009aSym", "MNI152NLin2009bSym", "MNI152NLin2009cSym", "MNI152NLin2009aAsym",
+    "MNI152NLin2009bAsym", "MNI152NLin2009cAsym", "MNI152NLin6Sym", "MNI152NLin6Asym", "MNI152NLin6ASym", "MNI305", "MNIColin27",
+    "MNIInfant", "MNIPediatricAsym", "ICBM452AirSpace", "ICBM452Warp5Space", "IXI549Space", "NKI", "OASIS30AntsOASISAnts",
+    "OASIS30Atropos", "Talairach", "UNCInfant", "fsaverage", "fsaverageSym", "fsLR", "fsaverage3", "fsaverage4", "fsaverage5",
+    "fsaverage6",
+)
+_SPACE_LABELS_FOLDED = {label.casefold() for label in SPACE_LABELS}
+
+
+def is_space_value(value):
+    """Whether a cell can be the study's space column: missing, "native" or a template space (:data:`SPACE_LABELS`, any case)."""
+    return is_missing(value) or str(value).strip().casefold() in _SPACE_LABELS_FOLDED
+
+
 def is_included(row):
     """True unless the row's include value means 0 (:func:`include_value`); the one test every reader uses."""
     return include_value((row or {}).get("include", "1")) != "0"

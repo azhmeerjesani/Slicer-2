@@ -1508,6 +1508,49 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertNotIn("lesion_original", study.columns)
         self.assertEqual([study.subject(sid)["lesion"] for sid in study.subject_ids], ["sub-01_lesion.nii.gz", "lesions/gone.nii.gz", "n/a"])
 
+    def test_7c_adopted_user_space_column_kept(self):
+        """A participants.tsv with a user "space" column (field strength 1.5T / 3T) became the study's space column: traced
+        lesions were named space-3T, no brain mask applied (outside_brain_pct n/a) and the share export left the lesions out
+        as native space or shared them as space-3T (BB-1). The column is kept as space_original and the study's space comes
+        from the files' grids.
+        """
+        from LesionNetworkMappingLib import share
+        from LesionNetworkMappingLib.study import read_tsv
+
+        from StudioLib import study_ui
+
+        _folder, control = self._adopt("No space column", ["participant_id", "age"], [["sub-01", "60"], ["sub-02", "61"], ["sub-03", "62"]], lesions=(1,))
+        expected = control.subject("sub-01")["space"]
+        self.assertNotIn(expected, (None, "", "n/a", "native"))
+        header = ["participant_id", "diagnosis", "space", "age"]
+        values = [["sub-01", "stroke", "1.5T", "60"], ["sub-02", "stroke", "3T", "61"], ["sub-03", "control", "3T", "62"]]
+        folder, study = self._adopt("Field strength", header, values, {"space": {"Description": "Scanner field strength"}}, lesions=(1,))
+        self.assertEqual(study.adoptedRenames, {"space": "space_original"})
+        self.assertEqual(study.columns[:4], ["participant_id", "diagnosis", "space_original", "age"])
+        rows = [study.subject(sid) for sid in study.subject_ids]
+        self.assertEqual([row["space_original"] for row in rows], ["1.5T", "3T", "3T"])
+        self.assertEqual([row["space"] for row in rows], [expected] * 3)
+        self.assertEqual(study.lesion_relpath("sub-02"), f"lesions/sub-02_space-{expected}_desc-lesion_mask.nii.gz")
+        self.assertEqual(share._lesion_space(study, rows[0]), expected)
+        columns, saved = read_tsv(os.path.join(folder, "participants.tsv"))
+        self.assertIn("space", columns)
+        self.assertEqual([row["space_original"] for row in saved], ["1.5T", "3T", "3T"])
+        with open(os.path.join(folder, "participants.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["space_original"]["Description"], "Scanner field strength")
+        # Importing such a table into the open study keeps the study's space too
+        table = os.path.join(self.directory, "field-strength.tsv")
+        with open(table, "w", encoding="utf-8") as f:
+            f.write("participant_id\tspace\nsub-01\t7T\nsub-02\t3T\n")
+        result = study_ui._importTable(study, table)
+        self.assertEqual(result["renamed"], {"space": "space_original"})
+        self.assertEqual([study.subject(sid)["space"] for sid in ("sub-01", "sub-02")], [expected] * 2)
+        self.assertEqual([study.subject(sid)["space_original"] for sid in ("sub-01", "sub-02")], ["7T", "3T"])
+        # A space column of template ids and native (any case) is the study's own column
+        folder, study = self._adopt("Spaces", ["participant_id", "space"], [["sub-01", "MNI152NLin2009cAsym"], ["sub-02", "native"], ["sub-03", "n/a"]])
+        self.assertEqual(study.adoptedRenames, {})
+        self.assertNotIn("space_original", study.columns)
+        self.assertEqual([study.subject(sid)["space"] for sid in ("sub-01", "sub-02")], ["MNI152NLin2009cAsym", "native"])
+
     def test_73_project_closed_outside_draw_frees_its_lesion(self):
         """Closing a project from Library kept its lesion in memory: ``draw._metricsCache`` held the closed project's
         vtkSegmentation (one entry per project, keyed by a new segment ID each time) and only Draw's close observer, active only

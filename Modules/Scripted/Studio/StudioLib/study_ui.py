@@ -832,7 +832,8 @@ def adoptFolder(folder, name=None, groupColumn=None, groupMapping=None, template
     The table's columns and their order are kept (the missing standard columns are appended); its rows keep their
     values, except the ids (normalized to "sub-<label>", the original in ``source_id``) and the group mapping
     (``applyGroupMapping()``). A column named like a study column with fixed values (status, qc, include, group) that
-    holds other values ("alive", "deceased") is kept as ``<name>_original`` (``_keepClashingColumns()``; the returned
+    holds other values ("alive", "deceased"), and a space column of other values than spaces (a field strength of 3T), is
+    kept as ``<name>_original`` (``_keepClashingColumns()``; the returned
     study's ``adoptedRenames`` lists them). participants.tsv and participants.json are backed up once to ``.studio/``.
     """
     studyModule = _lnm("study")
@@ -936,15 +937,21 @@ def _keepClashingColumns(studyModule, columns, rows, dictionary, folder=None):
     is kept the same way as ``lesion_original``, and the study's own column starts empty (n/a), so that the folder's
     scans and lesion files are paired by ``Study.add_files`` and tracing never overwrites the user's values. A path is a
     NIfTI file name or a file in ``folder``; a column of paths (also of missing files) is the study's column.
+    A "space" column whose cells are not all spaces (``study.is_space_value``: "native" or a template id; a field
+    strength of 1.5T / 3T) is kept the same way as ``space_original``: the study's space column starts empty, so that
+    ``Study.add_files`` sets it from the files' grids and lesions are never named or shared with the user's values.
 
     :return: {old name: new name} of the renamed columns.
     """
     renamed = {}
-    for column in PATH_COLUMNS:
+    for column in (*PATH_COLUMNS, "space"):
         if column not in columns:
             continue
         values = [row.get(column, studyModule.NA) for row in rows]
-        if all(studyModule.is_missing(value) or _isImagePath(studyModule, value, folder) for value in values):
+        if column == "space":
+            if all(studyModule.is_space_value(value) for value in values):
+                continue
+        elif all(studyModule.is_missing(value) or _isImagePath(studyModule, value, folder) for value in values):
             continue
         target = _originalName(studyModule, column, columns, rows, dictionary)
         columns[columns.index(column)] = target
@@ -954,7 +961,7 @@ def _keepClashingColumns(studyModule, columns, rows, dictionary, folder=None):
         if column in dictionary:
             dictionary[target] = dictionary.pop(column)
         renamed[column] = target
-        logging.info(f"Studio: the adopted column {column} holds other values than image paths; kept as {target}")
+        logging.info(f"Studio: the adopted column {column} holds other values than {'spaces' if column == 'space' else 'image paths'}; kept as {target}")
     for column, allowed in studyModule.ALLOWED_VALUES.items():
         if column not in columns:
             continue
@@ -988,7 +995,8 @@ def _originalName(studyModule, column, columns, rows, dictionary):
 
 def _importClashingColumns(studyModule, columns, rows):
     """Keep the columns of a table imported into a study that are named like a study column with fixed values but hold other
-    values (``_keepClashingColumns()`` of adopting a folder, for an open study).
+    values (``_keepClashingColumns()`` of adopting a folder, for an open study), or a "space" column that holds other
+    values than spaces (``study.is_space_value``; a field strength of 1.5T / 3T).
 
     Such a column ("status" of alive / deceased) is renamed to ``<name>_original`` (a name the table does not use yet), so
     that the import keeps its values without changing the study's own column (tracing status, QC). An include column keeps
@@ -999,11 +1007,14 @@ def _importClashingColumns(studyModule, columns, rows):
     :return: {old name: new name} of the renamed columns.
     """
     renamed = {}
-    for column in studyModule.ALLOWED_VALUES:
+    for column in (*studyModule.ALLOWED_VALUES, "space"):
         if column not in columns:
             continue
         values = [row.get(column, studyModule.NA) for row in rows]
-        if all(studyModule.is_missing(value) or studyModule.canonical_value(column, value) is not None for value in values):
+        if column == "space":
+            if all(studyModule.is_space_value(value) for value in values):
+                continue
+        elif all(studyModule.is_missing(value) or studyModule.canonical_value(column, value) is not None for value in values):
             continue
         target, number = column + ORIGINAL_SUFFIX, 2
         while target in columns:
@@ -1020,7 +1031,8 @@ def _importClashingColumns(studyModule, columns, rows):
             for row in rows:
                 row.pop(column, None)
         renamed[column] = target
-        logging.info(f"Studio: the imported column {column} holds other values than the study's ({', '.join(studyModule.ALLOWED_VALUES[column])}); kept as {target}")
+        allowed = studyModule.ALLOWED_VALUES.get(column) or ("native", "template spaces")
+        logging.info(f"Studio: the imported column {column} holds other values than the study's ({', '.join(allowed)}); kept as {target}")
     return renamed
 
 
