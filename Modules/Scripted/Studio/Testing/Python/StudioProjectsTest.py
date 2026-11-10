@@ -5188,6 +5188,48 @@ class StudioProjectsTest(unittest.TestCase):
                 settings.setValue("Studio/LastOpenDirectory", savedFolder)
 
 
+    def test_66d_web_figure_and_template_image_dialogs_start_in_the_last_open_folder(self):
+        """README: "File dialogs start in /data until you choose another folder". Figure > Show source... passed "" (Qt then
+        opens the container HOME), "Choose the template image" fell back to HOME, and Open figure... always restarted in /data
+        even after a figure was picked in a subfolder.
+        """
+        from StudioLib import figure, templates_ui
+
+        settings = qt.QSettings()
+        keys = ("Studio/LastOpenDirectory", figure.LAST_FOLDER_KEY, templates_ui.LAST_DIRECTORY_KEY)
+        saved = {key: settings.value(key) for key in keys}
+        savedWeb = os.environ.get("SLICER_STUDIO_WEB")
+        data = os.path.join(self.tempDir, "data")
+        sub = os.path.join(data, "figs")
+        os.makedirs(sub)
+        try:
+            for key in keys:
+                settings.remove(key)
+            settings.setValue("Studio/LastOpenDirectory", data)
+            os.environ["SLICER_STUDIO_WEB"] = "1"
+            self.assertEqual(figure._lastFigureFolder(), data)
+            self.assertEqual(templates_ui._lastDirectory(), data)
+            settings.setValue(figure.LAST_FOLDER_KEY, sub)
+            self.assertEqual(figure._lastFigureFolder(), sub, "a folder that was chosen stays")
+            settings.setValue(templates_ui.LAST_DIRECTORY_KEY, sub)
+            self.assertEqual(templates_ui._lastDirectory(), sub)
+            settings.setValue(figure.LAST_FOLDER_KEY, os.path.join(self.tempDir, "gone"))
+            self.assertEqual(figure._lastFigureFolder(), data)
+            os.environ.pop("SLICER_STUDIO_WEB", None)
+            settings.remove(templates_ui.LAST_DIRECTORY_KEY)
+            self.assertEqual(figure._lastFigureFolder(), "", "the desktop build is unchanged")
+            self.assertEqual(templates_ui._lastDirectory(), os.path.expanduser("~"))
+        finally:
+            if savedWeb is None:
+                os.environ.pop("SLICER_STUDIO_WEB", None)
+            else:
+                os.environ["SLICER_STUDIO_WEB"] = savedWeb
+            for key, value in saved.items():
+                if value is None:
+                    settings.remove(key)
+                else:
+                    settings.setValue(key, value)
+
     def test_66b_web_recipe_folder_and_engine_run_dialogs_start_in_the_last_open_folder(self):
         """"Add a folder of lab recipes", "Folder for lab recipes" (Save as lab recipe without a study) and "Engine run folder"
         passed no start folder, so in the web build the first of them opened in the container HOME, not /data. They now start

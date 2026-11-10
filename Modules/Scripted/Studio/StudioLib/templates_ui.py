@@ -125,7 +125,11 @@ def _thumbnailLabel(size, objectName="studioTemplateThumbnail"):
 
 def _lastDirectory():
     value = qt.QSettings().value(LAST_DIRECTORY_KEY)
-    return str(value) if value and os.path.isdir(str(value)) else os.path.expanduser("~")
+    if value and os.path.isdir(str(value)):
+        return str(value)
+    from . import importer
+
+    return importer.webStartFolder() or os.path.expanduser("~")
 
 
 def _rememberDirectory(path):

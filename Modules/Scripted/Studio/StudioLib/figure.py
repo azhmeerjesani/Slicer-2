@@ -1898,9 +1898,23 @@ def pasteFigure(shell=None):
     return openFigure(path, shell)
 
 
+def _lastFigureFolder():
+    """Where a figure file dialog starts: the folder of the last figure chosen, else (web build) ``/data`` or the folder of the last file dialog."""
+    folder = str(slicer.util.settingsValue(LAST_FOLDER_KEY, "") or "")
+    if folder and os.path.isdir(folder):
+        return folder
+    if isWebBuild():
+        webFolder = _importer().webStartFolder()
+        if webFolder:
+            return webFolder
+        if os.path.isdir(WEB_DATA_FOLDER):
+            return WEB_DATA_FOLDER
+    return ""
+
+
 def openFigureDialog(shell=None):
     """"Open figure…": a file dialog (in ``/data`` in the web build). Return the figure node or None."""
-    start = WEB_DATA_FOLDER if isWebBuild() and os.path.isdir(WEB_DATA_FOLDER) else str(slicer.util.settingsValue(LAST_FOLDER_KEY, "") or "")
+    start = _lastFigureFolder()
     path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Open figure"), start, _(FIGURE_FILTER))
     if not path:
         return None
@@ -2425,7 +2439,7 @@ class FigureCard:
 
     def _showSourceDialog(self):
         current = session()
-        start = (current.sourcesFolder() if current is not None else None) or str(slicer.util.settingsValue(LAST_FOLDER_KEY, "") or "")
+        start = (current.sourcesFolder() if current is not None else None) or _lastFigureFolder()
         path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Show source"), start, _("Figure fit (*_fit.json)"))
         if path:
             try:
