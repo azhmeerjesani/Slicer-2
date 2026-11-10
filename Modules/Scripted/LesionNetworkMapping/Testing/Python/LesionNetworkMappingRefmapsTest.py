@@ -533,11 +533,13 @@ class SourcesTest(RefmapsTestBase):
             "/nolen/trunc.nii.gz": packed[: len(packed) // 2],
             "/nolen/tail.nii.gz": packed[:-4],  # all image data, but no gzip trailer (CRC and length)
             "/cut.nii": plain[: len(plain) - 100],
+            "/dl/plaindl": plain,  # extensionless links (figshare, OSF): the content decides, not the name
+            "/dl/gzdl": packed,
         }
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
-                body = files.get(self.path)
+                body = files.get(self.path.split("?")[0])
                 if body is None:
                     self.send_error(404)
                     return
@@ -585,6 +587,13 @@ class SourcesTest(RefmapsTestBase):
         self.assertIn("incomplete", str(raised.exception))
         self.assertEqual([item["id"] for item in refmaps.entries(self.root)], [entry["id"]])
         self.assertEqual(kept(), before)
+        with mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}):
+            for name, suffix in (("/dl/plaindl", ".nii"), ("/dl/gzdl", ".nii.gz")):
+                with self.subTest(name=name):
+                    extensionless = refmaps.add_url(base + name + "?download=1", root=self.root, offline=False)
+                    path = refmaps.entry_path(extensionless, self.root)
+                    self.assertTrue(path.endswith(suffix) and os.path.isfile(path), path)
+                    self.assertIn(os.path.relpath(path, fetch.cache_dir(self.root)).replace(os.sep, "/"), fetch.read_manifest(self.root)["files"])
 
     def test_multi_volume_file_is_refused_up_front(self):
         """BB-1: a 3-volume NIfTI was added ('Added ...') and then failed with a traceback on every Compare."""

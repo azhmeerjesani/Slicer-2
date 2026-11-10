@@ -548,7 +548,25 @@ def _fetch_into_registry(resource, root, session=None, progress=None, cancel=Non
     try:
         return fetch.fetch(resource, cache=registry_root(root), progress=progress, cancel=cancel, offline=offline, session=session)
     except fetch.FetchError as exc:
-        raise RefmapsError(f"{resource.title}: {exc.message}") from None
+        message = exc.message
+        raise RefmapsError(message if message.startswith(f"{resource.title}:") else f"{resource.title}: {message}") from None
+
+
+def _name_by_content(path, root):
+    """Rename a download made under a neutral name to ``.nii.gz`` (gzip magic bytes) or ``.nii``, keeping its fetch record."""
+    from . import fetch
+
+    with open(path, "rb") as f:
+        gzipped = f.read(2) == b"\x1f\x8b"
+    target = path[: -len(".download")] + (".nii.gz" if gzipped else ".nii")
+    cache = registry_root(root)
+    old, new = fetch._relpath(cache, path), fetch._relpath(cache, target)
+    record = fetch.read_manifest(cache)["files"].get(old)
+    os.replace(path, target)
+    if record is not None:
+        fetch._record_file(cache, new, record)
+        fetch._drop_record(cache, old)
+    return target
 
 
 def add_url(url, title=None, licence="unknown", citation="", condition=None, space=None, kind="map", entry_id=None, root=None, session=None,
@@ -560,11 +578,17 @@ def add_url(url, title=None, licence="unknown", citation="", condition=None, spa
     if not re.match(r"^https?://", url):
         raise RefmapsError("Give an http(s) URL of a NIfTI map")
     filename = os.path.basename(url.split("?")[0]) or "map.nii.gz"
-    if not re.search(r"\.nii(\.gz)?$", filename):
-        filename += ".nii.gz"
+    # A link without a .nii/.nii.gz name (figshare, OSF) says nothing about compression: the file is downloaded under a
+    # neutral name and named by what it is (gzip magic bytes or not) once it is here.
+    sniffed = not re.search(r"\.nii(\.gz)?$", filename)
+    if sniffed:
+        filename += ".download"
     resource = fetch.Resource({"id": f"refmap-url/{url}", "title": title or filename, "urls": [url], "filename": filename,
                                "checksum": fetch.RECORD_ON_FIRST_DOWNLOAD, "licence": licence or "unknown"})
     path = _fetch_into_registry(resource, root, session, progress, cancel, offline)
+    if sniffed:
+        path = _name_by_content(path, root)
+        filename = os.path.basename(path)
     _check_download(path, root, f"{title or filename} (from {url})")
     # The default id carries the URL's hash, so adding the same URL again refreshes its entry instead of listing it twice.
     entry_id = entry_id or f"url-{_slug(re.sub(r'.nii(.gz)?$', '', filename), 32)}-{hashlib.sha256(url.encode()).hexdigest()[:8]}"
