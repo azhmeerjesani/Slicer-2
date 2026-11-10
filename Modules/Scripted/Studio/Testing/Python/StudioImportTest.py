@@ -2146,6 +2146,34 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._wait(importer.TRANSIENT_LOAD_WINDOW_MS + 300)
         self.assertEqual(studioShell.currentModuleName(), "SampleData")
 
+    def test_sampledata_second_load_is_already_open(self):
+        """The same sample loaded a second time (Sample Data reads its cache file again) is not added twice: the open scan
+        becomes current again and keeps its lesion.
+        """
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        path = self._writeVolume("MRHeadTwice.nrrd", GRID_SHIFTED)
+        slicer.util.selectModule("SampleData")
+        self._pump(4)
+        first = slicer.util.loadVolume(path)
+        self._wait(importer.TRANSIENT_LOAD_WINDOW_MS + 300)
+        editor = self._editor()
+        lesion = editor.segmentationNode()
+        self.assertEqual(editor.sourceVolumeNode().GetID(), first.GetID())
+        volumeCount = len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"))
+        segmentationCount = len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode"))
+        studioShell.switchTo("library")
+        slicer.util.selectModule("SampleData")
+        self._pump(4)
+        slicer.util.loadVolume(path)
+        self._wait(importer.TRANSIENT_LOAD_WINDOW_MS + 300)
+        self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")), volumeCount)
+        self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")), segmentationCount)
+        self.assertEqual(studioShell.currentWorkspace(), "draw")
+        self.assertEqual(editor.sourceVolumeNode().GetID(), first.GetID())
+        self.assertEqual(editor.segmentationNode().GetID(), lesion.GetID())
+
     def test_no_banner_over_views(self):
         """Start on template shows no card over the views; after a stroke the 1 mm offer is a notice line; Not now is kept."""
         from StudioLib import importer

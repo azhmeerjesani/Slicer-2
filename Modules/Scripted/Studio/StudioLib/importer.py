@@ -1092,8 +1092,10 @@ def _normalizedPath(path):
     return os.path.normcase(os.path.realpath(os.path.abspath(str(path))))
 
 
-def openNodeForFile(path):
+def openNodeForFile(path, exclude=None):
     """The scan or segmentation of the scene that was loaded from ``path`` (same real path), or None.
+
+    ``exclude``: a node that is never returned (the node just loaded from ``path``, when looking for an older one).
 
     Only nodes shown to the user are considered: scans (not label maps) and segmentations whose storage node
     reads that file. A node whose file the open project took over (its storage node now names the copy in the project) is
@@ -1104,7 +1106,7 @@ def openNodeForFile(path):
     target = _normalizedPath(path)
     for className in ("vtkMRMLScalarVolumeNode", "vtkMRMLSegmentationNode"):
         for node in slicer.util.getNodesByClass(className):
-            if _shownNodeForFile(node) is None:
+            if _shownNodeForFile(node) is None or (exclude is not None and node.GetID() == exclude.GetID()):
                 continue
             storageNode = node.GetStorageNode()
             fileName = storageNode.GetFileName() if storageNode is not None else None
@@ -1120,7 +1122,7 @@ def openNodeForFile(path):
                 return proxyNode
     for node in _projectSourceNodes(path):
         shown = _shownNodeForFile(node)
-        if shown is not None:
+        if shown is not None and not (exclude is not None and shown.GetID() == exclude.GetID()):
             return shown
     return None
 
@@ -4846,6 +4848,38 @@ def _ownLoad():
     return _OwnLoad()
 
 
+def _sameLoadedScan(node):
+    """The scan already open that ``node`` is a second load of, else None.
+
+    The Sample Data module removes the storage node of what it loads, so the file cannot tell: the scene named the new node
+    ``<name>_<n>`` after the open scan ``<name>``, and both hold the same grid and voxels.
+    """
+    import re
+
+    import numpy as np
+
+    match = re.fullmatch(r"(.*)_\d+", node.GetName())
+    if match is None:
+        return None
+    for other in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
+        if other.GetID() == node.GetID() or other.GetName() != match.group(1) or _shownNodeForFile(other) is None:
+            continue
+        if other.GetImageData() is None or node.GetImageData() is None:
+            continue
+        if other.GetImageData().GetDimensions() != node.GetImageData().GetDimensions():
+            continue
+        matrices = []
+        for volume in (other, node):
+            matrix = vtk.vtkMatrix4x4()
+            volume.GetIJKToRASMatrix(matrix)
+            matrices.append(slicer.util.arrayFromVTKMatrix(matrix))
+        if not np.allclose(matrices[0], matrices[1]):
+            continue
+        if np.array_equal(slicer.util.arrayFromVolume(other), slicer.util.arrayFromVolume(node)):
+            return other
+    return None
+
+
 class _TransientLoadWatcher(VTKObservationMixin):
     """A scan added while the Sample Data or DICOM module is shown opens in Draw (with a "Lesion" segment), as if it was
     opened from Library. Scene imports and multi-volume loads (more than one volume within 500 ms) are left alone.
@@ -4891,7 +4925,23 @@ class _TransientLoadWatcher(VTKObservationMixin):
                 startOnTemplate(shell=self.shell, volumeNode=nodes[0])
                 return
             result = LoadResult()
-            result.volumes.append(nodes[0])
+            storageNode = nodes[0].GetStorageNode()
+            fileName = storageNode.GetFileName() if storageNode is not None else None
+            openNode = openNodeForFile(fileName, exclude=nodes[0]) if fileName else None
+            if openNode is None:
+                openNode = _sameLoadedScan(nodes[0])
+            if openNode is not None and _isScan(openNode):
+                # The same sample loaded a second time: the Sample Data module read its cache file again. The new copy
+                # goes, and the scan that is already open becomes current again ("<name> is already open")
+                related = [nodes[0].GetNthDisplayNode(i) for i in range(nodes[0].GetNumberOfDisplayNodes())]
+                related.append(storageNode)
+                slicer.mrmlScene.RemoveNode(nodes[0])
+                for other in related:
+                    if other is not None and slicer.mrmlScene.IsNodePresent(other):
+                        slicer.mrmlScene.RemoveNode(other)
+                result.alreadyOpen.append(openNode)
+            else:
+                result.volumes.append(nodes[0])
             _afterLoad(result, self.shell)
         except Exception:
             logging.error(f"Studio: cannot open the loaded scan in Draw:\n{traceback.format_exc()}")
