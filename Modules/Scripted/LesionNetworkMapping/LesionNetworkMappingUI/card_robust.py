@@ -1111,7 +1111,12 @@ class RobustCard:
         self.mapsJob = None
         self._updateProgress(force=True)
         kind, self.pendingKind = self.pendingKind, None
-        if kind and job.succeeded() and self.currentMapsTsv() is not None and self.runState(kind)[0]:
+        if kind and (job.stopRequested or job.state == "cancelled"):
+            # Stop was clicked while the lesions were being mapped: drop the pending analysis (a stopped job
+            # can still end 'done' when it was past its last cancel check)
+            self.setNotice(_("Analysis stopped: a job that did not finish has no results."))
+            self.refresh()
+        elif kind and job.succeeded() and self.currentMapsTsv() is not None and self.runState(kind)[0]:
             self.start(kind)
         else:
             self.refresh()
