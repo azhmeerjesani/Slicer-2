@@ -876,7 +876,7 @@ def adoptFolder(folder, name=None, groupColumn=None, groupMapping=None, template
             for row in rows:
                 row.setdefault(GROUP_ORIGINAL_COLUMN, studyModule.NA)
     columns = [column for column in columns if column != "participant_id"]
-    renamed = _keepClashingColumns(studyModule, columns + added, rows, dictionary)
+    renamed = _keepClashingColumns(studyModule, columns + added, rows, dictionary, folder)
     columns = [renamed.get(column, column) for column in columns]
     ordered = ["participant_id"] + columns
     ordered += [column for column in studyModule.STANDARD_COLUMNS if column not in ordered]
@@ -911,7 +911,19 @@ def adoptFolder(folder, name=None, groupColumn=None, groupMapping=None, template
     return opened
 
 
-def _keepClashingColumns(studyModule, columns, rows, dictionary):
+#: Study columns that hold a path to an image relative to the study (SPEC 5.5)
+PATH_COLUMNS = ("scan", "lesion")
+
+
+def _isImagePath(studyModule, value, folder):
+    """Whether a cell of an adopted scan or lesion column names an image: a NIfTI file name, or a file in ``folder``."""
+    value = str(value).strip()
+    if value.lower().endswith(studyModule.NIFTI_EXTENSIONS):
+        return True
+    return bool(folder) and os.path.isfile(os.path.join(folder, value))
+
+
+def _keepClashingColumns(studyModule, columns, rows, dictionary, folder=None):
     """Keep the user's columns that are named like a study column with fixed values but hold other values.
 
     A "status" column of "alive" / "deceased" is renamed to ``status_original`` (its values, position and data dictionary
@@ -920,9 +932,29 @@ def _keepClashingColumns(studyModule, columns, rows, dictionary):
     allowed values only is the study's column; its empty cells get the default. ``columns`` (without participant_id),
     ``rows`` and ``dictionary`` are changed in place.
 
+    A "scan" or "lesion" column whose cells are not all image paths (a clinical "lesion" column of yes / no, "left MCA")
+    is kept the same way as ``lesion_original``, and the study's own column starts empty (n/a), so that the folder's
+    scans and lesion files are paired by ``Study.add_files`` and tracing never overwrites the user's values. A path is a
+    NIfTI file name or a file in ``folder``; a column of paths (also of missing files) is the study's column.
+
     :return: {old name: new name} of the renamed columns.
     """
     renamed = {}
+    for column in PATH_COLUMNS:
+        if column not in columns:
+            continue
+        values = [row.get(column, studyModule.NA) for row in rows]
+        if all(studyModule.is_missing(value) or _isImagePath(studyModule, value, folder) for value in values):
+            continue
+        target = _originalName(studyModule, column, columns, rows, dictionary)
+        columns[columns.index(column)] = target
+        for row in rows:
+            row[target] = row.pop(column, studyModule.NA)
+            row[column] = studyModule.NA
+        if column in dictionary:
+            dictionary[target] = dictionary.pop(column)
+        renamed[column] = target
+        logging.info(f"Studio: the adopted column {column} holds other values than image paths; kept as {target}")
     for column, allowed in studyModule.ALLOWED_VALUES.items():
         if column not in columns:
             continue
@@ -933,9 +965,7 @@ def _keepClashingColumns(studyModule, columns, rows, dictionary):
                 if studyModule.is_missing(row.get(column)):
                     row[column] = default
             continue
-        target, number = column + ORIGINAL_SUFFIX, 2
-        while target in columns or target in dictionary or any(target in row for row in rows):
-            target, number = f"{column}{ORIGINAL_SUFFIX}{number}", number + 1
+        target = _originalName(studyModule, column, columns, rows, dictionary)
         columns[columns.index(column)] = target
         for row, value in zip(rows, values, strict=True):
             row[target] = row.pop(column, studyModule.NA)
@@ -946,6 +976,14 @@ def _keepClashingColumns(studyModule, columns, rows, dictionary):
         renamed[column] = target
         logging.info(f"Studio: the adopted column {column} holds other values than the study's ({', '.join(allowed)}); kept as {target}")
     return renamed
+
+
+def _originalName(studyModule, column, columns, rows, dictionary):
+    """``<column>_original`` (``_original2``, ... when the table already uses that name) for a renamed adopted column."""
+    target, number = column + ORIGINAL_SUFFIX, 2
+    while target in columns or target in dictionary or any(target in row for row in rows):
+        target, number = f"{column}{ORIGINAL_SUFFIX}{number}", number + 1
+    return target
 
 
 def _importClashingColumns(studyModule, columns, rows):

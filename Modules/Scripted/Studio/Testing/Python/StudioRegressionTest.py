@@ -1404,8 +1404,10 @@ class StudioRegressionTest(unittest.TestCase):
 
     # Adopted participants.tsv with columns named like the study's (BB-1)
 
-    def _adopt(self, name, header, values, dictionary=None):
-        """Adopt a folder of sub-01..03 T1w scans and a participants.tsv of ``header`` and ``values`` (one list per subject)."""
+    def _adopt(self, name, header, values, dictionary=None, lesions=()):
+        """Adopt a folder of sub-01..03 T1w scans (and lesion files of the subject numbers ``lesions``) and a
+        participants.tsv of ``header`` and ``values`` (one list per subject).
+        """
         from LesionNetworkMappingLib import geometry, nifti
 
         from StudioLib import study_ui
@@ -1418,6 +1420,9 @@ class StudioRegressionTest(unittest.TestCase):
         paths = []
         for index in range(1, 4):
             paths.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(paths[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        for index in lesions:
+            paths.append(os.path.join(folder, f"sub-0{index}_lesion.nii.gz"))
             nifti.write_nifti(paths[-1], np.zeros(grid.shape, np.uint8), grid.affine)
         with open(os.path.join(folder, "participants.tsv"), "w", encoding="utf-8") as f:
             f.write("\t".join(header) + "\n" + "".join("\t".join(row) + "\n" for row in values))
@@ -1470,6 +1475,38 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertEqual([[reader(row) for row in study.subjects] for reader in readers], [[True, False, True]] * 3)
         self.assertEqual(libcard_analysis.allTraced(study), (2, True))
         self.assertEqual([row["participant_id"] for row in study.analysis_rows()[0]], ["sub-01", "sub-03"])
+
+    def test_7b_adopted_clinical_lesion_column_kept(self):
+        """A participants.tsv with a clinical "lesion" column (yes / no) was read as lesion paths: the folder's lesion files
+        were skipped ("already has a lesion") and tracing overwrote the user's values (BB-1). The column is kept as
+        lesion_original and the study's lesion column pairs the files.
+        """
+        from LesionNetworkMappingLib.study import read_tsv
+
+        header = ["participant_id", "diagnosis", "lesion", "age"]
+        values = [["sub-01", "stroke", "yes", "60"], ["sub-02", "stroke", "yes", "61"], ["sub-03", "control", "no", "62"]]
+        folder, study = self._adopt("Clinical lesion", header, values, {"lesion": {"Description": "Lesion on MRI"}}, lesions=(1,))
+        self.assertEqual(study.adoptedRenames, {"lesion": "lesion_original"})
+        self.assertEqual(study.columns[:4], ["participant_id", "diagnosis", "lesion_original", "age"])
+        rows = [study.subject(sid) for sid in study.subject_ids]
+        self.assertEqual([row["lesion_original"] for row in rows], ["yes", "yes", "no"])
+        self.assertEqual(rows[0]["lesion"], "sub-01_lesion.nii.gz")
+        self.assertEqual([row["status"] for row in rows], ["traced", "untraced", "untraced"])
+        self.assertTrue(all(row["lesion"] == "n/a" for row in rows[1:]))
+        # Tracing sub-02 writes the study's lesion column only
+        study.set("sub-02", lesion="lesions/sub-02_desc-lesion_mask.nii.gz", status="traced")
+        study.save()
+        columns, saved = read_tsv(os.path.join(folder, "participants.tsv"))
+        self.assertIn("lesion", columns)
+        self.assertEqual([row["lesion_original"] for row in saved], ["yes", "yes", "no"])
+        with open(os.path.join(folder, "participants.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["lesion_original"]["Description"], "Lesion on MRI")
+        # A lesion column of paths (also of a missing file) is the study's own column
+        header = ["participant_id", "lesion"]
+        folder, study = self._adopt("Earlier lesions", header, [["sub-01", "sub-01_lesion.nii.gz"], ["sub-02", "lesions/gone.nii.gz"], ["sub-03", "n/a"]], lesions=(1,))
+        self.assertEqual(study.adoptedRenames, {})
+        self.assertNotIn("lesion_original", study.columns)
+        self.assertEqual([study.subject(sid)["lesion"] for sid in study.subject_ids], ["sub-01_lesion.nii.gz", "lesions/gone.nii.gz", "n/a"])
 
     def test_73_project_closed_outside_draw_frees_its_lesion(self):
         """Closing a project from Library kept its lesion in memory: ``draw._metricsCache`` held the closed project's
