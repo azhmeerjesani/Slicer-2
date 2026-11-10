@@ -2607,6 +2607,19 @@ fi
         with open(os.path.join(out, "studio-update.json"), encoding="utf-8") as f:
             self.assertEqual(json.load(f)["published"], "2024-02-29")
 
+    def test_MakeReleaseMinimumSupportedSummary(self):
+        """--minimum-supported without --required: the closing summary says older versions are blocked, not 'optional'."""
+        makeRelease = self._importScript(os.path.join("Utilities", "Scripts", "SlicerStudioRelease", "make_release.py"), "make_release_minsup")
+        linux = os.path.join(self.feedDir, "Slicer-5.13.0-linux-amd64.tar.gz")
+        _fakeLinuxPackage(linux, makeRelease.read_studio_version())
+        out = os.path.join(self.tempDir, "release-minsup")
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = makeRelease.main([linux, "--minimum-supported", "0.1.0", "--no-web", "--out-dir", out])
+        self.assertEqual(code, 0)
+        self.assertIn("older than 0.1.0 show a blocking 'Update required' dialog", stdout.getvalue())
+        self.assertNotIn("This release is optional", stdout.getvalue())
+
     def test_MakeReleaseHugeNotes(self):
         """Notes past the app's limits: a manifest over MANIFEST_MAX_BYTES is refused (never written), notes over
         NOTES_MAX_CHARS give a warning.

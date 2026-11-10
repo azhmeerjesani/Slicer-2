@@ -194,7 +194,7 @@ def collect_assets(args):
     return {key: str(Path(path).resolve()) for key, path in assets.items()}
 
 
-def print_steps(version, manifest_path, files, required, notes_file):
+def print_steps(version, manifest_path, files, required, notes_file, minimum_supported=None):
     tag = f"v{version}"
     commit = git_commit()
     print()
@@ -214,6 +214,9 @@ def print_steps(version, manifest_path, files, required, notes_file):
     print()
     if required:
         print("This release is REQUIRED: older installed versions show a blocking 'Update required' dialog at their next start (when they check for updates).")
+    elif minimum_supported:
+        print(f"Installed versions older than {minimum_supported} show a blocking 'Update required' dialog at their next start (when they check for updates); "
+              "newer ones are offered this release in Settings > Updates and with a notice that can be skipped.")
     else:
         print("This release is optional: Slicer Studio offers it in Settings > Updates and with a notice that can be skipped.")
     print(f"Manifest: {manifest_path}")
@@ -302,7 +305,7 @@ def main(argv=None):
         except OSError as error:
             raise ReleaseError(f"Cannot write {manifest_path}: {error.strerror or error}.") from None
         files = [assets[key] for key in PLATFORM_KEYS if key in assets] + [str(manifest_path)]
-        print_steps(version, manifest_path, files, args.required, args.notes)
+        print_steps(version, manifest_path, files, args.required, args.notes, args.minimum_supported)
     except ReleaseError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
