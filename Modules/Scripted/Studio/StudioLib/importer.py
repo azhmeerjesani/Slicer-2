@@ -1537,6 +1537,15 @@ def loadFiles(paths, shell=None, pairedLesion=None):
             openAddDataDialog(paths)
             return result
     else:
+        projectFolder = _closedProjectHoldingAll(paths, kinds) if pairedLesion is None else None
+        if projectFolder is not None:
+            # Scans and lesions of a Slicer Studio project that is not open (dropped, Open...): open that project in place
+            # with its lesion (A-09), never a second project or the open one with copies of its files
+            loadFolder(projectFolder, shell)
+            from . import projects
+
+            result.scenes.append(projects.sceneFile(projectFolder) or projectFolder)
+            return result
         tables = [path for path, kind in zip(paths, kinds, strict=True) if kind == "table" and isParticipantsTable(path)]
         if tables:
             # A participants table never opens the Add Data dialog (its "Color" reader would read it as a colour table)
@@ -2409,6 +2418,29 @@ def _projectHoldingAll(paths):
         return folders[0] if projects.sceneFile(folders[0]) is not None else None
     except (ImportError, OSError):
         return None
+
+
+def _closedProjectHoldingAll(paths, kinds):
+    """The project folder that holds every scan and lesion of ``paths`` when it is not the open project, or None.
+
+    Only scans and lesions count (what autosave would copy into a project); a scene file opens its project itself
+    (``_loadScene()``), and the files of the open project are not loaded again (``openNodeForFile()``).
+    """
+    if not paths or any(kind not in ("volume", "sequence", "lesion") for kind in kinds):
+        return None
+    projectFolder = _projectHoldingAll(paths)
+    if projectFolder is None:
+        return None
+    try:
+        from . import autosave
+
+        service = autosave.instance()
+    except ImportError:
+        service = None
+    current = service.currentProject() if service is not None else None
+    if current is not None and os.path.normcase(os.path.realpath(current.path)) == os.path.normcase(os.path.realpath(projectFolder)):
+        return None
+    return projectFolder
 
 
 #

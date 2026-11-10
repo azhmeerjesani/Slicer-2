@@ -1768,6 +1768,66 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(scalars(), ["sub-01_T1w", "sub-01_lesion"])
         self.assertFalse(slicer.util.getNodesByClass("vtkMRMLSegmentationNode"))
 
+    def test_files_of_a_closed_project_open_that_project(self):
+        """A scan or lesion of a Slicer Studio project that is not open, dropped or chosen with Open..., opens that project
+        in place (A-09), not a second project (or the open one) with copies of its files. Files of the open project, a mix
+        with a file from elsewhere and a scan opened for a lesion ("Open with") keep their routes.
+        """
+        from StudioLib import autosave
+        from StudioLib import importer
+        from StudioLib import projects as studioProjects
+
+        studioShell = self._applyStudio()
+        projectFolder = os.path.join(self.directory, "Projects", "closed project")
+        scan = self._writeVolume("sub-09_T1w.nii.gz", GRID_SHIFTED, subdirectory=os.path.join("Projects", "closed project", "Images"))
+        lesion = self._writeMask("sub-09_lesion.nii.gz", GRID_SHIFTED, subdirectory=os.path.join("Projects", "closed project", "Segmentations"))
+        open(os.path.join(projectFolder, "closed project.mrml"), "w").close()
+        outside = self._writeVolume("sub-10_T1w.nii.gz", GRID_SHIFTED)
+
+        class OpenProject:
+            path = projectFolder
+
+        class Service:
+            project = None
+
+            def currentProject(self):
+                return self.project
+
+        service = Service()
+        calls = []
+        saved = (importer.loadFolder, importer._loadScene, studioProjects.projectsFolder, autosave.instance, qt.QFileDialog.getOpenFileNames)
+        importer.loadFolder = lambda path, shell=None: calls.append(("folder", path))
+        importer._loadScene = lambda path, shell: calls.append(("scene", path)) or True
+        studioProjects.projectsFolder = lambda rootPath=None: os.path.join(self.directory, "Projects")
+        autosave.instance = lambda: service
+        qt.QFileDialog.getOpenFileNames = lambda *args, **kwargs: [scan]
+        try:
+            # Drop of the scan, drop of the lesion, Open... of the scan, and the scan with its lesion: the project opens
+            for route in (lambda: importer.handleDrop([scan], shell=studioShell), lambda: importer.handleDrop([lesion], shell=studioShell),
+                          lambda: importer.openFilesDialog(studioShell), lambda: importer.loadFiles([scan, lesion], studioShell)):
+                del calls[:]
+                result = route()
+                self.assertEqual(calls, [("folder", projectFolder)])
+                self.assertEqual(result.scenes, [os.path.join(projectFolder, "closed project.mrml")])
+                self.assertFalse(result.nodes())
+            self._pump()
+            # Not that project: a mix with a file from elsewhere, a scan opened for its lesion, the open project's own scan
+            del calls[:]
+            self.assertIsNone(importer._closedProjectHoldingAll([scan, outside], ["volume", "volume"]))
+            self.assertIsNone(importer._closedProjectHoldingAll([os.path.join(projectFolder, "closed project.mrml")], ["scene"]))
+            service.project = OpenProject()
+            self.assertIsNone(importer._closedProjectHoldingAll([scan], ["volume"]))
+            service.project = None
+            self.assertEqual(importer._closedProjectHoldingAll([scan], ["volume"]), projectFolder)
+            result = importer.loadFiles([scan], studioShell, pairedLesion=slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode"))
+            self.assertEqual(calls, [])
+            self.assertEqual(len(result.volumes), 1)
+        finally:
+            importer.loadFolder, importer._loadScene, studioProjects.projectsFolder, autosave.instance, qt.QFileDialog.getOpenFileNames = saved
+        self._pump()
+        studioShell.dispose()
+        self._pump()
+
     def test_studio_folder_argument_shows_the_library(self):
         """The Slicer Studio folder or its Projects folder as an argument is recognised, not offered to Add Data empty."""
         from StudioLib import importer
