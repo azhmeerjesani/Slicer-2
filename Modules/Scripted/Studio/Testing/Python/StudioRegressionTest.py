@@ -5338,6 +5338,44 @@ class StudioRegressionTest(unittest.TestCase):
             if host is not None:
                 host.deleteLater()
 
+    def test_47b_case_line_edits_show_the_start_of_a_long_value(self):
+        """A Case section line edit that is not being edited showed the end of a long value (cursor at the end after
+        setText), so the first author or the start of the etiology was never visible (BB-1). It shows the start now.
+        """
+        from StudioLib import libcard_columns, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        study = self._study([("sub-01", {}, False), ("sub-02", {}, False)])
+        host = None
+        try:
+            session = study_ui.openStudy(study.path, showLibrary=False)
+            self.assertIsNotNone(session)
+            host = qt.QWidget()
+            hostLayout = qt.QVBoxLayout(host)
+            sectionWidget = libcard_columns._createSection(session)
+            section = libcard_columns._sections[sectionWidget]
+            hostLayout.addWidget(sectionWidget)
+            host.resize(306, 900)
+            host.show()
+            section.refresh("sub-02")
+            for button, _container, _columns in section.groups.values():
+                if not button.isChecked():
+                    button.click()
+            long = "Müller A, Schmidt B. Neglect after thalamic stroke. Brain 2020"
+            for column in ("citation", "etiology"):
+                self.assertTrue(section.setField(column, long), column)
+            section.refresh("sub-01")
+            section.refresh("sub-02")
+            slicer.app.processEvents()
+            for column in ("citation", "etiology"):
+                editor = section.editors[column]
+                self.assertEqual(str(editor.text), long, column)
+                self.assertEqual(editor.cursorPosition, 0, f"{column}: a field not being edited shows the start of its value")
+        finally:
+            if host is not None:
+                host.deleteLater()
+
     def test_48_case_doi_field_is_as_wide_as_the_other_source_fields(self):
         """The Case section's DOI field was 53 px wide in a 137 px field: the flat "Open" button next to it keeps a minimum
         width of about 80 px, so no DOI could be read (BB-1). The edit now has the width of the other fields and the link
