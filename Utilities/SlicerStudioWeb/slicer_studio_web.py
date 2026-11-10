@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import errno
 import getpass
 import hashlib
 import http.client
@@ -522,8 +523,22 @@ def check_port_free(listen, port):
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             probe.bind((listen, port))
-        except OSError:
-            in_use = True
+        except OSError as error:
+            # Name the real cause: only EADDRINUSE (and the Windows equivalent) means "in use".
+            code = error.errno
+            if code in (errno.EACCES, getattr(errno, "WSAEACCES", None)) and port < 1024 and os.name != "nt":
+                raise LauncherError(
+                    f"Port {port} needs administrator rights on this computer. Choose a port of 1024 or higher, for example: --port 8080",
+                ) from None
+            if code in (errno.EADDRNOTAVAIL, getattr(errno, "WSAEADDRNOTAVAIL", None)):
+                raise LauncherError(
+                    f"--listen {listen} is not an address of this computer. Use 127.0.0.1 (this computer only) or 0.0.0.0 (all addresses).",
+                ) from None
+            if code in (errno.EADDRINUSE, getattr(errno, "WSAEADDRINUSE", None), errno.EACCES, getattr(errno, "WSAEACCES", None)):
+                # EACCES on Windows also reports a port held exclusively by another program.
+                in_use = True
+            else:
+                raise LauncherError(f"Cannot use port {port} on {listen}: {error.strerror or error}") from None
     if not in_use:
         # On macOS the bind above also succeeds when another program listens on all
         # addresses of the port: check that nothing answers there either.
@@ -533,7 +548,8 @@ def check_port_free(listen, port):
         except OSError:
             pass
     if in_use:
-        raise LauncherError(f"Port {port} is already in use. Close the program that uses it, or choose another port, for example: --port {port + 1}")
+        suggestion = f", for example: --port {port + 1}" if port < 65535 else ""
+        raise LauncherError(f"Port {port} is already in use. Close the program that uses it, or choose another port{suggestion}")
 
 
 def free_local_port():

@@ -2754,6 +2754,57 @@ fi
         self.assertIn("is a required update", str(raised.exception))
         self.assertIn("--no-update-check", str(raised.exception))
 
+    def test_WebLauncherPortErrorNamesRealCause(self):
+        """check_port_free names the real cause of a failed bind: a privileged port, an address that is not on this
+        computer, a port in use (with a valid suggestion at most 65535), and not "in use" for everything.
+        """
+        import errno as errnoModule
+
+        web = self._importScript(os.path.join("Utilities", "SlicerStudioWeb", "slicer_studio_web.py"), "slicer_studio_web_port")
+
+        class FakeProbe:
+            code = None
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def setsockopt(self, *args):
+                pass
+
+            def bind(self, address):
+                raise OSError(FakeProbe.code, os.strerror(FakeProbe.code))
+
+        realSocket = web.socket.socket
+        web.socket.socket = FakeProbe
+        try:
+            def message(code, listen, port):
+                FakeProbe.code = code
+                with self.assertRaises(web.LauncherError) as raised:
+                    web.check_port_free(listen, port)
+                return str(raised.exception)
+
+            if os.name != "nt":
+                text = message(errnoModule.EACCES, "127.0.0.1", 80)
+                self.assertIn("administrator", text)
+                self.assertNotIn("already in use", text)
+            text = message(errnoModule.EADDRNOTAVAIL, "10.99.99.99", 8195)
+            self.assertIn("not an address of this computer", text)
+            self.assertNotIn("already in use", text)
+            text = message(errnoModule.EADDRINUSE, "127.0.0.1", 8195)
+            self.assertIn("already in use", text)
+            self.assertIn("--port 8196", text)
+            text = message(errnoModule.EADDRINUSE, "127.0.0.1", 65535)
+            self.assertIn("already in use", text)
+            self.assertNotIn("65536", text)
+        finally:
+            web.socket.socket = realSocket
+
     def test_WebLauncherPlainErrorTexts(self):
         """The web launcher's update check says what the app says for the same feeds, without the parser's, the error
         number's, the exception class's or the server's own text.
