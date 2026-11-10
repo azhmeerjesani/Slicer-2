@@ -2488,6 +2488,7 @@ class AutosaveService:
             self._suspendCount += 1
             succeeded = False
             failed = False  # failed with an error (reported); a kill leaves what moved to finishInterruptedMove
+            projectsBefore = studiesBefore = contentBefore = None
             # Items that landed under another name (" 2") because the new folder already had one with that name: paths
             # follow them there, never the other item that kept the name (a project of the new folder)
             renamed = {}
@@ -2506,6 +2507,13 @@ class AutosaveService:
                 # the setting on an old folder that lacks it, and the next start finishes the move
                 # (``finishInterruptedMove``). A move that fails is reported, and the setting stays as it is.
                 projects.recordPendingMove(oldRoot, newRoot)
+                # What the new folder and the old one hold before the move: when it fails partway, what moved is told apart
+                # from the new folder's own projects and studies (``recordPartialMove``)
+                projectsBefore = journal.projectsBefore() if resuming else None
+                if projectsBefore is None:
+                    projectsBefore = projects._visibleNames(os.path.join(newRoot, projects.PROJECTS_DIR))
+                studiesBefore = projects._visibleNames(os.path.join(newRoot, projects.STUDIES_DIR))
+                contentBefore = projects.contentNames(oldRoot)
                 function = lambda: projects.moveContent(oldRoot, newRoot, renamed=renamed, renamedIds=renamedIds, journal=journal)  # noqa: E731
                 moved = run(function) if run is not None else function()
                 succeeded = True
@@ -2519,6 +2527,14 @@ class AutosaveService:
                     projects.clearPendingMove()
                     if not resuming:
                         projects.discardMoveJournal()  # a failed move is reported; the one that finishes a kill tries again
+                    if contentBefore is not None:
+                        # What moved stays in the new folder while the setting stays on the old one: Library lists the projects
+                        # and studies that moved, and each start names that folder, until the folder changes (BB-1)
+                        try:
+                            if contentBefore - projects.contentNames(oldRoot):
+                                projects.recordPartialMove(oldRoot, newRoot, projectsBefore, studiesBefore)
+                        except Exception:
+                            logging.error("Slicer Studio: recording the move that failed partway failed:\n" + traceback.format_exc())
                 raise
             finally:
                 self._suspendCount -= 1
@@ -2623,19 +2639,23 @@ class AutosaveService:
         the setting then points at the new folder, and the user is told. Called at startup before the crash scan.
         ``run`` runs the move (default: a progress dialog), ``notify(text, level)`` tells the user (default: a toast).
         A move that another running Slicer Studio is doing now (its ``projects.takeMoveLock``) is left to it: nothing is
-        moved or changed, and the user is told. Return "finished", "failed", "unavailable", "running" or None (no
-        interrupted move).
+        moved or changed, and the user is told. A move that failed partway with a reported error is not finished by
+        itself: the user is told where what moved is (``projects.partialMove``). Return "finished", "failed",
+        "unavailable", "running", "partial" or None (no interrupted move).
         """
         projects = self._projects()
-        pending = projects.pendingMove()
-        if pending is None or not projects.isEnabled() or projects.isRootFromEnvironment():
+        if not projects.isEnabled() or projects.isRootFromEnvironment():
             return None
-        oldRoot, newRoot = pending
         if notify is None:
             from StudioLib import projects_ui
 
             def notify(text, level):
                 projects_ui.message(text, level=level, ms=15000)
+
+        pending = projects.pendingMove()
+        if pending is None:
+            return self._notifyPartialMove(notify)
+        oldRoot, newRoot = pending
 
         def runningElsewhere():
             notify(_("Slicer Studio is moving your projects and studies to {folder} in another window.").format(
@@ -2682,6 +2702,24 @@ class AutosaveService:
         notify(_("Slicer Studio was closed while it moved your projects and studies. The move is now finished: they are in {folder}.").format(
             folder=projects.shortPath(newRoot)), "info")
         return "finished"
+
+    def _notifyPartialMove(self, notify):
+        """At startup, after a move of the folder that failed partway (``projects.partialMove``): name the folder that holds
+        what moved, and how to finish the move. Return "partial", or None when there is no such move.
+        """
+        projects = self._projects()
+        partial = projects.partialMove()
+        if partial is None:
+            return None
+        newRoot = partial[1]
+        if not os.path.isdir(newRoot):
+            notify(_("Some of your projects and studies were moved to {folder}, and that folder cannot be found now: connect "
+                     "the drive that holds it.").format(folder=projects.shortPath(newRoot)), "warning")
+        else:
+            notify(_("Some of your projects and studies are in {folder}: moving them there could not finish. Library lists "
+                     "them. To finish, choose that folder again in Settings › Saving and move.").format(  # noqa: RUF001
+                folder=projects.shortPath(newRoot)), "warning")
+        return "partial"
 
     def removeInterruptedCopies(self):
         """Delete the partial copies ("<name>.studio-copy") that a Duplicate killed midway left in Projects/ (background)."""

@@ -51,6 +51,11 @@ ROOT_CHOSEN_KEY = "Studio/Projects/RootChosen"
 #: ``recordPendingMove``): a move that is interrupted (a crash, a kill) has deleted originals in the old folder while the
 #: setting still points there, so the next start finishes it (``AutosaveService.finishInterruptedMove``)
 MOVE_PENDING_KEY = "Studio/Projects/MovePending"
+#: A move of the folder's content that failed partway with a reported error (the new disk is full): what moved stays in
+#: the new folder while the setting stays on the old one (JSON ``{"from", "to", "projects", "studies"}``,
+#: ``recordPartialMove``). Library lists the projects and studies that moved there (``listProjects``), and each start
+#: names that folder (``AutosaveService.finishInterruptedMove``), until the folder setting changes (``setRoot``)
+PARTIAL_MOVE_KEY = "Studio/Projects/PartialMove"
 #: Environment: the folder (skips the chooser), and "0" to turn projects off
 ROOT_ENVIRONMENT = "SLICER_STUDIO_PROJECTS_ROOT"
 ENABLED_ENVIRONMENT = "SLICER_STUDIO_PROJECTS"
@@ -247,6 +252,7 @@ def setRoot(path, chosen=True):
         settings.setValue(ROOT_CHOSEN_KEY, True)
     # A move that was pending ends here: it finished, or another folder was chosen since
     settings.remove(MOVE_PENDING_KEY)
+    settings.remove(PARTIAL_MOVE_KEY)  # a move done again ends it (or another folder was chosen)
     discardMoveJournal()
     # Written now: after a move, the content is already in the new folder, and a crash before Qt writes the settings by
     # itself would start the next time in the old, now empty folder
@@ -280,6 +286,49 @@ def clearPendingMove():
     settings = qt.QSettings()
     if settings.contains(MOVE_PENDING_KEY):
         settings.remove(MOVE_PENDING_KEY)
+        settings.sync()
+
+
+def recordPartialMove(oldRoot, newRoot, projectsBefore=(), studiesBefore=()):
+    """Record that a move of ``oldRoot`` to ``newRoot`` failed partway (reported) and left some of its items in ``newRoot``.
+
+    ``projectsBefore`` and ``studiesBefore``: the item names that Projects/ and Studies/ of ``newRoot`` had before the move
+    (they are that folder's own, not moved ones). Library lists the projects and studies that moved (``listProjects``,
+    ``listStudies``), and each start names the folder that holds them, until the folder setting changes (``setRoot``):
+    without it the old folder, whose Projects/ may have moved, looks like a new install (BB-1).
+    """
+    settings = qt.QSettings()
+    settings.setValue(PARTIAL_MOVE_KEY, json.dumps({"from": os.path.normpath(oldRoot), "to": os.path.normpath(newRoot),
+                                                    "projects": sorted(projectsBefore), "studies": sorted(studiesBefore)}))
+    settings.sync()
+
+
+def partialMove():
+    """``(old folder, new folder, projects before, studies before)`` of the move recorded by ``recordPartialMove``, or None.
+
+    None when the folder setting is no longer that old folder (``root()``), or when nothing of it is in the new folder now.
+    """
+    try:
+        record = json.loads(str(_setting(PARTIAL_MOVE_KEY, "") or "null"))
+    except ValueError:
+        return None
+    if not isinstance(record, dict) or not record.get("from") or not record.get("to"):
+        return None
+    oldRoot, newRoot = os.path.normpath(str(record["from"])), os.path.normpath(str(record["to"]))
+    if os.path.normcase(os.path.realpath(oldRoot)) != os.path.normcase(os.path.realpath(root())):
+        return None
+
+    def names(key):
+        value = record.get(key)
+        return {str(name) for name in value} if isinstance(value, list) else set()
+
+    return oldRoot, newRoot, names("projects"), names("studies")
+
+
+def clearPartialMove():
+    settings = qt.QSettings()
+    if settings.contains(PARTIAL_MOVE_KEY):
+        settings.remove(PARTIAL_MOVE_KEY)
         settings.sync()
 
 
@@ -1043,32 +1092,68 @@ class ProjectInfo:
         return f"ProjectInfo({self.name!r})"
 
 
-def listProjects(rootPath=None):
-    """The projects of the folder, the most recently modified first."""
-    folder = projectsFolder(rootPath)
-    try:
-        names = os.listdir(folder)
-    except OSError:
+def _partiallyMovedFolders(kind):
+    """``[(folder, names that were there before)]`` where a move that failed partway left items of the Slicer Studio folder
+    (``partialMove``): ``kind`` is PROJECTS_DIR or STUDIES_DIR. Empty when there is none.
+    """
+    partial = partialMove()
+    if partial is None:
         return []
+    _oldRoot, newRoot, projectsBefore, studiesBefore = partial
+    return [(os.path.join(newRoot, kind), projectsBefore if kind == PROJECTS_DIR else studiesBefore)]
+
+
+def listProjects(rootPath=None):
+    """The projects of the folder, the most recently modified first.
+
+    Without ``rootPath`` (the Slicer Studio folder, as Library lists it), also the projects that a move of the folder that
+    failed partway left in the new folder (``partialMove``): they are the user's projects, and the old folder lacks them.
+    """
+    folders = [(projectsFolder(rootPath), None)]
+    if rootPath is None:
+        folders += _partiallyMovedFolders(PROJECTS_DIR)
     projects = []
-    for name in names:
-        if name.startswith(".") or (COPY_MARKER in name and not _hasOwnScene(os.path.join(folder, name))):
-            continue  # hidden folders, and a Duplicate in progress (or one that an earlier version left after a failure)
-        path = os.path.join(folder, name)
-        if os.path.isdir(path):
-            projects.append(ProjectInfo(path))
+    seen = set()
+    for folder, skipped in folders:
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            continue
+        for name in names:
+            if name.startswith(".") or (COPY_MARKER in name and not _hasOwnScene(os.path.join(folder, name))):
+                continue  # hidden folders, and a Duplicate in progress (or one that an earlier version left after a failure)
+            if skipped is not None and name in skipped:
+                continue  # a project that the new folder had before the move
+            path = os.path.join(folder, name)
+            key = os.path.normcase(os.path.realpath(path))
+            if os.path.isdir(path) and key not in seen:
+                seen.add(key)
+                projects.append(ProjectInfo(path))
     projects.sort(key=lambda info: info.modified or 0.0, reverse=True)
     return projects
 
 
 def listStudies(rootPath=None):
-    """The study folders of <root>/Studies (folders with a study.json), the most recently modified first."""
-    folder = studiesFolder(rootPath)
-    try:
-        names = os.listdir(folder)
-    except OSError:
-        return []
-    studies = [os.path.join(folder, name) for name in names if os.path.isfile(os.path.join(folder, name, "study.json"))]
+    """The study folders of <root>/Studies (folders with a study.json), the most recently modified first.
+
+    Without ``rootPath``, also the studies that a move that failed partway left in the new folder (as ``listProjects``).
+    """
+    folders = [(studiesFolder(rootPath), None)]
+    if rootPath is None:
+        folders += _partiallyMovedFolders(STUDIES_DIR)
+    studies = []
+    seen = set()
+    for folder, skipped in folders:
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            continue
+        for name in names:
+            path = os.path.join(folder, name)
+            key = os.path.normcase(os.path.realpath(path))
+            if (skipped is None or name not in skipped) and key not in seen and os.path.isfile(os.path.join(path, "study.json")):
+                seen.add(key)
+                studies.append(path)
     studies.sort(key=lambda path: os.path.getmtime(os.path.join(path, "study.json")), reverse=True)
     return studies
 
@@ -2095,6 +2180,21 @@ def movableItems(rootPath):
     """The items of a Slicer Studio folder that "Move your projects, studies and templates" moves (those that exist)."""
     items = [name for name in (*_MOVABLE_FOLDERS, ABOUT_FILE) if os.path.exists(os.path.join(rootPath, name))]
     return items
+
+
+def contentNames(rootPath):
+    """The items that a move of the folder moves one by one (``moveContent``), as a set of relative paths: each project,
+    study and template, the folders of LNM/ one level deeper, and "About this folder.txt". Worker-safe.
+    """
+    names = set()
+    for kind in _MOVABLE_FOLDERS:
+        for name in _visibleNames(os.path.join(rootPath, kind)):
+            names.add(kind + "/" + name)
+            if kind == LNM_DIR:
+                names.update(kind + "/" + name + "/" + child for child in _visibleNames(os.path.join(rootPath, kind, name)))
+    if os.path.exists(os.path.join(rootPath, ABOUT_FILE)):
+        names.add(ABOUT_FILE)
+    return names
 
 
 def _hasVisibleEntries(folder):

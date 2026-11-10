@@ -6748,6 +6748,94 @@ class StudioProjectsTest(unittest.TestCase):
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
             templates.registerGrids(force=True)
 
+    def test_81d_failed_root_move_after_projects_moved_keeps_them_listed(self):
+        """Change folder > Move fails partway (the new disk is full) after Projects/ and Studies/ moved: the setting stays on
+        the old folder, whose Projects/ is gone. Library listed no project, in this session and after a restart, and nothing
+        named the folder that holds them (BB-1). Now Library lists the projects and studies that moved (never the new
+        folder's own), each start names that folder, and moving again ends it.
+        """
+        import errno
+        from unittest import mock
+
+        projects = self.projects
+        settings = qt.QSettings()
+        oldRoot = os.path.normpath(os.path.join(self.tempDir, "partial", "A", "Slicer Studio"))
+        newRoot = os.path.normpath(os.path.join(self.tempDir, "partial", "Q", "Slicer Studio"))
+
+        def makeProject(root, name):
+            path = os.path.join(root, projects.PROJECTS_DIR, name)
+            os.makedirs(path)
+            with open(os.path.join(path, name + ".mrml"), "w") as f:
+                f.write("<MRML></MRML>\n")
+            return path
+
+        def makeStudy(root, name):
+            path = os.path.join(root, projects.STUDIES_DIR, name)
+            os.makedirs(path)
+            with open(os.path.join(path, "study.json"), "w", encoding="utf-8") as f:
+                json.dump({"format": "slicer-studio-study", "version": 1, "name": name, "created": "2026-01-01"}, f)
+            return path
+
+        makeProject(oldRoot, "Alpha")
+        makeProject(oldRoot, "Beta")
+        makeStudy(oldRoot, "Stroke")
+        os.makedirs(os.path.join(oldRoot, projects.LNM_DIR, "maps"))
+        with open(os.path.join(oldRoot, projects.LNM_DIR, "maps", "big.bin"), "wb") as f:
+            f.write(b"\0" * 64)
+        makeProject(newRoot, "Theirs")
+        makeStudy(newRoot, "Their study")
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        settings.setValue(projects.ROOT_KEY, oldRoot)
+        settings.setValue(projects.ROOT_CHOSEN_KEY, True)
+        realRename = os.rename
+        try:
+            def fullDisk(source, destination, *args, **kwargs):
+                if os.sep + projects.LNM_DIR + os.sep in os.fspath(source) + os.sep:
+                    raise OSError(errno.ENOSPC, "No space left on device", os.fspath(destination))
+                return realRename(source, destination, *args, **kwargs)
+
+            with mock.patch.object(projects.os, "rename", side_effect=fullDisk):
+                with self.assertRaises(OSError) as context:
+                    self._service().moveRoot(newRoot, moveContent=True, run=lambda function: function())
+            self.assertEqual(context.exception.errno, errno.ENOSPC)
+            self.assertEqual(projects.root(), oldRoot, "the setting is unchanged")
+            self.assertIsNone(projects.pendingMove(), "a reported failure is not finished by itself")
+            self.assertFalse(os.path.exists(os.path.join(oldRoot, projects.PROJECTS_DIR)), "Projects/ moved")
+            self.assertTrue(os.path.isdir(os.path.join(newRoot, projects.PROJECTS_DIR, "Alpha")))
+            self.assertTrue(os.path.isdir(os.path.join(oldRoot, projects.LNM_DIR)), "LNM/ did not move")
+            expectedProjects = sorted(os.path.join(newRoot, projects.PROJECTS_DIR, name) for name in ("Alpha", "Beta"))
+            expectedStudies = [os.path.join(newRoot, projects.STUDIES_DIR, "Stroke")]
+            # Library lists what moved, never the new folder's own projects and studies
+            self.assertEqual(sorted(info.path for info in projects.listProjects()), expectedProjects)
+            self.assertEqual(projects.listStudies(), expectedStudies)
+            self.assertEqual(sorted(info.name for info in projects.listProjects(oldRoot)), [], "the old folder itself has none")
+            # A restart: the record is kept in the settings, the listing is the same, and the user is told where they are
+            settings.sync()
+            self.assertEqual(sorted(info.path for info in projects.listProjects()), expectedProjects)
+            told = []
+            result = self._service().finishInterruptedMove(run=lambda function: function(), notify=lambda text, level: told.append((text, level)))
+            self.assertEqual(result, "partial")
+            self.assertEqual(len(told), 1)
+            self.assertIn(projects.shortPath(newRoot), told[0][0], "the notice names the folder that holds the projects")
+            self.assertEqual(told[0][1], "warning")
+            self.assertEqual(projects.root(), oldRoot, "nothing is moved by itself")
+            # The user frees space and moves again: one folder, everything listed once, and the record ends
+            self._service().moveRoot(newRoot, moveContent=True, run=lambda function: function())
+            self.assertEqual(projects.root(), newRoot)
+            self.assertIsNone(projects.partialMove())
+            self.assertEqual(sorted(info.name for info in projects.listProjects()), ["Alpha", "Beta", "Theirs"])
+            self.assertEqual(sorted(os.path.basename(path) for path in projects.listStudies()), ["Stroke", "Their study"])
+            told.clear()
+            self.assertIsNone(self._service().finishInterruptedMove(notify=lambda text, level: told.append(text)))
+            self.assertEqual(told, [])
+        finally:
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            projects.clearPendingMove()
+            projects.clearPartialMove()
+            projects.discardMoveJournal()
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
     def test_83_crash_offer_follows_the_projects_when_the_folder_is_moved(self):
         """A crash offer (the Library card, the notice, the Classic box) made before Change folder > Move: Open project then
         opened the old folder's path, which the move had emptied, and answered "P2 was renamed or moved" (BB-1). The offer
