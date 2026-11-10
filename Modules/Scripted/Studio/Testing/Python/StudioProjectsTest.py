@@ -8204,6 +8204,61 @@ class StudioProjectsTest(unittest.TestCase):
             self.io.backgroundWriter().drain(10.0)
         timer.stop()
 
+    def test_105_new_project_asks_nothing_about_a_volume_not_saved_with_the_scene(self):
+        """A Map run in progress keeps its temporary or partial map in a volume that is not saved with the scene: the project
+        save leaves it "modified since read" while the scene itself is not. Ctrl+N and Ctrl+W then fell back to 3D Slicer's
+        File > Close Scene, which asked "Save before closing scene?" about that volume (BB-1). They now close the saved
+        project unasked.
+        """
+        from unittest import mock
+
+        from StudioLib import firstrun, projects_ui
+
+        mainWindow = slicer.util.mainWindow()
+        if mainWindow is None or mainWindow.findChild(qt.QAction, "FileCloseSceneAction") is None:
+            self.skipTest("the main window has no Close Scene action")
+        service = self._service()
+        asked = []
+
+        def closeQuestion():
+            dialog = slicer.app.activeModalWidget()
+            if dialog is not None:
+                asked.append(str(dialog.windowTitle))
+                dialog.reject()
+
+        timer = qt.QTimer()
+        timer.setInterval(100)
+        timer.connect("timeout()", closeQuestion)
+        timer.start()
+        self.addCleanup(timer.stop)
+        handled = slicer.app.property(firstrun.DISCLAIMER_HANDLED_PROPERTY)
+        slicer.app.setProperty(firstrun.DISCLAIMER_HANDLED_PROPERTY, True)  # Studio's own close prompt
+        self.addCleanup(slicer.app.setProperty, firstrun.DISCLAIMER_HANDLED_PROPERTY, handled)
+        patch = mock.patch.object(self.autosave, "instance", return_value=service)  # (the one projects_ui uses)
+        patch.start()
+        self.addCleanup(patch.stop)
+        for key in ("newProject", "closeScene"):
+            volume, _path = self._userVolume("Scan", shape=(12, 14, 16), extension=".nrrd")
+            self._lesion(volume)
+            self._projectFor(service)
+            temporary = slicer.util.addVolumeFromArray(np.zeros((4, 5, 6), dtype=np.float32), name="Network map (computing…)")
+            temporary.SetSaveWithScene(False)
+            self._save(service)
+            self.assertFalse(slicer.mrmlScene.GetModifiedSinceRead(), "the save wrote the scene")
+            self.assertTrue(slicer.mrmlScene.GetStorableNodesModifiedSinceRead(), "the temporary map is not saved")
+            if key == "newProject":
+                service.newProject()
+            else:
+                self.assertTrue(projects_ui.closeScene())
+            for _step in range(5):
+                slicer.app.processEvents()
+                time.sleep(0.05)
+            self.assertEqual(asked, [], key + " asks nothing about a volume that is not saved with the scene")
+            self.assertEqual(slicer.mrmlScene.GetNumberOfNodesByClass("vtkMRMLSegmentationNode"), 0, key + " closed the scene")
+            self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName("Network map (computing…)"), key + " closed the scene")
+            self.io.backgroundWriter().drain(10.0)
+        timer.stop()
+
     def test_100_files_saved_elsewhere_come_back_under_their_plain_names(self):
         """Classic "Save Data" into another folder points every node at the new files; the project's old files leave in the
         same save, so the re-imported copies keep "Scan.nrrd" etc. instead of "Scan 2.nrrd" (BB-1).

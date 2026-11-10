@@ -2625,7 +2625,11 @@ class AutosaveService:
         scene = slicer.mrmlScene
         mainWindow = slicer.util.mainWindow()
         action = mainWindow.findChild(qt.QAction, "FileCloseSceneAction") if mainWindow is not None else None
-        if action is not None and not (saved and scene.GetModifiedSinceRead()):
+        # What Close Scene would ask about (qSlicerMainWindowPrivate::isSceneContentModifiedSinceRead): the scene itself, or
+        # a storable node modified since read. With the project saved, such a node is one that is not saved with the scene
+        # on purpose (the temporary or partial map of a Map run in progress): it is not saved work either
+        modified = bool(scene.GetModifiedSinceRead()) or bool(scene.GetStorableNodesModifiedSinceRead())
+        if action is not None and not (saved and modified):
             action.trigger()
             return
         scene.Clear(0)
