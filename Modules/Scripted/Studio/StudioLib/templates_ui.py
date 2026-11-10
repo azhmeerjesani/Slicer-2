@@ -478,8 +478,13 @@ class AddTemplateDialog(qt.QDialog):
         roles = {path: _companionRole(path) for path in paths if templates.isImageFile(path)}
         images = sorted(roles, key=lambda path: roles[path] is not None)  # the template image first
         # A plain image sets the template image, replacing the current one as Change… does
-        if images and (self.imagePath is None or roles[images[0]] is None):
+        if images and roles[images[0]] is None:
             self.setImage(images.pop(0))
+        elif images and self.imagePath is None:
+            # Only mask or head files and no template image yet: they are companions, never the template image
+            for path in images:
+                message(_("{name} was not added: choose the template image first").format(name=os.path.basename(path)))
+            images = []
         for path in images:
             if roles[path] == "mask" and self.maskPath is None:
                 self.setCompanion("mask", path)

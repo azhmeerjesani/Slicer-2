@@ -2270,3 +2270,26 @@ class StudioTemplatesTest(unittest.TestCase):
             self.assertEqual(dialog.imagePath, self.image15)
         finally:
             dialog.deleteLater()
+
+    def test_45_mask_dropped_alone_is_not_the_template_image(self):
+        """BB-1: a file named ..._mask or ..._head dropped on an empty dialog became the template image."""
+        import shutil
+
+        folder = os.path.join(self.tempDir if hasattr(self, "tempDir") else os.path.dirname(self.image15), "bb45")
+        os.makedirs(folder, exist_ok=True)
+        mask = os.path.join(folder, "beta_brain_mask.nii.gz")
+        head = os.path.join(folder, "beta_head.nii.gz")
+        shutil.copy(self.image15, mask)
+        shutil.copy(self.image15, head)
+        dialog = self.ui.AddTemplateDialog()
+        try:
+            dialog._onDropped([mask])
+            self.assertIsNone(dialog.imagePath)
+            dialog._onDropped([head])
+            self.assertIsNone(dialog.imagePath)
+            dialog._onDropped([mask, self.image15])
+            self.assertEqual(dialog.imagePath, self.image15)
+            self.assertEqual(dialog.maskPath, mask)
+        finally:
+            dialog.deleteLater()
+            shutil.rmtree(folder, ignore_errors=True)
