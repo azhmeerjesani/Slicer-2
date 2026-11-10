@@ -2640,6 +2640,8 @@ def moveContent(oldRoot, newRoot, progress=None, renamed=None, renamedIds=None, 
             _movedTemplateIdsUnique(os.path.join(newRoot, TEMPLATES_DIR), templatesBefore, renamedIds, journal)
         if renamedIds and projectsBefore is not None:
             _movedScenesFollowRenamedIds(os.path.join(newRoot, PROJECTS_DIR), projectsBefore, renamedIds)
+        if renamedIds:
+            _movedNormalizationsFollowRenamedIds(newRoot, renamedIds)
         _studiesFollowRenamedFolders(absoluteRenames, newRoot)  # also after a failed move: what moved is listed there
         if renamed is not None:
             for source, destination in absoluteRenames.items():
@@ -2721,6 +2723,82 @@ def _sceneFollowRenamedIds(scene, mapping):
         with contextlib.suppress(OSError):
             os.remove(staging)
         raise
+
+
+#: The record of a normalization result (``LesionNetworkMappingLib.normalize.PROVENANCE_JSON``)
+_NORMALIZATION_JSON = "normalization.json"
+
+
+def _normalizationRecords(newRoot):
+    """The normalization.json files of ``newRoot``: LNM/normalization/<scan>/ and <study>/derivatives/normalization/<sub>/."""
+    folders = [os.path.join(newRoot, LNM_DIR, "normalization")]
+    studies = os.path.join(newRoot, STUDIES_DIR)
+    if os.path.isdir(studies):
+        for current, subfolders, files in os.walk(studies):
+            relative = os.path.relpath(current, studies)
+            depth = 0 if relative == os.curdir else relative.count(os.sep) + 1
+            if depth > 0 and "study.json" in files:
+                subfolders[:] = []
+                folders.append(os.path.join(current, "derivatives", "normalization"))
+                continue
+            subfolders[:] = [name for name in subfolders if not name.startswith(".")] if depth < _STUDY_SEARCH_DEPTH else []
+    records = []
+    for folder in folders:
+        for name in sorted(_visibleNames(folder)):
+            path = os.path.join(folder, name, _NORMALIZATION_JSON)
+            if os.path.isfile(path):
+                records.append(path)
+    return records
+
+
+def _movedNormalizationsFollowRenamedIds(newRoot, renamedIds):
+    """The normalization results of ``newRoot`` made on a moved template that got another id (``renamedIds``, ``{old id:
+    new id}``) name its new id: their ``template.id`` would otherwise name the template of the new folder that kept the
+    id (another image, perhaps another grid), and Update MNI lesion, the review and the label would use that one.
+
+    A record follows only when the image sha256 it stores is that of the renamed template, so the results of the
+    template that kept the id keep it, and a move that is finished after a kill can follow them again. The record keeps
+    its fingerprint and its modification time. Worker-safe; never raises.
+    """
+    try:
+        from . import templates
+
+        shaById = {}
+        folder = os.path.join(newRoot, TEMPLATES_DIR)
+        for name in sorted(_visibleNames(folder)):
+            record = templates.readRecord(os.path.join(folder, name))
+            if record is not None:
+                shaById[templates.USER_PREFIX + str(record.get("id"))] = ((record.get("sha256") or {}).get("image"), record.get("name"))
+        follow = {oldId: (newId, *shaById[newId]) for oldId, newId in renamedIds.items()
+                  if oldId and newId and newId in shaById and shaById[newId][0]}
+        if not follow:
+            return
+        paths = _normalizationRecords(newRoot)
+    except Exception:
+        logging.warning("Slicer Studio: the template ids of the moved normalization results could not be updated", exc_info=True)
+        return
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            template = data.get("template") if isinstance(data, dict) else None
+            if not isinstance(template, dict) or template.get("id") not in follow:
+                continue
+            newId, sha, name = follow[template["id"]]
+            stored = template.get("image_sha256") or ((template.get("sha256") or {}).get("fixed") if isinstance(template.get("sha256"), dict) else None)
+            if stored != sha:
+                continue  # a result of the template that kept the id
+            template["id"] = newId
+            if name and "name" in template:
+                template["name"] = name
+            status = os.stat(path)
+            from . import autosave_io
+
+            # The text format of LesionNetworkMappingLib.jobs.write_json_atomic (one line, final newline)
+            autosave_io.atomicWriteText(path, json.dumps(data, ensure_ascii=False) + "\n")
+            os.utime(path, ns=(status.st_atime_ns, status.st_mtime_ns))
+        except Exception:
+            logging.warning(f"Slicer Studio: the template id of the moved normalization result {path} could not be updated", exc_info=True)
 
 
 def _studiesFollowRenamedFolders(absoluteRenames, newRoot):

@@ -1538,6 +1538,83 @@ class StudioTemplatesTest(unittest.TestCase):
             with contextlib.suppress(OSError):
                 os.remove(os.path.join(self.tempDir, "journal 37.json"))
 
+    def test_46_moved_normalization_results_follow_the_moved_template(self):
+        """BB-1: after Change folder > Move into a folder with a same-name template, the normalization results made on the
+        moved template (LNM/normalization/<scan>/ and a study's derivatives/normalization/<sub>/) name its new id
+        ("user:my-template-2"), as the scenes do. They kept "user:my-template", which then named the other folder's template:
+        Update MNI lesion warped onto that template's grid (or failed: "The image grid does not match"), and the result was
+        labelled and reviewed against it. The results of the template that kept the id keep it.
+        """
+        from LesionNetworkMappingLib import normalize
+        from LesionNetworkMappingUI import normalize_controller as nc
+
+        from StudioLib import autosave
+
+        templates, projects = self.templates, self.projects
+        newRoot = self.root
+        oldRoot = os.path.join(self.tempDir, "old folder 46", "Slicer Studio")
+        shutil.rmtree(os.path.dirname(oldRoot), ignore_errors=True)
+        settings = qt.QSettings()
+        stamp = 1600000000
+
+        def writeResult(folder, template):
+            os.makedirs(folder)
+            path = os.path.join(folder, normalize.PROVENANCE_JSON)
+            record = {"format": normalize.FORMAT, "status": "done", "fingerprint": "f" * 64, "subject": "sub-01",
+                      "template": {"id": template.id, "files": {"fixed": "image.nii.gz"}, "sha256": {"fixed": template.imageSha256},
+                                   "grid": {"id": "grid"}, "name": template.name, "space": template.space, "image_sha256": template.imageSha256},
+                      "outputs": {}}
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+            os.utime(path, (stamp, stamp))
+            return path
+
+        def templateOf(path):
+            return normalize.read_result(os.path.dirname(path))["template"]
+
+        try:
+            kept = self._add(name="My template", rootPath=newRoot)
+            moved = templates.addTemplate(self.bundled, mask=self.bundledMask, name="My template", rootPath=oldRoot)
+            self.assertEqual(moved.id, kept.id)
+            self.assertNotEqual(moved.imageSha256, kept.imageSha256)
+            theirs = writeResult(os.path.join(newRoot, projects.LNM_DIR, "normalization", "sub-01"), kept)
+            writeResult(os.path.join(oldRoot, projects.LNM_DIR, "normalization", "sub-01"), moved)
+            studyFolder = os.path.join(oldRoot, projects.STUDIES_DIR, "Study", "derivatives", "normalization", "sub-01")
+            writeResult(studyFolder, moved)
+            with open(os.path.join(oldRoot, projects.STUDIES_DIR, "Study", "study.json"), "w", encoding="utf-8") as f:
+                json.dump({"name": "Study"}, f)
+
+            os.environ.pop(projects.ROOT_ENVIRONMENT, None)
+            settings.setValue(projects.ROOT_KEY, oldRoot)
+            service = autosave.AutosaveService(force=True, root=os.path.join(self.tempDir, "private autosave move 46"))
+            service.studioActiveOverride = True
+            service.reloadSettings()
+            self.services.append(service)
+            self.assertIn("LNM", service.moveRoot(newRoot, moveContent=True))
+            self.assertEqual(templates.templateById("user:my-template-2").imageSha256, moved.imageSha256)
+
+            mine = os.path.join(newRoot, projects.LNM_DIR, "normalization", "sub-01 2", normalize.PROVENANCE_JSON)
+            study = os.path.join(newRoot, projects.STUDIES_DIR, "Study", "derivatives", "normalization", "sub-01", normalize.PROVENANCE_JSON)
+            for path in (mine, study):
+                template = templateOf(path)
+                self.assertEqual((template["id"], template["name"]), ("user:my-template-2", "My template 2"), path)
+                record = normalize.resolve_user_template(template["id"], nc.templateDirectories())
+                self.assertEqual(record["sha256"]["image"], moved.imageSha256, path)
+                self.assertEqual(nc.templateName(template["id"]), "My template 2")
+                self.assertEqual(int(os.path.getmtime(path)), stamp, "the record keeps its modification time")
+                self.assertEqual(normalize.read_result(os.path.dirname(path))["fingerprint"], "f" * 64)
+            template = templateOf(theirs)
+            self.assertEqual((template["id"], template["name"]), ("user:my-template", "My template"), "a result that was there keeps its id")
+
+            # Following again (a move finished after a kill) changes nothing
+            projects._movedNormalizationsFollowRenamedIds(newRoot, {"user:my-template": "user:my-template-2"})
+            self.assertEqual(templateOf(mine)["id"], "user:my-template-2")
+            self.assertEqual(templateOf(theirs)["id"], "user:my-template")
+        finally:
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            shutil.rmtree(os.path.dirname(oldRoot), ignore_errors=True)
+
     def test_27_cancelled_add_adds_nothing(self):
         """BB-1: Cancel in "Add your own MNI template" adds nothing, for a 4D image as well. The first volume of a 4D image
         was read and written without looking at Cancel, and the dialog registered a copy whose result came after Cancel:
