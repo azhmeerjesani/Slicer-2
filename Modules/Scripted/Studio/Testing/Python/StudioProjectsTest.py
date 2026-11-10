@@ -1124,6 +1124,43 @@ class StudioProjectsTest(unittest.TestCase):
             qt.QCoreApplication.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.app.processEvents()
 
+    def test_13bc_project_card_elided_name_fits_its_label(self):
+        """An elided card name, ellipsis included, is never wider than its label, whatever the width of the card (a name
+        elided to card.width - 26 was 1 to 3 px too wide, and the last dot of the "…" was cut; BB-1).
+        """
+        from StudioLib import projects_ui
+
+        service = self._service()
+        self._userVolume()
+        self._projectFor(service)
+        service.renameProject("Very long project name for the multicentre post-stroke aphasia cohort 脳卒中患者の拡散強調画像")
+        self._save(service)
+        section = projects_ui.ProjectsSection()
+        remembered = section.viewMode
+        try:
+            section.setViewMode("grid")
+            section.widget.show()
+            section.refresh()
+            elidedCards = 0
+            for width in range(330, 700, 7):
+                section.widget.resize(width, 500)
+                for _step in range(4):
+                    slicer.app.processEvents()
+                for card in section.cards():
+                    name = card.findChild("QLabel", "studioProjectCardName")
+                    elidedCards += name.text.endswith("…")
+                    need = qt.QFontMetrics(name.font).horizontalAdvance(name.text)
+                    self.assertLessEqual(need, name.contentsRect().width, f"{width}: the elided name is wider than its label")
+            self.assertGreater(elidedCards, 0, "no name was elided: the test checks nothing")
+        finally:
+            section.setViewMode(remembered)
+            section.widget.hide()
+            section.dispose()
+            section.widget.setParent(None)
+            section.widget.deleteLater()
+            qt.QCoreApplication.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.app.processEvents()
+
     def test_13c_folder_chooser_enter_presses_continue(self):
         """Enter in the folder chooser presses the primary "Continue" and does not open the folder picker, whichever button has
         the initial focus; Cancel (Change folder) is never the default either (BB-1).

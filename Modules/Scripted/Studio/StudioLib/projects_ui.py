@@ -1698,13 +1698,26 @@ class ProjectsSection(qt.QObject):
             widget.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
         return card
 
+    @staticmethod
+    def _gridTextWidth(card):
+        """The room of the texts of a grid card, from the card's width (its label is laid out after the resize event): the
+        card's contents rectangle (inside the border), minus the margins of the card's layout and of the body's layout.
+        """
+        width = card.contentsRect().width()
+        for widget in (card, card.findChild("QWidget", "studioProjectCardBody")):
+            layout = widget.layout() if widget is not None else None
+            if layout is not None:
+                margins = layout.contentsMargins()
+                width -= margins.left() + margins.right()
+        return width
+
     def elideCard(self, card):
         """Elide the name and the meta line of a card to its width (the full texts are the ``fullText`` properties)."""
         for label in card.findChildren("QLabel"):
             text = label.property("fullText")
             if text is None:
                 continue
-            width = max(0, (label.width if card.property("studioProjectView") == "list" else card.width - 26))
+            width = max(0, (label.width if card.property("studioProjectView") == "list" else self._gridTextWidth(card)))
             elided = qt.QFontMetrics(label.font).elidedText(str(text), qt.Qt.ElideRight, width)
             if label.text != elided:
                 label.setText(elided)
