@@ -2117,6 +2117,20 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._pump(8)
         self.assertEqual(draw.gapViewName(studioShell), "Red")
 
+        # Red reoriented to Sagittal: the card counts the gaps along the new slicing axis, without an edit
+        red = self._sliceNode("Red")
+        self._wait(300)
+        self._pump()
+        self.assertEqual(draw.extension().card._state["stats"]["gaps"], 0)
+        red.SetOrientation("Sagittal")
+        self._wait(300)
+        self._pump()
+        self.assertEqual(draw.extension().card._state["stats"]["gaps"], 4, "the card follows the Red view's orientation")
+        red.SetOrientation("Axial")
+        self._wait(300)
+        self._pump()
+        self.assertEqual(draw.extension().card._state["stats"]["gaps"], 0)
+
     #
     # Scans from the Sample Data module, the 1 mm offer, re-opening, new lesions
     #

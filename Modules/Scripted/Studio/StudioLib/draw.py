@@ -643,6 +643,8 @@ class _DrawSession(VTKObservationMixin):
         self._observedSegmentation = None
         self._observedInteractionNode = None
         self._viewObservations = []
+        self._sliceNodeObservations = []
+        self._sliceNormals = {}
         self._strokePress = None
         self._lastStroke = None
         self._smoothBaseline = None
@@ -1180,6 +1182,24 @@ class _DrawSession(VTKObservationMixin):
                                              (vtk.vtkCommand.LeftButtonDoubleClickEvent, self._onDoubleClick, DOUBLE_CLICK_GUARD_PRIORITY)):
                 self._addViewObserver(observation, event, handler, priority, viewName)
             self._viewObservations.append(observation)
+            # The card's gap count follows the slicing axis of the gap view: refresh when a view's orientation changes
+            sliceNode = sliceWidget.mrmlSliceNode()
+            self._sliceNormals[viewName] = self._sliceNormal(sliceNode)
+            tag = sliceNode.AddObserver(vtk.vtkCommand.ModifiedEvent,
+                                        lambda caller, event, name=viewName: self._onSliceNodeModified(caller, name))
+            self._sliceNodeObservations.append((sliceNode, tag))
+
+    @staticmethod
+    def _sliceNormal(sliceNode):
+        sliceToRas = sliceNode.GetSliceToRAS()
+        return tuple(round(sliceToRas.GetElement(row, 2), 3) for row in range(3))
+
+    def _onSliceNodeModified(self, sliceNode, viewName):
+        normal = self._sliceNormal(sliceNode)
+        if normal != self._sliceNormals.get(viewName):
+            self._sliceNormals[viewName] = normal
+            if self.active:
+                self._refreshTimer.start()
 
     def _addViewObserver(self, observation, event, handler, priority, viewName):
         interactor = observation[0]
@@ -1204,6 +1224,12 @@ class _DrawSession(VTKObservationMixin):
                 except Exception:
                     pass
         self._viewObservations = []
+        for sliceNode, tag in self._sliceNodeObservations:
+            try:
+                sliceNode.RemoveObserver(tag)
+            except Exception:
+                pass
+        self._sliceNodeObservations = []
         if self._layoutManagerConnected:
             layoutManager = slicer.app.layoutManager()
             if layoutManager is not None:
