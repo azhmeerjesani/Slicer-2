@@ -477,7 +477,8 @@ class AddTemplateDialog(qt.QDialog):
         surfaces = [path for path in paths if templates.isSurfaceFile(path)]
         roles = {path: _companionRole(path) for path in paths if templates.isImageFile(path)}
         images = sorted(roles, key=lambda path: roles[path] is not None)  # the template image first
-        if images and self.imagePath is None:
+        # A plain image sets the template image, replacing the current one as Change… does
+        if images and (self.imagePath is None or roles[images[0]] is None):
             self.setImage(images.pop(0))
         for path in images:
             if roles[path] == "mask" and self.maskPath is None:

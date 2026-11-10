@@ -2257,3 +2257,16 @@ class StudioTemplatesTest(unittest.TestCase):
         accepted = templates.identify(self.image4d)
         self.assertTrue(accepted.ok)
         self.assertTrue(any("only the first" in line for line in accepted.warnings))
+
+    def test_44_second_template_image_dropped_replaces_the_first(self):
+        """BB-1: dropping another template image after one was set was refused with "choose a brain mask or head image" and
+        the dialog kept the first image. A dropped plain image replaces the template image, as Change... does.
+        """
+        dialog = self.ui.AddTemplateDialog()
+        try:
+            dialog._onDropped([self.image4d])
+            self.assertEqual(dialog.imagePath, self.image4d)
+            dialog._onDropped([self.image15])
+            self.assertEqual(dialog.imagePath, self.image15)
+        finally:
+            dialog.deleteLater()
