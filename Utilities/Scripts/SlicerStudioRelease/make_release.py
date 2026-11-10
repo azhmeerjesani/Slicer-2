@@ -38,6 +38,10 @@ WEB_FILES = ("slicer_studio_web.py", "Dockerfile", "README.md", "docker")
 
 REPOSITORY = "azhmeerjesani/Slicer-2"
 MANIFEST_NAME = "studio-update.json"
+#: What the application accepts (StudioLib/updates.py MANIFEST_MAX_BYTES and NOTES_MAX_CHARS; this script uses only the
+#: standard library, so the values are repeated here and checked against updates.py by StudioUpdatesTest)
+MANIFEST_MAX_BYTES = 256 * 1024
+NOTES_MAX_CHARS = 20000
 PLATFORM_KEYS = ("macos-arm64", "macos-x86_64", "linux-x86_64", "web")
 #: Names that GitHub keeps as they are (spaces would become dots) and that the application accepts
 ASSET_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,254}$")
@@ -284,8 +288,17 @@ def main(argv=None):
             assets["web"] = str(make_web_bundle(version, out_dir))
         manifest = build_manifest(version, assets, args.required, args.minimum_supported, notes_text, args.published)
         manifest_path = out_dir / MANIFEST_NAME
+        manifest_text = json.dumps(manifest, indent=2) + "\n"
+        manifest_size = len(manifest_text.encode("utf-8"))
+        if manifest_size > MANIFEST_MAX_BYTES:
+            raise ReleaseError(f"The manifest would be {manifest_size} bytes, more than the {MANIFEST_MAX_BYTES} bytes that the "
+                               "application accepts: it would refuse the release (\"The update manifest is too large.\"). "
+                               f"Shorten the release notes (the application shows only the first {NOTES_MAX_CHARS} characters).")
+        if len(notes_text) > NOTES_MAX_CHARS:
+            print(f"Warning: the release notes have {len(notes_text)} characters; the application shows only the first "
+                  f"{NOTES_MAX_CHARS}. Shorten them or put the rest on the release page.", file=sys.stderr)
         try:
-            manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+            manifest_path.write_text(manifest_text, encoding="utf-8")
         except OSError as error:
             raise ReleaseError(f"Cannot write {manifest_path}: {error.strerror or error}.") from None
         files = [assets[key] for key in PLATFORM_KEYS if key in assets] + [str(manifest_path)]

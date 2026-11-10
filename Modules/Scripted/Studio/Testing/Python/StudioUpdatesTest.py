@@ -2607,6 +2607,35 @@ fi
         with open(os.path.join(out, "studio-update.json"), encoding="utf-8") as f:
             self.assertEqual(json.load(f)["published"], "2024-02-29")
 
+    def test_MakeReleaseHugeNotes(self):
+        """Notes past the app's limits: a manifest over MANIFEST_MAX_BYTES is refused (never written), notes over
+        NOTES_MAX_CHARS give a warning.
+        """
+        makeRelease = self._importScript(os.path.join("Utilities", "Scripts", "SlicerStudioRelease", "make_release.py"), "make_release_huge")
+        self.assertEqual(makeRelease.MANIFEST_MAX_BYTES, self.updates.MANIFEST_MAX_BYTES)
+        self.assertEqual(makeRelease.NOTES_MAX_CHARS, self.updates.NOTES_MAX_CHARS)
+        linux = os.path.join(self.feedDir, "Slicer-5.13.0-linux-amd64.tar.gz")
+        _fakeLinuxPackage(linux, makeRelease.read_studio_version())
+        out = os.path.join(self.tempDir, "release-huge")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = makeRelease.main([linux, "--no-web", "--out-dir", out, "--notes-text", "x" * (self.updates.MANIFEST_MAX_BYTES + 10)])
+        self.assertEqual(code, 1)
+        self.assertTrue(stderr.getvalue().startswith("Error: "), stderr.getvalue())
+        self.assertIn("too large", stderr.getvalue())
+        self.assertFalse(os.path.exists(os.path.join(out, "studio-update.json")))
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            code = makeRelease.main([linux, "--no-web", "--out-dir", out, "--notes-text", "y" * (self.updates.NOTES_MAX_CHARS + 1)])
+        self.assertEqual(code, 0)
+        self.assertIn("Warning", stderr.getvalue())
+        self.assertIn(str(self.updates.NOTES_MAX_CHARS), stderr.getvalue())
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            code = makeRelease.main([linux, "--no-web", "--out-dir", out, "--notes-text", "short"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("Warning: the release notes", stderr.getvalue())
+
     def test_ReleaseScriptsOutputPathIsFile(self):
         """--out-dir and the launcher's update --dest naming a file (or under one) are errors, never a traceback."""
         makeRelease = self._importScript(os.path.join("Utilities", "Scripts", "SlicerStudioRelease", "make_release.py"), "make_release_test5")
