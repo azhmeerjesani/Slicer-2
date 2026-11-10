@@ -689,6 +689,23 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._pump()
         self.assertEqual(studioShell.currentWorkspace(), "library")
 
+    def test_breadcrumb_open_study_never_names_a_scan(self):
+        """While a study is open (no subject, no project) the title does not fall back to a scan left in the scene."""
+        studioShell = self._applyStudio()
+        topBar = studioShell.topBar
+        self._addVolume("P0_scan")
+        studioShell.switchTo("library")
+        self.assertTrue(self._wait(lambda: topBar.breadcrumbText() == "P0_scan"), topBar.breadcrumbText())
+        studioShell.studySession = object()
+        try:
+            topBar._updateDefaultBreadcrumb()
+            self.assertEqual(topBar.breadcrumbText(), "")
+            self.assertEqual(str(topBar.breadcrumbButton.text), "")
+        finally:
+            studioShell.studySession = None
+        topBar._updateDefaultBreadcrumb()
+        self.assertEqual(topBar.breadcrumbText(), "P0_scan")
+
     def test_breadcrumb_ampersand(self):
         """A '&' in a name is shown as typed: not a mnemonic, so no underline and no shortcut on the breadcrumb."""
         studioShell = self._applyStudio()

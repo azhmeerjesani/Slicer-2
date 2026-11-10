@@ -833,6 +833,11 @@ class TopBar:
             self._showBreadcrumb(os.path.basename(os.path.normpath(project.path)), None, BREADCRUMB_SEPARATOR, clickable=True)
             self._updateProjectMenuButton()
             return
+        if getattr(self.shell, "studySession", None) is not None:
+            # A study is open without a subject (Library's list): no scan of the project that was just released
+            self._showBreadcrumb("", None, BREADCRUMB_SEPARATOR, clickable=False)
+            self._updateProjectMenuButton()
+            return
         volume = self._sourceVolume()
         secondary = None
         if volume is not None and self.shell.currentWorkspace() == "draw":
