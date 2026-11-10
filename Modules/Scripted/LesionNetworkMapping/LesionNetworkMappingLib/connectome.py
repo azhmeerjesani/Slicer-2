@@ -798,6 +798,9 @@ class ConnectomeWriter:
         manifest = os.path.join(self.path, MANIFEST_NAME)
         if os.path.exists(manifest) and not (overwrite or resume):
             raise FileExistsError(f"A connectome bundle already exists at {self.path}")
+        if os.path.exists(os.path.join(self.path, PARTIAL_MANIFEST_NAME)) and not (overwrite or resume):
+            # Without this, _remove_previous() deleted the subjects of a stopped conversion (hours of work for a large dataset)
+            raise FileExistsError(f"An interrupted conversion is at {self.path}: resume it, or overwrite it to start over")
         os.makedirs(os.path.join(self.path, "subjects"), exist_ok=True)
         self.mask = np.asarray(mask).reshape(np.asarray(mask).shape[:3]) != 0
         # Affines are stored as float32 in NIfTI headers; keep connectome.json identical to them.
@@ -1747,6 +1750,8 @@ class _TarStreamConverter:
         if not resume:
             if os.path.isfile(manifests[0]) and not overwrite:
                 raise FileExistsError(f"A connectome bundle already exists at {self.path}")
+            if os.path.isfile(manifests[1]) and not overwrite:
+                raise FileExistsError(f"An interrupted conversion is at {self.path}: resume it, or overwrite it to start over")
             shutil.rmtree(_staging_dir(self.path), ignore_errors=True)
         existing = None
         if resume and os.path.isfile(os.path.join(self.path, "mask.nii.gz")) and any(os.path.isfile(p) for p in manifests):

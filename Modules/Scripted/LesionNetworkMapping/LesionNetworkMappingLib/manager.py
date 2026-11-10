@@ -411,6 +411,10 @@ def _convert_main(argv):
     out = os.path.abspath(args.out)
     if os.path.isfile(os.path.join(out, "connectome.json")) and not (args.resume or args.overwrite):
         raise jobs.JobError(f"A connectome bundle already exists at {out} (use --overwrite to replace it)", code="exists")
+    if os.path.isfile(os.path.join(out, "connectome.partial.json")) and not (args.resume or args.overwrite):
+        # A stopped conversion: starting again would delete the subjects it already wrote
+        raise jobs.JobError(f"An interrupted conversion is at {out}: convert again with --resume to continue it, or with --overwrite to start over",
+                            code="interrupted")
     if args.resume and os.path.isfile(os.path.join(out, "connectome.json")) and not os.path.isfile(os.path.join(out, "connectome.partial.json")):
         # Resume only continues an interrupted conversion: into a finished bundle it would add its subjects again
         raise jobs.JobError(f"{out} is a finished connectome bundle: there is no interrupted conversion to resume (use --overwrite to replace it, or choose another folder)", code="exists")

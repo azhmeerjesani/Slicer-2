@@ -424,6 +424,57 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
         finally:
             dialog.hide()
 
+    def test_convert_without_resume_into_a_stopped_conversion_asks_first(self):
+        """Bug BB-1 convert-without-resume-silently-deletes-stopped-conversion: Convert… with Resume unticked (the default) into
+        the bundle folder of a stopped conversion deleted the subjects it had written. Convert asks now: Resume (ticks it),
+        Start over (--overwrite) or Cancel (no job). A folder without a stopped conversion is not asked about.
+        """
+        from unittest import mock
+
+        import numpy as np
+
+        from LesionNetworkMappingLib import connectome
+
+        out = os.path.join(self.tmp, "Stopped convert.lnmc")
+        mask = np.zeros((4, 4, 4), bool)
+        mask[1:3, 1:3, 1:3] = True
+        writer = connectome.ConnectomeWriter(out, mask, np.eye(4), name="Stopped convert")
+        writer.add_subject("sub-01", [np.random.default_rng(0).standard_normal((int(mask.sum()), 6))])
+        manager = self.widget.openManager()
+        dialog = manager.openConvert() or manager.convertDialog
+        try:
+            dialog.sourceCombo.setCurrentIndex(dialog.sourceCombo.findData("nifti"))
+            dialog.termsEdit.setPlainText("")
+            dialog.inputEdit.setText(self.tmp)
+            dialog.maskEdit.setText(os.path.join(self.tmp, "mask.nii.gz"))
+            dialog.outEdit.setText(out)
+            for answer, expected in ((None, None), ("resume", "--resume"), ("overwrite", "--overwrite")):
+                dialog.resumeCheckBox.setChecked(False)
+                dialog.estimate = {"enough": True}
+                with mock.patch.object(dialog, "askInterrupted", return_value=answer) as ask, mock.patch.object(manager, "startConversion") as start:
+                    dialog.onConvert()
+                ask.assert_called_once_with(out)
+                if expected is None:
+                    start.assert_not_called()
+                    continue
+                args = start.call_args[0][0]
+                self.assertIn(expected, args)
+                self.assertFalse({"--resume", "--overwrite"} - {expected} & set(args))
+            self.assertEqual(sorted(os.listdir(os.path.join(out, "subjects"))), ["sub-01.f16.npy", "sub-01.norms.npy"])  # the dialog deletes nothing itself
+            # Resume ticked, or a folder without a stopped conversion: nothing to ask
+            for ticked, folder in ((True, out), (False, os.path.join(self.tmp, "New convert.lnmc"))):
+                dialog.resumeCheckBox.setChecked(ticked)
+                dialog.outEdit.setText(folder)
+                dialog.estimate = {"enough": True}
+                with mock.patch.object(dialog, "askInterrupted") as ask, mock.patch.object(manager, "startConversion") as start:
+                    dialog.onConvert()
+                ask.assert_not_called()
+                self.assertEqual("--resume" in start.call_args[0][0], ticked)
+                self.assertNotIn("--overwrite", start.call_args[0][0])
+        finally:
+            dialog.hide()
+            shutil.rmtree(out, ignore_errors=True)
+
     def test_buttons_show_their_full_text_at_the_smallest_size(self):
         # The seven actions of the selected connectome were one row: at 1366 x 768 their labels were cut. They wrap now:
         # as opened (the dialog fits the screen) and at the dialog's minimum size, every visible button is as wide as its

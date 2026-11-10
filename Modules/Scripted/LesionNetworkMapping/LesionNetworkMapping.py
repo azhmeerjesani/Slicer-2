@@ -1875,6 +1875,16 @@ class ConvertConnectomeDialog(qt.QDialog):
         if self.estimate is None:
             self.runEstimate(then=self.onConvert)
             return
+        overwrite = False
+        if not self.resumeCheckBox.checked and paths["out"] and os.path.isfile(os.path.join(paths["out"], "connectome.partial.json")):
+            # A stopped conversion is in the bundle folder: converting without Resume would delete the subjects it wrote
+            answer = self.askInterrupted(paths["out"])
+            if answer == "resume":
+                self.resumeCheckBox.setChecked(True)
+            elif answer == "overwrite":
+                overwrite = True
+            else:
+                return
         if self.estimate.get("enough") is False and not self.resumeCheckBox.checked:
             slicer.util.errorDisplay(self.estimateText(self.estimate), windowTitle=_("Not enough free space"))
             return
@@ -1895,8 +1905,28 @@ class ConvertConnectomeDialog(qt.QDialog):
             args += ["--terms-file", termsPath]
         if self.resumeCheckBox.checked:
             args.append("--resume")
+        elif overwrite:
+            args.append("--overwrite")
         self.manager.startConversion(args, paths["out"])
         self.close()
+
+    def askInterrupted(self, outPath):
+        """Ask what to do with the stopped conversion in ``outPath``: "resume", "overwrite" (start over) or None (cancel)."""
+        text = _("{folder} holds a conversion that was stopped before it was finished. Resume continues it and keeps the subjects already "
+                 "written. Start over deletes them and converts every subject again.").format(folder=outPath)
+        box = qt.QMessageBox(qt.QMessageBox.Question, _("Resume the stopped conversion?"), text, qt.QMessageBox.NoButton, self)
+        box.setObjectName("LNMConvertInterruptedQuestion")
+        resumeButton = box.addButton(_("Resume"), qt.QMessageBox.AcceptRole)
+        overwriteButton = box.addButton(_("Start over"), qt.QMessageBox.DestructiveRole)
+        cancelButton = box.addButton(qt.QMessageBox.Cancel)
+        box.setDefaultButton(resumeButton)
+        box.setEscapeButton(cancelButton)
+        run = getattr(box, "exec_", None) or box.exec  # Qt 5 PythonQt: exec_, Qt 6: exec
+        run()
+        clicked = box.clickedButton()
+        if clicked == resumeButton:
+            return "resume"
+        return "overwrite" if clicked == overwriteButton else None
 
 
 class ConnectomeManagerDialog(qt.QDialog):

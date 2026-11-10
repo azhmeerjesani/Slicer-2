@@ -936,6 +936,44 @@ class BundleTest(_TempDirTestCase):
         self.assertEqual(bundle.subject_ids, ["sub-01", "sub-02", "sub-03"])
         self.assertEqual((bundle.name, bundle.citation, bundle.data_use_terms), ("Partial", "Cite me", "Research use only."))
 
+    def test_converting_again_without_resume_keeps_a_stopped_conversion(self):
+        """Bug BB-1 convert-without-resume-silently-deletes-stopped-conversion: converting again into a stopped conversion
+        without resume (the Convert dialog's default) deleted the subjects it had written and started from zero, without asking.
+        """
+        from LesionNetworkMappingLib import manager
+
+        mask_path = self.path("mask.nii.gz")
+        nifti.write_nifti(mask_path, self.mask.astype(np.uint8), RAS_AFFINE)
+        inputs = self.path("stopped-inputs")
+        os.makedirs(inputs)
+        for name in ("sub-01", "sub-02", "sub-03"):
+            nifti.write_nifti(os.path.join(inputs, f"{name}.nii.gz"), self.rng.standard_normal((*self.mask.shape, 6)).astype(np.float32), RAS_AFFINE)
+        out = self.path("stopped.lnmc")
+        writer = connectome.ConnectomeWriter(out, self.mask, RAS_AFFINE, name="Stopped")
+        writer.add_subject("sub-01", [self.rng.standard_normal((self.n_voxels, 6))])
+        written = sorted(os.listdir(os.path.join(out, "subjects")))
+        self.assertEqual(written, ["sub-01.f16.npy", "sub-01.norms.npy"])
+        # Neither the writer, the NIfTI converter nor the manager job deletes it without resume or overwrite
+        with self.assertRaisesRegex(FileExistsError, "interrupted conversion"):
+            connectome.ConnectomeWriter(out, self.mask, RAS_AFFINE)
+        with self.assertRaisesRegex(FileExistsError, "interrupted conversion"):
+            connectome.from_nifti_timeseries(os.path.join(inputs, "*.nii.gz"), mask_path, out)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(jobs.JobError) as context:
+                manager.main(["convert", "--source", "nifti", "--input", inputs, "--mask", mask_path, "--out", out])
+        self.assertEqual(context.exception.code, "interrupted")
+        self.assertEqual(sorted(os.listdir(os.path.join(out, "subjects"))), written)
+        self.assertTrue(os.path.isfile(os.path.join(out, connectome.PARTIAL_MANIFEST_NAME)))
+        # Resume continues it; overwrite (asked for) starts over
+        bundle = connectome.ConnectomeBundle.open(connectome.from_nifti_timeseries(os.path.join(inputs, "*.nii.gz"), mask_path, out, resume=True))
+        self.assertEqual(bundle.subject_ids, ["sub-01", "sub-02", "sub-03"])
+        again = self.path("stopped-again.lnmc")
+        writer = connectome.ConnectomeWriter(again, self.mask, RAS_AFFINE, name="Stopped")
+        writer.add_subject("old", [self.rng.standard_normal((self.n_voxels, 6))])
+        bundle = connectome.ConnectomeBundle.open(connectome.from_nifti_timeseries(os.path.join(inputs, "*.nii.gz"), mask_path, again, overwrite=True))
+        self.assertEqual(bundle.subject_ids, ["sub-01", "sub-02", "sub-03"])
+        self.assertFalse(os.path.exists(os.path.join(again, "subjects", "old.f16.npy")))
+
     def test_from_leaddbs(self):
         shape = (6, 7, 8)
         spm_mat = np.array([[-2.0, 0, 0, 92], [0, 2, 0, -128], [0, 0, 2, -74], [0, 0, 0, 1]])
