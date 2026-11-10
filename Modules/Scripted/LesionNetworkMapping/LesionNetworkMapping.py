@@ -5386,7 +5386,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
     def _outputsByKey(self, outputs):
         """{"T", "AvgFz", "AvgR": path} of the run's lesion from an event's output list."""
         bundle = self._runBundle or self.bundle
-        if bundle is None or not self.lesionName:
+        if bundle is None or not self.lesionName or not self.runDir:
             return {}
         expected = self.logic.mapPaths(self.runDir, self.lesionName, bundle.name, self.runDescSuffix)
         normalized = {os.path.normpath(path) for path in outputs}
@@ -6814,10 +6814,40 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         display.resumeOutlines()
 
     def onSceneStartClose(self, caller, event):
+        self._stopRunOfClosedScene()
         self._outlineState = None
         self._previousRun = None
         self._observeSeed(None)
         self.setParameterNode(None)
+
+    def _stopRunOfClosedScene(self):
+        """The scene closes while Map's engine runs: stop the run (as Normalize stops its job) and stop listening to it.
+
+        Its events and its end belong to the closed scene: handled after ``onSceneEndClose()`` they would look up the
+        maps of a run folder that is gone (a traceback on every event) and leave Compute on "Mapping…". When it has
+        ended, the Compute step and Map's status chip show the state of the new scene.
+        """
+        from LesionNetworkMappingUI import jobrunner
+
+        job, self.job = self.job, None
+        if hasattr(self, "progressTimer"):
+            self.progressTimer.stop()
+        self._pendingProgress = None
+        if job is None or job.isFinished():
+            return
+
+        def onDone(job):
+            qt.QTimer.singleShot(jobrunner.FINISHED_CHIP_MS + 200, self._refreshStatusChip)
+            self.updateComputeState()
+
+        job.spec.onEvent = None
+        job.spec.onDone = onDone
+        if hasattr(self, "progress"):
+            # As before the first run: no progress row (it would keep the closed scene's "312 / 1000 subjects")
+            self.progress.setJob(None)
+            self.progress.reset()
+            self.progress.widget.hide()
+        job.stop()
 
     def onSceneEndClose(self, caller, event):
         self.runOutputs, self.runN, self.runPartial, self.runDir = {}, None, False, None
@@ -6832,6 +6862,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.ctx.setCurrentRun(None)
         if self.parent.isEntered:
             self.initializeParameterNode()
+        self.refreshResult()  # the Result card of the new scene: no title of the closed scene's map or run ("Mapping: …")
+        self.updateComputeState()
 
     def onSceneEndImport(self, caller, event):
         # A scene or project opened while Map is shown: its parameter values (the threshold rule among them) are shown
