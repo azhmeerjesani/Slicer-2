@@ -193,6 +193,34 @@ def openLink(url):
     return bool(qt.QDesktopServices.openUrl(qt.QUrl(url)))
 
 
+def availableArea(widget=None):
+    """The available geometry (``QRect``, without panels) of the screen that shows ``widget``, else of the primary screen; None without a screen."""
+    try:
+        ui = _studioUi()
+        screen = ui.screenOf(widget) if ui is not None else None
+        if screen is None:
+            screens = qt.QGuiApplication.screens()
+            screen = screens[0] if screens else None
+        return screen.availableGeometry if screen is not None else None
+    except Exception:  # noqa: BLE001 (the default size is fine without a screen)
+        return None
+
+
+def fitDialogToScreen(dialog, width, height, minWidth, minHeight):
+    """Resize ``dialog`` to ``width`` x ``height``, kept to 90% of the available screen area (a window manager adds a title bar and panels).
+
+    The minimum size is lowered with it, so a short screen (960x540 at 200% scaling) can still show the whole dialog. The content must scroll.
+    """
+    area = availableArea(dialog.parentWidget())
+    if area is not None:
+        width = min(width, int(area.width() * 0.9))
+        height = min(height, int(area.height() * 0.9))
+        minWidth = min(minWidth, width)
+        minHeight = min(minHeight, height)
+    dialog.setMinimumSize(minWidth, minHeight)
+    dialog.resize(width, height)
+
+
 def routeLinks(widget):
     """Send the links clicked in a ``QLabel`` or ``QTextBrowser`` through :func:`openLink` (a link window in the web build).
 

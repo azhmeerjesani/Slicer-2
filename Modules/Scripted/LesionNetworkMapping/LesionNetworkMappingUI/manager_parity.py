@@ -278,8 +278,19 @@ class ParityDialog(qt.QDialog):
         self.parityResult = None
         self.setObjectName("LNMLeadDbsParityDialog")
         self.setWindowTitle(_("Verify against Lead-DBS"))
-        self.setMinimumSize(760, 720)
-        layout = qt.QVBoxLayout(self)
+        widgets.fitDialogToScreen(self, 760, 720, 560, 420)
+        outer = qt.QVBoxLayout(self)  # the content scrolls on a short screen; the buttons stay in view
+        outer.setContentsMargins(0, 0, 0, 8)
+        scroll = qt.QScrollArea()
+        scroll.setObjectName("LNMLeadDbsParityScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(qt.QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        outer.addWidget(scroll, 1)
+        content = qt.QWidget()
+        content.setObjectName("LNMLeadDbsParityContent")
+        scroll.setWidget(content)
+        layout = qt.QVBoxLayout(content)
         layout.addWidget(_label(_("Maps 24 reference lesions (aphasia, addiction, epilepsy and synthetic sets of van den Heuvel et al. 2026) with this connectome and "
                                   "compares them with their published Lead-DBS GSP1000v2 Full Set maps. The numbers are measured, not promised: parity is "
                                   "like-for-like only on a connectome converted from the Lead-DBS release."), "LNMLeadDbsParityIntro"))
@@ -332,6 +343,7 @@ class ParityDialog(qt.QDialog):
         self.statusLabel = _label("", "LNMLeadDbsParityStatus", secondary=True, selectable=True)
         layout.addWidget(self.statusLabel)
         buttons = qt.QHBoxLayout()
+        buttons.setContentsMargins(9, 0, 9, 0)
         self.openButton = _button(_("Open folder"), "LNMLeadDbsParityOpenFolder")
         self.openButton.setEnabled(False)
         self.openButton.connect("clicked()", self.openFolder)
@@ -344,7 +356,7 @@ class ParityDialog(qt.QDialog):
         close = _button(_("Close"), "LNMLeadDbsParityClose")
         close.connect("clicked()", self.close)
         buttons.addWidget(close)
-        layout.addLayout(buttons)
+        outer.addLayout(buttons)
         for button in self.findChildren(qt.QPushButton):
             button.setAutoDefault(False)
         self.verifyButton.setDefault(True)
