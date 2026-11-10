@@ -82,6 +82,29 @@ class StudioLazyWrappersTest(unittest.TestCase):
         self.assertFalse(hasattr(slicer, "__all__"))
         self.assertNotIn("_lazyWrapperState", namespace)
 
+    def test_abstract_plugin_class_registered_under_private_is_public(self):
+        """A class that PythonQt registered under PythonQt.private (the abstract subject hierarchy plugin base
+        class, when a plugin object is wrapped before its wrapper module is imported) is still available as
+        slicer.<Class>, as in official 3D Slicer.
+        """
+        import PythonQt
+
+        name = "qStudioTestPrivateRegisteredClass"
+        try:
+            setattr(PythonQt.private, name, slicer.qMRMLWidget)
+        except (AttributeError, TypeError):
+            self.skipTest("PythonQt.private cannot be extended in this build")
+        try:
+            self.assertFalse(name in slicer.__dict__)
+            slicer.util._copyLazyWrapperPrivateClasses(slicer)
+            self.assertIs(slicer.__dict__.get(name), slicer.qMRMLWidget)
+        finally:
+            slicer.__dict__.pop(name, None)
+            try:
+                delattr(PythonQt.private, name)
+            except (AttributeError, TypeError):
+                pass
+
     def test_attribute_access_stays_lazy(self):
         """Looking up another name does not import the pending wrappers (the setting keeps startup fast)."""
         self.assertTrue(slicer.util._registerLazyWrapperIndex(self.directory, self.indexPath))

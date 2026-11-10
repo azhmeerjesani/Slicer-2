@@ -716,9 +716,38 @@ def _importLazyWrapperModuleLocked(moduleName):
                 # Not in the index, for example an abstract Qt base class that PythonQt registers
                 # with the first wrapped subclass.
                 slicerModule.__dict__[itemName] = item
+    if kind != "vtk":
+        _copyLazyWrapperPrivateClasses(slicerModule)
     # Indexed names that the eager import would not have copied (not a class of this kind)
     for className in [name for name, owner in list(classes.items()) if owner == moduleName]:
         del classes[className]
+
+
+def _copyLazyWrapperPrivateClasses(slicerModule):
+    """Copy Qt classes that PythonQt registered under ``PythonQt.private`` into ``slicer``.
+
+    An object whose wrapper module is not imported yet (for example a subject hierarchy plugin
+    wrapped during startup) makes PythonQt register its abstract base classes under
+    ``PythonQt.private``. They are in no wrapper module and not in the index, but the eager import
+    finds them in the module that is imported first (``slicer.qSlicerSubjectHierarchyAbstractPlugin``).
+    """
+    try:
+        import PythonQt
+
+        private = PythonQt.private
+        names = dir(private)
+    except (ImportError, AttributeError):
+        return
+    state = _lazyWrapperState
+    for itemName in names:
+        if itemName.startswith("_") or itemName in state["removed"] or itemName in slicerModule.__dict__:
+            continue
+        try:
+            item = getattr(private, itemName)
+        except AttributeError:
+            continue
+        if _lazyWrapperMatches(item, "qt") and itemName not in state["classes"]:
+            slicerModule.__dict__[itemName] = item
 
 
 def _importPendingLazyWrappers():
@@ -761,6 +790,9 @@ def _resolveLazyWrapperAttribute(name):
             _LAZY_WRAPPER_CLASS_NAME = re.compile(r"^(q|vtk|ctk)[A-Z]\w*$")
         if _LAZY_WRAPPER_CLASS_NAME.match(name):
             _importPendingLazyWrappers()
+    if name not in slicerModule.__dict__ and name not in state["removed"]:
+        with _lazyWrapperLock:
+            _copyLazyWrapperPrivateClasses(slicerModule)
     if name in slicerModule.__dict__:
         return slicerModule.__dict__[name]
     raise AttributeError(f"module 'slicer' has no attribute {name!r}")
