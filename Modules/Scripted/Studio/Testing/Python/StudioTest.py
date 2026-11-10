@@ -2558,6 +2558,31 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertEqual([label.text for label in frame.findChildren("QLabel") if label.wordWrap and label.text.startswith("Actual")], [], effectName)
         editor.setActiveEffectByName("")
 
+    def test_33b_figure_row_web_build_has_no_paste_hint(self):
+        """The "Trace from a figure" row advertises Ctrl+V and drop only where they work: not in the web build."""
+        if not _hasFigureTracing():
+            self.skipTest("figure tracing is not in this build")
+        from StudioLib import figure
+
+        saved = figure.isWebBuild
+        self.addCleanup(setattr, figure, "isWebBuild", saved)
+        for web in (False, True):
+            figure.isWebBuild = lambda web=web: web
+            card = figure.FigureCard()
+            # A throwaway card, never added to the inspector: delete its parentless slot synchronously. A deleteLater() on
+            # a parentless Python-owned slot crashes Slicer later (at the next shutdown or in a following test)
+            self.addCleanup(card.slot.delete)
+            value = card.row.findChild("QLabel", "StudioListRowValue").text
+            tip = card.row.toolTip
+            if web:
+                self.assertEqual(value, "")
+                self.assertNotIn("Ctrl+V", tip)
+                self.assertNotIn("paste", tip.lower())
+                self.assertIn("Open figure", tip)
+            else:
+                self.assertIn("V", value)
+                self.assertIn("paste", tip.lower())
+
     def test_33_figure_round_trip(self):
         """A synthetic figure and 5 landmark pairs: RMS < 0.5 mm; the crop and fit file are saved; Show source rebuilds the
         overlay in <= 300 ms with the same fit; Ctrl+V follows the clipboard; the trace views are restored on close.

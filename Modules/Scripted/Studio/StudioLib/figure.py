@@ -2008,9 +2008,15 @@ class FigureCard:
         slotLayout = qt.QVBoxLayout(self.slot)
         slotLayout.setContentsMargins(0, 0, 0, 0)
         slotLayout.setSpacing(4)
-        self.row = ui.listRow("image", _("Trace from a figure"), ui.keyText(PASTE_SHORTCUT), self._onRowClicked, "StudioFigureRow")
-        self.row.setToolTip(ui.tooltip(_("Trace from a figure"), PASTE_SHORTCUT,
-                                       _("trace a lesion from a published figure: open the picture, drop it on the window or paste it")))
+        # The web build has no image clipboard and no drop from the computer: no Ctrl+V hint, and the tooltip points to "Open figure…"
+        web = isWebBuild()
+        self.row = ui.listRow("image", _("Trace from a figure"), "" if web else ui.keyText(PASTE_SHORTCUT), self._onRowClicked, "StudioFigureRow")
+        if web:
+            self.row.setToolTip(ui.tooltip(_("Trace from a figure"), None,
+                                           _("trace a lesion from a published figure: open the picture with Open figure… (in /data)")))
+        else:
+            self.row.setToolTip(ui.tooltip(_("Trace from a figure"), PASTE_SHORTCUT,
+                                           _("trace a lesion from a published figure: open the picture, drop it on the window or paste it")))
         slotLayout.addWidget(self.row)
         #: The card is shown without a figure (its entry points) after a click on the row
         self.expanded = False
