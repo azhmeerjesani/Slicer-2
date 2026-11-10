@@ -1253,8 +1253,11 @@ class QcCore:
             written.append((sid, values["dimensionality"]))
         if written:
             session.flush(lockTimeout=0.5)
-            for sid, dim in written:
-                _appendAudit(study, {"at": _now(), "by": "lesionqc", "event": "lesion_dimensionality", "sid": sid, "dimensionality": dim, "source": "file"})
+            try:
+                for sid, dim in written:
+                    _appendAudit(study, {"at": _now(), "by": "lesionqc", "event": "lesion_dimensionality", "sid": sid, "dimensionality": dim, "source": "file"})
+            except OSError as e:  # a read-only study writes nothing: skip the audit record, and still ask about 2D lesions
+                logging.warning("Studio: the dimensionality of the lesions was not added to the audit log (%s)", e)
         self._askImported(session)
         return bool(written)
 

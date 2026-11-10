@@ -2427,6 +2427,52 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertEqual(chosen["level"], "neutral")
         self.assertEqual([a["text"] for a in chosen["actions"]], ["Change…"])
 
+    def test_12_read_only_study_dimensionality_audit_skipped(self):
+        """A read-only study: the dimensionality audit append fails quietly (one warning) and the 2D question is still asked."""
+        from StudioLib import lesionqc
+
+        asked = []
+
+        class Row(dict):
+            pass
+
+        class Study:
+            path = "/study"
+
+            def __contains__(self, sid):
+                return True
+
+            def subject(self, sid):
+                return {"lesion": "l.nii.gz"}
+
+            def abspath(self, rel):
+                return rel
+
+        class Session:
+            study = Study()
+
+            def setValues(self, sids, values):
+                pass
+
+            def flush(self, lockTimeout=0):
+                pass
+
+        fake = types.SimpleNamespace(studyPath="/study", _askImported=asked.append)
+        saved = (lesionqc._session, lesionqc._appendAudit, lesionqc._stat, lesionqc.dimensionColumns)
+        session = Session()
+
+        def deny(study, record):
+            raise PermissionError(13, "Permission denied")
+
+        lesionqc._session = lambda: session
+        lesionqc._appendAudit = deny
+        lesionqc._stat = lambda path: ("key",)
+        lesionqc.dimensionColumns = lambda info, figure=False: {"dimensionality": "3D"}
+        self.addCleanup(lambda: (setattr(lesionqc, "_session", saved[0]), setattr(lesionqc, "_appendAudit", saved[1]), setattr(lesionqc, "_stat", saved[2]), setattr(lesionqc, "dimensionColumns", saved[3])))
+        result = {"studyPath": "/study", "found": [("sub-01", ("key",), {"dimensionality": "3D"})]}
+        self.assertTrue(lesionqc.QcCore._applyDimensions(fake, result))
+        self.assertEqual(asked, [session])
+
     def test_13_failed_adopt_leaves_folder_unchanged(self):
         from LesionNetworkMappingLib import geometry, nifti
 
