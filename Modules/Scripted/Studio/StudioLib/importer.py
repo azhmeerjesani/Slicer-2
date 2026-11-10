@@ -744,6 +744,41 @@ def _checkNiftiComplete(path):
               "its source.").format(name=os.path.basename(str(path)), have=shortfall[0], need=shortfall[1]))
 
 
+# NIfTI datatype codes of 64-bit integer voxels (int64, uint64): nibabel writes int64 by default for a numpy integer array
+_NIFTI_64BIT_INTEGER_DATATYPES = {1024: "int64", 1280: "uint64"}
+
+
+def _niftiDatatype(path):
+    """The ``datatype`` code of a NIfTI-1 or NIfTI-2 header, None if not NIfTI or unreadable (the readers report those)."""
+    if not isNiftiFile(path) or not os.path.isfile(path):
+        return None
+    header = _niftiHeader(path, 540)
+    if header is None or len(header) < 348:
+        return None
+    for byteOrder in ("<", ">"):
+        sizeOfHeader = struct.unpack(byteOrder + "i", header[0:4])[0]
+        if sizeOfHeader == 348:
+            return struct.unpack(byteOrder + "h", header[70:72])[0]
+        if sizeOfHeader == 540 and len(header) >= 540:
+            return struct.unpack(byteOrder + "h", header[12:14])[0]
+    return None
+
+
+def _checkScanVoxelType(path):
+    """Raise ``RefusedFileError`` (a message for the user) if the NIfTI scan ``path`` stores 64-bit integer voxels: the
+    reader reads them as VTK_LONG / VTK_LONG_LONG, which the image filters of the slice views and histograms are not
+    compiled for, and the first slice render ends the application (3D Slicer does the same). It runs before the file is
+    read, so no node is created. Lesions are read by the segmentation reader, which converts the type, and are not checked.
+    """
+    typeName = _NIFTI_64BIT_INTEGER_DATATYPES.get(_niftiDatatype(path))
+    if typeName is None:
+        return
+    raise RefusedFileError(
+        _("{name} cannot be opened: its voxels are stored as 64-bit integers ({type}), which the slice views cannot "
+          "show. Save it again with 16-bit or 32-bit integer or floating-point voxels (for example "
+          "data.astype(\"int32\") in nibabel) and open it again.").format(name=os.path.basename(str(path)), type=typeName))
+
+
 def _checkLesionValueRange(path):
     """Raise ``RuntimeError`` (a message for the user) if the voxel values of the label image ``path`` are beyond what the
     segmentation reader reads (``LESION_LABEL_VALUE_LIMIT``): it would crash (values beyond the int range) or fail to
@@ -1623,9 +1658,11 @@ def loadFiles(paths, shell=None, pairedLesion=None):
                         result.scenes.append(path)
                     elif kind == "volume":
                         _checkNiftiComplete(path)
+                        _checkScanVoxelType(path)
                         result.volumes.append(slicer.util.loadVolume(path, {"singleFile": True}))
                     elif kind == "sequence":
                         _checkNiftiComplete(path)
+                        _checkScanVoxelType(path)
                         result.volumes.append(loadSequence(path))
                     else:
                         segmentationNode = loadLesion(path)

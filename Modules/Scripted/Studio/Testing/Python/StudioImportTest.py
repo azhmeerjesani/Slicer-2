@@ -671,6 +671,66 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLVolumeNode")), 0, name)
             self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")), 0, name)
 
+    def test_int64_nifti_scan_is_refused(self):
+        """BB-1: a NIfTI scan with 64-bit integer voxels (datatype 1024 or 1280, what nibabel writes for a numpy integer
+        array) is refused in plain words before it is read: read as VTK_LONG, its first slice render ended the
+        application. An int32 scan of the same voxels opens, and an int64 lesion is still opened as a lesion.
+        """
+        from StudioLib import importer
+
+        dims = (12, 10, 8)
+
+        def niftiBytes(datatype, bitpix, data, gz):
+            header = bytearray(348)
+            struct.pack_into("<i", header, 0, 348)
+            struct.pack_into("<8h", header, 40, 3, *dims, 1, 1, 1, 1)
+            struct.pack_into("<hh", header, 70, datatype, bitpix)
+            struct.pack_into("<8f", header, 76, 1, 1, 1, 1, 1, 0, 0, 0)
+            struct.pack_into("<f", header, 108, 352)
+            header[344:348] = b"n+1\0"
+            content = bytes(header) + bytes(4) + data.tobytes()
+            return gzip.compress(content) if gz else content
+
+        rng = np.random.default_rng(11)
+        values = rng.integers(0, 1000, size=dims[::-1])
+        lesion = np.zeros(dims[::-1], "<i8")
+        lesion[2:6, 3:7, 3:9] = 1
+        paths = {}
+        for name, datatype, bitpix, data in (
+            ("sub-01_T1w.nii.gz", 1024, 64, values.astype("<i8")), ("brain_uint64.nii", 1280, 64, values.astype("<u8")),
+            ("sub-02_T1w.nii.gz", 8, 32, values.astype("<i4")), ("sub-02_lesion.nii.gz", 1024, 64, lesion),
+        ):
+            paths[name] = os.path.join(self.directory, name)
+            with open(paths[name], "wb") as f:
+                f.write(niftiBytes(datatype, bitpix, data, name.endswith(".gz")))
+        self.assertEqual(importer._niftiDatatype(paths["sub-01_T1w.nii.gz"]), 1024)
+        self.assertEqual(importer._niftiDatatype(paths["sub-02_T1w.nii.gz"]), 8)
+        studioShell = self._applyStudio()
+        for name in ("sub-01_T1w.nii.gz", "brain_uint64.nii"):
+            recorder = logging.Handler()
+            records = []
+            recorder.emit = records.append
+            logging.getLogger().addHandler(recorder)
+            try:
+                result = importer.loadFiles([paths[name]], studioShell)
+            finally:
+                logging.getLogger().removeHandler(recorder)
+            self._pump()
+            self.assertEqual(len(result.errors), 1, name)
+            self.assertIn("64-bit integers", result.errors[0][1], name)
+            self.assertFalse([r for r in records if "Traceback" in r.getMessage()], name)
+            self.assertEqual(result.volumes, [], name)
+            self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLVolumeNode")), 0, name)
+        result = importer.loadFiles([paths["sub-02_T1w.nii.gz"]], studioShell)
+        self._pump()
+        self.assertEqual(result.errors, [])
+        self.assertEqual(len(result.volumes), 1)
+        self.assertEqual(result.volumes[0].GetImageData().GetScalarType(), vtk.VTK_INT)
+        result = importer.loadFiles([paths["sub-02_lesion.nii.gz"]], studioShell, pairedLesion=None)
+        self._pump()
+        self.assertEqual(result.errors, [])
+        self.assertEqual(len(result.segmentations), 1)
+
     def test_damaged_seg_nrrd_leaves_nothing_in_the_scene(self):
         """BB-1: a ``.seg.nrrd`` that the reader only partly reads (truncated, header only) is a load error like a damaged
         ``.nii.gz``: the segmentation reader raises but leaves a half-created segmentation node and its storage node, which
