@@ -570,6 +570,44 @@ class SeedSetTest(CoordsTestCase):
         self.assertEqual(tuple(header["shape"])[3], 4)
 
 
+class CardSeedModeDocsTest(unittest.TestCase):
+    """The docs say which seed modes show which Map card (each card's ``modes`` in its ``card_*.py``)."""
+
+    def test_card_table_matches_card_modes(self):
+        import re
+
+        root = os.path.dirname(os.path.dirname(os.path.dirname(MODULE_DIR)))
+        page_path = os.path.join(root, "Docs", "user_guide", "modules", "lesionnetworkmapping.md")
+        studio_path = os.path.join(root, "Docs", "user_guide", "modules", "studio.md")
+        if not os.path.isfile(page_path) or not os.path.isfile(studio_path):
+            self.skipTest("no source tree")
+        with open(page_path, encoding="utf-8") as f:
+            rows = {}
+            for line in f:
+                cells = [c.strip() for c in line.strip().strip("|").split("|")]
+                if line.startswith("|") and len(cells) == 3:
+                    rows[cells[0]] = cells[2]
+        self.assertEqual(rows.get("Export"), "Lesion")
+        ui = os.path.join(MODULE_DIR, "LesionNetworkMappingUI")
+        for name in sorted(os.listdir(ui)):
+            if not (name.startswith("card_") and name.endswith(".py")):
+                continue
+            with open(os.path.join(ui, name), encoding="utf-8") as f:
+                text = f.read()
+            modes = re.search(r'^    "modes": \(([^)]*)\),', text, re.M)
+            title = re.search(r'^    "title": "([^"]+)",', text[text.rfind("\nCARD = {"):], re.M)
+            if modes is None or title is None or title.group(1) not in rows:
+                continue
+            shown = [m.strip().strip('"') for m in modes.group(1).split(",") if m.strip()]
+            cell = rows[title.group(1)].split(";")[0]
+            for mode in ("lesion", "cohort", "coordinates", "stimulation"):
+                self.assertEqual(mode.capitalize() in cell, mode in shown, f"{title.group(1)}: {mode} in {cell!r}")
+        with open(studio_path, encoding="utf-8") as f:
+            studio = " ".join(f.read().split())
+        self.assertNotIn("with the seed set to **Cohort** it also shows Preflight", studio)
+        self.assertIn("(no Normalize to MNI, Result or Export", studio)
+
+
 class AtrophyDocsTest(unittest.TestCase):
     """Atrophy seeds exist only as ``coords atrophy`` on the command line: the README and the module page say so."""
 

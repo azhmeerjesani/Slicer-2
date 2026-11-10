@@ -67,32 +67,32 @@ capped so that the computer stays usable.
 ## The Map workspace
 
 The inspector of the Map workspace is a list of **cards** in a fixed order; the same cards appear in the Classic
-interface. Cards that do not apply to the seed (Lesion, Cohort, Coordinates or Stimulation) are hidden, and the research-only
+interface. Cards that do not apply to the seed (Lesion, Cohort, Coordinates or Stimulation) are hidden (the last column of the table says which seeds show each card), and the research-only
 statement is always visible at the bottom.
 
-| Card | What it is for |
-| ---- | -------------- |
-| Battery strip | six dots that show which of the checks below have been run |
-| Recipe | the named analysis recipe and the state of the analysis plan ("Plan: open", "Plan: locked 2026-10-18 · 3f2a…") |
-| Seed | Lesion, Cohort (n lesions), Coordinates or Stimulation |
-| Normalize to MNI | native-space lesions (see [Intake](lnm_intake.md#normalize-native-space-lesions-to-mni)) |
-| Connectome | the connectome in use: name, DOI, version, N, ages, GSR, voxels, the data use terms, and **Manage…** |
-| Preflight | the checks before a run: study, connectome and its terms, design |
-| Run everything | the automated cohort analysis (cohort seed) |
-| Compute | **Map network** (or **Maps only** for a cohort) |
-| Result | the map, its threshold rule and the percentage of voxels above it, the GSR banner |
-| QA | the degree similarity and the relocated-lesion null chip |
-| Cohort | tabs **Overlap**, **Contrast**, **Symptom** and **VLSM** |
-| Nulls | null-referenced sensitivity |
-| Validate | out-of-sample validation against baselines |
-| Robust | threshold sweep, other connectome, split-half, influence |
-| Clusters | cluster tables with atlas labels |
-| Networks | the networks that a map overlaps |
-| Circuits | a result re-seeded as a circuit; damage scores and targets |
-| Compare | comparison with other maps and a library of reference maps |
-| Calibrate | empirical false-positive rate and planted-network recovery |
-| Report | the reporting checklist, the methods text and the publication bundle |
-| Export | the maps with their sidecars |
+| Card | What it is for | Shown for seed |
+| ---- | -------------- | -------------- |
+| Battery strip | six dots that show which of the checks below have been run | All |
+| Recipe | the named analysis recipe and the state of the analysis plan ("Plan: open", "Plan: locked 2026-10-18 · 3f2a…") | All |
+| Seed | Lesion, Cohort (n lesions), Coordinates or Stimulation | All |
+| Normalize to MNI | native-space lesions (see [Intake](lnm_intake.md#normalize-native-space-lesions-to-mni)) | Lesion |
+| Connectome | the connectome in use: name, DOI, version, N, ages, GSR, voxels, the data use terms, and **Manage…** | All |
+| Preflight | the checks before a run: study, connectome and its terms, design | Cohort |
+| Run everything | the automated cohort analysis (cohort seed) | Cohort |
+| Compute | **Map network** (or **Maps only** for a cohort) | All |
+| Result | the map, its threshold rule and the percentage of voxels above it, the GSR banner | Lesion; other seeds only while a map is browsed |
+| QA | the degree similarity and the relocated-lesion null chip | Lesion, Cohort |
+| Cohort | tabs **Overlap**, **Contrast**, **Symptom** and **VLSM** | Cohort; Coordinates and Stimulation once seed maps exist |
+| Nulls | null-referenced sensitivity | Cohort |
+| Validate | out-of-sample validation against baselines | Cohort |
+| Robust | threshold sweep, other connectome, split-half, influence | Cohort |
+| Clusters | cluster tables with atlas labels | Lesion, Cohort |
+| Networks | the networks that a map overlaps | Lesion, Cohort |
+| Circuits | a result re-seeded as a circuit; damage scores and targets | All |
+| Compare | comparison with other maps and a library of reference maps | Lesion, Cohort |
+| Calibrate | empirical false-positive rate and planted-network recovery | Cohort |
+| Report | the reporting checklist, the methods text and the publication bundle | All |
+| Export | the maps with their sidecars | Lesion |
 
 **Ctrl+Enter** runs the preflight and then the computation. The status chip follows the running job ("Mapping 34%",
 "GLM 1200/5000 · 3 min left").

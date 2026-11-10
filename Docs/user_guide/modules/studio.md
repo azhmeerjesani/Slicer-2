@@ -249,9 +249,12 @@ Autosave (see [below](#autosave-and-recovery)) is not Save: it says "Autosaved",
 
 ### Map
 
-Map is the [Lesion Network Mapping](lesionnetworkmapping.md) module. Its inspector shows the cards Seed, Normalize
-to MNI (when a scan is open), Connectome, Compute, Result, QA, Clusters, Networks, Circuits, Compare, Report and
-Export; with the seed set to **Cohort** it also shows Preflight, Run everything and Cohort. The footer is always
+Map is the [Lesion Network Mapping](lesionnetworkmapping.md) module. Which cards its inspector shows depends on the seed: **Lesion** shows Seed, Normalize to MNI (when a scan is open),
+Connectome, Compute, Result, QA, Clusters, Networks, Circuits, Compare, Report and Export. **Cohort** shows Seed,
+Connectome, Preflight, Run everything, Compute, QA, Cohort, Nulls, Validate, Robust, Clusters, Networks, Circuits,
+Compare, Calibrate and Report (no Normalize to MNI, Result or Export: the cohort's maps are in the Cohort card).
+**Coordinates** and **Stimulation** show Seed, Connectome, Compute, Circuits and Report. The table in
+[Lesion Network Mapping](lesionnetworkmapping.md) lists the seeds that show each card. The footer is always
 visible and is one line, "Research use only. Lesion network mapping specificity is debated. **Read more**". **Read
 more** opens the whole statement ("Research use only — not for clinical decisions", with its three references), which
 the Report card also shows. The top bar shows the state of the computation next to the switcher ("No connectome", "Ready", "Mapping
