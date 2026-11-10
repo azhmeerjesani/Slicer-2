@@ -6915,6 +6915,90 @@ class StudioProjectsTest(unittest.TestCase):
             projects.discardMoveJournal()
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
 
+    def test_81e_project_left_in_new_folder_by_failed_move_opens_in_place(self):
+        """After Change folder > Move failed partway, Library lists the projects that moved from the new folder (81d), but
+        opening one made "a copy" in the old folder that took the edits, Library listed it twice, and moving again left the
+        stale original next to the edited copy as "<name> 2" (BB-1). Now it opens and saves in place, Opened from elsewhere
+        does not list it, and moving again ends with one project that holds the edits. The new folder's own projects (there
+        before the move) still open as a copy.
+        """
+        from unittest import mock
+
+        from StudioLib import library
+
+        projects = self.projects
+        settings = qt.QSettings()
+        oldRoot = os.path.normpath(os.path.join(self.tempDir, "partial open", "A", "Slicer Studio"))
+        newRoot = os.path.normpath(os.path.join(self.tempDir, "partial open", "T", "Slicer Studio"))
+        os.makedirs(oldRoot)
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        settings.setValue(projects.ROOT_KEY, oldRoot)
+        settings.setValue(projects.ROOT_CHOSEN_KEY, True)
+        try:
+            service = self._service()
+            announced = []
+            service.setProjectAnnouncer(lambda event, project, **info: announced.append(event))
+            for name in ("Alpha", "Beta"):
+                self._userVolume(name)
+                self._projectFor(service)
+                self._save(service)
+                service.newProject()
+                slicer.mrmlScene.Clear(0)
+                self.io.backgroundWriter().drain(10.0)
+            theirs = os.path.join(newRoot, projects.PROJECTS_DIR, "Theirs")
+            os.makedirs(theirs)
+            with open(os.path.join(theirs, "Theirs.mrml"), "w") as f:
+                f.write("<MRML></MRML>\n")
+            names = sorted(os.listdir(projects.projectsFolder()))
+            self.assertEqual(len(names), 2, names)
+            # What _moveRoot leaves when Projects/ moved and Studies/ failed (the new disk is full)
+            for name in names:
+                shutil.move(os.path.join(oldRoot, projects.PROJECTS_DIR, name), os.path.join(newRoot, projects.PROJECTS_DIR, name))
+            projects.recordPartialMove(oldRoot, newRoot, ["Theirs"], [])
+            moved = os.path.join(newRoot, projects.PROJECTS_DIR, names[0])
+            self.assertIn(moved, [info.path for info in projects.listProjects()])
+            self.assertEqual(projects.projectOfPath(os.path.join(moved, "Images", "x.nrrd")), moved)
+            self.assertEqual(projects.projectOfSceneFile(projects.sceneFile(moved)), moved)
+            self.assertIsNone(projects.projectOfPath(os.path.join(theirs, "Theirs.mrml")), "the new folder's own project")
+            del announced[:]
+            self.assertTrue(service.openProject(moved))
+            self.assertEqual(os.path.normpath(service.project.path), moved, "opened in place, not as a copy in the old folder")
+            self.assertNotIn("copy", announced)
+            self.assertFalse(os.path.isdir(os.path.join(oldRoot, projects.PROJECTS_DIR, names[0])))
+            markups = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Edit points")
+            markups.AddControlPoint([1, 2, 3], "e")
+            self._save(service)
+            with open(projects.sceneFile(moved), encoding="utf-8", errors="ignore") as f:
+                self.assertIn("Edit points", f.read(), "the edit is saved in place")
+            self.assertEqual(sorted(info.name for info in projects.listProjects()), names)
+            # Opened from elsewhere does not list it (Projects does)
+            class Action:
+                def __init__(self, path):
+                    self.path = path
+
+                def property(self, name):
+                    return {"fileName": self.path, "fileType": "SceneFile"} if name == "fileParameters" else None
+
+            class Menu:
+                def actions(self):
+                    return [Action(projects.sceneFile(moved)), Action(os.path.join(theirs, "Theirs.mrml"))]
+
+            with mock.patch.object(library, "recentlyLoadedMenu", return_value=Menu()):
+                recent = [os.path.normpath(entry.path) for entry in library.recentEntries(limit=50)]
+            self.assertEqual(recent, [os.path.join(theirs, "Theirs.mrml")], "the moved project is listed in Projects only")
+            # The user frees space and moves again: one project of each name, and the open one holds the edits
+            service.moveRoot(newRoot, moveContent=True, run=lambda function: function())
+            self.assertEqual(projects.root(), newRoot)
+            self.assertEqual(sorted(os.listdir(projects.projectsFolder())), sorted(names + ["Theirs"]))
+            self.assertEqual(os.path.normpath(service.project.path), moved)
+        finally:
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            projects.clearPendingMove()
+            projects.clearPartialMove()
+            projects.discardMoveJournal()
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
     def test_83_crash_offer_follows_the_projects_when_the_folder_is_moved(self):
         """A crash offer (the Library card, the notice, the Classic box) made before Change folder > Move: Open project then
         opened the old folder's path, which the move had emptied, and answered "P2 was renamed or moved" (BB-1). The offer

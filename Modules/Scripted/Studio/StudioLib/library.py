@@ -527,6 +527,7 @@ def recentEntries(limit=RECENT_ROW_COUNT, outsideRootOnly=False):
     openedTimes = _importer().recentOpenTimes()
     internal = _internalFolders()
     projectsFolder = _rootFolder() if outsideRootOnly else _projectsFolder()
+    movedProjects = projectsFolder is not None and _hasPartiallyMovedProjects()
     entries = []
     for properties, action in candidates:
         if len(entries) >= limit:
@@ -536,6 +537,8 @@ def recentEntries(limit=RECENT_ROW_COUNT, outsideRootOnly=False):
             continue
         if projectsFolder and isInternalPath(path, [projectsFolder]):
             continue
+        if movedProjects and _projectOfPath(path) is not None:
+            continue  # a project that Projects lists from the new folder of a move that failed partway (BB-1)
         entry = RecentEntry(properties, action, openedTimes)
         if entry.exists():
             entries.append(entry)
@@ -551,6 +554,28 @@ def _projectsFolder():
     if not projects.isEnabled():
         return None
     return os.path.normcase(os.path.realpath(projects.projectsFolder()))
+
+
+def _hasPartiallyMovedProjects():
+    """True when a move of the Slicer Studio folder that failed partway left projects in the new folder (Library lists them
+    in Projects: ``projects.partialMove``).
+    """
+    try:
+        from . import projects
+
+        return projects.partialMove() is not None
+    except ImportError:
+        return False
+
+
+def _projectOfPath(path):
+    """The project of the Slicer Studio folder that holds ``path`` (``projects.projectOfPath``), or None."""
+    try:
+        from . import projects
+
+        return projects.projectOfPath(path)
+    except (ImportError, OSError, ValueError):
+        return None
 
 
 def _rootFolder():

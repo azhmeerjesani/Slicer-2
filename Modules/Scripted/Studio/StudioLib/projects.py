@@ -990,21 +990,42 @@ def sceneFile(projectPath):
 
 
 def projectOfPath(path, rootPath=None):
-    """The project folder that holds ``path`` (``<root>/Projects/<name>``), or None."""
+    """The project folder that holds ``path`` (``<root>/Projects/<name>``), or None.
+
+    Without ``rootPath`` (the Slicer Studio folder), also a project that Library lists from the new folder of a move that
+    failed partway (``partialMove``, ``listProjects``): it is one of the user's projects, so it opens and saves in place,
+    never as a copy in the old folder (which a later move would put next to it as "<name> 2", BB-1). The new folder's own
+    projects (there before the move) are not.
+    """
     if not path:
         return None
-    projects = os.path.normcase(os.path.realpath(projectsFolder(rootPath)))
+    project = _projectInFolder(path, projectsFolder(rootPath))
+    if project is None and rootPath is None:
+        for folder, skipped in _partiallyMovedFolders(PROJECTS_DIR):
+            candidate = _projectInFolder(path, folder)
+            if candidate is not None and os.path.basename(candidate) not in skipped:
+                return candidate
+    return project
+
+
+def _projectInFolder(path, folder):
+    """The project folder ``<folder>/<name>`` that holds ``path``, with its real spelling, or None."""
+    projects = os.path.normcase(os.path.realpath(folder))
     real = os.path.normcase(os.path.realpath(str(path)))
     if not real.startswith(projects.rstrip(os.sep) + os.sep):
         return None
     name = real[len(projects.rstrip(os.sep)) + 1:].split(os.sep)[0]
     # The folder with its real spelling
-    candidate = os.path.join(projectsFolder(rootPath), name)
+    candidate = os.path.join(folder, name)
     if os.path.isdir(candidate):
         return candidate
-    for entry in os.listdir(projectsFolder(rootPath)):
+    try:
+        entries = os.listdir(folder)
+    except OSError:
+        return None
+    for entry in entries:
         if os.path.normcase(entry) == name:
-            return os.path.join(projectsFolder(rootPath), entry)
+            return os.path.join(folder, entry)
     return None
 
 
