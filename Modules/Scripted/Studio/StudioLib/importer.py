@@ -728,13 +728,17 @@ def _niftiDataShortfall(path):
     return (have, need) if have < need else None
 
 
+class RefusedFileError(RuntimeError):
+    """A file that Studio refuses on purpose, with a message for the user: it is announced, and logged without a traceback."""
+
+
 def _checkNiftiComplete(path):
     """Raise ``RuntimeError`` (a message for the user) if the data of the NIfTI file ``path`` stops before the end that its
     header promises: the voxels that are missing would be read as 0, and a lesion would lose part of its volume.
     """
     shortfall = _niftiDataShortfall(path)
     if shortfall is not None:
-        raise RuntimeError(
+        raise RefusedFileError(
             _("{name} is damaged: its image data stops after {have:,} of the {need:,} bytes that its header announces "
               "(the file was probably cut short by a failed copy or download). It was not opened; copy it again from "
               "its source.").format(name=os.path.basename(str(path)), have=shortfall[0], need=shortfall[1]))
@@ -753,7 +757,7 @@ def _checkLesionValueRange(path):
     low, high = valueRange
     if -LESION_LABEL_VALUE_LIMIT <= low and high <= LESION_LABEL_VALUE_LIMIT:
         return
-    raise RuntimeError(
+    raise RefusedFileError(
         _("{name} cannot be opened as a lesion: its voxel values ({low:g} to {high:g}) are beyond the label values a "
           "segmentation can hold (-{limit} to {limit}). Save the mask with 1 for the lesion and 0 elsewhere.").format(
             name=os.path.basename(str(path)), low=low, high=high, limit=LESION_LABEL_VALUE_LIMIT))
@@ -1628,6 +1632,9 @@ def loadFiles(paths, shell=None, pairedLesion=None):
                         restoreSidecarText(segmentationNode, path)
                         result.segmentations.append(segmentationNode)
                     loadedPaths.append(path)
+                except RefusedFileError as e:
+                    logging.warning(f"Studio: {path} was not opened: {e}")  # planned refusal: no traceback
+                    result.errors.append((path, str(e)))
                 except Exception as e:
                     logging.error(f"Studio: cannot load {path}:\n{traceback.format_exc()}")
                     result.errors.append((path, str(e)))

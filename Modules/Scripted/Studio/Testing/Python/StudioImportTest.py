@@ -11,6 +11,7 @@ Classic interface. All data is synthetic and written to a temporary folder.
 
 import gzip
 import json
+import logging
 import os
 import struct
 import tempfile
@@ -611,10 +612,19 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         for name in ("sub-03_T1w.nii", "sub-04_T1w.nii.gz", "sub-05_lesion.nii.gz"):
             have, need = importer._niftiDataShortfall(paths[name])
             self.assertEqual((have, need), (len(complete) - 100, len(complete)), name)
-            result = importer.loadFiles([paths[name]], studioShell)
+            recorder = logging.Handler()
+            records = []
+            recorder.emit = records.append
+            logging.getLogger().addHandler(recorder)
+            try:
+                result = importer.loadFiles([paths[name]], studioShell)
+            finally:
+                logging.getLogger().removeHandler(recorder)
             self._pump()
             self.assertEqual(len(result.errors), 1, name)
             self.assertIn("damaged", result.errors[0][1], name)
+            # a planned refusal is not a defect: no traceback in the log
+            self.assertFalse([r for r in records if "Traceback" in r.getMessage()], name)
             self.assertEqual(result.volumes + result.segmentations, [], name)
             self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLVolumeNode")), 0, name)
         result = importer.loadFiles([paths["sub-02_T1w.nii.gz"]], studioShell)
