@@ -244,8 +244,7 @@ def main(argv=None):
                                "raise STUDIO_VERSION and build the packages again.")
         if args.published is not None:
             check_published(args.published)
-        if args.minimum_supported:
-            version_key(args.minimum_supported)
+        if args.minimum_supported is not None:
             if version_key(args.minimum_supported) > version_key(version):
                 raise ReleaseError(f"--minimum-supported {args.minimum_supported} is newer than the release {version}.")
         assets = collect_assets(args)

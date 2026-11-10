@@ -2551,6 +2551,8 @@ fi
         # Mistakes are refused
         self.assertEqual(makeRelease.main([linux, "--version", "99.0.0", "--out-dir", out]), 1)
         self.assertEqual(makeRelease.main([linux, "--minimum-supported", "99.0.0", "--out-dir", out]), 1)
+        for badMinimum in ("", " "):  # an empty value must not become a manifest that the app refuses
+            self.assertEqual(makeRelease.main([linux, "--minimum-supported", badMinimum, "--out-dir", out]), 1)
         spaced = os.path.join(built, "Slicer 5.13 linux-amd64.tar.gz")
         shutil.copy(linux, spaced)
         self.assertEqual(makeRelease.main([spaced, "--out-dir", out]), 1)
