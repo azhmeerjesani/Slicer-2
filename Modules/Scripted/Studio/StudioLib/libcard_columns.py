@@ -1063,8 +1063,19 @@ class CaseSection:
         try:
             _text, warning = schema.normalize_with_spec(spec, str(value))
         except ValueError as e:
-            return str(e)
-        return warning or ""
+            return self._inWords(column, spec, str(e))
+        return self._inWords(column, spec, warning or "")
+
+    @staticmethod
+    def _inWords(column, spec, message):
+        """The schema's warning with the field's label, as shown next to the editor, instead of the column code."""
+        label = _(FIELD_LABELS.get(column, column))
+        code = spec.name
+        if not message or label == code:
+            return message
+        if message.startswith(f"{code} value "):
+            return f"{label}: " + message[len(f"{code} value "):]
+        return message.replace(f" {code} ", f" {label} ", 1)
 
     def _caseNumber(self, study, sid):
         order = recordedGallery(study)

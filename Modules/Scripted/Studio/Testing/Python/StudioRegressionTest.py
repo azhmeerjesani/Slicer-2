@@ -5616,7 +5616,13 @@ class StudioRegressionTest(unittest.TestCase):
         # Other studies keep the registry's levels, and an undeclared value still warns
         session.study.set("sub-02", {"sex": "Z"})
         section.refresh("sub-02")
-        self.assertIn("Unknown sex value 'Z'", str(section.warningLabel.text))
+        self.assertIn("Unknown Sex value 'Z'", str(section.warningLabel.text))
+        # The warning names the field as the editor does, never the column code
+        session.study.set("sub-02", {"onset_to_imaging_days": "2,5"})
+        section.refresh("sub-02")
+        text = str(section.warningLabel.text)
+        self.assertIn("Onset to imaging: '2,5' is not a number", text)
+        self.assertNotIn("onset_to_imaging_days", text)
         # A strict column keeps the registry's levels and refuses others
         dimensionality = section.editors["dimensionality"]
         self.assertEqual([dimensionality.itemData(i) for i in range(dimensionality.count)], [None, "2D", "3D", "multi2D"])
