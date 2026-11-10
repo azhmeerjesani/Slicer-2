@@ -502,6 +502,9 @@ class CircuitsCard:
             return
         try:
             view.selectionModel().connect("currentRowChanged(QModelIndex,QModelIndex)", lambda *args: self.refreshSource())
+            # Remaking the table (a new threshold, a sort, a cleared table) resets the model and drops the selected row without
+            # currentRowChanged: follow the reset too, so the line names the seed Seed this will use (the crosshair when no row is selected)
+            view.model().connect("modelReset()", lambda *args: self.refreshSource())
             self._clustersConnected = True
         except Exception:
             logging.debug("Lesion network mapping: the Circuits card cannot follow the cluster selection", exc_info=True)

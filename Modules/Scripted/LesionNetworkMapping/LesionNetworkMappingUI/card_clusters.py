@@ -1685,16 +1685,34 @@ class ClustersCard:
             self.sortDescending = not self.sortDescending
         else:
             self.sortColumn, self.sortDescending = column, False
-        self._fillView()
+        self._refillKeepingSelection()
 
     def sortBy(self, key, descending=False):
         """Sort the clusters by a column key ("id", "mm3", "peak"...); each cluster keeps its sub-peaks below it."""
         for column, (_name, _tip, columnKey) in enumerate(self._columns):
             if columnKey == key:
                 self.sortColumn, self.sortDescending = column, bool(descending)
-                self._fillView()
+                self._refillKeepingSelection()
                 return True
         return False
+
+    def _refillKeepingSelection(self):
+        """Fill the view again in the new sort order, keeping the selected row (the same table: only the order changes)."""
+        index = self.view.currentIndex()
+        current = index.row() if index is not None and index.isValid() else -1
+        selected = self.displayRows[current] if 0 <= current < len(self.displayRows) else None
+        self._fillView()
+        if selected is None:
+            return
+        for rowIndex, row in enumerate(self.displayRows):
+            if row is selected:
+                self._loading = True  # the slice views stay where they are: the row was already selected
+                try:
+                    self.view.setCurrentIndex(self.itemModel.index(rowIndex, 0))
+                finally:
+                    self._loading = False
+                self._showDetail(rowIndex)
+                return
 
     def _onRowClicked(self, index):
         self.jumpToRow(index.row())
