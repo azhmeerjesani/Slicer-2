@@ -1176,6 +1176,34 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertTrue(library.closeLoadedSet())
         self.assertEqual(self._segmentationFamily()["vtkMRMLSegmentationNode"], 0)
 
+    def test_close_lesion_in_project_does_not_ask_about_unsaved_changes(self):
+        """In a project the lesion is stored with the project: closing it never says it has changes that are not saved."""
+        from StudioLib import library
+
+        node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "sub-81_lesion")
+        node.GetSegmentation().AddEmptySegment("lesion")
+        dims = GRID_NLIN6_2MM[0]
+        grid = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "grid")
+        slicer.util.updateVolumeFromArray(grid, np.zeros((dims[2], dims[1], dims[0]), np.int16))
+        grid.SetIJKToRASMatrix(self._ijkToRas(GRID_NLIN6_2MM))
+        array = np.zeros((dims[2], dims[1], dims[0]), np.uint8)
+        array[1, 1, 1] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, node, node.GetSegmentation().GetNthSegmentID(0), grid)
+        slicer.mrmlScene.RemoveNode(grid)
+        asked = []
+        originalConfirm, originalService = library._confirmClose, library._projectService
+        library._confirmClose = lambda text, informative="": asked.append(text) or False
+        self.cleanup.append(lambda: setattr(library, "_confirmClose", originalConfirm))
+        self.cleanup.append(lambda: setattr(library, "_projectService", originalService))
+        # Outside a project the voxels are unsaved
+        library._projectService = lambda: None
+        self.assertTrue(library.isLesionUnsaved(node))
+        # In a project they are not, and closing does not ask
+        library._projectService = object  # any object: a project is open
+        self.assertFalse(library.isLesionUnsaved(node))
+        self.assertTrue(library.closeNode(node))
+        self.assertEqual(asked, [])
+
     def test_space_label_both(self):
         """The grid line of the set names the space when there is one, else says the space is unknown (both texts render)."""
         from StudioLib import importer, library, space

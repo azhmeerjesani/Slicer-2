@@ -1017,7 +1017,13 @@ def lesionSaveInfo(segmentationNode):
 
 
 def isLesionUnsaved(segmentationNode):
-    """True when closing the lesion would lose voxels: it has voxels and is not saved (or changed since it was saved)."""
+    """True when closing the lesion would lose voxels: it has voxels and is not saved (or changed since it was saved).
+
+    In a project nothing is unsaved: the project stores the lesion (.seg.nrrd) and the autosave keeps it, whatever the
+    NIfTI save state says (as the Current work buttons already assume).
+    """
+    if _projectService() is not None:
+        return False
     if lesionSaveInfo(segmentationNode)[0] == "saved":
         return False
     return not _importer().isSegmentationEmpty(segmentationNode)
