@@ -322,6 +322,9 @@ class ParityDialog(qt.QDialog):
         options.addWidget(qt.QLabel(_("Subjects:")))
         self.subsetCombo = qt.QComboBox()
         self.subsetCombo.setObjectName("LNMLeadDbsParitySubset")
+        # Items are added later (setBundle), so give the combo room for 'All subjects' and named subsets up front.
+        self.subsetCombo.setSizeAdjustPolicy(qt.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.subsetCombo.setMinimumContentsLength(16)
         options.addWidget(self.subsetCombo)
         self.saveMapsCheck = qt.QCheckBox(_("Also save our maps (Lead-DBS names)"))
         self.saveMapsCheck.setObjectName("LNMLeadDbsParitySaveMaps")

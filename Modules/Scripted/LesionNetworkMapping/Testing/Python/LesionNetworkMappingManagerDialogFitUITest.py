@@ -71,3 +71,12 @@ class LesionNetworkMappingManagerDialogFitUITest(unittest.TestCase):
     def test_no_screen_keeps_the_default_sizes(self):
         self.assertEqual(self.make("fast", None).height, 760)
         self.assertEqual(self.make("parity", None).height, 720)
+
+    def test_parity_subjects_combo_shows_its_text(self):
+        dialog = self.make("parity", None)
+        combo = dialog.subsetCombo
+        self.assertGreater(combo.count, 0)
+        fm = qt.QFontMetrics(combo.font)
+        text = combo.itemText(0)
+        width = fm.horizontalAdvance(text) if hasattr(fm, "horizontalAdvance") else fm.width(text)
+        self.assertGreaterEqual(combo.sizeHint.width(), width + 40, "the Subjects combo must be wide enough for '%s'" % text)
