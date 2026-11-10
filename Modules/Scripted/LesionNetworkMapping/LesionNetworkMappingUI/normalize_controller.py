@@ -606,11 +606,39 @@ def findSourceVolume(segmentationNode):
     return None
 
 
+def seedSpaceOf(segmentationNode):
+    """``(space, resolution)`` that Map's seed check gives a segmentation (``LesionNetworkMappingLogic.seedSpace`` on its
+    reference grid), else None (native space).
+
+    The Normalize to MNI card asks the same question as the Seed check, so both give one verdict: a lesion file a fraction
+    of a millimetre off a template grid (TemplateFlow's 2009c 2 mm files) is mapped as MNI by the Seed check and the engine,
+    so it is not offered for normalization. ``spaceOf`` (``StudioLib.space``, ±0.01 mm) is the fallback when the Map
+    logic cannot be imported.
+    """
+    if segmentationNode is None:
+        return None
+    grid = _gridOf(segmentationNode)
+    if grid is not None:
+        try:
+            from LesionNetworkMapping import LesionNetworkMappingLogic
+        except Exception:
+            LesionNetworkMappingLogic = None
+        if LesionNetworkMappingLogic is not None:
+            try:
+                found = LesionNetworkMappingLogic.seedSpace(segmentationNode, tuple(int(n) for n in grid[0]), grid[1])
+                return tuple(found) if found else None
+            except Exception:
+                logging.exception("Lesion network mapping: the template space of the lesion could not be found")
+    return spaceOf(segmentationNode)
+
+
 def isNativeSegmentation(segmentationNode):
-    """True for a segmentation that is not on an MNI grid and is not a normalization result."""
+    """True for a segmentation that is not a normalization result and that Map's seed check finds in native space
+    (``seedSpaceOf``: not on an MNI grid).
+    """
     if segmentationNode is None or isNormalizationResult(segmentationNode):
         return False
-    return spaceOf(segmentationNode) is None
+    return seedSpaceOf(segmentationNode) is None
 
 
 class _Answer(tuple):
