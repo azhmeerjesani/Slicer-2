@@ -571,7 +571,7 @@ class SourcesCard:
             offers = []
         else:
             # Offers depend on the ids, titles and years only: P, X and U do not recompute them
-            key = hash(tuple((row["record_id"], row["title"], row["year"]) for row in records.rows))
+            key = hash(tuple((row["record_id"], row["title"], row["year"], row["doi"], row["pmid"]) for row in records.rows))
             if key != self._offersKey:
                 self._offersAll = records.merge_offers()
                 self._offersKey = key
@@ -582,7 +582,10 @@ class SourcesCard:
         self.offerRow.setVisible(bool(self._offers))
         if self._offers:
             keep, drop, ratio = self._offers[0]
-            self.offerLabel.setText(_("Possible duplicate: {drop} looks like {keep} ({percent}% the same title)").format(drop=drop, keep=keep, percent=round(100 * ratio)))
+            if records.same_identifier(keep, drop):
+                self.offerLabel.setText(_("Possible duplicate: {drop} has the same DOI or PMID as {keep}").format(drop=drop, keep=keep))
+            else:
+                self.offerLabel.setText(_("Possible duplicate: {drop} looks like {keep} ({percent}% the same title)").format(drop=drop, keep=keep, percent=round(100 * ratio)))
             self.mergeButton.setToolTip(_("Merge {drop} into {keep}; it then counts as a removed duplicate").format(drop=drop, keep=keep))
 
     # Table actions

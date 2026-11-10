@@ -409,6 +409,17 @@ class SourcesTest(unittest.TestCase):
         with self.assertRaises(KeyError):
             sources.fill_from_lookup(records, "nobody2000", found)
 
+    def test_fetch_that_fills_another_records_doi_offers_the_exact_duplicate(self):
+        """BB-1: a PMID-only record that a lookup gives the DOI of another record is offered as its duplicate."""
+        records = sources.Records.open(self.study)
+        records.add([sources.draft(doi="10.1000/xyz", title="Unrelated first title", year="2001"), sources.draft(pmid="123456", title="Other words entirely", year="1999")])
+        first, second = records.ids()
+        self.assertEqual(records.merge_offers(), [])
+        found = sources.draft(doi="10.1000/XYZ", pmid="123456")
+        self.assertIn("doi", sources.fill_from_lookup(records, second, found))
+        self.assertEqual([offer[:2] for offer in records.merge_offers()], [(first, second)])
+        self.assertTrue(records.same_identifier(first, second))
+
     def test_no_network_without_a_call(self):
         original = sources._http_json
         sources._http_json = lambda *a, **k: self.fail("network used")

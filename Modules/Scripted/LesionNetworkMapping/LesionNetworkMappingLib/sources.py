@@ -617,8 +617,18 @@ class Records:
             offers = self.merge_offers(added)
         return {"added": added, "merged": merged, "offers": offers}
 
+    def same_identifier(self, record_id, other_id):
+        """Whether two records have the same DOI or the same PMID (an exact duplicate, as :meth:`add` merges it)."""
+        a, b = self.get(record_id), self.get(other_id)
+        doi, pmid = normalize_doi(a["doi"]), normalize_pmid(a["pmid"])
+        return bool((doi and doi == normalize_doi(b["doi"])) or (pmid and pmid == normalize_pmid(b["pmid"])))
+
     def merge_offers(self, record_id=None):
-        """Pairs of records whose normalized titles match (ratio of at least :data:`TITLE_RATIO`) and have the same year.
+        """Pairs of records with the same DOI or PMID (ratio 1.0), or whose normalized titles match (ratio of at least
+        :data:`TITLE_RATIO`) and have the same year.
+
+        A DOI or PMID that a lookup (:func:`fill_from_lookup`) copied into a record can equal one of another record: the
+        pair is offered as the exact duplicate that :meth:`add` would have merged.
 
         :param record_id: only the pairs that involve this record, or one of these records (default: every pair).
         :return: ``[(record_id, other_record_id, ratio)]``, the older record first.
@@ -661,6 +671,23 @@ class Records:
                         if pair[:2] not in seen:
                             seen.add(pair[:2])
                             out.append(pair)
+        # Exact duplicates by identifier (whatever the titles say)
+        first = {}
+        for row in self.rows:
+            rid = row["record_id"]
+            for tag, value in (("doi", normalize_doi(row["doi"])), ("pmid", normalize_pmid(row["pmid"]))):
+                if not value:
+                    continue
+                if (tag, value) not in first:
+                    first[(tag, value)] = rid
+                    continue
+                other = first[(tag, value)]
+                if wanted is not None and rid not in wanted and other not in wanted:
+                    continue
+                if (other, rid) not in seen:
+                    seen.add((other, rid))
+                    out = [item for item in out if item[:2] != (other, rid)]
+                    out.append((other, rid, 1.0))
         return out
 
     def merge(self, keep, drop):
