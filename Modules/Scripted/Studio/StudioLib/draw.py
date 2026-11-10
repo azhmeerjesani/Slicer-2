@@ -3413,7 +3413,9 @@ class DrawExtension:
         segmentId = _selectedSegmentId(segmentationNode, editor)
         segment = segmentationNode.GetSegmentation().GetSegment(segmentId) if segmentId else None
         displayNode = segmentationNode.GetDisplayNode()
-        readoutKey = (segmentationNode.GetID(), segmentId)
+        # The node and segment IDs come back after Ctrl+W (the next lesion is vtkMRMLSegmentationNode1 / Segment_1 again), so
+        # the key also holds the segmentation object: a new lesion with the same IDs is computed, not shown with the old stats
+        readoutKey = (segmentationNode.GetID(), segmentId, segmentationNode.GetSegmentation())
         metrics = lesionMetrics(segmentationNode, compute=computeMetrics or self._lastReadout is None or self._lastReadoutKey != readoutKey)
         if metrics is not None:
             # Gaps along the slicing axis of the view N moves (Red, else the view shown), not along the k axis of the scan

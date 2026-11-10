@@ -7452,3 +7452,43 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertNotIn("gets no patient letters", readme)
         self.assertIn("until its side is answered it shows `Figure · side unknown` and no letters", readme)
         self.assertIn("once answered it shows only R and L", readme)
+
+    def test_93_lesion_card_describes_a_new_lesion_that_reuses_the_closed_ones_ids(self):
+        """After Ctrl+W the next lesion gets the same node and segment IDs again (vtkMRMLSegmentationNode1, Segment_1). The
+        Draw card kept the closed lesion's Volume/Parts/Side because it only recomputed the stats when those IDs changed
+        (BB-1 draw-card-stale-after-ctrlw-then-open-or-drop-same-node-id).
+        """
+        import numpy as np
+
+        from StudioLib import draw
+
+        slicer.mrmlScene.Clear(0)
+        self.addCleanup(slicer.mrmlScene.Clear, 0)
+
+        def addLesion(size):
+            image = np.zeros((20, 20, 20), np.int16)
+            volumeNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "scan")
+            slicer.util.updateVolumeFromArray(volumeNode, image)
+            segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "lesion")
+            segmentationNode.CreateDefaultDisplayNodes()
+            segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volumeNode)
+            segmentId = segmentationNode.GetSegmentation().AddEmptySegment("Segment_1", "lesion")
+            mask = np.zeros((20, 20, 20), np.uint8)
+            mask[2:2 + size, 2:2 + size, 2:2 + size] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(mask, segmentationNode, segmentId, volumeNode)
+            return segmentationNode, volumeNode
+
+        extension = draw.DrawExtension()
+        extension._hint = lambda *args: None  # the hint needs the Draw editor; the stat cells do not
+        first, firstVolume = addLesion(2)
+        state = extension._cardState(None, None, first, firstVolume, None, False)
+        self.assertIsNotNone(state["stats"])
+        self.assertAlmostEqual(state["stats"]["ml"], 8 / 1000.0)
+        firstId = first.GetID()
+        slicer.mrmlScene.Clear(0)
+        second, secondVolume = addLesion(3)
+        self.assertEqual(second.GetID(), firstId, "the new lesion reuses the closed lesion's node ID (the case of the bug)")
+        # No edit has happened yet (computeMetrics=False), as right after Open... or a drop
+        state = extension._cardState(None, None, second, secondVolume, None, False)
+        self.assertIsNotNone(state["stats"])
+        self.assertAlmostEqual(state["stats"]["ml"], 27 / 1000.0, msg="the card describes the new lesion, not the closed one")
