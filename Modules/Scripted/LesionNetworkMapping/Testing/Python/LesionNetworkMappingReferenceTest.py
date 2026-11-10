@@ -301,14 +301,17 @@ class LoaderTest(_Base):
         self.assertIsNotNone(reference.load_reference(path, verify=False))
 
     def test_bundle_converted_again_with_other_data_is_stale(self):
-        # Same grid, mask, subjects, runs and dtype (identical connectome.json): only the time series differ
+        # Same grid, mask, subjects, runs and dtype: only the time series differ, so connectome.json differs only by
+        # its data fingerprint (connectome.NORMS_SHA256_KEY); the reference checks the norms files themselves
         path = self.copy_bundle("reconverted.lnmc")
         self.quiet_build(path, n_seeds=20, power_iters=1)
         with open(os.path.join(path, "connectome.json"), encoding="utf-8") as f:
-            manifest = f.read()
+            manifest = json.load(f)
         _write_bundle(path, seed=99)
         with open(os.path.join(path, "connectome.json"), encoding="utf-8") as f:
-            self.assertEqual(f.read(), manifest)
+            reconverted = json.load(f)
+        self.assertNotEqual(reconverted.pop(connectome.NORMS_SHA256_KEY), manifest.pop(connectome.NORMS_SHA256_KEY))
+        self.assertEqual(reconverted, manifest)
         self.assertIsNone(reference.load_reference(path))
         self.assertIsNone(reference.load_reference(path, strict=True))
         status = reference.reference_status(path)[0]

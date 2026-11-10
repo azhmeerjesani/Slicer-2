@@ -330,6 +330,58 @@ class FastmapTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             fastmap.load_index(copy)
 
+    def test_index_of_a_bundle_converted_again_from_other_data_is_stale(self):
+        """Converting other time series with the same subject ids and mask into the same folder (``--overwrite``) must
+        change connectome.json (the manifest sha256 that keys the cohort maps cache) and make the fast index stale.
+        Before the fix the manifest was byte-identical and the old index was found and accepted.
+        """
+        path = os.path.join(self.tmp, "Reconverted.lnmc")
+        connectome.make_synthetic(path, shape=(14, 16, 14), n_subjects=3, runs=(20,), seed=1)
+        first = connectome.ConnectomeBundle.open(path)
+        manifest = os.path.join(path, connectome.MANIFEST_NAME)
+        with open(manifest, "rb") as f:
+            first_manifest = f.read()
+        self.assertEqual(connectome.norms_fingerprint(first.metadata), reference.subjects_data_sha256(first, first.subject_ids))
+        tiling = fastmap.build_tiling(first, atlas_entries=[], cell_mm=6.0)
+        index = fastmap.build_index(first, tiling, emit=_quiet, register=False)
+        self.assertEqual(fastmap.load_index(index.path, first).path, index.path)
+        from LesionNetworkMappingLib import nulls
+
+        self.assertEqual(nulls.find_fast_index(first, verify=True), index.path)
+        first.close()
+
+        connectome.make_synthetic(path, shape=(14, 16, 14), n_subjects=3, runs=(20,), seed=2, overwrite=True)
+        second = connectome.ConnectomeBundle.open(path)
+        self.assertEqual(second.subject_ids, first.subject_ids)
+        self.assertEqual(second.mask_sha256, first.mask_sha256)
+        with open(manifest, "rb") as f:
+            self.assertNotEqual(f.read(), first_manifest, "other data must give another connectome.json (manifest sha256)")
+        self.assertTrue(os.path.isdir(index.path), "the old index is still in derived/")
+        self.assertIsNone(nulls.find_fast_index(second))
+        self.assertIsNone(nulls.find_fast_index(second, verify=True))
+        with self.assertRaisesRegex(ValueError, "converted again"):
+            fastmap.load_index(index.path, second)
+        # A bundle written before the fingerprint key (or downloaded): only verify, which hashes the norms files, can tell
+        with open(manifest, encoding="utf-8") as f:
+            metadata = json.load(f)
+        del metadata[connectome.NORMS_SHA256_KEY]
+        with open(manifest, "w", encoding="utf-8") as f:
+            json.dump(metadata, f)
+        legacy = connectome.ConnectomeBundle.open(path)
+        self.assertEqual(nulls.find_fast_index(legacy), index.path)
+        self.assertIsNone(nulls.find_fast_index(legacy, verify=True))
+        with self.assertRaises(ValueError):
+            fastmap.load_index(index.path, legacy, verify=True)
+        second.close()
+        legacy.close()
+        # The same data converted again gives the same connectome.json, and the index is current again
+        connectome.make_synthetic(path, shape=(14, 16, 14), n_subjects=3, runs=(20,), seed=1, overwrite=True)
+        with open(manifest, "rb") as f:
+            self.assertEqual(f.read(), first_manifest)
+        again = connectome.ConnectomeBundle.open(path)
+        self.assertEqual(nulls.find_fast_index(again, verify=True), index.path)
+        again.close()
+
     def test_resume_after_stop(self):
         out = os.path.join(self.tmp, "index-resume")
         calls = {"n": 0}

@@ -1113,7 +1113,9 @@ def find_fast_index(bundle, subject_ids=None, verify=False):
     """Folder of the fast parcel index of a bundle and subject list (fastmap.default_out_dir), or None.
 
     The index.json must be a fast index of this connectome mask and of exactly these subjects (all of the bundle's by
-    default), with its matrices present; ``verify`` also checks every file's sha256 (slow for large connectomes).
+    default), built from their current data (``fastmap.stale_data_reason``), with its matrices present; ``verify`` also
+    checks every file's sha256 and, for bundles that do not record their data fingerprint, the subjects' norms files
+    (slow for large connectomes).
     """
     from . import fastmap
     from .connectome import ConnectomeBundle, subjects_sha256
@@ -1133,12 +1135,14 @@ def find_fast_index(bundle, subject_ids=None, verify=False):
         return None
     if (metadata.get("bundle") or {}).get("mask_sha256") not in (None, bundle.mask_sha256):
         return None
+    if fastmap.stale_data_reason(metadata, bundle, ids, verify):
+        return None  # built from time series that were replaced since (the bundle was converted again)
     files = metadata.get("files") or {}
     if any(not os.path.isfile(os.path.join(folder, item.get("file", ""))) for item in files.values()):
         return None
     if verify:
         try:
-            fastmap.load_index(folder, bundle, verify=True)
+            fastmap.load_index(folder, bundle, verify=True, subject_ids=ids)
         except (OSError, ValueError):
             return None
     return folder

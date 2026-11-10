@@ -1047,12 +1047,45 @@ def build_index(
         lock.release()
 
 
-def load_index(path, bundle=None, verify=True):
+def stale_data_reason(metadata, bundle, subject_ids=None, verify=False):
+    """Why a fast index (its index.json ``metadata``) was built from other time series of ``bundle``'s subjects, or None.
+
+    The index records ``subjects.data_sha256`` (``reference.subjects_data_sha256`` of its subjects). It is compared
+    with the bundle's current fingerprint: read from connectome.json (``connectome.norms_fingerprint``, no data file
+    read) when the bundle records it, else with ``verify`` by hashing the subjects' norms files. Without either, or
+    when the index's subjects are unknown, nothing can be told and None is returned.
+
+    :param subject_ids: the index's subjects (default: all of the bundle's when the index's subject sha256 says so).
+    """
+    from .connectome import norms_fingerprint, subjects_sha256
+
+    subjects = (metadata or {}).get("subjects") or {}
+    recorded = subjects.get("data_sha256")
+    if not recorded:
+        return None
+    ids = list(subject_ids) if subject_ids is not None else list(subjects["ids"]) if isinstance(subjects.get("ids"), list) else None
+    if ids is None and subjects.get("sha256") == subjects_sha256(bundle.subject_ids):
+        ids = list(bundle.subject_ids)
+    if ids is None:
+        return None
+    current = norms_fingerprint(bundle.metadata, ids)
+    if current is None and verify:
+        from .reference import subjects_data_sha256
+
+        current = subjects_data_sha256(bundle, ids)
+    if current is None or current == recorded:
+        return None
+    return f"The fast index was built from other data of {bundle.name!r}: its subjects were converted again since; build the fast index again"
+
+
+def load_index(path, bundle=None, verify=True, subject_ids=None):
     """Read a parcel index folder (or its index.json); return a :class:`FastIndex`.
 
-    :param bundle: when given, the index must belong to this connectome (same mask and voxels).
+    :param bundle: when given, the index must belong to this connectome (same mask and voxels) and to its current
+      data (:func:`stale_data_reason`).
     :param verify: check every file against the sha256 recorded in index.json.
-    :raise ValueError: not an index, a file that does not match, or another connectome.
+    :param subject_ids: the index's subjects when they are not all of the bundle's (for the data check).
+    :raise ValueError: not an index, a file that does not match, another connectome, or replaced data.
     """
     folder = os.path.dirname(path) if os.path.basename(os.fspath(path)) == INDEX_JSON else os.fspath(path)
     json_path = os.path.join(folder, INDEX_JSON)
@@ -1076,6 +1109,9 @@ def load_index(path, bundle=None, verify=True):
         bundle = _open_bundle(bundle)
         if bundle.n_voxels != tiling.n_voxels or not np.array_equal(bundle.mask_indices, tiling.mask_indices) or (metadata.get("bundle") or {}).get("mask_sha256") not in (None, bundle.mask_sha256):
             raise ValueError(f"The fast index belongs to another connectome ({(metadata.get('bundle') or {}).get('name')!r}) than {bundle.name!r}")
+        stale = stale_data_reason(metadata, bundle, subject_ids, verify)
+        if stale:
+            raise ValueError(stale)
     return FastIndex(p, c, tiling, metadata, folder, _file_sha256(json_path))
 
 

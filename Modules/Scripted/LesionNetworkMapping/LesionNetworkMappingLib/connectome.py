@@ -38,6 +38,14 @@ them, so the format stays "lnmc" version 1; see :data:`PROVENANCE_KEYS` and :fun
 
 ``ConnectomeWriter`` fills in "subjectsSha256" and "mask.sha256" when it finalizes a bundle.
 
+It also writes the data fingerprint :data:`NORMS_SHA256_KEY`, ``"subjectsNormsSha256": {id: sha256 of
+subjects/<id>.norms.npy}``, so that a bundle converted again into the same folder from other time series
+(same subject ids and mask) gets another connectome.json, and with it another manifest sha256: caches
+keyed on the manifest (cohort lesion maps) are then recomputed, and :func:`norms_fingerprint` lets the fast
+index notice the change without reading the data. Like the provenance keys it is optional (bundles written
+before it, and downloaded ones, lack it) and readers that do not know it ignore it; :func:`set_metadata`
+never changes it.
+
 The V voxels are the non-zero voxels of the mask in C order of the [i, j, k] array
 (``geometry.mask_indices``). With this layout the Pearson correlation of every voxel with a unit-norm
 seed is a single matrix product (see engine.py). A "float32" dtype (``<id>.f32.npy``) is also accepted.
@@ -82,6 +90,8 @@ _SUBJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 REQUIRED_KEYS = ("format", "version", "name", "shape", "affine", "nVoxels", "subjects", "dtype")
 # Optional provenance keys (format "lnmc" version 1.1); older readers ignore them
 PROVENANCE_KEYS = ("source", "kind", "mask", "subjectsSha256", "licence", "termsSha256", "acknowledgement", "preprocessing", "population", "trS", "subsets", "participants")
+# Data fingerprint written by ConnectomeWriter.finalize (never by set_metadata): {subject id: sha256 of <id>.norms.npy}
+NORMS_SHA256_KEY = "subjectsNormsSha256"
 # Other optional keys that set_metadata() may change
 DESCRIPTIVE_KEYS = ("description", "citation", "dataUseTerms", "space")
 KINDS = ("timeseries", "group_pca", "tractogram")
@@ -142,6 +152,35 @@ def _write_json_atomic(path, obj):
 def subjects_sha256(subject_ids):
     """Hex sha256 of a subject list: the UTF-8 ids, each followed by a newline, in the given order."""
     return hashlib.sha256("".join(f"{subject_id}\n" for subject_id in subject_ids).encode("utf-8")).hexdigest()
+
+
+def _file_sha256(path, block=1 << 20):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(block):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def norms_fingerprint(metadata, subject_ids=None):
+    r"""Fingerprint of the time series of ``subject_ids`` (default: all) from connectome.json alone, or None.
+
+    The value equals ``reference.subjects_data_sha256`` (sha256 over ``"<id>\t<sha256 of <id>.norms.npy>\n"``
+    per subject) but reads the per-subject sha256 recorded in :data:`NORMS_SHA256_KEY` instead of the files.
+    None when the manifest does not record them (bundles written before the key, downloaded bundles) or misses
+    one of the subjects.
+    """
+    recorded = metadata.get(NORMS_SHA256_KEY) if isinstance(metadata, dict) else None
+    if not isinstance(recorded, dict):
+        return None
+    ids = [entry.get("id") for entry in metadata.get("subjects", [])] if subject_ids is None else list(subject_ids)
+    digest = hashlib.sha256()
+    for subject_id in ids:
+        sha = recorded.get(subject_id)
+        if not isinstance(sha, str) or not _SHA256_PATTERN.match(sha):
+            return None
+        digest.update(f"{subject_id}\t{sha}\n".encode())
+    return digest.hexdigest()
 
 
 def mask_content_sha256(mask):
@@ -820,6 +859,7 @@ class ConnectomeWriter:
             "dtype": dtype,
         }
         self._suffix, self._dtype = SUBJECT_DTYPES[dtype]
+        self._norms_sha256 = {}  # subject id -> sha256 of its norms file, for NORMS_SHA256_KEY
         if resume:
             # Text left empty here is taken from the conversion being resumed (a resume without --terms-file keeps its terms)
             self._resume(given={"name": bool(name), "description": bool(description), "citation": bool(citation), "dataUseTerms": bool(data_use_terms)})
@@ -931,6 +971,7 @@ class ConnectomeWriter:
         _save_npy_atomic(data_path, data)
         _save_npy_atomic(norms_path, norms)
         self.metadata["subjects"].append({"id": subject_id, "runs": lengths})
+        self._norms_sha256[subject_id] = _file_sha256(norms_path)
         self.save_partial()
 
     def save_partial(self):
@@ -952,6 +993,13 @@ class ConnectomeWriter:
         provenance["mask"] = {**mask_info, "sha256": computed}
         provenance["subjectsSha256"] = subjects_sha256(entry["id"] for entry in self.metadata["subjects"])
         self.metadata = _apply_metadata(self.metadata, provenance)
+        # The data fingerprint: without it a conversion of other time series with the same ids and mask into the same
+        # folder wrote a byte-identical connectome.json, and caches of the old data were taken as current
+        norms_sha = {}
+        for entry in self.metadata["subjects"]:
+            subject_id = entry["id"]
+            norms_sha[subject_id] = self._norms_sha256.get(subject_id) or _file_sha256(self._subject_files(subject_id)[1])
+        self.metadata[NORMS_SHA256_KEY] = norms_sha
         _write_json_atomic(os.path.join(self.path, MANIFEST_NAME), self.metadata)
         partial = os.path.join(self.path, PARTIAL_MANIFEST_NAME)
         if os.path.exists(partial):
