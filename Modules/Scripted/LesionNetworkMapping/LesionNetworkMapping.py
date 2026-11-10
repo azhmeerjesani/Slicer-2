@@ -5038,8 +5038,10 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             # The data use terms are part of the step: it is done once they are accepted
             connectomeState = "action"
             connectomeSummary = _("{name} · accept the data use terms").format(name=str(self.connectomeCombo.currentText))
+        # The temporary "(computing…)" volume of a run that has no partial map yet is not a result
+        resultVolume = self._parameterNode.resultVolume if self._parameterNode is not None else None
         hasResult = self.loadedMap is not None or bool(getattr(self, "runOutputs", None)) or (
-            self._parameterNode is not None and self._parameterNode.resultVolume is not None)
+            resultVolume is not None and resultVolume.GetAttribute(COMPUTING_ATTRIBUTE) != "1")
         refusal = getattr(self, "_seedSetRefusal", None)
         if refusal is not None and refusal[0] == self.seedMode():
             # The seeds of this seed set were refused before a run: the shown map is not theirs, the step needs the user
@@ -5054,6 +5056,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             # A stopped run keeps its latest snapshot: it is not "Done" and its specificity check did not finish. The card stays open
             # (a rerun is the next action)
             computeState, computeSummary = "current", _("Stopped · partial map, N = {n:,}").format(n=self.runN or 0)
+        elif not hasResult and self.job is not None and (self.job.isRunning() or self.job.isQueued()):
+            computeState, computeSummary = "current", _("Mapping…")
         elif hasResult:
             computeState, computeSummary = "done", _("Done")
             if getattr(self, "nullCheckBox", None) is not None and self.nullCheckBox.checked and self.seedMode() == "lesion":
@@ -7614,6 +7618,28 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
             self.assertEqual(records, [])  # nothing logged as an error
         finally:
             logging.getLogger().removeHandler(handler)
+
+    def test_LesionNetworkMapping_computingVolumeIsNoResult(self):
+        """The temporary "(computing…)" volume of a first run is not a result: Compute is not "Done" and Result states no N."""
+        widget = slicer.modules.lesionnetworkmapping.widgetRepresentation().self()
+        widget.initializeParameterNode()
+        node = widget._parameterNode
+        temporary = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "Lesion LNM T (computing…)")
+        temporary.SetAttribute(COMPUTING_ATTRIBUTE, "1")
+        previousVolume, previousOutputs, previousMap = node.resultVolume, widget.runOutputs, widget.loadedMap
+        try:
+            widget.runOutputs, widget.loadedMap = {}, None
+            node.resultVolume = temporary
+            widget._updateSteps()
+            compute, result = widget._cardWidgets["compute"][1], widget._cardWidgets["result"][1]
+            self.assertNotEqual(compute.property("studioStepState"), "done")
+            self.assertNotIn("Done", str(compute.property("studioStepSummary")))
+            self.assertNotIn("N =", str(result.property("studioStepSummary")))
+        finally:
+            widget.runOutputs, widget.loadedMap = previousOutputs, previousMap
+            node.resultVolume = previousVolume
+            slicer.mrmlScene.RemoveNode(temporary)
+            widget._updateSteps()
 
     def test_LesionNetworkMapping_v1(self):
         import numpy as np
