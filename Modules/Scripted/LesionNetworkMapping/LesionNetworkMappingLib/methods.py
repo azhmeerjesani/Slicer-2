@@ -1560,10 +1560,25 @@ def run_sections(info, n, subset, threshold, lesions, run_meta=None, software=No
     if rule.get("kind") == "top_pct":
         threshold_text = _top_pct_text(rule, resolved)
     elif resolved["statistic"] == "Fz":
-        threshold_text = f"Maps were displayed at |mean Fz| ≥ {resolved['value']:g} (effect size; maps are stored unthresholded)."
+        tail = threshold.get("sign")
+        if tail == "pos":
+            quantity = f"mean Fz ≥ {resolved['value']:g}"
+        elif tail == "neg":
+            quantity = f"mean Fz ≤ -{resolved['value']:g}"
+        else:
+            quantity = f"|mean Fz| ≥ {resolved['value']:g}"
+        threshold_text = f"Maps were displayed at {quantity} (effect size; maps are stored unthresholded)."
     else:
-        p_text = f", two-sided p_unc ≤ {resolved['p_unc']:.2g}" if resolved.get("p_unc") is not None else ""
-        threshold_text = f"T maps were thresholded at |T| ≥ {export._format_number(resolved['value'])} (rule {threshold['rule']['kind']}, df = {resolved['df']}, V = {resolved['v']:,} voxels{p_text}); maps are stored unthresholded."
+        tail = threshold.get("sign")
+        value = export._format_number(resolved["value"])
+        p_unc = resolved.get("p_unc")
+        if tail in ("pos", "neg"):
+            quantity = f"T ≥ {value}" if tail == "pos" else f"T ≤ -{value}"
+            p_text = f", one-sided p_unc ≤ {p_unc / 2:.2g}" if p_unc is not None else ""
+        else:
+            quantity = f"|T| ≥ {value}"
+            p_text = f", two-sided p_unc ≤ {p_unc:.2g}" if p_unc is not None else ""
+        threshold_text = f"T maps were thresholded at {quantity} (rule {threshold['rule']['kind']}, df = {resolved['df']}, V = {resolved['v']:,} voxels{p_text}); maps are stored unthresholded."
     qa_text = "Connectome-confound QA followed van den Heuvel et al. (2026): the spatial correlation between each T map and the connectome degree map was computed when the degree map was available"
     if null.get("k"):
         qa_text += (

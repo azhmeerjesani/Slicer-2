@@ -249,9 +249,25 @@ class ExportCard:
         resolved = getattr(widget, "resolved", None) if widget is not None else None
         if rule is None and widget is not None:
             rule = widget.currentRule()
+        sign = None
+        if widget is not None and resolved is not None and (rule or {}).get("kind") != "top_pct":
+            # One tail shown and binarized: the provenance states that tail and its share of in-mask voxels
+            shown = widget._sign()
+            if shown in ("pos", "neg"):
+                sign = shown
+                try:
+                    import dataclasses
+
+                    from LesionNetworkMappingLib import thresholds
+
+                    values = widget._mapValues(widget._ruleStatistic(thresholds.normalize_rule(rule)))
+                    if values is not None:
+                        resolved = dataclasses.replace(resolved, fraction=thresholds.fraction_connected(values, resolved, shown))
+                except Exception:
+                    pass
         try:
             with slicer.util.WaitCursor():
-                result = logic.exportRun(run.runDir, destination, rule=rule, resolved=resolved, partial=run.partial)
+                result = logic.exportRun(run.runDir, destination, rule=rule, resolved=resolved, partial=run.partial, sign=sign)
         except Exception as exc:
             import logging
 

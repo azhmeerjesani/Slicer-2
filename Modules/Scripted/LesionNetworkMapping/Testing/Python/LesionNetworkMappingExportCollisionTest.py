@@ -69,6 +69,49 @@ class _Helpers:
         return {name: open(os.path.join(dest, name), "rb").read().decode() for name in sorted(os.listdir(dest)) if name.endswith(".nii.gz")}
 
 
+class LesionNetworkMappingExportSignTest(_Helpers, unittest.TestCase):
+    """A map shown and binarized with + or - only is described as that tail in the sidecar and methods.md (BB-1)."""
+
+    def export(self, rule, sign):
+        from LesionNetworkMappingLib import thresholds
+
+        _runDir, meta = self.runMeta("patient1")
+        resolved = thresholds.resolve(thresholds.normalize_rule(rule), 120, 6360)
+        files = self.write_with(meta, rule, resolved, sign)
+        with open(files["sidecars"][0], encoding="utf-8") as f:
+            sidecar = json.load(f)
+        with open(files["methods"], encoding="utf-8") as f:
+            methods = f.read()
+        return sidecar["threshold"], methods
+
+    def write_with(self, meta, rule, resolved, sign):
+        return export.write_run(self.dest, meta["maps"], [entry["name"] for entry in meta["lesions"]], BUNDLE, run_meta=meta, rule=rule, resolved=resolved, sign=sign)
+
+    def test_negative_tail_of_custom_t(self):
+        threshold, methods = self.export({"kind": "custom_t", "value": 6.0, "reference_n": 120}, "neg")
+        self.assertEqual(threshold["sign"], "neg")
+        self.assertIn("T ≤ -6", threshold["derived"])
+        self.assertNotIn("|T|", threshold["derived"])
+        self.assertIn("T ≤ -6", methods)
+        self.assertIn("one-sided p_unc", methods)
+        self.assertNotIn("|T| ≥", methods)
+
+    def test_positive_tail_of_fz(self):
+        threshold, methods = self.export({"kind": "fz_abs", "value": 0.05}, "pos")
+        self.assertEqual(threshold["sign"], "pos")
+        self.assertIn("Fz ≥ 0.05", threshold["derived"])
+        self.assertIn("mean Fz ≥ 0.05", methods)
+        self.assertNotIn("|mean Fz|", methods)
+
+    def test_both_tails_keep_the_absolute_value_text(self):
+        for sign in (None, "both"):
+            threshold, methods = self.export({"kind": "custom_t", "value": 6.0, "reference_n": 120}, sign)
+            self.assertNotIn("sign", threshold)
+            self.assertIn("|T| ≥ 6", threshold["derived"])
+            self.assertIn("|T| ≥ 6", methods)
+            self.assertIn("two-sided p_unc", methods)
+
+
 class LesionNetworkMappingExportCollisionLibTest(_Helpers, unittest.TestCase):
     def test_other_lesion_of_the_same_name_is_foreign(self):
         _runDir, first = self.runMeta("patient1")

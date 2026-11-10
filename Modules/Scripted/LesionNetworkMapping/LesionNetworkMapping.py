@@ -1324,7 +1324,7 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
     def software():
         return {"slicer": slicer.app.applicationVersion, "fork_revision": slicer.app.revision}
 
-    def exportRun(self, runDir, dest, rule=None, resolved=None, partial=False):
+    def exportRun(self, runDir, dest, rule=None, resolved=None, partial=False, sign=None):
         """Export a run folder (maps, one sidecar per lesion, provenance.json, methods.md, reproduce.sh) into ``dest``.
 
         Like ``export.export_run``, with the resolved threshold of the display (a top-x% rule needs the map values).
@@ -1346,7 +1346,7 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
             with open(qaPath, encoding="utf-8") as f:
                 qa = json.load(f).get("lesions") or {}
         names = [entry["name"] for entry in runMeta["lesions"]]
-        return export.write_run(dest, runMeta["maps"], names, runMeta["bundle"], rule=rule, resolved=resolved, qa=qa, run_meta=runMeta, software=self.software())
+        return export.write_run(dest, runMeta["maps"], names, runMeta["bundle"], rule=rule, resolved=resolved, qa=qa, run_meta=runMeta, software=self.software(), sign=sign)
 
     @staticmethod
     def templateVolume(scene=None):

@@ -726,7 +726,7 @@ def _earlier_methods_text(record, info, index):
     return methods.render(sections, "md", title=title)
 
 
-def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=None, run_meta=None, preview_n=None, software=None):
+def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=None, run_meta=None, preview_n=None, software=None, sign=None):
     """Export a network-mapping run: maps, one sidecar per lesion, provenance.json, methods.md and reproduce.sh.
 
     Lesions exported earlier into ``out_dir`` by other runs keep their maps and sidecars: provenance.json lists their
@@ -745,6 +745,8 @@ def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=
       lesion files, timings and the command line; may be None.
     :param preview_n: number of subjects of a preview (subset) run: adds "PreviewN<k>" to the desc labels.
     :param software: optional {"slicer": version, "fork_revision": revision} of the exporting application.
+    :param sign: the display sign "pos" or "neg" when one tail of the rule was shown and binarized (recorded in the threshold
+      block, the derived text and methods.md); None or "both" for the two-tailed |value| rule. Ignored for top-x% rules.
     :return: {"maps": [paths], "sidecars": [paths], "provenance": path, "methods": path, "reproduce": path}.
     """
     from .engine import OUTPUT_KEYS, write_maps
@@ -789,6 +791,11 @@ def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=
         "seed": run_meta.get("seed", (run_meta.get("subjects") or {}).get("seed", 0)),
     }
     threshold = {"rule": rule, "resolved": resolved.to_dict(), "derived": derived}
+    if sign in ("pos", "neg") and rule.get("kind") != "top_pct":
+        from . import thresholds
+
+        threshold["sign"] = sign
+        threshold["derived"] = thresholds.describe(resolved, resolved.fraction, sign)
     lesion_meta = {entry.get("name"): entry for entry in run_meta.get("lesions", []) if isinstance(entry, dict)}
     timestamp = now_iso()
     software = _software(run_meta, software)
