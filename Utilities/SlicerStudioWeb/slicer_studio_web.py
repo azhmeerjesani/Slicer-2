@@ -976,7 +976,9 @@ def command_run(args):
             f"  {script_command('build')} --package Slicer-X.Y.Z-linux-amd64.tar.gz\n"
             f"or give the package to this command (--package, --package-url or --slicer-build). See README.md.")
     if state is not None:
-        docker("rm", "--force", "--volumes", args.name)
+        if state == "running":
+            info("Stopping the running Slicer Studio first (it saves the open project).")
+        remove_container(args.name, state)
     if remote:
         remote_access_warning(args.listen, args.port)
     check_port_free(args.listen, args.port)
@@ -1041,14 +1043,24 @@ def command_run(args):
     open_browser(url, not args.no_browser)
 
 
+def remove_container(name, state):
+    """Remove the container. One that may still run is stopped first: 'docker stop' sends SIGTERM, so Slicer saves
+    the open project, while 'docker rm --force' alone would kill it with SIGKILL and lose the edits since the last
+    autosave.
+    """
+    if state not in ("created", "exited", "dead"):
+        docker("stop", "--time", "20", name, check=False)
+    docker("rm", "--force", "--volumes", name)
+
+
 def command_stop(args):
     ensure_docker_running()
-    if container_state(args.name) is None:
+    state = container_state(args.name)
+    if state is None:
         info("Slicer Studio is not running.")
         return
     info("Stopping Slicer Studio.")
-    docker("stop", "--time", "20", args.name, check=False)
-    docker("rm", "--force", "--volumes", args.name)
+    remove_container(args.name, state)
     info("Stopped. Files saved in the data folder stay there.")
 
 

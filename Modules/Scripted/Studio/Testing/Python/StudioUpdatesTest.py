@@ -2805,6 +2805,48 @@ fi
         finally:
             web.socket.socket = realSocket
 
+    def test_WebLauncherRecreateStopsRunningContainerFirst(self):
+        """'run --recreate' (what 'update' tells users to run) replaces a running container like 'stop' does: 'docker
+        stop' first, so Slicer gets SIGTERM and saves the open project, then 'docker rm'. 'docker rm --force' alone
+        would kill Slicer and lose the edits since the last autosave. A container that is not running is only removed.
+        """
+        web = self._importScript(os.path.join("Utilities", "SlicerStudioWeb", "slicer_studio_web.py"), "slicer_studio_web_recreate")
+        calls = []
+        state = {"value": "running"}
+
+        def fakeDocker(*args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        web.docker = fakeDocker
+        web.ensure_docker_running = lambda: "x86_64"
+        web.needs_amd64_emulation = lambda architecture: False
+        web.container_state = lambda name: state["value"]
+        web.image_exists = lambda image: True
+        web.check_port_free = lambda *args: None
+        web.wait_for_http = lambda *args, **kwargs: True
+        web.open_browser = lambda *args, **kwargs: None
+        dataDir = os.path.join(self.tempDir, "web-recreate-data")
+        arguments = ["run", "--recreate", "--no-browser", "--no-update-check", "--data", dataDir, "--home-volume", ""]
+        for current, stops in (("running", True), ("exited", False)):
+            state["value"] = current
+            calls.clear()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(web.main(arguments), 0)
+            names = [call[0] for call in calls]
+            self.assertIn("rm", names, current)
+            self.assertEqual("stop" in names, stops, f"{current}: {names}")
+            if stops:
+                self.assertEqual(calls[names.index("stop")][:3], ("stop", "--time", "20"))
+                self.assertLess(names.index("stop"), names.index("rm"))
+            self.assertLess(names.index("rm"), names.index("run"))
+        # 'stop' keeps stopping before removing
+        state["value"] = "running"
+        calls.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            web.command_stop(web.build_parser().parse_args(["stop"]))
+        self.assertEqual([call[0] for call in calls], ["stop", "rm"])
+
     def test_WebLauncherPlainErrorTexts(self):
         """The web launcher's update check says what the app says for the same feeds, without the parser's, the error
         number's, the exception class's or the server's own text.
