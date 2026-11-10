@@ -240,6 +240,42 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertEqual(len(result.images), 1)
         np.testing.assert_allclose(self._markerRas(result.images[0]), (-40.0, -20.0, 10.0), atol=1e-4)
 
+    def test_02a_extent_not_starting_at_zero_keeps_voxels_in_place(self):
+        """An image whose extent does not start at 0 (vtkImageClip in a script) is written where the views show it, as
+        3D Slicer's own writer writes it: scan, label map and map with its threshold mask (a right voxel stays right).
+        """
+        ijkToRas = np.array([[2.0, 0, 0, -10], [0, 2.0, 0, -20], [0, 0, 2.0, -30], [0, 0, 0, 1]])
+        expected = (4.0, -14.0, -22.0)  # IJK (7, 3, 4): the subject's right
+        for className, name in (("vtkMRMLScalarVolumeNode", "cropped scan"), ("vtkMRMLLabelMapVolumeNode", "cropped labels"),
+                                ("vtkMRMLScalarVolumeNode", "cropped_T")):
+            array = np.zeros((15, 20, 40), np.int16)
+            array[4, 3, 7] = 1000 if name != "cropped labels" else 1
+            node = self._volume(name, array, ijkToRas, className)
+            clip = vtk.vtkImageClip()
+            clip.SetInputData(node.GetImageData())
+            clip.SetOutputWholeExtent(5, 24, 2, 19, 1, 14)
+            clip.ClipDataOn()
+            clip.Update()
+            cropped = vtk.vtkImageData()
+            cropped.DeepCopy(clip.GetOutput())
+            node.SetAndObserveImageData(cropped)
+            self.assertEqual(node.GetImageData().GetExtent(), (5, 24, 2, 19, 1, 14))
+            threshold = None
+            if name == "cropped_T":
+                node.SetAttribute("LNM.Statistic", "T")
+                threshold = 500.0
+            safe = name.replace(" ", "_")
+            path = os.path.join(self.out, f"{safe}.nii.gz")
+            result = self.export.exportVolume(node, path, threshold=threshold)
+            self.assertEqual(result.errors, [])
+            np.testing.assert_allclose(self._markerRas(path), expected, atol=1e-4, err_msg=name)
+            if threshold is not None:
+                np.testing.assert_allclose(self._markerRas(self.export.mapMaskPath(path)), expected, atol=1e-4, err_msg="mask")
+            # 3D Slicer's own writer places it at the same position
+            slicerPath = os.path.join(self.out, f"{safe}_slicer.nii.gz")
+            self.assertTrue(slicer.util.saveNode(node, slicerPath))
+            np.testing.assert_allclose(self._markerRas(slicerPath), expected, atol=1e-4, err_msg=f"{name} (Slicer writer)")
+
     def test_03_oblique_and_dicom_derived(self):
         """An oblique, DICOM-derived volume keeps its full direction matrix (no resampling); its name comes from the series."""
         transform = vtk.vtkTransform()

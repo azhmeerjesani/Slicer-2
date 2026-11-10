@@ -660,6 +660,13 @@ def volumeData(volumeNode):
     array = slicer.util.arrayFromVolume(volumeNode)
     if array is None or array.ndim != 3:
         raise ExportError(_("{name} is not a 3D image").format(name=volumeNode.GetName()))
+    # The array starts at the image's extent start, which is not always IJK 0 (a vtkImageClip done in a script): the
+    # file's voxel 0 is IJK (extent[0], extent[2], extent[4]), as 3D Slicer's own writer stores it
+    extent = volumeNode.GetImageData().GetExtent()
+    if extent[0] != 0 or extent[2] != 0 or extent[4] != 0:
+        start = np.eye(4)
+        start[:3, 3] = (extent[0], extent[2], extent[4])
+        affine = affine @ start
     # [k, j, i] (VTK memory order) -> [i, j, k] (file order); the copy keeps the data after temporary nodes are removed
     return np.array(array, copy=True).transpose(2, 1, 0), affine, note
 
