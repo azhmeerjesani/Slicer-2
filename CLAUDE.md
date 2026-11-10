@@ -38,9 +38,9 @@ The user pays for any usage beyond their plans, so even an accidental use costs 
 
 ## Agent concurrency
 
-- Run at most two agents at any time, day and night (the user set two on 2026-10-28, raised it to
-  three on 2026-10-30 and lowered it back to two on 2026-11-08): for example one workflow with two
-  agents running at once and no separate agent beside it. Agents that run at the same time never edit the same working tree or build tree at
+- Run at most four agents at any time, day and night (the user set two on 2026-10-28, three on
+  2026-10-30, two on 2026-11-08 and four on 2026-11-10): for example one workflow with four agents
+  running at once, or two plus two separate agents. Agents that run at the same time never edit the same working tree or build tree at
   once, run Slicer with their own throwaway HOME and `xvfb-run -a`, and never kill processes they did
   not start.
 - Keep at least 5 GB of disk free at all times (the user, 2026-10-31). Each agent deletes its own large outputs,
