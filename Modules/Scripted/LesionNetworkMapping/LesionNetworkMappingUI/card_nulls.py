@@ -923,7 +923,15 @@ class NullsCard:
         seed = (record.get("seeds") or {}).get("seed")
         if seed is not None and int(seed) != int(self.seedSpin.value):
             reasons.append(_("seed"))
+        if record.get("kind") == "rl_strength" and self.kind == "rl_strength" and NullsCard.recordStrength(record) != (self.strengthCombo.currentData or "signed"):
+            reasons.append(_("strength map"))
         return reasons
+
+    @staticmethod
+    def recordStrength(record):
+        """The strength map of an rl_strength record ('signed' when it does not say, as in older records)."""
+        design = record.get("design") if isinstance(record.get("design"), dict) else {}
+        return design.get("strength") or "signed"
 
     def showResult(self):
         folder = self.outDir()
@@ -935,7 +943,10 @@ class NullsCard:
         approximate = bool(record.get("approximate"))
         widgets.setChipLevel(self.modeChip, "warn" if approximate else "ok", _("Approximate (fast mode)") if approximate else _("Exact pooled null"))
         statusTag = next((row[3] for row in KIND_ROWS if row[0] == record.get("kind")), record.get("kind_status") or "")
-        self.basisLabel.setText(_("{kind} [{status}] · {label} · K = {k}").format(kind=record.get("kind"), status=statusTag, label=record.get("mode_label"), k=record.get("k")))
+        basisText = _("{kind} [{status}] · {label} · K = {k}").format(kind=record.get("kind"), status=statusTag, label=record.get("mode_label"), k=record.get("k"))
+        if record.get("kind") == "rl_strength":
+            basisText += " · " + (_("Strength map: Absolute hubness") if self.recordStrength(record) == "abs" else _("Strength map: Signed μC_r"))
+        self.basisLabel.setText(basisText)
         if approximate:
             widgets.setBannerText(self.approxBanner, _("Approximate: fast mode uses the parcel index (approximate z-scale, rank rules only); your observed map was recomputed in fast mode, like with like. "
                                                        "Fast-mode maps are never final observed maps."))
@@ -950,7 +961,7 @@ class NullsCard:
                                                                                                        text=inference.get("discreteness") or ""))
         self.countsLabel.setText(_("Voxels with p ≤ 0.05: {p:,} · q ≤ 0.05: {q:,} · FWE p ≤ 0.05: {f:,} (of {v:,} in the mask).").format(
             p=inference.get("n_p_05", 0), q=inference.get("n_q_05", 0), f=inference.get("n_fwe_05", 0), v=inference.get("n_voxels", 0)))
-        self.qaLabel.setText(self.groupQaText(record.get("group_qa")))
+        self.qaLabel.setText(self.groupQaText(record.get("group_qa"), strength=self.recordStrength(record) if record.get("kind") == "rl_strength" else None))
         self.parityLabel.setText(self.parityText(record))
         self.parityLabel.setVisible(bool(self.parityLabel.text))
         basis = _("approximate") if approximate else _("exact pooled")
@@ -967,7 +978,7 @@ class NullsCard:
         self.biasCheck.setVisible(hasBias)
 
     @staticmethod
-    def groupQaText(group):
+    def groupQaText(group, strength=None):
         """The group QA line of a nulls record: the percentile of r(group map, μC_r) among the null cohorts' maps."""
         from .card_qa import ordinal
 
@@ -983,7 +994,10 @@ class NullsCard:
 
         kind = values.get("null_kind") or group.get("null_kind") or GROUP_QA_KIND
         if kind in MATCHED_NULL_KINDS:
-            where = _("not the QA card's verdict: these null cohorts keep each lesion's mean connectivity, μC_r")
+            if strength == "abs":
+                where = _("not the QA card's verdict: these null cohorts keep each lesion's absolute hubness")
+            else:
+                where = _("not the QA card's verdict: these null cohorts keep each lesion's mean connectivity, μC_r")
         elif kind == GROUP_QA_KIND:
             where = _("shown in the QA card")
         else:

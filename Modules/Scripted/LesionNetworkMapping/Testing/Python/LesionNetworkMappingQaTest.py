@@ -694,6 +694,31 @@ class QaGroupChipFastModeTest(unittest.TestCase):
         self.assertIn("not the QA card's verdict", text)
         self.assertIn("99 rl_strength null cohorts", text)
 
+    def test_nulls_card_strength_map_stale_and_texts(self):
+        import types
+
+        from LesionNetworkMappingLib import thresholds
+        from LesionNetworkMappingUI import card_nulls
+
+        card = card_nulls.NullsCard
+        fake = types.SimpleNamespace(kind="rl_strength", kPoolSpin=types.SimpleNamespace(value=2000), seedSpin=types.SimpleNamespace(value=0),
+                                     strengthCombo=types.SimpleNamespace(currentData="signed"))
+        fake.rule = lambda: thresholds.normalize_rule(None)
+        fake.overlapSettings = lambda: (0.0, "both")
+        fake.kValue = lambda: 199
+        fake.usesPool = lambda: True
+        fake.effectiveMode = lambda: "exact"
+        record = {"rule": thresholds.normalize_rule(None), "overlap_pct": 0, "sign": "both", "k": 199, "k_pool": 2000, "seeds": {"seed": 0}, "kind": "rl_strength", "design": {"strength": "abs"}}
+        self.assertEqual(card.staleReasons(fake, record), ["strength map"])
+        fake.strengthCombo.currentData = "abs"
+        self.assertEqual(card.staleReasons(fake, record), [])
+        fake.strengthCombo.currentData = "signed"
+        self.assertEqual(card.staleReasons(fake, dict(record, design={"strength": "signed"})), [])
+        group = {"available": True, "null_kind": "rl_strength", "mean": {"percentile": 40.0, "k": 99, "text": "x", "null_kind": "rl_strength"}, "statistic": "T"}
+        self.assertIn("absolute hubness", card.groupQaText(group, strength="abs"))
+        self.assertNotIn("μC_r, ", card.groupQaText(group, strength="abs").split("r(group map")[0])
+        self.assertIn("mean connectivity, μC_r", card.groupQaText(group, strength="signed"))
+
     def test_nulls_card_labels_fast_group_qa(self):
         from LesionNetworkMappingUI import card_nulls
 
