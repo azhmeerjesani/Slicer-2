@@ -2579,6 +2579,9 @@ class StudioRegressionTest(unittest.TestCase):
             def setValues(self, sids, values):
                 pass
 
+            def setSubjectValues(self, valuesBySid):
+                pass
+
             def flush(self, lockTimeout=0):
                 pass
 
@@ -2597,6 +2600,43 @@ class StudioRegressionTest(unittest.TestCase):
         result = {"studyPath": "/study", "found": [("sub-01", ("key",), {"dimensionality": "3D"})]}
         self.assertTrue(lesionqc.QcCore._applyDimensions(fake, result))
         self.assertEqual(asked, [session])
+
+    def test_12b_dimensionality_of_many_lesions_sends_one_notice(self):
+        """BB-1: the dimensionality that lesion QC found for the lesions of a study is written with ONE study notice.
+
+        Before, each lesion was written with its own ``setValues`` and each notice refreshed the whole Library on the main
+        thread: a 300-subject study froze the GUI for 2-10 s after it opened (in the grid, while the thumbnails were made).
+        """
+        from StudioLib import lesionqc, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        sids = [f"sub-{index:02d}" for index in range(1, 7)]
+        study = self._study([(sid, {}, False) for sid in sids])
+        session = study_ui.StudySession(study)
+        self.addCleanup(session.close)
+        notices = []
+
+        def listener(studySession):
+            notices.append(studySession)
+
+        study_ui.addListener(listener)
+        self.addCleanup(study_ui.removeListener, listener)
+        saved = (lesionqc._session, lesionqc._stat)
+        self.addCleanup(lambda: (setattr(lesionqc, "_session", saved[0]), setattr(lesionqc, "_stat", saved[1])))
+        lesionqc._session = lambda: session
+        lesionqc._stat = lambda path: ("key",)
+        fake = types.SimpleNamespace(studyPath=study.path, _askImported=lambda s: None)
+        info = {"dimensionality": "3D", "planes": [], "n_slices": {}}
+        result = {"studyPath": study.path, "found": [(sid, ("key",), info) for sid in sids]}
+        self.assertTrue(lesionqc.QcCore._applyDimensions(fake, result))
+        self.assertEqual({sid: study.subject(sid).get("dimensionality") for sid in sids}, dict.fromkeys(sids, "3D"))
+        self.assertEqual(len(notices), 1, "one notice (one Library refresh) for all the lesions, not one per lesion")
+        # Written to participants.tsv (the flush after the values)
+        from LesionNetworkMappingLib.study import Study
+
+        reopened = Study.open(study.path)
+        self.assertEqual({sid: reopened.subject(sid).get("dimensionality") for sid in sids}, dict.fromkeys(sids, "3D"))
 
     def test_13_failed_adopt_leaves_folder_unchanged(self):
         from LesionNetworkMappingLib import geometry, nifti

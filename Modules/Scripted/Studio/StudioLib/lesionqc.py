@@ -1242,6 +1242,7 @@ class QcCore:
             return False
         study = session.study
         written = []
+        changes = {}
         for sid, key, info in result["found"]:
             if info is None or sid not in study:
                 continue
@@ -1249,9 +1250,10 @@ class QcCore:
             if not _missing(row.get("dimensionality")) or _missing(row.get("lesion")) or _stat(study.abspath(row["lesion"])) != key:
                 continue  # Done recorded it meanwhile, or the file changed (it is asked again)
             values = dimensionColumns(info, figure=figureOwnsPlanes(row))
-            session.setValues([sid], values)
+            changes[sid] = values
             written.append((sid, values["dimensionality"]))
         if written:
+            session.setSubjectValues(changes)  # one notice (one Library refresh) for all the lesions, not one per lesion
             session.flush(lockTimeout=0.5)
             try:
                 for sid, dim in written:

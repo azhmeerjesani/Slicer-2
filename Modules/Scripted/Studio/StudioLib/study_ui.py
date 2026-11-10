@@ -2890,6 +2890,23 @@ class StudySession:
         self.scheduleSave()
         _notify(self)
 
+    def setSubjectValues(self, valuesBySid):
+        """Set different cells for several subjects (``{sid: {column: value}}``, see ``Study.set``) with ONE notice and save.
+
+        A background result that fills a column for many subjects (lesion QC's dimensionality of 300 lesions) writes them
+        here: ``setValues`` per subject sent one notice each, and each notice refreshed the whole Library on the main thread
+        (a 300-subject study froze the GUI for seconds, BB-1).
+        """
+        if not valuesBySid:
+            return
+        try:
+            for sid, values in valuesBySid.items():
+                self.study.set(sid, values)
+                self._cropCache.pop(sid, None)
+        finally:
+            self.scheduleSave()
+            _notify(self)
+
     def setQc(self, sids, value, column="qc"):
         """P / X / U: ``value`` in pass, fail, unreviewed (``column``: qc, or a filter's qcColumn such as norm_qc)."""
         self.setValues(sids, {column: value})
