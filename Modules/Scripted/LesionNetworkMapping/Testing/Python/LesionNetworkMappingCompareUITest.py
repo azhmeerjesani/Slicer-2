@@ -122,7 +122,14 @@ class LesionNetworkMappingCompareUITest(unittest.TestCase):
                  "https://neurovault.org/collections/457/": ["--collection", "457"], "neurovault.org/media/images/457/a%20b.nii.gz": ["--collection", "457", "--file", "a b.nii.gz"]}
         for text, expected in cases.items():
             self.assertEqual(neurovaultArgs(text), expected, text)
-        for text in ("https://neurovault.org/media/images/457/", "https://neurovault.org/collections/ABCDEF/", ""):
+        # Any wording of a collection label names the collection, never an image with the same number.
+        for text in ("Collection: 457", "c 457", "collection  457", "collection #457", "coll 457", "Collections 457"):
+            self.assertEqual(neurovaultArgs(text), ["--collection", "457"], text)
+        self.assertEqual(neurovaultArgs("image 3128"), ["--image", "3128"])
+        args = self.card.additionArgs("neurovault", {"id": "Collection: 457"})
+        self.assertNotIn("--image", args)
+        for text in ("https://neurovault.org/media/images/457/", "https://neurovault.org/collections/ABCDEF/", "",
+                     "collection id 457 or 458", "c-457 x"):
             with self.assertRaises(ValueError, msg=text):
                 neurovaultArgs(text)
 

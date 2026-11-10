@@ -144,7 +144,8 @@ def neurovaultArgs(value):
     number is the collection id, so it is never read as an image id.
     """
     text = str(value or "").strip()
-    match = re.match(r"^(?:c|collection[: ]?)(\d+)$", text, re.IGNORECASE)
+    # "c457", "c 457", "coll 457", "Collection: 457", "collection #457": all name a collection.
+    match = re.match(r"^(?:c|coll(?:ections?)?)\s*[:#-]?\s*(\d+)$", text, re.IGNORECASE)
     if match:
         return ["--collection", match.group(1)]
     match = re.match(r"^#?(\d+)$", text)
@@ -161,7 +162,9 @@ def neurovaultArgs(value):
     match = re.search(r"(?:^|/)collections/(\d+)(?:[/?#]|$)", text, re.IGNORECASE)
     if match:
         return ["--collection", match.group(1)]
-    if "/" not in text and "neurovault" not in text.lower():
+    # Last, a short label such as "image 3128" or "id: 3128"; text that mentions a collection is never read as an image id.
+    mentionsCollection = re.search(r"coll", text, re.IGNORECASE) or re.match(r"^c\W*\d", text, re.IGNORECASE)
+    if "/" not in text and "neurovault" not in text.lower() and not mentionsCollection:
         match = re.search(r"(\d+)", text)
         if match:
             return ["--image", match.group(1)]
