@@ -6419,11 +6419,13 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                 item.setForeground(qt.QBrush(self.widgets.valueColor(peak["value"])))
 
     def _peakSpace(self, grid):
-        """The template space of the peaks' grid (to keep the atlases of its family), or None when it cannot be told."""
+        """The template space label of the peaks' grid (to keep the atlases of its family), or None when it cannot be told."""
         try:
             from LesionNetworkMappingLib import geometry
 
-            return geometry.detect_space((tuple(grid.shape), grid.affine)) if grid is not None else None
+            # The one-argument form gives (space, resolution), or None for a grid that is not a standard one
+            detected = geometry.detect_space((tuple(grid.shape), grid.affine)) if grid is not None else None
+            return detected[0] if detected else None
         except Exception:
             return None
 

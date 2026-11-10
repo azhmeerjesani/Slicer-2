@@ -720,12 +720,15 @@ def peak_regions(points, space=None, cache=None, atlases=None):
     Each point gets the label of the first usable atlas (in :data:`PEAK_REGION_ATLASES` order) that names a region there
     other than a broad one (cerebral cortex or white matter, a lateral ventricle), as :func:`region_text`. When the atlases
     give only broad labels, the first broad label is shown; :data:`OUTSIDE_ATLAS` only when no usable atlas labels the
-    point. ``space`` (the template space of the map) skips the atlases of another space family. The cached atlases are
-    read only while some point has no specific name yet.
+    point. ``space`` (the template space of the map, a label or the (space, resolution) pair of
+    ``geometry.detect_space(grid)``) skips the atlases of another space family. The cached atlases are read only while some
+    point has no specific name yet.
 
     :return: a list of texts, one per point, or None when no usable atlas is cached (nothing can be said).
     """
     points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    if isinstance(space, (tuple, list)):  # (space, resolution) of geometry.detect_space(grid)
+        space = space[0] if space else None
     family = space_family(space) if space else None
     if atlases is None:
         folder = fetch.cache_dir(cache)

@@ -135,6 +135,19 @@ class PeakRegionsTest(unittest.TestCase):
         self.assertEqual(atlases.peak_regions(point, space="MNI152NLin2009cAsym", atlases=[other]), ["L putamen"])
         self.assertEqual(atlases.peak_regions(point, space="MNI152NLin6Asym", atlases=[other, subcortical()]), ["L caudate"])
 
+    def test_space_family_with_a_detected_space_tuple(self):
+        # geometry.detect_space(grid) gives (space, resolution): the family filter still applies to that form (it used
+        # to read as an "unknown" family, so a 2009c map was named by FSL-family atlases and an FSL map by 2009 ones)
+        other = atlases.Atlas("other", subcortical().data, AFFINE, {3: "Left Putamen"}, family="2009")
+        point = [world((4, 4, 4))]
+        self.assertIsNone(atlases.peak_regions(point, space=("MNI152NLin2009cAsym", 2), atlases=[subcortical()]))
+        self.assertIsNone(atlases.peak_regions(point, space=("MNI152NLin6Asym", 2), atlases=[other]))
+        self.assertEqual(atlases.peak_regions(point, space=("MNI152NLin2009cAsym", 2), atlases=[subcortical(), other]), ["L putamen"])
+        with mock.patch.object(atlases.fetch, "is_cached", lambda resource, folder=None: resource.id == "harvard-oxford-subcortical-th25-2mm"), \
+             mock.patch.object(atlases, "_region_atlas", lambda resource, folder: subcortical()):
+            self.assertIsNone(atlases.peak_regions(point, space=("MNI152NLin2009cAsym", 2), cache=tempfile.gettempdir()))
+            self.assertEqual(atlases.peak_regions(point, space=("MNI152NLin6Asym", 2), cache=tempfile.gettempdir()), ["L caudate"])
+
     def test_no_atlas_cached_downloads_nothing(self):
         # An empty cache folder: no atlas, None ("nothing can be said"), and no file is written (nothing is downloaded)
         with tempfile.TemporaryDirectory() as folder:
