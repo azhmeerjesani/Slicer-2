@@ -183,6 +183,20 @@ def asciiText(text):
     return "".join(character for character in decomposed if not unicodedata.combining(character))
 
 
+#: Longest base name of an image (bytes). A file system accepts 255 bytes per name component, and a job adds up to
+#: ``_label-<segment>_mask`` (with the segment value of at most ``MAX_ENTITY_LENGTH``, ``dup<N>``) and ``.nii.gz`` to it,
+#: or ``_desc-thresholded_mask.nii.gz``, plus the ``_<N>`` of the uniqueness bump.
+MAX_BASE_LENGTH = 140
+MAX_ENTITY_LENGTH = 64
+
+
+def limitLength(text, limit=MAX_BASE_LENGTH):
+    """``text`` cut to ``limit`` characters (ASCII file names: one byte each), without a dangling separator."""
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip("._-") or text[:limit]
+
+
 def safeName(text, fallback="image"):
     """A file name made of ASCII letters, digits, ".", "_" and "-" only (spaces become "_", accents are dropped)."""
     name = re.sub(r"[^A-Za-z0-9._-]+", "_", asciiText(text)).strip("._-")
@@ -192,7 +206,7 @@ def safeName(text, fallback="image"):
 
 def entityValue(text, fallback="segment"):
     """A BIDS entity value (letters and digits only): "Left lesion 2" -> "Leftlesion2", "Ödem" -> "Odem"."""
-    value = re.sub(r"[^A-Za-z0-9]+", "", asciiText(text))
+    value = re.sub(r"[^A-Za-z0-9]+", "", asciiText(text))[:MAX_ENTITY_LENGTH]
     return value or fallback
 
 
@@ -1394,7 +1408,7 @@ def planExport(nodes, folder, extension=".nii.gz", segmentationMode=SEGMENTATION
         if node is None or unavailableReason(node):
             continue
         kind = kindOf(node)
-        base = (names or {}).get(node.GetID()) or defaultBaseName(node, kind, bids=bids)
+        base = limitLength((names or {}).get(node.GetID()) or defaultBaseName(node, kind, bids=bids))
         if kind == KIND_SEGMENTATION and segmentationMode == SEGMENTATION_LABELMAP:
             base = f"{base}_dseg"
         options = {}

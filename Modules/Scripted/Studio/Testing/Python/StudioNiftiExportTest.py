@@ -956,6 +956,30 @@ class StudioNiftiExportTest(unittest.TestCase):
             "Lasionen_label-Odemrechtsdup2_mask.nii.gz": "Odem rechts",
         })
 
+    def test_06db_long_names_are_cut_to_what_the_file_system_accepts(self):
+        """A 300-letter image name or segment name is cut (255 bytes per file name, suffixes included) and the export succeeds."""
+        export = self.export
+        scan = self._volume("Patient scan " + "a" * 300, np.zeros((10, 10, 10), np.int16), np.eye(4))
+        twin = self._volume("Patient scan " + "a" * 301, np.zeros((10, 10, 10), np.int16), np.eye(4))
+        result = export.exportNodes([scan, twin], os.path.join(self.out, "long"))
+        self.assertEqual(result.errors, [])
+        self.assertEqual(len(result.images), 2)
+        self.assertEqual(len({path.lower() for path in result.images}), 2)
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesion " + "y" * 300)
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        for name in ("Infarct " + "x" * 260, "Infarct " + "x" * 261):
+            segmentId = segmentation.GetSegmentation().AddEmptySegment("", name)
+            data = np.zeros((10, 10, 10), np.uint8)
+            data[3 + len(name) % 2, 5, 5] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(data, segmentation, segmentId, scan)
+        masks = export.exportNodes([segmentation], os.path.join(self.out, "long"), segmentationMode=export.SEGMENTATION_MASKS)
+        self.assertEqual(masks.errors, [])
+        self.assertEqual(len(masks.images), 2)
+        for folder in (os.path.join(self.out, "long"),):
+            for name in os.listdir(folder):
+                self.assertLessEqual(len(name.encode()), 255, name)
+
     def test_06e_4d_image_is_written_whole(self):
         """A 4D image (fMRI) opened as a sequence is written with every time point and its TR, not only the one on screen."""
         from LesionNetworkMappingLib import nifti
