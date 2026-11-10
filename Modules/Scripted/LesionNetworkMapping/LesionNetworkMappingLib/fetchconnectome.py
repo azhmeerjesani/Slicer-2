@@ -586,7 +586,7 @@ class ArchiveSource:
             self._check_total(total)
             self.connected.set()
             try:
-                for chunk in response.iter_content(CHUNK_BYTES):
+                for chunk in fetch.raw_chunks(response, CHUNK_BYTES):
                     if self._stop.is_set():
                         return False
                     if _is_cancelled(self.cancel):

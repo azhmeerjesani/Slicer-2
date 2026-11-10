@@ -103,6 +103,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 return self._send(416, headers=[("Content-Range", f"bytes */{len(body)}")])
             status = 206
         payload = body[start:]
+        if behavior.get("content_encoding"):  # a misconfigured server: the stored .gz file is labelled as an encoding
+            self.send_response(status)
+            self.send_header("Content-Encoding", behavior["content_encoding"])
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return None
         self.send_response(status)
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Accept-Ranges", "bytes")
@@ -315,6 +322,15 @@ class FetchTest(_Base):
             f.write(b"junk" * 1000)  # a stale partial file
         path = fetch.fetch(entry, self.cache)
         self.assertEqual(read_bytes(path), self.body)
+
+    def test_content_encoding_gzip_is_stored_as_sent(self):
+        stored = gzip.compress(bytes(2_000_000))  # far smaller compressed than decoded
+        url = self.serve("/real.nii.gz", stored, content_encoding="gzip")
+        entry = entry_for(url, stored, filename="real.nii.gz")
+        path = fetch.fetch(entry, self.cache)
+        self.assertEqual(read_bytes(path), stored)
+        self.assertEqual(len(self.requests_for("/real.nii.gz")), 1)
+        self.assertFalse(os.path.exists(path + ".part"))
 
     def test_checksum_mismatch_retries_once_then_raises(self):
         url = self.serve("/file.bin", self.body)

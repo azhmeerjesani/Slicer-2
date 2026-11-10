@@ -893,7 +893,7 @@ def _stream(session, url, part, size_hint, progress, cancel):
         _raise_if_cancelled(cancel, done)
         try:
             with open(part, mode) as f:
-                for chunk in response.iter_content(CHUNK_BYTES):
+                for chunk in raw_chunks(response):
                     if chunk:
                         f.write(chunk)
                         done += len(chunk)
@@ -910,6 +910,26 @@ def _stream(session, url, part, size_hint, progress, cancel):
         if expected_total is not None and done != expected_total:
             raise _Transient(f"The connection to {host_of(url)} closed after {done:,} of {expected_total:,} bytes. Check the network and try again.",
                              detail=f"the connection closed after {done} of {expected_total} bytes")
+
+
+def raw_chunks(response, size=CHUNK_BYTES):
+    """The body of ``response`` exactly as sent (a server that labels a .gz file ``Content-Encoding: gzip`` must not have it decoded:
+    Content-Length and Range offsets count the stored bytes). Errors are raised as ``requests`` raises them.
+    """
+    raw = getattr(response, "raw", None)
+    if raw is None or not hasattr(raw, "stream"):
+        yield from response.iter_content(size)
+        return
+    import requests
+    from urllib3.exceptions import ProtocolError, ReadTimeoutError, SSLError
+    try:
+        yield from raw.stream(size, decode_content=False)
+    except ProtocolError as exc:
+        raise requests.exceptions.ChunkedEncodingError(exc, response=response) from exc
+    except ReadTimeoutError as exc:
+        raise requests.ConnectionError(exc, response=response) from exc
+    except SSLError as exc:
+        raise requests.exceptions.SSLError(exc, response=response) from exc
 
 
 def _download(resource, dest, progress, cancel, session, retries):
