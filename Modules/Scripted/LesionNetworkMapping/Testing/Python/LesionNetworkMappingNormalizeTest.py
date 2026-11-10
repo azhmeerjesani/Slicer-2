@@ -491,6 +491,21 @@ class NormalizeTest(unittest.TestCase):
             if wrapper.poll() is None:
                 wrapper.kill()
 
+    def test_33_unwritable_output_folder(self):
+        """A folder that cannot be written ends as code output_unwritable naming it (not as an unexpected exception)."""
+        import errno
+        from unittest import mock
+
+        out = self.path("unwritable-out")
+        for error in (PermissionError(errno.EACCES, "Permission denied", out), OSError(errno.EROFS, "Read-only file system", out)):
+            with mock.patch.object(normalize.os, "makedirs", side_effect=error):
+                with self.assertRaises(jobs.JobError) as caught:
+                    normalize.normalize(self.subject["scan"], self.subject["lesion"], out, quality="affine", template_dirs=EXTRA_TEMPLATE_DIRS)
+            self.assertEqual(caught.exception.code, "output_unwritable")
+            self.assertIn(out, caught.exception.message)
+            self.assertEqual(caught.exception.fields.get("path"), out)
+        self.assertFalse(normalize.is_unwritable_error(OSError(errno.ENOSPC, "No space left on device")))
+
     def test_34_lock(self):
         run = self.affine_run()
         lock = os.path.join(run["out"], normalize.LOCK_NAME)

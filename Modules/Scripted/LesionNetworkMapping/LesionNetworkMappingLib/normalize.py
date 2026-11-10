@@ -81,6 +81,7 @@ if __name__ == "__main__":
 
     set_blas_threads(sys.argv[1:])  # before numpy is imported: BLAS reads these variables once
 
+import errno
 import hashlib
 import json
 import math
@@ -1351,7 +1352,12 @@ def normalize(
         brainsroiauto=brainsroiauto,
     )
 
-    os.makedirs(out, exist_ok=True)
+    try:
+        os.makedirs(out, exist_ok=True)
+    except OSError as exc:
+        if is_unwritable_error(exc):
+            raise jobs.JobError(f"The output folder {out} cannot be written: {exc.strerror or exc}", code="output_unwritable", path=out) from exc
+        raise
     try:
         free = shutil.disk_usage(out).free
     except OSError:
@@ -1360,7 +1366,12 @@ def normalize(
         raise jobs.JobError(f"Not enough free disk space in {out} ({free / 1e6:.0f} MB)", code="disk_full")
 
     lock = jobs.OutputLock(os.path.join(out, LOCK_NAME))
-    lock.acquire()
+    try:
+        lock.acquire()
+    except OSError as exc:
+        if is_unwritable_error(exc):
+            raise jobs.JobError(f"The output folder {out} cannot be written: {exc.strerror or exc}", code="output_unwritable", path=out) from exc
+        raise
     try:
         if lock.reclaimed is not None:
             _warn(f"Reclaimed a stale lock of process {lock.reclaimed.get('pid')} on {lock.reclaimed.get('host')}", "stale_lock", subject=sid)
@@ -1378,6 +1389,11 @@ def normalize(
         return _run(ctx, force, batch_progress, started)
     finally:
         lock.release()
+
+
+def is_unwritable_error(exc):
+    """Whether ``exc`` says a folder cannot be written (permission denied or read-only file system)."""
+    return isinstance(exc, PermissionError) or getattr(exc, "errno", None) in (errno.EACCES, errno.EPERM, errno.EROFS)
 
 
 def _remove_stale_work(out):

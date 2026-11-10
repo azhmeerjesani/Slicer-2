@@ -1052,6 +1052,8 @@ def describeFailure(info):
         return _("The lesion is empty: trace it first, or normalize the scan only."), None
     if code == "locked":
         return _("Another job is writing this output folder; try again when it has finished."), None
+    if code == "output_unwritable":
+        return _("The output folder cannot be written: {folder}. Choose a folder you can write to as the data folder (Settings).").format(folder=event.get("path") or info.get("path") or _("(unknown)")), None
     if code == "exception":
         # an unexpected error: its text is internal (it may name local paths); the job log and the Python console have it
         return _("Normalization failed because of an unexpected error ({kind}); the log has the details.").format(kind=event.get("type") or _("internal error")), None

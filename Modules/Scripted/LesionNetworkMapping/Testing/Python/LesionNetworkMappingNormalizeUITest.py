@@ -177,6 +177,13 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
     # Entry points
     #
 
+    def test_describe_unwritable_output_folder(self):
+        text, offer = self.nc.describeFailure({"code": "output_unwritable", "message": "The output folder /x/y cannot be written: Permission denied", "event": {"path": "/x/y"}})
+        self.assertIsNone(offer)
+        self.assertIn("/x/y", text)
+        self.assertIn("Settings", text)
+        self.assertNotIn("unexpected", text)
+
     def test_01_entry_points(self):
         """canNormalize() answers without starting anything; offerNormalize() never starts a job; no download under testing."""
         nc = self.nc
