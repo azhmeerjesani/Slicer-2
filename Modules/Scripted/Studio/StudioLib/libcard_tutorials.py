@@ -59,6 +59,14 @@ def _toast(text, ms=3000, **kwargs):
         logging.info(f"Studio tutorials: {text}")
 
 
+def _studyFolderProblem(folder):
+    """Why ``folder`` cannot become the new study (``study_ui.studyFolderProblem``: Studio's own folders, a project or a
+    folder inside another study), or None. None too when this build has no study library.
+    """
+    studyUi = library._studyUi()
+    return studyUi.studyFolderProblem(folder) if studyUi is not None else None
+
+
 def cacheFolder():
     """The LNM cache folder (``$SLICER_LNM_CACHE``, else ``<application cache>/LNM``, as the other cards use it)."""
     return _lnm("fetch").app_cache_dir()
@@ -478,6 +486,9 @@ class TutorialsDialog:
         reason = ""
         if not folder:
             reason = _("Choose a folder for the new study") if folder == "" else self._pathProblem(self.folder())
+        elif _studyFolderProblem(folder):
+            # The same rule as New study and Create study (A-09): never a study in Projects/, a project or another study
+            reason = _studyFolderProblem(folder)
         elif os.path.isfile(folder):
             reason = _("This is a file: choose a folder")
         elif os.path.isdir(folder) and os.listdir(folder):
@@ -537,6 +548,9 @@ class TutorialsDialog:
             return False
         dest = self._typedPath(self.folder())
         if not dest:  # the button checks this too: never let a relative path reach the job (it would build inside the application)
+            return False
+        if _studyFolderProblem(dest):  # the button checks this too: the folder may have changed since (a project or study made there)
+            self._updateButtons()
             return False
         self._startOptions = self._options()
         sourceDir = (self._typedPath(self.sourceEdit.text) or None) if entry["source"]["type"] == "folder" else None

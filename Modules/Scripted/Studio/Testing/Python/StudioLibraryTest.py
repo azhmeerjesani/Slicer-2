@@ -1957,6 +1957,73 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         tutorialsDialog.sourceEdit.setText(work)
         self.assertTrue(button.enabled, button.toolTip)
 
+    def test_tutorials_refuses_studio_folders_projects_and_other_studies(self):
+        """Tutorial cohorts: "New study in" follows the rule of New study and Create study (study_ui.studyFolderProblem, A-09).
+        A folder in Projects/, inside a project or inside another study was built: the study in Projects/ then showed in
+        Library as a broken "Empty" project, and a nested study landed in another study's derivatives/.
+        """
+        import types
+
+        from LesionNetworkMappingLib import study as studyModule
+        from LesionNetworkMappingUI import jobrunner
+        from StudioLib import libcard_tutorials, projects, study_ui
+
+        saved = os.environ.get("SLICER_STUDIO_PROJECTS_ROOT")
+
+        def restore():
+            if saved is None:
+                os.environ.pop("SLICER_STUDIO_PROJECTS_ROOT", None)
+            else:
+                os.environ["SLICER_STUDIO_PROJECTS_ROOT"] = saved
+
+        self.cleanup.append(restore)
+        root = os.path.join(self.directory, "Slicer Studio")
+        os.makedirs(root)
+        os.environ["SLICER_STUDIO_PROJECTS_ROOT"] = root
+        self.assertTrue(projects.isEnabled())
+        project = projects.createProject("myproject").path
+        outer = os.path.join(self.directory, "outer-study")
+        studyModule.Study.create(outer, name="outer-study")
+        submitted = []
+        fakeJob = types.SimpleNamespace(isFinished=lambda: True)
+        savedInstance = jobrunner.instance
+        jobrunner.instance = lambda: types.SimpleNamespace(submit=lambda spec: submitted.append(spec) or fakeJob)
+        self.cleanup.append(lambda: setattr(jobrunner, "instance", savedInstance))
+        tutorialsDialog = libcard_tutorials.TutorialsDialog()
+        self.cleanup.append(tutorialsDialog.dialog.deleteLater)
+        button = tutorialsDialog.downloadButton
+        tutorialsDialog.select("joutsa2022_addiction")
+        refused = {
+            os.path.join(projects.projectsFolder(), "tutorial-in-projects"): "part of the project",
+            os.path.join(project, "x"): "part of the project myproject",
+            os.path.join(outer, "derivatives", "inner-study"): "inside the study outer-study",
+            projects.studiesFolder(): "Studies/",
+        }
+        for folder, words in refused.items():
+            tutorialsDialog.folderEdit.setText(folder)
+            self.assertFalse(button.enabled, folder)
+            self.assertIn(study_ui.studyFolderProblem(folder), button.toolTip, folder)
+            self.assertIn(words, button.toolTip, folder)
+            self.assertFalse(tutorialsDialog.start(), folder)
+        self.assertEqual(submitted, [])
+        # The button state is checked again when the build starts: the folder became a project after it was typed
+        late = os.path.join(projects.projectsFolder(), "late")
+        tutorialsDialog.folderEdit.setText(os.path.join(root, "Studies", "late"))
+        self.assertTrue(button.enabled, button.toolTip)
+        tutorialsDialog.folderEdit.blockSignals(True)
+        tutorialsDialog.folderEdit.setText(late)
+        tutorialsDialog.folderEdit.blockSignals(False)
+        self.assertFalse(tutorialsDialog.start())
+        self.assertFalse(button.enabled)
+        self.assertEqual(submitted, [])
+        # A new folder inside Studies/ (the A-09 place of a study) is still built
+        ok = os.path.join(projects.studiesFolder(), "ok-study")
+        tutorialsDialog.folderEdit.setText(ok)
+        self.assertTrue(button.enabled, button.toolTip)
+        self.assertTrue(tutorialsDialog.start())
+        self.assertEqual(len(submitted), 1)
+        self.assertEqual(submitted[0].args[submitted[0].args.index("--dest") + 1], ok)
+
     def test_control_sets_list_elides_long_rows_without_a_scroll_bar(self):
         """A row of the Control sets list that does not fit is elided with an ellipsis: the list has no horizontal scroll bar (the
         row was as wide as its text, so it was cut mid-word at the panel edge and the bar took height from the fixed-height list).
