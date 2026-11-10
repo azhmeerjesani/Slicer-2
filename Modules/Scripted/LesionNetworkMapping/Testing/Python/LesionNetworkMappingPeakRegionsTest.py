@@ -10,6 +10,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 MODULE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if MODULE_DIR not in sys.path:
@@ -99,6 +100,28 @@ class PeakRegionsTest(unittest.TestCase):
             atlases._region_atlas = original
             atlases._region_resources = originalResources
         self.assertEqual(len(loaded), 1)
+
+    def test_cerebellar_peaks_are_named_by_the_buckner_atlas(self):
+        # Neither Harvard-Oxford atlas covers the cerebellum; Get atlases (Clusters card) downloads the Buckner2011
+        # cerebellum atlas, so a cached Buckner atlas names a cerebellar peak instead of "Outside atlas"
+        self.assertIn("buckner2011-cerebellum-7n-1mm", atlases.PEAK_REGION_ATLASES)
+        data = np.zeros(SHAPE, np.int16)
+        data[12:16, 2:6, 2:6] = 6
+        data[8:12, 2:6, 8:12] = 4
+        # TemplateFlow's table spells "Netowrk6": the network comes from the label value (Yeo 2011 numbering)
+        buckner = atlases.Atlas("buckner2011-cerebellum-7n-1mm", data, AFFINE, {4: "Network4", 6: "Netowrk6"}, family="fsl6",
+                                space="MNI152NLin6Asym", networks="yeo7")
+        data17 = np.zeros(SHAPE, np.int16)
+        data17[2:6, 15:18, 2:6] = 12
+        buckner17 = atlases.Atlas("buckner2011-cerebellum-17n-1mm", data17, AFFINE, {12: "Network12"}, family="fsl6")
+        fake = {"harvard-oxford-subcortical-th25-2mm": subcortical(), "buckner2011-cerebellum-7n-1mm": buckner,
+                "buckner2011-cerebellum-17n-1mm": buckner17}
+        midline = world((10, 3, 10)) - np.array([1.0, 0.0, 0.0])  # x = 0: the vermis takes no side
+        points = [world((14, 3, 3)), midline, world((3, 16, 3)), world((4, 4, 4))]
+        with mock.patch.object(atlases.fetch, "is_cached", lambda resource, folder=None: resource.id in fake), \
+             mock.patch.object(atlases, "_region_atlas", lambda resource, folder: fake[resource.id]):
+            names = atlases.peak_regions(points, space="MNI152NLin6Asym", cache=tempfile.gettempdir())
+        self.assertEqual(names, ["R cerebellum (Cont network)", "Cerebellum (SalVentAttn network)", "L cerebellum (network 12)", "L caudate"])
 
     def test_outside_the_atlas_grid(self):
         names = atlases.peak_regions([[500.0, 0.0, 0.0]], atlases=[subcortical()])

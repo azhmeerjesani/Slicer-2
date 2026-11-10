@@ -600,6 +600,8 @@ def cache_status(cache=None, catalog="atlases"):
 
 #: Atlases that name the region of a peak, in order of preference: anatomical names first (Harvard-Oxford subcortical,
 #: then cortical), then the finer and the network atlases. Only cached atlases are used (nothing is downloaded).
+#: Neither Harvard-Oxford atlas covers the cerebellum: the Buckner2011 cerebellum atlases (which Get atlases of the
+#: Clusters card downloads) name a cerebellar peak when no anatomical atlas does (see :data:`_CEREBELLAR_ATLASES`).
 PEAK_REGION_ATLASES = (
     "harvard-oxford-subcortical-th25-2mm",
     "harvard-oxford-cortical-th25-2mm",
@@ -608,6 +610,8 @@ PEAK_REGION_ATLASES = (
     "aal3v1",
     "harvard-aan-v2",
     "hcp-mmp1-volumetric",
+    "buckner2011-cerebellum-7n-1mm",
+    "buckner2011-cerebellum-17n-1mm",
     "tian-s1-2mm",
     "tian-s1-2mm-2009c",
     "schaefer2018-400-7n-2mm",
@@ -623,6 +627,9 @@ _GENERIC_REGION = re.compile(r"(?i)^(left |right )?(cerebral (white matter|corte
 _MIDLINE_REGION = re.compile(r"(?i)brain-?stem|vermis|corpus callosum|(3rd|4th|third|fourth) ventricle")
 _SIDE_PREFIX = re.compile(r"(?i)^(left|right|lh|rh|l|r)[ _-]+")
 _SIDE_SUFFIX = re.compile(r"(?i)[ _-]+(left|right|lh|rh|l|r)$")
+#: Atlases of cerebellar networks only (their labels are network numbers, "Network6"): a peak they label is named
+#: "R cerebellum (Cont network)" (the Yeo 2011 network) or "R cerebellum (network 12)"
+_CEREBELLAR_ATLASES = frozenset(("buckner2011-cerebellum-7n-1mm", "buckner2011-cerebellum-17n-1mm"))
 #: {(cache folder, atlas id): Atlas} of the atlases loaded for peak regions (an atlas file is read once, when needed)
 _region_atlases = {}
 
@@ -696,6 +703,17 @@ def region_text(label, x=None):
     return text[:1].upper() + text[1:]
 
 
+def _cerebellar_text(atlas, value, label, x=None):
+    """The region name of a cerebellar network label: "R cerebellum (Cont network)", "Cerebellum (network 12)" at x = 0."""
+    network = atlas.network(value)
+    if network:
+        detail = f"{network} network"
+    else:
+        number = _TRAILING_NUMBER.search(str(label or ""))
+        detail = f"network {int(number.group(1)) if number else int(value)}"
+    return region_text("Cerebellum", x) + f" ({detail})"
+
+
 def peak_regions(points, space=None, cache=None, atlases=None):
     """Region names of peaks (world RAS mm, (N, 3)) for the Peak region column.
 
@@ -735,6 +753,8 @@ def peak_regions(points, space=None, cache=None, atlases=None):
             if _GENERIC_REGION.match(str(label).replace("_", " ").strip()):
                 if fallback[index] is None:
                     fallback[index] = region_text(label, points[index][0])
+            elif atlas.id in _CEREBELLAR_ATLASES:
+                names[index] = _cerebellar_text(atlas, value, label, points[index][0])
             else:
                 names[index] = region_text(label, points[index][0])
     if not usable:
