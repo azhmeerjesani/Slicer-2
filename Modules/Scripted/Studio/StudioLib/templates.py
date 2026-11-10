@@ -533,11 +533,12 @@ def identify(path):
         detection.warnings.append(_("The voxels are not cubic ({spacing} mm): drawing and maps work best on near-isotropic templates.").format(
             spacing=" × ".join(f"{value:g}" for value in spacing)))  # noqa: RUF001
     if detection.frames > 1:
-        detection.warnings.append(_("The file holds {count} volumes: only the first is used.").format(count=detection.frames))
         if header["format"] != "NIfTI":
+            # Refused: no "only the first is used" warning beside it (the dialog shows the warnings of refused files too)
             detection.status, detection.message = "refused", _("A NRRD file with several volumes cannot be used: save its first volume as NIfTI.")
             detection.facts = " · ".join(facts)
             return detection
+        detection.warnings.append(_("The file holds {count} volumes: only the first is used.").format(count=detection.frames))
     refusal = xformRefusal(header)
     if refusal:
         # The checked matrix (the sform) would not be the one the scene uses (Slicer loads the qform, or the pixdim voxel sizes)

@@ -2233,3 +2233,27 @@ class StudioTemplatesTest(unittest.TestCase):
                     dialog.deleteLater()
         finally:
             qt.QApplication.setFont(original)
+
+    def test_39_four_d_nrrd_is_refused_without_a_first_volume_warning(self):
+        """BB-1: a 4D NRRD was refused ("cannot be used") while the dialog also said "only the first is used". The refusal
+        carries no first-volume warning; a 4D NIfTI is still accepted with it.
+        """
+        import numpy as np
+
+        templates = self.templates
+        path = os.path.join(self.tempDir, "four_d.nrrd")
+        header = ("NRRD0004\ntype: float\ndimension: 4\nspace: right-anterior-superior\nsizes: 2 97 115 97\n"
+                  "space directions: none (2,0,0) (0,2,0) (0,0,2)\nkinds: list domain domain domain\nendian: little\n"
+                  "encoding: raw\nspace origin: (-96,-132,-78)\n\n")
+        with open(path, "wb") as handle:
+            handle.write(header.encode() + np.zeros(2 * 97 * 115 * 97, dtype="<f4").tobytes())
+        try:
+            detection = templates.identify(path)
+        finally:
+            os.remove(path)
+        self.assertEqual(detection.status, "refused")
+        self.assertIn("several volumes", detection.message)
+        self.assertFalse(any("only the first" in line for line in detection.warnings), detection.warnings)
+        accepted = templates.identify(self.image4d)
+        self.assertTrue(accepted.ok)
+        self.assertTrue(any("only the first" in line for line in accepted.warnings))

@@ -38,7 +38,8 @@ only:
   at another size and place than the sform the check reads. Set the voxel size in
   the header to the sform's and add the file again.
 
-A file with several volumes (4D) is added with its first volume only. Voxels that
+A 4D NIfTI file (several volumes) is added with its first volume only; a 4D NRRD file is
+refused, so save its first volume as NIfTI. Voxels that
 are not cubic are accepted with a warning: drawing and maps work best on
 near-isotropic templates.
 
