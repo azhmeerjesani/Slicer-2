@@ -520,6 +520,18 @@ def _base_entry(path, root, **fields):
 # Adding maps (each is a user action; nothing runs on its own)
 
 
+def _library_error_text(exc, folder):
+    """A sentence for an OSError while writing the reference library ``folder`` (no errno, no temporary file name)."""
+    import errno
+
+    number = getattr(exc, "errno", None)
+    if number in (errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)):
+        return f"The disk of {folder} is full. Free some space or choose another folder."
+    if number in (errno.EROFS, errno.EACCES, errno.EPERM):
+        return f"The folder {folder} cannot be written (read-only or not allowed). Choose another folder."
+    return f"The reference library in {folder} cannot be written ({exc.strerror or 'the folder is not usable'}). Choose another folder."
+
+
 def add_file(path, title=None, licence="unknown", citation="", condition=None, space=None, kind="map", entry_id=None, root=None, licence_note=""):
     """Copy a NIfTI map into the library and register it; return the entry."""
     path = os.fspath(path)
@@ -532,14 +544,18 @@ def add_file(path, title=None, licence="unknown", citation="", condition=None, s
     # twice does) instead of listing it twice and comparing it with itself.
     entry_id = entry_id or f"file-{_slug(stem, 32)}-{_sha256(path)[:8]}"
     folder = os.path.join(registry_root(root), FILES_DIR, _slug(entry_id, 64))
-    os.makedirs(folder, exist_ok=True)
     target = os.path.join(folder, name)
-    if os.path.abspath(target) != os.path.abspath(path):
-        shutil.copyfile(path, target + ".tmp")
-        os.replace(target + ".tmp", target)
-    entry = _base_entry(target, root, id=entry_id, title=title or stem, source={"type": "file", "name": name}, licence=licence or "unknown",
-                        licence_note=licence_note, citation=citation or "", condition=condition or None, kind=kind, space=space)
-    return _register(entry, root)
+    try:
+        os.makedirs(folder, exist_ok=True)
+        if os.path.abspath(target) != os.path.abspath(path):
+            shutil.copyfile(path, target + ".tmp")
+            os.replace(target + ".tmp", target)
+        entry = _base_entry(target, root, id=entry_id, title=title or stem, source={"type": "file", "name": name}, licence=licence or "unknown",
+                            licence_note=licence_note, citation=citation or "", condition=condition or None, kind=kind, space=space)
+        return _register(entry, root)
+    except OSError as exc:
+        # A data folder that cannot be written (read-only, full) is said in a sentence, not as "[Errno 13] ... '<temporary name>'".
+        raise RefmapsError(_library_error_text(exc, registry_root(root))) from exc
 
 
 def _fetch_into_registry(resource, root, session=None, progress=None, cancel=None, offline=None):

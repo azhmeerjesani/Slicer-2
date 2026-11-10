@@ -468,6 +468,22 @@ class SourcesTest(RefmapsTestBase):
         self.assertEqual(two["id"], one["id"])
         self.assertEqual(sorted(item["id"] for item in refmaps.entries(self.root)), sorted([first["id"], one["id"]]))
 
+    def test_add_file_unwritable_folder_says_so(self):
+        """A data folder that cannot be written gives a sentence (no raw errno, no path of a temporary name), and nothing is registered."""
+        import errno
+        from unittest import mock
+
+        path = self.writeMap("ro.nii.gz", _smooth_field(self.rng, SHAPE))
+        for number, words in ((errno.EACCES, "cannot be written"), (errno.EROFS, "cannot be written"), (errno.ENOSPC, "is full")):
+            with mock.patch.object(refmaps.os, "makedirs", side_effect=OSError(number, os.strerror(number), self.root)):
+                with self.assertRaises(refmaps.RefmapsError) as caught:
+                    refmaps.add_file(path, root=self.root)
+            text = str(caught.exception)
+            self.assertIn(words, text)
+            self.assertIn(self.root, text)
+            self.assertNotIn("Errno", text)
+        self.assertEqual(refmaps.entries(self.root), [])
+
     def test_remove_url_entry_deletes_download(self):
         import functools
         import http.server
