@@ -1203,11 +1203,15 @@ def _consolidate_text(summary, params, seeds):
     return f"lesions consolidated to the {_or_nr({'L': 'left', 'R': 'right'}.get(side, side))} hemisphere (an analysis option, not the primary result): {counts}"
 
 
+def _of_connectome(name):
+    return f" of {name}" if isinstance(name, str) and name else ""
+
+
 def _connectome_split_half_text(summary, params, seeds):
     data = summary.get("split_half")
     data = data if isinstance(data, dict) else {}
     return (
-        f"connectome split-half (odd/even subjects), {_or_nr(data.get('label'))}: {_number(data.get('n_odd')) or NOT_RECORDED} and {_number(data.get('n_even')) or NOT_RECORDED} subjects per half; "
+        f"connectome split-half{_of_connectome(data.get('bundle'))} (odd/even subjects), {_or_nr(data.get('label'))}: {_number(data.get('n_odd')) or NOT_RECORDED} and {_number(data.get('n_even')) or NOT_RECORDED} subjects per half; "
         f"median r {_number(data.get('median_r')) or NOT_RECORDED}, minimum r {_number(data.get('min_r')) or NOT_RECORDED}"
         f"{'; small halves (the estimate is less reliable)' if data.get('small_halves') else ''}"
     )

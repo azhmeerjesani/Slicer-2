@@ -1804,8 +1804,8 @@ def connectome_split_half(run):
     """Summary of the connectome split-half of an engine run with ``--split-half`` (odd vs even subjects).
 
     :param run: the engine's output folder (its qa.json), qa.json or run.json, or their dict (or the "done" event).
-    :return: {"label": :data:`CONNECTOME_SPLIT_HALF_LABEL`, "n_odd", "n_even", "r" ({lesion: r}), "median_r",
-      "min_r", "small_halves" (fewer than 500 subjects per half), "rows" (connectomes.tsv rows)}.
+    :return: {"label": :data:`CONNECTOME_SPLIT_HALF_LABEL`, "bundle" (the connectome's name in qa.json, or None), "n_odd",
+      "n_even", "r" ({lesion: r}), "median_r", "min_r", "small_halves" (fewer than 500 subjects per half), "rows" (connectomes.tsv rows)}.
     """
     import json
 
@@ -1831,6 +1831,7 @@ def connectome_split_half(run):
              "r": r, "dice": None, "peaks_persist": None, "flag": "", "note": note} for name, r in values.items()]
     return {
         "label": CONNECTOME_SPLIT_HALF_LABEL,
+        "bundle": label,
         "n_odd": n_odd,
         "n_even": n_even,
         "r": values,
@@ -2007,7 +2008,7 @@ def main(argv=None):
             cancel.raise_if_cancelled()
             result = connectome_split_half(args.connectome_run)
             write_connectomes_tsv(result["rows"], os.path.join(out, CONNECTOMES_TSV))
-            summary = {"split_half": {key: result[key] for key in ("label", "n_odd", "n_even", "median_r", "min_r", "small_halves")}}
+            summary = {"split_half": {key: result[key] for key in ("label", "bundle", "n_odd", "n_even", "median_r", "min_r", "small_halves")}}
             run_id = _register(_run_root(args, out), out, "connectome_split_half", {}, parents=parents, summary=summary, outputs=[CONNECTOMES_TSV])
             _write_json(os.path.join(out, "connectome_split_half.json"), _record("connectome_split_half", out, run_id, **{k: v for k, v in result.items() if k != "rows"}))
             outputs = [os.path.join(out, CONNECTOMES_TSV)]

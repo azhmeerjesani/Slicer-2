@@ -725,6 +725,33 @@ class RobustCard:
                 return path
         return None
 
+    def engineRunConnectome(self, path=None):
+        """The connectome name recorded in the qa.json of an engine run (the engine run folder by default), or None."""
+        path = path if path is not None else self.engineRunDir()
+        name = (_readJson(os.path.join(path, "qa.json")) or {}).get("bundle") if path else None
+        return name if isinstance(name, str) and name else None
+
+    def engineRunMismatch(self):
+        """(run connectome, current connectome) when the engine run was made on another connectome than the one in use, else None.
+
+        The summary is filed under the current connectome's folder (conn-<label>) and cited in its methods, so a run made on
+        another connectome must not be summarised there.
+        """
+        from LesionNetworkMappingLib import export
+
+        name = self.engineRunConnectome()
+        if name is None:
+            return None
+        bundle = self.ctx.bundle
+        if bundle is not None and getattr(bundle, "name", None) and bundle.name != name:
+            return name, bundle.name
+        connDir = self.connectomeDir()
+        if connDir:
+            folder, expected = os.path.basename(os.path.normpath(connDir)), export.run_dir_name(name)
+            if folder != expected and not folder.startswith(expected + "_n-"):
+                return name, bundle.name if bundle is not None else folder
+        return None
+
     #
     # State
     #
@@ -763,6 +790,9 @@ class RobustCard:
                 return False, _("The sphere variants need a coordinates file (participant_id, x, y, z).")
         if kind == "connsplit" and self.engineRunDir() is None:
             return False, _("No engine run with a split-half: run the engine with --split-half, or choose its folder.")
+        if kind == "connsplit" and self.engineRunMismatch() is not None:
+            other, current = self.engineRunMismatch()
+            return False, _("This engine run was made on {other}, not on {current}: choose an engine run made on {current}.").format(other=other, current=current)
         if kind in ("splithalf", "influence") and self.designCheck.isChecked() and self.designPath() is None:
             return False, _("No GLM design yet: run the Contrast tab first, or untick “With the GLM design”.")
         if kind in MAP_KINDS and self.currentMapsTsv() is None:
@@ -1010,7 +1040,9 @@ class RobustCard:
         for variant in COORDINATE_VARIANTS:
             self.variantChecks[variant].setToolTip(robustness.VARIANTS[variant][1] + ("" if self._coordinates else " " + _("(needs a coordinates file)")))
         engine = self.engineRunDir()
-        self.engineLabel.setText(os.path.basename(engine) if engine else _("none with a split-half"))
+        engineConnectome = self.engineRunConnectome(engine) if engine else None
+        self.engineLabel.setText(_("none with a split-half") if not engine else _("{folder} (on {connectome})").format(folder=os.path.basename(engine), connectome=engineConnectome)
+                                 if engineConnectome else os.path.basename(engine))
 
     #
     # Run
@@ -1425,8 +1457,10 @@ class RobustCard:
 
     def showConnectome(self, folder):
         record = _readJson(os.path.join(folder, "connectome_split_half.json")) or {}
-        text = _("Connectome split-half (odd {odd} / even {even} subjects): median r {median}, minimum {minimum}.").format(
-            odd=record.get("n_odd", "?"), even=record.get("n_even", "?"), median=_num(_float(record.get("median_r")), 3), minimum=_num(_float(record.get("min_r")), 3))
+        connectome = record.get("bundle") if isinstance(record.get("bundle"), str) and record.get("bundle") else None
+        text = (_("Connectome split-half of {connectome} (odd {odd} / even {even} subjects): median r {median}, minimum {minimum}.") if connectome else
+                _("Connectome split-half (odd {odd} / even {even} subjects): median r {median}, minimum {minimum}.")).format(
+            connectome=connectome, odd=record.get("n_odd", "?"), even=record.get("n_even", "?"), median=_num(_float(record.get("median_r")), 3), minimum=_num(_float(record.get("min_r")), 3))
         if record.get("small_halves"):
             text += " " + _("Fewer than 500 subjects per half.")
         self.connLabel.setText(f"{_('Sampling stability, not robustness')}. {text}")
