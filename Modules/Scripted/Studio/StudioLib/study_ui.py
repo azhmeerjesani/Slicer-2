@@ -2691,6 +2691,10 @@ class StudySession:
         """
         if not self.folderAvailable():
             return []  # nothing is written at the old path (see flush)
+        if self.readOnly:
+            # A read-only study has no inbox to post to either: the changes are lost, which was said once (_markReadOnly)
+            logging.warning(f"Studio: the study {self.study.path} is read-only: its changes of this session are not saved")
+            return []
         try:
             path, kept, notKept = self.study.keep_unsaved(self.saveErrorText(), source="studio-unsaved")
         except Exception:

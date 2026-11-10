@@ -2209,6 +2209,59 @@ class StudioRegressionTest(unittest.TestCase):
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
 
+    def test_16c_closing_a_read_only_study_does_not_try_to_keep_the_changes(self):
+        """Closing a read-only study with changes that cannot be saved says nothing more (no inbox is posted to) and
+        logs no error or traceback (BB-1).
+        """
+        from unittest import mock
+
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Shared read-only study close")
+        os.makedirs(folder)
+        path = os.path.join(folder, "sub-01_T1w.nii.gz")
+        nifti.write_nifti(path, np.zeros(grid.shape, np.uint8), grid.affine)
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: None
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        records = []
+
+        class Recorder(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = Recorder(level=logging.DEBUG)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        try:
+            with mock.patch.object(study_ui.StudySession, "_studyWritable", return_value=False):
+                session = study_ui.createStudy([path], studioShell, folder=folder)
+            self.assertTrue(session.readOnly)
+            session.study.set("sub-01", notes="changed")
+            error = PermissionError(13, "Permission denied", os.path.join(folder, ".studio", "participants.lock"))
+            logging.getLogger().addHandler(handler)
+            try:
+                with mock.patch.object(session.study, "save", side_effect=error), \
+                        mock.patch.object(session.study, "keep_unsaved", side_effect=PermissionError(13, "Permission denied")) as keep:
+                    study_ui.closeStudy()
+                    keep.assert_not_called()
+            finally:
+                logging.getLogger().removeHandler(handler)
+            self.assertEqual([r for r in records if r.levelno >= logging.ERROR], [])
+            self.assertFalse([r for r in records if r.exc_info or "Traceback" in r.getMessage()])
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
     # Scripted module .ui files need the Qt Designer plugins (BB-1)
 
     def test_17_job_result_waits_for_open_subject_edits(self):
