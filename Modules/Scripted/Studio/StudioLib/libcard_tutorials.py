@@ -6,7 +6,7 @@ without an open study). It opens a dialog with the cohorts of ``LesionNetworkMap
 ``catalog/tutorials.json``; CC0 and Apache sources only):
 
 - the list shows the title, the licence and the size; the details show the summary, the licence badge, whether the masks
-  are in MNI space or native (normalize first, A-03), what the cohort teaches, the guidance on the lesion volume
+  are in MNI space or native (normalize first in Library > Normalization), what the cohort teaches, the guidance on the lesion volume
   covariate where there is one, and the citation to use;
 - options: all subjects or the first 25 (a quick start), the scans of native cohorts (large, off by default) and the
   folder of the new study (a new folder: nothing is overwritten);
@@ -395,7 +395,7 @@ class TutorialsDialog:
         ui.setChipLevel(self.spaceChip, "warn" if native else "neutral")
         self.summaryLabel.setText(entry["summary"])
         self.nativeLabel.setVisible(native)
-        self.nativeLabel.setText(_("The masks are in scan (native) space: normalize first (A-03). The scans are an option below; without them the study opens but cannot be normalized in the app."))
+        self.nativeLabel.setText(_("The masks are in scan (native) space: normalize first (Library > Normalization). The scans are an option below; without them the study opens but cannot be normalized in the app."))
         self.stepsLabel.setText("\n".join(f"{number}. {step}" for number, step in enumerate(entry["steps"], 1)))
         guidance = entry.get("volume_covariate")
         self.guidanceHeader.setVisible(bool(guidance))
@@ -562,6 +562,7 @@ class TutorialsDialog:
         self._resultOptions = None
         self._jobId = entry["id"]
         self._warnings = 0
+        self._notes = []
         self.progressBar.setRange(0, 0)
         self.progressBar.show()
         self.statusLabel.setText(_("Listing the files…"))
@@ -581,6 +582,8 @@ class TutorialsDialog:
             self.statusLabel.setText(labels.get(event.get("name"), str(event.get("label") or "")))
         elif kind == "warning":
             self._warnings += 1
+            if event.get("message"):
+                self._notes.append(str(event["message"]))
         elif kind == "progress":
             stage, done, total = event.get("stage"), event.get("done") or 0, event.get("total") or 0
             if stage == "download":
@@ -610,9 +613,13 @@ class TutorialsDialog:
             subjects = int(result.get("subjects") or 0)
             text = (_("Built {n} subject") if subjects == 1 else _("Built {n} subjects")).format(n=subjects)
             if result.get("native"):
-                text += " · " + _("normalize first (A-03)")
+                text += " · " + _("normalize first (Library > Normalization)")
             if self._warnings:
-                text += " · " + (_("{n} note, see the job log") if self._warnings == 1 else _("{n} notes, see the job log")).format(n=self._warnings)
+                text += " · " + (_("{n} note") if self._warnings == 1 else _("{n} notes")).format(n=self._warnings)
+                shown = self._notes[:5]
+                text += "\n" + "\n".join("• " + note for note in shown)
+                if self._warnings > len(shown):
+                    text += "\n" + _("… and {n} more (in the README of the study)").format(n=self._warnings - len(shown))
             self.statusLabel.setText(text)
             _toast(_("Tutorial study ready · {n} subjects").format(n=subjects), 6000, action=self.openStudy, actionText=_("Open"))
         elif job.state == "cancelled":

@@ -569,7 +569,7 @@ class S3BuildTest(TutorialsTestBase):
         report = self.build(catalog, "arc_like")
         self.assertEqual(report["subjects"], 6)
         self.assertTrue(report["native"])
-        self.assertEqual(report["next"], "normalize first (A-03)")
+        self.assertEqual(report["next"], "normalize first (Library > Normalization)")
         self.assertEqual(report["scans"], 0)
         self.assertEqual(report["without_mask"], 1)  # sub-M2099 has a table row and no mask
         self.assertEqual(report["score_columns"], ["wab_aq"])
@@ -607,9 +607,18 @@ class S3BuildTest(TutorialsTestBase):
         self.assertTrue(dictionary["wab_aq"]["SlicerStudio"]["confirmed"])
         self.assertEqual(dictionary["wab_days"]["SlicerStudio"]["role"], "covariate")
         readme = read_text(os.path.join(self.dest, "README.md"))
-        self.assertIn("normalize first (A-03)", readme)
+        self.assertIn("normalize first (Library > Normalization)", readme)
         self.assertIn("volume effect", readme)
         self.assertEqual(tutorials.tutorial_info(self.dest)["guidance"], "Aphasia severity is largely a volume effect: keep volume_ml.")
+
+    def test_readme_lists_build_notes_and_has_no_work_package_code(self):
+        entry = {"study": {"name": "X"}, "title": "X", "summary": "s", "licence": "L", "terms_url": "u", "source": {}, "citation": "c", "steps": ["a"], "native": True}
+        report = {"subjects": 3, "scans": 2, "warnings": ["sub-N03: the scan could not be downloaded (HTTP 404)."]}
+        text = tutorials._readme(entry, report)
+        self.assertNotIn("A-03", text)
+        self.assertIn("## Build notes", text)
+        self.assertIn("- sub-N03: the scan could not be downloaded (HTTP 404).", text)
+        self.assertNotIn("## Build notes", tutorials._readme(entry, dict(report, warnings=[])))
 
     def test_limit_prefers_subjects_with_a_score(self):
         catalog = self.s3_catalog(scans=False)

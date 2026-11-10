@@ -7,7 +7,7 @@ version 1). Nothing is bundled and nothing is downloaded unless a caller asks fo
 (:func:`validate_entry`); the van den Heuvel lesion repository has no licence and is never a tutorial.
 
 Recipe fields: ``id``, ``title``, ``summary``, ``licence`` (+ ``badge``, ``terms_url``), ``citation``, ``homepage``,
-``native`` (masks are in scan space: normalize first, A-03), ``space``, ``size_bytes`` and ``n_subjects`` (for the size
+``native`` (masks are in scan space: normalize first in Library > Normalization), ``space``, ``size_bytes`` and ``n_subjects`` (for the size
 shown before the click), ``scan_bytes_each`` (native cohorts: the scans are an option), ``source``, ``study`` (the study
 name, the group of every row, and ``columns``: the role, type, levels, units and description of every table column),
 ``teaches``, ``steps`` (the learning path) and ``volume_covariate`` (the guidance text of the volume covariate).
@@ -34,7 +34,7 @@ table, ``participants.json`` with the roles of its columns (confirmed, so picker
 scans, guidance). ``tutorial: true`` is what ``figures.watermark_for`` reads: figures carry "TUTORIAL DATA" (see
 :func:`watermark_for_study` for other outputs such as reports). Scans of native cohorts (an option, large) go to
 ``sub-<id>/.../`` next to the study's ``lesions/`` and the rows get ``scan``. Native studies are flagged
-"normalize first (A-03)": ``normalize batch`` needs the scans, and the normalization QC review applies as for any study.
+"normalize first (Library > Normalization)": ``normalize batch`` needs the scans, and the normalization QC review applies as for any study.
 
 Downloads use ``fetch`` (verified, resumable, cached in ``<cache>/tutorials/<id>/``; a cached file is not downloaded
 again) and run in a few threads. The sources are fetched over HTTPS only when :func:`build_tutorial` runs.
@@ -770,13 +770,19 @@ def _readme(entry, report):
     lines += ["## What is in this study", "", f"- {report['subjects']} subjects with a lesion mask (`lesions/`), listed in `participants.tsv`; the roles of its columns are in `participants.json`."]
     lines.append("- `volume_ml` is the lesion volume (the covariate that sLNM adjusts for by default).")
     if entry.get("native"):
-        lines.append("- The masks are in scan (native) space: **normalize first (A-03)**." + (" The scans are in `sub-*/`." if report.get("scans") else " The scans were not downloaded; add them to normalize in the app."))
+        if report.get("scans"):
+            scans = " The scans are in `sub-*/`" + (" (except the subjects listed under Build notes)." if report.get("warnings") else ".")
+        else:
+            scans = " The scans were not downloaded; add them to normalize in the app."
+        lines.append("- The masks are in scan (native) space: **normalize first (Library > Normalization)**." + scans)
     lines += ["", "## Learning path", ""]
     lines += [f"{number}. {step}" for number, step in enumerate(entry["steps"], 1)]
     if entry.get("volume_covariate"):
         lines += ["", "## The lesion volume covariate", "", entry["volume_covariate"]]
     if entry.get("notes"):
         lines += ["", "## Notes", "", entry["notes"]]
+    if report.get("warnings"):
+        lines += ["", "## Build notes", ""] + [f"- {message}" for message in report["warnings"]]
     return "\n".join(lines) + "\n"
 
 
@@ -997,7 +1003,7 @@ def build_study(entry, dest, items, table_path=None, warnings=None, cancel=None,
             "covariate_columns": study.covariate_columns(),
             "steps": list(entry["steps"]),
         }
-        report["next"] = "normalize first (A-03)" if entry.get("native") else "map and analyse"
+        report["next"] = "normalize first (Library > Normalization)" if entry.get("native") else "map and analyse"
         with open(os.path.join(work, README_NAME), "w", encoding="utf-8", newline="\n") as f:
             f.write(_readme(entry, report))
         study.save()

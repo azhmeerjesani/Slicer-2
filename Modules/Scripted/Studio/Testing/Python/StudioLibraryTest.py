@@ -1985,6 +1985,31 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         tutorialsDialog.sourceEdit.setText(work)
         self.assertTrue(button.enabled, button.toolTip)
 
+    def test_tutorials_status_shows_notes_without_work_package_code(self):
+        """Tutorial cohorts: the notes of the build (for example a scan that could not be downloaded) are shown in the dialog,
+        and no text shows the work-package id "A-03" (it said "1 note, see the job log" and the log could not be opened).
+        """
+        import types
+
+        from StudioLib import libcard_tutorials
+
+        tutorialsDialog = libcard_tutorials.TutorialsDialog()
+        self.cleanup.append(tutorialsDialog.dialog.deleteLater)
+        tutorialsDialog.select("joutsa2022_addiction")
+        self.assertNotIn("A-03", tutorialsDialog.nativeLabel.text)
+        tutorialsDialog._jobId = "joutsa2022_addiction"
+        tutorialsDialog._warnings = 0
+        tutorialsDialog._notes = []
+        tutorialsDialog._startOptions = tutorialsDialog._options()
+        tutorialsDialog._onEvent({"event": "warning", "code": "tutorial", "message": "sub-N03: the scan could not be downloaded (HTTP 404)."})
+        job = types.SimpleNamespace(succeeded=lambda: True, outputs=[], results=[{"kind": "study", "subjects": 3, "native": True}], state="done")
+        tutorialsDialog._onDone(job)
+        text = tutorialsDialog.statusLabel.text
+        self.assertNotIn("A-03", text)
+        self.assertNotIn("job log", text)
+        self.assertIn("Library > Normalization", text)
+        self.assertIn("sub-N03: the scan could not be downloaded", text)
+
     def test_tutorials_refuses_studio_folders_projects_and_other_studies(self):
         """Tutorial cohorts: "New study in" follows the rule of New study and Create study (study_ui.studyFolderProblem, A-09).
         A folder in Projects/, inside a project or inside another study was built: the study in Projects/ then showed in
