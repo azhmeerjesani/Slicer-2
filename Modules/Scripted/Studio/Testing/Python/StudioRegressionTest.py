@@ -623,6 +623,31 @@ class StudioRegressionTest(unittest.TestCase):
         # and on reopening the study
         self.assertAlmostEqual(float(Study.open(study.path).subject("sub-01")["volume_ml"]), 0.169, places=6)
 
+    def test_1d_duplicate_flag_goes_when_the_partner_leaves_the_study(self):
+        """BB-1: removing a subject from the study takes its duplicate pair with it: the partner keeps no ``duplicate`` flag, and
+        putting the subject back (Undo) scans again.
+        """
+        from StudioLib import lesionqc, study_ui
+
+        study = self._study([("sub-01", {}, False), ("sub-02", {}, False)])
+        study_ui.openStudy(study.path, None, showLibrary=False)
+        self.addCleanup(study_ui.closeStudy)
+        for _ in range(4):
+            slicer.app.processEvents()
+        session = study_ui.session()
+        core = lesionqc.core()
+        core.pairs = [("sub-01", "sub-02", 1.0)]
+        core._applyDuplicateFlags()
+        self.assertIn("duplicate", lesionqc.flagsOf(session.study.subject("sub-02")))
+        self.assertEqual(session.removeSubjects(["sub-01"]), 1)
+        self.assertEqual(core.pairs, [])
+        self.assertNotIn("duplicate", lesionqc.flagsOf(session.study.subject("sub-02")))
+        self.assertEqual(core.duplicatesOf("sub-02"), [])
+        core._scanTimer.stop()
+        self.assertEqual(session.undoRemove(), 1)
+        self.assertTrue(core._scanTimer.isActive(), "the restored subject is scanned again")
+        core._scanTimer.stop()
+
     def test_1c_binary_policy_semantics_follow_the_lesion_grid(self):
         """BB-1: the binary 2D policy's stored sentence (study.json, toast, methods "Lesion intake") counted the voxels at the
         template resolution (trace_policy.res, 2 mm by default) while each lesion is extruded on its own grid (1 mm here):

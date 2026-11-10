@@ -1025,6 +1025,7 @@ class QcCore:
         self.studyPath = None
         self.dismissed = set()
         self.pairs = []
+        self._memberIds = None  # ids of the subjects at the last notice
         self.current = {}  # sid -> [(other, dice)] of the lesion in the scene
         self.fileHygiene = {}  # sid -> (file key, hygiene result)
         self.lastSeen = {}  # sid -> stat of the lesion file when this module last looked
@@ -1152,6 +1153,7 @@ class QcCore:
         self.worker.setClosed(path, False)
         self.studyPath = path
         self.pairs = []
+        self._memberIds = None
         self.current = {}
         self.fileHygiene = {}
         self.lastSeen = {}
@@ -1169,6 +1171,7 @@ class QcCore:
         self.worker.setClosed(self.studyPath)  # a scan still running must not write into the closed study
         self.studyPath = None
         self.pairs = []
+        self._memberIds = None
         self.current = {}
         self.fileHygiene = {}
         self.lastSeen = {}
@@ -1468,8 +1471,26 @@ class QcCore:
 
     # After a change of the study
 
+    def _followMembers(self, session):
+        """A subject that left the study takes its duplicate pairs with it (the flag of its partner goes); one put back is scanned again."""
+        study = session.study
+        if study.path != self.studyPath:
+            return
+        ids = {row["participant_id"] for row in study.subjects}
+        known, self._memberIds = self._memberIds, ids
+        if known is None or known == ids:
+            return
+        if any(a not in ids or b not in ids for a, b, _dice in self.pairs):
+            self.pairs = [pair for pair in self.pairs if pair[0] in ids and pair[1] in ids]
+            self.current = {key: [item for item in value if item[0] in ids] for key, value in self.current.items() if key in ids}
+            self._applyDuplicateFlags()
+            self._changed()
+        if ids - known:
+            self.scheduleScan()
+
     def afterNotify(self, session):
         """After a change of the study: finish what a Done started (the files of a 2D tracing), or notice a plain write of the lesion."""
+        self._followMembers(session)
         sid = session.current()
         if sid is None or sid not in session.study:
             return
