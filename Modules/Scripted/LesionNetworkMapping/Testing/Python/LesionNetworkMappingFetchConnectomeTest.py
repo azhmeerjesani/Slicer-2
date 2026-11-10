@@ -900,6 +900,29 @@ class FetchIntegrityTest(FetchConnectomeBase):
         self.assertEqual(self.fetch(resume=True)["subjects"], 5)
 
 
+    def test_a_provider_that_cannot_be_reached_gives_a_plain_message_without_the_exception_text(self):
+        import requests
+
+        raw = ("HTTPSConnectionPool(host='127.0.0.1', port=18471): Max retries exceeded with url: /s3/5000?exp=1794212481&sig=4f712ddc "
+               "(Caused by NewConnectionError(\"Failed to establish a new connection: [Errno 111] Connection refused\"))")
+        real_get = requests.Session.get
+
+        def get(session, url, *args, **kwargs):
+            if "/api/access/datafile/" in url:
+                raise requests.ConnectionError(raw)
+            return real_get(session, url, *args, **kwargs)
+
+        with mock.patch.object(requests.Session, "get", get), \
+                mock.patch.object(fetchconnectome, "MAX_FAILURES", 0), mock.patch.object(fetchconnectome, "RETRY_DELAYS_S", (0.0,)):
+            with self.assertRaises(jobs.JobError) as ctx:
+                self.fetch()
+        message = str(ctx.exception)
+        self.assertEqual(ctx.exception.code, "network")
+        for leak in ("HTTPSConnectionPool", "Errno", "sig=", "exp=", "NewConnectionError", "Max retries"):
+            self.assertNotIn(leak, message)
+        self.assertIn("Resume when you are online again", message)
+
+
 class FetchPlatformTest(FetchConnectomeBase):
     def test_caffeinate_runs_on_macos_for_the_whole_fetch(self):
         popen = mock.MagicMock()

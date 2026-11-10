@@ -396,7 +396,7 @@ class SignedUrlResolver:
         try:
             response = self.session.get(access, allow_redirects=False, stream=True, timeout=(CONNECT_TIMEOUT_S, READ_TIMEOUT_S))
         except Exception as exc:
-            raise _Transient(f"cannot reach {access}: {exc}") from None
+            raise _Transient(fetch.network_problem(exc, access)) from None
         try:
             status = response.status_code
             if status in REDIRECT_STATUSES and response.headers.get("Location"):
@@ -507,7 +507,7 @@ class ArchiveSource:
                     if resign_failures >= MAX_RESIGN_FAILURES:
                         raise jobs.JobError(f"{self.name}: the provider keeps refusing the signed URL (HTTP 403)", code="http", status=403) from None
                     if failures > MAX_FAILURES:
-                        raise jobs.JobError(f"{self.name}: the download keeps failing ({exc}); what was read is kept and the job can be resumed", code="network") from None
+                        raise jobs.JobError(f"{self.name}: the download keeps failing. {exc} What was downloaded is kept: Resume when you are online again.", code="network") from None
                     self.reconnects += 1
                     self._wait(RETRY_DELAYS_S[min(failures, len(RETRY_DELAYS_S) - 1)] if failures else 0.0)
                     continue
@@ -555,9 +555,9 @@ class ArchiveSource:
         try:
             response = self.resolver.session.get(url, headers={"Range": f"bytes={self._fetched}-"}, stream=True, timeout=(CONNECT_TIMEOUT_S, READ_TIMEOUT_S))
         except (requests.ConnectionError, requests.Timeout) as exc:
-            raise _Transient(f"cannot connect: {exc}") from None
+            raise _Transient(fetch.network_problem(exc, url)) from None
         except requests.RequestException as exc:
-            raise jobs.JobError(f"{self.name}: the request failed: {exc}", code="http") from None
+            raise jobs.JobError(f"{self.name}: {fetch.network_problem(exc, url)}", code="http") from None
         self._response = response
         with response:
             status = response.status_code
@@ -606,7 +606,7 @@ class ArchiveSource:
                         return False
                     self._fetched += len(chunk)
             except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError, requests.exceptions.ContentDecodingError) as exc:
-                raise _Transient(f"the connection dropped at byte {self._fetched:,}: {exc}") from None
+                raise _Transient(f"the connection dropped at byte {self._fetched:,}. {fetch.network_problem(exc, url)}") from None
         return self.size is not None and self._fetched >= self.size
 
     # Consumer
