@@ -263,5 +263,92 @@ class LesionNetworkMappingExportCollisionCardTest(_Helpers, unittest.TestCase):
         self.assertEqual(self.mapContents(), first)
 
 
+@unittest.skipUnless(_HAS_APP, "needs the Slicer application")
+class LesionNetworkMappingExportUnwritableFolderTest(_Helpers, unittest.TestCase):
+    """A folder the user cannot write is said in plain words, without errno, a hidden file name or a logged traceback (BB-1)."""
+
+    def permissionError(self, name):
+        import errno
+
+        return PermissionError(errno.EACCES, "Permission denied", os.path.join(self.work, "rodest", name))
+
+    def test_message_names_the_folder_only(self):
+        from LesionNetworkMappingUI import widgets
+
+        message = widgets.unwritableMessage(self.permissionError(".clusters-abc.tmp"))
+        self.assertIn(os.path.join(self.work, "rodest"), message)
+        self.assertIn("cannot be written", message)
+        for noise in ("Errno", "Permission denied", ".tmp", "clusters-"):
+            self.assertNotIn(noise, message)
+        self.assertIsNone(widgets.unwritableMessage(ValueError("x")))
+        self.assertIsNone(widgets.unwritableMessage(FileNotFoundError(2, "No such file", "x")))
+
+    def test_cards_show_plain_message_and_log_no_traceback(self):
+        import logging
+        from unittest import mock
+
+        from LesionNetworkMappingUI import card_clusters, card_export
+
+        class Label:
+            text = ""
+
+            def setText(self, text):
+                self.text = text
+
+            def show(self):
+                pass
+
+        class Records(logging.Handler):
+            def __init__(self):
+                super().__init__()
+                self.records = []
+
+            def emit(self, record):
+                self.records.append(record)
+
+        handler = Records()
+        logging.getLogger().addHandler(handler)
+        try:
+            # Export card
+            card = card_export.ExportCard.__new__(card_export.ExportCard)
+
+            class Run:
+                runDir, partial = "x", False
+
+            card._run = Run
+
+            class Ctx:
+                rule = {"kind": "top_pct"}
+                logic = mock.Mock()
+
+            Ctx.logic.exportRun.side_effect = self.permissionError("conn-Synthetic")
+            card.ctx = Ctx()
+            card.resultLabel = Label()
+            with self.assertRaises(PermissionError):
+                card.exportTo(os.path.join(self.work, "rodest"))
+            self.assertIn("cannot be written", card.resultLabel.text)
+            self.assertNotIn("Errno", card.resultLabel.text)
+
+            # Clusters card
+            clusters = card_clusters.ClustersCard.__new__(card_clusters.ClustersCard)
+            clusters.table = object()
+            clusters.caption = lambda: ""
+            clusters.exportLabel = Label()
+            from LesionNetworkMappingLib import clusters as clusterLib
+
+            with mock.patch.object(clusterLib, "write_clusters", side_effect=self.permissionError(".clusters-j5tss4g2.tmp")):
+                with self.assertRaises(PermissionError):
+                    clusters.exportTo(self.work)
+            self.assertIn("cannot be written", clusters.exportLabel.text)
+            self.assertNotIn(".tmp", clusters.exportLabel.text)
+            self.assertNotIn("Errno", clusters.exportLabel.text)
+        finally:
+            logging.getLogger().removeHandler(handler)
+        self.assertTrue(handler.records)
+        for record in handler.records:
+            self.assertIsNone(record.exc_info, "an expected permission error is logged without a traceback")
+            self.assertLess(record.levelno, logging.ERROR)
+
+
 if __name__ == "__main__":
     unittest.main()

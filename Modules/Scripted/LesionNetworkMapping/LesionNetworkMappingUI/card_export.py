@@ -271,8 +271,12 @@ class ExportCard:
         except Exception as exc:
             import logging
 
-            logging.exception("Lesion network mapping: the export failed")
-            self.resultLabel.setText(_("Export failed: {error}").format(error=exc))
+            plain = widgets.unwritableMessage(exc)
+            if plain:  # expected (a folder the user cannot write): one line, no traceback, no errno or hidden file name
+                logging.warning("Lesion network mapping: the export failed: %s", plain)
+            else:
+                logging.exception("Lesion network mapping: the export failed")
+            self.resultLabel.setText(plain or _("Export failed: {error}").format(error=exc))
             self.resultLabel.show()
             raise
         self.lastResult = result

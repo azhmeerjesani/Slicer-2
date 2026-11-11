@@ -1845,8 +1845,12 @@ class ClustersCard:
             os.makedirs(folder, exist_ok=True)
             clusters.write_clusters(self.table, tsv_path=tsv, html_path=page, caption=self.caption())
         except Exception as exc:
-            logging.exception("Lesion network mapping: the cluster table could not be exported")
-            self.exportLabel.setText(_("Export failed: {error}").format(error=exc))
+            plain = widgets.unwritableMessage(exc)
+            if plain:  # expected (a folder the user cannot write): one line, no traceback, no errno or hidden file name
+                logging.warning("Lesion network mapping: the cluster table could not be exported: %s", plain)
+            else:
+                logging.exception("Lesion network mapping: the cluster table could not be exported")
+            self.exportLabel.setText(plain or _("Export failed: {error}").format(error=exc))
             self.exportLabel.show()
             raise
         self.lastFolder = folder

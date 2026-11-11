@@ -42,6 +42,20 @@ def dialogStartFolder(fallback=""):
         return fallback
 
 
+def unwritableMessage(error):
+    """The sentence for a folder that cannot be written (permission denied, read-only medium), or None for any other error.
+
+    The folder is the one that holds the file the failing call named: no exception class, errno or temporary file name.
+    """
+    import errno
+
+    if not isinstance(error, OSError) or error.errno not in (errno.EACCES, errno.EPERM, errno.EROFS) or not error.filename:
+        return None
+    name = os.fspath(error.filename)
+    folder = os.path.dirname(name.rstrip(os.sep)) or name
+    return _("The folder {folder} cannot be written. Choose another folder.").format(folder=folder)
+
+
 def typedPath(text):
     """A path typed in a dialog field, as the absolute path a job is given: ``~`` is expanded; "" for an empty field.
 
