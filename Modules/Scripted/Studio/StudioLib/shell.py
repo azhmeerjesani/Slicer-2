@@ -2129,6 +2129,12 @@ class Shell:
         # 8. Start workspace
         self.switchTo(self._midSessionWorkspace() if midSession else self._startWorkspace())
         self._moduleOnEntry = str(self.currentModuleName())
+        # The top bar is new: show "study / subject" again for the subject that stays open over Classic
+        if midSession:
+            from StudioLib import study_ui
+            session = study_ui.session()
+            if session is not None:
+                session._showBreadcrumb(self)
 
         # 9. Navigation behaviours of the views that only Studio uses
         self._applyNavigationBehaviours(True)

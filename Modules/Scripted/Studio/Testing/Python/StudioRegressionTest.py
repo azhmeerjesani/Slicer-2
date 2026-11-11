@@ -8145,3 +8145,45 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(folder, names["sub-05"])))
         self.assertEqual(study.subject("sub-06")["lesion"], "lesions/custom.nii.gz")
         self.assertEqual(study.lesion_sidecar_path("sub-04"), os.path.join(lesions, f"sub-04_space-{answer}_desc-lesion_mask.json"))
+
+    def test_breadcrumb_back_after_classic_round_trip(self):
+        """BB-1: the top bar breadcrumb "study / subject" is shown again (and opens the subject switcher) after Classic -> Studio
+        with the subject still open (the new top bar started without it).
+        """
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import shell, study_ui
+
+        if slicer.util.mainWindow() is None:
+            self.skipTest("needs the main window")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        data = np.zeros(grid.shape, np.uint8)
+        data[30:34, 60:64, 50:53] = 1
+        folder = os.path.join(self.directory, "Crumb study")
+        os.makedirs(folder)
+        paths = []
+        for sid in ("sub-01", "sub-02"):
+            path = os.path.join(folder, sid + "_lesion.nii.gz")
+            nifti.write_nifti(path, data, grid.affine)
+            paths.append(path)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        try:
+            session = study_ui.createStudy(paths, studioShell, folder=folder)
+            self.assertTrue(session.open("sub-02", switchToDraw=True))
+            before = studioShell.topBar.breadcrumbText()
+            self.assertIn("sub-02", before)
+            studioShell.classic()
+            studioShell.studio()
+            studioShell = shell.instance()
+            studioShell.switchTo("draw")
+            slicer.app.processEvents()
+            button = studioShell.topBar.breadcrumbButton
+            self.assertEqual(studioShell.topBar.breadcrumbText(), before)
+            self.assertTrue(button.isVisible())
+            self.assertTrue(button.property("studioClickable"))
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
