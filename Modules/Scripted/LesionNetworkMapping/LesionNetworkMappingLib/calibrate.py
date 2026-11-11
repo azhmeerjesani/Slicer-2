@@ -821,18 +821,15 @@ def latest_record(root, run_records=None, design=None):
     """(run id, calibration.json record with absolute paths) of the newest finished calibration of a run root, or (None, None).
 
     With ``design`` (a ``_design_info`` dict or a ``design.Design``), only a calibration of that design counts.
+    The record in a run's folder must be that run's own finished record: a folder calibrated again holds the newer
+    run's record, so an older run whose record was replaced does not count.
     """
-    if design is None:
-        record = runs.latest(root, "calibration", status="done", runs=run_records)
-        if record is None:
-            return None, None
-        folder = runs.run_dir(root, record)
-        data = read_record(os.path.join(folder, CALIBRATION_JSON)) if folder else None
-        return record.get("id"), data
     for record in reversed(runs.list_runs(root, kind="calibration", status="done", runs=run_records)):
         folder = runs.run_dir(root, record)
         data = read_record(os.path.join(folder, CALIBRATION_JSON)) if folder else None
-        if data is not None and data.get("run_id", record.get("id")) == record.get("id") and matches_design(data, design):
+        if data is None or data.get("run_id", record.get("id")) != record.get("id") or data.get("status", "done") != "done":
+            continue
+        if design is None or matches_design(data, design):
             return record.get("id"), data
     return None, None
 
@@ -1122,9 +1119,7 @@ def _run_cli(args, argv, effects):
         state.data.setdefault("fwer", [])
         state.data.setdefault("planted", {})
         state.save()
-        previous_json = os.path.join(out_dir, CALIBRATION_JSON)
-        if os.path.exists(previous_json):
-            os.remove(previous_json)
+        # The previous finished calibration.json stays until this run finishes: a stopped or failed run keeps it
 
         # Maps
         emit("stage", name="maps", index=1, total=4)
@@ -1225,7 +1220,10 @@ def _run_cli(args, argv, effects):
     except jobs.Cancelled as exc:
         if record is not None:
             record.update({"status": "cancelled", "end": now_iso(), "stop_reason": exc.reason})
-            write_record(os.path.join(out_dir, CALIBRATION_JSON), record)
+            json_path = os.path.join(out_dir, CALIBRATION_JSON)
+            previous = read_record(json_path) if os.path.exists(json_path) else None
+            if not previous or previous.get("status") != "done":  # never replace a finished result with a stopped run
+                write_record(json_path, record)
         if run_id:
             runs.update(run_root, run_id, status="cancelled", ended=now_iso())
         raise

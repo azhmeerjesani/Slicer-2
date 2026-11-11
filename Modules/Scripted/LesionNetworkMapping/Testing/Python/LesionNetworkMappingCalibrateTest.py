@@ -326,6 +326,36 @@ class CommandLineTest(_CalibrateTestCase):
         self.assertIn("empirical FWER", value)
         self.assertEqual(evidence, [registered["id"]])
 
+    def test_stopped_recalibration_keeps_the_finished_result(self):
+        """A new calibration of the same folder that is stopped keeps the previous finished record (bug bash BB-1)."""
+        study = self.make_study(16, 16)
+        Y = _maps(self.rng, len(study.subject_ids), self.degree, self.networks)
+        maps_tsv = self.write_maps(study, Y)
+        design_path = designlib.DesignSpec(test="two_group", levels=["case", "control"], inference={"n_perm": 1000}).save(self.path("design.json"))
+        out = self.path("study", "derivatives", "lnm", "calibration", "caseVsControl")
+        common = ["--maps", maps_tsv, "--participants", os.path.join(study.path, "participants.tsv"), "--design", design_path, "--mask", self.path("mask.nii.gz"), "--out", out,
+                  "--inner-perm", "100", "--no-planted"]
+        code, events, stderr = self.run_cli(*common, "--k", "10")
+        self.assertEqual(code, 0, (stderr, events[-3:]))
+        first = runs.latest(study.path, "calibration", status="done")["id"]
+        before = calibrate.checklist_evidence(study.path)
+        self.assertIn("empirical FWER", before[1])
+        self.assertNotIn("not computed", before[1])
+        # Other settings, stopped at once
+        cancel = self.path("cancel.flag")
+        open(cancel, "w").close()
+        code, events, _ = self.run_cli(*common, "--k", "15", "--cancel-file", cancel)
+        self.assertEqual(code, 3)
+        self.assertEqual(runs.list_runs(study.path, kind="calibration")[-1]["status"], "cancelled")
+        record = calibrate.read_record(os.path.join(out, calibrate.CALIBRATION_JSON))
+        self.assertEqual((record["status"], record["run_id"], record["fwer"]["k"]), ("done", first, 10))
+        self.assertEqual(calibrate.checklist_evidence(study.path), before)
+        self.assertEqual(calibrate.latest_record(study.path)[0], first)
+        # A record that is not the run's own (an older version's stopped stub over the folder) is not cited
+        stub = dict(record, status="cancelled", run_id="calibration-other", fwer=None)
+        calibrate.write_record(os.path.join(out, calibrate.CALIBRATION_JSON), stub)
+        self.assertEqual(calibrate.checklist_evidence(study.path)[0], "not_run")
+
     def test_blocked_and_usage(self):
         study = self.make_study(4, 0)
         Y = _maps(self.rng, 4, self.degree, self.networks)
