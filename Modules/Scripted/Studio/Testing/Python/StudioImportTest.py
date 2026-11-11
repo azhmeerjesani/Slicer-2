@@ -677,6 +677,59 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(result.errors, [])
         self.assertEqual(len(result.volumes), 1)
 
+    def test_uncompressed_nifti_named_nii_gz_opens(self):
+        """BB-1: a valid NIfTI saved without compression but named ``.nii.gz`` (a browser or server unpacked a download and
+        kept the name) opens as a scan and as a lesion, as in official 3D Slicer, whose reader reads it as plain data. A
+        cut-off one is still refused as damaged, and the refusal box names the file once.
+        """
+        from StudioLib import importer
+
+        header = bytearray(348)
+        struct.pack_into("<i", header, 0, 348)
+        struct.pack_into("<8h", header, 40, 3, 8, 8, 6, 1, 1, 1, 1)
+        struct.pack_into("<hh", header, 70, 2, 8)  # uint8
+        struct.pack_into("<8f", header, 76, 1, 1, 1, 1, 1, 0, 0, 0)
+        struct.pack_into("<f", header, 108, 352)
+        header[344:348] = b"n+1\0"
+        complete = bytes(header) + bytes(4) + bytes([1]) * (8 * 8 * 6)
+        paths = {}
+        for name, content in (
+            ("sub-91_T1w.nii.gz", complete), ("sub-91_lesion.nii.gz", complete),
+            ("sub-92_T1w.nii.gz", gzip.compress(complete)), ("sub-93_T1w.nii.gz", complete[:-100]),
+            ("zero.nii.gz", b""),
+        ):
+            paths[name] = os.path.join(self.directory, name)
+            with open(paths[name], "wb") as f:
+                f.write(content)
+        for name in ("sub-91_T1w.nii.gz", "sub-92_T1w.nii.gz"):
+            self.assertEqual(importer.niftiDimensions(paths[name])[:4], [3, 8, 8, 6], name)
+            self.assertIsNone(importer._niftiDataShortfall(paths[name]), name)
+            importer._checkNiftiComplete(paths[name])  # no RefusedFileError
+        self.assertEqual(importer._niftiDataShortfall(paths["sub-93_T1w.nii.gz"]), (len(complete) - 100, len(complete)))
+        studioShell = self._applyStudio()
+        for name in ("sub-91_T1w.nii.gz", "sub-92_T1w.nii.gz"):
+            result = importer.loadFiles([paths[name]], studioShell)
+            self._pump()
+            self.assertEqual(result.errors, [], name)
+            self.assertEqual(len(result.volumes), 1, name)
+        result = importer.loadFiles([paths["sub-91_lesion.nii.gz"]], studioShell)
+        self._pump()
+        self.assertEqual(result.errors, [])
+        self.assertEqual(len(result.segmentations), 1)
+        shown = []
+        original = (slicer.util.errorDisplay, slicer.util.warningDisplay)
+        slicer.util.errorDisplay = slicer.util.warningDisplay = lambda text, **kw: shown.append(text)
+        try:
+            result = importer.loadFiles([paths["sub-93_T1w.nii.gz"], paths["zero.nii.gz"]], studioShell)
+        finally:
+            slicer.util.errorDisplay, slicer.util.warningDisplay = original
+        self._pump()
+        self.assertEqual(len(result.errors), 2)
+        self.assertTrue(any("damaged" in error for _path, error in result.errors), result.errors)
+        self.assertEqual(len(shown), 1)
+        self.assertNotIn("zero.nii.gz: zero.nii.gz", shown[0])
+        self.assertIn("zero.nii.gz is empty", shown[0])
+
     def test_header_lying_or_cut_nrrd_and_mha_are_refused_as_damaged(self):
         """BB-1: an NRRD, seg.nrrd, NHDR or MetaImage file whose data is shorter than its header announces is a planned
         refusal like the NIfTI one: plain "damaged" words, a warning without a traceback, no raw reader text.

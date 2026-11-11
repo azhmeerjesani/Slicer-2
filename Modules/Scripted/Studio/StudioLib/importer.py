@@ -268,14 +268,30 @@ def isNiftiFile(path):
     return _extension(path) in NIFTI_EXTENSIONS
 
 
-def _niftiHeader(path, size):
-    """The first ``size`` bytes of a NIfTI file (gzip or not), None if unreadable.
+def _isGzipFile(path):
+    """True for a ``.gz`` file that starts with the gzip magic bytes (1f 8b).
 
-    A damaged file is unreadable, never an exception: gzip raises ``OSError`` (``BadGzipFile``) for a file that is not
-    gzip, ``EOFError`` for a truncated one and ``zlib.error`` for a corrupt deflate stream.
+    The ITK NIfTI reader (znzlib) reads a ``.nii.gz`` saved without compression (a browser or server that unpacked a
+    download and kept the name, or a tool that writes it so) as plain data, so 3D Slicer opens it, and it must open here.
+    A gzip file named ``.nii`` is not read by ITK, so it stays plain data here too (and is refused as not NIfTI).
+    """
+    if not str(path).lower().endswith(".gz"):
+        return False
+    try:
+        with open(path, "rb") as f:
+            return f.read(2) == b"\x1f\x8b"
+    except OSError:
+        return False
+
+
+def _niftiHeader(path, size):
+    """The first ``size`` bytes of a NIfTI file (gzip or not, see ``_isGzipFile``), None if unreadable.
+
+    A damaged file is unreadable, never an exception: gzip raises ``EOFError`` for a truncated stream and ``zlib.error``
+    for a corrupt deflate stream.
     """
     try:
-        opener = gzip.open if _extension(path) == ".nii.gz" or str(path).lower().endswith(".gz") else open
+        opener = gzip.open if _isGzipFile(path) else open
         with opener(path, "rb") as f:
             return f.read(size)
     except (OSError, EOFError, zlib.error):
@@ -710,7 +726,7 @@ def _niftiDataShortfall(path):
     for size in dims[1:dims[0] + 1]:
         voxels *= size
     need = offset + (voxels * bitpix + 7) // 8
-    if _extension(path) == ".nii":
+    if not _isGzipFile(path):
         have = os.path.getsize(path)
     else:
         have = 0
@@ -1898,8 +1914,9 @@ def loadFiles(paths, shell=None, pairedLesion=None):
     if result.errors:
         # A planned refusal says why in the box and is a warning (errorDisplay would log an ERROR and light the error badge)
         refusedOnly = all(path in refused for path, error in result.errors)
-        lines = "\n".join(f"{os.path.basename(path)}: {error}" if path in refused else os.path.basename(path)
-                          for path, error in result.errors)
+        # A refusal message that starts with the file name is shown alone ("x.nii is empty", not "x.nii: x.nii is empty")
+        lines = "\n".join((error if str(error).startswith(os.path.basename(path)) else f"{os.path.basename(path)}: {error}")
+                          if path in refused else os.path.basename(path) for path, error in result.errors)
         (slicer.util.warningDisplay if refusedOnly else slicer.util.errorDisplay)(
             _("Some files could not be loaded:") + "\n\n" + lines,
             detailedText="\n\n".join(f"{path}\n{error}" for path, error in result.errors))
