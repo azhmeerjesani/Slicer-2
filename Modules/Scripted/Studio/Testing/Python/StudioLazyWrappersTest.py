@@ -85,25 +85,40 @@ class StudioLazyWrappersTest(unittest.TestCase):
     def test_abstract_plugin_class_registered_under_private_is_public(self):
         """A class that PythonQt registered under PythonQt.private (the abstract subject hierarchy plugin base
         class, when a plugin object is wrapped before its wrapper module is imported) is still available as
-        slicer.<Class>, as in official 3D Slicer.
+        slicer.<Class>, as in official 3D Slicer. Other classes under PythonQt.private (internal or not
+        wrapped) are never copied into slicer, neither at import nor by a missed lookup.
         """
         import PythonQt
 
         name = "qStudioTestPrivateRegisteredClass"
+        other = "qStudioTestInternalPrivateClass"
         try:
             setattr(PythonQt.private, name, slicer.qMRMLWidget)
+            setattr(PythonQt.private, other, slicer.qMRMLWidget)
         except (AttributeError, TypeError):
             self.skipTest("PythonQt.private cannot be extended in this build")
+        original = slicer.util._LAZY_WRAPPER_PRIVATE_CLASSES
+        slicer.util._LAZY_WRAPPER_PRIVATE_CLASSES = original + (name,)
         try:
             self.assertFalse(name in slicer.__dict__)
+            self.assertFalse(hasattr(slicer, "qStudioTestNoSuchName"))
+            self.assertFalse(other in slicer.__dict__)
+            self.assertIs(getattr(slicer, name), slicer.qMRMLWidget)
+            slicer.__dict__.pop(name, None)
             slicer.util._copyLazyWrapperPrivateClasses(slicer)
             self.assertIs(slicer.__dict__.get(name), slicer.qMRMLWidget)
+            self.assertFalse(other in slicer.__dict__)
+            self.assertFalse(hasattr(slicer, other))
+            self.assertNotIn("PythonQtPrivate", slicer.__dict__)
+            self.assertNotIn("QMainWindowLayout", slicer.__dict__)
         finally:
-            slicer.__dict__.pop(name, None)
-            try:
-                delattr(PythonQt.private, name)
-            except (AttributeError, TypeError):
-                pass
+            slicer.util._LAZY_WRAPPER_PRIVATE_CLASSES = original
+            for n in (name, other):
+                slicer.__dict__.pop(n, None)
+                try:
+                    delattr(PythonQt.private, n)
+                except (AttributeError, TypeError):
+                    pass
 
     def test_attribute_access_stays_lazy(self):
         """Looking up another name does not import the pending wrappers (the setting keeps startup fast)."""
