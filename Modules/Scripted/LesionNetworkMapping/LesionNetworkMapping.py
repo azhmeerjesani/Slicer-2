@@ -6473,7 +6473,15 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                 item.setForeground(qt.QBrush(self.widgets.valueColor(peak["value"])))
 
     def _peakSpace(self, grid):
-        """The template space label of the peaks' grid (to keep the atlases of its family), or None when it cannot be told."""
+        """The template space label of the peaks (to keep the atlases of its family), or None when it cannot be told.
+
+        The space declared for the map shown comes first (its ``Studio.Space``, from a map file's sidecar or the run's
+        connectome, as the Clusters card reads it with ``card_clusters.volumeSpace``): a map on a grid that is not a
+        standard one is still named by its own family's atlases. Only without a declared space is it told from the grid.
+        """
+        declared = self._declaredPeakSpace()
+        if declared:
+            return declared
         try:
             from LesionNetworkMappingLib import geometry
 
@@ -6481,6 +6489,27 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             detected = geometry.detect_space((tuple(grid.shape), grid.affine)) if grid is not None else None
             return detected[0] if detected else None
         except Exception:
+            return None
+
+    def _declaredPeakSpace(self):
+        """Template space declared for the map whose peaks are shown (a loaded map or a run's result), or None."""
+        if self.loadedMap is None and not self.runOutputs:
+            return None
+        try:
+            from LesionNetworkMappingUI.card_clusters import _templateSpace, volumeSpace
+
+            space = _templateSpace(self.loadedMap.get("space")) if self.loadedMap is not None else None
+            if space:
+                return space
+            volume = self.ctx.resultVolume if self.ctx is not None else None
+            if volume is None and self.loadedMap is not None:
+                volume = self._loadedVolume()
+            if volume is None or volume.GetScene() is None:
+                return None
+            attribute = volume.GetAttribute("Studio.Space")
+            return volumeSpace(volume) if attribute else None
+        except Exception:
+            logging.exception("Lesion network mapping: the declared space of the map could not be read")
             return None
 
     def _lookupPeakRegions(self, peaks, grid):

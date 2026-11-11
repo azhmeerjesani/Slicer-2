@@ -2,7 +2,8 @@
 
 ``LesionNetworkMappingWidget._peakSpace`` used ``geometry.detect_space(grid)``'s (space, resolution) pair as the space;
 ``atlases.peak_regions`` read that pair as an "unknown" family and took every cached atlas, so a 2009c map was named
-by the FSL-family atlases (Harvard-Oxford, Schaefer NLin6) that the Clusters card refuses for it.
+by the FSL-family atlases (Harvard-Oxford, Schaefer NLin6) that the Clusters card refuses for it. It also told the
+space from the grid only, so a map on a non-standard grid whose sidecar declares its space was named by every family.
 
 They need the Slicer application::
 
@@ -58,6 +59,42 @@ class LesionNetworkMappingPeakSpaceUITest(unittest.TestCase):
             widget._lookupPeakRegions([{"world": (0.0, 0.0, 0.0)}], grid2009)
             self.assertTrue(wait(lambda: getattr(widget, "_peakRegionJob", None) is None))
         self.assertEqual(spaces, ["MNI152NLin2009cAsym"])
+
+    def test_peak_space_prefers_the_declared_space_on_a_nonstandard_grid(self):
+        """A 2009c map on a 3 mm grid (no standard grid) whose sidecar declares MNI152NLin2009cAsym: the Peak region
+        keeps to the 2009c atlases, as the Clusters card does (it read None from the grid and mixed every family).
+        """
+        import numpy as np
+
+        from LesionNetworkMappingLib import geometry
+        from LesionNetworkMappingUI.card_clusters import labelFamily, volumeSpace
+
+        widget = slicer.modules.LesionNetworkMappingWidget
+        affine = np.array([[-3.0, 0, 0, 96.0], [0, 3.0, 0, -132.0], [0, 0, 3.0, -78.0], [0, 0, 0, 1.0]])
+        grid = types.SimpleNamespace(shape=(65, 77, 65), affine=affine)
+        self.assertIsNone(geometry.detect_space((grid.shape, grid.affine)))
+        volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "PeakSpaceDeclared")
+        volume.SetAttribute("Studio.Space", "MNI152NLin2009cAsym")
+        saved = (widget.loadedMap, widget.ctx.resultVolume)
+        try:
+            widget.loadedMap = {"path": None, "statistic": "T", "n": None, "name": "declared", "label": "declared",
+                                "siblings": {}, "space": "MNI152NLin2009cAsym"}
+            widget.ctx.resultVolume = volume
+            self.assertEqual(widget._peakSpace(grid), "MNI152NLin2009cAsym")
+            # The same source as the Clusters card's label family
+            self.assertEqual(volumeSpace(volume), widget._peakSpace(grid))
+            self.assertEqual(labelFamily(types.SimpleNamespace(grid=grid, space=volumeSpace(volume))), "2009")
+
+            # Declared only on the volume (a map adopted from a scene): the volume's Studio.Space is used
+            widget.loadedMap = dict(widget.loadedMap, space=None)
+            self.assertEqual(widget._peakSpace(grid), "MNI152NLin2009cAsym")
+
+            # Nothing declared: the grid decides (None for this grid), as before
+            volume.RemoveAttribute("Studio.Space")
+            self.assertIsNone(widget._peakSpace(grid))
+        finally:
+            widget.loadedMap, widget.ctx.resultVolume = saved
+            slicer.mrmlScene.RemoveNode(volume)
 
 
 if __name__ == "__main__":
