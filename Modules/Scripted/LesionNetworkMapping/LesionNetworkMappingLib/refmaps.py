@@ -1422,7 +1422,8 @@ def heatmap_figure(names, lower, upper=None, title="Map comparison", dpi=150, fo
     top = int(legend_y + 16 * scale + small_px)
     left = int(margin + label_w)
     bar_h = int(9 * scale)
-    width = max(left + k * cell + margin, int(380 * scale))
+    bar_w = min(max(k * cell, int(160 * scale)), int(240 * scale))
+    width = max(left + k * cell + margin, left + bar_w + margin, int(380 * scale))
     height = top + k * cell + int(58 * scale)
     lut = figures.diverging_lut()
     pixels = np.full((height, width, 3), 255, dtype=np.uint8)
@@ -1463,7 +1464,6 @@ def heatmap_figure(names, lower, upper=None, title="Map comparison", dpi=150, fo
                     items.append(figures.Annotation("text", left + j * cell + cell / 2 + gap / 2, top + i * cell + cell / 2 + gap / 2,
                                                     text=f"{values[i, j]:.2f}", size=small_px * (0.9 if cell < 36 * scale else 1.0),
                                                     anchor="mm", color="#FFFFFF" if dark else "#1A1A1A", role="value"))
-    bar_w = min(max(k * cell, int(160 * scale)), int(240 * scale))
     items.extend(figures._colorbar({"kind": "diverging", "window": 1.0, "label": "r"}, left, top + k * cell + int(24 * scale), bar_w, bar_h, fonts, text_px, small_px))
     meta = {"format": figures.FORMAT, "version": figures.VERSION, "preset": "compare-matrix", "title": title, "maps": list(names),
             "lower": lower_label, "upper": upper_text, "dpi": int(dpi), "size_px": list(base.size),

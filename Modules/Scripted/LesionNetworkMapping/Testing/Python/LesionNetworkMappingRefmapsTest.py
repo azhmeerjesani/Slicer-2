@@ -1027,6 +1027,15 @@ class OutputsTest(RefmapsTestBase):
         self.assertGreater(figure.size[0], 200)
         self.assertIn("map 19", figure.caption)
 
+    def test_heatmap_colorbar_fits_with_long_names(self):
+        names = ["GSP1000 voxel degree map (van den Heuvel 2026)", "real.nii.gz"]
+        figure = refmaps.heatmap_figure(names, np.array([[1.0, -0.02], [-0.02, 1.0]]))
+        width = figure.base.size[0]
+        ticks = [a for a in figure.annotations if getattr(a, "kind", None) == "text" and str(a.text) in ("1", "r")]
+        self.assertTrue(ticks)
+        for tick in ticks:
+            self.assertLess(tick.x, width)
+
 
 if __name__ == "__main__":
     unittest.main()
