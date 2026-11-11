@@ -2421,6 +2421,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self._refreshGeneration = 0
         self._preloading = False
         self._pumpTimer = None
+        self._closed = False
         #: Cohort seed: the study, what it maps (``cohortSeeds``), the cohort map job and its maps.tsv
         self.cohortStudy = None
         self.cohortInfo = None
@@ -6802,6 +6803,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.restoreLesionDisplay()
 
     def cleanup(self):
+        self._closed = True
         self._refreshGeneration += 1
         if self.managerDialog is not None:
             self.managerDialog.detachJobs()
@@ -6895,12 +6897,24 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             qt.QTimer.singleShot(0, self._adoptDefaultSeed)
 
     def _adoptDefaultSeed(self):
+        # The timer queued by onNodeAdded can fire after the widget is torn down (the app quits right after a
+        # segmentation is added): its Qt objects are gone then.
+        if self._closed or self._widgetDestroyed():
+            return
         if self._parameterNode is None or self._parameterNode.seedSegmentation is not None:
             return
         segNode, segmentId = self.logic.defaultSeed()
         if segNode is not None:
             self.ctx.setSeed(segNode, segmentId)
             self.updateGUIFromParameterNode()
+
+    def _widgetDestroyed(self):
+        try:
+            self.seedModeGroup.objectName
+            self.seedModeGroup.buttons()
+        except (ValueError, RuntimeError, AttributeError):
+            return True
+        return False
 
     def initializeParameterNode(self):
         self.setParameterNode(self.logic.getParameterNode())
