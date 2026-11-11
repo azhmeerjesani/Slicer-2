@@ -841,6 +841,10 @@ def _lookup_failure_text(error, kind):
         return f"The lookup failed: {service} did not accept the request (HTTP {status})"
     if isinstance(error, ValueError):  # bad JSON
         return f"The lookup failed: {service} sent an answer that could not be read; try again later"
+    from . import fetch
+
+    if fetch.proxy_refusal_status(error) is not None:
+        return f"The lookup failed: {fetch.network_problem(error, '')}"
     return "The lookup failed; check the connection and try again"  # offline, proxy, timeout
 
 

@@ -293,6 +293,22 @@ class FetchTest(_Base):
         ):
             self.assertEqual(fetch.network_problem(exc, url), expected)
 
+    def test_proxy_refusal_is_not_reported_as_unreachable(self):
+        import requests
+
+        url = "https://neurovault.org/api/images/63/?format=json"
+        for status, reason, expected in (
+            (407, "Proxy Authentication Required", "The proxy server asks for a login (407)"),
+            (403, "Forbidden", "The proxy server refused the connection to neurovault.org (403)"),
+        ):
+            inner = OSError(f"Tunnel connection failed: {status} {reason}")
+            exc = requests.exceptions.ProxyError(f"HTTPSConnectionPool(host='neurovault.org', port=443): Max retries exceeded (Caused by ProxyError('Unable to connect to proxy', {inner!r}))", inner)
+            self.assertEqual(fetch.proxy_refusal_status(exc), status)
+            message = fetch.network_problem(exc, url)
+            self.assertIn(expected, message)
+            self.assertNotIn("cannot be reached", message)
+        self.assertIsNone(fetch.proxy_refusal_status(requests.exceptions.ProxyError("Cannot connect to proxy.")))
+
     def test_short_message_and_user_message_for_labels(self):
         long_text = "No connection to host.example: " + " ".join(["word"] * 80)
         short = fetch.short_message(long_text, 100)
