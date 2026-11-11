@@ -781,6 +781,16 @@ def vdh_catalog(path=None):
     return load_parity_catalog(path)
 
 
+def _vdh_licence_note(catalog_note):
+    """Join the catalog note and VDH_NOTE into clear sentences, without saying 'states no licence' twice."""
+    note = str(catalog_note or "").strip()
+    for clause in ("; the repository states no licence", ", the repository states no licence"):
+        if note.endswith(clause):
+            note = note[: -len(clause)].rstrip()
+    note = note.rstrip(".")
+    return ". ".join(text for text in (note, VDH_NOTE) if text)
+
+
 def add_vdh(commit=VDH_COMMIT, entry=VDH_DEFAULT_ENTRY, accepted_terms_sha256=None, condition=None, root=None, catalog_path=None, session=None,
             progress=None, cancel=None, offline=None):
     """Fetch a file of the van den Heuvel 2026 repository at the pinned commit (the user's click); return the entry.
@@ -804,7 +814,7 @@ def add_vdh(commit=VDH_COMMIT, entry=VDH_DEFAULT_ENTRY, accepted_terms_sha256=No
     expected = resource.get("git_blob")
     if expected and git_blob_sha1(path) != expected:
         raise RefmapsError(f"{resource.title} does not match the pinned repository file (git blob {expected[:12]})")
-    licence_note = " ".join(text for text in (resource.get("licence_note") or "", VDH_NOTE) if text)
+    licence_note = _vdh_licence_note(resource.get("licence_note"))
     kind = "degree" if resource.kind == "degree" else "map"
     record = _base_entry(path, root, id=f"vdh-{_slug(entry.replace('/', '-'), 48)}", title=resource.title,
                          source={"type": "vdh", "repository": source.get("repository") or VDH_REPOSITORY, "commit": pinned[:7],

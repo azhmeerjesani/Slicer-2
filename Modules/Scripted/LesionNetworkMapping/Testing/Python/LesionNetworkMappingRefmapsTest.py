@@ -898,8 +898,20 @@ class SourcesTest(RefmapsTestBase):
         self.assertFalse(entry["redistribute"])
         self.assertEqual(entry["badge"], "grey")
         self.assertIn("never redistributed", entry["licence_note"])
+        # The "states no licence" wording appears once, with a full stop before the repository sentence
+        self.assertEqual(entry["licence_note"].lower().count("states no licence"), 1)
+        self.assertIn(". The van den Heuvel repository states no licence", entry["licence_note"])
         self.assertIn("ca410e6", entry["citation"])
         self.assertEqual(entry["source"]["commit"], "ca410e6")
+
+
+class VdhLicenceNoteTest(unittest.TestCase):
+    def test_gsp_note_does_not_repeat_the_no_licence_clause(self):
+        gsp = "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence"
+        note = refmaps._vdh_licence_note(gsp)
+        self.assertEqual(note.lower().count("states no licence"), 1)
+        self.assertIn("(terms GSP-DUT-2014). The van den Heuvel repository states no licence:", note)
+        self.assertEqual(refmaps._vdh_licence_note(None), refmaps.VDH_NOTE)
 
 
 class MergeTest(RefmapsTestBase):
