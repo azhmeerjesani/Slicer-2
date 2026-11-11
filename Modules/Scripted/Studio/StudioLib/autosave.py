@@ -899,10 +899,20 @@ class AutosaveService:
             writer.executor.drain(30.0)
             result = writer.finalize(plan)
             writer._finished(plan, result)
+        except OSError as error:
+            writer.abort(plan, str(error))
+            self.plan = None
+            self._removePlanObservers()
+            if isinstance(plan, _io().ProjectPlan):
+                self._projectFailed(plainOSError(error))
+            else:
+                self._pauseForOSError(error)
+            return False
         except Exception as error:
             writer.abort(plan, str(error))
             self.plan = None
             self._removePlanObservers()
+            self._setState("error", _("Autosave failed (see the error log)."))
             logging.error("Autosave: final generation failed:\n" + traceback.format_exc())
             return False
         self._generationDone(plan)

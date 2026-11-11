@@ -46,6 +46,7 @@ Studio surfaces (StudioLib/autosave_ui.py, A-01b), with ``Shell(force=True).appl
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -1980,6 +1981,39 @@ class StudioAutosaveTest(unittest.TestCase):
             service.status().message,
             "Autosave paused: the autosave folder cannot be written (Permission denied (in the folder StudioAutosave)).",
         )
+
+    def test_zc3_synchronousAutosaveIntoUnwritableFolderPausesPlainly(self):
+        """BB-1: a close/exit autosave that cannot write pauses with the plain message (no traceback, no busy state)."""
+        service = self._service()
+        self._userVolume()
+        service.autosaveNow("test")
+        self.assertTrue(service.waitForIdle(120.0))
+        writer = service._slotWriter()
+        realFinalize = writer.finalize
+
+        def failing(plan):
+            raise PermissionError(13, "Permission denied", os.path.join(service.root, "session", "scene-1", "data"))
+
+        errors = []
+
+        class _Handler(logging.Handler):
+            def emit(self, record):
+                if record.levelno >= logging.ERROR:
+                    errors.append(record.getMessage())
+
+        handler = _Handler()
+        logging.getLogger().addHandler(handler)
+        writer.finalize = failing
+        try:
+            slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Changed").AddControlPoint(1.0, 2.0, 3.0)
+            service.autosaveNow("test", synchronous=True)
+        finally:
+            writer.finalize = realFinalize
+            logging.getLogger().removeHandler(handler)
+        status = service.status()
+        self.assertEqual(status.state, "paused", status.message)
+        self.assertTrue(status.message.startswith("Autosave paused: the autosave folder cannot be written"), status.message)
+        self.assertEqual(errors, [])
 
     def test_zd_discardConfirmationSaysTrash(self):
         """BB-1: Discard moves the session to the OS Trash, so its confirmation must not say "This cannot be undone"

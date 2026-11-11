@@ -972,6 +972,10 @@ class BackgroundWriter:
         while self._results:
             callback, value, failure = self._results.popleft()
             if failure is not None and callback is None:
+                if isinstance(value, OSError):
+                    # A folder that cannot be written is reported by the service as a pause, not as a bug
+                    logging.warning(f"Autosave background job failed: {value}")
+                    continue
                 logging.error(f"Autosave background job failed:\n{failure}")
                 continue
             if callback is None:
