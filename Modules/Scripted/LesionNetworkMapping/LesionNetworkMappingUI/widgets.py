@@ -97,6 +97,25 @@ def notAFolderProblem(path):
     return None
 
 
+def unwritableProblem(path):
+    """Why files cannot be created for the absolute destination ``path`` (its nearest existing folder is not writable), or None.
+
+    The same plain sentence as ``unwritableMessage``, said before a job starts instead of as a raw ``[Errno 13]`` after it failed.
+    """
+    path = str(path or "")
+    if not path:
+        return None
+    probe = path
+    while probe and not os.path.lexists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            return None
+        probe = parent
+    if probe and os.path.isdir(probe) and not os.access(probe, os.W_OK | os.X_OK):
+        return _("The folder {folder} cannot be written. Choose another folder.").format(folder=probe)
+    return None
+
+
 def _studioUi():
     """``StudioLib.ui``, or None when the Studio module is not available."""
     try:

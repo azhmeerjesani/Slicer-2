@@ -1769,6 +1769,14 @@ class ConvertConnectomeDialog(qt.QDialog):
             name = LesionNetworkMappingLogic.connectomeIdentifierName(self.nameEdit.text.strip() or "connectome")
             self._autoOut = os.path.join(_dataDirectory(), "connectomes", f"{_safeName(name, 'connectome')}.lnmc")
             self.outEdit.setText(self._autoOut)
+        # A bundle folder inside a folder that cannot be written: say so now, not as a raw errno after the job failed
+        from LesionNetworkMappingUI import widgets
+
+        out = widgets.typedPath(self.outEdit.text)
+        problem = widgets.unwritableProblem(out) if out else None
+        if problem:
+            self.estimateLabel.setText(problem)
+        self.convertButton.setEnabled(not problem)
 
     def _isAutoFilled(self, edit, attribute):
         """True when the field is empty or still holds the text this dialog put there itself."""
@@ -1821,9 +1829,10 @@ class ConvertConnectomeDialog(qt.QDialog):
 
     def runEstimate(self, then=None):
         """The size of the bundle and the free space (a light job that reads only headers)."""
-        from LesionNetworkMappingUI import jobrunner
+        from LesionNetworkMappingUI import jobrunner, widgets
 
         paths, problem = self.typedPaths()
+        problem = problem or (widgets.unwritableProblem(paths["out"]) if paths["out"] else None)
         if problem:
             self.estimateLabel.setText(problem)
             return None
@@ -1868,7 +1877,10 @@ class ConvertConnectomeDialog(qt.QDialog):
         return text
 
     def onConvert(self):
+        from LesionNetworkMappingUI import widgets
+
         paths, problem = self.typedPaths()
+        problem = problem or (widgets.unwritableProblem(paths["out"]) if paths["out"] else None)
         if problem:
             self.estimateLabel.setText(problem)
             return

@@ -283,6 +283,28 @@ class LesionNetworkMappingExportUnwritableFolderTest(_Helpers, unittest.TestCase
         self.assertIsNone(widgets.unwritableMessage(ValueError("x")))
         self.assertIsNone(widgets.unwritableMessage(FileNotFoundError(2, "No such file", "x")))
 
+    def test_unwritable_destination_is_refused_up_front(self):
+        from unittest import mock
+
+        from LesionNetworkMappingUI import widgets
+
+        ro = os.path.join(self.work, "rodest")
+        os.makedirs(ro, exist_ok=True)
+        real = os.access
+
+        def fake(path, mode, *args, **kwargs):  # root can write everywhere: pretend this one folder is read-only
+            return False if os.fspath(path) == ro else real(path, mode, *args, **kwargs)
+
+        with mock.patch("os.access", fake):
+            for dest in (os.path.join(ro, "MyConn.lnmc"), os.path.join(ro, "Connectomes", "x")):
+                message = widgets.unwritableProblem(dest)
+                self.assertIn(ro, message)
+                self.assertIn("cannot be written. Choose another folder.", message)
+                self.assertNotIn("Errno", message)
+            self.assertIsNone(widgets.unwritableProblem(os.path.join(self.work, "MyConn.lnmc")))
+        self.assertIsNone(widgets.unwritableProblem(os.path.join(ro, "MyConn.lnmc")))
+        self.assertIsNone(widgets.unwritableProblem(""))
+
     def test_cards_show_plain_message_and_log_no_traceback(self):
         import logging
         from unittest import mock
