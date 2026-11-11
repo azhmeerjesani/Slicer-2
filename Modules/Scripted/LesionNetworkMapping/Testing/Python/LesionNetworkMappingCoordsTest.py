@@ -73,6 +73,16 @@ class ParserTest(CoordsTestCase):
         self.assertEqual(foci[1].radius_mm, 6.0)
         self.assertEqual(list(coords.group_by_study(foci)), ["A", "B"])
 
+    def test_numeric_columns_reads_every_missing_token(self):
+        head = "x,y,z,outcome\n"
+        for token in ("NA", "n/a", "nan", "NaN", ""):
+            path = self.write("stim.csv", head + f"1,2,3,40\n4,5,6,{token}\n7,8,9,25\n")
+            self.assertEqual(coords.numeric_columns(path), ["outcome"], token)
+        path = self.write("stim.csv", head + "1,2,3,40\n4,5,6,high\n")
+        self.assertEqual(coords.numeric_columns(path), [])
+        path = self.write("stim.csv", head + "1,2,3,NA\n4,5,6,\n")
+        self.assertEqual(coords.numeric_columns(path), [])
+
     def test_csv_headerless_and_tsv(self):
         foci = coords.read_csv(self.write("plain.txt", "1 2 3\n4 5 6\n"))
         self.assertEqual([f.xyz for f in foci], [(1.0, 2.0, 3.0), (4.0, 5.0, 6.0)])

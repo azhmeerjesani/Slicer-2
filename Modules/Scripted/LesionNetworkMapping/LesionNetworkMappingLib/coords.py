@@ -1318,12 +1318,13 @@ def numeric_columns(path):
     for column in columns:
         if column in skip:
             continue
-        values = [row.get(column) for row in rows if (row.get(column) or "").strip() not in ("", NA)]
         try:
-            if values and all(math.isfinite(float(value)) for value in values):
-                out.append(column)
+            # Missing values are read as _number reads them: blank, n/a, NA (R), nan, NaN.
+            values = [v for v in (_number(row.get(column)) for row in rows) if v is not None]
         except ValueError:
             continue
+        if values:
+            out.append(column)
     return out
 
 
