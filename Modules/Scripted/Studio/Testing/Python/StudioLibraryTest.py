@@ -546,6 +546,31 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertTrue(library._sameNode(library.lesionScan(lesion), scan))
         self.assertEqual(slicer.util.arrayFromSegmentBinaryLabelmap(lesion, lesion.GetSegmentation().GetNthSegmentID(0)).sum(), 3 * 3 * 3)
 
+    def test_classic_label_map_lesion_keeps_its_source_file_for_redrops(self):
+        """The lesion made from a Classic label map takes over the label map's source file in the project's records, so that
+        dropping that file again finds the lesion (``openNodeForFile()``) instead of loading a second copy.
+        """
+        import types
+        from unittest import mock
+
+        from StudioLib import autosave_io, library
+
+        writer = autosave_io.ProjectWriter.__new__(autosave_io.ProjectWriter)
+        writer.project = types.SimpleNamespace(path="/tmp/studio-test-project")
+        writer.sources = {}
+        self._applyStudio()
+        mask = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "sub-02_lesion")
+        array = np.zeros((10, 12, 14), np.uint8)
+        array[3:6, 4:7, 5:8] = 1
+        slicer.util.updateVolumeFromArray(mask, array)
+        # The project took the file over: the label map's record names the original file
+        writer.sources[mask.GetID()] = autosave_io.sourceId("/tmp/outside/sub-02_lesion.nii.gz")
+        with mock.patch.object(library, "_projectWriter", return_value=writer):
+            lesion = library.labelMapToLesion(mask)
+        self.assertIsNotNone(lesion)
+        self.assertEqual(writer.nodeIdsForSource("/tmp/outside/sub-02_lesion.nii.gz"), [lesion.GetID()])
+        self.assertEqual(list(writer.sources), [lesion.GetID()])
+
     def test_stray_segmentation_ignored(self):
         """The empty segmentation that the classic Segment Editor creates keeps the empty state; a figure is not data."""
         from StudioLib import library

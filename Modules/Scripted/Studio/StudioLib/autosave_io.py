@@ -2294,6 +2294,17 @@ class ProjectWriter(SlotWriter):
         if files and not _isUnder(_canonical(files[0]), projectCanonical):
             self.sources[nodeId] = sourceId(files[0])
 
+    def transferSource(self, oldNodeId, newNodeId, path=None):
+        """The node ``newNodeId`` replaces ``oldNodeId`` (a mask opened in Classic that became a lesion: no storage node
+        reads the file any more): it is found by the file that ``oldNodeId`` was read from. ``path``: that file when the
+        old node still read it from outside the project (the project did not take it over yet).
+        """
+        source = self.sources.pop(oldNodeId, None)
+        if source is None and path and not _isUnder(_canonical(path), _canonical(self.project.path)):
+            source = sourceId(path)
+        if source:
+            self.sources[newNodeId] = source
+
     def _projectRelative(self, path):
         """``path`` relative to the project folder with "/" (a key of .studio/sources.json), None if it is outside."""
         canonical, projectCanonical = _canonical(path), _canonical(self.project.path)

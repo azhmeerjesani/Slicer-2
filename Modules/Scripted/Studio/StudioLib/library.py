@@ -1175,8 +1175,31 @@ def labelMapToLesion(volumeNode):
     scan = next((node for node in scanNodes() if importer._referenceGeometryMatches(lesion, node)), None)
     if scan is not None:
         lesion.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+    volumeId = volumeNode.GetID()
+    storageNode = volumeNode.GetStorageNode()
+    sourceFile = storageNode.GetFileName() if storageNode is not None else None
     closeNode(volumeNode, confirm=False)
+    _rememberLesionSource(lesion, volumeId, sourceFile)
     return lesion
+
+
+def _rememberLesionSource(lesion, volumeId, path):
+    """Tell the open project that ``lesion`` was made from the label map ``volumeId`` that was read from ``path``: dropping
+    that file again finds the lesion (``importer.openNodeForFile()``) instead of loading a second copy.
+    """
+    writer = _projectWriter()
+    if writer is not None and hasattr(writer, "transferSource"):
+        writer.transferSource(volumeId, lesion.GetID(), path)
+
+
+def _projectWriter():
+    try:
+        from . import autosave
+
+        service = autosave.instance()
+    except ImportError:
+        return None
+    return getattr(service, "projectWriter", None) if service is not None else None
 
 
 def labelMapInDraw(volumeNode, shell=None):
