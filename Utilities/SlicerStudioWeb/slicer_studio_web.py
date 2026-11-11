@@ -1491,6 +1491,10 @@ def command_local(args):
     except KeyboardInterrupt:
         info("Stopping.")
     finally:
+        # A second Ctrl+C (or SIGTERM) while Slicer saves and quits must not interrupt the clean-up:
+        # the services run in their own sessions and would stay behind with the port and runtime folder.
+        for stop_signal in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(stop_signal, signal.SIG_IGN)
         session.stop()
     return 0
 

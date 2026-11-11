@@ -8773,6 +8773,54 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertEqual(started[0][1].get("DISPLAY"), ":99")
 
 
+    def test_101c_local_web_launcher_second_ctrl_c_does_not_orphan_services(self):
+        """BB-1: a second Ctrl+C (SIGTERM, SIGHUP) while the local launcher waits for Slicer to save and quit raised
+        KeyboardInterrupt inside ``LocalSession.stop()``, so the virtual display, the web server and the runtime folder
+        (started in their own sessions) stayed behind and the port stayed taken. The signals are now ignored while the
+        clean-up runs. Run in a child Python so the signals cannot reach Slicer.
+        """
+        import subprocess
+        import sys
+
+        sourceDir = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        path = os.path.join(sourceDir, "Utilities", "SlicerStudioWeb", "slicer_studio_web.py")
+        if not os.path.exists(path):
+            self.skipTest("the web launcher source is not available")
+        marker = os.path.join(self.tempDir, "stop-finished.txt")
+        code = """
+import importlib.util, os, signal, sys, time, argparse
+spec = importlib.util.spec_from_file_location("slicer_studio_web_ctrlc", sys.argv[1])
+web = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(web)
+marker = sys.argv[2]
+
+class FakeSession:
+    def __init__(self, *args): pass
+    def start(self): pass
+    def services_alive(self): return True
+    def supervise(self): os.kill(os.getpid(), signal.SIGTERM); time.sleep(5)
+    def stop(self):
+        for _ in range(2):
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(0.2)
+        os.kill(os.getpid(), signal.SIGHUP)
+        time.sleep(0.2)
+        open(marker, "w").write("done")
+
+web.LocalSession = FakeSession
+web.find_slicer = web.find_websockify = web.find_novnc = lambda *a: "x"
+web.check_port_free = lambda *a: None
+web.wait_for_http = lambda *a: True
+web.open_browser = lambda *a: None
+web.password_from_environment = lambda *a, **k: None
+args = argparse.Namespace(listen="127.0.0.1", port=1, slicer=None, novnc=None, no_browser=True, ask_password=False)
+sys.exit(web.command_local(args))
+"""
+        result = subprocess.run([sys.executable, "-c", code, path, marker], capture_output=True, text=True, timeout=60, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(os.path.exists(marker), "stop() ran to the end although more stop signals arrived")
+
+
     def test_102_project_in_a_read_only_folder_is_not_half_removed(self):
         """BB-1: Move to Trash of a project in a read-only Projects folder (a share where only Projects/ is locked) asked
         "This system has no Trash. Delete the project permanently?" (there is a Trash; the folder is read-only), then
