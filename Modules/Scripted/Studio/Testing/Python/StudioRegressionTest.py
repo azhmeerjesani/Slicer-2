@@ -2264,6 +2264,13 @@ class StudioRegressionTest(unittest.TestCase):
                 logging.getLogger().addHandler(handler)
                 try:
                     self.assertIsNone(library._runAction(lambda: session.importTable(table), "Failed to import the table."))
+                    # A user problem is a warning box and never errorDisplay (it would log an ERROR and light the badge)
+                    shown = []
+                    with mock.patch.object(slicer.util, "warningDisplay", lambda text, *a, **k: shown.append(("warning", text))), \
+                         mock.patch.object(slicer.util, "errorDisplay", lambda text, *a, **k: shown.append(("error", text))):
+                        self.assertIsNone(library._runAction(lambda: session.importTable(table), "Failed to import the table."))
+                    self.assertEqual([kind for kind, text in shown], ["warning"], shown)
+                    self.assertIn("read-only", shown[0][1])
                     # Open… / drop
                     toasts[:] = []
                     shellToasts = []

@@ -324,10 +324,11 @@ def _runAction(function, errorMessage):
         return function()
     except Exception as e:
         if getattr(e, "user_problem", False):
-            # A problem with the user's own file (a table that is not UTF-8, ...): its message says what to do, not a program error
-            logging.warning(f"Studio Library: {errorMessage} {e}")
-        else:
-            logging.error(f"Studio Library: {errorMessage}\n{traceback.format_exc()}")
+            # A problem with the user's own file (a table that is not UTF-8, ...): its message says what to do, not a program
+            # error. A warning box (warningDisplay logs the warning itself), never errorDisplay: that logs an ERROR and lights the badge.
+            slicer.util.warningDisplay(f"{errorMessage}\n\n{e}")
+            return None
+        logging.error(f"Studio Library: {errorMessage}\n{traceback.format_exc()}")
         if not slicer.app.testingEnabled():
             slicer.util.errorDisplay(f"{errorMessage}\n\n{e}")
     return None
