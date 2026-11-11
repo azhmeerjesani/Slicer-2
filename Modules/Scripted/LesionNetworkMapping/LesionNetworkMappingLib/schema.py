@@ -325,6 +325,12 @@ def _match_level(spec, text):
     for level in spec.levels:
         if level.lower() == lowered:
             return level
+    if "\u201c" in text or "\u201d" in text:  # the stored form of a straight quote (study.typographic_quotes)
+        from .study import typographic_quotes
+
+        for level in spec.levels:
+            if '"' in level and typographic_quotes(level) == text:
+                return text
     if spec.synonyms and lowered in spec.synonyms:
         return spec.synonyms[lowered]
     number = _number(text)

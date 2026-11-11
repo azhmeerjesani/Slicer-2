@@ -5922,7 +5922,7 @@ class StudioRegressionTest(unittest.TestCase):
 
         self.assertFalse(editable("dimensionality"), "the levels of a strict registered column are fixed")
         self.assertTrue(editable("sex"), "the levels of a lenient registered column can be declared")
-        dialog.setText("sex", lc.COL_LEVELS, "M = male; F = female; O = other; X = non-binary")
+        dialog.setText("sex", lc.COL_LEVELS, 'M = male; F = female; O = other; X = non-binary; 2"x = two inch')
         self.assertEqual(list(dialog.changes()[0]), ["sex"], "the read-only Levels of dimensionality are not a change")
         self.assertEqual(sorted(dialog.confirm()["applied"]), ["sex"])
         slicer.app.processEvents()
@@ -5942,8 +5942,13 @@ class StudioRegressionTest(unittest.TestCase):
                 button.click()
         slicer.app.processEvents()
         combo = section.editors["sex"]
-        self.assertEqual([combo.itemData(i) for i in range(combo.count)], [None, "M", "F", "O", "X"], "the combo offers the declared levels")
+        self.assertEqual([combo.itemData(i) for i in range(combo.count)], [None, "M", "F", "O", "X", "2\u201dx"], "the combo offers the declared levels")
         self.assertEqual(combo.itemText(4), "non-binary")
+        # A level typed with a straight quote is stored with a typographic one (Study.set) and must stay choosable
+        self.assertTrue(section.setField("sex", "2\u201dx"))
+        section.refresh("sub-01")
+        self.assertEqual(str(section.warningLabel.text), "", "a declared level with a quote is no warning")
+        self.assertEqual(combo.currentText, "two inch")
         self.assertTrue(section.setField("sex", "X"))
         self.assertEqual(session.study.subject("sub-01")["sex"], "X")
         section.refresh("sub-01")

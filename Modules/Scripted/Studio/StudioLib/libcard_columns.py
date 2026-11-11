@@ -951,7 +951,10 @@ class CaseSection:
         if spec is None or spec.strict or not spec.levels or spec.separator is not None:
             return spec
         declared = study.column_spec(column).levels
-        return spec.replace(levels=declared) if declared else spec
+        if not declared:
+            return spec
+        quotes = _lnm("study").typographic_quotes  # the cells hold levels as Study.set stores them, so the choices do too
+        return spec.replace(levels={quotes(level): description for level, description in declared.items()})
 
     def _syncLevels(self, study, column, editor):
         """Offer the levels the open study declares for a lenient column (the editors are made once, for every study)."""
