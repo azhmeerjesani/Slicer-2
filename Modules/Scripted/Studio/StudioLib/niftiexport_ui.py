@@ -883,6 +883,9 @@ def exportNodesDialog(nodes=None, shell=None, show=True, **kwargs):
     if checked:
         ids = {node.GetID() for node in available}
         available += [node for node in checked if node.GetID() not in ids and not niftiexport.unavailableReason(node)]
+    # The same files from every entry point: a map thresholded in Map brings its thresholded mask along
+    if kwargs.get("mapOptions") is None:
+        kwargs["mapOptions"] = niftiexport.mapOptionsFromMapModule()
     dialog = ExportDialog(available, checked or None, **kwargs)
     return showDialog(dialog) if show else dialog
 

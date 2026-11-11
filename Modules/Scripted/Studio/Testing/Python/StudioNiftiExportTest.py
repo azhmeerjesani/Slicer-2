@@ -1137,6 +1137,29 @@ class StudioNiftiExportTest(unittest.TestCase):
         data, _affine, _header = self._read(os.path.join(self.out, "Lesions_label-Lesion_mask.nii.gz"))
         self.assertTrue((data == 5).all(), "the scan is not overwritten by the segment mask")
 
+    def test_07a_nodes_dialog_brings_the_map_threshold_like_the_other_entry_points(self):
+        """Library's "Export as NIfTI…" and Search use exportNodesDialog: a map thresholded in Map gets its mask there too."""
+        from StudioLib import autosave_io, niftiexport_ui
+
+        values = np.zeros((10, 10, 10), np.float32)
+        values[5, 5, 5] = 9
+        tmap = self._volume("T", values, np.eye(4))
+        tmap.SetAttribute("LNM.Statistic", "T")
+        tmap.SetAttribute("LNM.Result", "1")
+        options = {tmap.GetID(): {"threshold": 3.0, "sign": "both", "rule": "|T| >= 3"}}
+        original = self.export.mapOptionsFromMapModule
+        self.export.mapOptionsFromMapModule = lambda: options
+        try:
+            dialog = niftiexport_ui.exportNodesDialog([tmap], show=False, executor=autosave_io.InlineExecutor())
+            self.assertEqual(dialog.mapOptions, options)
+            explicit = niftiexport_ui.exportNodesDialog([tmap], show=False, mapOptions={}, executor=autosave_io.InlineExecutor())
+            self.assertEqual(explicit.mapOptions, {}, "an explicit mapOptions is kept")
+        finally:
+            self.export.mapOptionsFromMapModule = original
+        jobs = self.export.planExport([tmap], self.out, mapOptions=options)
+        names = [os.path.basename(path) for path in self.export.plannedFiles(jobs)]
+        self.assertTrue(any(name.endswith("_desc-thresholded_mask.nii.gz") for name in names), names)
+
     def test_07b_map_on_a_declared_connectome_space_is_mni(self):
         """A Map result of a connectome on a grid that is not a built-in one (the demo, the user's conversions) is in the
         connectome's declared space: code 4 and that space in the sidecar, as the engine's own file of the map.
