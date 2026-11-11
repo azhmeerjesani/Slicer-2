@@ -106,6 +106,10 @@ Run with the main window and testing enabled::
   puts under a resting mouse: Four-up -> Library -> Draw -> Focus) used to show the brush with its first filter unconnected,
   and the render logged "Input port 0 of algorithm vtkTransformPolyDataFilter ... has 0 connections but is not optional"
   (the red error badge of the top bar).
+- ``test_37b_paint_first_click_without_mouse_move_paints`` (BB-1): with Paint turned on while the pointer rests on a slice
+  view (Studio's P key), the first click with no mouse move paints the brush on an empty segment (the brush model was built
+  only at mouse moves: nothing was painted and "ModifyImage failed: geometry mismatch" was logged twice), and a click after a
+  brush size change without a move paints with the new size.
 - ``test_38_quit_after_fill_between_slices_exits_cleanly`` (BB-1): a child process runs the Fill between slices interpolator
   (``vtkITKMorphologicalContourInterpolator``) on a lesion with many traced slices and quits: exit code 0, no "exit abnormally"
   (the interpolator's thread_local ITK filters were destroyed in worker threads that end after ITK's globals at shutdown: a
@@ -4921,6 +4925,80 @@ class StudioRegressionTest(unittest.TestCase):
                 text = " | ".join(str(errorModel.data(errorModel.index(row, column))) for column in range(errorModel.columnCount()))
                 if "| Error |" in text or "| Critical |" in text:
                     errors.append(text)
+            self.assertEqual(errors, [])
+        finally:
+            if editor is not None:
+                editor.setActiveEffectByName("")
+                editor.setMRMLScene(None)
+            slicer.app.processEvents()
+            slicer.mrmlScene.Clear(0)
+
+    def test_37b_paint_first_click_without_mouse_move_paints(self):
+        """With the Paint effect turned on while the pointer rests on a slice view (Studio's P key), a click with no mouse move
+        paints the brush on an empty segment. The brush model was built only at mouse moves: the click painted nothing and
+        logged twice "vtkOrientedImageDataResample::ModifyImage failed: geometry mismatch" (the error badge showed 2). A click
+        after a brush size change, still without a move, paints with the new size.
+        """
+        import vtk
+
+        if slicer.util.mainWindow() is None or slicer.app.layoutManager() is None:
+            self.skipTest("needs the main window")
+        slicer.mrmlScene.Clear(0)
+        editor = None
+        try:
+            volume = slicer.util.addVolumeFromArray(np.full((40, 40, 40), 100, dtype=np.int16), name="FirstClick")
+            segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
+            segmentation.CreateDefaultDisplayNodes()
+            segmentation.SetReferenceImageGeometryParameterFromVolumeNode(volume)
+            firstId = segmentation.GetSegmentation().AddEmptySegment("Lesion")
+            secondId = segmentation.GetSegmentation().AddEmptySegment("Lesion 2")
+            editor = slicer.qMRMLSegmentEditorWidget()
+            editor.setMRMLScene(slicer.mrmlScene)
+            editor.setMRMLSegmentEditorNode(slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentEditorNode"))
+            editor.setSegmentationNode(segmentation)
+            editor.setSourceVolumeNode(volume)
+            editor.setCurrentSegmentID(firstId)
+            slicer.util.setSliceViewerLayers(background=volume, fit=True)
+            slicer.app.processEvents()
+            effect = editor.effectByName("Paint")
+            effect.setCommonParameter("BrushSphere", 0)
+            effect.setCommonParameter("BrushDiameterIsRelative", 0)
+            effect.setCommonParameter("BrushAbsoluteDiameter", 3.0)
+            editor.setActiveEffectByName("Paint")
+            slicer.app.processEvents()
+
+            sliceView = slicer.app.layoutManager().sliceWidget("Red").sliceView()
+            interactor = sliceView.interactorStyle().GetInteractor()
+            errorModel = slicer.app.errorLogModel()
+            firstRow = errorModel.rowCount()
+
+            def clickWithoutMove(x, y):
+                interactor.SetEventPosition(x, y)
+                interactor.InvokeEvent(vtk.vtkCommand.LeftButtonPressEvent)
+                interactor.InvokeEvent(vtk.vtkCommand.LeftButtonReleaseEvent)
+                slicer.app.processEvents()
+
+            def voxels(segmentId):
+                return int(np.count_nonzero(slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, segmentId, volume)))
+
+            width, height = sliceView.width, sliceView.height
+            clickWithoutMove(width // 2, height // 2)
+            firstClick = voxels(firstId)
+
+            # A larger brush, then a click with no move on another empty segment: painted with the new size
+            effect.setCommonParameter("BrushAbsoluteDiameter", 9.0)
+            editor.setCurrentSegmentID(secondId)
+            slicer.app.processEvents()
+            clickWithoutMove(width // 2, height // 2)
+            secondClick = voxels(secondId)
+
+            errors = []
+            for row in range(firstRow, errorModel.rowCount()):
+                text = " | ".join(str(errorModel.data(errorModel.index(row, column))) for column in range(errorModel.columnCount()))
+                if "mismatch" in text or "| Error |" in text or "| Critical |" in text:
+                    errors.append(text)
+            self.assertGreater(firstClick, 0)
+            self.assertGreater(secondClick, firstClick)
             self.assertEqual(errors, [])
         finally:
             if editor is not None:

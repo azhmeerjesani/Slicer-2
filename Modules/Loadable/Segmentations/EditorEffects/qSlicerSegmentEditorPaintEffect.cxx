@@ -1696,6 +1696,16 @@ bool qSlicerSegmentEditorPaintEffect::processInteractionEvents(vtkRenderWindowIn
     {
       return false;
     }
+    if (!d->BrushModelUpToDate || !d->brushModelAvailable())
+    {
+      // The brush model is built at mouse moves. A press with no mouse move since the effect was activated (for example
+      // by a keyboard shortcut while the pointer rests on the view) or since the brush changed would paint with no brush
+      // model (nothing painted, "ModifyImage failed: geometry mismatch") or a stale one: build it at the press position.
+      d->updateBrushModel(viewWidget, brushPosition_World);
+      d->updateBrushes();
+      d->BrushModelUpToDate = true;
+      viewWidgets = d->BrushPipelines.keys();
+    }
     // Start the stroke feedback. In the slice view that the stroke is painted in, it is drawn as circles
     // in the slice plane; other views show the brush glyphs (the other slice views cut them).
     d->resetFeedback();
