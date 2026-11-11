@@ -795,7 +795,11 @@ class ExportDialog(qt.QDialog):
         try:
             os.makedirs(self.folder, exist_ok=True)
         except OSError as e:
-            slicer.util.errorDisplay(_("The folder {folder} cannot be created.").format(folder=self.folder), detailedText=str(e))
+            # Expected (read-only parent, a project that became read-only): a plain warning, no raw errno, no ERROR entry
+            reason = plainError(e)
+            logging.warning(f"Slicer Studio: the NIfTI export folder could not be created: {reason}")
+            message(_("The folder {folder} cannot be created: {reason}. Choose another folder.").format(folder=shortPath(self.folder), reason=reason),
+                    level="warning", ms=8000, toolTip=self.folder)
             return None
         self._remember()
         self.list.setEnabled(False)

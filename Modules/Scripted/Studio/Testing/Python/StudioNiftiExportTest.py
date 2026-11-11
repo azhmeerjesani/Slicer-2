@@ -1444,6 +1444,61 @@ class StudioNiftiExportTest(unittest.TestCase):
             logging.getLogger().removeHandler(handler)
             slicer.mrmlScene.RemoveNode(node)
 
+    def test_08ada_uncreatable_folder_is_a_plain_warning(self):
+        """A folder that cannot be created (read-only parent): a warning toast with the reason, no error box, no raw errno, no
+        ERROR in the log, and the dialog stays open.
+        """
+        import logging
+
+        from StudioLib import niftiexport_ui
+
+        records = []
+
+        class Handler(logging.Handler):
+            def emit(self, record):
+                records.append((record.levelno, record.getMessage()))
+
+        handler = Handler()
+        logging.getLogger().addHandler(handler)
+        toasts = []
+        boxes = []
+        originalMessage = niftiexport_ui.message
+        originalError = slicer.util.errorDisplay
+        originalMakedirs = os.makedirs
+        niftiexport_ui.message = lambda text, **kwargs: toasts.append((text, kwargs.get("level")))
+        slicer.util.errorDisplay = lambda *args, **kwargs: boxes.append(args)
+        node = self._volume("nowhere scan", np.zeros((3, 3, 3), np.int16), np.eye(4))
+        target = os.path.join(self.out, "new-folder")
+
+        def refuse(path, *args, **kwargs):
+            if os.path.abspath(path) == os.path.abspath(target):
+                raise PermissionError(13, "Permission denied", path)
+            return originalMakedirs(path, *args, **kwargs)
+
+        try:
+            dialog = niftiexport_ui.exportNodesDialog([node], show=False)
+            dialog.show()
+            dialog.setFolder(target)
+            os.makedirs = refuse
+            self.assertIsNone(dialog.export())
+            self.assertEqual(boxes, [])
+            self.assertEqual(len(toasts), 1)
+            text, level = toasts[0]
+            self.assertEqual(level, "warning")
+            self.assertIn("cannot be created", text)
+            self.assertIn("Permission denied", text)
+            self.assertNotIn("Errno", text)
+            self.assertFalse([t for lv, t in records if lv >= logging.ERROR], "expected failures are not errors")
+            self.assertFalse([t for lv, t in records if "Errno" in t], "no raw errno in the log")
+            self.assertTrue(dialog.isVisible())
+            self.assertTrue(dialog.exportButton.isEnabled())
+        finally:
+            os.makedirs = originalMakedirs
+            niftiexport_ui.message = originalMessage
+            slicer.util.errorDisplay = originalError
+            logging.getLogger().removeHandler(handler)
+            slicer.mrmlScene.RemoveNode(node)
+
     def test_08ae_partial_failure_names_the_image_and_the_reason(self):
         """Some images are written and one fails: the message says which image and why, not only "1 failed"."""
         from StudioLib import autosave_io, niftiexport_ui
