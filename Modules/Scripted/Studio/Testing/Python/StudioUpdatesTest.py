@@ -2925,6 +2925,33 @@ fi
         self.assertIn("is a required update", str(raised.exception))
         self.assertIn("--no-update-check", str(raised.exception))
 
+    def test_WebLauncherUpdateRemovesOldPackages(self):
+        """'update' keeps only the package it needs: an earlier update's folder is removed when the next one starts,
+        and the folder of an update that was built into the image is removed. --no-build keeps the package and says where.
+        """
+        web = self._importScript(os.path.join("Utilities", "SlicerStudioWeb", "slicer_studio_web.py"), "slicer_studio_web_oldpkg")
+        cache = web.Path(self.tempDir) / "webcache"
+        web.cache_dir = lambda: cache
+        web.launcher_version = lambda: "0.9.0"
+        web.ensure_docker_running = lambda: "x86_64"
+        web.image_studio_version = lambda image: "0.9.0"
+        calls = []
+        web.subprocess.call = lambda command, *a, **k: calls.append(command) or 0
+        updates = cache / "updates"
+        for version in ("1.2.0", "1.3.0"):
+            self._publish(version)
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(web.command_update(web.build_parser().parse_args(["update", "--no-build"])), 0)
+            self.assertEqual(sorted(p.name for p in updates.iterdir()), [version])
+            self.assertTrue(any(updates.joinpath(version).glob("*linux-amd64.tar.gz")))
+            self.assertIn(str(updates / version), stdout.getvalue())
+        self._publish("1.4.0")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(web.command_update(web.build_parser().parse_args(["update"])), 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(list(updates.iterdir()), [])
+
     def test_WebLauncherPortErrorNamesRealCause(self):
         """check_port_free names the real cause of a failed bind: a privileged port, an address that is not on this
         computer, a port in use (with a valid suggestion at most 65535), and not "in use" for everything.

@@ -908,6 +908,20 @@ def unpack_web_bundle(bundle, destination):
     return target
 
 
+def remove_update_downloads(keep=None):
+    """Delete the downloaded update packages in the cache (a Slicer package is several hundred MB), except the folder
+    of the version 'keep'. Failures are ignored: the files are only a cache.
+    """
+    root = cache_dir() / "updates"
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if entry.name != keep and entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry, ignore_errors=True)
+
+
 def command_update(args):
     """Download, verify and install the latest release of the web version."""
     feed = update_feed()
@@ -932,6 +946,7 @@ def command_update(args):
                             f"Try again once the package is published; until then {script_command('run')} keeps starting this version.")
     info(f"Updating to Slicer Studio {version} (you have {current or 'an unknown version'}).")
     directory = cache_dir() / "updates" / version
+    remove_update_downloads(keep=version)  # the packages of earlier updates are no longer needed
     package = download_update_asset(manifest, "linux-x86_64", directory, feed)
     launcher_dir = SCRIPT_DIR
     if (manifest.get("assets") or {}).get("web"):
@@ -949,12 +964,14 @@ def command_update(args):
     new_script = launcher_dir / "slicer_studio_web.py"
     if args.no_build:
         info(f"Verified package: {package}")
+        info(f"It stays in {directory} until the next update removes it; delete that folder when you no longer need it.")
         info(f"Build the image with: python3 {new_script} build --package {package}")
         return 0
     command = [sys.executable, str(new_script), "build", "--package", str(package), "--image", args.image]
     info("Building the image with the new launcher.")
     if subprocess.call(command) != 0:
         raise LauncherError("Building the image of the update failed (see above); the previous image is kept.")
+    shutil.rmtree(directory, ignore_errors=True)  # the image holds the package now
     info("")
     info(f"Slicer Studio {version} is installed. Start it with: python3 {new_script} run --recreate")
     return 0

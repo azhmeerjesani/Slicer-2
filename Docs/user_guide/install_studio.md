@@ -265,7 +265,9 @@ python3 slicer_studio_web.py update
 It downloads the launcher bundle and the Linux package of the latest release,
 checks their size and SHA-256 checksum, unpacks the new launcher next to the old
 one (or in the cache folder when run from a source tree) and builds the Docker
-image from the verified package. Start the new version with
+image from the verified package. The package is deleted after a successful build; with `--no-build`
+it stays in the launcher's cache folder (`updates/<version>` inside it, which the command prints) until the next
+`update` removes it. Start the new version with
 `python3 <new launcher folder>/slicer_studio_web.py run --recreate`.
 `--no-update-check` (or the environment variable
 `SLICER_STUDIO_UPDATE_FEED=off`) skips the check.
