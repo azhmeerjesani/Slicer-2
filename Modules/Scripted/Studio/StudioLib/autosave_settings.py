@@ -269,10 +269,18 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
 
     def onOpenDirectory(self):
         path = io.defaultRoot()
-        if os.path.isdir(path):
-            from . import projects
+        if not os.path.isdir(path):
+            # Nothing was autosaved there yet (work in Studio projects does not use it): create the folder, as the first
+            # autosave does, so that Open always shows it instead of doing nothing.
+            try:
+                io.ensureRoot(path)
+            except OSError:
+                qt.QMessageBox.information(self, _("Recovery location"),
+                                           _("Nothing has been autosaved yet, and the folder could not be created:") + "\n" + path)
+                return
+        from . import projects
 
-            projects.showInFileManager(path)
+        projects.showInFileManager(path)
 
     def onRecover(self):
         from . import recovery

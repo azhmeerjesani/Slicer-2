@@ -2063,3 +2063,33 @@ class StudioAutosaveTest(unittest.TestCase):
         source = thumbnails.projectThumbnailSource()
         self.assertIsNotNone(source)
         self.assertEqual(len(source.lesions), 0)
+
+    def test_zf_openRecoveryFolderBeforeFirstAutosave(self):
+        """BB-1: Settings > Saving > Recovery "Open" did nothing while the recovery folder did not exist yet (Studio work goes to
+        Projects, so a fresh install has none): it now creates the folder and shows it.
+        """
+        import shutil
+        import tempfile
+
+        from StudioLib import autosave_settings, projects
+
+        base = tempfile.mkdtemp(prefix="StudioAutosaveOpen")
+        folder = os.path.join(base, "StudioAutosave")
+        shown = []
+        realShow, realEnv = projects.showInFileManager, os.environ.get("SLICER_STUDIO_AUTOSAVE_DIR")
+        projects.showInFileManager = lambda path: shown.append(path) or True
+        os.environ["SLICER_STUDIO_AUTOSAVE_DIR"] = folder
+        panel = autosave_settings.AutosaveSettingsPanel(None)
+        try:
+            self.assertFalse(os.path.exists(folder))
+            panel.onOpenDirectory()
+            self.assertEqual(shown, [os.path.normpath(folder)])
+            self.assertTrue(os.path.isdir(folder))
+        finally:
+            panel.deleteLater()
+            projects.showInFileManager = realShow
+            if realEnv is None:
+                os.environ.pop("SLICER_STUDIO_AUTOSAVE_DIR", None)
+            else:
+                os.environ["SLICER_STUDIO_AUTOSAVE_DIR"] = realEnv
+            shutil.rmtree(base, ignore_errors=True)
