@@ -2284,8 +2284,10 @@ def defaultLesionFileName(segmentationNode, sourceVolumeNode=None, directory=Non
 
 def _withNiftiExtension(path):
     if not path.lower().endswith(NIFTI_EXTENSIONS):
-        path += ".nii.gz"
-    return path
+        return path + ".nii.gz"
+    # The NIfTI writer only accepts a lower-case extension ("Bad Nifti file name"): keep the stem, normalise the extension
+    stem, extension = (path[:-7], ".nii.gz") if path.lower().endswith(".nii.gz") else (path[:-4], ".nii")
+    return stem + extension
 
 
 def lesionNodes(editor=None):
@@ -2412,6 +2414,11 @@ def saveLesion(path, segmentationNode, referenceVolumeNode=None, segmentIds=None
         if not slicer.util.saveNode(labelmapNode, path):
             raise RuntimeError(_("Failed to write {path}").format(path=path))
     finally:
+        # The writer leaves its empty TempWrite<name> folder behind when it fails
+        import shutil
+        for leftover in (os.path.join(os.path.dirname(path), "TempWrite" + os.path.basename(path).split(".")[0]),):
+            if os.path.isdir(leftover) and not os.listdir(leftover):
+                shutil.rmtree(leftover, ignore_errors=True)
         # Remove the temporary label map and what the export added (its color table, display and storage nodes)
         for index in reversed(range(scene.GetNumberOfNodes())):
             node = scene.GetNthNode(index)

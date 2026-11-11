@@ -913,6 +913,26 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertEqual(node.GetStorageNodeID(), storageNodeId)
         self.assertEqual(slicer.mrmlScene.GetNumberOfNodes(), nodesBefore)
 
+    def test_06bb_lesion_saved_under_a_mixed_case_extension(self):
+        """``UPPER.NII.GZ`` / ``Mixed.Nii.Gz`` are accepted (the writer wants a lower-case extension) and leave no TempWrite folder (BB-1)."""
+        from StudioLib import draw
+
+        self.assertEqual(draw._withNiftiExtension("/a/UPPER.NII.GZ"), "/a/UPPER.nii.gz")
+        self.assertEqual(draw._withNiftiExtension("/a/Mixed.Nii"), "/a/Mixed.nii")
+        self.assertEqual(draw._withNiftiExtension("/a/noext"), "/a/noext.nii.gz")
+        volume = slicer.util.addVolumeFromArray(np.zeros((10, 10, 10), np.uint8))
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "S")
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(volume)
+        segmentation.GetSegmentation().AddEmptySegment("a")
+        mask = np.zeros((10, 10, 10), np.uint8)
+        mask[3:6, 3:6, 3:6] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(mask, segmentation, segmentation.GetSegmentation().GetNthSegmentID(0), volume)
+        for name in ("UPPER.NII.GZ", "Mixed.Nii.Gz"):
+            written = draw.saveLesion(os.path.join(self.out, name), segmentation)
+            self.assertTrue(written.endswith(".nii.gz"), written)
+            self.assertTrue(os.path.isfile(written), written)
+        self.assertEqual(sorted(os.listdir(self.out)), ["Mixed.nii.gz", "UPPER.nii.gz"])
+
     def test_06c_mask_names_keep_bids_entity_order(self):
         """``desc`` stays the last entity of a mask name (BIDS); other names just add ``_label-<segment>_mask``."""
         self.assertEqual(self.export.maskBaseName("sub-01_desc-lesion", "Lesion"), "sub-01_label-Lesion_desc-lesion_mask")
