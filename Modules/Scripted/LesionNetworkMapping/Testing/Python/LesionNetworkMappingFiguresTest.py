@@ -434,6 +434,17 @@ class FiguresTest(unittest.TestCase):
             self.assertEqual(events[-1]["code"], "input", n)
             self.assertFalse(os.path.exists(os.path.join(out, "figures")), n)
 
+    def test_multiline_title_and_case_label_are_drawn_on_one_line(self):
+        # Pillow refuses an anchor with multi-line text: a line break in --title or a case label failed the figure
+        map_path = os.path.join(self.tmp, "multiline-map.nii.gz")
+        nifti.write_nifti(map_path, self.tmap[0], self.affine)
+        out = os.path.join(self.tmp, "o-multiline")
+        code, events = self._cli(["--preset", "montage", "--map", map_path, "--threshold", "3", "--slices", "A 10", "--title", "Figure 1\nLeft", "--out", out, "--formats", "png,svg"])
+        self.assertEqual(code, 0, events[-1])
+        self.assertTrue(any(name.endswith(".png") for _root, _dirs, names in os.walk(out) for name in names))
+        self.assertEqual(figures.Annotation("text", 0, 0, text="case 1\n(pilot)").text, "case 1 (pilot)")
+        self.assertEqual(figures.Annotation("text", 0, 0, text="a\r\nb").text, "a b")
+
     def test_nonfinite_width_point_slices_are_input_errors(self):
         # inf/nan reached int() (OverflowError traceback); a tiny width reached Pillow ("x1 must be >= x0")
         map_path = os.path.join(self.tmp, "nonfinite-map.nii.gz")

@@ -814,6 +814,16 @@ class Annotation:
     colors: tuple = ()
     role: str = ""
 
+    def __post_init__(self):
+        self.text = _single_line(self.text)
+
+
+def _single_line(text):
+    """``text`` on one line: Pillow refuses an anchor with multi-line text, and an SVG text element has no line break."""
+    if not text:
+        return text
+    return re.sub(r"(?:\r\n|[\r\n\x0b\x0c\x85\u2028\u2029])+", " ", str(text)).strip()
+
 
 def _pt(points, dpi):
     return points / 72.0 * dpi
@@ -986,6 +996,8 @@ class Options:
         if self.v is not None and int(self.v) < 1:
             # 0 is not "not given": V is the number of voxels tested, at least 1 (as thresholds.resolve says)
             raise ValueError(f"The number of voxels must be at least 1, got {self.v}")
+        if self.title:
+            self.title = _single_line(self.title)
         if self.watermark is not None and self.watermark not in WATERMARKS.values():
             self.watermark = WATERMARKS.get(str(self.watermark).lower(), str(self.watermark))
         return self
