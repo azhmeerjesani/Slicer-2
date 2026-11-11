@@ -1011,7 +1011,7 @@ class NullsCard:
         parity = record.get("parity")
         if not record.get("approximate") or not isinstance(parity, dict):
             return ""
-        strata = ", ".join(parity.get("allowed_strata") or []) or _("none")
+        strata = manager_fastindex.strataText(parity.get("allowed_strata")) or _("none")
         text = _("Parity gate (median partial r ≥ {r:g}, top-10% Dice ≥ {d:g}): fast mode allowed for {strata}.").format(
             r=(parity.get("constants") or {}).get("partial_r", 0.0), d=(parity.get("constants") or {}).get("top10_dice", 0.0), strata=strata)
         left = [item.get("participant_id") for item in record.get("excluded") or [] if isinstance(item, dict) and "volume_ml" in item]  # the gate's exclusions carry the lesion's volume

@@ -208,13 +208,18 @@ class FastModeState:
         return f"FastModeState(enabled={self.enabled}, reason={self.reason!r})"
 
 
+def strataText(names):
+    """"brain stem, white matter (supervoxel)": the readable names of gate strata ids (unknown ids stay as they are)."""
+    return ", ".join(STRATUM_TEXT.get(name, name) for name in names or [])
+
+
 def failingText(gate):
     """"brainstem (median partial r 0.61 < 0.80), …": the strata and size bins that failed the gate."""
     parts = []
     for group in ("strata", "size_bins"):
         for name, verdict in (gate.get(group) or {}).items():
             if not verdict.get("passed"):
-                label = SIZE_BIN_TEXT.get(name, name) if group == "size_bins" else name
+                label = SIZE_BIN_TEXT.get(name, name) if group == "size_bins" else STRATUM_TEXT.get(name, name)
                 parts.append(f"{label} ({verdict.get('reason')})")
     return ", ".join(parts)
 
@@ -262,7 +267,7 @@ def fastModeState(bundle, mapsTsv):
         return FastModeState(reason=_("The parity gate needs at least {n} exact lesions. {text}").format(n=gate.get("min_lesions", fastmap.PARITY_MIN_LESIONS), text=text), index=folder, parity=path, report=report, total=total)
     if not gate.get("allowed_strata") or allowed < 2:
         return FastModeState(reason=_("The fast index fails the parity gate on your lesions: {text}.").format(text=failingText(gate) or _("no stratum passed")), index=folder, parity=path, report=report, allowed=allowed, total=total)
-    passed = ", ".join(gate["allowed_strata"])
+    passed = strataText(gate["allowed_strata"])
     summary = _("Parity gate passed on your lesions for {passed}: {allowed} of {total} checked lesions allowed.").format(passed=passed, allowed=allowed, total=total)
     failing = failingText(gate)
     if failing:
@@ -1063,7 +1068,7 @@ class FastIndexDialog(qt.QDialog):
         lines = [_("Gate: median partial r ≥ {r:g} and median top-10% Dice ≥ {d:g}, per stratum and size bin, at least {n} exact lesions ({have} checked).").format(
             r=constants.get("partial_r", 0.0), d=constants.get("top10_dice", 0.0), n=gate.get("min_lesions"), have=total)]
         if gate.get("allowed_strata"):
-            lines.append(_("Passed: {names}. {allowed} of {total} checked lesions are allowed in fast mode.").format(names=", ".join(gate["allowed_strata"]), allowed=allowed, total=total))
+            lines.append(_("Passed: {names}. {allowed} of {total} checked lesions are allowed in fast mode.").format(names=strataText(gate["allowed_strata"]), allowed=allowed, total=total))
         if failing:
             lines.append(_("Failed: {failing}. Lesions in these groups are left out of fast-mode statistics.").format(failing=failing))
         lines += [message for message in gate.get("messages") or [] if message not in " ".join(lines)][:3]
