@@ -436,6 +436,8 @@ class LoadResult:
         self.addDataPaths = []
         self.errors = []
         self.alreadyOpen = []
+        #: names of scene files whose copy is the open project: not opened again
+        self.alreadyOpenScenes = []
         self.figures = []
         self.statmaps = []
         self.tables = []
@@ -1653,6 +1655,11 @@ def loadFiles(paths, shell=None, pairedLesion=None):
                     continue
                 try:
                     if kind == "scene":
+                        service = _sceneProjectService(shell)
+                        if service is not None and service.isOpenCopyOf(path):
+                            result.alreadyOpenScenes.append(service.project.name)
+                            loadedPaths.append(path)
+                            continue
                         if not _loadScene(path, shell):
                             continue  # not opened (for example a project locked by another computer): already announced
                         result.scenes.append(path)
@@ -2010,6 +2017,8 @@ def _loadToast(result, shell):
             shell.toast(_("Loaded {name} and {count} more").format(name=name, count=len(loaded) - 1))
     elif result.alreadyOpen:
         shell.toast(_("{name} is already open").format(name=result.alreadyOpen[0].GetName()))
+    elif result.alreadyOpenScenes:
+        shell.toast(_("{name} is already open").format(name=result.alreadyOpenScenes[0]))
     elif result.scenes:
         shell.toast(_("Loaded {name}").format(name=os.path.basename(result.scenes[0])))
 

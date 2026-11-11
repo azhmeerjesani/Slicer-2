@@ -3493,7 +3493,7 @@ class StudioProjectsTest(unittest.TestCase):
             standIn.setObjectName("")
             standIn.deleteLater()
             real.setObjectName("FileSaveSceneAction")
-        self.assertEqual(len(self.projects.listProjects()), 1, "one project, made once")
+        self.assertEqual(len(self.projects.listProjects(self.root)), 1, "one project, made once")
 
     def test_47c_new_project_close_scene_and_quit_right_after_opening_a_scan_save_the_project(self):
         """Ctrl+N, Ctrl+W and quit in the first second after a scan was opened (BB-1). No project existed before the next
@@ -3525,7 +3525,7 @@ class StudioProjectsTest(unittest.TestCase):
                 else:
                     self.assertTrue(projects_ui.closeScene())
                 self.io.backgroundWriter().drain(30.0)
-                self.assertEqual(len(self.projects.listProjects()), 1 if key == "quit" else {"newProject": 2, "closeScene": 3}[key],
+                self.assertEqual(len(self.projects.listProjects(self.root)), 1 if key == "quit" else {"newProject": 2, "closeScene": 3}[key],
                                  key + ": the data became a project")
                 studio.releaseProject()
                 slicer.mrmlScene.Clear(0)
@@ -4204,6 +4204,13 @@ class StudioProjectsTest(unittest.TestCase):
         # Another project open: Open… replaces it with the scene, which again opens as a copy
         copyPath = service.project.path
         del announced[:]
+        # The same file again while its copy is open keeps that copy ("<name> is already open", no "variant 2")
+        self.assertTrue(service.openSceneFile(variantPath))
+        self.assertEqual(os.path.normpath(service.project.path), os.path.normpath(copyPath))
+        self.assertEqual(announced, [])
+        # A changed file is a new scene: it opens as another copy
+        stat = os.stat(variantPath)
+        os.utime(variantPath, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
         self.assertTrue(service.openSceneFile(variantPath))
         self.assertIsNotNone(service.project)
         self.assertNotIn(os.path.normpath(service.project.path), (os.path.normpath(projectPath), os.path.normpath(copyPath)))
@@ -4232,6 +4239,30 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertTrue(classic.openProject(projectPath))
         self.assertEqual(os.path.normpath(classic.project.path), os.path.normpath(projectPath))
         self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Lesion"))
+
+
+    def test_54b_same_outside_scene_opened_again_keeps_its_copy(self):
+        """The same scene file from outside Projects opened twice in a row (a double drop, Open… again) keeps the copy that
+        is open: no second project "<name> 2" (BB-1). A file that changed since is a new scene and opens as another copy.
+        """
+        service = self._service()
+        announced = []
+        service.setProjectAnnouncer(lambda event, project, **info: announced.append(event))
+        slicer.util.addVolumeFromArray(np.ones((6, 7, 8), np.int16), name="Outside scan")
+        outside = os.path.join(self.tempDir, "outside_scene.mrb")
+        self.assertTrue(slicer.util.saveScene(outside))
+        slicer.mrmlScene.Clear(0)
+        service.poll()
+        self.assertTrue(service.openSceneFile(outside))
+        first = service.project
+        self.assertIsNotNone(first)
+        self.assertEqual(announced.count("copy"), 1)
+        self.io.backgroundWriter().drain(30.0)
+        self.assertTrue(service.isOpenCopyOf(outside))
+        self.assertTrue(service.openSceneFile(outside))
+        self.assertEqual(os.path.normpath(service.project.path), os.path.normpath(first.path))
+        self.assertEqual(announced.count("copy"), 1, "no second copy")
+        self.assertEqual(len(self.projects.listProjects(self.root)), 1)
 
 
     def test_55_root_move_is_refused_while_another_studio_has_a_study_open(self):

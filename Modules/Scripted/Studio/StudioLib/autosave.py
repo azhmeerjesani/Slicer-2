@@ -428,6 +428,9 @@ class AutosaveService:
         #: once it is set
         self._pendingAnnouncements = []
         self._pendingSceneSource = None
+        #: (project folder, source scene file, its size and mtime) of the open project that is a copy of a scene file from
+        #: outside Projects; in memory only (no local path is written anywhere)
+        self._copySource = None
         self._forceProjectOpen = False
         #: the scene file that the last scene load could not read (damaged): openProject does not open its project
         self._unreadableScene = None
@@ -2222,6 +2225,20 @@ class AutosaveService:
         """
         return self.project is not None and self.projectsActive()
 
+    def isOpenCopyOf(self, path):
+        """True if the open project is the copy made from the scene file ``path`` (outside Projects) and the file is unchanged."""
+        record = self._copySource
+        current = self.project
+        if record is None or current is None:
+            return False
+        try:
+            same = os.path.normcase(os.path.realpath(current.path)) == record[0] and \
+                os.path.normcase(os.path.realpath(str(path))) == record[1]
+            stat = os.stat(str(path))
+        except OSError:
+            return False
+        return same and (stat.st_size, stat.st_mtime_ns) == record[2]
+
     def openSceneFile(self, path):
         """Open a scene file (.mrml/.mrb) as its own project while a project is open (``opensSceneAsProject()``).
 
@@ -2249,6 +2266,8 @@ class AutosaveService:
             return self.openProject(projectPath)
         if self.refuseDamagedSceneFile(path):
             return False  # nothing was read: the open project stays open
+        if self.isOpenCopyOf(path):
+            return True  # the copy of this very file is open: a second drop keeps it (no "<name> 2")
         self.setPendingSceneSource(path)
         slicer.util.loadScene(path, {"clear": True})
         return True
@@ -2329,6 +2348,10 @@ class AutosaveService:
         name = projects.displayName(os.path.basename(source or url))
         project = self.createProject(name, announce=None if unread else "copy")
         if project is not None:
+            if source is not None and os.path.isfile(source):
+                stat = os.stat(source)
+                self._copySource = (os.path.normcase(os.path.realpath(project.path)), os.path.normcase(os.path.realpath(source)),
+                                    (stat.st_size, stat.st_mtime_ns))
             if unread:
                 self._announce("copy-incomplete", project, unread=unread)
             # Copy the files now (in the background): the original is never changed
