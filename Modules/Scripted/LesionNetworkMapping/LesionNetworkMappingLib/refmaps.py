@@ -566,6 +566,9 @@ def _fetch_into_registry(resource, root, session=None, progress=None, cancel=Non
     except fetch.FetchError as exc:
         message = exc.message
         raise RefmapsError(message if message.startswith(f"{resource.title}:") else f"{resource.title}: {message}") from None
+    except OSError as exc:
+        # Any other write problem of the library folder (no errno, no absolute path, no temporary name in the text).
+        raise RefmapsError(f"{resource.title}: {_library_error_text(exc, registry_root(root))}") from None
 
 
 def _name_by_content(path, root):
@@ -585,6 +588,20 @@ def _name_by_content(path, root):
     return target
 
 
+def _short_file_name(name, limit=100):
+    """``name`` cut to at most ``limit`` UTF-8 bytes, keeping a .nii/.nii.gz suffix (file systems refuse names over 255 bytes,
+    and the library adds '.part' and '.lock' to them).
+    """
+    if len(name.encode("utf-8")) <= limit:
+        return name
+    suffix = re.search(r"\.nii(\.gz)?$", name)
+    suffix = suffix.group(0) if suffix else ""
+    stem = name[: len(name) - len(suffix)]
+    while stem and len((stem + suffix).encode("utf-8")) > limit:
+        stem = stem[:-1]
+    return (stem or "map") + suffix
+
+
 def add_url(url, title=None, licence="unknown", citation="", condition=None, space=None, kind="map", entry_id=None, root=None, session=None,
             progress=None, cancel=None, offline=None, licence_note=""):
     """Download a NIfTI map from a URL (the user's click) and register it; return the entry."""
@@ -599,11 +616,13 @@ def add_url(url, title=None, licence="unknown", citation="", condition=None, spa
         filename = "map.nii.gz"
     # A link without a .nii/.nii.gz name (figshare, OSF) says nothing about compression: the file is downloaded under a
     # neutral name and named by what it is (gzip magic bytes or not) once it is here.
+    shown_name = filename
+    filename = _short_file_name(filename)
     sniffed = not re.search(r"\.nii(\.gz)?$", filename)
     if sniffed:
         filename += ".download"
     # Failure texts start with the resource title: the internal '.download' name is never shown, the link (without its query) is.
-    shown = title or (re.sub(r"^https?://", "", url.split("?")[0].split("#")[0]) if sniffed else filename)
+    shown = title or (re.sub(r"^https?://", "", url.split("?")[0].split("#")[0]) if sniffed else shown_name)
     resource = fetch.Resource({"id": f"refmap-url/{url}", "title": shown, "urls": [url], "filename": filename,
                                "checksum": fetch.RECORD_ON_FIRST_DOWNLOAD, "licence": licence or "unknown"})
     path = _fetch_into_registry(resource, root, session, progress, cancel, offline)
@@ -613,7 +632,7 @@ def add_url(url, title=None, licence="unknown", citation="", condition=None, spa
     _check_download(path, root, f"{title or filename} (from {url})")
     # The default id carries the URL's hash, so adding the same URL again refreshes its entry instead of listing it twice.
     entry_id = entry_id or f"url-{_slug(re.sub(r'.nii(.gz)?$', '', filename), 32)}-{hashlib.sha256(url.encode()).hexdigest()[:8]}"
-    entry = _base_entry(path, root, id=entry_id, title=title or filename, source={"type": "url", "url": url}, licence=licence or "unknown",
+    entry = _base_entry(path, root, id=entry_id, title=title or shown_name, source={"type": "url", "url": url}, licence=licence or "unknown",
                         licence_note=licence_note, citation=citation or "", condition=condition or None, kind=kind, space=space)
     return _register(entry, root)
 

@@ -525,6 +525,42 @@ class SourcesTest(RefmapsTestBase):
         np.testing.assert_allclose(new, -old, atol=1e-5)
         self.assertNotEqual(again["sha256"], entry["sha256"])
 
+    def test_url_with_very_long_file_name_is_added(self):
+        """A link whose file name is over 255 bytes (about 85 CJK letters) is stored under a shortened name, never a raw [Errno 36]."""
+        import http.server
+        import threading
+        from unittest import mock
+
+        served = os.path.join(self.tmp, "served-long")
+        os.makedirs(served)
+        long_name = "\u5730" * 90 + ".nii.gz"
+        nifti.write_nifti(os.path.join(served, "plain.nii.gz"), _smooth_field(self.rng, SHAPE).astype(np.float32), self.bundle.affine)
+
+        class QuietHandler(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def translate_path(self, path):
+                return os.path.join(served, "plain.nii.gz")
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), QuietHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        import urllib.parse
+
+        url = f"http://127.0.0.1:{server.server_address[1]}/any/" + urllib.parse.quote(long_name)
+        with mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}):
+            entry = refmaps.add_url(url, root=self.root, offline=False)
+        self.assertTrue(entry["file"].endswith(".nii.gz"))
+        self.assertLessEqual(len(os.path.basename(entry["file"]).encode("utf-8")), 100)
+        self.assertEqual(entry["title"], long_name)
+
+    def test_short_file_name(self):
+        self.assertEqual(refmaps._short_file_name("a.nii.gz"), "a.nii.gz")
+        cut = refmaps._short_file_name("m" * 290 + ".nii.gz")
+        self.assertTrue(cut.endswith(".nii.gz") and len(cut) <= 100)
+
     def test_url_title_is_url_decoded(self):
         """A link with %-escapes in its file name gives the decoded name as title and stored file name."""
         import functools
