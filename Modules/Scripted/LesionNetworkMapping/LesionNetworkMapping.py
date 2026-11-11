@@ -3600,6 +3600,36 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         _columns, rows = coords.read_table(self.stimulationSource)
         return {row["participant_id"]: row.get(column) for row in rows if row.get("participant_id")}
 
+    def stimulationRowOutcomes(self):
+        """The chosen outcome column's text of each row of ``stimulationItems`` (in order), or None without one.
+
+        Rows are kept apart: a participant with two rows may have two different outcomes, which
+        ``coords.outcome_conflicts`` reports (never one of them chosen silently).
+        """
+        from LesionNetworkMappingLib import coords
+
+        column = self.stimOutcomeCombo.currentData if self.stimOutcomeCombo.count else ""
+        if not column or not self.stimulationSource or not self.stimulationItems:
+            return None
+        try:
+            _columns, rows = coords.read_table(self.stimulationSource)
+        except (OSError, ValueError):
+            return None
+        if len(rows) != len(self.stimulationItems):
+            return None  # the items no longer come from this table
+        return [row.get(column) for row in rows]
+
+    def stimulationOutcomeConflict(self):
+        """The message of the participants whose rows have different outcomes ("" when every participant has one)."""
+        from LesionNetworkMappingLib import coords
+
+        outcomes = self.stimulationRowOutcomes()
+        if not outcomes:
+            return ""
+        conflicts = coords.outcome_conflicts([dict(item, outcome=outcome) for item, outcome in zip(self.stimulationItems, outcomes, strict=True)])
+        return " ".join(_("{participant} has different outcomes: {values}. Its rows make one seed, so they need one outcome.").format(
+            participant=sid, values=", ".join(values)) for sid, values in conflicts.items())
+
     def _showStimulation(self):
         from LesionNetworkMappingLib import coords
 
@@ -3612,14 +3642,15 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         threshold = kind == "efield" and (self.stimWeightingCombo.currentData or "") == "threshold"
         self.stimThresholdRowLabel.setVisible(threshold)
         self.stimThresholdSpin.setVisible(threshold)
-        outcomes = self.stimulationOutcomes() if self.stimulationItems else {}
+        rowOutcomes = self.stimulationRowOutcomes() or []
         self.stimTable.setRowCount(len(self.stimulationItems))
         for row, item in enumerate(self.stimulationItems):
             if item.get("points"):
                 site = ", ".join(f"({p.x:g}, {p.y:g}, {p.z:g})" + (" " + _("Talairach") if getattr(p, "space", "MNI") == "TAL" else "") for p in item["points"])
             else:
                 site = os.path.basename(item.get("image") or "")
-            for column, value in enumerate((item["participant_id"], site, str(outcomes.get(item["participant_id"], "") or ""))):
+            outcome = rowOutcomes[row] if row < len(rowOutcomes) else ""  # each row's own outcome
+            for column, value in enumerate((item["participant_id"], site, str(outcome or ""))):
                 cell = qt.QTableWidgetItem(value)
                 cell.setFlags(qt.Qt.ItemIsSelectable | qt.Qt.ItemIsEnabled)
                 self.stimTable.setItem(row, column, cell)
@@ -3711,6 +3742,10 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             coords.sphere_radius(*self.sphereSettings())
         except ValueError as exc:
             return False, str(exc)
+        if self.seedMode() == "stimulation":
+            conflict = self.stimulationOutcomeConflict()
+            if conflict:
+                return False, conflict
         if self.bundle is None:
             return False, _("Add a connectome, or use the demo, to map.")
         if not self.acceptTermsCheckBox.checked:
@@ -3748,10 +3783,11 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                     f.write(f"{focus.study}\t{focus.x!r}\t{focus.y!r}\t{focus.z!r}\t{focus.space}\t{'' if focus.radius_mm is None else repr(focus.radius_mm)}\n")
             return coords.prepare_coordinates(runDir, self.coordinateFoci, self.bundle.grid, radius, diameter, source=fociPath, grid_space=coords.grid_space(self.bundle),
                                               mask_indices=maskIndices)
-        outcomes = self.stimulationOutcomes()
+        outcomes = self.stimulationRowOutcomes()
         column = self.stimOutcomeCombo.currentData if self.stimOutcomeCombo.count else ""
         safeColumn = column if column and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", column) else "outcome"
-        items = [dict(item, outcome=outcomes.get(item["participant_id"]) if column else None) for item in self.stimulationItems]
+        # Each row's own outcome: coords.prepare_stimulation refuses a participant whose rows disagree
+        items = [dict(item, outcome=outcomes[index] if outcomes else None) for index, item in enumerate(self.stimulationItems)]
         kind = self.stimulationKind()
         threshold = float(self.stimThresholdSpin.value) or None
         return coords.prepare_stimulation(runDir, items, self.bundle.grid, kind, radius if kind == "points" else None, diameter if kind == "points" else None,

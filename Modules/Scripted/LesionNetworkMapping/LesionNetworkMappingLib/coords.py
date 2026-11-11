@@ -1122,10 +1122,46 @@ def prepare_atrophy(out_dir, wmaps, grid, rule=DEFAULT_ATROPHY_RULE, weighted=Fa
                                                             "seed_rule": "per-patient w-map thresholded (Tetreault et al. 2020)"}, mask_indices)
 
 
+def _outcome_value(text):
+    """The outcome of a stimulation row for comparing rows of one participant: a float, the stripped text when it is not
+    a number, or None when it is missing ("", n/a).
+    """
+    try:
+        return _number(text)
+    except ValueError:
+        return str(text).strip()
+
+
+def outcome_conflicts(items):
+    """{participant_id: [outcome texts]} of participants whose rows in ``items`` have different outcomes (missing values
+    are ignored; "40" and "40.0" agree). :func:`prepare_stimulation` refuses them, as the rows make one seed.
+    """
+    values, texts = {}, {}
+    for item in items:
+        sid = str(item.get("participant_id") or "").strip()
+        value = _outcome_value(item.get("outcome"))
+        if not sid or value is None:
+            continue
+        if value not in values.setdefault(sid, []):
+            values[sid].append(value)
+            texts.setdefault(sid, []).append(str(item["outcome"]).strip())
+    return {sid: texts[sid] for sid, found in values.items() if len(found) > 1}
+
+
+def outcome_conflict_text(sid, texts):
+    """"sub-01 has two different outcomes: 40 and 80 ..." for a participant whose rows disagree."""
+    texts = [str(text).strip() for text in texts]
+    listed = ", ".join(texts[:-1]) + " and " + texts[-1]
+    count = "two" if len(texts) == 2 else str(len(texts))
+    return (f"{sid} has {count} different outcomes: {listed}. Its rows make one seed (a union of its sites), "
+            "so they need one outcome: correct the table or give each seed its own participant_id")
+
+
 def prepare_stimulation(out_dir, items, grid, kind, radius_mm=None, diameter_mm=None, weighting=None, threshold=None, outcome_column="outcome", mask_indices=None):
     """Stimulation seeds of ``items`` [{participant_id, points | image, outcome}] in ``out_dir``; return lesions.tsv.
 
-    Points of rows with the same participant_id form one seed (a union). The outcomes, when given, are written to
+    Points of rows with the same participant_id form one seed (a union); their outcomes must agree (different values
+    are refused with a ValueError, :func:`outcome_conflicts`). The outcomes, when given, are written to
     ``outcomes.tsv`` (for :func:`slnm_arguments`). ``mask_indices``: refuse participants whose seed has no weight
     in the connectome's brain mask (:func:`write_seed_set`).
     """
@@ -1152,8 +1188,14 @@ def prepare_stimulation(out_dir, items, grid, kind, radius_mm=None, diameter_mm=
             if entry["image"] is not None:
                 raise ValueError(f"{sid} has two stimulation images")
             entry["image"] = item["image"]
-        if item.get("outcome") not in (None, ""):
-            entry["outcome"] = item["outcome"]
+        if _outcome_value(item.get("outcome")) is not None:
+            if _outcome_value(entry["outcome"]) is None:
+                entry["outcome"] = item["outcome"]
+            elif _outcome_value(item["outcome"]) != _outcome_value(entry["outcome"]):
+                # Rows of one participant make one seed: one outcome. Never keep one of two values silently.
+                raise ValueError(outcome_conflict_text(sid, [entry["outcome"], item["outcome"]]))
+        elif entry["outcome"] is None and item.get("outcome") not in (None, ""):
+            entry["outcome"] = item["outcome"]  # a missing value ("n/a") is kept only when no row has a value
     seeds, used, outcomes, records = [], set(), {}, {}
     for sid, entry in merged.items():
         seed, record = stimulation_seed(kind, grid, points=entry["points"] or None, image=entry["image"], radius_mm=radius_mm, diameter_mm=diameter_mm,

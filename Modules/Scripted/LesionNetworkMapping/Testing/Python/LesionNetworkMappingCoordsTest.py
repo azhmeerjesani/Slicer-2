@@ -474,6 +474,27 @@ class StimulationTest(CoordsTestCase):
         self.assertEqual(record["seeds"][1]["stimulation"]["points"], 2)  # two rows of p2 make one seed
         self.assertEqual(_absolute_strings(record), [])
 
+    def test_stimulation_rows_of_one_participant_with_different_outcomes_refused(self):
+        # Rows of one participant make one seed: two different outcomes are refused in either row order, never last-row-wins
+        for name, body in (("dup_a.csv", "participant_id,x,y,z,outcome\nsub-01,-12,-14,-6,40\nsub-01,12,-14,-6,80\nsub-02,10,10,10,30\n"),
+                           ("dup_b.csv", "participant_id,x,y,z,outcome\nsub-01,12,-14,-6,80\nsub-01,-12,-14,-6,40\nsub-02,10,10,10,30\n")):
+            items = coords.read_stimulation_table(self.write(name, body), "points", "outcome")
+            self.assertEqual(list(coords.outcome_conflicts(items)), ["sub-01"])
+            out = os.path.join(self.tmp, "stim " + name)
+            with self.assertRaisesRegex(ValueError, "sub-01 has two different outcomes"):
+                coords.prepare_stimulation(out, items, GRID_2MM, "points", radius_mm=6)
+            self.assertFalse(os.path.exists(os.path.join(out, coords.OUTCOMES_TSV)))
+        # Equal values ("40" and "40.0") and a missing value on one row agree: one outcome, in either row order
+        for body in ("participant_id,x,y,z,outcome\nsub-01,-12,-14,-6,40\nsub-01,12,-14,-6,40.0\nsub-01,0,-14,-6,n/a\nsub-02,10,10,10,30\n",
+                     "participant_id,x,y,z,outcome\nsub-01,0,-14,-6,n/a\nsub-01,-12,-14,-6,40\nsub-02,10,10,10,30\n"):
+            items = coords.read_stimulation_table(self.write("agree.csv", body), "points", "outcome")
+            self.assertEqual(coords.outcome_conflicts(items), {})
+            out = os.path.join(self.tmp, "stim agree")
+            shutil.rmtree(out, ignore_errors=True)
+            coords.prepare_stimulation(out, items, GRID_2MM, "points", radius_mm=6)
+            _columns, outcomes = read_tsv(os.path.join(out, coords.OUTCOMES_TSV))
+            self.assertEqual([(row["participant_id"], row["outcome"]) for row in outcomes], [("sub-01", "40.0"), ("sub-02", "30.0")])
+
     def test_stimulation_talairach_sites_converted_and_recorded(self):
         # A "space" column of Talairach is converted to MNI (Lancaster 2007) as in the Coordinates mode, never mapped as MNI mm
         table = self.write("stim_tal.csv", "participant_id,x,y,z,space\nsub-01,-10,-12,6,Talairach\nsub-02,-10,-12,6,MNI\n")

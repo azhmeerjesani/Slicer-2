@@ -74,6 +74,51 @@ class SeedSetCountsTest(unittest.TestCase):
             widget.stimulationItems = items
             widget._showStimulation()
 
+    def test_stimulation_rows_with_different_outcomes(self):
+        # Bug stim-duplicate-participant-conflicting-outcomes-last-row-wins: the table showed sub-01's last outcome on both
+        # of its rows and Map used it silently. Each row now shows its own outcome and mapping is refused with a reason.
+        import os
+        import tempfile
+
+        widget = slicer.modules.LesionNetworkMappingWidget
+        node = widget._parameterNode
+        saved = (list(widget.stimulationItems or []), widget.stimulationSource, list(widget.stimulationColumns or []), node.seedMode)
+        folder = tempfile.mkdtemp()
+        try:
+            node.seedMode = "stimulation"
+            path = os.path.join(folder, "stim_dup.csv")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("participant_id,x,y,z,outcome\nsub-01,-12,-14,-6,40\nsub-01,12,-14,-6,80\nsub-02,10,10,10,30\n")
+            self.assertIsNotNone(widget.importStimulation(path))
+            self.assertEqual(widget.stimOutcomeCombo.currentData, "outcome")
+            self.assertEqual([widget.stimTable.item(row, 2).text() for row in range(3)], ["40", "80", "30"])
+            enabled, reason = widget.seedSetComputeState()
+            self.assertFalse(enabled)
+            self.assertIn("sub-01 has different outcomes: 40, 80", reason)
+            # Mapping anyway (prepareSeedSet, on a small stand-in grid) is refused, naming both values
+            import types
+
+            import numpy as np
+            from LesionNetworkMappingLib.geometry import Grid
+
+            bundle, widget.bundle = widget.bundle, types.SimpleNamespace(grid=Grid((20, 24, 20), np.array([[2.0, 0, 0, -19.0], [0, 2.0, 0, -23.0], [0, 0, 2.0, -19.0], [0, 0, 0, 1.0]])),
+                                                                     mask_indices=None)
+            try:
+                with self.assertRaisesRegex(ValueError, "sub-01 has two different outcomes: 40 and 80"):
+                    widget.prepareSeedSet(os.path.join(folder, "run"), checkMask=False)
+            finally:
+                widget.bundle = bundle
+            # Without an outcome column there is nothing to disagree about
+            widget.stimOutcomeCombo.setCurrentIndex(0)
+            self.assertEqual(widget.stimulationOutcomeConflict(), "")
+        finally:
+            widget.stimulationItems, widget.stimulationSource, widget.stimulationColumns = saved[0], saved[1], saved[2]
+            node.seedMode = saved[3]
+            widget._showStimulation()
+            import shutil
+
+            shutil.rmtree(folder, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()
