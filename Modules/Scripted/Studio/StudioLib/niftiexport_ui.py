@@ -640,7 +640,7 @@ class ExportDialog(qt.QDialog):
         projects = _projects()
         project = projects.currentProject() if projects is not None else None
         title = _("NIfTI export of {name}").format(name=project.name) if project is not None else _("NIfTI export")
-        return os.path.join(self.folder, niftiexport.README_NAME), title
+        return niftiexport.readmePath(self.folder), title
 
     def plan(self):
         nodes = self.checkedNodes()
@@ -674,7 +674,7 @@ class ExportDialog(qt.QDialog):
             if extras:
                 text += " · " + _("plus {things}").format(things=extras)
             if self.mode == "project":
-                text += " · README.txt"
+                text += " · " + os.path.basename(niftiexport.readmePath(self.folder))
         else:
             text = _("Check at least one image to export.")
         self.summaryLabel.setText(text)

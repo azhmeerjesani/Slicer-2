@@ -77,6 +77,8 @@ XYZT_UNITS_MM_SEC = 10
 PROJECT_EXPORT_FOLDER = "nifti"
 #: Name of the list of files written by a project export
 README_NAME = "README.txt"
+#: Name of that list when the folder already holds a README.txt that Slicer Studio did not write (the user's own is kept)
+STUDIO_README_NAME = "README_SlicerStudio.txt"
 
 #: Fork-only settings (Studio/*): the last folder, format and segmentation mode of the export dialog
 LAST_FOLDER_KEY = "Studio/NiftiExport/LastFolder"
@@ -1506,12 +1508,48 @@ def existingFiles(jobs, extra=()):
 _README_IMAGE_LINE = re.compile(r"^- ([A-Za-z0-9._-]+\.nii(?:\.gz)?): ")
 
 
-def readmeImages(path):
-    """The names of the images that the README of a project export (``path``) lists ([] without a README)."""
+def _readmeLines(path):
     try:
         with open(path, encoding="utf-8") as f:
-            lines = f.read().splitlines()
+            return f.read().splitlines()
     except (OSError, ValueError):
+        return None
+
+
+def _isStudioReadmeLines(lines):
+    # writeReadme: "<title>", "=====" (as long as the title), "", "Written by Slicer Studio <version> on <date>."
+    return (len(lines) > 3 and bool(lines[0]) and lines[1] == "=" * len(lines[0]) and not lines[2]
+            and "Slicer Studio " in lines[3])
+
+
+def isStudioReadme(path):
+    """True when ``path`` is the README of a project export written by Slicer Studio (``writeReadme``), not a README
+    that the user wrote: only such a README names files that a later export may replace or remove.
+    """
+    lines = _readmeLines(path)
+    return lines is not None and _isStudioReadmeLines(lines)
+
+
+def readmePath(folder):
+    """The README of a project export into ``folder``: README.txt, unless the folder holds a README.txt that Slicer
+    Studio did not write (the user's own file is kept: README_SlicerStudio.txt is written instead).
+    """
+    path = os.path.join(folder, README_NAME)
+    if not os.path.exists(path) or isStudioReadme(path):
+        return path
+    base, extension = os.path.splitext(STUDIO_README_NAME)
+    path, index = os.path.join(folder, STUDIO_README_NAME), 2
+    while os.path.exists(path) and not isStudioReadme(path):
+        path, index = os.path.join(folder, f"{base}-{index}{extension}"), index + 1
+    return path
+
+
+def readmeImages(path):
+    """The names of the images that the README of a project export (``path``) lists ([] without a README, or when the
+    README was not written by Slicer Studio: a README of the user's own never makes their files look like Studio's).
+    """
+    lines = _readmeLines(path)
+    if lines is None or not _isStudioReadmeLines(lines):
         return []
     names = []
     for line in lines:
@@ -1522,9 +1560,11 @@ def readmeImages(path):
 
 
 def _writtenByStudio(sidecar):
-    """True unless ``sidecar`` exists and was not written by Slicer Studio (a file the user put there is never removed)."""
+    """True when ``sidecar`` exists and was written by Slicer Studio: an image without one, or with a sidecar of its
+    own, is a file the user put there, and is never removed or replaced as a file of an earlier export.
+    """
     if not os.path.exists(sidecar):
-        return True
+        return False
     try:
         with open(sidecar, encoding="utf-8") as f:
             content = json.load(f)

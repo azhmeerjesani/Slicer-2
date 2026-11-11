@@ -1895,6 +1895,61 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertNotIn("1 files", notice)
         self.assertTrue(os.path.isdir(folder))
 
+    def test_09ad_project_export_keeps_the_users_own_files_and_readme(self):
+        """A project export into a folder of the user's (Change…) that holds their own images and a README.txt they wrote in
+        the "- name.nii.gz: description" form never takes those images for files of an earlier export: nothing is offered
+        for removal or removed, and their README.txt is kept (Slicer Studio's list goes to README_SlicerStudio.txt).
+        """
+        from StudioLib import autosave_io, niftiexport_ui, projects
+
+        project = projects.createProject("NIfTI own folder")
+        projects.setCurrentProject(project)
+        self._phantom("sub-01_T1w", np.array([[-1.0, 0, 0, 10], [0, -1.0, 0, 10], [0, 0, 1.0, -10], [0, 0, 0, 1]]))
+        folder = os.path.join(self.out, "My analysis")
+        os.makedirs(folder)
+        own = {"brain.nii.gz": b"brain", "lesion_final.nii.gz": b"lesion", "lesion_final.json": b'{"Rater": 2}'}
+        for name, content in own.items():
+            with open(os.path.join(folder, name), "wb") as f:
+                f.write(content)
+        userReadme = "My analysis\n===========\n\nFiles:\n- brain.nii.gz: skull-stripped T1 (BET)\n- lesion_final.nii.gz: lesion traced by rater 2\n"
+        readmePath = os.path.join(folder, "README.txt")
+        with open(readmePath, "w", encoding="utf-8") as f:
+            f.write(userReadme)
+        self.assertFalse(self.export.isStudioReadme(readmePath))
+        self.assertEqual(self.export.readmeImages(readmePath), [])
+        dialog = niftiexport_ui.exportProjectDialog(show=False, executor=autosave_io.InlineExecutor(), mapOptions={})
+        try:
+            dialog.setFolder(folder)
+            self.assertEqual(dialog._stale, [])
+            self.assertEqual(dialog._existing, [])
+            self.assertEqual(os.path.basename(dialog.readme()[0]), "README_SlicerStudio.txt")
+            runner = dialog.export(confirm=lambda *args: True)
+            self.assertTrue(runner.wait(60))
+        finally:
+            dialog.close()
+        self.assertEqual(runner.result.removed, [])
+        for name, content in own.items():
+            with open(os.path.join(folder, name), "rb") as f:
+                self.assertEqual(f.read(), content, name)
+        with open(readmePath, encoding="utf-8") as f:
+            self.assertEqual(f.read(), userReadme)
+        studioReadme = os.path.join(folder, "README_SlicerStudio.txt")
+        self.assertTrue(self.export.isStudioReadme(studioReadme))
+        self.assertEqual(self.export.readmeImages(studioReadme), ["sub-01_T1w.nii.gz"])
+        with open(studioReadme, encoding="utf-8") as f:
+            self.assertIn("Also in this folder, not written by this export:\n- brain.nii.gz\n- lesion_final.nii.gz", f.read())
+        # Exporting again finds Slicer Studio's own list, and still keeps the user's files
+        self.assertEqual(self.export.readmePath(folder), studioReadme)
+        result = self.export.runJobs(self.export.planExport(self.export.projectNodes(), folder, bids=True), overwrite=True,
+                                     readme=(studioReadme, "NIfTI export"))
+        self.assertEqual(result.removed, [])
+        self.assertTrue(all(os.path.exists(os.path.join(folder, name)) for name in own))
+        # An image the user put there with no sidecar, even when a Studio README names it, is not Studio's
+        os.remove(os.path.join(folder, "lesion_final.json"))
+        with open(studioReadme, "a", encoding="utf-8") as f:
+            f.write("- lesion_final.nii.gz: added by hand\n")
+        self.assertEqual(self.export.earlierExportFiles(self.export.planExport(self.export.projectNodes(), folder, bids=True), studioReadme), [])
+
     def test_09ac_reexport_removes_label_tables_of_an_earlier_label_map(self):
         """A label map export writes _dseg .nii.gz, .json, .tsv and .txt; a later export without it removes all four."""
         from StudioLib import projects
