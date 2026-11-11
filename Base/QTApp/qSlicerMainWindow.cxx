@@ -721,6 +721,22 @@ bool qSlicerMainWindowPrivate::confirmCloseApplicationUnsavedLesion(const QStrin
 bool qSlicerMainWindowPrivate::confirmCloseApplicationLesionSaved(const QString& summary)
 {
   Q_Q(qSlicerMainWindow);
+  // The application may ask the question in its own dialog (see qSlicerMainWindow::closeQuestionRequested())
+  q->setProperty("SlicerStudioCloseAnswer", QVariant());
+  emit q->closeQuestionRequested();
+  const QString answer = q->property("SlicerStudioCloseAnswer").toString();
+  if (answer == "cancel")
+  {
+    return false;
+  }
+  if (answer == "quit")
+  {
+    return true;
+  }
+  if (answer == "save")
+  {
+    return qSlicerApplication::application()->ioManager()->openSaveDataDialog();
+  }
   QMessageBox messageBox(QMessageBox::Question, qSlicerMainWindow::tr("Quit?"), summary, QMessageBox::NoButton, q);
   QPushButton* quitButton = messageBox.addButton(qSlicerMainWindow::tr("Quit"), QMessageBox::AcceptRole);
   QPushButton* saveButton = messageBox.addButton(qSlicerMainWindow::tr("Save session..."), QMessageBox::ActionRole);

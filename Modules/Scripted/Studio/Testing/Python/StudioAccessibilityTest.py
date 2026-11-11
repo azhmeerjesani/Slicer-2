@@ -1154,6 +1154,33 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
         self._pump()
         self.assertEqual(self._closeProperties(), ("", ""))
 
+    def test_close_question_uses_studio_dialog_chrome(self):
+        """The "lesionSaved" exit question is a Studio dialog (VISUAL 4.7), not a plain message box: the dialog chrome, the
+        icon tile, the title and the summary, Quit as the single primary button, and an answer for the main window.
+        """
+        from StudioLib import firstrun
+
+        if not hasattr(self.mainWindow, "closeQuestionRequested"):
+            self.skipTest("the main window has no close question hook")
+        summary = "Your lesion is saved as sub-01_lesion.nii.gz. The session (scene) is not saved. Quit?"
+        question = firstrun.closeQuestionDialog(summary, self.mainWindow)
+        dialog = question.dialog
+        try:
+            self.assertTrue(dialog.property("studioDialogChrome"))
+            self.assertFalse(isinstance(dialog, qt.QMessageBox))
+            self.assertIsNotNone(dialog.findChild("QLabel", "StudioCloseQuestionIcon"))
+            self.assertEqual(dialog.findChild("QLabel", "StudioCloseQuestionTitle").text, "Quit?")
+            self.assertEqual(dialog.findChild("QLabel", "StudioCloseQuestionBody").text, summary)
+            self.assertTrue(question.quitButton.isDefault())
+            self.assertEqual(question.quitButton.property("slicerRole"), "primary")
+            for answer, button in (("quit", question.quitButton), ("save", question.saveButton), ("cancel", question.cancelButton)):
+                question.answer = ""
+                dialog.show()
+                button.click()
+                self.assertEqual(question.answer, answer)
+        finally:
+            dialog.deleteLater()
+
     def test_close_summary_study(self):
         """With a study open, closing writes the current subject first (a study has no Save) and asks only "All changes are
         saved in study <name>. Quit?": never the no-study "Save lesion…" / "Don't save" prompt, whose "Don't save" the

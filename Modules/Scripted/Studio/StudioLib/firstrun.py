@@ -42,6 +42,7 @@ DISCLAIMER_FOOTER_KEY = "disclaimer"
 #: Main window properties of the close prompt (W3-03)
 CLOSE_MODE_PROPERTY = "SlicerStudioCloseMode"
 CLOSE_SUMMARY_PROPERTY = "SlicerStudioCloseSummary"
+CLOSE_ANSWER_PROPERTY = "SlicerStudioCloseAnswer"
 SAVE_RESULT_PROPERTY = "SlicerStudioSaveResult"
 CLOSE_MODE_UNSAVED_LESION = "unsavedLesion"
 CLOSE_MODE_LESION_SAVED = "lesionSaved"
@@ -391,6 +392,78 @@ def computeCloseSummary():
     mainWindow.setProperty(CLOSE_MODE_PROPERTY, mode)
 
 
+class CloseQuestion:
+    """Holder of the dialog and its buttons (PythonQt widgets take no attributes)."""
+
+    answer = "cancel"
+
+
+def closeQuestionDialog(summary, parent=None):
+    """The "lesionSaved" exit question in the Studio dialog chrome (VISUAL 4.7): the icon tile and the title beside the
+    summary (text2), "Save session…" as a link on the left and "Quit" as the primary button. Return a ``CloseQuestion``:
+    its ``dialog`` is the QDialog and its ``answer`` is "quit", "save" or "cancel" (also Esc and closing the window).
+    """
+    from . import ui
+
+    dialog = qt.QDialog(parent if parent is not None else slicer.util.mainWindow())
+    dialog.setObjectName("StudioCloseQuestionDialog")
+    dialog.setWindowTitle(_("Quit?"))
+    dialog.setMinimumWidth(460)
+    question = CloseQuestion()
+    question.dialog = dialog
+    layout = qt.QVBoxLayout(dialog)
+    layout.setContentsMargins(24, 24, 24, 22)
+    layout.setSpacing(14)
+    header, _title, _body = ui.dialogHeader("circle-help", _("Quit?"), summary, "StudioCloseQuestion")
+    layout.addLayout(header)
+    buttons = qt.QHBoxLayout()
+    buttons.setSpacing(10)
+
+    def choose(answer):
+        question.answer = answer
+        dialog.accept() if answer != "cancel" else dialog.reject()
+
+    question.saveButton = ui.linkButtonWidget(_("Save session…"), lambda: choose("save"), "StudioCloseQuestionSaveButton")
+    buttons.addWidget(question.saveButton)
+    buttons.addStretch(1)
+    question.cancelButton = qt.QPushButton(_("Cancel"))
+    question.cancelButton.setObjectName("StudioCloseQuestionCancelButton")
+    question.cancelButton.setMinimumHeight(36)
+    ui.setRole(question.cancelButton, "secondary")
+    question.cancelButton.connect("clicked()", lambda: choose("cancel"))
+    buttons.addWidget(question.cancelButton)
+    question.quitButton = qt.QPushButton(_("Quit"))
+    question.quitButton.setObjectName("StudioCloseQuestionQuitButton")
+    question.quitButton.setDefault(True)
+    question.quitButton.setMinimumHeight(36)
+    question.quitButton.setMinimumWidth(96)
+    ui.setRole(question.quitButton, "primary")
+    question.quitButton.connect("clicked()", lambda: choose("quit"))
+    buttons.addWidget(question.quitButton)
+    layout.addLayout(buttons)
+    ui.dialogChrome(dialog, styleSheet=lambda: (
+        f"QLabel#StudioCloseQuestionBody {{ color: {ui.token('text2').name()}; }}"))
+    return question
+
+
+def askCloseQuestion():
+    """``closeQuestionRequested()``: ask the "lesionSaved" exit question in the Studio dialog and set
+    ``SlicerStudioCloseAnswer``. Never raises: on an error the main window shows its standard message box.
+    """
+    mainWindow = slicer.util.mainWindow()
+    if mainWindow is None:
+        return
+    try:
+        question = closeQuestionDialog(str(mainWindow.property(CLOSE_SUMMARY_PROPERTY) or ""), mainWindow)
+        dialog = question.dialog
+        run = getattr(dialog, "exec", None) or dialog.exec_
+        run()
+        mainWindow.setProperty(CLOSE_ANSWER_PROPERTY, question.answer)
+        dialog.deleteLater()
+    except Exception:
+        logging.error(f"Studio: cannot show the quit question:\n{traceback.format_exc()}")
+
+
 def saveLesionForClose(shell=None):
     """"Save lesion…" of the close prompt (``saveRequested()``): the Save lesion dialog. The main window quits only if
     ``SlicerStudioSaveResult`` is "saved"; a cancelled dialog or an error keeps the application open.
@@ -428,6 +501,8 @@ class FirstRun:
         if hasattr(mainWindow, "closeSummaryRequested") and hasattr(mainWindow, "saveRequested"):
             mainWindow.connect("closeSummaryRequested()", computeCloseSummary)
             mainWindow.connect("saveRequested()", self._onSaveRequested)
+            if hasattr(mainWindow, "closeQuestionRequested"):
+                mainWindow.connect("closeQuestionRequested()", askCloseQuestion)
             self._closeConnected = True
         if _disclaimerMessage is not None and not _dontShowDisclaimer():
             self.showDisclaimerLine()
@@ -439,6 +514,8 @@ class FirstRun:
             mainWindow = self.shell.mainWindow
             mainWindow.disconnect("closeSummaryRequested()", computeCloseSummary)
             mainWindow.disconnect("saveRequested()", self._onSaveRequested)
+            if hasattr(mainWindow, "closeQuestionRequested"):
+                mainWindow.disconnect("closeQuestionRequested()", askCloseQuestion)
             self._closeConnected = False
         _clearDisclaimerLine()
 

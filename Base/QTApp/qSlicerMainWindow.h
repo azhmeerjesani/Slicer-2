@@ -211,6 +211,13 @@ signals:
   /// \sa closeSummaryRequested()
   void saveRequested();
 
+  /// Emitted when the application is about to ask the "lesionSaved" exit question (Quit, Save session..., Cancel),
+  /// after the main window property SlicerStudioCloseAnswer is cleared. A handler connected with a direct connection
+  /// may show its own dialog and set the property to "quit", "save" or "cancel"; if it stays empty, the application
+  /// shows a standard message box.
+  /// \sa closeSummaryRequested()
+  void closeQuestionRequested();
+
 protected slots:
   virtual void onModuleLoaded(const QString& moduleName);
   virtual void onModuleAboutToBeUnloaded(const QString& moduleName);
