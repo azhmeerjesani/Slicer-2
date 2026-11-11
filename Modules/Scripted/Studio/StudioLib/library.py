@@ -1152,6 +1152,41 @@ def openScanInDraw(volumeNode, shell=None):
     return lesion
 
 
+def labelMapToLesion(volumeNode):
+    """Turn a label map volume (a mask opened in Classic, or by the Data module) into a lesion: a segmentation named like the
+    volume, whose first segment is "Lesion", bound to the scan of the same grid if there is one. The label map is closed.
+    Return the lesion (None if the conversion failed; the label map stays then).
+    """
+    importer = _importer()
+    lesion = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", volumeNode.GetName())
+    lesion.CreateDefaultDisplayNodes()
+    lesion.GetSegmentation().SetConversionParameter(
+        slicer.vtkSegmentationConverter.GetReferenceImageGeometryParameterName(), importer._volumeGeometry(volumeNode))
+    if not slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(volumeNode, lesion):
+        slicer.mrmlScene.RemoveNode(lesion)
+        return None
+    segmentation = lesion.GetSegmentation()
+    if segmentation.GetNumberOfSegments() == 0:
+        segmentId = segmentation.AddEmptySegment("", importer.LESION_SEGMENT_NAME, importer.LESION_COLOR)
+    else:
+        segmentId = segmentation.GetNthSegmentID(0)
+        segmentation.GetSegment(segmentId).SetName(importer.LESION_SEGMENT_NAME)
+    importer.styleLesionSegment(lesion, segmentId)
+    scan = next((node for node in scanNodes() if importer._referenceGeometryMatches(lesion, node)), None)
+    if scan is not None:
+        lesion.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+    closeNode(volumeNode, confirm=False)
+    return lesion
+
+
+def labelMapInDraw(volumeNode, shell=None):
+    """"Open in Draw" for a label map: it becomes a lesion (``labelMapToLesion()``) that Draw edits."""
+    lesion = labelMapToLesion(volumeNode)
+    if lesion is None:
+        return None
+    return continueInDraw(shell if shell is not None else _shell(), lesion)
+
+
 def continueInDraw(shell=None, segmentationNode=None, volumeNode=None):
     """"Continue in Draw →": edit the lesion that Draw edited (or ``segmentationNode``) on its scan, with the brush armed.
 
@@ -1161,6 +1196,14 @@ def continueInDraw(shell=None, segmentationNode=None, volumeNode=None):
     shell = shell if shell is not None else _shell()
     model = _Model()
     lesion = segmentationNode if segmentationNode is not None else model.currentLesion()
+    if lesion is None and segmentationNode is None:
+        # Masks opened in Classic are label map volumes: they are the lesions that Draw continues
+        for node in model.others:
+            if volumeKind(node) == "labelmap":
+                lesion = labelMapToLesion(node)
+                if lesion is not None:
+                    model = _Model()
+                    break
     if lesion is None:
         if model.scans:
             return openScanInDraw(model.scans[0], shell)
@@ -2499,8 +2542,10 @@ class OpenNowCard(qt.QObject):
 
         if kind != "set":
             addAction(_("Rename…"), "StudioOpenNowRename", lambda: (renameNode(node()), self.refresh()))
-        canDraw = kind == "lesion" or (kind == "volume" and item["volumeKind"] in ("scan", "template"))
-        if kind == "set":
+        canDraw = kind == "lesion" or (kind == "volume" and item["volumeKind"] in ("scan", "template", "labelmap"))
+        if kind == "volume" and item["volumeKind"] == "labelmap":
+            addAction(_("Open in Draw"), "StudioOpenNowOpenInDraw", lambda: labelMapInDraw(node(), _shell()))
+        elif kind == "set":
             addAction(_("Open in Draw"), "StudioOpenNowOpenInDraw", lambda: reviewLoadedSet(_shell()))
         elif kind == "lesion":
             addAction(_("Open in Draw"), "StudioOpenNowOpenInDraw", lambda: continueInDraw(_shell(), node()))

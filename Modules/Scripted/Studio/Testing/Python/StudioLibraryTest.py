@@ -495,6 +495,31 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual((canvas.dropZone.width, canvas.dropZone.height), (library.COLUMN_WIDTH, library.DROP_ZONE_HEIGHT))
         self.assertEqual(canvas.dropFrame.height, defaultFrameHeight)
 
+    def test_classic_label_map_is_a_lesion_in_draw(self):
+        """A mask that Classic opened is a label map volume: Draw continues it as a lesion (not a new empty one), and the
+        row's "Open in Draw" is enabled.
+        """
+        from StudioLib import library
+
+        studioShell = self._applyStudio()
+        scan = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "sub-02_T1w")
+        slicer.util.updateVolumeFromArray(scan, np.zeros((10, 12, 14), np.int16))
+        mask = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "sub-02_lesion")
+        array = np.zeros((10, 12, 14), np.uint8)
+        array[3:6, 4:7, 5:8] = 1
+        slicer.util.updateVolumeFromArray(mask, array)
+        self.assertEqual(library.volumeKind(mask), "labelmap")
+        self.assertEqual(library.lesionNodes(), [])
+        lesion = library.continueInDraw(studioShell)
+        self._pump()
+        self.assertIsNotNone(lesion)
+        self.assertEqual(lesion.GetName(), "sub-02_lesion")
+        self.assertEqual([node.GetName() for node in library.lesionNodes()], ["sub-02_lesion"])
+        self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLLabelMapVolumeNode")), 0)
+        self.assertFalse(library._importer().isSegmentationEmpty(lesion))
+        self.assertTrue(library._sameNode(library.lesionScan(lesion), scan))
+        self.assertEqual(slicer.util.arrayFromSegmentBinaryLabelmap(lesion, lesion.GetSegmentation().GetNthSegmentID(0)).sum(), 3 * 3 * 3)
+
     def test_stray_segmentation_ignored(self):
         """The empty segmentation that the classic Segment Editor creates keeps the empty state; a figure is not data."""
         from StudioLib import library
