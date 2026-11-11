@@ -2165,9 +2165,12 @@ class StudioRegressionTest(unittest.TestCase):
         try:
             logging.getLogger().addHandler(handler)
             try:
-                # The study opens from a folder that cannot be written (os.access says so; the tests run as root)
-                with mock.patch.object(study_ui.StudySession, "_studyWritable", return_value=False):
-                    session = study_ui.createStudy(paths, studioShell, folder=folder)
+                # The study opens from a folder that cannot be written, and stays so (os.access says so; the tests run as
+                # root): a folder found writable again ends the read-only state (test_16bc)
+                notWritable = mock.patch.object(study_ui.StudySession, "_studyWritable", return_value=False)
+                notWritable.start()
+                self.addCleanup(notWritable.stop)
+                session = study_ui.createStudy(paths, studioShell, folder=folder)
                 self.assertIsNotNone(session)
                 self.assertTrue(session.readOnly)
                 self.assertTrue([text for text in toasts if "read-only" in text and "cannot be saved" in text], toasts)
@@ -2273,6 +2276,90 @@ class StudioRegressionTest(unittest.TestCase):
                 self.assertTrue([text for text in shellToasts if "read-only" in text and "ro-clinical.tsv" in text], shellToasts)
                 self.assertFalse([text for text in shellToasts if "Errno" in text or ".tmp" in text], shellToasts)
             self.assertFalse(os.path.exists(os.path.join(folder, ".studio", f"import-{os.getpid()}.tsv")))
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
+    def test_16bc_a_study_made_writable_again_saves_and_stops_saying_read_only(self):
+        """A study folder that was read-only and is made writable again during the session: the session stops calling
+        itself read-only (the top bar), the heartbeat resumes, and importing a table, adding files and the agreement
+        work again without closing and reopening the study. The read-only state stuck for the whole session (BB-1).
+        """
+        import json
+        from unittest import mock
+
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Writable again study")
+        os.makedirs(folder)
+        paths = [os.path.join(folder, f"sub-0{index}_T1w.nii.gz") for index in (1, 2)]
+        for path in paths[:1]:
+            nifti.write_nifti(path, np.zeros(grid.shape, np.uint8), grid.affine)
+        table = os.path.join(self.directory, "writable-again.tsv")
+        with open(table, "w", encoding="utf-8") as f:
+            f.write("participant_id\tscore\nsub-01\t3\n")
+        toasts = []
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: toasts.append(str(text))
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        try:
+            # The folder cannot be written when the study opens (os.access says so; the tests run as root)
+            with mock.patch.object(study_ui.StudySession, "_studyWritable", return_value=False):
+                session = study_ui.createStudy(paths[:1], studioShell, folder=folder)
+                self.assertTrue(session.readOnly)
+                with self.assertRaises(study_ui.ReadOnlyStudyError):
+                    session.importTable(table)
+            sessionFile = session._sessionFile()
+            if os.path.exists(sessionFile):
+                os.remove(sessionFile)
+            # Write access is given back: the next heartbeat is written (two-window detection works again)
+            session._writeHeartbeat()
+            self.assertFalse(session.readOnly, "the session stayed read-only after the folder became writable")
+            self.assertTrue(os.path.exists(sessionFile), "the heartbeat stopped for good")
+            with open(sessionFile, encoding="utf-8") as f:
+                self.assertGreater(json.load(f)["heartbeat_epoch"], 0)
+
+            # Read-only again through a failed save, then writable again: a successful save says so
+            error = PermissionError(13, "Permission denied", os.path.join(folder, ".studio", "participants.lock"))
+            session.study.set("sub-01", notes="changed")
+            with mock.patch.object(session.study, "save", side_effect=error):
+                self.assertFalse(session.flush())
+            self.assertTrue(session.readOnly)
+            self.assertIn("Read-only", session.saveStatus()[0])
+            session.study.set("sub-01", notes="changed again")
+            self.assertTrue(session.flush())
+            self.assertFalse(session.readOnly)
+            self.assertEqual(session.saveStatus()[0], "All changes saved")
+
+            # Read-only again, then writable again: Import table, Add files and Compute agreement are not refused
+            with mock.patch.object(session.study, "save", side_effect=error):
+                session.study.set("sub-01", notes="third")
+                self.assertFalse(session.flush())
+            self.assertTrue(session.readOnly)
+            session._requireWritable("The agreement was not computed.")  # raised ReadOnlyStudyError before the fix
+            self.assertFalse(session.readOnly)
+            session.flush()
+            with mock.patch.object(session.study, "save", side_effect=error):
+                session.study.set("sub-01", notes="fourth")
+                self.assertFalse(session.flush())
+            self.assertTrue(session.readOnly)
+            session.importTable(table)
+            self.assertFalse(session.readOnly)
+            nifti.write_nifti(paths[1], np.zeros(grid.shape, np.uint8), grid.affine)
+            session.addFiles(paths[1:])
+            self.assertIn("sub-02", session.study)
+            self.assertFalse([text for text in toasts if "not imported" in text or "not added" in text], toasts)
         finally:
             study_ui.closeStudy()
             studioShell.dispose()

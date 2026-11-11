@@ -2559,9 +2559,25 @@ class StudySession:
         """A change that needs the study folder is refused with a plain message (``ReadOnlyStudyError``) when the folder
         cannot be written, before anything is written (no temporary file name, no errno).
         """
-        if self.readOnly or not self._studyWritable():
-            self.readOnly = True
-            raise ReadOnlyStudyError(f"{self.readOnlyText()} {notDone}")
+        if self._studyWritable():
+            self._clearReadOnly()  # the folder can be written again (write access was given back): the change is done
+            return
+        self.readOnly = True
+        raise ReadOnlyStudyError(f"{self.readOnlyText()} {notDone}")
+
+    def _clearReadOnly(self):
+        """The study folder can be written again (write access was given back during the session): the session saves,
+        the top bar stops saying "Read-only", and imports, added files, agreement and the heartbeat work again.
+
+        Called only once the folder was found writable (``_studyWritable``) or a write succeeded. The read-only notice is
+        not shown again if the folder becomes read-only again (the top bar says so): a folder whose subfolders stay
+        read-only would otherwise repeat it after every heartbeat.
+        """
+        if not self.readOnly:
+            return
+        self.readOnly = False
+        logging.info(f"Studio: the study {self.study.path} can be written again: changes are saved")
+        _notifySaved(self)
 
     def readOnlyText(self):
         return _("The study {name} is read-only: you can look at it and trace, but changes cannot be saved. Ask for write access, "
@@ -2586,7 +2602,9 @@ class StudySession:
         if not self._checkFolder(sayOnce=not closed):
             return
         if self.readOnly:
-            return  # nothing can be written (said once when the study opened)
+            if not self._studyWritable():
+                return  # nothing can be written (said once when the study opened)
+            self._clearReadOnly()  # write access was given back: the heartbeat (and two-window detection) resumes
         other = _liveOtherSession(self._readSessionRecord())
         if closed:
             if other is not None:
@@ -2681,6 +2699,8 @@ class StudySession:
             return False
         self._lastSaveTime = time.time()
         self._lastSaveError = None
+        if self.readOnly and self._studyWritable():
+            self._clearReadOnly()  # the save worked: the folder can be written again
         _notifySaved(self)  # the view drew "Saving…" while the save timer was active
         return True
 
