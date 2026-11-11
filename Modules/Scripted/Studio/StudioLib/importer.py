@@ -4604,6 +4604,10 @@ def _routeFigure(path, shell, result, figureNode=None):
         result.alreadyOpen.append(figureNode)
     loaded = figureNode is None
     try:
+        if figureNode is not None:
+            # Tag a figure that is already loaded first: untagged it is itself the background of the views, so no
+            # template would be started for it
+            figureNode.SetAttribute(space.ROLE_ATTRIBUTE, space.ROLE_FIGURE)
         if _backgroundVolume() is None:
             # Something to draw on: the template (an existing template lesion is reused)
             startOnTemplate(shell=shell)

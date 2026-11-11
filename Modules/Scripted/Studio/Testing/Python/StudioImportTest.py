@@ -930,6 +930,35 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(self._background("Yellow").GetID(), second.GetID())
         self.assertEqual(self._background("Red").GetName(), "sub-09_T1w")
 
+    def test_figure_colour_volume_file_starts_template(self):
+        """A colour picture stored as a one-slice volume file (NRRD) that a route of 3D Slicer loaded into every view
+        still gets the template on the left to draw on, like a PNG figure (it is not itself the background).
+        """
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        path = os.path.join(self.directory, "fig_rgb2d.nrrd")
+        pixels = np.random.RandomState(3).randint(0, 255, size=(120, 160, 3)).astype(np.uint8)
+        header = (
+            "NRRD0004\ntype: uchar\ndimension: 4\nsizes: 3 160 120 1\nkinds: vector domain domain domain\n"
+            "encoding: raw\nspace: left-posterior-superior\nspace directions: none (1,0,0) (0,1,0) (0,0,1)\n"
+            "space origin: (0,0,0)\n\n"
+        )
+        with open(path, "wb") as handle:
+            handle.write(header.encode("ascii") + pixels.tobytes())
+        loaded = slicer.util.loadVolume(path)  # shown as the background of every view, untagged
+        self.assertIsNotNone(loaded)
+        self.assertEqual(importer._referenceKind(loaded), "figure")
+        result = importer.LoadResult()
+        importer._routeReferenceNode(loaded, studioShell, result)
+        self._pump(8)
+        self.assertEqual(loaded.GetAttribute("Studio.Role"), "figure")
+        template = self._background("Red")
+        self.assertIsNotNone(template)
+        self.assertEqual(template.GetAttribute("Studio.Role"), "template")
+        self.assertEqual(self._background("Yellow").GetID(), loaded.GetID())
+        self.assertGreaterEqual(len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")), 1)
+
     def test_figure_keeps_scan_view_slice_and_zoom(self):
         """Opening a figure (Compare layout) leaves the slice and zoom the user was on in the scan view (USABILITY P4):
         only the figure is fitted, in Yellow.
