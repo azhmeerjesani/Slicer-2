@@ -673,6 +673,21 @@ class S3BuildTest(TutorialsTestBase):
         self.assertTrue(all(item["resource"]["checksum"] == fetch.RECORD_ON_FIRST_DOWNLOAD for item in candidates))
         self.assertEqual(self.build(catalog, "arc_like")["subjects"], 6)
 
+    def test_s3_resource_titles_are_plain_file_names(self):
+        catalog = self.s3_catalog(scans=True)
+        entry = catalog["entries"][0]
+        candidates, _warnings = tutorials.s3_candidates(entry, self.cache, None, None)
+        self.assertTrue(candidates)
+        for item in candidates:
+            self.assertEqual(item["resource"]["title"], item["name"])
+            self.assertIn(item["resource"]["id"].split(":", 1)[1].split(":")[0], ("mask",))
+            if item["scan"]:
+                self.assertEqual(item["scan"]["resource"]["title"], item["scan"]["rel"].rsplit("/", 1)[-1])
+        table = tutorials.table_resource(entry)
+        self.assertEqual(table["title"], entry["source"]["table"].rsplit("/", 1)[-1])
+        for resource in [item["resource"] for item in candidates] + [table]:
+            self.assertNotRegex(resource["title"], r"^(mask|scan|table):")
+
     def test_changed_source_is_reported(self):
         catalog = self.s3_catalog(scans=False)
         catalog["entries"][0]["source"]["expected"]["masks"] = 9

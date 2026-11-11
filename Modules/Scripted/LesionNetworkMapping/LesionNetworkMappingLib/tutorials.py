@@ -403,8 +403,9 @@ def _s3_listing(entry, cache, offline, session):
 # Candidates: the subjects a source offers
 
 
-def _resource(entry, name, urls, size=None, md5=None, kind="tutorial"):
-    resource = {"id": f"{entry['id']}:{name}", "title": name, "kind": kind, "urls": list(urls), "filename": name, "licence": entry["licence"]}
+def _resource(entry, name, urls, size=None, md5=None, kind="tutorial", title=None):
+    # The id keeps the internal key (mask:..., table:...); the title is what error messages show the user.
+    resource = {"id": f"{entry['id']}:{name}", "title": title or name, "kind": kind, "urls": list(urls), "filename": name, "licence": entry["licence"]}
     if size:
         resource["size"] = int(size)
     resource["checksum"] = {"algo": "md5", "value": md5.lower()} if md5 and re.fullmatch(r"[0-9a-fA-F]{32}", md5) else fetch.RECORD_ON_FIRST_DOWNLOAD
@@ -446,7 +447,7 @@ def s3_candidates(entry, cache=None, offline=None, session=None):
         rel = match.group("rel")
         name = rel.rsplit("/", 1)[-1]
         item = {"sid": _label(match.group("sid")), "name": name, "size": size, "rel": rel, "scan": None,
-                "resource": _resource(entry, f"mask:{rel}", [_object_url(source["base"], key)], size, etag if "-" not in etag else None)}
+                "resource": _resource(entry, f"mask:{rel}", [_object_url(source["base"], key)], size, etag if "-" not in etag else None, title=name)}
         item["resource"]["filename"] = name
         if scan_rule.get("replace"):
             scan_rel = rel
@@ -454,7 +455,7 @@ def s3_candidates(entry, cache=None, offline=None, session=None):
                 scan_rel = re.sub(pattern_text, replacement, scan_rel)
             if scan_rel != rel:
                 scan_name = scan_rel.rsplit("/", 1)[-1]
-                scan = _resource(entry, f"scan:{scan_rel}", [_object_url(source["base"], scan_rule.get("root", "") + scan_rel)], entry.get("scan_bytes_each"))
+                scan = _resource(entry, f"scan:{scan_rel}", [_object_url(source["base"], scan_rule.get("root", "") + scan_rel)], entry.get("scan_bytes_each"), title=scan_name)
                 scan["filename"] = scan_name
                 item["scan"] = {"rel": scan_rel, "resource": scan}
         out.append(item)
@@ -577,7 +578,7 @@ def table_resource(entry):
     if source["type"] != "s3":
         return None
     name = source["table"].rsplit("/", 1)[-1]
-    return _resource(entry, f"table:{name}", [_object_url(source["base"], source["table"])], None)
+    return _resource(entry, f"table:{name}", [_object_url(source["base"], source["table"])], None, title=name)
 
 
 # Choosing the subjects
