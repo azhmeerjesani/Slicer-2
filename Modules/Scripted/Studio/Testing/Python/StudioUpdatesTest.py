@@ -1047,6 +1047,28 @@ class StudioUpdatesTest(unittest.TestCase):
         self.assertTrue(callable(calls[0]["action"]))
         self.assertTrue(calls[0]["actionText"])
 
+    def test_RequiredDialogAfterFailedInstallSaysWhy(self):
+        """The toast of a failed install is behind the modal required-update dialog: the dialog itself says why the last
+        attempt failed and offers the log.
+        """
+        updates = self.updates
+        self._publish("1.2.1", required=True)
+        log = os.path.join(self.tempDir, "install.log")
+        service = self._service()
+        service.status = updates.evaluate(updates.fetchManifest(self.feed), "0.9.0")
+        service._failedInstall = ("1.2.1", "the new version cannot be moved in place", log)
+        required = updates.RequiredUpdateDialog(service, slicer.util.mainWindow())
+        self.addCleanup(required.dispose)
+        self.assertTrue(required.statusLabel.isVisibleTo(required.dialog))
+        self.assertIn("1.2.1", required.statusLabel.text)
+        self.assertIn("cannot be moved in place", required.statusLabel.text)
+        self.assertIsNotNone(required.logButton)
+        service._failedInstall = None
+        plain = updates.RequiredUpdateDialog(service, slicer.util.mainWindow())
+        self.addCleanup(plain.dispose)
+        self.assertFalse(plain.statusLabel.isVisibleTo(plain.dialog))
+        self.assertIsNone(plain.logButton)
+
     def test_LinuxFailedInstallRelaunchesKeptVersion(self):
         """Restart now promises a restart: when the helper fails after the application exited, it still starts the kept
         previous version (so the failure message shows at once); when the application never exits it starts nothing.

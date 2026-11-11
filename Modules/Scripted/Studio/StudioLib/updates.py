@@ -1137,6 +1137,7 @@ class UpdateService:
         #: Staged copies of dropped updates, removed by the next download (``_discardPrepared()``)
         self._staleStaging = []
         self._finishedMessage = None
+        self._failedInstall = None  # (version, reason, log) of the last failed install: the required-update dialog says it
         self._finishedLog = None  # the install log of a failed install (the toast's "Show log" action opens it)
         self._startTime = time.monotonic()
         #: How long the startup waited for the check before going on (ms; None until then, or when a required
@@ -2201,6 +2202,7 @@ class UpdateService:
             return None
         updates_install.clearRecord(stateDir)
         self._finishedLog = None
+        self._failedInstall = None
         newVersion = str(record.get("version") or "")
         succeeded = result == "ok" and versionModule.tryParse(newVersion) is not None and versionModule.compare(newVersion, currentVersion()) == 0
         if succeeded:
@@ -2217,6 +2219,7 @@ class UpdateService:
                                                "Details: {log}").format(version=newVersion or "?", reason=reason, current=currentVersion(),
                                                                       log=record.get("log") or ""))
             self._finishedLog = record.get("log") or None
+            self._failedInstall = (newVersion or "?", reason, record.get("log") or None)
         package = record.get("package")
         if package and os.path.isfile(package) and os.path.dirname(os.path.abspath(package)) == os.path.abspath(downloadDirectory()):
             _removeQuietly(package)
@@ -2394,6 +2397,18 @@ class RequiredUpdateDialog:
         self.statusLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
         self.statusLabel.setVisible(False)
         layout.addWidget(self.statusLabel)
+        self.logButton = None
+        failed = getattr(service, "_failedInstall", None)
+        if failed:
+            # The toast of the failed install is behind this modal dialog (its "Show log" cannot be clicked), and
+            # "Update now" would repeat the same install: say why it failed here, with the log
+            version, reason, log = failed
+            self._setStatus(_("The last attempt to install {version} failed: {reason}. Slicer Studio {current} was kept. "
+                              "You can try again, or install it by hand from the download page.").format(
+                                  version=version, reason=reason, current=status.currentVersion), error=True)
+            if log:
+                self.logButton = ui.linkButtonWidget(_("Show log"), lambda: _openLog(log), "StudioRequiredUpdateLogButton")
+                layout.addWidget(self.logButton)
         # Footer (VISUAL 4.7): the link on the left, the single primary button on the right
         buttons = qt.QHBoxLayout()
         buttons.setSpacing(10)
