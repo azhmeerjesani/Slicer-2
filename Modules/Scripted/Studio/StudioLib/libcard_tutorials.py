@@ -409,7 +409,7 @@ class TutorialsDialog:
         self.limitCombo.blockSignals(True)
         self.limitCombo.clear()
         total = entry.get("n_subjects")
-        self.limitCombo.addItem(_("All {n} subjects").format(n=total) if total else _("All subjects"), None)
+        self.limitCombo.addItem((_("All {n} subject") if total == 1 else _("All {n} subjects")).format(n=total) if total else _("All subjects"), None)
         if total is None or total > QUICK_START_SUBJECTS:
             self.limitCombo.addItem(_("The first {n} (quick start)").format(n=QUICK_START_SUBJECTS), QUICK_START_SUBJECTS)
         self.limitCombo.blockSignals(False)
@@ -589,7 +589,7 @@ class TutorialsDialog:
             if stage == "download":
                 have, want = event.get("bytes_done") or 0, event.get("bytes_total") or 0
                 fraction = have / want if want else (done / total if total else 0)
-                text = _("Downloading… {done} of {total} files").format(done=done, total=total)
+                text = (_("Downloading… {done} of {total} file") if total == 1 else _("Downloading… {done} of {total} files")).format(done=done, total=total)
                 if want:
                     text += " · " + _("{have} of {want}").format(have=self.tutorials.human_size(have), want=self.tutorials.human_size(want))
                 self.statusLabel.setText(text)
@@ -621,7 +621,7 @@ class TutorialsDialog:
                 if self._warnings > len(shown):
                     text += "\n" + _("… and {n} more (in the README of the study)").format(n=self._warnings - len(shown))
             self.statusLabel.setText(text)
-            _toast(_("Tutorial study ready · {n} subjects").format(n=subjects), 6000, action=self.openStudy, actionText=_("Open"))
+            _toast((_("Tutorial study ready · {n} subject") if subjects == 1 else _("Tutorial study ready · {n} subjects")).format(n=subjects), 6000, action=self.openStudy, actionText=_("Open"))
         elif job.state == "cancelled":
             self.statusLabel.setText(_("Stopped. Downloaded files are kept; nothing was built."))
         else:

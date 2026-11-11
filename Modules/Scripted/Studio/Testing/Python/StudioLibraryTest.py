@@ -2087,6 +2087,23 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 gap = rowAfter - (top + tutorialsDialog.limitCombo.height)
                 self.assertLessEqual(gap, tutorialsDialog.limitRow.verticalSpacing() + 2, "%s: gap %d" % (entry["id"], gap))
 
+    def test_tutorials_one_subject_or_one_file_texts_are_singular(self):
+        """Tutorial cohorts: a count of one reads "1 file" in the download status and "1 subject" in the toast and the limit combo."""
+        import inspect
+
+        from StudioLib import libcard_tutorials
+
+        tutorialsDialog = libcard_tutorials.TutorialsDialog()
+        self.cleanup.append(tutorialsDialog.dialog.deleteLater)
+        tutorialsDialog._onEvent({"event": "progress", "stage": "download", "done": 0, "total": 1})
+        self.assertIn("0 of 1 file", tutorialsDialog.statusLabel.text)
+        self.assertNotIn("1 files", tutorialsDialog.statusLabel.text)
+        tutorialsDialog._onEvent({"event": "progress", "stage": "download", "done": 1, "total": 3})
+        self.assertIn("1 of 3 files", tutorialsDialog.statusLabel.text)
+        source = inspect.getsource(libcard_tutorials.TutorialsDialog)
+        for singular in ("All {n} subject", "Tutorial study ready · {n} subject"):
+            self.assertIn('_("%s")' % singular, source, singular)
+
     def test_tutorials_delete_downloads_is_disabled_while_downloading(self):
         """Tutorial cohorts: "Delete downloads" is disabled while the cohort downloads (freeCache does nothing then), like the other fields."""
         import types
