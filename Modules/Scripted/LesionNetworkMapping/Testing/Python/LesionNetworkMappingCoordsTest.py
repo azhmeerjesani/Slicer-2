@@ -98,6 +98,20 @@ class ParserTest(CoordsTestCase):
         with self.assertRaisesRegex(ValueError, "Unknown coordinate space"):
             coords.read_csv(self.write("bad.csv", "x,y,z,space\n1,2,3,Colin\n"))
 
+    def test_csv_error_row_is_the_file_line(self):
+        # Blank and comment lines are dropped before parsing and a headerless table has no header line: the message
+        # must still name the line the user sees in the file (it said "row 3" for all of these).
+        with self.assertRaisesRegex(ValueError, "badrow.csv, row 4: "):
+            coords.read_csv(self.write("badrow.csv", "x,y,z\n1,2,3\n\n4,abc,6\n"))
+        with self.assertRaisesRegex(ValueError, "comment_bad.csv, row 4: "):
+            coords.read_csv(self.write("comment_bad.csv", "x,y,z\n1,2,3\n# note\n4,abc,6\n"))
+        with self.assertRaisesRegex(ValueError, "headerless_bad.txt, row 2: "):
+            coords.read_csv(self.write("headerless_bad.txt", "1 2 3\n4 abc 6\n"))
+        with self.assertRaisesRegex(ValueError, "plain_bad.csv, row 3: "):
+            coords.read_csv(self.write("plain_bad.csv", "x,y,z\n1,2,3\n4,abc,6\n"))
+        with self.assertRaisesRegex(ValueError, "wide.csv, row 5 has 4 values for 3 columns"):
+            coords.read_csv(self.write("wide.csv", "# c\nx,y,z\n\n1,2,3\n4,5,6,7\n"))
+
     def test_csv_row_with_more_fields_than_header(self):
         # Decimal commas split each number in two: the row must not be cut to the header and read as other numbers
         # (it was read as (-33, 5, -57), and with a radius column the 25 became the sphere radius).

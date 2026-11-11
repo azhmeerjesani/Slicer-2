@@ -250,6 +250,12 @@ def _sniff_delimiter(text):
     return None  # whitespace
 
 
+class _Row(dict):
+    """A table row (dict of text) that remembers the line of the file it came from (``line``)."""
+
+    line = None
+
+
 def read_table(path):
     """(columns, rows) of a CSV/TSV/whitespace table; columns are lower-case; rows are dicts of text.
 
@@ -260,12 +266,16 @@ def read_table(path):
     """
     text = read_text(path)
     delimiter = _sniff_delimiter(text)
-    lines = [line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+    numbered = [(n, line) for n, line in enumerate(text.splitlines(), start=1) if line.strip() and not line.lstrip().startswith("#")]
+    lines = [line for _n, line in numbered]
     if delimiter is None:
         records = [line.split() for line in lines]
     else:
         records = list(csv.reader(lines, delimiter=delimiter))
-    records = [[cell.strip() for cell in record] for record in records if any(cell.strip() for cell in record)]
+    kept = [(n, [cell.strip() for cell in record]) for (n, _line), record in zip(numbered, records, strict=True)
+            if any(cell.strip() for cell in record)]
+    line_numbers = [n for n, _record in kept]  # file line of each record, so messages name the line the user sees
+    records = [record for _n, record in kept]
     if not records:
         return [], []
     try:
@@ -275,16 +285,18 @@ def read_table(path):
     except ValueError:
         header = [cell.lower() for cell in records[0]]
         body = records[1:]
-    first_row = len(records) - len(body) + 1  # row numbers count the header as row 1, like foci_from_rows
+    body_lines = line_numbers[len(records) - len(body):]
     rows = []
-    for number, record in enumerate(body, start=first_row):
+    for number, record in zip(body_lines, body, strict=True):
         while len(record) > len(header) and not record[-1]:
             record = record[:-1]  # trailing empty fields ("1,2,3,") are harmless
         if len(record) > len(header):
             hint = " Decimal commas? Write numbers with '.' (for example -33.5)." if delimiter == "," else ""
             raise ValueError(f"{os.path.basename(os.fspath(path))}, row {number} has {len(record)} values for {len(header)} columns "
                              f"({', '.join(header)}).{hint}")
-        rows.append(dict(zip(header, record + [""] * (len(header) - len(record)), strict=True)))
+        row = _Row(zip(header, record + [""] * (len(header) - len(record)), strict=True))
+        row.line = number
+        rows.append(row)
     return header, rows
 
 
@@ -301,7 +313,8 @@ def foci_from_rows(columns, rows, default_space="MNI", default_study="study", wh
     if names["radius"] and names["diameter"]:
         raise ValueError(f"{where} has both a radius and a diameter column: keep one, so that the sphere size is explicit")
     foci = []
-    for number, row in enumerate(rows, start=2):
+    for index, row in enumerate(rows, start=2):
+        number = getattr(row, "line", None) or index  # file line when known (read_table), else count after a header
         try:
             x, y, z = (_number(row.get(names[axis])) for axis in ("x", "y", "z"))
             if x is None or y is None or z is None:
