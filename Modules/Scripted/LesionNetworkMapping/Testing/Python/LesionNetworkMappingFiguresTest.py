@@ -501,6 +501,25 @@ class FiguresTest(unittest.TestCase):
         self.assertEqual(rendered, [], "nothing may be rendered for a bad --formats")
         self.assertFalse(os.path.exists(os.path.join(out, "figures")))
 
+    def test_name_validated_before_rendering(self):
+        # An invalid --name was refused only after the whole figure was rendered, without naming the option
+        out = os.path.join(self.tmp, "o-name")
+        map_path = os.path.join(self.tmp, "name-map.nii.gz")
+        nifti.write_nifti(map_path, self.tmap[0], self.affine)
+        rendered = []
+        original = figures.montage
+        figures.montage = lambda *a, **k: rendered.append(1) or original(*a, **k)
+        try:
+            for bad in ("my figure", "-lead", "a/b"):
+                code, events = self._cli(["--preset", "montage", "--map", map_path, "--threshold", "3", "--out", out, "--name", bad, "--formats", "png"])
+                self.assertEqual(code, jobs.EXIT_USAGE, bad)
+                self.assertEqual(events[-1]["code"], "usage")
+                self.assertIn("--name", events[-1]["message"])
+        finally:
+            figures.montage = original
+        self.assertEqual(rendered, [], "nothing may be rendered for a bad --name")
+        self.assertFalse(os.path.exists(os.path.join(out, "figures")))
+
     def test_columns_and_per_page_validated(self):
         # --columns -2 wrote a blank figure, montage --columns -1 failed with "max() iterable argument is empty",
         # and --per-page 0 silently became 1

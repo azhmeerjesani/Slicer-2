@@ -2550,6 +2550,12 @@ def main(argv=None, cancel=None):
         )
     if not formats:
         raise jobs.JobError(f"Give at least one format in --formats ({', '.join(FORMATS)})", code="usage", exit_code=jobs.EXIT_USAGE)
+    if not _NAME_PATTERN.match(name or ""):
+        # Also refused at once: write_figure checks the name too, but only after the whole figure has been rendered
+        raise jobs.JobError(
+            f"--name may use letters, digits, '.', '_' and '-' and must start with a letter or digit: {name!r}",
+            code="usage", exit_code=jobs.EXIT_USAGE,
+        )
     # An explicit --font that is not a file is refused (Fonts() alone would silently use Pillow's font, which is
     # only the right fallback when no font was asked for)
     if args.font is not None and not os.path.isfile(args.font):
