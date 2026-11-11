@@ -1073,6 +1073,11 @@ def statistics_section(records, used):
         found = True
         used.update(("winkler2014", "benjamini1995"))
         section.paragraph(slnm_paragraph(data, run_id))
+    if records.done_runs("calibration"):
+        from . import calibrate  # numpy: imported only when a calibration was run
+
+        for run_id, data in reversed(calibrate.finished_records(records.root, records.runs)):
+            section.paragraph(calibration_paragraph(data, run_id, calibrate.rate_text))
     for kind in [*STATISTICS_KINDS[3:], *sorted({r.get("kind") for r in records.runs.values()} - set(STATISTICS_KINDS) - {"map", "cohortmaps", "reference", "preflight", "figure", "report", "export", "normalization", "pipeline", "fastindex", "calibration", "parity", None})]:
         for record in records.done_runs(kind):
             if kind == "robustness" and records.overwritten(record):
@@ -1330,6 +1335,33 @@ def slnm_paragraph(data, run_id=None):
     if controls:
         text += f" Control-score maps: {len(controls)}, compared with partial spatial r given [μC_r, PC1]."
     return text
+
+
+def calibration_paragraph(data, run_id=None, rate_text=None):
+    """Methods text of a calibration.json record (pipeline calibration, L-48); ``rate_text`` formats a rate with its CI."""
+    rate_text = rate_text or (lambda summary: _number((summary or {}).get("rate")) or NOT_RECORDED)
+    design = data.get("design") or {}
+    text = (
+        f"Pipeline calibration (run {run_id or data.get('run_id') or NOT_RECORDED}): the configured analysis "
+        f"({_or_nr(design.get('label'))}, test {_or_nr(design.get('test'))}, n = {_or_nr(design.get('n'))}, permutation {_or_nr(design.get('permute'))}) was run again on synthetic data"
+    )
+    fwer = data.get("fwer") or {}
+    if fwer.get("fwe"):
+        text += (
+            f". Empirical family-wise error rate: {_or_nr(fwer.get('k'))} null datasets ({fwer.get('null_source_text') or NOT_RECORDED}), "
+            f"{_or_nr(fwer.get('inner_perm'))} permutations each, seed {_or_nr(fwer.get('seed'))}; the fraction with any voxelwise max-statistic FWE-significant voxel "
+            f"was {rate_text(fwer['fwe'])} at alpha {_number(fwer.get('alpha')) or NOT_RECORDED} ({fwer.get('level') or NOT_RECORDED})"
+        )
+        if fwer.get("fdr"):
+            text += f"; BH-FDR: {rate_text(fwer['fdr'])}"
+    else:
+        text += f". Empirical family-wise error rate: not computed ({fwer.get('reason') or NOT_RECORDED})"
+    planted = data.get("planted") or {}
+    effects = planted.get("effects") or []
+    if effects:
+        powers = "; ".join(f"beta = {_number(effect.get('beta'))}: {rate_text(effect.get('power'))}" for effect in effects)
+        text += f". Planted-network recovery ({_or_nr(planted.get('n_sims'))} simulations per effect), power (any FWE voxel in the target): {powers}"
+    return text + "."
 
 
 def thresholds_section(records):

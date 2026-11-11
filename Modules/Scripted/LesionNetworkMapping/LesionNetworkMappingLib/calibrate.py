@@ -817,31 +817,75 @@ def estimate_seconds(n, n_voxels, p=6, k=DEFAULT_K, inner_perm=DEFAULT_INNER_PER
 # Checklist
 
 
-def latest_record(root, run_records=None, design=None):
-    """(run id, calibration.json record with absolute paths) of the newest finished calibration of a run root, or (None, None).
+def finished_records(root, run_records=None):
+    """[(run id, calibration.json record with absolute paths)] of the finished calibrations of a run root, newest first.
 
-    With ``design`` (a ``_design_info`` dict or a ``design.Design``), only a calibration of that design counts.
     The record in a run's folder must be that run's own finished record: a folder calibrated again holds the newer
     run's record, so an older run whose record was replaced does not count.
     """
+    out = []
     for record in reversed(runs.list_runs(root, kind="calibration", status="done", runs=run_records)):
         folder = runs.run_dir(root, record)
         data = read_record(os.path.join(folder, CALIBRATION_JSON)) if folder else None
         if data is None or data.get("run_id", record.get("id")) != record.get("id") or data.get("status", "done") != "done":
             continue
+        out.append((record.get("id"), data))
+    return out
+
+
+def latest_record(root, run_records=None, design=None):
+    """(run id, calibration.json record with absolute paths) of the newest finished calibration of a run root, or (None, None).
+
+    With ``design`` (a ``_design_info`` dict or a ``design.Design``), only a calibration of that design counts.
+    """
+    for run_id, data in finished_records(root, run_records):
         if design is None or matches_design(data, design):
-            return record.get("id"), data
+            return run_id, data
     return None, None
 
 
-def checklist_evidence(root, run_records=None, design=None):
-    """(status, value, evidence) of the newest calibration for the reporting checklist (item F8, design and
-    correction): "done" when the empirical FWER is consistent with alpha, "flagged" when it is inflated or the
-    calibration was partial, "not_run" without a calibration (of ``design`` when it is given).
+def group_design(data, kind="glm"):
+    """The design identity fields (:data:`DESIGN_IDENTITY`) that a group record stores: glm.json (``kind`` "glm") or
+    slnm.json ("slnm"). Fields a record does not store are left out, so the result is a partial identity.
     """
-    run_id, data = latest_record(root, run_records, design)
-    if data is None:
-        return "not_run", "no pipeline calibration", []
+    data = data or {}
+    permutation = data.get("permutation") or {}
+    inputs = data.get("inputs") or {}
+    out = {}
+    if kind == "slnm":
+        out["test"] = "continuous"
+        if "method" in data:
+            out["method"] = data["method"]
+    elif "test" in data:
+        out["test"] = data["test"]
+    for key in ("design_type", "n", "covariates"):
+        if key in data:
+            out[key] = data[key]
+    contrast = data.get("contrast")
+    if kind != "slnm" and isinstance(contrast, dict) and "spec" in contrast:
+        out["contrast"] = contrast["spec"]
+    if "scheme" in permutation:
+        out["permute"] = permutation["scheme"]
+    for key in ("exchange", "block_column"):
+        if key in permutation:
+            out[key] = permutation[key]
+    if "input" in inputs:
+        out["input"] = inputs["input"]
+    return json.loads(json.dumps(out, sort_keys=True, default=str))
+
+
+def matches_group(record, data, kind="glm"):
+    """True when a calibration record was computed for the design of a group record (glm.json or slnm.json, see
+    :func:`group_design`). Only the fields both store are compared; a record without a design cannot be compared and
+    counts as matching.
+    """
+    if not (record or {}).get("design"):
+        return True
+    identity = design_identity(record["design"])
+    return all(identity.get(key) == value for key, value in group_design(data, kind).items())
+
+
+def _evidence(run_id, data):
     fwer = data.get("fwer") or {}
     parts = []
     status = "done"
@@ -857,6 +901,34 @@ def checklist_evidence(root, run_records=None, design=None):
     for effect in planted.get("effects") or []:
         parts.append(f"power at beta={effect['beta']:g}: {rate_text(effect['power'])}")
     return status, "; ".join(parts), [run_id] if run_id else []
+
+
+def checklist_evidence(root, run_records=None, design=None):
+    """(status, value, evidence) of the newest calibration for the reporting checklist (item F8, design and
+    correction): "done" when the empirical FWER is consistent with alpha, "flagged" when it is inflated or the
+    calibration was partial, "not_run" without a calibration (of ``design`` when it is given).
+    """
+    run_id, data = latest_record(root, run_records, design)
+    if data is None:
+        return "not_run", "no pipeline calibration", []
+    return _evidence(run_id, data)
+
+
+def group_checklist_evidence(root, groups, run_records=None):
+    """(status, value, evidence) of the calibration of a run root's group analyses for checklist item F8, or None
+    without a finished calibration.
+
+    :param groups: [(kind "glm" | "slnm", glm.json or slnm.json record)] of the group analyses.
+    The newest calibration of the design of one of the analyses counts (the newest calibration when there is no
+    analysis); when every calibration was run for another design, it is "flagged" as out of date.
+    """
+    found = finished_records(root, run_records)
+    if not found:
+        return None
+    for run_id, data in found:
+        if not groups or any(matches_group(data, group, kind) for kind, group in groups):
+            return _evidence(run_id, data)
+    return "flagged", "out of date (calibrated for another design than the group analyses; calibrate this analysis again)", [found[0][0]]
 
 
 # Files

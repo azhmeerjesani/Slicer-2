@@ -356,6 +356,63 @@ class CommandLineTest(_CalibrateTestCase):
         calibrate.write_record(os.path.join(out, calibrate.CALIBRATION_JSON), stub)
         self.assertEqual(calibrate.checklist_evidence(study.path)[0], "not_run")
 
+    def test_checklist_battery_and_methods_carry_the_calibration(self):
+        """Checklist item F8, the Specificity battery dot, checklist.md and the methods include the calibration of the
+        group analysis (bug bash BB-1 calibration-evidence-missing-from-checklist-battery-report-methods, L-48).
+        """
+        from LesionNetworkMappingLib import checklist, methods
+
+        study = self.make_study(16, 16)
+        Y = _maps(self.rng, len(study.subject_ids), self.degree, self.networks)
+        maps_tsv = self.write_maps(study, Y)
+        design_path = designlib.DesignSpec(test="two_group", levels=["case", "control"], inference={"n_perm": 1000}).save(self.path("design.json"))
+        common = ["--maps", maps_tsv, "--participants", os.path.join(study.path, "participants.tsv"), "--design", design_path, "--mask", self.path("mask.nii.gz")]
+        glm_out = self.path("study", "derivatives", "lnm", "glm", "caseVsControl")
+        process = subprocess.run([sys.executable, "-m", "LesionNetworkMappingLib.glm", *common, "--out", glm_out], cwd=MODULE_DIR, env=_env(), capture_output=True, text=True, timeout=600, check=False)
+        self.assertEqual(process.returncode, 0, process.stderr[-2000:])
+        out = self.path("study", "derivatives", "lnm", "calibration", "caseVsControl")
+        code, events, stderr = self.run_cli(*common, "--out", out, "--k", "10", "--inner-perm", "100", "--no-planted")
+        self.assertEqual(code, 0, (stderr, events[-3:]))
+        calibration_id = runs.latest(study.path, "calibration", status="done")["id"]
+        glm_id = runs.latest(study.path, "glm", status="done")["id"]
+        record_path = os.path.join(out, calibrate.CALIBRATION_JSON)
+        record = calibrate.read_record(record_path)
+        with open(os.path.join(glm_out, "glm.json"), encoding="utf-8") as f:
+            glm_record = json.load(f)
+        self.assertTrue(calibrate.matches_group(record, glm_record, "glm"))  # the same design, read from both records
+
+        def f8():
+            items = checklist.evaluate(study.path)
+            dot = next(dot for dot in checklist.battery(study.path, items=items) if dot["id"] == "specificity")
+            return next(item for item in items if item["id"] == "F8"), dot, checklist.checklist_markdown(items, checklist.battery(study.path, items=items))
+
+        item, dot, markdown = f8()
+        self.assertIn("calibration: empirical FWER", item["value"])
+        self.assertEqual(item["evidence"], [glm_id, calibration_id])
+        self.assertIn("empirical FWER", dot["text"])
+        self.assertIn("calibration: empirical FWER", markdown)
+        text = methods.render(methods.methods_sections(study.path), fmt="txt")
+        self.assertIn(f"Pipeline calibration (run {calibration_id})", text)
+        self.assertIn("Empirical family-wise error rate: 10 null datasets", text)
+        # An inflated FWER (the one-sample error class) flags the item and turns the battery dot amber
+        raw = calibrate.read_record(record_path)
+        raw["fwer"]["level"] = "inflated"
+        calibrate.write_record(record_path, raw)
+        item, dot, markdown = f8()
+        self.assertEqual(item["status"], checklist.FLAGGED)
+        self.assertIn("(inflated)", item["value"])
+        self.assertEqual(dot["colour"], checklist.AMBER)
+        # A calibration of another design (another covariate set) is out of date for the group analysis
+        raw["fwer"]["level"] = "consistent"
+        raw["design"]["covariates"] = []
+        calibrate.write_record(record_path, raw)
+        self.assertFalse(calibrate.matches_group(calibrate.read_record(record_path), glm_record, "glm"))
+        item, dot, _ = f8()
+        self.assertEqual(item["status"], checklist.FLAGGED)
+        self.assertIn("calibration: out of date", item["value"])
+        self.assertIn(calibration_id, item["evidence"])
+        self.assertEqual(dot["colour"], checklist.AMBER)
+
     def test_blocked_and_usage(self):
         study = self.make_study(4, 0)
         Y = _maps(self.rng, 4, self.degree, self.networks)

@@ -1,9 +1,10 @@
-"""Reporting checklist (15 items) and battery strip (6 dots) derived from the run registry and files (standard library only).
+"""Reporting checklist (15 items) and battery strip (6 dots) derived from the run registry and files (standard library only; the calibration evidence of item F8 uses calibrate).
 
 Addendum §3.11 and the reviewer checklist of the 2026 debate (research notes, validation §8). Every
 item is evaluated only from what was run and written: the study (``participants.tsv``, ``study.json``),
 the run registry (``derivatives/lnm/runs.jsonl``) and the files of the runs (see
-:class:`.methods.Records`). Each evaluation is a dict::
+:class:`.methods.Records`). Item F8 also reads the newest pipeline calibration (``calibration.json``,
+:func:`.calibrate.group_checklist_evidence`), imported only when a calibration was run. Each evaluation is a dict::
 
     {"id": "A1", "number": 1, "title", "status": "done" | "not_run" | "na" | "flagged",
      "value": short text, "evidence": [run ids, or "file:<path relative to the root>"]}
@@ -194,10 +195,25 @@ def _e7_overlap_null(records):
     return NOT_RUN, "no overlap or null run", []
 
 
+def _calibration(records, groups):
+    """(status, value, evidence) of the pipeline calibration of the group analyses (L-48), or None without one."""
+    if not records.done_runs("calibration"):
+        return None
+    from . import calibrate  # numpy: imported only when a calibration was run
+
+    return calibrate.group_checklist_evidence(records.root, groups, run_records=records.runs)
+
+
 def _f8_design(records):
-    groups = records.group_records("glm.json", "glm") + records.group_records("slnm.json", "slnm")
+    glm_records = records.group_records("glm.json", "glm")
+    slnm_records = records.group_records("slnm.json", "slnm")
+    groups = glm_records + slnm_records
+    calibration = _calibration(records, [("glm", data) for _, data in glm_records] + [("slnm", data) for _, data in slnm_records])
     if not groups:
-        return NOT_RUN, "no group analysis", []
+        if calibration is None:
+            return NOT_RUN, "no group analysis", []
+        status, value, evidence = calibration
+        return (FLAGGED if status == FLAGGED else NOT_RUN), "no group analysis; calibration: " + value, evidence
     flags = []
     for run_id, data in groups:
         label = run_id or "analysis"
@@ -211,6 +227,13 @@ def _f8_design(records):
             flags.append(f"{label}: {len(data['warnings'])} design warning(s)")
     evidence = [run_id for run_id, _ in groups if run_id]
     value = f"{len(groups)} group analysis(es); permutation inference with FWE (primary) and FDR"
+    if calibration is not None:
+        status, text, calibration_evidence = calibration
+        evidence += calibration_evidence
+        if status == FLAGGED:
+            flags.append("calibration: " + text)
+        else:
+            value += "; calibration: " + text
     return (FLAGGED, value + "; " + "; ".join(flags), evidence) if flags else (DONE, value, evidence)
 
 
