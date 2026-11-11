@@ -1106,6 +1106,23 @@ class FiguresTest(unittest.TestCase):
         code, events = self._cli(base + ["--out", os.path.join(self.tmp, "o-new", "deeper")])  # a missing folder is still created
         self.assertEqual(code, 0)
 
+    def test_study_that_is_not_a_study_folder_is_refused_and_not_created(self):
+        map_path = os.path.join(self.tmp, "typo-map.nii.gz")
+        nifti.write_nifti(map_path, self.tmap[0], self.affine)
+        base = ["--preset", "montage", "--map", map_path, "--threshold", "3", "--slices", "A 0", "--width-mm", "89", "--dpi", "150", "--formats", "png"]
+        plain = os.path.join(self.tmp, "plain-folder")
+        os.makedirs(plain)
+        missing = os.path.join(self.tmp, "reel", "study")
+        for bad in (missing, plain):
+            for extra in ([], ["--out", os.path.join(self.tmp, "o-typo")]):
+                code, events = self._cli(base + ["--study", bad] + extra)
+                self.assertNotEqual(code, 0, bad)
+                self.assertEqual(events[-1]["code"], "input")
+                self.assertIn("--study", events[-1]["message"])
+                self.assertIn(bad, events[-1]["message"])
+        self.assertFalse(os.path.exists(os.path.dirname(missing)), "a mistyped --study must not be created")
+        self.assertFalse(os.path.exists(os.path.join(plain, "derivatives")))
+
     def test_watermark_for(self):
         study = os.path.join(self.tmp, "study")
         os.makedirs(study)

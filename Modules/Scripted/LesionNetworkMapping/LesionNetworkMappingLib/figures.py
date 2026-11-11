@@ -2523,6 +2523,9 @@ def main(argv=None, cancel=None):
         if os.path.exists(blocker) and not os.path.isdir(blocker):
             where = "is a file, not a folder" if blocker == os.path.abspath(args.out) else f"lies under {blocker}, which is a file, not a folder"
             raise jobs.JobError(f"--out {args.out} {where}; give a folder for the figures", code="input")
+    if args.study is not None and not os.path.isfile(os.path.join(args.study, "study.json")):
+        # A mistyped --study (or one that does not exist) used to be created, with a run registry, as a stray folder
+        raise jobs.JobError(f"--study {args.study} is not a study folder (no study.json there); check the path", code="input")
     out_root = args.out or os.path.join(args.study, "derivatives", "lnm")
     run_root = args.run_root or args.study or _find_study(out_root) or out_root
     name = args.name or args.preset
