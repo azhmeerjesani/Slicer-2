@@ -1997,6 +1997,22 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 gap = rowAfter - (top + tutorialsDialog.limitCombo.height)
                 self.assertLessEqual(gap, tutorialsDialog.limitRow.verticalSpacing() + 2, "%s: gap %d" % (entry["id"], gap))
 
+    def test_tutorials_delete_downloads_is_disabled_while_downloading(self):
+        """Tutorial cohorts: "Delete downloads" is disabled while the cohort downloads (freeCache does nothing then), like the other fields."""
+        import types
+
+        from StudioLib import libcard_tutorials
+
+        tutorialsDialog = libcard_tutorials.TutorialsDialog()
+        self.cleanup.append(tutorialsDialog.dialog.deleteLater)
+        tutorialsDialog.select("joutsa2022_addiction")
+        tutorialsDialog.job = types.SimpleNamespace(isFinished=lambda: False)
+        tutorialsDialog._updateButtons()
+        self.assertFalse(tutorialsDialog.cacheButton.isEnabled())
+        tutorialsDialog.job = types.SimpleNamespace(isFinished=lambda: True)
+        tutorialsDialog._updateButtons()
+        self.assertTrue(tutorialsDialog.cacheButton.isEnabled())
+
     def test_tutorials_relative_or_tilde_folder_never_builds_inside_the_application(self):
         """Tutorial cohorts: "~/name" is expanded to the home folder and a relative folder is refused, for the new study and for
         the downloaded folder. The build job runs in the module folder, so both were built inside the application before.

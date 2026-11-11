@@ -504,7 +504,7 @@ class TutorialsDialog:
         self.openButton.setVisible(built)
         self.stopButton.setVisible(busy)
         self.closeButton.setText(_("Hide") if busy else _("Close"))
-        for widget in (self.listWidget, self.limitCombo, self.scansCheck, self.folderEdit, self.folderBrowse, self.sourceEdit, self.sourceBrowse):
+        for widget in (self.listWidget, self.limitCombo, self.scansCheck, self.folderEdit, self.folderBrowse, self.sourceEdit, self.sourceBrowse, self.cacheButton):
             widget.setEnabled(not busy)
 
     # Actions
