@@ -52,6 +52,28 @@ class SubjectsTextFollowsConnectomeUITest(unittest.TestCase):
             if node is not None and old is not None:
                 node.subjectsMode = old
 
+    def test_preview_label_states_all_subjects_on_a_small_connectome(self):
+        """Preview size 100 on a 5-subject connectome runs all 5: the line must not say N=100 (BB-1)."""
+        w = slicer.modules.LesionNetworkMappingWidget
+        node = w._parameterNode
+        if node is None:
+            self.skipTest("no parameter node")
+        old = (node.subjectsMode, node.previewN)
+        try:
+            node.subjectsMode = "preview"
+            node.previewN = 100
+            w._selectConnectome(self.paths[5])
+            w._showSubjectsText()
+            self.assertEqual(w.plannedN(), 5)
+            self.assertNotIn("100 random", w.subjectsLabel.text)
+            self.assertIn("All 5 subjects", w.subjectsLabel.text)
+            node.previewN = 3
+            w._showSubjectsText()
+            self.assertIn("N=3 random", w.subjectsLabel.text)
+        finally:
+            node.subjectsMode, node.previewN = old
+            w._showSubjectsText()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4970,8 +4970,11 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         node = self._parameterNode
         if node is None:
             return
-        if node.subjectsMode == "preview":
+        if node.subjectsMode == "preview" and (self.bundle is None or int(node.previewN) < self.bundle.n_subjects):
             self.subjectsLabel.setText(_("Preview · N={n} random subjects, seed {seed}").format(n=node.previewN, seed=node.previewSeed))
+        elif node.subjectsMode == "preview":
+            # The preview size is not below the connectome size: the run maps every subject (see plannedN()).
+            self.subjectsLabel.setText(_("All {n:,} subjects (the preview size {p} is not smaller)").format(n=self.bundle.n_subjects, p=int(node.previewN)))
         elif self.bundle is not None:
             self.subjectsLabel.setText(_("All {n:,} subjects").format(n=self.bundle.n_subjects))
         else:
