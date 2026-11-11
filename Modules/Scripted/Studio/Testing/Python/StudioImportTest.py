@@ -2182,6 +2182,9 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             def currentProject(self):
                 return self.project
 
+            def rootUnwritable(self):
+                return False
+
         service = Service()
         calls = []
         saved = (importer.loadFolder, importer._loadScene, studioProjects.projectsFolder, autosave.instance, qt.QFileDialog.getOpenFileNames)
@@ -2200,6 +2203,10 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 self.assertEqual(result.scenes, [os.path.join(projectFolder, "closed project.mrml")])
                 self.assertFalse(result.nodes())
             self._pump()
+            # The Library caption asks the (stubbed) service too: the stub must answer the whole API it is asked, or the Qt
+            # event filter swallows an AttributeError and logs a traceback while the suite still passes
+            for name in ("currentProject", "rootUnwritable"):
+                self.assertTrue(callable(getattr(service, name, None)), name)
             # Not that project: a mix with a file from elsewhere, a scan opened for its lesion, the open project's own scan
             del calls[:]
             self.assertIsNone(importer._closedProjectHoldingAll([scan, outside], ["volume", "volume"]))
