@@ -9039,6 +9039,27 @@ sys.exit(web.command_local(args))
         self.assertTrue(same(service.project.path, pathA))
         self.assertFalse(service._discardOnClose, "the choice applies to that open only")
 
+    def test_107_move_refuses_a_target_holding_a_file_named_like_a_kind_folder(self):
+        """A target folder holding a FILE named Projects/Studies/LNM was "moved into" as 'Projects 2' etc. and the library
+        showed nothing (BB-1). The move refuses it with a plain message and changes nothing.
+        """
+        from StudioLib import projects
+
+        for kind in (projects.PROJECTS_DIR, projects.STUDIES_DIR, projects.LNM_DIR):
+            oldRoot = os.path.join(self.tempDir, "old-" + kind)
+            newRoot = os.path.join(self.tempDir, "new-" + kind)
+            os.makedirs(os.path.join(oldRoot, kind, "Item"))
+            os.makedirs(newRoot)
+            with open(os.path.join(newRoot, kind), "w") as f:
+                f.write("a file")
+            with self.assertRaises(OSError) as raised:
+                projects.checkMoveTarget(oldRoot, newRoot)
+            self.assertIn(kind, str(raised.exception))
+            with self.assertRaises(OSError):
+                projects.moveContent(oldRoot, newRoot)
+            self.assertEqual(os.listdir(newRoot), [kind])
+            self.assertTrue(os.path.isdir(os.path.join(oldRoot, kind, "Item")))
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk
