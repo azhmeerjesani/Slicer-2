@@ -873,6 +873,10 @@ class CaseSection:
             self._fillLevels(combo, spec)
             if not spec.strict:
                 combo.setEditable(True)
+                # Return must not add the typed text as a new item without data (QComboBox's default InsertAtBottom):
+                # activated() would then write that item's missing data as an empty value. The typed text is written by
+                # editingFinished(), which Return also emits.
+                combo.setInsertPolicy(qt.QComboBox.NoInsert)
                 combo.lineEdit().setPlaceholderText("—")
                 combo.lineEdit().connect("editingFinished()", lambda column=column, combo=combo: self._commitCombo(column, combo, typed=True))
                 self._escFilter(column, combo)

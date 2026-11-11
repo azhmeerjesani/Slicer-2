@@ -8060,3 +8060,52 @@ class StudioRegressionTest(unittest.TestCase):
             volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", scanName)
             segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions_1")
             self.assertEqual(draw.defaultLesionFileName(segmentation, volume), expected)
+
+    def test_95_case_combo_return_writes_the_typed_value(self):
+        """Return in an editable choice field of the Case section (Sex, Handedness, Image quality) with a value that
+        matches no level label cleared the stored value (BB-1): QComboBox's default insert policy added the typed text
+        as an item without data and emitted activated(), which wrote that missing data as n/a. Return now writes the
+        typed value, as Tab does, and the field list does not grow.
+        """
+        from StudioLib import libcard_columns, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        study = self._study([("sub-01", {}, False), ("sub-02", {}, False)])
+        host = None
+        try:
+            session = study_ui.openStudy(study.path, showLibrary=False)
+            self.assertIsNotNone(session)
+            host = qt.QWidget()
+            hostLayout = qt.QVBoxLayout(host)
+            sectionWidget = libcard_columns._createSection(session)
+            section = libcard_columns._sections[sectionWidget]
+            hostLayout.addWidget(sectionWidget)
+            host.resize(306, 900)
+            host.show()
+            section.refresh("sub-01")
+            for button, _container, _columns in section.groups.values():
+                if not button.isChecked():
+                    button.click()
+            slicer.app.processEvents()
+            for column, stored, typed in (("sex", "M", "Q"), ("handedness", "R", "mixed"), ("image_quality", "1", "4"), ("sex", "M", "Female")):
+                self.assertTrue(section.setField(column, stored), column)
+                section.refresh("sub-01")
+                combo = section.editors[column]
+                self.assertTrue(combo.isEditable(), column)
+                count = combo.count
+                lineEdit = combo.lineEdit()
+                lineEdit.selectAll()
+                lineEdit.insert(typed)
+                lineEdit.setModified(True)
+                for eventType in (qt.QEvent.KeyPress, qt.QEvent.KeyRelease):
+                    qt.QApplication.sendEvent(lineEdit, qt.QKeyEvent(eventType, qt.Qt.Key_Return, qt.Qt.NoModifier))
+                slicer.app.processEvents()
+                expected = "F" if typed == "Female" else typed
+                self.assertEqual(str(session.study.subject("sub-01").get(column)), expected, f"{column}: Return writes {typed!r}")
+                self.assertEqual(combo.count, count, f"{column}: Return adds no item")
+                section.refresh("sub-01")
+                self.assertEqual(str(session.study.subject("sub-01").get(column)), expected, column)
+        finally:
+            if host is not None:
+                host.deleteLater()
