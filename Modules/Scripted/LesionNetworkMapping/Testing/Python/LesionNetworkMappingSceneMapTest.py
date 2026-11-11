@@ -129,6 +129,28 @@ class LesionNetworkMappingSceneMapTest(unittest.TestCase):
         self.assertEqual(len(widget._peaks), 5, widget._peaks)
         self.assertEqual(widget.peaksTable.rowCount, 5)
 
+    def test_reopened_stopped_partial_map_keeps_its_partial_label_in_result_step_and_chip(self):
+        """A map reopened from the project with LNM.Partial=1 still reads "(partial)" in the Result step and the chip (BB-1)."""
+        widget = self.widget
+        widget.exit()
+        volume = self._sceneMap()
+        volume.SetAttribute("LNM.Partial", "1")
+        volume.SetAttribute("LNM.N", "50")
+        widget.loadedMap = None
+        widget.runOutputs = {}
+        widget._peaks = []
+        widget.initializeParameterNode()
+        widget._parameterNode.resultVolume = volume
+        widget.enter()
+        _pump(300)
+        self.assertTrue(widget.loadedMap.get("partial"))
+        widget._updateSteps()
+        widget._updateStatusChip()
+        summary = str(widget._cardWidgets["result"][1].property("studioStepSummary"))
+        self.assertIn("N = 50 (partial)", summary)
+        if widget._statusChipText is not None:  # the chip exists only under the Studio shell
+            self.assertEqual(widget._statusChipText, "Stopped · N=50 (partial)")
+
     def test_legend_and_export_rule_state_the_threshold_of_the_derived_line(self):
         """An Fz map: the legend and the NIfTI sidecar Rule name the threshold as the derived line does (BB-1), never
         rounded to one decimal ("|Fz| ≥ 0.05", not "≥ 0.1"; a top-10% cut of 0.0x, not "≥ 0.0").

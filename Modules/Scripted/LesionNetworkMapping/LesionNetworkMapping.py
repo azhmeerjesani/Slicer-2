@@ -5118,9 +5118,12 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         if hasResult:
             n = self._resultN() if hasattr(self, "_resultN") else None
             nText = _("N = {n:,}").format(n=n) if n else _("N unknown")
-            if n and self.loadedMap is None and self.runPartial and getattr(self, "runOutputs", None):
+            # A map reopened from the project keeps the flags of the volume (LNM.Partial, "Preview" in its name)
+            if n and ((self.loadedMap is None and self.runPartial and getattr(self, "runOutputs", None))
+                      or (self.loadedMap is not None and self.loadedMap.get("partial"))):
                 nText = _("N = {n:,} (partial)").format(n=n)
-            elif n and self.loadedMap is None and self.runPreviewN and getattr(self, "runOutputs", None):
+            elif n and ((self.loadedMap is None and self.runPreviewN and getattr(self, "runOutputs", None))
+                        or (self.loadedMap is not None and self.loadedMap.get("preview"))):
                 nText = _("N = {n:,} · Preview").format(n=n)
             resultSummary = " · ".join(part for part in (nText, self.currentStatistic(), resultSummary) if part)
         for number, (key, state, summary) in enumerate((("seed", seedState, seedSummary), ("connectome", connectomeState, connectomeSummary),
@@ -6656,7 +6659,12 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                 text, level = (_("Ready") if n and self.bundle is not None else _("No seeds") if not n else _("No connectome")), "neutral"
         elif self.loadedMap is not None:
             n = self.loadedMap.get("n")
-            text, level = (_("Map · N={n:,}").format(n=n) if n else _("Map")), "neutral"
+            if n and self.loadedMap.get("partial"):
+                text, level = _("Stopped · N={n} (partial)").format(n=n), "neutral"
+            elif n and self.loadedMap.get("preview"):
+                text, level = _("Map · Preview N={n}").format(n=n), "neutral"
+            else:
+                text, level = (_("Map · N={n:,}").format(n=n) if n else _("Map")), "neutral"
         elif self.runOutputs and self.runN:
             if self._shownRunFailure() is not None:
                 text, level = _("Run failed · N={n} (partial)").format(n=self.runN), "warn"
