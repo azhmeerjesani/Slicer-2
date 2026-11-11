@@ -1151,6 +1151,9 @@ class Study:
         given = {"levels": levels, "units": units, "description": description}
         changes.update({key: value for key, value in given.items() if value is not None})
         spec = spec.replace(**changes)
+        if levels is None and spec.levels and spec.type not in ("categorical", "ordinal"):
+            # The levels were inferred while the column looked categorical: BIDS Levels belong to categorical columns
+            spec = spec.replace(levels=None)
         entry = schema.dictionary_entry(spec, True, self.dictionary.get(name))
         bids = spec.bids_entry()
         for key, field in (("Levels", "levels"), ("Units", "units"), ("Description", "description")):

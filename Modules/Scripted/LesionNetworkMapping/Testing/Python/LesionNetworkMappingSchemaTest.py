@@ -162,10 +162,21 @@ class SchemaTest(unittest.TestCase):
         with self.assertRaises(KeyError):
             created.set_column_role("nihss", "score")
         created.set_column_role("moca", "score")
+        self.assertNotIn("Levels", created.dictionary["moca"])  # numeric score: no inferred BIDS Levels
         created.save()
         again = Study.open(created.path)
         self.assertEqual(again.score_columns(), [("moca", True)])
         self.assertEqual(again.column_spec("moca").units, "points")
+        # Columns that look categorical (a decimal comma, few distinct words) get no inferred Levels once confirmed numeric or text
+        for index, sid in enumerate(again.subject_ids):
+            again.set(sid, zeta="1,5" if index % 2 else "2", remark="ok" if index % 2 else "dup")
+        self.assertEqual(again.column_spec("zeta").type, "categorical")
+        again.set_column_role("zeta", "score", type="numeric")
+        again.set_column_role("remark", "metadata", type="text")
+        self.assertNotIn("Levels", again.dictionary["zeta"])
+        self.assertNotIn("Levels", again.dictionary["remark"])
+        again.set_column_role("remark", "metadata", type="categorical", levels={"ok": "fine"})
+        self.assertEqual(again.dictionary["remark"]["Levels"], {"ok": "fine"})
 
     def test_participants_json_round_trip(self):
         created = self._cohort()
