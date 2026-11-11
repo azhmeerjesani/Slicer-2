@@ -733,6 +733,45 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         host.hide()
         host.deleteLater()
 
+    def test_failed_load_not_in_opened_from_elsewhere(self):
+        """The IO manager lists a file in RecentlyLoadedFiles even when it could not be loaded: Opened from elsewhere does not."""
+        from StudioLib import importer, library
+
+        broken = os.path.join(self.directory, "broken_T1w.nhdr")
+        with open(os.path.join(self.directory, "broken_T1w.raw"), "wb") as f:
+            f.write(bytes(100))
+        with open(broken, "w") as f:
+            f.write(
+                "NRRD0004\ntype: short\ndimension: 3\nspace: left-posterior-superior\nsizes: 64 64 64\n"
+                "space directions: (1,0,0) (0,1,0) (0,0,1)\nkinds: domain domain domain\nendian: little\nencoding: raw\n"
+                "space origin: (0,0,0)\ndata file: broken_T1w.raw\n",
+            )
+        names = lambda: [os.path.basename(entry.path) for entry in library.recentEntries(limit=50)]
+        shown = []
+        originals = (slicer.util.errorDisplay, slicer.util.warningDisplay)
+        slicer.util.errorDisplay = slicer.util.warningDisplay = lambda text, **kwargs: shown.append(text)
+        self.cleanup.append(lambda: setattr(slicer.util, "errorDisplay", originals[0]))
+        self.cleanup.append(lambda: setattr(slicer.util, "warningDisplay", originals[1]))
+        try:
+            result = importer.handleDrop([broken])
+        finally:
+            slicer.util.errorDisplay, slicer.util.warningDisplay = originals
+        self._pump(6)
+        self.assertTrue(shown and result.errors, "the file must be refused")
+        self.assertTrue(importer.isFailedLoad(broken))
+        self.assertNotIn("broken_T1w.nhdr", names())
+        # Nothing of it stays in the stored list (shared with official installations)
+        settings = qt.QSettings()
+        stored = []
+        for index in range(settings.beginReadArray("RecentlyLoadedFiles/RecentFiles")):
+            settings.setArrayIndex(index)
+            stored.append(os.path.basename(str(dict(settings.value("file") or {}).get("fileName", ""))))
+        settings.endArray()
+        self.assertNotIn("broken_T1w.nhdr", stored)
+        # A later successful load of the same path lists it again
+        importer._noteLoadResult(broken, True)
+        self.assertFalse(importer.isFailedLoad(broken))
+
     def test_recent_folders_first(self):
         """The folders opened in Studio come first as rows that open the folder card again."""
         from StudioLib import importer, library

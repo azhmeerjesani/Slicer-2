@@ -1864,18 +1864,22 @@ def loadFiles(paths, shell=None, pairedLesion=None):
                         restoreSidecarText(segmentationNode, path)
                         result.segmentations.append(segmentationNode)
                     loadedPaths.append(path)
+                    _noteLoadResult(path, True)
                 except RefusedFileError as e:
                     refused.append(path)
+                    _noteLoadResult(path, False)
                     logging.warning(f"Studio: {path} was not opened: {e}")  # planned refusal: no traceback
                     result.errors.append((path, str(e)))
                 except Exception as e:
                     if _isAllocationFailure(e):
                         # a file too large for the memory: planned refusal, plain words (no reader text, no traceback)
                         refused.append(path)
+                        _noteLoadResult(path, False)
                         logging.warning(f"Studio: {path} was not opened: too large for the memory ({str(e)[:200]!r})")
                         result.errors.append((path, _tooLargeMessage(path)))
                         continue
                     logging.error(f"Studio: cannot load {path}:\n{traceback.format_exc()}")
+                    _noteLoadResult(path, False)
                     result.errors.append((path, str(e)))
     _afterLoad(result, shell)
     if shell is not None:
@@ -2711,6 +2715,53 @@ def _jsonSetting(key, default):
     except ValueError:
         return default
     return parsed if isinstance(parsed, type(default)) else default
+
+
+_failedLoadPaths = set()  # real paths of the files that could not be loaded (not listed as recent files)
+
+
+def _failedKey(path):
+    return os.path.normcase(os.path.realpath(str(path)))
+
+
+def isFailedLoad(path):
+    """True when ``path`` could not be loaded in this session (its load failed and no later load succeeded)."""
+    return _failedKey(path) in _failedLoadPaths
+
+
+def _noteLoadResult(path, loaded):
+    """The IO manager lists every file it was asked to load in RecentlyLoadedFiles, even when the load failed. A file
+    that failed is therefore left out of Library > Opened from elsewhere (``isFailedLoad()``) and removed from the stored
+    list (a setting that official installations share; only the entry of this file is dropped, so the list stays valid).
+    """
+    key = _failedKey(path)
+    if loaded:
+        _failedLoadPaths.discard(key)
+        return
+    _failedLoadPaths.add(key)
+    try:
+        settings = qt.QSettings()
+        count = settings.beginReadArray("RecentlyLoadedFiles/RecentFiles")
+        kept = []
+        for index in range(count):
+            settings.setArrayIndex(index)
+            value = settings.value("file")
+            if not value:
+                continue
+            properties = dict(value)
+            name = str(properties.get("fileName", ""))
+            if name and _failedKey(slicer.app.toSlicerHomeAbsolutePath(name)) == key:
+                continue
+            kept.append(value)
+        settings.endArray()
+        if len(kept) != count:
+            settings.beginWriteArray("RecentlyLoadedFiles/RecentFiles", len(kept))
+            for index, value in enumerate(kept):
+                settings.setArrayIndex(index)
+                settings.setValue("file", value)
+            settings.endArray()
+    except Exception:
+        logging.debug("Studio: could not update the recent files after a failed load", exc_info=True)
 
 
 def recentOpenTimes():

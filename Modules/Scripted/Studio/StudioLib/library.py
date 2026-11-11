@@ -537,6 +537,8 @@ def recentEntries(limit=RECENT_ROW_COUNT, outsideRootOnly=False):
             continue
         if projectsFolder and isInternalPath(path, [projectsFolder]):
             continue
+        if _importer().isFailedLoad(path):
+            continue  # the IO manager lists a file whose load failed too: it never opened, so it is not offered again
         if movedProjects and _projectOfPath(path) is not None:
             continue  # a project that Projects lists from the new folder of a move that failed partway (BB-1)
         entry = RecentEntry(properties, action, openedTimes)
