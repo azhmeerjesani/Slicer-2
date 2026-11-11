@@ -6213,6 +6213,14 @@ class LibraryCanvas(qt.QObject):
     def _onProjectsRefreshed(self):
         """The Projects section listed the projects again (a project changed, or the folder was chosen or changed)."""
         self._syncCurrentProject()
+        # Whether a project is attached decides the Close button and the lesion chips (A-09): closing a study re-attaches
+        # the project after the card was drawn without it
+        card = self._currentWork
+        if card is not None and card.widget.isVisible() and _studySession() is None:
+            try:
+                card.refresh()
+            except Exception:
+                logging.error(f"Studio Library: the current work card failed:\n{traceback.format_exc()}")
         self._refreshCaption()
         scheduleTabOrder()
 

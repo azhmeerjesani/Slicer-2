@@ -594,6 +594,31 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
     # Save states
     #
 
+    def test_continue_card_follows_the_project_that_attaches_later(self):
+        """Closing a study re-attaches the open project after the Library drew the Continue card without it: the card said
+        "Close… (unsaved)" and "Not saved yet" until a workspace switch (BB-1). The card is drawn again when the Projects
+        section lists the projects again.
+        """
+        from StudioLib import library, projects
+
+        studioShell = self._applyStudio()
+        self._template(studioShell, fill=True)
+        canvas = self._library(studioShell)
+        self.assertEqual(canvas.currentWork.closeButton.text, "Close… (unsaved)")
+        original = library._projectService
+        self.cleanup.append(lambda: setattr(library, "_projectService", original))
+
+        def attached():
+            return object()  # a project is attached now, the card has not heard of it
+
+        library._projectService = attached
+        self.assertEqual(canvas.currentWork.closeButton.text, "Close… (unsaved)")
+        projects.notifyChanged()
+        deadline = time.time() + 10
+        while canvas.currentWork.closeButton.text != "Close" and time.time() < deadline:
+            self._wait(500)
+        self.assertEqual(canvas.currentWork.closeButton.text, "Close")
+
     def test_saved_states(self):
         """The save line follows draw.lesionSaveState: Saved, Unsaved changes, Not saved yet and, after the scene was saved
         and opened again, Last saved as … (never Saved or Unsaved changes).
