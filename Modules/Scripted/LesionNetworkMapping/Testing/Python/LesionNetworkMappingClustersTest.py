@@ -20,7 +20,7 @@ if MODULE_DIR not in sys.path:
 import numpy as np
 from scipy import ndimage
 
-from LesionNetworkMappingLib import atlases, clusters, thresholds
+from LesionNetworkMappingLib import atlases, clusters, stats, thresholds
 from LesionNetworkMappingLib.geometry import Grid, mask_indices, space_family
 
 SHAPE = (20, 22, 18)
@@ -227,6 +227,24 @@ class SubpeakTest(unittest.TestCase):
         volume[3:9, 10, 9] = 5.0
         volume[9, 10, 9] = 0.0  # 6 voxels: the two central voxels tie, the first in index order wins
         self.assertEqual(clusters.cluster_table(volume, grid(), None, 1.0)[0]["ijk"], (5, 10, 9))
+
+
+class PlateauPeakAgreementTest(unittest.TestCase):
+    def test_peak_table_and_clusters_report_the_same_plateau_peak(self):
+        volume = np.zeros(SHAPE)
+        volume[4:7, 10:13, 8:11] = 7.0  # a 3x3x3 cube of equal maxima: the peak is its centre voxel
+        volume[14, 5, 5] = 3.0
+        card = clusters.cluster_table(volume, grid(), None, 1.0)[0]
+        self.assertEqual(card["ijk"], (5, 11, 9))
+        peaks = stats.peak_table(volume, grid(), top_k=2)
+        self.assertEqual(peaks[0]["ijk"], card["ijk"])
+        self.assertEqual(peaks[0]["world"], tuple(card["xyz"]))
+        self.assertEqual(peaks[1]["ijk"], (14, 5, 5))
+        # masked vector, negative plateau, and a 2-voxel plateau (first in index order wins, as in clusters)
+        vol2 = np.zeros(SHAPE)
+        vol2[4:6, 10, 8] = -4.0
+        idx = np.flatnonzero(vol2.ravel())
+        self.assertEqual(stats.peak_table(vol2.ravel()[idx], grid(), mask_indices=idx)[0]["ijk"], (4, 10, 8))
 
 
 class MinimumExtentTest(unittest.TestCase):
