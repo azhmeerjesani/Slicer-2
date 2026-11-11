@@ -2560,6 +2560,20 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         )
         self.assertEqual(libcard_cohort.subsetText("s", 2, 1), "Subset s: 2 cases + 1 control")
 
+    def test_network_map_result_is_a_map_not_a_scan(self):
+        """Map network results (LNM.Result, computing/partial/finished) are maps, never among the scans to trace on."""
+        import numpy as np
+        from StudioLib import library
+
+        scan = slicer.util.addVolumeFromArray(np.zeros((4, 4, 4), dtype=np.uint8), name="plain scan")
+        result = slicer.util.addVolumeFromArray(np.zeros((4, 4, 4), dtype=np.float32), name="Lesions-LNM T N=50 (partial)")
+        result.SetAttribute("LNM.Result", "1")
+        self.assertEqual(library.volumeKind(scan), "scan")
+        self.assertEqual(library.volumeKind(result), "statmap")
+        scans = library.scanNodes()
+        self.assertIn(scan, scans)
+        self.assertNotIn(result, scans)
+
     def test_review_and_agreement_counts_use_singular_for_one(self):
         """The Review, Agreement and adjudication texts say "1 change requested", "1 pair", "1 lesion" and "1 second tracing", not
         "1 changes requested", "1 pairs", "lesion(s)" or "tracing(s)".

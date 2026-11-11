@@ -893,6 +893,9 @@ def volumeKind(node):
     if node.IsA("vtkMRMLLabelMapVolumeNode"):
         return "labelmap"
     if node.IsA("vtkMRMLScalarVolumeNode"):
+        # Map network results (computing, partial, finished, threshold masks) carry LNM.Result but no role
+        if node.GetAttribute("LNM.Result") == "1":
+            return space.ROLE_STATMAP
         # A template of a scene saved before the tag existed
         return "template" if node.GetName().startswith(space.TEMPLATE_SPACE) else "scan"
     return "volume"
