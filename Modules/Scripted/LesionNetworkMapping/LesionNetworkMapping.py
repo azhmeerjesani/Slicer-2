@@ -6160,7 +6160,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                     quantity = {"both": f"|{ruleStatistic}|", "pos": ruleStatistic, "neg": f"−{ruleStatistic}"}[sign]  # noqa: RUF001
                     advice = _("switch to the Fz rule or use a larger connectome") if ruleStatistic == "T" else _("lower the threshold")
                     atN = _("at N={n}").format(n=n) if n else _("at N unknown")
-                    empty = _("0 voxels pass {quantity} ≥ {value:.2f} {atN}: {advice}.").format(quantity=quantity, value=self.resolved.value, atN=atN, advice=advice)
+                    empty = _("0 voxels pass {quantity} ≥ {value} {atN}: {advice}.").format(quantity=quantity, value=thresholds.format_value(self.resolved), atN=atN, advice=advice)
         elif hasMap and resultVolume is not None and loaded is not None:
             # A map shown from a file whose N is unknown, with a rule that needs N: the module colour table, unthresholded
             window = self._displayWindow(resultVolume, mapChanged)
@@ -7515,6 +7515,13 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
         self.assertIn("Fz≥0.05", mask.GetName())
         self.assertEqual(int(np.count_nonzero(slicer.util.arrayFromVolume(mask))), widget.lastPassing)
         slicer.mrmlScene.RemoveNode(mask)
+
+        # The empty-result notice states an Fz threshold as the derived line and the legend do ("≥ 5", not "≥ 5.00")
+        widget.setRule({"kind": "fz_abs", "value": 5.0})
+        settle()
+        self.assertEqual(widget.lastPassing, 0)
+        self.assertIn("0 voxels pass |Fz| ≥ " + thresholds.format_value(widget.resolved) + " ", widget.emptyResultLabel.text)
+        self.assertNotIn("5.00", widget.emptyResultLabel.text)
 
         # The |T| >= 7 convention at N=30 is not applied ("Nothing is shown") until Keep
         widget.statisticGroup.button(STATISTICS.index("T")).click()
