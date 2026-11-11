@@ -5061,7 +5061,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             # A stopped run keeps its latest snapshot: it is not "Done" and its specificity check did not finish. The card stays open
             # (a rerun is the next action)
             computeState, computeSummary = "current", _("Stopped · partial map, N = {n:,}").format(n=self.runN or 0)
-        elif not hasResult and self.job is not None and (self.job.isRunning() or self.job.isQueued()):
+        elif self.job is not None and (self.job.isRunning() or self.job.isQueued()):
+            # A run in progress is not "Done", also once a partial snapshot replaced the "(computing…)" volume: its specificity
+            # check has not run yet. Result may show "N = 50 (partial)"
             computeState, computeSummary = "current", _("Mapping…")
         elif hasResult:
             computeState, computeSummary = "done", _("Done")
@@ -7644,6 +7646,42 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
             widget.runOutputs, widget.loadedMap = previousOutputs, previousMap
             node.resultVolume = previousVolume
             slicer.mrmlScene.RemoveNode(temporary)
+            widget._updateSteps()
+
+    def test_LesionNetworkMapping_partialSnapshotWhileRunningIsNotDone(self):
+        """A partial snapshot of a run in progress is shown as "N = 50 (partial)", but Compute stays "Mapping…": not "Done", and no
+        claim that the specificity check ran (bug BB-1 map-single compute-done-while-first-run-running-after-partial-snapshot).
+        """
+        widget = slicer.modules.lesionnetworkmapping.widgetRepresentation().self()
+        widget.initializeParameterNode()
+        node = widget._parameterNode
+
+        class RunningJob:
+            def isRunning(self):
+                return True
+
+            def isQueued(self):
+                return False
+
+            def isFinished(self):
+                return False
+
+        snapshot = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "Lesion LNM T N=50 (partial)")
+        previous = (node.resultVolume, widget.runOutputs, widget.loadedMap, widget.job, widget.runPartial, widget.runN)
+        try:
+            widget.runOutputs, widget.loadedMap, widget.job, widget.runPartial, widget.runN = {"T": snapshot}, None, RunningJob(), True, 50
+            node.resultVolume = snapshot
+            widget._updateSteps()
+            compute = widget._cardWidgets["compute"][1]
+            self.assertEqual(compute.property("studioStepState"), "current")
+            self.assertEqual(str(compute.property("studioStepSummary")), "Mapping…")
+            # Once the job has finished (stopped), the stopped branch applies, not "Done"
+            widget.job = None
+            widget._updateSteps()
+            self.assertNotEqual(compute.property("studioStepState"), "done")
+        finally:
+            node.resultVolume, widget.runOutputs, widget.loadedMap, widget.job, widget.runPartial, widget.runN = previous
+            slicer.mrmlScene.RemoveNode(snapshot)
             widget._updateSteps()
 
     def test_LesionNetworkMapping_v1(self):
