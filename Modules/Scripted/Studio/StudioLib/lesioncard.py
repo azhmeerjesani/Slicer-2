@@ -120,8 +120,8 @@ def computeLesionMetrics(array_kji, spacing, ijkToRAS, axis=0, brainMask=None):
       - ``gaps``: array indices along ``axis``, inside the lesion extent, of the slices without any lesion voxel;
         ``gaps_by_axis``: the same along each array axis (0 = k, 1 = j, 2 = i), see ``nearestArrayAxis()``;
       - ``centroid_ras``: (R, A, S) of the centre of mass, None for an empty lesion;
-      - ``x_min``/``x_max``: RAS x extent of the voxel centres; ``spans_both``: voxels lie more than one voxel on both
-        sides of x = 0 (the midline on an MNI grid only);
+      - ``x_min``/``x_max``: RAS x extent of the voxel centres; ``spans_both``: the voxels (their full width, not only
+        their centres) reach both sides of x = 0, so the column that holds x = 0 counts (the midline on an MNI grid only);
       - ``bbox``: ``(k0, k1, j0, j1, i0, i1)`` inclusive, None for an empty lesion.
     """
     array = np.asarray(array_kji)
@@ -176,7 +176,9 @@ def computeLesionMetrics(array_kji, spacing, ijkToRAS, axis=0, brainMask=None):
         "bbox": bbox,
         "x_min": xMin,
         "x_max": xMax,
-        "spans_both": xMin < -voxelWidthX and xMax > voxelWidthX,
+        # voxel extents, not centres: the column that holds x = 0 reaches both sides of it on any MNI grid (its centre is at
+        # 0 on the FSL grids, at -0.5 mm on the 2009c 2 mm grid)
+        "spans_both": xMin - voxelWidthX / 2 < 0 < xMax + voxelWidthX / 2,
     }
 
 

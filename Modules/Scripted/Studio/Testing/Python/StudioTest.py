@@ -1625,6 +1625,15 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIn("2 parts", lesioncard.readoutHtml(dict(metrics, parts=2)))
         self.assertEqual(lesioncard.computeLesionMetrics(np.zeros((3, 3, 3)), (1, 1, 1), np.eye(4))["voxels"], 0)
 
+        # The midline column is "both hemispheres" on the FSL and the 2009c 2 mm grids alike; a lesion that stays on one side is not
+        for originX, columns, expected in ((-0.5, [0], True), (0.0, [0], True), (-1.5, [0], False), (1.5, [0], False), (-2.5, [0, 1, 2, 3], True),
+                                           (-0.5 - 4, [0, 1], False)):
+            grid = np.zeros((1, 1, 6), bool)
+            grid[0, 0, columns] = True
+            gridMatrix = np.diag([2.0, 2.0, 2.0, 1.0])
+            gridMatrix[0, 3] = originX
+            self.assertEqual(lesioncard.computeLesionMetrics(grid, None, gridMatrix)["spans_both"], expected, (originX, columns))
+
         # A lesion on a 1 mm MNI-size grid against Segment Statistics
         volumeNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "MetricsGrid")
         slicer.util.updateVolumeFromArray(volumeNode, np.zeros((182, 218, 182), np.int16))
