@@ -734,10 +734,32 @@ class RefusedFileError(RuntimeError):
     """A file that Studio refuses on purpose, with a message for the user: it is announced, and logged without a traceback."""
 
 
+def _niftiVoxelHeaderSize(path):
+    """348 or 540 if ``path`` starts with a NIfTI-1 or NIfTI-2 header (either byte order), None if it does not (or is unreadable)."""
+    header = _niftiHeader(path, 540)
+    if header is None or len(header) < 348:
+        return None
+    for byteOrder in ("<", ">"):
+        size = struct.unpack(byteOrder + "i", header[0:4])[0]
+        if size == 348 or (size == 540 and len(header) >= 540):
+            return size
+    return None
+
+
 def _checkNiftiComplete(path):
     """Raise ``RuntimeError`` (a message for the user) if the data of the NIfTI file ``path`` stops before the end that its
     header promises: the voxels that are missing would be read as 0, and a lesion would lose part of its volume.
     """
+    if isNiftiFile(path):
+        name = os.path.basename(str(path))
+        if not os.path.isfile(path):
+            raise RefusedFileError(_("{name} was not opened: the file no longer exists.").format(name=name))
+        if os.path.getsize(path) == 0:
+            raise RefusedFileError(_("{name} is empty (0 bytes), so it was not opened.").format(name=name))
+        if _niftiVoxelHeaderSize(path) is None:
+            raise RefusedFileError(
+                _("{name} is not a NIfTI image (it may be a web page or another file saved under this name, or a damaged "
+                  "file), so it was not opened.").format(name=name))
     shortfall = _niftiDataShortfall(path)
     if shortfall is not None:
         raise RefusedFileError(
@@ -1641,6 +1663,7 @@ def loadFiles(paths, shell=None, pairedLesion=None):
             return result
 
     loadedPaths = []
+    refused = []
     with slicer.util.WaitCursor():
         # Scenes first (they may replace nodes), then scans (a 4D image is a sequence), then lesions (shown over the scans)
         for wantedKind in ("scene", "volume", "sequence", "lesion"):
@@ -1677,6 +1700,7 @@ def loadFiles(paths, shell=None, pairedLesion=None):
                         result.segmentations.append(segmentationNode)
                     loadedPaths.append(path)
                 except RefusedFileError as e:
+                    refused.append(path)
                     logging.warning(f"Studio: {path} was not opened: {e}")  # planned refusal: no traceback
                     result.errors.append((path, str(e)))
                 except Exception as e:
@@ -1697,8 +1721,12 @@ def loadFiles(paths, shell=None, pairedLesion=None):
     if loadedPaths:
         recordOpenTimes(loadedPaths)
     if result.errors:
-        slicer.util.errorDisplay(
-            _("Some files could not be loaded:") + "\n\n" + "\n".join(os.path.basename(path) for path, error in result.errors),
+        # A planned refusal says why in the box and is a warning (errorDisplay would log an ERROR and light the error badge)
+        refusedOnly = all(path in refused for path, error in result.errors)
+        lines = "\n".join(f"{os.path.basename(path)}: {error}" if path in refused else os.path.basename(path)
+                          for path, error in result.errors)
+        (slicer.util.warningDisplay if refusedOnly else slicer.util.errorDisplay)(
+            _("Some files could not be loaded:") + "\n\n" + lines,
             detailedText="\n\n".join(f"{path}\n{error}" for path, error in result.errors))
     return result
 

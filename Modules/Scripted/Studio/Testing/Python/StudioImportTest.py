@@ -577,6 +577,51 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(len(result.errors), 1)
         self.assertEqual(result.volumes, [])
 
+    def test_unreadable_nifti_is_refused_with_a_reason_and_no_error(self):
+        """BB-1: a dropped ``.nii.gz`` that is empty, is not NIfTI (an HTML page) or no longer exists is refused with the
+        reason: one WARNING, no traceback, no ERROR record (the error badge), and the box text names the reason.
+        """
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        shown = []
+        original = (slicer.util.errorDisplay, slicer.util.warningDisplay)
+        slicer.util.errorDisplay = lambda text, **kw: shown.append(("error", text))
+        slicer.util.warningDisplay = lambda text, **kw: shown.append(("warning", text))
+        paths = {}
+        for name, content, word in (
+            ("download.nii.gz", b"", "empty"),
+            ("notreally.nii.gz", b"<html><body>404 Not Found</body></html>", "not a NIfTI"),
+            ("plain.nii", b"<html>404</html>" * 40, "not a NIfTI"),
+            ("gone.nii.gz", None, "no longer exists"),
+        ):
+            paths[name] = os.path.join(self.directory, name)
+            if content is not None:
+                with open(paths[name], "wb") as f:
+                    f.write(content)
+        try:
+            for name, word in (("download.nii.gz", "empty"), ("notreally.nii.gz", "not a NIfTI"),
+                               ("plain.nii", "not a NIfTI"), ("gone.nii.gz", "no longer exists")):
+                recorder = logging.Handler()
+                records = []
+                recorder.emit = records.append
+                logging.getLogger().addHandler(recorder)
+                del shown[:]
+                try:
+                    result = importer.loadFiles([paths[name]], studioShell)
+                finally:
+                    logging.getLogger().removeHandler(recorder)
+                self._pump()
+                self.assertEqual(len(result.errors), 1, name)
+                self.assertIn(word, result.errors[0][1], name)
+                self.assertFalse([r for r in records if "Traceback" in r.getMessage()], name)
+                self.assertFalse([r for r in records if r.levelno >= logging.ERROR], name)
+                self.assertEqual([kind for kind, _text in shown], ["warning"], name)
+                self.assertIn(word, shown[0][1], name)
+                self.assertEqual(result.volumes, [], name)
+        finally:
+            slicer.util.errorDisplay, slicer.util.warningDisplay = original
+
     def test_truncated_nifti_is_refused_as_damaged(self):
         """BB-1: a NIfTI file whose data stops before the end that its header announces (gzip or plain) is a load error in
         plain words, for a scan and for a lesion: the reader zero-fills the missing voxels and reports success.
