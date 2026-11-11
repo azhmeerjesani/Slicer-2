@@ -8109,3 +8109,39 @@ class StudioRegressionTest(unittest.TestCase):
         finally:
             if host is not None:
                 host.deleteLater()
+
+    def test_96_grid_answer_after_done_renames_lesion_files_to_the_answered_space(self):
+        """BB-1: answering the ambiguous-grid question after a lesion was written under the guessed space renames the lesion
+        file and its sidecar (BIDS space entity), points the row at it, and leaves other names and an existing target alone.
+        """
+        from StudioLib import study_ui
+
+        Study = study_ui._lnm("study").Study
+        folder = os.path.join(self.directory, "grid answer")
+        study = Study.create(folder, name="Grid answer")
+        lesions = os.path.join(folder, "lesions")
+        os.makedirs(lesions, exist_ok=True)
+        names = {}
+        for sid in ("sub-04", "sub-05", "sub-06"):
+            names[sid] = f"lesions/{sid}_space-MNI152NLin2009cAsym_desc-lesion_mask.nii.gz"
+            study.add_subject(sid, status="traced", lesion=names[sid], space="MNI152NLin2009cAsym")
+            for extension in (".nii.gz", ".json"):
+                with open(os.path.join(folder, names[sid].replace(".nii.gz", extension)), "w", encoding="utf-8") as f:
+                    f.write(sid)
+        # sub-05: the answered name is already taken, so nothing is overwritten
+        with open(os.path.join(lesions, "sub-05_space-MNI152NLin2009aSym_desc-lesion_mask.nii.gz"), "w", encoding="utf-8") as f:
+            f.write("other")
+        # sub-06: an imported file with another name is never renamed
+        study.set("sub-06", lesion="lesions/custom.nii.gz")
+        os.replace(os.path.join(folder, names["sub-06"]), os.path.join(lesions, "custom.nii.gz"))
+        answer = "MNI152NLin2009aSym"
+        gridRows = {"grid": {"candidates": [answer, "MNI152NLin2009cAsym"], "sids": ["sub-04", "sub-05", "sub-06"]}}
+        study.grid_answers = {"grid": answer}
+        study_ui._applyGridAnswers(study, gridRows)
+        self.assertEqual(study.subject("sub-04")["lesion"], f"lesions/sub-04_space-{answer}_desc-lesion_mask.nii.gz")
+        self.assertEqual(sorted(name for name in os.listdir(lesions) if name.startswith("sub-04")),
+                         [f"sub-04_space-{answer}_desc-lesion_mask.json", f"sub-04_space-{answer}_desc-lesion_mask.nii.gz"])
+        self.assertEqual(study.subject("sub-05")["lesion"], names["sub-05"])
+        self.assertTrue(os.path.isfile(os.path.join(folder, names["sub-05"])))
+        self.assertEqual(study.subject("sub-06")["lesion"], "lesions/custom.nii.gz")
+        self.assertEqual(study.lesion_sidecar_path("sub-04"), os.path.join(lesions, f"sub-04_space-{answer}_desc-lesion_mask.json"))

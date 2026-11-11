@@ -1226,6 +1226,50 @@ def _applyGridAnswers(studyObject, gridRows):
         for sid in entry["sids"]:
             if studyObject.subject(sid).get("space") != answer:
                 studyObject.set(sid, space=answer)
+            _renameLesionForSpace(studyObject, sid, answer)
+
+
+def _renameLesionForSpace(studyObject, sid, space):
+    """Rename the lesion file (and sidecar) that Studio wrote under ``lesions/`` with another space in its BIDS name (the
+    guessed space, before an ambiguous grid was answered) to ``space``, and point the row at it. Return the new absolute
+    path, or None when nothing was renamed (no such file, another name, or the new name is taken).
+    """
+    try:
+        studyModule = _lnm("study")
+        row = studyObject.subject(sid)
+        current = studyObject.abspath(row.get("lesion"))
+        lesionsDir = os.path.join(studyObject.path, studyModule.LESIONS_DIR)
+        if not current or not os.path.isfile(current) or not _isNifti(current) or not _isInside(current, lesionsDir):
+            return None
+        if os.path.dirname(os.path.abspath(current)) != os.path.abspath(lesionsDir):
+            return None
+        match = re.fullmatch(re.escape(sid) + r"_space-([A-Za-z0-9]+)_desc-lesion_mask(\.nii(?:\.gz)?)", os.path.basename(current))
+        if match is None or match.group(1) == space or not re.fullmatch(r"[A-Za-z0-9]+", space):
+            return None
+        target = os.path.join(lesionsDir, f"{sid}_space-{space}_desc-lesion_mask{match.group(2)}")
+        if os.path.lexists(target):
+            return None
+        moves = [(current, target)]
+        oldSidecar = studyObject.lesion_sidecar_path(sid)
+        if os.path.isfile(oldSidecar):
+            moves.append((oldSidecar, os.path.join(lesionsDir, os.path.basename(target)[:-len(match.group(2))] + ".json")))
+        done = []
+        try:
+            for source, destination in moves:
+                if os.path.lexists(destination):
+                    raise OSError(f"{destination} exists")
+                _replaceFile(source, destination)
+                done.append((source, destination))
+        except OSError:
+            for source, destination in reversed(done):
+                with contextlib.suppress(OSError):
+                    os.replace(destination, source)
+            raise
+        studyObject.set(sid, lesion=studyObject.relpath(target))
+        return target
+    except Exception:
+        logging.warning(f"Studio: the lesion file of {sid} could not be renamed to the answered space {space}:\n{traceback.format_exc()}")
+        return None
 
 
 #
@@ -3011,7 +3055,14 @@ class StudySession:
         answers = self.study.grid_answers
         answers[gridId] = spaceName
         self.study.grid_answers = answers
+        before = self._gridReference
         _applyGridAnswers(self.study, self._gridRows)
+        if self._current is not None and self._current in self.study:
+            moved = self.study.abspath(self.study.subject(self._current).get("lesion"))
+            if before and moved and os.path.normcase(os.path.abspath(before)) != os.path.normcase(os.path.abspath(moved)) and os.path.isfile(moved) \
+                    and not os.path.isfile(before) and os.path.basename(before).startswith(f"{self._current}_space-"):
+                self._gridReference = moved
+                self._lesionStamp = _fileStamp(moved)
         self.flush()
         _notify(self)
 
