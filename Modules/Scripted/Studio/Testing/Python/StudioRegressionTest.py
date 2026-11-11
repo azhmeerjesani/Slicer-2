@@ -7958,3 +7958,15 @@ class StudioRegressionTest(unittest.TestCase):
         state = extension._cardState(None, None, second, secondVolume, None, False)
         self.assertIsNotNone(state["stats"])
         self.assertAlmostEqual(state["stats"]["ml"], 27 / 1000.0, msg="the card describes the new lesion, not the closed one")
+
+    def test_94_save_lesion_default_name_folds_accents_like_export(self):
+        from StudioLib import draw
+
+        for scanName, expected in (
+            ("Müller_T1", "Muller_T1_lesion.nii.gz"),
+            ("Lésion gauche", "Lesion_gauche_lesion.nii.gz"),
+            ("Ödem rechts", "Odem_rechts_lesion.nii.gz"),
+        ):
+            volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", scanName)
+            segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions_1")
+            self.assertEqual(draw.defaultLesionFileName(segmentation, volume), expected)

@@ -2059,8 +2059,10 @@ def saveStateText(segmentationNode):
 
 
 def _sanitizeFileName(name):
-    """A file name made of letters, digits, ".", "_" and "-" only."""
-    name = re.sub(r"[^A-Za-z0-9._-]+", "_", str(name)).strip("._-")
+    """A file name made of letters, digits, ".", "_" and "-" only (accents are folded like Export as NIfTI: "Müller" -> "Muller")."""
+    from . import niftiexport
+
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", niftiexport.asciiText(name)).strip("._-")
     return re.sub(r"_+", "_", name)
 
 
