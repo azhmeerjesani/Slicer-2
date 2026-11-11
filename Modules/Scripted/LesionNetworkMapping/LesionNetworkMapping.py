@@ -4532,6 +4532,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.ctx.setBundle(self.bundle)
         changed = self._restoreParkedRun() or changed
         self._showConnectome()
+        self._showSubjectsText()
         self.scheduleSeedUpdate()
         if self.seedMode() == "cohort" and getattr(self, "cohortSeedPanel", None) is not None:
             self.refreshCohort()
