@@ -185,6 +185,10 @@ def _checkCancelled(cancelled):
         raise InstallCancelled()
 
 
+# Ends the errors about the content of a release file: installing that file by hand would not help
+RELEASE_FILE_WRONG = " The release file is wrong: the installed version was kept."
+
+
 def manualSteps(kind, packagePath, target):
     """How to install the package ``packagePath`` (named by its full path: the user must find it) by hand."""
     if kind == "macos":
@@ -487,10 +491,10 @@ def prepareLinux(packagePath, target, expectedVersion, stagingParent=None, cance
         staged = os.path.join(root, top)
         for required in ("Slicer", os.path.join("bin", "SlicerApp-real")):
             if not os.path.exists(os.path.join(staged, required)):
-                raise InstallError(f"The package is not a Slicer Studio package ({required} is missing).", manual)
+                raise InstallError(f"The package is not a Slicer Studio package ({required} is missing)." + RELEASE_FILE_WRONG)
         stagedVersion = linuxPackageVersion(staged)
         if stagedVersion is not None and stagedVersion != str(expectedVersion):
-            raise InstallError(f"The package contains Slicer Studio {stagedVersion}, not {expectedVersion}.", manual)
+            raise InstallError(f"The package contains Slicer Studio {stagedVersion}, not {expectedVersion}." + RELEASE_FILE_WRONG)
     except InstallError:
         _removeTree(root)
         raise
@@ -577,7 +581,7 @@ def prepareMacOS(dmgPath, target, expectedVersion, env=None, stagingParent=None,
         _checkCancelled(cancelled)
         apps = sorted(name for name in os.listdir(mountPoint) if name.endswith(".app") and os.path.isdir(os.path.join(mountPoint, name)))
         if not apps:
-            raise InstallError("The disk image contains no application.", manual)
+            raise InstallError("The disk image contains no application." + RELEASE_FILE_WRONG)
         staged = os.path.join(root, os.path.basename(target))
         _run(["ditto", os.path.join(mountPoint, apps[0]), staged], env=env)
         _checkCancelled(cancelled)
@@ -611,7 +615,7 @@ def prepareMacOS(dmgPath, target, expectedVersion, env=None, stagingParent=None,
         problem = f"The disk image contains Slicer Studio {newInfo.get('CFBundleShortVersionString')}, not {expectedVersion}."
     if problem:
         _removeTree(root)
-        raise InstallError(problem, manual)
+        raise InstallError(problem + RELEASE_FILE_WRONG)
     return PreparedInstall("macos", target, staged, expectedVersion, os.path.join("Contents", "Info.plist"), needsAdmin=needsAdmin, package=dmgPath)
 
 

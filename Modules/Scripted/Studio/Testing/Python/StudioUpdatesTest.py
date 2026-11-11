@@ -3216,6 +3216,32 @@ fi
         with open(os.path.join(other, name), "rb") as f:
             self.assertEqual(f.read(), b"another file")
 
+    def test_InvalidPackageHasNoManualSteps(self):
+        """A release file that is not a usable package is reported as wrong, with no steps to install it by hand;
+        the steps stay for a good package that cannot be put in place.
+        """
+        install = self.install
+        target = self._fakeLinuxInstall("0.9.0")
+        incomplete = os.path.join(self.tempDir, "incomplete.tar.gz")
+        _fakeLinuxPackage(incomplete, "1.2.0", complete=False)
+        with self.assertRaises(install.InstallError) as context:
+            install.prepareLinux(incomplete, target, "1.2.0")
+        self.assertIn("SlicerApp-real", str(context.exception))
+        self.assertFalse(context.exception.manualSteps)
+        self.assertIn("release file is wrong", str(context.exception))
+        package = os.path.join(self.tempDir, "new.tar.gz")
+        _fakeLinuxPackage(package, "1.2.0")
+        with self.assertRaises(install.InstallError) as context:
+            install.prepareLinux(package, target, "1.3.0")
+        self.assertIn("not 1.3.0", str(context.exception))
+        self.assertFalse(context.exception.manualSteps)
+        saved = install.isWritable
+        install.isWritable = lambda path: False
+        self.addCleanup(setattr, install, "isWritable", saved)
+        with self.assertRaises(install.InstallError) as context:
+            install.prepareLinux(package, target, "1.2.0")
+        self.assertTrue(context.exception.manualSteps)
+
     def test_PrepareLinuxCancelled(self):
         """prepareLinux() looks at Cancel before each file it extracts: it stops and removes what it extracted."""
         install = self.install
