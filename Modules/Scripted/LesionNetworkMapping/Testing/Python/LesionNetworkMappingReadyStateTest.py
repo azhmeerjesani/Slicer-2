@@ -48,6 +48,11 @@ class LesionNetworkMappingReadyStateTest(unittest.TestCase):
         self.widget = slicer.modules.LesionNetworkMappingWidget
         self.logic = self.widget.logic
         self.logic.registerConnectome(self.path)
+        # selectModule and registerConnectome leave the 400 ms seedTimer pending: on a slow machine updateSeed() would
+        # fire inside a test's _pump and replace the hand-set seedCheck. Settle the widget so the tests control it.
+        _pump(20)
+        self.widget.seedTimer.stop()
+        self.widget._seedDirty = False
 
     def tearDown(self):
         paths = [p for p in self.logic.registeredConnectomes() if os.path.abspath(p) != self.path]
@@ -57,6 +62,10 @@ class LesionNetworkMappingReadyStateTest(unittest.TestCase):
 
         qt.QSettings().setValue(CONNECTOMES_SETTING, paths)
         slicer.mrmlScene.Clear(0)
+
+    def test_set_up_leaves_no_pending_seed_update(self):
+        self.assertFalse(self.widget.seedTimer.isActive())
+        self.assertFalse(self.widget._seedDirty)
 
     def test_planned_threshold_line_after_choosing_a_connectome(self):
         widget = self.widget
