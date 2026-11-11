@@ -6810,6 +6810,10 @@ def enter(shell):
     shell.setInspectorVisible(not isEmptyState(shell))
     libraryCanvas.refresh()
     libraryCanvas.focusFirst()
+    # The inspector panel stays shown across Classic and back (no Show event): it still holds the Classic cards
+    panel = _livePanel()
+    if panel is not None and panel.isBuilt():
+        panel.refresh()
     if _sceneWatcher is not None:
         _sceneWatcher.dispose()
     _sceneWatcher = _SceneWatcher(shell)

@@ -1601,6 +1601,33 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertFalse(panel.openCard.isHidden())
         self.assertTrue(library.hasData())
 
+    def test_inspector_shows_project_card_after_classic_round_trip(self):
+        """Back from Classic the Library inspector shows the open project's card again, not the Classic cards."""
+        from StudioLib import library, projects
+
+        studioShell = self._applyStudio()
+        self._template(studioShell, fill=True)
+        project = projects.createProject("roundtrip", rootPath=self.directory)
+        previous = projects.currentProject()
+        projects.setCurrentProject(project)
+        self.cleanup.append(lambda: projects.setCurrentProject(previous))
+        self._library(studioShell)
+        panel = self._panel()
+        self.assertTrue(panel.overviewCard.widget.isVisible())
+        # Classic: the panel shows the Open buttons and Recent and hides the project card (the panel stays shown)
+        original = library._shell
+        library._shell = lambda: None
+        try:
+            panel.refresh()
+            self.assertTrue(panel.overviewCard.widget.isHidden())
+        finally:
+            library._shell = original
+        # Back in Studio: entering Library refreshes the panel, no Show event comes
+        library.enter(studioShell)
+        self._pump(4)
+        self.assertTrue(panel.overviewCard.widget.isVisible())
+        self.assertTrue(panel.openCard.isHidden())
+
     def test_template_offer_line(self):
         """The 1 mm template offer is the last line of the Current work card (never over the views); its buttons work."""
         from StudioLib import importer
