@@ -451,6 +451,10 @@ class Panel:
     def pairCount(self):
         return len(self.pairs()[0])
 
+    def distinctPairCount(self):
+        """Pairs at distinct figure points (a pair placed again on the same figure point counts once)."""
+        return _figurefit().distinct_count(self.pairs()[1])
+
     def ijkToRas(self):
         """The figure's IJK to RAS: the fit, or the initial placement before it (a brain about 140 mm wide)."""
         figurefit = _figurefit()
@@ -464,7 +468,7 @@ class Panel:
         """Fit the landmark pairs (similarity, or affine with at least 4 pairs). Return the fit or None."""
         figurefit = _figurefit()
         names, pixels, points = self.pairs()
-        model = self.model if len(names) >= figurefit.MIN_PAIRS.get(self.model, 2) else "similarity"
+        model = self.model if figurefit.distinct_count(pixels) >= figurefit.MIN_PAIRS.get(self.model, 2) else "similarity"
         self.fit = None
         self.fitError = None
         if len(names) >= figurefit.MIN_PAIRS["similarity"]:
@@ -2336,8 +2340,9 @@ class FigureCard:
         self.pairLabel.setText(_("{n} pairs").format(n=pairs) if not placing else _("placing “{name}”…").format(name=current._placing[2]))
         self.removePairButton.setEnabled(pairs > 0 or (panel.figureLandmarks() is not None and panel.figureLandmarks().GetNumberOfControlPoints() > 0))
         affineButton = self.modelGroup.button(1)
-        affineButton.setEnabled(pairs >= figurefit.MIN_AFFINE_PAIRS)
-        model = panel.fit.model if panel.fit is not None else ("affine" if panel.model == "affine" and pairs >= figurefit.MIN_AFFINE_PAIRS else "similarity")
+        distinct = panel.distinctPairCount()
+        affineButton.setEnabled(distinct >= figurefit.MIN_AFFINE_PAIRS)
+        model = panel.fit.model if panel.fit is not None else ("affine" if panel.model == "affine" and distinct >= figurefit.MIN_AFFINE_PAIRS else "similarity")
         self.modelGroup.button(0 if model == "similarity" else 1).setChecked(True)
         if panel.fit is not None:
             text, level = figurefit.residual_chip(panel.fit.rms_mm, panel.fit.loo_rms_mm, panel.fit.n_pairs)
@@ -2349,6 +2354,8 @@ class FigureCard:
         warnings = []
         if panel.fitError:
             warnings.append(_("Fit failed: {error}").format(error=panel.fitError))
+        if distinct < pairs:
+            warnings.append(_("{n} landmark pair(s) repeat another pair's figure point and add nothing to the fit").format(n=pairs - distinct))
         if panel.fit is not None and panel.fit.mirror_suspected:
             warnings.append(_("The mirrored figure fits much better: check the side"))
         if panel.fit is not None and len(panel.fit.out_of_plane_mm) and float(np.max(panel.fit.out_of_plane_mm)) > OFF_PLANE_WARNING_MM:

@@ -78,6 +78,39 @@ class FitTest(unittest.TestCase):
             line = np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0], [3.0, 3.0]])
             figurefit.affine_2d(line, line)
 
+    def test_repeated_pair_is_not_an_extra_pair(self):
+        """A pair placed again on the same figure point must not get round the 4-pair affine rule (BB-1)."""
+        # 3 inconsistent pairs: no exact similarity, so the honest residual is large
+        src = FIG_PX[[0, 2, 3]]
+        dst = figurefit.apply_2d(AFFINE, src) + [[0.0, 0.0], [9.0, -6.0], [-7.0, 8.0]]
+        for repeat in (src[2], src[2] + [0.6, 0.0]):  # exact repeat, and a re-click 0.6 px off
+            with self.assertRaisesRegex(ValueError, "distinct"):
+                figurefit.affine_2d(np.vstack([src, repeat]), np.vstack([dst, dst[2:]]))
+            with self.assertRaisesRegex(ValueError, "distinct"):
+                figurefit.fit_2d("affine", np.vstack([src, repeat]), np.vstack([dst, dst[2:]]))
+        self.assertEqual(figurefit.distinct_count(np.vstack([src, src[2] + [0.6, 0.0]])), 3)
+        self.assertEqual(figurefit.distinct_count(FIG_PX), len(FIG_PX))
+        self.assertEqual(figurefit.distinct_count([[5.0, 5.0]] * 3), 1)
+        self.assertEqual(figurefit.distinct_count(np.zeros((0, 2))), 0)
+        # 4 distinct points still fit
+        figurefit.affine_2d(FIG_PX[:4], figurefit.apply_2d(AFFINE, FIG_PX[:4]))
+        # A similarity of 2 points and a repeat is exact with no LOO RMS: never shown green
+        sim_src = np.vstack([src[:2], src[1:2]])
+        sim_dst = np.vstack([dst[:2], dst[1:2]])
+        fit = figurefit.umeyama_similarity(sim_src, sim_dst)
+        rms = figurefit.rms(fit, sim_src, sim_dst)
+        loo = figurefit.loo_rms("similarity", sim_src, sim_dst)
+        self.assertLess(rms, 1e-9)
+        self.assertIsNone(loo)
+        text, level = figurefit.residual_chip(rms, loo, 3)
+        self.assertEqual(text, "RMS 0.0 mm · LOO n/a (3 pairs)")
+        self.assertEqual(level.level, "none")
+        self.assertIn("no leave-one-out RMS", level.text)
+        self.assertIn("measures landmark consistency, not lesion accuracy", level.text)
+        # a large RMS without LOO still shows its level
+        self.assertEqual(figurefit.residual_chip(5.0, None, 2)[1].level, "red")
+        self.assertEqual(figurefit.residual_chip(3.0, None, 2)[1].level, "amber")
+
     def test_bad_input(self):
         with self.assertRaises(ValueError):
             figurefit.umeyama_similarity(FIG_PX[:1], FIG_PX[:1])
