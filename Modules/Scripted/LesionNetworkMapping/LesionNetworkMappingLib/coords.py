@@ -575,7 +575,7 @@ def spheres(foci, grid, radius_mm=None, diameter_mm=None, supersample=DEFAULT_SU
         if getattr(focus, "space", "MNI") == "TAL":
             raise ValueError("Talairach foci must be converted to MNI first (coords.to_mni)")
         r = radius
-        if use_focus_radius and getattr(focus, "radius_mm", None):
+        if use_focus_radius and getattr(focus, "radius_mm", None) is not None:
             r = sphere_radius(focus.radius_mm)[0]
             own.add(r)
         xyz = focus.xyz if hasattr(focus, "xyz") else tuple(float(v) for v in focus[:3])
@@ -614,7 +614,7 @@ def study_union_seeds(foci_by_study, grid, radius_mm=None, diameter_mm=None, mas
 def focus_radii(foci, radius_mm=None, diameter_mm=None):
     """(F,) sphere radius of each focus, as :func:`spheres` uses it: its own radius when it has one, else the given one."""
     radius = sphere_radius(radius_mm, diameter_mm)[0]
-    return np.array([sphere_radius(focus.radius_mm)[0] if getattr(focus, "radius_mm", None) else radius for focus in foci], dtype=np.float64)
+    return np.array([sphere_radius(focus.radius_mm)[0] if getattr(focus, "radius_mm", None) is not None else radius for focus in foci], dtype=np.float64)
 
 
 #

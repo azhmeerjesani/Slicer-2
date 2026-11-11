@@ -229,6 +229,13 @@ class SphereTest(unittest.TestCase):
         self.assertLess(small.sum(), large.sum())
         self.assertEqual(record["per_focus_radii_mm"], [2.0])
 
+    def test_zero_focus_radius_is_refused(self):
+        for bad in (0, 0.0, -3):
+            with self.assertRaisesRegex(ValueError, "radius must be in"):
+                coords.spheres([coords.Focus(0, 0, 0, radius_mm=bad)], GRID_2MM, radius_mm=6)
+            with self.assertRaisesRegex(ValueError, "radius must be in"):
+                coords.focus_radii([coords.Focus(0, 0, 0, radius_mm=bad)], radius_mm=6)
+
     def test_study_union_seeds(self):
         groups = {"A": [coords.Focus(-10, 0, 0, "A"), coords.Focus(-10, 1, 0, "A")], "B": [coords.Focus(10, 0, 0, "B")]}
         names, weights, record = coords.study_union_seeds(groups, GRID_2MM, radius_mm=4)
