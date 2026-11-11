@@ -157,6 +157,34 @@ class LesionNetworkMappingCompareUITest(unittest.TestCase):
         self.assertIn("constant", card.notice)
         self.assertIn("no variance", card.notice)
 
+    def test_5_vdh_terms_offline_message_is_one_sentence_with_try_again(self):
+        from types import SimpleNamespace
+
+        from LesionNetworkMappingUI import card_compare
+
+        reason = "No connection to dataverse.harvard.edu: the proxy server cannot be reached. Check the network and try again."
+        calls = []
+        saved = card_compare.AddReferenceDialog.loadTerms
+        card_compare.AddReferenceDialog.loadTerms = lambda self: calls.append(1)
+        dialog = card_compare.AddReferenceDialog("vdh", slicer.util.mainWindow())
+        try:
+            self.assertEqual(len(calls), 1)
+            retry = dialog.findChild("QPushButton", "LNMCompareVdhTermsRetry")
+            self.assertIsNotNone(retry)
+            self.assertFalse(retry.isVisibleTo(dialog))
+            dialog._onTermsDone(SimpleNamespace(results=[], failureReason=reason, state="failed"))
+            text = dialog.termsView.toPlainText()
+            self.assertEqual(text.lower().count("try again"), 1, text)
+            self.assertNotIn(".)", text)
+            self.assertIn("could not be fetched", text)
+            self.assertIn(reason, text)
+            self.assertTrue(retry.isVisibleTo(dialog))
+            retry.click()
+            self.assertEqual(len(calls), 2)
+        finally:
+            card_compare.AddReferenceDialog.loadTerms = saved
+            dialog.deleteLater()
+
 
 if __name__ == "__main__":
     unittest.main()

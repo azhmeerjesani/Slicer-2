@@ -1245,6 +1245,12 @@ class AddReferenceDialog(qt.QDialog):
             self.termsView.setMinimumHeight(90)
             self.termsView.setMaximumHeight(160)
             layout.addWidget(self.termsView)
+            self.retryButton = qt.QPushButton(_("Try again"))
+            self.retryButton.setObjectName("LNMCompareVdhTermsRetry")
+            self.retryButton.setToolTip(_("Fetch the GSP data use terms again"))
+            self.retryButton.connect("clicked()", self.loadTerms)
+            self.retryButton.setVisible(False)
+            layout.addWidget(self.retryButton)
             self.acceptCheck = qt.QCheckBox(_("I accept these data use terms"))
             self.acceptCheck.setObjectName("LNMCompareVdhAccept")
             self.acceptCheck.setEnabled(False)
@@ -1275,6 +1281,7 @@ class AddReferenceDialog(qt.QDialog):
         """Fetch the live GSP terms text in a light job (never on the main thread)."""
         from . import jobrunner
 
+        self.retryButton.setVisible(False)
         self.termsView.setPlainText(_("Fetching the GSP data use terms from Harvard Dataverse…"))
         spec = jobrunner.JobSpec(TERMS_MODULE, ["terms"], title=_("Data use terms"), heavy=False, kind="leaddbs-terms", name="leaddbs-terms",
                                  runRoot=jobrunner.defaultRunRoot(), onDone=self._onTermsDone)
@@ -1288,8 +1295,13 @@ class AddReferenceDialog(qt.QDialog):
             return
         event = next((event for event in job.results if event.get("kind") == "terms"), None)
         if event is None:
-            self.termsView.setPlainText(_("The data use terms could not be fetched ({reason}). They must be shown before anything is downloaded: "
-                                          "check the connection and try again.").format(reason=job.failureReason or job.state))
+            # The failure reason is a sentence that already says what to check ("... Check the network and try again.").
+            reason = str(job.failureReason or job.state).strip()
+            if not reason.endswith((".", "!", "?")):
+                reason += "."
+            self.termsView.setPlainText(_("The GSP data use terms could not be fetched: {reason} They must be shown before the map is downloaded.")
+                                        .format(reason=reason))
+            self.retryButton.setVisible(True)
             return
         self.setTermsText(event.get("text") or "", event.get("url"))
 
