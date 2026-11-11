@@ -2688,6 +2688,47 @@ class StudioProjectsTest(unittest.TestCase):
 
 
 
+    def test_32b_root_move_waits_for_a_running_duplicate(self):
+        """Change folder > Move while a Duplicate is still copying (no project open) waits for the copy: it used to move or
+        fail on the hidden "<name>.studio-copy" folder ("Copying Big copy.studio-copy failed: No such file or directory").
+        """
+        import time
+        from unittest import mock
+
+        projects = self.projects
+        service = self._service()
+        self.assertIsNone(service.project)
+        big = os.path.join(self.root, "Projects", "Big")
+        os.makedirs(os.path.join(big, ".studio"))
+        with open(os.path.join(big, ".studio", "project.json"), "w") as f:
+            json.dump({"name": "Big", "state": "closed"}, f)
+        with open(os.path.join(big, "data.bin"), "wb") as f:
+            f.write(b"x" * 1000)
+        realCopytree = shutil.copytree
+
+        def slowCopytree(*args, **kwargs):
+            result = realCopytree(*args, **kwargs)
+            time.sleep(1.0)  # the half-made copy is there for a while
+            return result
+
+        done = []
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        qt.QSettings().setValue(projects.ROOT_KEY, self.root)
+        try:
+            with mock.patch.object(projects.shutil, "copytree", slowCopytree):
+                projects.duplicateFolder(big, onDone=done.append, onError=done.append)
+                time.sleep(0.3)
+                newRoot = os.path.join(self.tempDir, "movedDup", "Slicer Studio")
+                service.moveRoot(newRoot, moveContent=True)
+            self.assertEqual(len(done), 1, done)
+            names = sorted(os.listdir(os.path.join(newRoot, "Projects")))
+            self.assertEqual(names, ["Big", "Big copy"])
+            self.assertEqual(projects.root(), os.path.normpath(newRoot))
+        finally:
+            qt.QSettings().remove(projects.ROOT_KEY)
+            qt.QSettings().remove(projects.ROOT_CHOSEN_KEY)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
     def test_33_save_a_copy_leaves_the_project_unchanged(self):
         """"Save a copy as…" writes the .mrb without marking the data "modified since read": the next project save does not
         write every node again (the scan opened as .nii.gz was written as a second .nrrd and the scene pointed at it, the

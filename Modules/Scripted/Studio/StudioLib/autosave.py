@@ -2507,7 +2507,12 @@ class AutosaveService:
             project = self.project
             if project is not None:
                 self.saveNow("move", progress=True)
-                _io().backgroundWriter().drain(10.0)
+            # A Duplicate that is still copying (it runs in the background writer, also when no project is open) makes its
+            # copy under a hidden temporary name and renames it when complete: moving the folder meanwhile would copy that
+            # half-made folder and fail
+            if not _io().backgroundWriter().drain(10.0 if project is not None else 60.0):
+                raise OSError(_("Slicer Studio is still copying or saving a project. Wait until it is finished, then try again."))
+            if project is not None:
                 project.unlock()
             # Nothing is written into the old folder while it moves (poll, heartbeat of project.json)
             timers = [timer for timer in (self._pollTimer, self._heartbeatTimer) if timer.isActive()]
