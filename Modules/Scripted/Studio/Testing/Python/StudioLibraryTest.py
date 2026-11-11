@@ -259,6 +259,32 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(editor.currentSegmentID(), segmentId)
         self.assertEqual(editor.sourceVolumeNode().GetID(), volumeNode.GetID())
 
+    def test_lesion_row_name_is_not_elided_when_the_row_has_room(self):
+        """A hidden lesion's name ("sub-02_lesion · hidden") shows whole in a row with room, also in the compact layout."""
+        from StudioLib import library
+        node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "sub-02_lesion")
+        try:
+            for width in (240, 700):
+                block = library._LesionBlock(node, 0)
+                parent = qt.QWidget()
+                layout = qt.QVBoxLayout(parent)
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.addWidget(block.widget)
+                block.metricsLabel.setProperty("fullText", "Left \u00b7 4.22 mL \u00b7 1 part")
+                block.setChipWidth("Saved in the project")
+                title = "sub-02_lesion \u00b7 hidden"
+                block.setName(title, "sub-02_lesion")
+                parent.resize(width, 80)
+                parent.show()
+                self._pump(4)
+                need = qt.QFontMetrics(block.nameLabel.font).horizontalAdvance(title)
+                self.assertGreaterEqual(block.nameLabel.width, need, (width, block.mode, block.nameLabel.width, need))
+                self.assertEqual(block.nameLabel.text, title)
+                parent.hide()
+                parent.deleteLater()
+        finally:
+            slicer.mrmlScene.RemoveNode(node)
+
     def test_metrics_tooltip_uses_singular_for_one(self):
         """The Continue card's metrics tooltip says "1 part" and "1 gap" (singular), and plurals otherwise."""
         from StudioLib import draw, library

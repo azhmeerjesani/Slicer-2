@@ -1536,6 +1536,8 @@ class _LesionBlock:
 
     #: Narrowest name (about 16 characters), and narrowest save state chip; the chip's stylesheet padding is 2 x 8 px
     NAME_MIN_WIDTH = 110
+    #: The widest the name is made (its whole text unless longer; the rest of the line is the filler's)
+    NAME_MAX_WIDTH = 320
     CHIP_MIN_WIDTH = 56
     CHIP_PADDING = 16
     SWATCH = 10
@@ -1588,12 +1590,12 @@ class _LesionBlock:
         font = qt.QFont(self.nameLabel.font)
         font.setWeight(qt.QFont.Medium)
         self.nameLabel.setFont(font)
-        # An Ignored label as wide as its whole text (at most 220 px; ``refresh()`` sets the maximum) and as the row allows: a
+        # An Ignored label as wide as its whole text (at most NAME_MAX_WIDTH; ``refresh()`` sets the maximum) and as the row allows: a
         # Preferred label would take the width of its elided text and never grow back ("L...n" in a wide row)
         self.nameLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
         # Its minimum is wide enough for the start and the end of a name ("sub-PCS0…e_lesion"); the name is the first to be elided
         self.nameLabel.setMinimumWidth(self.NAME_MIN_WIDTH)
-        self.nameLabel.setMaximumWidth(220)
+        self.nameLabel.setMaximumWidth(self.NAME_MAX_WIDTH)
         # The metrics ("Left · 4.22 mL · 1 part") are elided to the width the row leaves them (a rich-text label cannot
         # be elided by Qt and was cut off mid-word next to the state chip); "Both hemispheres" is colored by the card's
         # stylesheet (property ``studioWarn``)
@@ -1606,9 +1608,10 @@ class _LesionBlock:
         self.stateLabel.setFixedHeight(20)
         # Fixed (its width is set by ``relayout()``): the layout gives a label with an Ignored size policy no room of its own
         self.stateLabel.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Fixed)
-        self._topRow.addWidget(self.nameLabel, 3)
+        # A stretch far above the filler's and the metrics': the name takes the width of its whole text before they take any
+        self._topRow.addWidget(self.nameLabel, 100)
         # Takes the spare width of the name's line when the metrics and the chip are on the lines below (the name is capped at
-        # 220 px), so that the swatch and the name stay left-aligned instead of centred; hidden in a wide row
+        # NAME_MAX_WIDTH), so that the swatch and the name stay left-aligned instead of centred; hidden in a wide row
         self._topFiller = qt.QWidget()
         self._topFiller.setObjectName("StudioCurrentWorkLesionFiller")
         self._topFiller.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
@@ -1620,6 +1623,11 @@ class _LesionBlock:
         self.mode = "wide"
         self._filter = _LesionRowFilter(self)
         _installEventFilter(self.widget, self._filter)
+
+    def setName(self, title, toolTip=None):
+        """Set the name; the label is as wide as its whole text (at most ``NAME_MAX_WIDTH``)."""
+        setElidedText(self.nameLabel, title, toolTip)
+        self.nameLabel.setMaximumWidth(min(self.NAME_MAX_WIDTH, qt.QFontMetrics(self.nameLabel.font).horizontalAdvance(title) + 4))
 
     def setChipWidth(self, chipText):
         """The width of the whole chip text; the chip is never wider, and in a row with room never narrower (``relayout()``)."""
@@ -1981,8 +1989,7 @@ class CurrentWorkCard(qt.QObject):
             displayNode = lesion.GetDisplayNode()
             if displayNode is not None and not (displayNode.GetVisibility() and displayNode.GetVisibility2D()):
                 title += " · " + _("hidden")
-            setElidedText(block.nameLabel, title, lesion.GetName())
-            block.nameLabel.setMaximumWidth(min(220, qt.QFontMetrics(block.nameLabel.font).horizontalAdvance(title) + 4))
+            block.setName(title, lesion.GetName())
             segmentation = lesion.GetSegmentation()
             segment = segmentation.GetNthSegment(0) if segmentation.GetNumberOfSegments() else None
             color = qt.QColor.fromRgbF(*segment.GetColor()[:3]).name() if segment is not None else ui.token("lesion").name()
