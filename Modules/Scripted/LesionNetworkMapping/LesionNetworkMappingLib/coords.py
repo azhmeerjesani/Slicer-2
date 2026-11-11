@@ -1112,7 +1112,17 @@ def prepare_stimulation(out_dir, items, grid, kind, radius_mm=None, diameter_mm=
     in the connectome's brain mask (:func:`write_seed_set`).
     """
     grid = _as_grid(grid)
-    merged = {}
+    merged, conversion = {}, None
+    if kind == "points":
+        # Talairach sites (a "space" column) are converted to MNI as the Coordinates mode does, and recorded
+        points = [p if isinstance(p, Focus) else Focus(float(p[0]), float(p[1]), float(p[2])) for item in items for p in item.get("points") or ()]
+        mni, conversion = to_mni(points)
+        mni, converted = iter(mni), []
+        for item in items:
+            if item.get("points"):
+                item = dict(item, points=[next(mni) for _point in item["points"]])
+            converted.append(item)
+        items = converted
     for item in items:
         sid = str(item.get("participant_id") or "").strip()
         if not sid:
@@ -1144,7 +1154,8 @@ def prepare_stimulation(out_dir, items, grid, kind, radius_mm=None, diameter_mm=
     tsv = write_seed_set(out_dir, seeds, grid, "stimulation", {
         "stimulation": {"kind": kind, "weighting": weighting or STIMULATION_WEIGHTINGS[kind][0],
                         "sphere": sphere_radius(radius_mm, diameter_mm)[1] if kind == "points" else None,
-                        "placement": placement, "space_unconfirmed": unconfirmed},
+                        "placement": placement, "space_unconfirmed": unconfirmed,
+                        "conversion": conversion, "conversion_text": conversion_text(conversion) if conversion else None},
         "outcome_column": outcome_column if outcomes else None, "research_use": RESEARCH_ONLY}, mask_indices)
     if outcomes:
         write_outcome_table(os.path.join(os.path.dirname(tsv), OUTCOMES_TSV), outcomes, outcome_column)
@@ -1165,7 +1176,7 @@ def read_stimulation_table(path, kind="points", outcome_column=None):
     if kind == "points":
         foci = foci_from_rows(columns, rows, where=os.path.basename(os.fspath(path)))
         for row, focus in zip(rows, foci, strict=True):
-            out.append({"participant_id": row["participant_id"], "points": [Focus(*focus.xyz, radius_mm=focus.radius_mm)],
+            out.append({"participant_id": row["participant_id"], "points": [Focus(*focus.xyz, study=row["participant_id"], space=focus.space, radius_mm=focus.radius_mm)],
                         "outcome": row.get(outcome_column) if outcome_column else None})
         return out
     file_column = next((name for name in ("file", "path", "image", "efield", "vta") if name in columns), None)

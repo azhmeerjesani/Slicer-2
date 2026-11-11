@@ -445,6 +445,27 @@ class StimulationTest(CoordsTestCase):
         self.assertEqual(record["seeds"][1]["stimulation"]["points"], 2)  # two rows of p2 make one seed
         self.assertEqual(_absolute_strings(record), [])
 
+    def test_stimulation_talairach_sites_converted_and_recorded(self):
+        # A "space" column of Talairach is converted to MNI (Lancaster 2007) as in the Coordinates mode, never mapped as MNI mm
+        table = self.write("stim_tal.csv", "participant_id,x,y,z,space\nsub-01,-10,-12,6,Talairach\nsub-02,-10,-12,6,MNI\n")
+        items = coords.read_stimulation_table(table, "points")
+        self.assertEqual([item["points"][0].space for item in items], ["TAL", "MNI"])
+        tal_out = os.path.join(self.tmp, "stim tal")
+        tal_rows = read_tsv(coords.prepare_stimulation(tal_out, items[:1], GRID_2MM, "points", radius_mm=6))[1]
+        mni_out = os.path.join(self.tmp, "stim mni")
+        mni_rows = read_tsv(coords.prepare_stimulation(mni_out, [{"participant_id": "sub-01", "points": [coords.Focus(*coords.tal2mni((-10, -12, 6)))]}],
+                                                       GRID_2MM, "points", radius_mm=6))[1]
+        np.testing.assert_allclose(nifti.read_nifti(os.path.join(tal_out, tal_rows[0]["lesion"]))[0], nifti.read_nifti(os.path.join(mni_out, mni_rows[0]["lesion"]))[0])
+        raw = read_tsv(coords.prepare_stimulation(os.path.join(self.tmp, "stim raw"), items[1:], GRID_2MM, "points", radius_mm=6))[1]
+        self.assertFalse(np.allclose(nifti.read_nifti(os.path.join(tal_out, tal_rows[0]["lesion"]))[0],
+                                     nifti.read_nifti(os.path.join(self.tmp, "stim raw", raw[0]["lesion"]))[0]))  # not the Talairach mm used as MNI
+        both = os.path.join(self.tmp, "stim both")
+        coords.prepare_stimulation(both, items, GRID_2MM, "points", radius_mm=6)
+        conversion = coords.read_seed_record(both)["stimulation"]["conversion"]
+        self.assertEqual((conversion["converted"], conversion["total"], conversion["from"], conversion["studies"]), (1, 2, "Talairach", ["sub-01"]))
+        self.assertIn("1 of 2 foci converted from Talairach to MNI", coords.read_seed_record(both)["stimulation"]["conversion_text"])
+        self.assertEqual(coords.read_seed_record(mni_out)["stimulation"]["conversion"]["converted"], 0)
+
 
 class SeedSetTest(CoordsTestCase):
     @classmethod

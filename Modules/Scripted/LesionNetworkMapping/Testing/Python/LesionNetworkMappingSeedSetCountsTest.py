@@ -61,6 +61,15 @@ class SeedSetCountsTest(unittest.TestCase):
             widget.stimulationItems = [{"participant_id": "p1", "site": "a", "points": []}]
             widget._showStimulation()
             self.assertEqual(widget.stimSummaryLabel.text, "1 patient · 1 row")
+            from LesionNetworkMappingLib.coords import Focus
+
+            # Talairach sites (a "space" column) are announced and marked; they are converted to MNI when the seeds are made
+            widget.stimulationItems = [{"participant_id": "p1", "points": [Focus(-30.0, -55.0, 10.0, space="TAL")]},
+                                       {"participant_id": "p2", "points": [Focus(-2.0, 40.0, 20.0)]}]
+            widget._showStimulation()
+            self.assertIn("1 Talairach site will be converted to MNI (Lancaster et al. 2007)", widget.stimSummaryLabel.text)
+            self.assertEqual(widget.stimTable.item(0, 1).text(), "(-30, -55, 10) Talairach")
+            self.assertEqual(widget.stimTable.item(1, 1).text(), "(-2, 40, 20)")
         finally:
             widget.stimulationItems = items
             widget._showStimulation()

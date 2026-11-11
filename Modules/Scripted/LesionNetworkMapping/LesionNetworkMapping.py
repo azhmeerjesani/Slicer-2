@@ -3615,7 +3615,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.stimTable.setRowCount(len(self.stimulationItems))
         for row, item in enumerate(self.stimulationItems):
             if item.get("points"):
-                site = ", ".join(f"({p.x:g}, {p.y:g}, {p.z:g})" for p in item["points"])
+                site = ", ".join(f"({p.x:g}, {p.y:g}, {p.z:g})" + (" " + _("Talairach") if getattr(p, "space", "MNI") == "TAL" else "") for p in item["points"])
             else:
                 site = os.path.basename(item.get("image") or "")
             for column, value in enumerate((item["participant_id"], site, str(outcomes.get(item["participant_id"], "") or ""))):
@@ -3629,7 +3629,12 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         else:
             text = stimulationSummaryText(patients, len(self.stimulationItems))
             if points:
-                text += _ownRadiusText([p for item in self.stimulationItems for p in item.get("points") or ()])
+                sites = [p for item in self.stimulationItems for p in item.get("points") or ()]
+                talairach = sum(1 for p in sites if getattr(p, "space", "MNI") == "TAL")
+                if talairach:
+                    text += " · " + (_("1 Talairach site will be converted to MNI (Lancaster et al. 2007)") if talairach == 1 else
+                                     _("{n} Talairach sites will be converted to MNI (Lancaster et al. 2007)").format(n=talairach))
+                text += _ownRadiusText(sites)
             self.stimSummaryLabel.setText(text)
         notice = "" if points else coords.stimulation_space_notice(
             [(os.path.basename(item.get("image") or ""), item.get("space")) for item in self.stimulationItems if item.get("image") is not None])
