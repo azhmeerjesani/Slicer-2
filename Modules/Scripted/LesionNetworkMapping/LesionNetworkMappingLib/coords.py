@@ -378,14 +378,22 @@ def read_nimare_json(path):
 
     Each contrast is a study named "<study>-<contrast>" (NiMARE's id); "talairach"/"TAL" spaces are marked TAL.
     """
-    with open(path, encoding="utf-8") as f:
+    name = os.path.basename(os.fspath(path))
+    with open(path, encoding="utf-8-sig") as f:
         data = json.load(f)
     if not isinstance(data, dict):
-        raise ValueError(f"{os.path.basename(os.fspath(path))} is not a NiMARE dataset (a JSON object of studies)")
+        raise ValueError(f"{name} is not a NiMARE dataset (a JSON object of studies)")
     foci = []
     for study_id, study in data.items():
-        for contrast_id, contrast in ((study or {}).get("contrasts") or {}).items():
-            coords = (contrast or {}).get("coords") or {}
+        contrasts = (study or {}).get("contrasts") or {} if isinstance(study or {}, dict) else None
+        if not isinstance(contrasts, dict):
+            raise ValueError(f"{name} is not a NiMARE dataset (study {study_id!r} has no table of contrasts)")
+        for contrast_id, contrast in contrasts.items():
+            coords = (contrast or {}).get("coords") or {} if isinstance(contrast or {}, dict) else None
+            if not isinstance(coords, dict):
+                raise ValueError(f"{name} is not a NiMARE dataset (contrast {study_id}-{contrast_id} has no coords)")
+            if not all(isinstance(coords.get(axis) or [], list) for axis in ("x", "y", "z")):
+                raise ValueError(f"{name} is not a NiMARE dataset (x, y and z of {study_id}-{contrast_id} must be lists of numbers)")
             xs, ys, zs = (list(coords.get(axis) or []) for axis in ("x", "y", "z"))
             if not (len(xs) == len(ys) == len(zs)):
                 raise ValueError(f"{study_id}-{contrast_id}: x, y and z have different lengths")
@@ -394,10 +402,14 @@ def read_nimare_json(path):
             space = normalize_space(coords.get("space"))
             sizes = ((contrast.get("metadata") or {}).get("sample_sizes") or [None]) if isinstance(contrast, dict) else [None]
             n = sizes[0] if sizes and isinstance(sizes[0], (int, float)) else None
-            for x, y, z in zip(xs, ys, zs, strict=True):
-                foci.append(Focus(float(x), float(y), float(z), f"{study_id}-{contrast_id}", space, None, None if n is None else int(n)))
+            try:
+                points = [(float(x), float(y), float(z)) for x, y, z in zip(xs, ys, zs, strict=True)]
+            except (TypeError, ValueError):
+                raise ValueError(f"{name} is not a NiMARE dataset (x, y and z of {study_id}-{contrast_id} must be lists of numbers)") from None
+            for x, y, z in points:
+                foci.append(Focus(x, y, z, f"{study_id}-{contrast_id}", space, None, None if n is None else int(n)))
     if not foci:
-        raise ValueError(f"{os.path.basename(os.fspath(path))} holds no coordinates")
+        raise ValueError(f"{name} holds no coordinates")
     return foci
 
 

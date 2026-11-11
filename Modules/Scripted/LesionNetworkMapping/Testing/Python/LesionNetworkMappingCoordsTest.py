@@ -131,6 +131,28 @@ class ParserTest(CoordsTestCase):
         self.assertEqual(foci[0].subjects, 20)
 
 
+    def test_nimare_json_bom_and_wrong_shapes(self):
+        good = {"s1": {"contrasts": {"c1": {"coords": {"space": "MNI", "x": [1], "y": [2], "z": [3]}}}}}
+        path = os.path.join(self.tmp, "bom.json")
+        with open(path, "w", encoding="utf-8-sig") as f:
+            json.dump(good, f)
+        self.assertEqual(len(coords.read_foci(path)), 1)
+        bad = [
+            {"s1": [1, 2]},
+            {"s1": {"contrasts": [1]}},
+            {"s1": {"contrasts": {"c": 5}}},
+            {"s1": {"contrasts": {"c": {"coords": {"x": 1, "y": [2], "z": [3]}}}}},
+            {"s1": {"contrasts": {"c": {"coords": {"x": ["a"], "y": [2], "z": [3]}}}}},
+        ]
+        for i, data in enumerate(bad):
+            path = os.path.join(self.tmp, f"bad{i}.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            with self.assertRaises(ValueError, msg=str(data)) as ctx:
+                coords.read_foci(path)
+            self.assertIn("NiMARE", str(ctx.exception))
+
+
 class TalairachTest(unittest.TestCase):
     def test_published_reference_point(self):
         # NiMARE's tal2mni test value (inverse Lancaster 2007 "pooled" icbm2tal): (-44, 31, 27) TAL -> MNI
