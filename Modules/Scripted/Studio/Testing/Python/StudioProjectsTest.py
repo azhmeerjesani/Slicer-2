@@ -3098,6 +3098,50 @@ class StudioProjectsTest(unittest.TestCase):
             thumbnails._writeAtomic(blocked, b"png")
         self.assertEqual(sorted(os.listdir(os.path.dirname(blocked))), ["blocked.png"])
 
+    def test_39b_lesion_card_says_not_saved_when_the_project_save_fails(self):
+        """The Lesion card's save line follows a failed project save (BB-1): while the top bar says "Not saved · Retry"
+        (disk full), the card says "Not saved" with the reason, not "Saved in the project" with a green check; once the
+        save succeeds again it says "Saved in the project" again.
+        """
+        import shutil as shutilModule
+        from unittest import mock
+
+        from StudioLib import draw, library
+
+        service = self._service()
+        volume, _path = self._userVolume("Card disk", shape=(20, 24, 28))
+        self._projectFor(service)
+        segmentation, segmentId, array = self._lesion(volume, name="Lesion")
+        self._save(service)
+        running = self.autosave._service
+        self.autosave._service = service  # as the running service of the application
+        try:
+            self.assertEqual(draw.saveStateText(segmentation)[0], "Saved in the project", draw.saveStateText(segmentation))
+            realDiskUsage = shutilModule.disk_usage
+
+            def diskUsage(path):
+                return realDiskUsage(path)._replace(free=1024)
+
+            array[12:14, 12:14, 12:14] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, volume)
+            with mock.patch.object(shutilModule, "disk_usage", side_effect=diskUsage):
+                self.assertFalse(service.saveNow("test", progress=False))
+            status = service.status()
+            self.assertEqual(status.state, "error", status.message)
+            text, toolTip = draw.saveStateText(segmentation)
+            self.assertEqual(text, "Not saved", (text, toolTip))
+            self.assertIn(status.message, toolTip)
+            self.assertNotIn("is saved with the project", toolTip)
+            # The library lesion chip uses the same line
+            self.assertEqual(library.lesionSaveInfo(segmentation)[1], "Not saved")
+            # Space is free again: the save succeeds and the card says so again
+            self.assertTrue(service.saveNow("test", progress=False), service._projectPausedReason)
+            self.io.backgroundWriter().drain(30.0)
+            self.assertEqual(service.status().state, "idle")
+            self.assertEqual(draw.saveStateText(segmentation)[0], "Saved in the project", draw.saveStateText(segmentation))
+        finally:
+            self.autosave._service = running
+
     def test_40_root_move_is_refused_while_another_studio_has_a_project_open(self):
         """Moving the Slicer Studio folder while another running Slicer Studio has one of its projects open (BB-1) is
         refused before anything is saved or moved, with a message that names the project, as rename and Move to Trash

@@ -2045,6 +2045,14 @@ def saveStateText(segmentationNode):
         return " · ".join(part for part in parts if part), path
     # In a project (A-09) the lesion itself is saved with the project; the line then speaks of the NIfTI mask
     inProject = _projectLesionsFolder() is not None
+    problem = _projectSaveProblem() if inProject else None
+    if problem is not None:
+        # The project save failed (disk full, folder not writable): the card must not claim the lesion is saved; it says
+        # what the top bar says ("Not saved · Retry"), with the reason in the tooltip
+        lines = [problem, _("Press {key} to try again.").format(key=qt.QKeySequence("Ctrl+S").toString(qt.QKeySequence.NativeText))]
+        if state == "unsaved" and path:
+            lines.append(_("{name} is older than the lesion.").format(name=name))
+        return _("Not saved"), "\n".join(lines)
     if state == "unsaved":
         if inProject:
             return _("Saved in the project · {name} is older").format(name=name), _("{path}\nSave lesion updates it.").format(path=path)
@@ -2111,6 +2119,26 @@ def isUserFile(path):
     return not any(_isInside(path, directory) for directory in _applicationDirectories())
 
 
+def _projectSaveProblem():
+    """The reason the open project could not be saved (autosave state "error" or "paused", as the top bar shows
+    "Not saved · Retry"), or None when the project saves normally or there is no running autosave service.
+    """
+    try:
+        from . import autosave
+    except ImportError:
+        return None
+    service = autosave.instance()
+    if service is None:
+        return None
+    try:
+        status = service.status()
+    except Exception:
+        return None
+    if not getattr(status, "projectName", None) or getattr(status, "state", None) not in ("error", "paused"):
+        return None
+    return getattr(status, "message", None) or _("see the error log")
+
+
 def _projectLesionsFolder(create=False):
     """Lesions/ of the open project (A-09), or None without a project."""
     try:
@@ -2137,6 +2165,37 @@ def _watchProject():
         return
     projects.addListener(_onProjectChanged)
     _projectWatched = True
+
+
+_statusWatched = None  # the autosave service whose status the Lesion card follows
+_saveProblemShown = None  # the project save problem the Lesion card last spoke of
+
+
+def _watchSaveStatus():
+    """Update the save line of the Lesion card when a project save fails or succeeds again ("Not saved" <-> "Saved in
+    the project") without waiting for the next edit.
+    """
+    global _statusWatched
+    try:
+        from . import autosave
+    except ImportError:
+        return
+    service = autosave.instance()
+    if service is None or service is _statusWatched or not hasattr(service, "addStatusListener"):
+        return
+    service.addStatusListener(_onSaveStatus)
+    _statusWatched = service
+
+
+def _onSaveStatus(_status=None):
+    global _saveProblemShown
+    problem = _projectSaveProblem()
+    if problem == _saveProblemShown:
+        return
+    _saveProblemShown = problem
+    session = extension().session
+    if session is not None:
+        session.refreshPanel()
 
 
 def _onProjectChanged():
@@ -2810,6 +2869,7 @@ class DrawExtension:
     def attach(self, drawSession):
         self._session = drawSession
         _watchProject()
+        _watchSaveStatus()
 
     def detach(self, drawSession):
         if self._session is drawSession:
