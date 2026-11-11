@@ -323,6 +323,57 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertIn("All changes are saved in Projects/sub-012 T1w", summary)
         self.assertEqual(service.closeFlushResult, (True, ""))
 
+    def test_03c_running_map_or_normalize_is_named_when_quitting_or_closing_the_scene(self):
+        """Quitting says that a Map network / Normalize run is going and is stopped (not only "All changes are saved");
+        Ctrl+N and Ctrl+W ask first, and Cancel keeps the scene and the run (bug quit-question-midrun-says-all-saved).
+        """
+        import importlib
+        import types
+
+        from StudioLib import firstrun, projects_ui
+
+        jobrunner = importlib.import_module("LesionNetworkMappingUI.jobrunner")
+        runner = types.SimpleNamespace(runningJobs=lambda: [])
+        job = types.SimpleNamespace(spec=types.SimpleNamespace(name="engine"), progress=0.19, isFinished=lambda: False)
+        original = jobrunner.instance
+        jobrunner.instance = lambda: runner
+        service = self._service()
+        asked = []
+        originalQuestion = projects_ui._question
+        projects_ui._question = lambda parent, title, text, buttons, default=0: (asked.append((title, text, default)), 1)[1]
+        calls = []
+        originalNew = service.newProject
+        service.newProject = lambda: calls.append("new")
+        originalService = projects_ui._service
+        projects_ui._service = lambda: service
+        try:
+            self.assertEqual(firstrun.runningJobNotice(), "")
+            self.assertTrue(projects_ui.newProject() is True)  # nothing runs: no question
+            self.assertEqual((asked, calls), ([], ["new"]))
+            runner.runningJobs = lambda: [job]
+            notice = firstrun.runningJobNotice()
+            self.assertIn("Map network is running (19%)", notice)
+            self.assertIn("Quitting stops it", notice)
+            self.assertIn("Closing the scene stops it", firstrun.runningJobNotice(sceneOnly=True))
+            self.assertIn("Quitting stops it", firstrun._withRunNotice("All changes are saved in X. Quit?"))
+            # Ctrl+N and Ctrl+W: asked, Cancel (the default) changes nothing
+            calls.clear()
+            self.assertFalse(projects_ui.newProject())
+            self.assertFalse(projects_ui.closeScene())
+            self.assertEqual(calls, [])
+            self.assertEqual(len(asked), 2)
+            self.assertIn("Map network is running", asked[0][1])
+            self.assertEqual(asked[0][2], 1, "Cancel is the default")
+            # A batch normalization of the Library is not stopped by closing the scene, but by quitting
+            job.spec.name = "normalize-batch"
+            self.assertEqual(firstrun.runningJobNotice(sceneOnly=True), "")
+            self.assertIn("Normalize to MNI is running", firstrun.runningJobNotice())
+        finally:
+            jobrunner.instance = original
+            projects_ui._question = originalQuestion
+            projects_ui._service = originalService
+            service.newProject = originalNew
+
     def test_03b_user_scan_named_like_a_template_is_user_data(self):
         """A scan the user opened from a file is user data whatever its name (FSL's MNI152_T1_2mm_brain is not a template)."""
         service = self._service()

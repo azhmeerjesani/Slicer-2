@@ -239,6 +239,39 @@ def _autosaveLine():
         return ""
 
 
+#: Jobs that quitting stops (job name -> what the user knows it as); Ctrl+N / Ctrl+W stop only the first two
+_RUN_LABELS = {"engine": "Map network", "normalize": "Normalize to MNI", "normalize-batch": "Normalize to MNI"}
+_SCENE_BOUND_RUNS = ("engine", "normalize")
+
+
+def runningJobNotice(sceneOnly=False):
+    """The sentence that tells that a Map network or Normalize run is going and what leaving does to it, "" if none runs.
+
+    ``sceneOnly``: only the runs that closing the scene (Ctrl+N, Ctrl+W) stops; quitting stops every one of them.
+    """
+    import sys
+
+    module = sys.modules.get("LesionNetworkMappingUI.jobrunner")
+    if module is None:
+        return ""
+    try:
+        jobs = module.instance().runningJobs()
+    except Exception:
+        return ""
+    names = _SCENE_BOUND_RUNS if sceneOnly else tuple(_RUN_LABELS)
+    for job in jobs:
+        name = getattr(job.spec, "name", None)
+        if name not in names or job.isFinished():
+            continue
+        label = _("Map network") if name == "engine" else _("Normalize to MNI")
+        progress = getattr(job, "progress", None)
+        running = _("{what} is running ({pct}%).").format(what=label, pct=round(100 * progress)) if progress is not None else _("{what} is running.").format(what=label)
+        if sceneOnly:
+            return _("{running} Closing the scene stops it and its result will be lost.").format(running=running)
+        return _("{running} Quitting stops it and its result will be lost.").format(running=running)
+    return ""
+
+
 def projectCloseSummary():
     """``(mode, summary)`` of the close prompt while the scene is a project (A-09): the project is saved now; ``("", "")``
     if there is no project or saving failed (the classic prompt then asks), else "All changes are saved…".
@@ -306,6 +339,12 @@ def studyCloseSummary():
     return CLOSE_MODE_LESION_SAVED, _("All changes are saved in study {study}. Quit?").format(study=studySession.name)
 
 
+def _withRunNotice(summary):
+    """The close question with the running Map network / Normalize run put first (its result is lost when quitting)."""
+    notice = runningJobNotice()
+    return f"{notice}\n\n{summary}" if notice else summary
+
+
 def computeCloseSummary():
     """Set the close prompt properties of the main window (``closeSummaryRequested()``). Never raises: on an error the
     classic prompt runs.
@@ -321,6 +360,7 @@ def computeCloseSummary():
     if studySummary is not None:
         mode, summary = studySummary
         if mode:
+            summary = _withRunNotice(summary)
             mainWindow.setProperty(CLOSE_SUMMARY_PROPERTY, summary)
             mainWindow.setProperty(CLOSE_MODE_PROPERTY, mode)
         return
@@ -332,6 +372,7 @@ def computeCloseSummary():
     if projectSummary is not None:
         mode, summary = projectSummary
         if mode:
+            summary = _withRunNotice(summary)
             mainWindow.setProperty(CLOSE_SUMMARY_PROPERTY, summary)
             mainWindow.setProperty(CLOSE_MODE_PROPERTY, mode)
         return
@@ -345,6 +386,7 @@ def computeCloseSummary():
     autosaveLine = _autosaveLine()
     if autosaveLine:
         summary = f"{summary}\n\n{autosaveLine}"
+    summary = _withRunNotice(summary)
     mainWindow.setProperty(CLOSE_SUMMARY_PROPERTY, summary)
     mainWindow.setProperty(CLOSE_MODE_PROPERTY, mode)
 

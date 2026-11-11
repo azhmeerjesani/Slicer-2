@@ -734,10 +734,24 @@ def _ensureRootOrTell():
     return True
 
 
+def _confirmStopRun(title):
+    """True if no Map network / Normalize run would be stopped by closing the scene, or the user accepts stopping it."""
+    from . import firstrun
+
+    notice = firstrun.runningJobNotice(sceneOnly=True)
+    if not notice:
+        return True
+    return _question(slicer.util.mainWindow(), title, notice, [_("Stop and continue"), _("Cancel")], default=1) == 0
+
+
 def newProject():
-    """New project (Ctrl+N): the open project is saved and closed; the next data opened or drawn starts the next one."""
+    """New project (Ctrl+N): the open project is saved and closed; the next data opened or drawn starts the next one.
+    A Map network or Normalize run that is going is stopped with the scene: the user is asked first.
+    """
     service = _service()
     if service is None:
+        return False
+    if not _confirmStopRun(_("New project")):
         return False
     service.newProject()
     return True
@@ -747,6 +761,8 @@ def closeScene():
     """Close scene in Studio (Ctrl+W, File > Close Scene, Search): with a project or a study open, it is saved first and closed (as New
     project), so 3D Slicer does not ask "Save before closing scene?" about saved work; else the official action.
     """
+    if not _confirmStopRun(_("Close scene")):
+        return False
     service = _service()
     if service is not None and (service.currentProject() is not None or service._studyOpen() or service.ensureProject() is not None):
         service.newProject()
