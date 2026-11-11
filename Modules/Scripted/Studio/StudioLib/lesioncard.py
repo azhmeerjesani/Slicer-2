@@ -905,8 +905,8 @@ class LesionCard:
 
     def _fitStatCells(self):
         """Share the width of the stat row so that every cell gets the width its value and caption need, and the width
-        left over is shared equally; when the row is too narrow for all three texts (a narrow inspector), the cells
-        shrink in proportion to what they need and their labels elide. Equal thirds cut "scanner space" (and "Side ·
+        left over is shared equally; when the row is too narrow for all three texts (a narrow inspector or a long
+        "Both hemispheres"), the Side cell gives way first and then all cells shrink in proportion, and their labels elide. Equal thirds cut "scanner space" (and "Side ·
         scanner space") at the default 340 px inspector, where the Volume cell had room to spare.
         """
         available = self.statsFrame.contentsRect().width()
@@ -915,10 +915,25 @@ class LesionCard:
         needs = []
         for key in ("volume", "parts", "side"):
             value, caption = self.statValues[key]
-            margins = value.parent().contentsMargins()
+            # The margins are the cell layout's (the cell widget itself has none)
+            margins = value.parent().layout().contentsMargins()
             needs.append(max(_textWidth(value), _textWidth(caption)) + margins.left() + margins.right() + 2)
         spare = available - sum(needs)
-        widths = [need + (spare // len(needs) if spare > 0 else 0) for need in needs]
+        if spare >= 0:
+            widths = [need + spare // len(needs) for need in needs]
+        else:
+            # Too narrow for all three texts: the Side value ("Both hemispheres") is the one that gives way first, down
+            # to about 6 characters ("Both…"), so "97.34 mL" and "Part · 0 gaps" stay whole; only when that is not
+            # enough do all the cells shrink in proportion
+            deficit = -spare
+            sideMin = min(needs[2], 6 * self.statValues["side"][0].fontMetrics().averageCharWidth() + 20)
+            cut = min(deficit, max(0, needs[2] - sideMin))
+            widths = list(needs)
+            widths[2] -= cut
+            deficit -= cut
+            if deficit > 0:
+                total = sum(widths)
+                widths = [max(1, width - deficit * width // total) for width in widths]
         for index, width in enumerate(widths):
             if self.statsLayout.stretch(index) != width:
                 self.statsLayout.setStretch(index, width)

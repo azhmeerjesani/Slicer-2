@@ -707,6 +707,34 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         self._pump(4)
         draw.session(studioShell).refreshPanel(computeMetrics=True)
 
+    def test_lesion_volume_and_captions_whole_with_both_hemispheres(self):
+        """With "Both hemispheres" in the Side cell at about the default inspector width the Volume value ("97.34 mL",
+        "941 mL"), its caption and "Part · 0 gaps" are shown whole; only the Side cell gives way (BB-1: "94…" read as 94).
+        """
+        from StudioLib import draw, importer
+
+        studioShell = self._applyStudio()
+        importer.startOnTemplate(shell=studioShell)
+        self._restores.append(importer._closeTemplateBanner)
+        self._pump(10)
+        card = draw.lesionCard()
+        try:
+            for ml, parts in ((97.34, 3), (941.0, 12), (2.0, 2)):
+                card._setStats({"ml": ml, "parts": parts, "gaps": 0, "side": "Both hemispheres", "sideLevel": "warn"})
+                for width in (300, 280):
+                    card.statsFrame.setFixedWidth(width)
+                    self._pump(6)
+                    for key in ("volume", "parts"):
+                        value, caption = card.statValues[key]
+                        for label in (value, caption):
+                            self.assertEqual(str(label.text), str(label.property("studioFullText")),
+                                             f"{key} label {str(label.text)!r} is elided at {width} px for {ml} mL")
+        finally:
+            card.statsFrame.setMaximumWidth(16777215)
+            card.statsFrame.setMinimumWidth(0)
+            self._pump(4)
+            draw.session(studioShell).refreshPanel(computeMetrics=True)
+
     def test_lesion_name_is_elided_when_long(self):
         """A lesion name that does not fit the name field of the Lesion card ends with an ellipsis (VISUAL 6: no clipped text);
         it never starts in a half letter after a rename, the whole name is the tool tip, and it is whole while it is edited.
