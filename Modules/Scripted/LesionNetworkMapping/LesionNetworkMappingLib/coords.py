@@ -164,7 +164,10 @@ def _number(text):
     text = str(text).strip()
     if text in ("", NA, "NA", "nan", "NaN"):
         return None
-    return float(text)
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"not a finite number: {text!r}")
+    return value
 
 
 def _now():
@@ -366,6 +369,8 @@ def read_sleuth(path):
                              f"expected 3 (x y z): {raw!r}.{hint}")
         try:
             x, y, z = (float(value) for value in values)
+            if not all(math.isfinite(v) for v in (x, y, z)):
+                raise ValueError("not finite")
         except ValueError:
             raise ValueError(f"{os.path.basename(os.fspath(path))}, line {number}: not a coordinate: {raw!r}") from None
         if space is None:
@@ -410,6 +415,8 @@ def read_nimare_json(path):
             n = sizes[0] if sizes and isinstance(sizes[0], (int, float)) else None
             try:
                 points = [(float(x), float(y), float(z)) for x, y, z in zip(xs, ys, zs, strict=True)]
+                if not all(math.isfinite(v) for point in points for v in point):
+                    raise ValueError("not finite")
             except (TypeError, ValueError):
                 raise ValueError(f"{name} is not a NiMARE dataset (x, y and z of {study_id}-{contrast_id} must be lists of numbers)") from None
             for x, y, z in points:
@@ -528,6 +535,8 @@ def sphere_occupancy(center_xyz, radius_mm, grid, supersample=DEFAULT_SUPERSAMPL
         out = np.zeros(grid.shape, dtype=np.float32)
     linear, offset = grid.affine[:3, :3], grid.affine[:3, 3]
     center = np.asarray(center_xyz, dtype=np.float64)
+    if not np.all(np.isfinite(center)):
+        return out  # no voxel (prepare_coordinates refuses such a focus by name)
     voxel = np.linalg.solve(linear, center - offset)
     reach = np.ceil(radius / np.maximum(grid.spacing, 1e-9)).astype(int) + 1
     lo = np.maximum(np.floor(voxel).astype(int) - reach, 0)
@@ -1078,16 +1087,49 @@ def _source(path):
     return {"file": os.path.basename(os.fspath(path)), "sha256": _sha256(path)} if path and os.path.isfile(path) else None
 
 
+def focus_text(focus):
+    """A focus named by its study and position, for example "Smith 2010 focus (-33, -57, 110)"."""
+    return f"{focus.study} focus ({', '.join(f'{v:g}' for v in focus.xyz)})"
+
+
+def unplaced_foci(foci_by_study, grid, radius_mm=None, diameter_mm=None, mask_indices=None, supersample=DEFAULT_SUPERSAMPLE):
+    """Labels of the foci whose sphere has no weight on ``grid`` (or in ``mask_indices``), in study order.
+
+    A non-finite focus, or one off the connectome grid or outside its brain mask, adds nothing to its study's seed.
+    A study none of whose foci can be placed is named by its study label; otherwise each such focus is named
+    (:func:`focus_text`).
+    """
+    grid = _as_grid(grid)
+    indices = None if mask_indices is None else np.asarray(mask_indices)
+    labels = []
+    for name, members in foci_by_study.items():
+        radii = focus_radii(members, radius_mm, diameter_mm)
+        bad = []
+        for focus, radius in zip(members, radii, strict=True):
+            volume = sphere_occupancy(focus.xyz, radius, grid, supersample).reshape(-1)
+            if not np.any((volume if indices is None else volume[indices]) > 0):
+                bad.append(focus)
+        if bad:
+            labels.extend([str(name)] if len(bad) == len(members) else [focus_text(focus) for focus in bad])
+    return labels
+
+
 def prepare_coordinates(out_dir, foci, grid, radius_mm=None, diameter_mm=None, tal_matrix=DEFAULT_TAL_MATRIX, source=None, grid_space=None, supersample=DEFAULT_SUPERSAMPLE,
                         mask_indices=None):
     """Study-level union seeds of ``foci`` in ``out_dir`` (Talairach foci converted, recorded); return lesions.tsv.
 
     ``mask_indices``: refuse studies whose seed has no weight in the connectome's brain mask (:func:`write_seed_set`).
+    A focus that adds nothing to a study's seed (off the grid, or outside ``mask_indices``) is refused by name too
+    (:class:`OutsideMaskError`, :func:`unplaced_foci`), so that the recorded foci counts describe the seeds.
     """
     if not foci:
         raise ValueError("No coordinates")
     mni, conversion = to_mni(foci, tal_matrix)
     groups = group_by_study(mni)
+    unplaced = unplaced_foci(groups, grid, radius_mm, diameter_mm, mask_indices, supersample)
+    if any(label not in groups for label in unplaced):
+        # A focus that adds no voxel to its study's seed would be counted (n_foci, foci) but silently dropped
+        raise OutsideMaskError(unplaced)
     seeds, used = [], set()
     sphere = sphere_radius(radius_mm, diameter_mm)[1]
     for name, members in groups.items():

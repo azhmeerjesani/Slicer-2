@@ -596,6 +596,48 @@ class SeedSetTest(CoordsTestCase):
         self.assertNotEqual(process.returncode, 0)
         self.assertIn("Out 2021 lies outside the connectome's brain mask", process.stdout + process.stderr)
 
+    def test_focus_that_adds_nothing_is_refused_by_name(self):
+        """A focus off the connectome grid (a typo such as z=110), outside its brain mask or not finite is refused by
+        name before anything is written, even when its study has another, valid focus: it was counted in the foci
+        totals (seeds.json foci, n_foci) but silently added nothing to the seed.
+        """
+        a = self.meta["blobs"]["A"]["center_world"]
+        corner = (np.asarray(self.bundle.affine) @ np.array([1.0, 1.0, 1.0, 1.0]))[:3]  # on the grid, outside the ellipsoid mask
+        above = (a[0], a[1], a[2] + 500.0)  # far above the grid
+        source = self.write("mixed.csv", "study,x,y,z\n" + f"Smith 2010,{a[0]},{a[1]},{a[2]}\nSmith 2010,{above[0]},{above[1]},{above[2]}\nJones 2012,{a[0]},{a[1]},{a[2]}\n")
+        foci = coords.read_foci(source)
+        out = os.path.join(self.tmp, "mixed")
+        for mask in (self.bundle.mask_indices, None):
+            with self.assertRaises(coords.OutsideMaskError) as caught:
+                coords.prepare_coordinates(out, foci, self.bundle.grid, radius_mm=3, mask_indices=mask)
+            self.assertEqual(caught.exception.labels, [coords.focus_text(foci[1])])
+            self.assertIn(f"Smith 2010 focus ({a[0]:g}, {a[1]:g}, {above[2]:g}) lies outside", str(caught.exception))
+            self.assertFalse(os.path.exists(os.path.join(out, coords.LESIONS_TSV)))
+        # In the grid but outside the brain mask: refused when the mask is checked, named with any wholly outside study
+        foci = [coords.Focus(*a, study="Smith 2010"), coords.Focus(*corner, study="Smith 2010"), coords.Focus(*corner, study="Out 2021")]
+        with self.assertRaises(coords.OutsideMaskError) as caught:
+            coords.prepare_coordinates(out, foci, self.bundle.grid, radius_mm=3, mask_indices=self.bundle.mask_indices)
+        self.assertEqual(caught.exception.labels, [coords.focus_text(foci[1]), "Out 2021"])
+        # A non-finite focus never reaches a seed: the parsers refuse it, and its sphere is empty (without a numpy warning)
+        with self.assertRaisesRegex(ValueError, r"inf.csv, row 3: not a finite number: 'inf'"):
+            coords.read_foci(self.write("inf.csv", f"study,x,y,z\nSmith 2010,{a[0]},{a[1]},{a[2]}\nSmith 2010,inf,1,2\n"))
+        with self.assertRaisesRegex(ValueError, "row 2: not a finite number"):
+            coords.read_foci(self.write("neginf.csv", "x,y,z,radius\n1,2,3,-inf\n"))
+        with self.assertRaisesRegex(ValueError, "line 3: not a coordinate"):
+            coords.read_foci(self.write("inf.txt", "// Reference=MNI\n// Smith 2010\n1 2 -inf\n"))
+        with self.assertRaisesRegex(ValueError, "must be lists of numbers"):
+            coords.read_foci(self.write("inf.json", '{"s": {"contrasts": {"1": {"coords": {"space": "MNI", "x": [1], "y": [2], "z": [Infinity]}}}}}'))
+        with np.errstate(all="raise"):
+            self.assertFalse(np.any(coords.sphere_occupancy((math.inf, 1.0, 2.0), 3.0, self.bundle.grid)))
+        foci = [coords.Focus(*a, study="Smith 2010"), coords.Focus(math.inf, 1.0, 2.0, study="Smith 2010")]
+        with self.assertRaises(coords.OutsideMaskError) as caught:
+            coords.prepare_coordinates(out, foci, self.bundle.grid, radius_mm=3, mask_indices=self.bundle.mask_indices)
+        self.assertEqual(caught.exception.labels, ["Smith 2010 focus (inf, 1, 2)"])
+        # The valid foci alone are mapped, and the recorded counts are the foci that make the seeds
+        tsv = coords.prepare_coordinates(out, [foci[0], coords.Focus(*a, study="Jones 2012")], self.bundle.grid, radius_mm=3, mask_indices=self.bundle.mask_indices)
+        record = coords.read_seed_record(os.path.dirname(tsv))
+        self.assertEqual((record["foci"], [seed["n_foci"] for seed in record["seeds"]]), (2, [1, 1]))
+
     def test_atrophy_prepare(self):
         w = np.zeros(self.bundle.shape, dtype=np.float32)
         w[self.bundle.mask] = 0.5
