@@ -442,7 +442,7 @@ class MoveJournal:
         self.newRoot = os.path.normpath(newRoot)
         self._lock = threading.Lock()
         self._data = {"from": self.oldRoot, "to": self.newRoot, "renamed": {}, "renamedIds": {}, "templatesBefore": None,
-                      "projectsBefore": None}
+                      "projectsBefore": None, "named": {}}
         if not path:
             return
         if resume:
@@ -458,6 +458,8 @@ class MoveJournal:
             if isinstance(data, dict) and same(str(data.get("from") or ""), self.oldRoot) and same(str(data.get("to") or ""), self.newRoot):
                 if isinstance(data.get("renamed"), dict):
                     self._data["renamed"] = {str(key): str(value) for key, value in data["renamed"].items()}
+                if isinstance(data.get("named"), dict):
+                    self._data["named"] = {str(key): str(value) for key, value in data["named"].items()}
                 if isinstance(data.get("renamedIds"), dict):
                     self._data["renamedIds"] = {str(key): str(value) for key, value in data["renamedIds"].items()}
                 if isinstance(data.get("templatesBefore"), list):
@@ -496,6 +498,28 @@ class MoveJournal:
             if self._data["renamed"].get(key) != value:
                 self._data["renamed"][key] = value
                 self._write()
+
+    def recordNamed(self, source, destination):
+        """The complete copy of ``source`` is about to get its name ``destination`` (cross-volume move): a kill before the
+        original is deleted leaves both, and ``namedDestination`` tells the move that finishes it that this is that copy.
+        """
+        try:
+            key = os.path.normpath(os.path.relpath(source, self.oldRoot))
+            value = os.path.normpath(os.path.relpath(destination, self.newRoot))
+        except ValueError:
+            return
+        with self._lock:
+            self._data["named"][key] = value
+            self._write()
+
+    def namedDestination(self, source):
+        """The absolute destination recorded by ``recordNamed`` for ``source`` (absolute), or None."""
+        try:
+            key = os.path.normpath(os.path.relpath(source, self.oldRoot))
+        except ValueError:
+            return None
+        value = self._data["named"].get(key)
+        return os.path.normpath(os.path.join(self.newRoot, value)) if value else None
 
     def recordId(self, oldId, newId):
         """A moved template is about to get the id ``newId`` instead of ``oldId``."""
@@ -571,6 +595,9 @@ class _JournaledRenames(dict):
     def update(self, *args, **kwargs):
         for source, destination in dict(*args, **kwargs).items():
             self[source] = destination
+
+    def journal(self):
+        return self._journal
 
 
 def projectsFolder(rootPath=None):
@@ -2289,6 +2316,43 @@ def _deleteCopiedFolder(source):
     shutil.rmtree(hidden)
 
 
+def _recordNamed(renamed, source, destination):
+    journal = renamed.journal() if isinstance(renamed, _JournaledRenames) else None
+    if journal is not None:
+        journal.recordNamed(source, destination)
+
+
+def _finishNamedCopy(source, renamed, progress=None):
+    """A move that was killed after the complete copy of ``source`` got its name, before the original was deleted, left
+    both: delete the original (the journal says that copy is the one) instead of moving it again as " 2". Return True
+    when that was the case.
+    """
+    journal = renamed.journal() if isinstance(renamed, _JournaledRenames) else None
+    if journal is None or not os.path.lexists(source):
+        return False
+    destination = journal.namedDestination(source)
+    if not destination or not os.path.lexists(destination) or os.path.lexists(_moveTemporary(destination)):
+        return False
+    try:
+        if os.path.isdir(source) != os.path.isdir(destination):
+            return False
+        if os.path.isdir(source):
+            if treeSize(source) != treeSize(destination):
+                return False
+            _deleteCopiedFolder(source)
+        else:
+            if os.path.getsize(source) != os.path.getsize(destination):
+                return False
+            os.remove(source)
+    except OSError:
+        return False
+    if os.path.basename(destination) != os.path.basename(source):
+        renamed[source] = destination  # where it is (a path follows it, as in an uninterrupted move)
+    if progress:
+        progress(os.path.basename(source))
+    return True
+
+
 def _removeMoveLeftovers(folder):
     """Delete what an interrupted move left in ``folder`` (hidden, never listed). Worker-safe."""
     try:
@@ -2314,11 +2378,15 @@ def _mergeMove(source, destination, sameVolume, progress=None, renamed=None):
     ``renamed`` (a dict) receives ``{source: destination}`` for each item that moved under another name (" 2") because
     its name was taken there.
     """
+    if _finishNamedCopy(source, renamed, progress):
+        return
     if os.path.isdir(source) and os.path.isdir(destination):
         _removeMoveLeftovers(destination)
         for name in os.listdir(source):
             if isMoveLeftover(name):
                 removePaths([os.path.join(source, name)])  # what an interrupted move left here (copied elsewhere, or partial)
+                continue
+            if _finishNamedCopy(os.path.join(source, name), renamed, progress):
                 continue
             target = os.path.join(destination, name)
             if os.path.exists(target):
@@ -2365,6 +2433,7 @@ def _mergeMove(source, destination, sameVolume, progress=None, renamed=None):
         if treeSize(source) != treeSize(temporary):
             shutil.rmtree(temporary, ignore_errors=True)
             raise OSError(_("Copying {name} failed: the sizes differ").format(name=os.path.basename(source)))
+        _recordNamed(renamed, source, destination)
         try:
             os.rename(temporary, destination)
         except OSError as error:
@@ -2380,6 +2449,7 @@ def _mergeMove(source, destination, sameVolume, progress=None, renamed=None):
         if os.path.getsize(source) != os.path.getsize(temporary):
             removePaths([temporary])
             raise OSError(_("Copying {name} failed: the sizes differ").format(name=os.path.basename(source)))
+        _recordNamed(renamed, source, destination)
         try:
             os.rename(temporary, destination)
         except OSError as error:

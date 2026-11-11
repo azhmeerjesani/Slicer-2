@@ -6610,6 +6610,50 @@ class StudioProjectsTest(unittest.TestCase):
                     self.assertEqual(_relativeFiles(os.path.join(newRoot, projects.PROJECTS_DIR, name)), files, name)
                 self.assertEqual(sorted(os.listdir(oldRoot)), [], "what the interrupted delete left is deleted")
 
+    def test_80b_move_killed_after_the_copy_got_its_name_does_not_duplicate_the_item(self):
+        """Killed between the copy getting its name and the original being deleted (BB-1): the move finished later saw the
+        name taken and moved the original again as "<name> 2" (or "<name> 3" next to a " 2" of a real collision). The journal
+        records the copy before it is named, and the move that finishes it deletes the original instead.
+        """
+        from unittest import mock
+
+        projects = self.projects
+
+        class Killed(BaseException):
+            pass
+
+        def makeProject(rootPath, name, size):
+            folder = os.path.join(rootPath, projects.PROJECTS_DIR, name)
+            os.makedirs(os.path.join(folder, projects.PRIVATE_DIR))
+            with open(os.path.join(folder, name + projects.SCENE_EXTENSION), "w") as f:
+                f.write("<MRML/>\n")
+            with open(os.path.join(folder, "data.bin"), "wb") as f:
+                f.write(os.urandom(size))
+
+        for case, existing in (("no collision", ()), ("collision", ("P1",))):
+            with self.subTest(case=case):
+                oldRoot = os.path.join(self.tempDir, "named " + case, "A", "Slicer Studio")
+                newRoot = os.path.join(self.tempDir, "named " + case, "B", "My projects")
+                journalPath = os.path.join(self.tempDir, "named " + case, "journal.json")
+                makeProject(oldRoot, "P1", 2048)
+                for name in existing:
+                    makeProject(newRoot, name, 1024)
+
+                def killed(source):
+                    raise Killed()
+
+                journal = projects.MoveJournal(journalPath, oldRoot, newRoot)
+                with mock.patch.object(projects, "_sameVolume", return_value=False), mock.patch.object(projects, "_deleteCopiedFolder", side_effect=killed):
+                    with self.assertRaises(Killed):
+                        projects.moveContent(oldRoot, newRoot, journal=journal)
+                self.assertTrue(os.path.isdir(os.path.join(oldRoot, projects.PROJECTS_DIR, "P1")), "the original is still there")
+                resumed = projects.MoveJournal(journalPath, oldRoot, newRoot, resume=True)
+                with mock.patch.object(projects, "_sameVolume", return_value=False):
+                    projects.moveContent(oldRoot, newRoot, renamed={}, journal=resumed)
+                self.assertEqual(sorted(os.listdir(os.path.join(newRoot, projects.PROJECTS_DIR))),
+                                 sorted(("P1", "P1 2") if existing else ("P1",)), "the item is there once")
+                self.assertEqual(sorted(os.listdir(oldRoot)), [], "the original is deleted")
+
     def test_81_interrupted_root_move_is_finished_at_the_next_start(self):
         """Change folder > Move to another volume, killed once an original was deleted (BB-1). The setting changed only after
         every item had moved, so the next start read the old folder, which lacked the deleted items: Library listed half
