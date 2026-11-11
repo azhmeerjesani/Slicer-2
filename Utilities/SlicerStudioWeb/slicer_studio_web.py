@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import contextlib
 import errno
 import getpass
 import hashlib
@@ -817,6 +818,17 @@ def check_for_updates(current, quiet_failure=True):
     return status
 
 
+def _update_folder_error(directory, error):
+    """One plain sentence for a download folder that cannot be written (full disk, not a folder, no permission)."""
+    reason = (error.strerror or str(error)).rstrip(".")
+    reason = reason[:1].lower() + reason[1:]
+    try:
+        shown = "~/" + directory.relative_to(Path.home()).as_posix()
+    except ValueError:
+        shown = str(directory)
+    return f"Cannot download the update into {shown}: {reason}."
+
+
 def download_update_asset(manifest, key, directory, feed=None):
     """Download a release file of the manifest to directory and verify its size and SHA-256. Return its path."""
     asset = (manifest.get("assets") or {}).get(key)
@@ -828,7 +840,10 @@ def download_update_asset(manifest, key, directory, feed=None):
         url = urllib.parse.urljoin(feed, urllib.parse.quote(name))
     else:
         url = UPDATE_DOWNLOAD_URL.format(repository=UPDATE_REPOSITORY, tag=f"v{manifest['version']}", name=urllib.parse.quote(name))
-    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise LauncherError(_update_folder_error(directory, error)) from None
     path = directory / name
     if path.is_file() and path.stat().st_size == asset["size"] and file_sha256(path) == asset["sha256"].lower():
         info(f"Using {name} downloaded before (checked).")
@@ -854,10 +869,16 @@ def download_update_asset(manifest, key, directory, feed=None):
             raise LauncherError(f"{name} has the wrong size ({received} bytes instead of {asset['size']}): refused.")
         if digest.hexdigest() != asset["sha256"].lower():
             raise LauncherError(f"{name} does not have the SHA-256 checksum of the release: refused.")
-    except BaseException:
-        partial.unlink(missing_ok=True)
+    except BaseException as error:
+        with contextlib.suppress(OSError):
+            partial.unlink(missing_ok=True)
+        if isinstance(error, OSError):  # every network failure is a LauncherError by now: this is the local folder or disk
+            raise LauncherError(_update_folder_error(directory, error)) from None
         raise
-    partial.replace(path)
+    try:
+        partial.replace(path)
+    except OSError as error:
+        raise LauncherError(_update_folder_error(directory, error)) from None
     return path
 
 

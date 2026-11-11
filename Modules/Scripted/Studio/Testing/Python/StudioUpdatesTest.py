@@ -32,6 +32,7 @@ service never starts by itself under --testing; the tests create ``UpdateService
 """
 
 import contextlib
+import errno
 import functools
 import hashlib
 import http.server
@@ -48,7 +49,9 @@ import tarfile
 import tempfile
 import threading
 import time
+import types
 import unittest
+from pathlib import Path
 
 import qt
 
@@ -714,6 +717,56 @@ class StudioUpdatesTest(unittest.TestCase):
                     self.assertLess(download.bytesReceived, size, "the rest of the file is not downloaded")
                 self.assertFalse(os.path.exists(dest))
                 self.assertFalse(os.path.exists(dest + ".part"))
+
+    def test_WebLauncherDownloadFolderErrorsArePlainSentences(self):
+        """BB-1: the web launcher's 'update' ended in a raw traceback when the cache folder could not be created or written."""
+        spec = importlib.util.spec_from_file_location("slicer_studio_web_under_test", os.path.join(SOURCE_DIR, "Utilities", "SlicerStudioWeb", "slicer_studio_web.py"))
+        launcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(launcher)
+        data = self._publish("1.2.0")
+        manifest = {"version": "1.2.0", "assets": data["assets"]}
+        name = data["assets"]["linux-x86_64"]["name"]
+        blocker = os.path.join(self.tempDir, "afile")
+        with open(blocker, "w") as f:
+            f.write("x")
+        # a folder that cannot be created
+        with self.assertRaisesRegex(launcher.LauncherError, r"^Cannot download the update into .*afile.*: .+\.$"):
+            launcher.download_update_asset(manifest, "linux-x86_64", Path(blocker) / "updates", self.feed)
+        # a file that cannot be written (a folder is in its place)
+        directory = Path(self.tempDir) / "updates"
+        (directory / (name + ".part")).mkdir(parents=True)
+        with self.assertRaisesRegex(launcher.LauncherError, r"^Cannot download the update into .*: .+\.$"):
+            launcher.download_update_asset(manifest, "linux-x86_64", directory, self.feed)
+        # a full disk while writing
+        (directory / (name + ".part")).rmdir()
+
+        class FullDisk:
+            def write(self, block):
+                raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        realOpen = open
+        launcher.open = lambda path, mode="r", *a, **k: FullDisk() if str(path).endswith(".part") else realOpen(path, mode, *a, **k)
+        try:
+            with self.assertRaisesRegex(launcher.LauncherError, "no space left on device"):
+                launcher.download_update_asset(manifest, "linux-x86_64", directory, self.feed)
+        finally:
+            del launcher.open
+        self.assertEqual(os.listdir(directory), [])
+        # main() prints the sentence and exits 1
+        args = types.SimpleNamespace(handler=lambda _args: launcher.download_update_asset(manifest, "linux-x86_64", Path(blocker) / "u", self.feed))
+        parser = types.SimpleNamespace(parse_args=lambda _argv: args)
+        launcher.build_parser = lambda: parser
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            self.assertEqual(launcher.main([]), 1)
+        self.assertTrue(captured.getvalue().startswith("Error: Cannot download the update into"), captured.getvalue())
+        self.assertNotIn("Traceback", captured.getvalue())
 
     def test_DownloadTimeoutMessage(self):
         """A download that stalls until the transfer timeout says so, not 'Operation canceled' (the user cancelled nothing)."""
