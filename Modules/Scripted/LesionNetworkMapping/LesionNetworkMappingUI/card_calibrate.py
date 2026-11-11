@@ -16,8 +16,9 @@ permutations, measured on 4 cores; the addendum planned 25 min):
 - Optionally the **sensitivity route** (classic overlap rule and its null-referenced version) on relocated lesion sets.
 
 The run's folder is ``<connectome folder>/calibration/<contrast label>`` (calibration.json without absolute paths, the
-target and truth maps); it is registered (kind "calibration"). The card shows the newest calibration again after a
-restart and states its checklist evidence (item 8). Nothing is computed until the button is pressed. It works in
+target and truth maps); it is registered (kind "calibration"). The card shows the newest calibration of the current
+design again after a restart and states its checklist evidence (item 8). A calibration of another design (a covariate,
+permutation or block change reuses the folder) is marked "Out of date" and does not count for the checklist. Nothing is computed until the button is pressed. It works in
 Classic and without the Studio shell. Search: "Calibrate this analysis".
 """
 
@@ -184,6 +185,8 @@ class CalibrateCard:
         self.notice = ""
         self.targetPath = None
         self.result = None  # (folder, record) on show
+        self.resultCurrent = True  # False when the shown record was calibrated for another design
+        self._shownFor = None  # the design identity the shown result was chosen for
         self._cleanedUp = False
         self.widget = widgets.card(_("Calibrate"), objectName="LNMCalibrateCard", collapsed=True)
         layout = qt.QVBoxLayout(self.widget)
@@ -269,6 +272,11 @@ class CalibrateCard:
         self.fwerChip = widgets.chip(_("FWER"), "neutral")
         self.fwerChip.setObjectName("LNMCalibrateFwerChip")
         fwerRow.addWidget(self.fwerChip, 0, qt.Qt.AlignTop)
+        self.staleChip = widgets.chip(_("Out of date"), "warn")
+        self.staleChip.setObjectName("LNMCalibrateStaleChip")
+        self.staleChip.setToolTip(_("This calibration was run for another design; calibrate this analysis again to measure the current one"))
+        self.staleChip.hide()
+        fwerRow.addWidget(self.staleChip, 0, qt.Qt.AlignTop)
         self.fwerLabel = label("", "LNMCalibrateFwerText")
         fwerRow.addWidget(self.fwerLabel, 1)
         results.addLayout(fwerRow)
@@ -399,6 +407,24 @@ class CalibrateCard:
         except Exception as exc:
             return None, design, str(exc)
 
+    def designIdentity(self, spec, design):
+        """The identity of the current design (``calibrate.design_identity``), or None without a design."""
+        from LesionNetworkMappingLib import calibrate
+
+        if design is None:
+            return None
+        try:
+            return calibrate.design_identity(calibrate._design_info(design, spec))
+        except Exception:
+            logging.debug("Lesion network mapping: the design to calibrate has no identity", exc_info=True)
+            return None
+
+    def isCurrent(self, record, identity):
+        """True when ``record`` was calibrated for the design of ``identity`` (or there is no design to compare)."""
+        from LesionNetworkMappingLib import calibrate
+
+        return identity is None or calibrate.design_identity((record or {}).get("design")) == identity
+
     def mapsTsv(self):
         tab = self.tab()
         try:
@@ -498,8 +524,9 @@ class CalibrateCard:
         self.stateLabel.setVisible(bool(reason))
         self.noticeLabel.setText(self.notice)
         self.noticeLabel.setVisible(bool(self.notice))
-        if self.result is None and not self.running():
-            self.showLatestResult()
+        identity = self.designIdentity(spec, design)
+        if not self.running() and (self.result is None or identity != self._shownFor):
+            self.showLatestResult(identity)
 
     def _onTargetChosen(self, index=None):
         if self.targetCombo.currentData == "mask":
@@ -595,28 +622,43 @@ class CalibrateCard:
         folders = [os.path.join(root, name) for name in os.listdir(root) if os.path.isfile(os.path.join(root, name, "calibration.json"))]
         return sorted(folders, key=lambda folder: os.path.getmtime(os.path.join(folder, "calibration.json")))
 
-    def showLatestResult(self):
+    def showLatestResult(self, identity=None):
+        """Show the newest calibration of the current design, else the newest one marked out of date."""
         folders = self.resultFolders()
-        if folders:
-            self.loadResult(folders[-1])
-        else:
+        if not folders:
             self.results.hide()
+            return
+        if identity is not None:
+            for folder in reversed(folders):
+                record = _readJson(os.path.join(folder, "calibration.json"))
+                if record and record.get("status") == "done" and self.isCurrent(record, identity):
+                    self.loadResult(folder, identity)
+                    return
+        self.loadResult(folders[-1], identity)
 
-    def loadResult(self, folder):
+    def loadResult(self, folder, identity=None):
         record = _readJson(os.path.join(folder, "calibration.json"))
         if not record or record.get("status") != "done":
             self.results.hide()
             return None
         self.result = (folder, record)
-        self.showResult(folder, record)
+        self.showResult(folder, record, identity)
         return record
 
-    def showResult(self, folder, record):
+    def showResult(self, folder, record, identity=None):
         from LesionNetworkMappingLib import calibrate
 
+        if identity is None and self.ctx.study is not None:
+            spec, design, _error = self.currentSpec()
+            identity = self.designIdentity(spec, design)
+        self._shownFor = identity
+        self.resultCurrent = self.isCurrent(record, identity)
+        self.staleChip.setVisible(not self.resultCurrent)
         fwer = record.get("fwer") or {}
         level = fwer.get("chip") or calibrate.LEVELS.get(fwer.get("level"), "neutral")
         chipText = {"inflated": _("FWER inflated"), "consistent": _("FWER ok"), "conservative": _("FWER conservative")}.get(fwer.get("level"), _("FWER"))
+        if not self.resultCurrent:
+            level = "neutral"  # it does not vouch for the current design
         widgets.setChipLevel(self.fwerChip, level if level in ("ok", "warn", "danger", "neutral", "busy") else "neutral", chipText)
         design = record.get("design") or {}
         lead = _("{label} ({test}, n = {n}): ").format(label=design.get("label") or "", test=str(design.get("test") or "").replace("_", " "), n=design.get("n"))
@@ -652,8 +694,13 @@ class CalibrateCard:
             self.chart.setPixmap(powerChart(effects))
         self.chart.setVisible(bool(effects))
         self._fillTable(effects)
-        status, value, _evidence = calibrate.checklist_evidence(self.ctx.study.path) if self.ctx.study is not None else ("not_run", "", [])
-        self.evidenceLabel.setText(_("Checklist (item 8, design and correction): {value}").format(value=value) if status != "not_run" else "")
+        if not self.resultCurrent:
+            covariates = ", ".join(design.get("covariates") or []) or _("none")
+            self.evidenceLabel.setText(_("Out of date: this calibration was run for another design (covariates: {covariates} · permute: {permute}). "
+                                         "It does not count for the checklist; calibrate this analysis again.").format(covariates=covariates, permute=design.get("permute") or "—"))
+        else:
+            status, value, _evidence = calibrate.checklist_evidence(self.ctx.study.path, design=identity) if self.ctx.study is not None else ("not_run", "", [])
+            self.evidenceLabel.setText(_("Checklist (item 8, design and correction): {value}").format(value=value) if status != "not_run" else "")
         self.results.show()
 
     def _fillTable(self, effects):

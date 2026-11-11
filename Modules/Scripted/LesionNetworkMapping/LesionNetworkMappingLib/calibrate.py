@@ -67,6 +67,7 @@ if __name__ == "__main__":
     set_blas_threads(sys.argv[1:])  # before numpy is imported: BLAS reads these variables once
 
 import dataclasses
+import json
 import math
 import time
 
@@ -448,8 +449,8 @@ def empirical_fwer(study, spec, Y, sids, k=DEFAULT_K, inner_perm=DEFAULT_INNER_P
     }
 
 
-def _design_info(design):
-    spec = design.spec
+def _design_info(design, spec=None):
+    spec = design.spec if spec is None else designlib.as_spec(spec)
     method = slnm_settings(spec)[0] if spec.test == "continuous" else None
     return {
         "test": spec.test,
@@ -467,6 +468,27 @@ def _design_info(design):
         "input": spec.input,
         "method": method,
     }
+
+
+#: The fields of a record's "design" that identify the configured analysis. The run folder is named by the contrast
+#: label only, so a covariate, permutation or block change reuses it: these fields tell the designs apart.
+DESIGN_IDENTITY = ("test", "design_type", "n", "contrast", "exchange", "permute", "block_column", "covariates", "input", "method")
+
+
+def design_identity(info):
+    """The identity of a design (a ``_design_info`` dict, or a ``design.Design``), JSON-normalised for comparison."""
+    if info is not None and not isinstance(info, dict):
+        info = _design_info(info)
+    info = info or {}
+    return json.loads(json.dumps({key: info.get(key) for key in DESIGN_IDENTITY}, sort_keys=True, default=str))
+
+
+def matches_design(record, design, spec=None):
+    """True when a calibration record was computed for ``design`` (a ``design.Design``, with the ``spec`` that was
+    saved for the run, or a ``_design_info`` dict); a record of another design is out of date for it.
+    """
+    current = design if isinstance(design, dict) else _design_info(design, spec)
+    return design_identity((record or {}).get("design")) == design_identity(current)
 
 
 # Sensitivity route
@@ -795,22 +817,32 @@ def estimate_seconds(n, n_voxels, p=6, k=DEFAULT_K, inner_perm=DEFAULT_INNER_PER
 # Checklist
 
 
-def latest_record(root, run_records=None):
-    """(run id, calibration.json record with absolute paths) of the newest finished calibration of a run root, or (None, None)."""
-    record = runs.latest(root, "calibration", status="done", runs=run_records)
-    if record is None:
-        return None, None
-    folder = runs.run_dir(root, record)
-    data = read_record(os.path.join(folder, CALIBRATION_JSON)) if folder else None
-    return record.get("id"), data
+def latest_record(root, run_records=None, design=None):
+    """(run id, calibration.json record with absolute paths) of the newest finished calibration of a run root, or (None, None).
+
+    With ``design`` (a ``_design_info`` dict or a ``design.Design``), only a calibration of that design counts.
+    """
+    if design is None:
+        record = runs.latest(root, "calibration", status="done", runs=run_records)
+        if record is None:
+            return None, None
+        folder = runs.run_dir(root, record)
+        data = read_record(os.path.join(folder, CALIBRATION_JSON)) if folder else None
+        return record.get("id"), data
+    for record in reversed(runs.list_runs(root, kind="calibration", status="done", runs=run_records)):
+        folder = runs.run_dir(root, record)
+        data = read_record(os.path.join(folder, CALIBRATION_JSON)) if folder else None
+        if data is not None and data.get("run_id", record.get("id")) == record.get("id") and matches_design(data, design):
+            return record.get("id"), data
+    return None, None
 
 
-def checklist_evidence(root, run_records=None):
+def checklist_evidence(root, run_records=None, design=None):
     """(status, value, evidence) of the newest calibration for the reporting checklist (item F8, design and
     correction): "done" when the empirical FWER is consistent with alpha, "flagged" when it is inflated or the
-    calibration was partial, "not_run" without a calibration.
+    calibration was partial, "not_run" without a calibration (of ``design`` when it is given).
     """
-    run_id, data = latest_record(root, run_records)
+    run_id, data = latest_record(root, run_records, design)
     if data is None:
         return "not_run", "no pipeline calibration", []
     fwer = data.get("fwer") or {}

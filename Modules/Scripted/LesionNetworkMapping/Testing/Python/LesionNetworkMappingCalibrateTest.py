@@ -216,6 +216,42 @@ class PlantedNetworkTest(_CalibrateTestCase):
             calibrate.planted_network(study, Y, study.subject_ids, np.ones(N_VOXELS, dtype=bool), effects=(1.5,), n_sims=1, inner_perm=100)
 
 
+class DesignMatchTest(_CalibrateTestCase):
+    """A calibration counts only for the design it was run for (BB-1 calibration-result-not-out-of-date-after-design-change).
+
+    The folder is named by the contrast label only, so a covariate change reuses it; the checklist evidence of the
+    changed design must not be the old design's calibration.
+    """
+
+    def register(self, study, design, name):
+        out = self.path("study", "derivatives", "lnm", "calibration", name)
+        os.makedirs(out, exist_ok=True)
+        run_id = runs.register(study.path, "calibration", out, params={"name": name})
+        record = {"format": calibrate.FORMAT_NAME, "version": calibrate.FORMAT_VERSION, "run_id": run_id, "status": "done", "design": calibrate._design_info(design),
+                  "fwer": {"level": "consistent", "fwe": calibrate.rate_summary(1, 20)}}
+        calibrate.write_record(os.path.join(out, calibrate.CALIBRATION_JSON), record)
+        runs.update(study.path, run_id, status="done")
+        return run_id
+
+    def test_evidence_follows_the_design(self):
+        study = self.make_study(8, 8)
+        with_volume = designlib.build_design(study, designlib.DesignSpec(test="two_group", levels=["case", "control"], covariates=["volume_ml"], inference={"n_perm": 1000}))
+        without = designlib.build_design(study, designlib.DesignSpec(test="two_group", levels=["case", "control"], covariates=[], volume_off_reason="tested without volume",
+                                                                      inference={"n_perm": 1000}))
+        run_id = self.register(study, with_volume, "caseVsControl")
+        record = calibrate.read_record(self.path("study", "derivatives", "lnm", "calibration", "caseVsControl", calibrate.CALIBRATION_JSON))
+        self.assertTrue(calibrate.matches_design(record, with_volume))
+        self.assertTrue(calibrate.matches_design(record, calibrate.design_identity(with_volume)))
+        self.assertFalse(calibrate.matches_design(record, without))
+        self.assertEqual(calibrate.checklist_evidence(study.path, design=with_volume)[2], [run_id])
+        self.assertEqual(calibrate.checklist_evidence(study.path, design=without)[0], "not_run")
+        self.assertEqual(calibrate.checklist_evidence(study.path)[2], [run_id])  # without a design: the newest, as before
+        # The same folder calibrated again for the other design: the older run no longer holds its own record
+        newer = self.register(study, without, "caseVsControl")
+        self.assertEqual(calibrate.checklist_evidence(study.path, design=without)[2], [newer])
+        self.assertEqual(calibrate.checklist_evidence(study.path, design=with_volume)[0], "not_run")
+
+
 class SensitivityTest(unittest.TestCase):
     def test_routes(self):
         rng = np.random.default_rng(7)
