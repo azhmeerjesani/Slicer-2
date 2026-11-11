@@ -677,6 +677,37 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(result.errors, [])
         self.assertEqual(len(result.volumes), 1)
 
+    def test_nifti_with_invalid_header_size_is_refused_as_damaged(self):
+        """BB-1: a NIfTI whose header gives a dimension below 1 (dim = 3, -5, 64, 64) is refused in plain words as damaged,
+        logged without a traceback: the reader fails on it with a bare error.
+        """
+        from StudioLib import importer
+
+        header = bytearray(348)
+        struct.pack_into("<i", header, 0, 348)
+        struct.pack_into("<8h", header, 40, 3, -5, 64, 64, 1, 1, 1, 1)
+        struct.pack_into("<hh", header, 70, 2, 8)
+        struct.pack_into("<8f", header, 76, 1, 1, 1, 1, 1, 0, 0, 0)
+        struct.pack_into("<f", header, 108, 352)
+        header[344:348] = b"n+1\0"
+        path = os.path.join(self.directory, "negdim_T1w.nii")
+        with open(path, "wb") as f:
+            f.write(bytes(header) + bytes(4) + bytes(1000))
+        self.assertTrue(importer._niftiHasInvalidSize(path))
+        studioShell = self._applyStudio()
+        recorder = logging.Handler()
+        records = []
+        recorder.emit = records.append
+        logging.getLogger().addHandler(recorder)
+        try:
+            result = importer.loadFiles([path], studioShell)
+        finally:
+            logging.getLogger().removeHandler(recorder)
+        self._pump()
+        self.assertEqual(len(result.errors), 1)
+        self.assertIn("damaged", result.errors[0][1])
+        self.assertFalse([r for r in records if "Traceback" in r.getMessage() or r.levelno >= logging.ERROR])
+
     def test_uncompressed_nifti_named_nii_gz_opens(self):
         """BB-1: a valid NIfTI saved without compression but named ``.nii.gz`` (a browser or server unpacked a download and
         kept the name) opens as a scan and as a lesion, as in official 3D Slicer, whose reader reads it as plain data. A

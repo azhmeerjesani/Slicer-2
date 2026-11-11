@@ -762,6 +762,25 @@ def _niftiVoxelHeaderSize(path):
     return None
 
 
+def _niftiHasInvalidSize(path):
+    """True if the NIfTI header of ``path`` announces an image size below 1 in one of its dimensions (``dim[1..dim[0]]``):
+    the ITK reader refuses such a header without saying why.
+    """
+    header = _niftiHeader(path, 540)
+    if header is None or len(header) < 348:
+        return False
+    for byteOrder in ("<", ">"):
+        size = struct.unpack(byteOrder + "i", header[0:4])[0]
+        if size == 348:
+            dims = struct.unpack(byteOrder + "8h", header[40:56])
+        elif size == 540 and len(header) >= 540:
+            dims = struct.unpack(byteOrder + "8q", header[16:80])
+        else:
+            continue
+        return 1 <= dims[0] <= 7 and any(n < 1 for n in dims[1:dims[0] + 1])
+    return False
+
+
 def _checkNiftiComplete(path):
     """Raise ``RuntimeError`` (a message for the user) if the data of the NIfTI file ``path`` stops before the end that its
     header promises: the voxels that are missing would be read as 0, and a lesion would lose part of its volume.
@@ -776,6 +795,10 @@ def _checkNiftiComplete(path):
             raise RefusedFileError(
                 _("{name} is not a NIfTI image (it may be a web page or another file saved under this name, or a damaged "
                   "file), so it was not opened.").format(name=name))
+        if _niftiHasInvalidSize(path):
+            raise RefusedFileError(
+                _("{name} is damaged: its header gives an invalid image size (a dimension below 1), so it was not "
+                  "opened.").format(name=name))
     _checkNrrdMhaComplete(path)
     shortfall = _niftiDataShortfall(path)
     if shortfall is not None:
