@@ -1641,6 +1641,8 @@ class Result:
         self.writeFailure = None
         #: ``(image name, plain reason)`` of each image that failed, in order (``errors`` holds the same as "name: reason")
         self.failures = []
+        #: ``(images written, images planned)`` when the export was stopped before it was done, else ``None``
+        self.stopped = None
 
     def add(self, written):
         self.files += written
@@ -1745,6 +1747,10 @@ def writeReadme(path, jobs, result, title):
     if carried:
         lines += ["", _("Written by an earlier export and not written again by this one:")]
         lines += [f"- {name}: {_('earlier export')} ({_readmeDescription(sidecarPath(os.path.join(folder, name)))})" for name in carried]
+    stopped = getattr(result, "stopped", None)
+    if stopped:
+        lines += ["", _("This export was stopped before it was done: {count} of {total} images were written, so this folder "
+                        "does not hold the whole project.").format(count=stopped[0], total=stopped[1])]
     if result.notes:
         lines += ["", _("Notes:")] + [f"- {note}" for note in result.notes]
     if result.errors:

@@ -2069,6 +2069,35 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertIn("sub-06_label-Core_desc-lesion_mask.nii.gz", names)
         self._assertNoAbsolutePaths(project.path)
 
+    def test_09ac_stopped_export_is_reported_as_stopped(self):
+        """An export stopped before it was done says so in the message and in the README (not 'Exported 2 NIfTI images')."""
+        from StudioLib import autosave_io, niftiexport_ui, projects
+
+        project = projects.createProject("NIfTI stopped report")
+        projects.setCurrentProject(project)
+        folder = self.export.projectExportFolder(create=True)
+        for name in ("sub-01_T1w", "sub-02_T1w", "sub-03_T1w"):
+            self._phantom(name, np.array([[-1.0, 0, 0, 10], [0, -1.0, 0, 10], [0, 0, 1.0, -10], [0, 0, 0, 1]]))
+        dialog = niftiexport_ui.exportProjectDialog(show=False, executor=autosave_io.InlineExecutor(), mapOptions={})
+        try:
+            runner = dialog.export(confirm=lambda files: True)
+            runner.cancel()
+            self.assertTrue(runner.wait(60))
+        finally:
+            dialog.close()
+        result = runner.result
+        self.assertTrue(runner.cancelled)
+        self.assertEqual(result.stopped, (len(result.images), 3))
+        self.assertLess(len(result.images), 3)
+        text = niftiexport_ui.resultText(result)
+        self.assertIn("Stopped", text)
+        self.assertIn(f"{len(result.images)} of 3", text)
+        self.assertNotIn("Exported", text)
+        if result.images:
+            with open(os.path.join(folder, "README.txt"), encoding="utf-8") as f:
+                self.assertIn(f"stopped before it was done: {len(result.images)} of 3 images", f.read())
+        self._assertNoAbsolutePaths(project.path)
+
     def test_10_entry_points(self):
         """Library's Open now ⋯, Draw's lesion ⋯ and Search list the exports; a figure is not exportable."""
         from StudioLib import draw, library, niftiexport_ui

@@ -292,6 +292,8 @@ class ExportRunner:
 
     def _finish(self):
         self.finished = True
+        if self.cancelled and self.done < self.total:
+            self.result.stopped = (len(self.result.images), self.total)
         if self.readme and self.result.images:
             try:
                 niftiexport.writeReadme(self.readme[0], self.jobs[:self.index], self.result, self.readme[1])
@@ -320,6 +322,9 @@ def resultText(result):
     """"Exported 3 NIfTI images to nifti" (with the errors counted)."""
     count = len(result.images)
     folder = os.path.basename(result.folder or "") or (result.folder or "")
+    stopped = getattr(result, "stopped", None)
+    if stopped:
+        return _("Stopped: {count} of {total} images exported to {folder}").format(count=stopped[0], total=stopped[1], folder=folder)
     text = (_("Exported 1 NIfTI image to {folder}") if count == 1 else _("Exported {count} NIfTI images to {folder}")).format(count=count, folder=folder)
     if result.errors:
         text += " · " + (_("1 failed") if len(result.errors) == 1 else _("{count} failed").format(count=len(result.errors)))
@@ -371,7 +376,7 @@ def announce(result):
                          _("removed {count} files of an earlier export").format(count=removed))
     if result.notes:
         text += " · " + notesText(result.notes)
-    message(text, level="warning" if result.errors else "info", action=show,
+    message(text, level="warning" if (result.errors or getattr(result, "stopped", None)) else "info", action=show,
             actionText=_("Show in {manager}").format(manager=fileManagerName()), ms=10000 if result.notes else 6000, toolTip=shortPath(folder))
     for note in result.notes:
         logging.info(f"Slicer Studio NIfTI export: {note}")
