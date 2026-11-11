@@ -785,6 +785,34 @@ class AtrophyDocsTest(unittest.TestCase):
         self.assertIn("atrophy seeds on the command line", readme)
         self.assertIn("command-line feature, not a seed mode of the Map workspace", readme)
 
+    def test_excel_and_odd_coordinate_files_get_plain_messages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            def write(name, data):
+                path = os.path.join(tmp, name)
+                with open(path, "wb") as f:
+                    f.write(data)
+                return path
+
+            # Excel "CSV (semicolon separated)" in a German locale: cp1252 bytes read as text
+            foci = coords.read_foci(write("de.csv", "x;y;z;study\nA;1;2;Müller\n".replace("A;", "1;").encode("cp1252")))
+            self.assertEqual(foci[0].study, "Müller")
+            # decimal commas in a semicolon table: the message names the file and the fix
+            with self.assertRaises(ValueError) as cm:
+                coords.read_foci(write("dc.csv", b"x;y;z\n-33,5;-57;11\n"))
+            self.assertIn("dc.csv", str(cm.exception))
+            self.assertIn("Decimal commas", str(cm.exception))
+            # an empty or broken .json
+            for name, data in (("zero.json", b""), ("bad.json", b"{oops")):
+                with self.assertRaises(ValueError) as cm:
+                    coords.read_foci(write(name, data))
+                self.assertIn(name, str(cm.exception))
+                self.assertNotIn("Expecting value", str(cm.exception))
+            # bytes that are neither: never a raw codec message
+            with self.assertRaises(ValueError) as cm:
+                coords.read_foci(write("junk.csv", b"x,y,z\n\x81,\x8d,\x90\n"))
+            self.assertIn("junk.csv", str(cm.exception))
+            self.assertNotIn("codec", str(cm.exception))
+
     def test_module_page_documents_the_atrophy_command(self):
         page = self._read("Docs", "user_guide", "modules", "lesionnetworkmapping.md")
         if page is None:

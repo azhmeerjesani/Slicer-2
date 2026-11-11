@@ -170,6 +170,20 @@ def _number(text):
     return value
 
 
+def read_text(path):
+    """Text of a file: UTF-8 (with or without BOM), else Windows-1252 (what Excel writes in Western locales)."""
+    with open(path, "rb") as f:
+        data = f.read()
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        pass
+    try:
+        return data.decode("cp1252")
+    except UnicodeDecodeError:
+        raise ValueError(f"{os.path.basename(os.fspath(path))} is not a text file in UTF-8 or Windows-1252: save it as UTF-8 text") from None
+
+
 def _now():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -244,8 +258,7 @@ def read_table(path):
     being cut to the header: in a comma-separated table it usually means decimal commas ("-33,5"), which would otherwise
     be read silently as other numbers.
     """
-    with open(path, encoding="utf-8-sig") as f:
-        text = f.read()
+    text = read_text(path)
     delimiter = _sniff_delimiter(text)
     lines = [line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
     if delimiter is None:
@@ -301,7 +314,10 @@ def foci_from_rows(columns, rows, default_space="MNI", default_study="study", wh
             study = (row.get(names["study"]) or "").strip() if names["study"] else ""
             subjects = _number(row.get(names["subjects"])) if names["subjects"] else None
         except ValueError as exc:
-            raise ValueError(f"{where}, row {number}: {exc}") from None
+            hint = ""
+            if any(re.fullmatch(r"[-+]?\d+,\d+", str(value or "").strip()) for value in row.values()):
+                hint = " Decimal commas? Write numbers with '.' (for example -33.5)."
+            raise ValueError(f"{where}, row {number}: {exc}.{hint}" if hint else f"{where}, row {number}: {exc}") from None
         foci.append(Focus(x, y, z, study or default_study, space, radius, None if subjects is None else int(subjects)))
     return foci
 
@@ -328,8 +344,7 @@ def read_sleuth(path):
     ``//`` lines (its first one names the study, ``// Subjects=N`` gives the sample size), followed by one
     coordinate per line (a ``//`` line after coordinates starts the next block). Two blocks with the same name get " #2", " #3".
     """
-    with open(path, encoding="utf-8-sig") as f:
-        lines = f.read().splitlines()
+    lines = read_text(path).splitlines()
     space = None
     foci, used = [], {}
     name, subjects, in_coordinates, pending = None, None, False, False
@@ -390,8 +405,13 @@ def read_nimare_json(path):
     Each contrast is a study named "<study>-<contrast>" (NiMARE's id); "talairach"/"TAL" spaces are marked TAL.
     """
     name = os.path.basename(os.fspath(path))
-    with open(path, encoding="utf-8-sig") as f:
-        data = json.load(f)
+    text = read_text(path)
+    if not text.strip():
+        raise ValueError(f"{name} is empty: it holds no NiMARE dataset")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{name} is not valid JSON (line {exc.lineno}, column {exc.colno}): it is not a NiMARE dataset") from None
     if not isinstance(data, dict):
         raise ValueError(f"{name} is not a NiMARE dataset (a JSON object of studies)")
     foci = []
@@ -431,8 +451,7 @@ def read_foci(path, default_space="MNI"):
     path = os.fspath(path)
     if path.lower().endswith(".json"):
         return read_nimare_json(path)
-    with open(path, encoding="utf-8-sig") as f:
-        head = f.read(4096)
+    head = read_text(path)[:4096]
     if any(line.strip().startswith("//") for line in head.splitlines()):
         return read_sleuth(path)
     return read_csv(path, default_space)
