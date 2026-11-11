@@ -2491,6 +2491,10 @@ class AutosaveService:
         project.path = os.path.normpath(newPath)
         project.name = os.path.basename(project.path)
         project.lock()
+        record = self._copySource
+        if record is not None and record[0] == os.path.normcase(os.path.realpath(oldPath)):
+            # the open project is the copy of an outside scene file: it stays that copy under its new folder
+            self._copySource = (os.path.normcase(os.path.realpath(project.path)),) + tuple(record[1:])
         scene = slicer.mrmlScene
         oldNorm = os.path.normpath(oldPath)
         rootDirectory = scene.GetRootDirectory()

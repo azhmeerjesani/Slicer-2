@@ -4350,6 +4350,27 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertEqual(len(self.projects.listProjects(self.root)), 1)
 
 
+    def test_54c_same_outside_scene_opened_again_after_rename_keeps_its_copy(self):
+        """After the open copy of an outside scene file is renamed, the same file opened again still keeps that copy (BB-1):
+        the renamed project is still the copy of that file, not a second scene.
+        """
+        service = self._service()
+        slicer.util.addVolumeFromArray(np.ones((6, 7, 8), np.int16), name="Outside scan")
+        outside = os.path.join(self.tempDir, "outside_renamed.mrb")
+        self.assertTrue(slicer.util.saveScene(outside))
+        slicer.mrmlScene.Clear(0)
+        service.poll()
+        self.assertTrue(service.openSceneFile(outside))
+        self.io.backgroundWriter().drain(30.0)
+        service.renameProject("Renamed case")
+        self.io.backgroundWriter().drain(30.0)
+        renamed = os.path.normpath(service.project.path)
+        self.assertTrue(service.isOpenCopyOf(outside))
+        self.assertTrue(service.openSceneFile(outside))
+        self.assertEqual(os.path.normpath(service.project.path), renamed)
+        self.assertEqual(len(self.projects.listProjects(self.root)), 1)
+
+
     def test_55_root_move_is_refused_while_another_studio_has_a_study_open(self):
         """Moving the Slicer Studio folder while another running Slicer Studio has one of its studies open (BB-1) is
         refused before anything is moved, with a message that names the study, as it is for a project open there. The
