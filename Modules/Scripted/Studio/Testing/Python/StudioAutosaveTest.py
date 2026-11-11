@@ -2043,3 +2043,23 @@ class StudioAutosaveTest(unittest.TestCase):
         self.assertTrue(service.dirty, "the status says saved with an unsaved label")
         self._generate(service)
         self.assertFalse(service.dirty)
+
+    def test_ze_thumbnailSkipsLesionHiddenInTheViews(self):
+        """BB-1: a segmentation that the slice views hide (a lesion of another subject, hidden by the importer) is not the
+        lesion of the project thumbnail: the thumbnail shows what the views show.
+        """
+        from StudioLib import thumbnails
+
+        volume = self._userVolume()
+        slicer.util.setSliceViewerLayers(background=volume)
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Other lesion")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentId = segmentation.GetSegmentation().AddEmptySegment("Lesion")
+        lesion = np.zeros(slicer.util.arrayFromVolume(volume).shape, np.uint8)
+        lesion[20, 25, 30] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(lesion, segmentation, segmentId, volume)
+        self.assertEqual(len(thumbnails.projectThumbnailSource().lesions), 1)
+        segmentation.GetDisplayNode().SetVisibility2D(False)
+        source = thumbnails.projectThumbnailSource()
+        self.assertIsNotNone(source)
+        self.assertEqual(len(source.lesions), 0)

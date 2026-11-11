@@ -766,11 +766,19 @@ def _segmentationLayers(segmentationNode):
     return layers
 
 
+def _shownInSliceViews(segmentationNode):
+    """False for a segmentation that the slice views hide (for example a lesion of another subject, which the importer
+    hides): the thumbnail shows what the views show.
+    """
+    displayNode = segmentationNode.GetDisplayNode()
+    return displayNode is None or bool(displayNode.GetVisibility() and displayNode.GetVisibility2D())
+
+
 def projectThumbnailSource(scene=None):
     """The images of a project thumbnail (main thread, well under a millisecond), or None when the scene has no image.
 
     The background is the reference image of the lesion, else the image shown in the Red view, else the first image;
-    never a figure, a statistic map or a network map. The lesion is the first segmentation with a label map (its
+    never a figure, a statistic map or a network map. The lesion is the first segmentation that the slice views show and that has a label map (its
     segments, at most 8). ``source.key`` changes when the images, the lesion or the window/level change, so that a save
     that changed nothing visible makes no new thumbnail.
     """
@@ -779,7 +787,11 @@ def projectThumbnailSource(scene=None):
     import slicer
 
     scene = scene or slicer.mrmlScene
-    segmentations = [node for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode", scene) if _segmentationLayers(node)]
+    segmentations = [
+        node
+        for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode", scene)
+        if _shownInSliceViews(node) and _segmentationLayers(node)
+    ]
     segmentationNode = segmentations[0] if segmentations else None
     background = None
     if segmentationNode is not None:
