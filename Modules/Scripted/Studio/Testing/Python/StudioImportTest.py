@@ -677,6 +677,78 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(result.errors, [])
         self.assertEqual(len(result.volumes), 1)
 
+    def test_header_lying_or_cut_nrrd_and_mha_are_refused_as_damaged(self):
+        """BB-1: an NRRD, seg.nrrd, NHDR or MetaImage file whose data is shorter than its header announces is a planned
+        refusal like the NIfTI one: plain "damaged" words, a warning without a traceback, no raw reader text.
+        """
+        import zlib
+
+        from StudioLib import importer
+
+        head = ("NRRD0004\ntype: short\ndimension: 3\nspace: left-posterior-superior\nsizes: {sizes}\n"
+                "space directions: (1,0,0) (0,1,0) (0,0,1)\nkinds: domain domain domain\nendian: little\n"
+                "encoding: {encoding}\nspace origin: (0,0,0)\n")
+        raw = bytes(16 * 16 * 10 * 2)
+        files = {}
+        files["ok_raw_T1w.nrrd"] = (head.format(sizes="16 16 10", encoding="raw") + "\n").encode() + raw
+        files["ok_gz_T1w.nrrd"] = (head.format(sizes="16 16 10", encoding="gzip") + "\n").encode() + gzip.compress(raw)
+        files["cut_raw_T1w.nrrd"] = files["ok_raw_T1w.nrrd"][:-100]
+        gz = gzip.compress(raw)
+        files["cut_gz_T1w.nrrd"] = (head.format(sizes="16 16 10", encoding="gzip") + "\n").encode() + gz[: len(gz) // 2]
+        files["lie_gz_T1w.nrrd"] = (head.format(sizes="2048 1024 1024", encoding="gzip") + "\n").encode() + gz
+        files["lie_seg.seg.nrrd"] = (head.format(sizes="2048 1024 1024", encoding="gzip")
+                                     + "Segment0_ID:=Segment_1\nSegment0_Name:=Lesion\n\n").encode() + gz
+        files["lie_detached_T1w.raw"] = raw
+        files["lie_detached_T1w.nhdr"] = (head.format(sizes="5000 5000 5000", encoding="raw")
+                                          + "data file: lie_detached_T1w.raw\n").encode()
+        meta = ("ObjectType = Image\nNDims = 3\nDimSize = {sizes}\nElementType = MET_SHORT\n"
+                "CompressedData = {compressed}\nElementDataFile = LOCAL\n")
+        files["ok_T1w.mha"] = meta.format(sizes="16 16 10", compressed="False").encode() + raw
+        files["cut_T1w.mha"] = files["ok_T1w.mha"][:-100]
+        noise = zlib.compress(os.urandom(16 * 16 * 10 * 2))  # incompressible: half of the stream holds about half the data
+        files["cut_z_T1w.mha"] = meta.format(sizes="16 16 10", compressed="True").encode() + noise[: len(noise) // 2]
+        paths = {}
+        for name, content in files.items():
+            paths[name] = os.path.join(self.directory, name)
+            with open(paths[name], "wb") as f:
+                f.write(content)
+        for name in ("ok_raw_T1w.nrrd", "ok_gz_T1w.nrrd", "ok_T1w.mha"):
+            self.assertIsNone(importer._nrrdMhaDataShortfall(paths[name]), name)
+        studioShell = self._applyStudio()
+        refused = ("cut_raw_T1w.nrrd", "cut_gz_T1w.nrrd", "lie_gz_T1w.nrrd", "lie_seg.seg.nrrd", "lie_detached_T1w.nhdr",
+                   "cut_T1w.mha", "cut_z_T1w.mha")
+        for name in refused:
+            self.assertIsNotNone(importer._nrrdMhaDataShortfall(paths[name]), name)
+            recorder = logging.Handler()
+            records = []
+            recorder.emit = records.append
+            logging.getLogger().addHandler(recorder)
+            original = slicer.util.errorDisplay, slicer.util.warningDisplay
+            shown = []
+            slicer.util.errorDisplay = lambda text, shown=shown, **kwargs: shown.append(
+                ("error", text, kwargs.get("detailedText", "")))
+            slicer.util.warningDisplay = lambda text, shown=shown, **kwargs: shown.append(
+                ("warning", text, kwargs.get("detailedText", "")))
+            try:
+                result = importer.loadFiles([paths[name]], studioShell)
+            finally:
+                slicer.util.errorDisplay, slicer.util.warningDisplay = original
+                logging.getLogger().removeHandler(recorder)
+            self._pump()
+            self.assertEqual(len(result.errors), 1, name)
+            self.assertIn("damaged", result.errors[0][1], name)
+            self.assertFalse([r for r in records if "Traceback" in r.getMessage()], name)
+            self.assertFalse([r for r in records if r.levelno >= logging.ERROR], name)
+            self.assertEqual([kind for kind, _text, _details in shown], ["warning"], name)
+            for word in ("vtkMRML", "itk::", "[nrrd]", "MegaMacro"):
+                self.assertNotIn(word, shown[0][2], name)
+            self.assertEqual(result.volumes + result.segmentations, [], name)
+            self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLVolumeNode")), 0, name)
+        result = importer.loadFiles([paths["ok_gz_T1w.nrrd"]], studioShell)
+        self._pump()
+        self.assertEqual(result.errors, [])
+        self.assertEqual(len(result.volumes), 1)
+
     def test_cut_gzip_stream_nifti_is_refused_as_damaged(self):
         """BB-1: a ``.nii.gz`` whose compressed stream is cut off (a stopped copy or download: no gzip end marker) is a
         load error in plain words like a complete stream with short data, for a scan and for a lesion: Python's gzip

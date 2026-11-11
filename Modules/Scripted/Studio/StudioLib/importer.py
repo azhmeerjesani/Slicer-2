@@ -760,12 +760,177 @@ def _checkNiftiComplete(path):
             raise RefusedFileError(
                 _("{name} is not a NIfTI image (it may be a web page or another file saved under this name, or a damaged "
                   "file), so it was not opened.").format(name=name))
+    _checkNrrdMhaComplete(path)
     shortfall = _niftiDataShortfall(path)
     if shortfall is not None:
         raise RefusedFileError(
             _("{name} is damaged: its image data stops after {have:,} of the {need:,} bytes that its header announces "
               "(the file was probably cut short by a failed copy or download). It was not opened; copy it again from "
               "its source.").format(name=os.path.basename(str(path)), have=shortfall[0], need=shortfall[1]))
+
+
+#: Bytes per voxel of the NRRD ``type`` names and of the MetaImage ``ElementType`` names that the check below understands
+_NRRD_TYPE_BYTES = {
+    "signed char": 1, "int8": 1, "int8_t": 1, "uchar": 1, "unsigned char": 1, "uint8": 1, "uint8_t": 1,
+    "short": 2, "short int": 2, "signed short": 2, "signed short int": 2, "int16": 2, "int16_t": 2,
+    "ushort": 2, "unsigned short": 2, "unsigned short int": 2, "uint16": 2, "uint16_t": 2,
+    "int": 4, "signed int": 4, "int32": 4, "int32_t": 4, "uint": 4, "unsigned int": 4, "uint32": 4, "uint32_t": 4,
+    "longlong": 8, "long long": 8, "long long int": 8, "signed long long": 8, "int64": 8, "int64_t": 8,
+    "ulonglong": 8, "unsigned long long": 8, "unsigned long long int": 8, "uint64": 8, "uint64_t": 8,
+    "float": 4, "double": 8,
+}
+_META_TYPE_BYTES = {
+    "MET_CHAR": 1, "MET_UCHAR": 1, "MET_SHORT": 2, "MET_USHORT": 2, "MET_INT": 4, "MET_UINT": 4, "MET_LONG": 4,
+    "MET_ULONG": 4, "MET_LONG_LONG": 8, "MET_ULONG_LONG": 8, "MET_FLOAT": 4, "MET_DOUBLE": 8,
+}
+
+
+def _readTextHeader(path, endsAtBlankLine, stopAtKey=None):
+    """``(fields, headerLength)`` of the text header of an NRRD or MetaImage file: ``fields`` maps the lower-case key to
+    the value, ``headerLength`` is the number of bytes up to and including the line that ends the header. None if the
+    header cannot be read (the readers report that).
+    """
+    fields = {}
+    length = 0
+    try:
+        with open(path, "rb") as f:
+            for _index in range(2000):
+                line = f.readline(1 << 16)
+                if not line:
+                    break
+                length += len(line)
+                text = line.decode("latin-1").strip()
+                if endsAtBlankLine and not text:
+                    break
+                if text.startswith("#") or not text:
+                    continue
+                for separator in (":=", ": ", "=", ":"):
+                    if separator in text:
+                        key, value = text.split(separator, 1)
+                        key = key.strip().lower()
+                        fields.setdefault(key, value.strip())
+                        break
+                if stopAtKey is not None and stopAtKey in fields:
+                    break
+    except OSError:
+        return None
+    return fields, length
+
+
+def _countedDataBytes(path, offset, need, decompress):
+    """Number of data bytes, up to ``need``, that the file ``path`` holds from ``offset`` on: its size for ``decompress``
+    None, else the decompressed size (``"gzip"`` or ``"zlib"``; a stream that is cut off counts the data it holds).
+    None if it cannot be judged.
+    """
+    if decompress is None:
+        return max(os.path.getsize(path) - offset, 0)
+    have = 0
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            if decompress == "gzip":
+                with gzip.GzipFile(fileobj=f) as stream:
+                    while have < need:
+                        chunk = stream.read1(min(1 << 22, need - have))
+                        if not chunk:
+                            break
+                        have += len(chunk)
+            else:
+                inflater = zlib.decompressobj()
+                while have < need:
+                    block = f.read(1 << 20)
+                    if not block:
+                        break
+                    have += len(inflater.decompress(block, need - have + 1))
+    except EOFError:
+        pass
+    except (OSError, zlib.error):
+        return None
+    return have
+
+
+def _nrrdMhaDataShortfall(path):
+    """``(have, need)`` in bytes if the data of the NRRD or MetaImage file ``path`` (not NIfTI) is shorter than its header
+    announces, None if it is complete or cannot be judged (the readers report those). The readers fail for such a file
+    with an allocation error or a raw decoder message, or zero-fill the rest.
+    """
+    extension = _extension(path)
+    if extension not in (".nrrd", ".nhdr", ".seg.nrrd", ".seg.nhdr", ".mha", ".mhd") or not os.path.isfile(path):
+        return None
+    isMeta = extension in (".mha", ".mhd")
+    parsed = _readTextHeader(path, endsAtBlankLine=not isMeta, stopAtKey="elementdatafile" if isMeta else None)
+    if parsed is None:
+        return None
+    fields, headerLength = parsed
+    try:
+        if isMeta:
+            sizes = [int(v) for v in fields["dimsize"].split()]
+            perVoxel = _META_TYPE_BYTES[fields["elementtype"].strip().upper()] * int(fields.get("elementnumberofchannels", 1))
+            dataFile = fields["elementdatafile"]
+            compression = "zlib" if fields.get("compresseddata", "false").strip().lower() == "true" else None
+            skip = max(int(fields.get("headersize", 0)), 0)
+            if int(fields.get("ndims", len(sizes))) != len(sizes):
+                return None
+            if dataFile.upper() == "LOCAL":
+                dataFile = None
+        else:
+            sizes = [int(v) for v in fields["sizes"].split()]
+            if int(fields["dimension"]) != len(sizes):
+                return None
+            perVoxel = _NRRD_TYPE_BYTES[fields["type"].strip().lower()]
+            encoding = fields["encoding"].strip().lower()
+            compression = {"raw": None, "gzip": "gzip", "gz": "gzip"}[encoding]
+            dataFile = fields.get("data file", fields.get("datafile"))
+            skip = int(fields.get("byte skip", 0))
+            if skip < 0 or int(fields.get("line skip", fields.get("lineskip", 0))) != 0:
+                return None
+    except (KeyError, ValueError):
+        return None
+    if not sizes or any(size < 1 for size in sizes):
+        return None
+    if dataFile is not None:
+        if any(mark in dataFile for mark in (" ", "%", "*")):
+            return None  # several files (a list or a pattern): not judged
+        dataFile = os.path.join(os.path.dirname(os.path.abspath(path)), dataFile)
+        if not os.path.isfile(dataFile):
+            return None
+        offset = skip
+        counted = dataFile
+    else:
+        offset = headerLength + (skip if not isMeta else 0)
+        counted = path
+    voxels = 1
+    for size in sizes:
+        voxels *= size
+    need = voxels * perVoxel
+    have = _countedDataBytes(counted, offset, need, compression)
+    if have is None:
+        return None
+    return (have, need) if have < need else None
+
+
+def _isAllocationFailure(error):
+    """True if the reader failed because it could not allocate the memory for the image."""
+    text = str(error)
+    return isinstance(error, MemoryError) or "MemoryAllocationError" in text or "Failed to allocate memory" in text
+
+
+def _tooLargeMessage(path):
+    return _("{name} is too large for this computer's memory, so it was not opened. Open a smaller or cropped copy of "
+             "it, or use a computer with more memory.").format(name=os.path.basename(str(path)))
+
+
+def _checkNrrdMhaComplete(path):
+    """Raise ``RefusedFileError`` (a message for the user) if the data of the NRRD or MetaImage file ``path`` stops before
+    the end that its header announces.
+    """
+    shortfall = _nrrdMhaDataShortfall(path)
+    name = os.path.basename(str(path))
+    if shortfall is not None:
+        raise RefusedFileError(
+            _("{name} is damaged: its image data stops after {have:,} of the {need:,} bytes that its header announces "
+              "(the file was probably cut short by a failed copy or download). It was not opened; copy it again from "
+              "its source.").format(name=name, have=shortfall[0], need=shortfall[1]))
 
 
 # NIfTI datatype codes of 64-bit integer voxels (int64, uint64): nibabel writes int64 by default for a numpy integer array
@@ -1704,6 +1869,12 @@ def loadFiles(paths, shell=None, pairedLesion=None):
                     logging.warning(f"Studio: {path} was not opened: {e}")  # planned refusal: no traceback
                     result.errors.append((path, str(e)))
                 except Exception as e:
+                    if _isAllocationFailure(e):
+                        # a file too large for the memory: planned refusal, plain words (no reader text, no traceback)
+                        refused.append(path)
+                        logging.warning(f"Studio: {path} was not opened: too large for the memory ({str(e)[:200]!r})")
+                        result.errors.append((path, _tooLargeMessage(path)))
+                        continue
                     logging.error(f"Studio: cannot load {path}:\n{traceback.format_exc()}")
                     result.errors.append((path, str(e)))
     _afterLoad(result, shell)
