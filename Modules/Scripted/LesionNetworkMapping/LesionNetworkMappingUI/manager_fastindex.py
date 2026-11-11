@@ -313,6 +313,16 @@ def missingAtlases(ids, cache=None):
     return missing
 
 
+def atlasTitle(atlasId):
+    """The readable catalog title of an atlas id (the id itself when the catalog has no such atlas)."""
+    from LesionNetworkMappingLib import fetch
+
+    try:
+        return fetch.find_resource(atlasId, ("atlases",)).title or atlasId
+    except Exception:
+        return atlasId
+
+
 def estimateBuild(bundle, nSubjects, nParcels, threads=None):
     """Estimated build of an index: {"seconds", "final_bytes", "peak_bytes", "memory_bytes"}.
 
@@ -783,7 +793,7 @@ class FastIndexDialog(qt.QDialog):
         if custom:
             self.atlasStatus.setText("")
         elif missing:
-            self.atlasStatus.setText(_("Not downloaded yet: {names}.").format(names=", ".join(missing)) + (" " + " ".join(notices) if notices else ""))
+            self.atlasStatus.setText(_("Not downloaded yet: {names}.").format(names=", ".join(atlasTitle(atlasId) for atlasId in missing)) + (" " + " ".join(notices) if notices else ""))
         else:
             self.atlasStatus.setText(_("The atlases of this pack are on this computer.") + (" " + " ".join(notices) if notices else ""))
         self.atlasStatus.setVisible(bool(self.atlasStatus.text))

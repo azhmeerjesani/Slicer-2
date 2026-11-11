@@ -44,3 +44,13 @@ class FastGateTextTest(unittest.TestCase):
         text = cls.parityText(record)
         self.assertIn("white matter (supervoxel)", text)
         self.assertNotIn("white-matter-supervoxel", text)
+
+    def test_missing_atlases_are_named_by_catalog_title(self):
+        # Bug fastindex-missing-atlases-shown-as-catalog-ids: "Not downloaded yet" listed ids such as tian-s2-2mm.
+        from LesionNetworkMappingLib import fetch
+        from LesionNetworkMappingUI import manager_fastindex
+
+        title = fetch.find_resource("tian-s2-2mm", ("atlases",)).title
+        self.assertNotEqual(title, "tian-s2-2mm")
+        self.assertEqual(manager_fastindex.atlasTitle("tian-s2-2mm"), title)
+        self.assertEqual(manager_fastindex.atlasTitle("no-such-atlas"), "no-such-atlas")
