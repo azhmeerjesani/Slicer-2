@@ -1308,11 +1308,16 @@ def numeric_columns(path):
     return out
 
 
-def cohortmaps_arguments(lesions_tsv, bundle_path, out_dir, preview_n=None, preview_seed=0):
+def cohortmaps_arguments(lesions_tsv, bundle_path, out_dir, preview_n=None, preview_seed=0, run_root=None):
     """Arguments of ``python -m LesionNetworkMappingLib.cohortmaps`` that map the seeds of ``lesions_tsv`` (weights
     used as they are: ``--probabilistic``; the job runner adds --threads and --cancel-file).
+
+    ``run_root``: the folder whose ``derivatives/lnm/runs.jsonl`` records the run (the open study, so that its Report
+    card sees the run); without it the run folder records itself.
     """
     args = ["--lesions-tsv", os.fspath(lesions_tsv), "--bundle", os.fspath(bundle_path), "--out", os.fspath(out_dir), "--probabilistic", "--resume"]
+    if run_root:
+        args += ["--run-root", os.fspath(run_root)]
     if preview_n:
         args += ["--subjects", str(int(preview_n)), "--random", "--seed", str(int(preview_seed))]
     return args

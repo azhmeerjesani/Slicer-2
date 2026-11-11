@@ -594,6 +594,8 @@ class Records:
                 "split_half": None,
                 "versions": data.get("versions") or record.get("software"),
                 "software": None,
+                # Coordinate, atrophy and stimulation seeds (coords.py): the run folder's seeds.json
+                "seeds": _seed_record(folder),
             })
         run_ids = {os.path.realpath(self.run_dir(record) or ""): record["id"] for record in self.runs.values() if self.run_dir(record)}
         for folder in self._folders():
@@ -964,6 +966,34 @@ def normalization_paragraph(normalizations, rows=()):
     return text + f". BRAINSFit samples randomly and multi-threaded, so {RESULTS_MAY_DIFFER}; reruns with the same inputs reuse the stored result."
 
 
+def _seed_record(folder):
+    """The ``seeds.json`` of a coordinate, atrophy or stimulation run folder (coords.write_seed_set), or None."""
+    data = _read_json(os.path.join(folder, "seeds.json")) if folder else None
+    return data if isinstance(data, dict) and data.get("format") == "slicer-lnm-seeds" else None
+
+
+def _seed_set_text(seeds):
+    """How the seeds of a coordinate, atrophy or stimulation run were made (from its seeds.json)."""
+    kind = seeds.get("kind")
+    count = len(seeds.get("seeds") or [])
+    if kind == "coordinates":
+        sphere = seeds.get("sphere_text") or f"sphere {NOT_RECORDED}"
+        text = (f"{_or_nr(seeds.get('foci'))} literature coordinate(s) of {_or_nr(seeds.get('studies'))} stud(ies) made {count} seed(s): "
+                f"{seeds.get('seed_rule') or 'study-level union of spheres'}, each focus a sphere of {sphere}, as fractional voxel occupancy. "
+                f"{seeds.get('conversion_text') or ''} {seeds.get('placement') or ''}".rstrip())
+    elif kind == "stimulation":
+        stim = seeds.get("stimulation") or {}
+        sphere = stim.get("sphere")
+        shape = f", each site a sphere of {sphere['radius_mm']:g} mm radius ({sphere['diameter_mm']:g} mm diameter)" if isinstance(sphere, dict) and sphere.get("radius_mm") is not None else ""
+        text = (f"{count} stimulation seed(s) from {_or_nr(stim.get('kind'))} (weighting {_or_nr(stim.get('weighting'))}){shape}. "
+                f"{stim.get('conversion_text') or ''} {stim.get('placement') or ''}".rstrip())
+    elif kind == "atrophy":
+        text = f"{count} atrophy seed(s): {seeds.get('seed_rule') or 'per-patient w-map thresholded'} ({'weighted' if seeds.get('weighted') else 'binary'})"
+    else:
+        return None
+    return " ".join(text.split()).rstrip(".")
+
+
 def seeds_section(records):
     section = _section("seeds")
     maps = records.map_records()
@@ -971,6 +1001,16 @@ def seeds_section(records):
         return section.paragraph(f"Seeds: {NOT_RECORDED} (no network-mapping run).")
     items = []
     for record in maps:
+        seed_set = _seed_set_text(record["seeds"]) if record.get("seeds") else None
+        if seed_set:
+            space_text = _lesion_space_text(record.get("lesions") or [], record.get("bundle") or {})
+            items.append(
+                f"Run {record['id']}: {seed_set}. Each seed was mapped on the connectome grid with its weights as they are (supersampling {_or_nr(record.get('supersample'))} per axis); "
+                f"the weighted mean time course of the seed was correlated with every voxel (Pearson r), averaged over runs and Fisher z-transformed; "
+                f"stored maps: mean r, mean Fisher z and the voxelwise one-sample t of Fisher z (statistic recorded for pooling: {_or_nr(record.get('statistic'))})"
+                + (f".{space_text}" if space_text else ""),
+            )
+            continue
         probabilistic = record.get("probabilistic")
         seed = "fractional voxel occupancy (probabilistic lesions)" if probabilistic else "fractional voxel occupancy of the binarized lesion" if probabilistic is False else f"seed weighting {NOT_RECORDED}"
         supersample = record.get("supersample")

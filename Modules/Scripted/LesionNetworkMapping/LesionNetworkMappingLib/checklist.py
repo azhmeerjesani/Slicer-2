@@ -151,9 +151,12 @@ def _c5_seed_statistic(records):
     maps = records.map_records()
     if not maps:
         return NOT_RUN, "no network-mapping run", []
-    seeds = sorted({"probabilistic" if record.get("probabilistic") else "binarized" if record.get("probabilistic") is False else methods.NOT_RECORDED for record in maps})
+    lesion_maps = [record for record in maps if not (record.get("seeds") or {}).get("kind")]
+    seeds = sorted({"probabilistic" if record.get("probabilistic") else "binarized" if record.get("probabilistic") is False else methods.NOT_RECORDED for record in lesion_maps})
+    # Coordinate, atrophy and stimulation runs (seeds.json): named by their seed kind, not as lesions
+    kinds = sorted({f"{record['seeds']['kind']} seeds" for record in maps if record not in lesion_maps})
     statistics = sorted({str(record.get("statistic") or methods.NOT_RECORDED) for record in maps})
-    value = f"fractional occupancy seeds ({', '.join(seeds)} lesions); map statistic {', '.join(statistics)}"
+    value = f"fractional occupancy seeds ({'; '.join(([', '.join(seeds) + ' lesions'] if seeds else []) + kinds)}); map statistic {', '.join(statistics)}"
     inputs = sorted({str((data.get("inputs") or {}).get("input")) for _, data in records.group_records("glm.json", "glm") + records.group_records("slnm.json", "slnm") if (data.get("inputs") or {}).get("input")})
     if inputs:
         value += f"; group input {', '.join(inputs)}"

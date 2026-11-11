@@ -3826,7 +3826,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self._openComputeCard()
             return None
         previewN = self.plannedN() if node.subjectsMode == "preview" and self.plannedN() < self.bundle.n_subjects else None
-        args = coords.cohortmaps_arguments(lesionsTsv, self.bundle.path, runDir, previewN, node.previewSeed)
+        # Inside a study the run is recorded in the study's registry (as the other study cards do): the Report card reads it
+        study = getattr(self.ctx, "study", None)
+        args = coords.cohortmaps_arguments(lesionsTsv, self.bundle.path, runDir, previewN, node.previewSeed, run_root=getattr(study, "path", None) if study is not None else None)
         title = _("Mapping the study seeds") if mode == "coordinates" else _("Mapping the stimulation seeds")
         spec = jobrunner.JobSpec("LesionNetworkMappingLib.cohortmaps", args, title=title, heavy=True, kind="cohortmaps", runRoot=os.path.dirname(runDir),
                                  onEvent=self.onCohortEvent, onDone=lambda job, mode=mode, runDir=runDir: self.onSeedSetDone(job, mode, runDir),

@@ -562,6 +562,43 @@ class SeedSetTest(CoordsTestCase):
         mask = self.bundle.mask
         self.assertGreater(np.corrcoef(np.asarray(t1)[mask], np.asarray(t3)[mask])[0, 1], 0.5)  # A and A2 share a network
 
+    def test_study_seed_run_reaches_the_report_methods(self):
+        """Coordinate seeds mapped inside a study are recorded in the study's run registry, and the Report card's methods and
+        checklist describe them (spheres, diameter, Talairach conversion), not "no network-mapping run".
+        """
+        from LesionNetworkMappingLib import checklist, methods, runs
+        from LesionNetworkMappingLib.study import Study
+
+        study = os.path.join(self.tmp, "CoordStudy")
+        Study.create(study, name="CoordStudy")
+        out = os.path.join(study, "derivatives", "lnm", "runs", "20261111-000000_coordinates")
+        source = self.foci_file()
+        tsv = coords.prepare_coordinates(out, coords.read_foci(source), self.bundle.grid, diameter_mm=6, source=source, grid_space="MNI152NLin2009cAsym")
+        args = coords.cohortmaps_arguments(tsv, self.bundle.path, out, run_root=study)
+        self.assertEqual(args[args.index("--run-root") + 1], study)
+        self.assertNotIn("--run-root", coords.cohortmaps_arguments(tsv, self.bundle.path, out))  # outside a study: unchanged
+        process = subprocess.run([sys.executable, "-m", "LesionNetworkMappingLib.cohortmaps", *args], check=False, cwd=MODULE_DIR, env=_env(), capture_output=True, text=True, timeout=600)
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertTrue(os.path.isfile(os.path.join(study, "derivatives", "lnm", "runs.jsonl")))
+        self.assertFalse(os.path.exists(os.path.join(out, "derivatives")))  # no registry nested in the run folder
+        self.assertEqual([record["kind"] for record in runs.load(study).values()], ["cohortmaps"])
+        records = methods.Records(study)
+        text = "\n".join(str(section) for section in methods.methods_sections(study, records=records))
+        self.assertNotIn("no network-mapping run", text)
+        self.assertIn("study-level union of spheres", text)
+        self.assertIn("3 mm radius (6 mm diameter, given as the diameter)", text)
+        self.assertIn("1 of 3 foci converted from Talairach to MNI", text)
+        self.assertNotIn("probabilistic lesions", text)
+        items = {item["id"]: item for item in checklist.evaluate(study, records=records)}
+        self.assertNotEqual(items["B4"]["status"], checklist.NOT_RUN)
+        self.assertEqual(items["C5"]["status"], checklist.DONE)
+        self.assertIn("coordinates seeds", items["C5"]["value"])
+        # The Map widget passes the open study as the run root of a seed-set run
+        with open(os.path.join(MODULE_DIR, "LesionNetworkMapping.py"), encoding="utf-8") as f:
+            widget = f.read()
+        call = widget[widget.index("coords.cohortmaps_arguments(lesionsTsv"):]
+        self.assertIn("run_root=", call[: call.index("\n")])
+
     def test_seed_outside_the_mask_is_refused_by_name(self):
         """A seed with no weight in the connectome's brain mask is refused before anything is written, named by its
         participant id or study (its all-zero map would otherwise fail the whole seed-set run under a cache name).
