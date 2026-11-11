@@ -206,6 +206,32 @@ def _is_relative_to(path, folder):
         return False
 
 
+_BIDS_SESSION = re.compile(r"(?:^|_)ses-([A-Za-z0-9]+)(?=_|$)")
+
+
+def _bids_session(path):
+    """The BIDS session label of a file ("2" for sub-01_ses-2_T1w.nii.gz or .../ses-2/anat/...), or None."""
+    path = os.path.abspath(os.fspath(path))
+    parts = [_nifti_stem(path) or os.path.basename(path)]
+    folder = os.path.dirname(path)
+    for _ in range(3):  # sub-01/ses-2/anat/file
+        parts.append(os.path.basename(folder))
+        folder = os.path.dirname(folder)
+    for part in parts:
+        match = _BIDS_SESSION.search(part)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _same_grid(header, other, tolerance=1e-3):
+    """Whether two NIfTI headers describe the same voxel grid (shape and voxel-to-RAS matrix)."""
+    if tuple(header["shape"][:3]) != tuple(other["shape"][:3]):
+        return False
+    a, b = header["affine"], other["affine"]
+    return all(abs(float(a[i][j]) - float(b[i][j])) <= tolerance for i in range(4) for j in range(4))
+
+
 def detect_file_space(path):
     """Template space of a NIfTI file from its header: "MNI152NLin6Asym", "MNI152NLin2009cAsym" or "native"."""
     from .geometry import detect_space
@@ -1839,7 +1865,16 @@ class Study:
             lesions = sorted(kinds["lesion"], key=lambda item: ("lesion" not in os.path.basename(item[0]).lower(), item[0]))
             chosen = {"lesion": lesions[0] if lesions else None}
             lesion_space = file_space(chosen["lesion"]) if chosen["lesion"] else None
-            scans = sorted(kinds["scan"], key=lambda item: (lesion_space is not None and file_space(item) != lesion_space, "t1" not in os.path.basename(item[0]).lower(), item[0]))
+            # A scan on the lesion's own grid first, then one of the lesion's BIDS session (ses-2 lesion: the ses-2 scan,
+            # not the ses-1 scan that sorts first), then one in its template space
+            lesion_session = _bids_session(chosen["lesion"][0]) if chosen["lesion"] else None
+            scans = sorted(kinds["scan"], key=lambda item: (
+                chosen["lesion"] is not None and not _same_grid(item[1], chosen["lesion"][1]),
+                lesion_session is not None and _bids_session(item[0]) != lesion_session,
+                lesion_space is not None and file_space(item) != lesion_space,
+                "t1" not in os.path.basename(item[0]).lower(),
+                item[0],
+            ))
             chosen["scan"] = scans[0] if scans else None
             for kind, files in (("scan", scans), ("lesion", lesions)):
                 for path, _ in files[1:]:

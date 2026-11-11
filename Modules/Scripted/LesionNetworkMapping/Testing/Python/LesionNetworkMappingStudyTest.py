@@ -347,6 +347,28 @@ class StudyTest(unittest.TestCase):
         created.save()
         self.assertEqual(Study.open(created.path).subjects, created.subjects)
 
+    def test_add_files_pairs_lesion_with_scan_of_its_session(self):
+        # Two sessions on different grids, the lesion traced on the later one: its own scan is chosen, not the
+        # session that sorts first (alphabetically ses-1 / ses-baseline)
+        folder = self.path("study")
+        created = Study.create(folder)
+        other_grid = NATIVE.copy()
+        other_grid[:3, 3] += 12.0
+        for sid, first, second in (("01", "1", "2"), ("02", "baseline", "followup")):
+            self._image(f"bids/sub-{sid}/ses-{first}/anat/sub-{sid}_ses-{first}_T1w.nii.gz", shape=(8, 9, 7))
+            self._image(f"bids/sub-{sid}/ses-{second}/anat/sub-{sid}_ses-{second}_T1w.nii.gz", shape=(9, 10, 6), affine=other_grid)
+            self._image(f"bids/sub-{sid}/ses-{second}/anat/sub-{sid}_ses-{second}_desc-lesion_mask.nii.gz", shape=(9, 10, 6), affine=other_grid, value=1)
+        # Same grid in both sessions: the lesion's session decides
+        self._image("bids/sub-03/ses-1/anat/sub-03_ses-1_T1w.nii.gz")
+        self._image("bids/sub-03/ses-2/anat/sub-03_ses-2_T1w.nii.gz")
+        self._image("bids/sub-03/ses-2/anat/sub-03_ses-2_desc-lesion_mask.nii.gz", value=1)
+        report = created.add_files([self.path("bids")], root=folder)
+        for sid, session in (("01", "2"), ("02", "followup"), ("03", "2")):
+            self.assertEqual(report["pairs"][f"sub-{sid}"]["scan"], self.path(f"bids/sub-{sid}/ses-{session}/anat/sub-{sid}_ses-{session}_T1w.nii.gz"), sid)
+            self.assertEqual(created.subject(f"sub-{sid}")["scan"], f"../bids/sub-{sid}/ses-{session}/anat/sub-{sid}_ses-{session}_T1w.nii.gz")
+        skipped = {os.path.basename(item["path"]) for item in report["skipped"]}
+        self.assertEqual(skipped, {"sub-01_ses-1_T1w.nii.gz", "sub-02_ses-baseline_T1w.nii.gz", "sub-03_ses-1_T1w.nii.gz"})
+
     def test_add_files_pairs_scans_and_lesions(self):
         folder = self.path("study")
         created = Study.create(folder)
