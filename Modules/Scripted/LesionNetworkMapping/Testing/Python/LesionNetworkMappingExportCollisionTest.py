@@ -350,5 +350,50 @@ class LesionNetworkMappingExportUnwritableFolderTest(_Helpers, unittest.TestCase
             self.assertLess(record.levelno, logging.ERROR)
 
 
+class LesionNetworkMappingReportReadOnlyStudyTest(_Helpers, unittest.TestCase):
+    """The publication bundle of a read-only study explains itself in plain words, with no errno and no logged traceback (BB-1)."""
+
+    def test_report_card_says_read_only_without_traceback(self):
+        import errno
+        import logging
+        from unittest import mock
+
+        from LesionNetworkMappingUI import card_report
+
+        class Label:
+            text = ""
+
+            def setText(self, text):
+                self.text = text
+
+            def show(self):
+                pass
+
+        class Records(logging.Handler):
+            def __init__(self):
+                super().__init__()
+                self.records = []
+
+            def emit(self, record):
+                self.records.append(record)
+
+        card = card_report.ReportCard.__new__(card_report.ReportCard)
+        card.root = lambda: self.work
+        card.resultLabel = Label()
+        handler = Records()
+        logging.getLogger().addHandler(handler)
+        try:
+            with mock.patch.object(card_report, "exportBundle", side_effect=PermissionError(errno.EACCES, "Permission denied", self.work)):
+                self.assertIsNone(card.exportBundle())
+        finally:
+            logging.getLogger().removeHandler(handler)
+        self.assertIn("read-only", card.resultLabel.text)
+        self.assertNotIn("Errno", card.resultLabel.text)
+        self.assertTrue(handler.records)
+        for record in handler.records:
+            self.assertIsNone(record.exc_info)
+            self.assertLess(record.levelno, logging.ERROR)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -563,7 +563,14 @@ class SourcesCard:
         self.fetchButton.setEnabled(self._lookup is not None or (record is not None and bool(record["doi"] or record["pmid"])))
         if record is not None and not (record["doi"] or record["pmid"]):
             self.fetchButton.setToolTip(_("The record has no DOI or PMID to look up"))
-        self.prismaButton.setEnabled(self.records is not None and len(self.records) > 0)
+        studyObject = self._study()
+        readOnly = studyObject is not None and not os.access(studyObject.path, os.W_OK | os.X_OK)
+        self.prismaButton.setEnabled(self.records is not None and len(self.records) > 0 and not readOnly)
+        self.prismaButton.setToolTip(
+            _("The study is read-only: ask for write access, or open a copy of the study folder.")
+            if readOnly
+            else _("Write derivatives/prisma/prisma_counts.json and prisma_flow.svg from the records"),
+        )
 
     def _refreshOffers(self):
         records = self.records
@@ -600,6 +607,9 @@ class SourcesCard:
             return function()
         except (ValueError, KeyError) as e:
             self._showError(str(e).strip("'\""))
+        except PermissionError:
+            logging.warning("Studio sources: the study is read-only")
+            self._showError(_("The study is read-only: ask for write access, or open a copy of the study folder."))
         except Exception as e:
             logging.error(f"Studio sources: {traceback.format_exc()}")
             self._showError(str(e))

@@ -1927,6 +1927,52 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertNotEqual(label.font.capitalization(), qt.QFont.AllUppercase, text)
             self.assertEqual(label.font.letterSpacing(), 0.0, text)
 
+    def test_sources_prisma_export_on_read_only_study_is_plain(self):
+        """A read-only study disables PRISMA export, and a permission error is said in plain words without a logged traceback (BB-1)."""
+        import errno
+        import logging
+        import types
+        from unittest import mock
+
+        from StudioLib import libcard_sources
+
+        card = libcard_sources.SourcesCard(None)
+        errors = []
+        card._showError = errors.append
+        records = []
+
+        class Handler(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = Handler()
+        logging.getLogger().addHandler(handler)
+        try:
+
+            def denied():
+                raise PermissionError(errno.EACCES, "Permission denied", "/x/derivatives/prisma")
+
+            self.assertIsNone(card._run(denied))
+        finally:
+            logging.getLogger().removeHandler(handler)
+        self.assertIn("read-only", errors[-1])
+        self.assertNotIn("Errno", errors[-1])
+        self.assertTrue(records)
+        for record in records:
+            self.assertIsNone(record.exc_info)
+            self.assertLess(record.levelno, logging.ERROR)
+        # Button state: records present, but the study folder cannot be written
+        card.records = [1]
+        card.selectedId = lambda: None
+        card._study = lambda: types.SimpleNamespace(path="/tmp")
+        with mock.patch.object(libcard_sources.os, "access", return_value=False):
+            card._updateButtons()
+        self.assertFalse(card.prismaButton.isEnabled())
+        self.assertIn("read-only", card.prismaButton.toolTip)
+        with mock.patch.object(libcard_sources.os, "access", return_value=True):
+            card._updateButtons()
+        self.assertTrue(card.prismaButton.isEnabled())
+
     def test_tutorials_options_form_has_no_empty_row_when_scans_do_not_apply(self):
         """Tutorial cohorts: for a cohort without the scans option, "New study in" sits one normal form spacing under "Subjects".
         The scans checkbox and its note used to be two rows with an empty label that stayed visible and kept the spacing.

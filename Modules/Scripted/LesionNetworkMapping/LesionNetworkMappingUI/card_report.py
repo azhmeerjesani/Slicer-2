@@ -709,10 +709,14 @@ class ReportCard:
         report = latestReport(state.root)
         self.reportButton.setEnabled(report is not None)
         self.reportButton.setToolTip(_("Open the report.html of the newest Run everything run") if report else _("No report yet: Run everything writes report.html"))
-        self.exportButton.setEnabled(state.root is not None and os.path.isdir(state.root))
+        readOnly = state.root is not None and os.path.isdir(state.root) and not os.access(state.root, os.W_OK | os.X_OK)
+        self.exportButton.setEnabled(state.root is not None and os.path.isdir(state.root) and not readOnly)
         self.exportButton.setToolTip(_("Copy the maps, design files, reproduce script, checklist and methods into derivatives/lnm/publication/<date>/"))
-        self.exportReason.setText("" if state.root is not None else _("Open a study to export a publication bundle."))
-        self.exportReason.setVisible(state.root is None)
+        if readOnly:
+            self.exportReason.setText(_("The study is read-only: ask for write access, or open a copy of the study folder."))
+        else:
+            self.exportReason.setText("" if state.root is not None else _("Open a study to export a publication bundle."))
+        self.exportReason.setVisible(state.root is None or readOnly)
         warnings = state.warnings()
         if warnings and state.root is not None:
             lines = "".join(f"<li>{html.escape(w[0])} {html.escape(w[1])}: {html.escape('flagged' if w[2] == 'flagged' else 'not run')}</li>" for w in warnings)
@@ -793,6 +797,11 @@ class ReportCard:
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
             result = exportBundle(root)
+        except PermissionError:
+            logging.warning("Lesion network mapping: the study is read-only, the publication bundle was not written")
+            self.resultLabel.setText(html.escape(_("The study is read-only: ask for write access, or open a copy of the study folder.")))
+            self.resultLabel.show()
+            return None
         except Exception as exc:
             logging.exception("Lesion network mapping: the publication bundle could not be exported")
             self.resultLabel.setText(html.escape(_("The bundle could not be written: {error}").format(error=exc)))
