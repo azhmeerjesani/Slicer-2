@@ -358,8 +358,14 @@ def read_sleuth(path):
                 in_coordinates = False
             continue
         values = [value for value in _SLEUTH_NUMBERS.split(line) if value]
+        if len(values) > 3:
+            # Never keep the first 3 of more numbers: "-30,5 -55,2 10,1" (decimal commas) would become (-30, 5, -55)
+            decimal_commas = any(re.search(r"\d,\d", field) for field in re.split(r"[\s;]+", line))
+            hint = " Decimal commas? Write numbers with '.' (for example -33.5)." if decimal_commas else ""
+            raise ValueError(f"{os.path.basename(os.fspath(path))}, line {number} has {len(values)} numbers, "
+                             f"expected 3 (x y z): {raw!r}.{hint}")
         try:
-            x, y, z = (float(value) for value in values[:3])
+            x, y, z = (float(value) for value in values)
         except ValueError:
             raise ValueError(f"{os.path.basename(os.fspath(path))}, line {number}: not a coordinate: {raw!r}") from None
         if space is None:

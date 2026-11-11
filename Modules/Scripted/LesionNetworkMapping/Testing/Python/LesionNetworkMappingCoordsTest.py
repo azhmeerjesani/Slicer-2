@@ -120,6 +120,13 @@ class ParserTest(CoordsTestCase):
         # "// Subjects=N" before the experiment's name line belongs to that experiment
         first = coords.read_sleuth(self.write("first.txt", "// Reference=MNI\n// Subjects=12\n// A\n1 2 3\n\n// Subjects=20\n// B\n4 5 6\n\n// C\n7 8 9\n"))
         self.assertEqual([(f.study, f.subjects) for f in first], [("A", 12), ("B", 20), ("C", None)])
+        # Decimal commas or extra numbers are refused, never cut to the first 3 numbers ("-30,5 -55,2 10,1" is not (-30, 5, -55))
+        for name, coordinate in (("tabs", "-30,5\t-55,2\t10,1"), ("spaces", "-30,5 -55,2 10,1")):
+            with self.subTest(name), self.assertRaisesRegex(ValueError, r"line 3 has 6 numbers, expected 3 .*Decimal commas\?"):
+                coords.read_sleuth(self.write(f"comma_{name}.txt", f"// Reference=MNI\n// Rossi 2019\n{coordinate}\n"))
+        with self.assertRaisesRegex(ValueError, "line 3 has 4 numbers, expected 3") as raised:
+            coords.read_sleuth(self.write("four.txt", "// Reference=MNI\n// Kim 2021\n-30.5 -55.2 10.1 4.2\n"))
+        self.assertNotIn("Decimal commas", str(raised.exception))
 
     def test_nimare_json(self):
         dataset = {"pain": {"contrasts": {"1": {"coords": {"space": "MNI", "x": [1, 2], "y": [3, 4], "z": [5, 6]}, "metadata": {"sample_sizes": [20]}}}},
