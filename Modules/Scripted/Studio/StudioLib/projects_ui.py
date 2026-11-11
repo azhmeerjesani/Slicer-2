@@ -510,7 +510,7 @@ def showChooser(then=None, parent=None):
             _makeUsableRoot(path)
             projects.setRoot(path, chosen=True)
         except OSError as error:
-            logging.error(f"Slicer Studio: the folder {path} cannot be used: {error}")
+            logging.warning(f"Slicer Studio: the folder {path} cannot be used: {getattr(error, 'strerror', None) or 'not writable'}")
             message(_cannotUseMessage(path, error), level="warning", ms=8000, toolTip=path)
             # Continue asks again; Escape or closing the window (never blocks the application) leaves the choice for the next start
             retry = not getattr(dialog, "dismissed", False)
@@ -1066,7 +1066,7 @@ def changeRootDialog(parent=None):
         # a folder that cannot be written (a read-only drive) was stored first, and its error reported as a failed move
         _makeUsableRoot(newRoot)
     except OSError as error:
-        logging.error(f"Slicer Studio: the folder {newRoot} cannot be used: {error}")
+        logging.warning(f"Slicer Studio: the folder {newRoot} cannot be used: {getattr(error, 'strerror', None) or 'not writable'}")
         _notice(parent, _("Change the Slicer Studio folder"), _cannotUseMessage(newRoot, error))
         return None
     service = _service()

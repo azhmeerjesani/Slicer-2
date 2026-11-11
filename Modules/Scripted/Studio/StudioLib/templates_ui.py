@@ -722,7 +722,11 @@ class AddTemplateDialog(qt.QDialog):
             text = str(error)
         else:
             text = _("The template could not be added: {error}").format(error=_plainCopyError(error, plan))
-            logging.error(f"Slicer Studio: adding a template failed: {text} ({error})")
+            if isinstance(error, OSError):
+                # A folder that cannot be written is a user problem: a plain warning, no error badge, no error number
+                logging.warning(f"Slicer Studio: adding a template failed: {text}")
+            else:
+                logging.error(f"Slicer Studio: adding a template failed: {text} ({error})")
         self._setError(text)
         self._update()
 

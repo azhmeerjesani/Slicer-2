@@ -2544,12 +2544,13 @@ def _writeLesion(shell, segmentationNode, sourceVolumeNode, path):
             writeSidecar(path, segmentationNode, sourceVolumeNode)
     except FolderNotWritableError as e:
         logging.warning(f"Studio: {e}")
-        slicer.util.errorDisplay(str(e))
+        slicer.util.warningDisplay(str(e))
         return None
     except (OSError, RuntimeError) as e:
         # Expected write failures: the reason is shown, no traceback
-        logging.warning(f"Studio: cannot save the lesion: {e}")
-        slicer.util.errorDisplay(_("The lesion could not be saved."), detailedText=str(e))
+        reason = (getattr(e, "strerror", None) or str(e)) if isinstance(e, OSError) else str(e)
+        logging.warning(f"Studio: cannot save the lesion: {reason}")
+        slicer.util.warningDisplay(_("The lesion could not be saved."), detailedText=reason)
         return None
     except Exception as e:
         logging.error(f"Studio: cannot save the lesion:\n{traceback.format_exc()}")

@@ -2527,11 +2527,13 @@ def importDicomFolder(path, shell=None):
 
             DICOM.DICOMFileDialog.createDefaultDatabase()
         except Exception:
-            logging.error(f"Studio: cannot create the DICOM database:\n{traceback.format_exc()}")
+            # Expected when the default folder cannot be written: the official dialog explains it, so no error badge
+            logging.warning("Studio: cannot create the DICOM database")
+            logging.debug(traceback.format_exc())
         database = getattr(slicer, "dicomDatabase", None)
     if database is None or not database.isOpen:
         slicer.util.selectModule("DICOM")
-        slicer.util.errorDisplay(_("The DICOM database is not set up. Choose a database folder in the DICOM module, then import the folder again."))
+        slicer.util.warningDisplay(_("The DICOM database is not set up. Choose a database folder in the DICOM module, then import the folder again."))
         return False
     with slicer.util.WaitCursor():
         if not DICOMUtils.importDicom(path):

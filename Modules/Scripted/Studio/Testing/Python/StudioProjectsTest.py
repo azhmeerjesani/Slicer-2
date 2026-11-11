@@ -9061,6 +9061,56 @@ sys.exit(web.command_local(args))
             self.assertTrue(os.path.isdir(os.path.join(oldRoot, kind, "Item")))
 
 
+    def test_108_unwritable_folder_refusals_are_warnings_not_errors(self):
+        """BB-1: a folder that cannot be written (first-run chooser, Save lesion) logged at ERROR, lighting the red error
+        badge, with the raw error number. They are plain warnings now (as the Library refusals).
+        """
+        import logging
+
+        from StudioLib import draw, projects_ui
+
+        records = []
+
+        class Handler(logging.Handler):
+            def emit(self, record):
+                records.append((record.levelname, record.getMessage()))
+
+        handler = Handler()
+        logging.getLogger().addHandler(handler)
+        shown = []
+        savedUtil = (slicer.util.errorDisplay, slicer.util.warningDisplay)
+        savedMake, savedSave = projects_ui._makeUsableRoot, draw.saveLesion
+        savedEmpty, savedCommit = draw.isLesionEmpty, draw._commitCardEdits
+        slicer.util.errorDisplay = lambda *a, **k: shown.append("error")
+        slicer.util.warningDisplay = lambda *a, **k: shown.append("warning")
+
+        def refuse(*args, **kwargs):
+            raise PermissionError(13, "Permission denied", "/read-only/x")
+
+        projects_ui._makeUsableRoot = refuse
+        draw.saveLesion = refuse
+        draw.isLesionEmpty = lambda *a, **k: False
+        draw._commitCardEdits = lambda *a, **k: None
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
+        try:
+            projects_ui.showChooser(lambda *a: None, None)
+            dialog = projects_ui._chooser
+            dialog.dismissed = True
+            dialog.path = os.path.join(self.tempDir, "no-write", "Slicer Studio")
+            dialog.accept()
+            slicer.app.processEvents()
+            self.assertIsNone(draw._writeLesion(None, segmentation, None, os.path.join(self.tempDir, "x.nii.gz")))
+        finally:
+            logging.getLogger().removeHandler(handler)
+            slicer.util.errorDisplay, slicer.util.warningDisplay = savedUtil
+            projects_ui._makeUsableRoot, draw.saveLesion = savedMake, savedSave
+            draw.isLesionEmpty, draw._commitCardEdits = savedEmpty, savedCommit
+        self.assertEqual([r for r in records if r[0] in ("ERROR", "CRITICAL")], [])
+        self.assertTrue(any(r[0] == "WARNING" and "cannot be used" in r[1] for r in records))
+        self.assertFalse(any("Errno" in r[1] for r in records), records)
+        self.assertEqual(shown, ["warning"], "Save lesion shows a warning box, not a Slicer error box")
+
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 
