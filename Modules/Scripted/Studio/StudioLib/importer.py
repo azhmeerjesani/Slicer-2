@@ -927,8 +927,65 @@ def _nrrdMhaDataShortfall(path):
 
 def _isAllocationFailure(error):
     """True if the reader failed because it could not allocate the memory for the image."""
-    text = str(error)
-    return isinstance(error, MemoryError) or "MemoryAllocationError" in text or "Failed to allocate memory" in text
+    seen = set()
+    while error is not None and id(error) not in seen:  # a fallback that fails after the first error hides it in __context__
+        seen.add(id(error))
+        text = str(error)
+        if isinstance(error, MemoryError) or "MemoryAllocationError" in text or "Failed to allocate memory" in text:
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
+def _niftiImageBytes(path):
+    """The size in bytes of the voxels that the header of the NIfTI file ``path`` announces, None if not known."""
+    dims = niftiDimensions(path)
+    header = _niftiHeader(path, 540)
+    if dims is None or header is None or not 1 <= dims[0] <= 7 or any(size < 1 for size in dims[1:dims[0] + 1]):
+        return None
+    for byteOrder in ("<", ">"):
+        sizeOfHeader = struct.unpack(byteOrder + "i", header[0:4])[0]
+        if sizeOfHeader in (348, 540):
+            bitpix = struct.unpack(byteOrder + "h", header[72:74] if sizeOfHeader == 348 else header[14:16])[0]
+            voxels = 1
+            for size in dims[1:dims[0] + 1]:
+                voxels *= size
+            return voxels * max(bitpix, 8) // 8 if bitpix > 0 else None
+    return None
+
+
+def _availableMemoryBytes():
+    """The memory that this process can still use (free RAM and swap, and the address-space limit if one is set), None if
+    not known (only Linux is asked).
+    """
+    limits = []
+    try:
+        with open("/proc/meminfo") as f:
+            fields = {line.split(":")[0]: int(line.split(":")[1].split()[0]) * 1024 for line in f if ":" in line}
+        limits.append(fields["MemAvailable"] + fields.get("SwapFree", 0))
+    except (OSError, ValueError, KeyError, IndexError):
+        pass
+    try:
+        import resource
+
+        soft = resource.getrlimit(resource.RLIMIT_AS)[0]
+        if soft != resource.RLIM_INFINITY:
+            with open("/proc/self/statm") as f:
+                limits.append(soft - int(f.read().split()[0]) * resource.getpagesize())
+    except (ImportError, OSError, ValueError, IndexError):
+        pass
+    return min(limits) if limits else None
+
+
+def _isNiftiTooLargeForMemory(path, error):
+    """True if the NIfTI reader failed (``nifti_image_load failed``, which does not say why) on an intact file whose voxels
+    are more than the memory that is left: the reader could not allocate them. The readers hold the voxels twice or more
+    (the NIfTI library, then the image), so half of the memory that is left is the most that a file can need.
+    """
+    if "nifti_image_load failed" not in str(error) or not isNiftiFile(path):
+        return False
+    need, have = _niftiImageBytes(path), _availableMemoryBytes()
+    return need is not None and have is not None and need * 2 > have
 
 
 def _tooLargeMessage(path):
@@ -1887,7 +1944,7 @@ def loadFiles(paths, shell=None, pairedLesion=None):
                     logging.warning(f"Studio: {path} was not opened: {e}")  # planned refusal: no traceback
                     result.errors.append((path, str(e)))
                 except Exception as e:
-                    if _isAllocationFailure(e):
+                    if _isAllocationFailure(e) or _isNiftiTooLargeForMemory(path, e):
                         # a file too large for the memory: planned refusal, plain words (no reader text, no traceback)
                         refused.append(path)
                         _noteLoadResult(path, False)

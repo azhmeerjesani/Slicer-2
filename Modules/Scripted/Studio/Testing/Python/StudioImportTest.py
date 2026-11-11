@@ -841,6 +841,47 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLVolumeNode")), 0, name)
             self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")), 0, name)
 
+    def test_allocation_failure_is_found_behind_a_fallback_error_and_a_bare_nifti_error(self):
+        """BB-1: a file too large for the memory is refused with the plain "too large" warning (no traceback), also when
+        the allocation error is only the ``__context__`` of the error that is raised last (the lesion route falls back to
+        a labelmap reader, which fails with "nifti_image_load failed"), or when the NIfTI reader says only
+        "nifti_image_load failed" for an intact file whose voxels are more than half of the memory that is left.
+        """
+        from StudioLib import importer
+
+        try:
+            try:
+                raise RuntimeError("itkImportImageContainer.hxx: Failed to allocate memory for image")
+            except RuntimeError:
+                raise RuntimeError("nifti_image_load failed for file: a.nii")
+        except RuntimeError as e:
+            self.assertTrue(importer._isAllocationFailure(e))
+        self.assertFalse(importer._isAllocationFailure(RuntimeError("nifti_image_load failed")))
+
+        header = bytearray(348)
+        struct.pack_into("<i", header, 0, 348)
+        struct.pack_into("<8h", header, 40, 3, 2048, 1024, 1024, 1, 1, 1, 1)
+        struct.pack_into("<hh", header, 70, 2, 8)
+        struct.pack_into("<f", header, 108, 352)
+        header[344:348] = b"n+1\0"
+        path = os.path.join(self.directory, "big_T1w.nii")
+        with open(path, "wb") as f:
+            f.write(bytes(header) + bytes(4))
+            f.truncate(352 + 2048 * 1024 * 1024)  # sparse: no disk used
+        self.assertEqual(importer._niftiImageBytes(path), 2048 * 1024 * 1024)
+        error = RuntimeError("Failed to load node from file\n- Error: nifti_image_load failed for file: " + path)
+        original = importer._availableMemoryBytes
+        try:
+            importer._availableMemoryBytes = lambda: 3 * 1024**3
+            self.assertTrue(importer._isNiftiTooLargeForMemory(path, error))
+            importer._availableMemoryBytes = lambda: 8 * 1024**3
+            self.assertFalse(importer._isNiftiTooLargeForMemory(path, error))
+            importer._availableMemoryBytes = lambda: None
+            self.assertFalse(importer._isNiftiTooLargeForMemory(path, error))
+        finally:
+            importer._availableMemoryBytes = original
+        self.assertFalse(importer._isNiftiTooLargeForMemory(path, RuntimeError("something else")))
+
     def test_int64_nifti_scan_is_refused(self):
         """BB-1: a NIfTI scan with 64-bit integer voxels (datatype 1024 or 1280, what nibabel writes for a numpy integer
         array) is refused in plain words before it is read: read as VTK_LONG, its first slice render ended the
