@@ -4879,18 +4879,32 @@ def _routeFigure(path, shell, result, figureNode=None):
         figureNode = reopened
         result.alreadyOpen.append(figureNode)
     loaded = figureNode is None
+    if figureNode is None:
+        # Read the figure before anything is started: a file that cannot be read is refused with its reason and leaves
+        # no template or lesion behind (and no bare Add Data dialog)
+        try:
+            if not os.path.isfile(path):
+                raise RefusedFileError(_("{name} was not opened: the file no longer exists.").format(name=os.path.basename(str(path))))
+            if os.path.getsize(path) == 0:
+                raise RefusedFileError(_("{name} is empty (0 bytes), so it was not opened.").format(name=os.path.basename(path)))
+            with slicer.util.WaitCursor():
+                figureNode = slicer.util.loadVolume(path, {"singleFile": True, "show": False})
+        except Exception as e:
+            if isinstance(e, RefusedFileError):
+                reason = str(e)
+            else:
+                reason = _("{name} could not be read as an image (it may be damaged, or another kind of file saved under "
+                           "this name), so it was not opened.").format(name=os.path.basename(str(path)))
+            logging.warning(f"Studio: {path} was not opened as a figure: {e}")
+            _noteLoadResult(path, False)
+            slicer.util.warningDisplay(reason, windowTitle=_("Figure not opened"), detailedText=str(path))
+            return False
     try:
-        if figureNode is not None:
-            # Tag a figure that is already loaded first: untagged it is itself the background of the views, so no
-            # template would be started for it
-            figureNode.SetAttribute(space.ROLE_ATTRIBUTE, space.ROLE_FIGURE)
+        # Tag the figure first: untagged it is itself the background of the views, so no template would be started for it
+        figureNode.SetAttribute(space.ROLE_ATTRIBUTE, space.ROLE_FIGURE)
         if _backgroundVolume() is None:
             # Something to draw on: the template (an existing template lesion is reused)
             startOnTemplate(shell=shell)
-        if figureNode is None:
-            with slicer.util.WaitCursor():
-                figureNode = slicer.util.loadVolume(path, {"singleFile": True, "show": False})
-        figureNode.SetAttribute(space.ROLE_ATTRIBUTE, space.ROLE_FIGURE)
         if figureNode.GetAttribute(space.FIGURE_CONVENTION_ATTRIBUTE) not in space.CONVENTIONS:
             figureNode.SetAttribute(space.FIGURE_CONVENTION_ATTRIBUTE, "unknown")
         if shell.currentWorkspace() != "draw":

@@ -1026,6 +1026,54 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
     # Figures
     #
 
+    def test_damaged_figure_is_refused_without_template(self):
+        """A figure that cannot be read (0 bytes, or a JPEG named .png) is refused with its reason: no template or lesion is
+        started and the bare Add Data dialog does not open.
+        """
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("library")
+        self._pump()
+        empty = os.path.join(self.directory, "fig_zero.png")
+        open(empty, "wb").close()
+        jpeg = self._writeFigure("fig_jpeg_named.jpg")
+        renamed = os.path.join(self.directory, "fig_jpeg_named.png")
+        os.replace(jpeg, renamed)
+        shown = []
+        addData = []
+        original = (slicer.util.errorDisplay, slicer.util.warningDisplay, importer.openAddDataDialog)
+        slicer.util.errorDisplay = slicer.util.warningDisplay = lambda text, **kw: shown.append(text)
+        importer.openAddDataDialog = addData.append
+        try:
+            for path in (empty, renamed):
+                del shown[:]
+                result = importer.handleDrop([path], shell=studioShell)
+                self._pump(5)
+                name = os.path.basename(path)
+                self.assertEqual(len(result.figures), 0, name)
+                self.assertEqual(addData, [], name)
+                self.assertEqual(len(shown), 1, name)
+                self.assertIn(name, shown[0])
+                self.assertEqual(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"), [], name)
+                self.assertEqual(slicer.util.getNodesByClass("vtkMRMLSegmentationNode"), [], name)
+            self.assertIn("empty (0 bytes)", self._lastEmptyReason(empty))
+        finally:
+            slicer.util.errorDisplay, slicer.util.warningDisplay, importer.openAddDataDialog = original
+
+    @staticmethod
+    def _lastEmptyReason(path):
+        from StudioLib import importer
+
+        shown = []
+        original = slicer.util.warningDisplay
+        slicer.util.warningDisplay = lambda text, **kw: shown.append(text)
+        try:
+            importer._routeFigure(path, None, importer.LoadResult())
+        finally:
+            slicer.util.warningDisplay = original
+        return shown[0]
+
     def test_figure_routed(self):
         """A dropped PNG: Compare layout, the figure in Yellow, the template in Red as the source, Draw, the question."""
         from StudioLib import importer, space
