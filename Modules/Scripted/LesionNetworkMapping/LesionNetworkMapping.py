@@ -3397,7 +3397,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         try:
             foci = coords.read_foci(path)
         except (OSError, ValueError) as exc:
-            slicer.util.errorDisplay(_("The coordinates cannot be read: {error}").format(error=exc), windowTitle=_("Import coordinates"))
+            slicer.util.warningDisplay(_("The coordinates cannot be read: {error}").format(error=exc), windowTitle=_("Import coordinates"))
             return None
         return self._appendNewFoci(foci, path if not self.coordinateFoci else None)
 
@@ -3582,7 +3582,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             items = coords.read_stimulation_table(path, self.stimulationKind())
             columns = coords.numeric_columns(path)
         except (OSError, ValueError) as exc:
-            slicer.util.errorDisplay(_("The stimulation sites cannot be read: {error}").format(error=exc), windowTitle=_("Import stimulation sites"))
+            slicer.util.warningDisplay(_("The stimulation sites cannot be read: {error}").format(error=exc), windowTitle=_("Import stimulation sites"))
             return None
         for item in items:
             if item.get("image") is not None:
