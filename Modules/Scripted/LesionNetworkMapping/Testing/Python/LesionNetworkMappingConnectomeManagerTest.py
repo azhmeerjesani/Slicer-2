@@ -697,6 +697,26 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
             qt.QSettings().setValue(CONNECTOMES_SETTING, saved)
             self.widget.refreshConnectomes(select=self.paths[0])
 
+    def test_open_manager_terms_column_follows_the_tick_in_the_connectome_card(self):
+        widget = self.widget
+        manager = widget.openManager()
+        _pump(100)
+        self._select(manager, self.paths[0])
+        row = [os.path.normpath(r["path"]) for r in manager.rows].index(os.path.normpath(self.paths[0]))
+        termsColumn = manager.COLUMNS.index("Terms")
+        widget.acceptTermsCheckBox.setChecked(False)
+        _pump(50)
+        self.assertEqual(manager.table.item(row, termsColumn).text(), "not accepted")
+        try:
+            widget.acceptTermsCheckBox.setChecked(True)
+            _pump(50)
+            self.assertEqual(manager.table.item(row, termsColumn).text(), "accepted")
+            widget.acceptTermsCheckBox.setChecked(False)
+            _pump(50)
+            self.assertEqual(manager.table.item(row, termsColumn).text(), "not accepted")
+        finally:
+            widget.acceptTermsCheckBox.setChecked(False)
+
 
 if __name__ == "__main__":
     unittest.main()

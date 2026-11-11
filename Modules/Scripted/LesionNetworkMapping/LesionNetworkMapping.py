@@ -4767,6 +4767,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             return
         self.logic.setTermsAccepted(self.bundle, checked)
         self.updateComputeState()
+        # The manager dialog is non-modal: keep its Terms column in step with the tick
+        if self.managerDialog is not None and self.managerDialog.isVisible():
+            self.managerDialog.refresh()
 
     def onAddBundle(self):
         """Register a connectome bundle folder chosen by the user (validated by ``ConnectomeBundle.open``)."""
