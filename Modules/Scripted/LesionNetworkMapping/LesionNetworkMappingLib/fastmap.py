@@ -1779,10 +1779,15 @@ def _apply_main(argv):
         if args.parity:
             with open(args.parity, encoding="utf-8") as f:
                 report = json.load(f)
-            if (report.get("index") or {}).get("sha256") not in (None, index.sha256):
+            gate_keys = ("constants", "min_lesions", "enough_lesions", "strata", "size_bins", "allowed_strata", "allowed_size_bins")
+            if not isinstance(report, dict) or not isinstance(report.get("gate"), dict) or any(key not in report["gate"] for key in gate_keys):
+                raise jobs.JobError(f"{os.path.basename(args.parity)} is not a parity report of this fast index", code="input")
+            if (report.get("index") if isinstance(report.get("index"), dict) else {}).get("sha256") not in (None, index.sha256):
                 jobs.emit("warning", code="parity_index", message="The parity report belongs to another fast index; its gate is not applied.")
                 report = None
         maps = approximate_maps(weights, index)
+    except jobs.JobError:
+        raise
     except (OSError, ValueError, KeyError) as exc:
         raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None
     os.makedirs(args.out, exist_ok=True)

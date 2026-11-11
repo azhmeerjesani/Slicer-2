@@ -775,6 +775,18 @@ class FastmapTest(unittest.TestCase):
         expected = fastmap.approximate_maps(weights, index)[0]
         np.testing.assert_allclose(data.reshape(-1)[self.bundle.mask_indices], expected, rtol=1e-6, atol=1e-6)
         self.assertTrue(record["lesions"][0]["map"].endswith("_desc-FastApproxFz_funcmap.nii.gz"))
+        # --parity that is not a parity report: a plain input error before anything is written
+        for number, content in enumerate(([1], {"index": {"sha256": None}}, {"gate": []})):
+            bad = os.path.join(root, f"notreport{number}.json")
+            with open(bad, "w", encoding="utf-8") as f:
+                json.dump(content, f)
+            bad_dir = os.path.join(root, f"fast-bad{number}")
+            code, events, stderr = self._run("apply", "--index", out, "--lesion", lesion_paths[0], "--out", bad_dir, "--parity", bad)
+            self.assertEqual(code, 1, stderr)
+            self.assertEqual(events[-1]["code"], "input")
+            self.assertIn("is not a parity report", events[-1]["message"])
+            self.assertNotIn("traceback", events[-1])
+            self.assertFalse(os.path.exists(bad_dir))
         # Usage errors and atlases that are not cached
         code, events, _ = self._run("build")
         self.assertEqual(code, jobs.EXIT_USAGE)
