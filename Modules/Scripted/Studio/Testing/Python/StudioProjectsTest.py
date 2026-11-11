@@ -8779,6 +8779,64 @@ class StudioProjectsTest(unittest.TestCase):
         finally:
             projects_ui.message = realMessage
 
+    def test_106_opening_another_project_asks_when_the_open_one_cannot_be_saved(self):
+        """Opening another project while the open one cannot be saved (disk full) asked nothing: the scene was replaced and
+        the edits were lost (BB-1). Like Ctrl+N, the user is asked: "Keep working" stops the open and keeps the edits in
+        memory, "Open without saving" opens the other project.
+        """
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        service = self._service()
+        self._userVolume("ScanA", shape=(12, 14, 16))
+        projectA = self._projectFor(service)
+        self._save(service)
+        pathA = projectA.path
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        volumeB, _path = self._userVolume("ScanB", shape=(12, 14, 16))
+        projectB = self._projectFor(service)
+        self._save(service)
+        pathB = projectB.path
+        array = slicer.util.arrayFromVolume(volumeB)
+        array[:] = 321  # the edit that cannot be saved
+        slicer.util.arrayFromVolumeModified(volumeB)
+
+        asked = []
+
+        def answer(index):
+            def question(parent, title, text, buttons, default=0):
+                asked.append((title, text, list(buttons), default))
+                return index
+            return question
+
+        def same(first, second):
+            return os.path.normcase(os.path.realpath(first)) == os.path.normcase(os.path.realpath(second))
+
+        with mock.patch.object(service, "saveNow", lambda *args, **kwargs: False), \
+                mock.patch.object(projects_ui, "_service", lambda: service), mock.patch.object(projects_ui, "_shell", lambda: None):
+            service._projectPausedReason = "less than 1.2 MB free on the disk"
+            with mock.patch.object(projects_ui, "_question", answer(2)):
+                self.assertFalse(projects_ui.openProject(pathA), "Keep working: the other project is not opened")
+            self.assertEqual(len(asked), 1, "the user is asked before the unsaved edits are dropped")
+            title, text, buttons, default = asked[0]
+            self.assertEqual(title, "Open project")
+            self.assertEqual(len(buttons), 3)
+            self.assertIn("less than 1.2 MB free", text)
+            self.assertEqual(default, 2, "keeping the work is the default")
+            self.assertIsNotNone(service.project)
+            self.assertTrue(same(service.project.path, pathB), "the project that could not be saved stays open")
+            self.assertTrue(slicer.mrmlScene.IsNodePresent(volumeB))
+            self.assertTrue((slicer.util.arrayFromVolume(volumeB) == 321).all(), "its edits are kept")
+
+            with mock.patch.object(projects_ui, "_question", answer(1)):
+                self.assertTrue(projects_ui.openProject(pathA), "Open without saving: the other project opens")
+            self.assertEqual(len(asked), 2)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertTrue(same(service.project.path, pathA))
+        self.assertFalse(service._discardOnClose, "the choice applies to that open only")
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

@@ -432,6 +432,8 @@ class AutosaveService:
         #: outside Projects; in memory only (no local path is written anywhere)
         self._copySource = None
         self._forceProjectOpen = False
+        #: the user chose to replace the open project without saving it (its save failed): the next scene close does not save
+        self._discardOnClose = False
         #: the scene file that the last scene load could not read (damaged): openProject does not open its project
         self._unreadableScene = None
         self._lastProjectPlan = None
@@ -2120,8 +2122,9 @@ class AutosaveService:
         scene = slicer.mrmlScene
         url = scene.GetURL()
         rootDirectory = scene.GetRootDirectory()
+        discard, self._discardOnClose = self._discardOnClose, False
         try:
-            if self._recovering == 0 and self.enabled():
+            if self._recovering == 0 and self.enabled() and not discard:
                 self.saveNow("close", progress=True, ignoreBusy=True)
         except Exception:
             logging.error("Slicer Studio: saving the project before closing failed:\n" + traceback.format_exc())
@@ -2145,6 +2148,29 @@ class AutosaveService:
         """The file a scene is about to be loaded from (a .mrb is unpacked first): names the project of a copy."""
         self._pendingSceneSource = str(path) if path else None
 
+    def confirmReplaceProject(self, title):
+        """Before another scene replaces the open project (open a project, open a scene file): save the project now. Return
+        True if it is saved (or there is nothing to save) or the user chose to go on without saving; False if the user keeps
+        working in it (the open must not go ahead). Loading a scene closes the project unasked (``_closeProjectOnSceneClose``),
+        so a save that fails here (disk full, folder not writable) would otherwise lose the edits silently; Ctrl+N and quit
+        fall back to the classic "Save before closing scene?" question in that case.
+        """
+        if self.project is None or self._recovering != 0 or not self.enabled():
+            return True
+        try:
+            if self.saveNow("open", progress=True, ignoreBusy=True):
+                return True
+        except Exception:
+            logging.error("Slicer Studio: saving the project before opening another failed:\n" + traceback.format_exc())
+        from StudioLib import projects_ui
+
+        answer = projects_ui.askReplaceUnsavedProject(title, self.project, self._projectPausedReason)
+        if answer in ("save", "discard"):
+            # A copy holds the edits, or the user chose to drop them: the close does not try (and fail) to save again
+            self._discardOnClose = True
+            return True
+        return False
+
     def openProject(self, path):
         """Open a project folder (its scene file): the current project is saved and closed first. Return True if loaded."""
         projects = self._projects()
@@ -2162,6 +2188,8 @@ class AutosaveService:
             # Nothing is opened: the message says who has it (another computer: "Open here" takes the lock it left)
             self._announce("locked", projects.Project(path), opened=False, holder=projects.lockHolder(path))
             return False
+        if not self.confirmReplaceProject(_("Open project")):
+            return False  # the open project could not be saved and the user keeps working in it
         if self._studyOpen():
             # Opening a project is an explicit choice of the user: the study is closed first (its subject's edits are written),
             # as opening another study closes the open one. Left open, the project would be attached, announced as continued and
@@ -2198,6 +2226,7 @@ class AutosaveService:
             logging.warning(f"Slicer Studio: {error}")
         finally:
             self._forceProjectOpen = False
+            self._discardOnClose = False
             self._pendingSceneSource = None  # used by _afterSceneImport; not left over for a later load if this one failed
         self._adoptMergedHierarchy()
         return self.project is not None
@@ -2278,8 +2307,13 @@ class AutosaveService:
             return False  # nothing was read: the open project stays open
         if self.isOpenCopyOf(path):
             return True  # the copy of this very file is open: a second drop keeps it (no "<name> 2")
+        if not self.confirmReplaceProject(_("Open scene")):
+            return False  # the open project could not be saved and the user keeps working in it
         self.setPendingSceneSource(path)
-        slicer.util.loadScene(path, {"clear": True})
+        try:
+            slicer.util.loadScene(path, {"clear": True})
+        finally:
+            self._discardOnClose = False
         return True
 
     def refuseDamagedSceneFile(self, path):

@@ -734,6 +734,25 @@ def _ensureRootOrTell():
     return True
 
 
+def askReplaceUnsavedProject(title, project, reason=""):
+    """The open project could not be saved and another scene is about to replace it (open a project, open a scene file).
+    Ask what to do instead of losing its edits: "save" (a copy was saved with "Save a copy as…"; the open goes on),
+    "discard" (open without saving) or "cancel" (keep working; the default, also Escape).
+    """
+    name = project.relativeName() if project is not None else _("The open project")
+    text = _("{project} could not be saved: {reason}. Opening now discards its changes since the last save.").format(
+        project=name, reason=reason or _("see the error log"))
+    while True:
+        answer = _question(slicer.util.mainWindow(), title, text, [_("Save a copy…"), _("Open without saving"), _("Keep working")], default=2)
+        if answer == 1:
+            return "discard"
+        if answer != 0:
+            return "cancel"
+        if saveCopyAs():
+            return "save"
+        # The copy was not saved (cancelled or failed): ask again, the edits are still only in memory
+
+
 def _confirmStopRun(title):
     """True if no Map network / Normalize run would be stopped by closing the scene, or the user accepts stopping it."""
     from . import firstrun
