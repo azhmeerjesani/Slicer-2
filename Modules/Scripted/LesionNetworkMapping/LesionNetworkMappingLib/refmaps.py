@@ -602,7 +602,9 @@ def add_url(url, title=None, licence="unknown", citation="", condition=None, spa
     sniffed = not re.search(r"\.nii(\.gz)?$", filename)
     if sniffed:
         filename += ".download"
-    resource = fetch.Resource({"id": f"refmap-url/{url}", "title": title or filename, "urls": [url], "filename": filename,
+    # Failure texts start with the resource title: the internal '.download' name is never shown, the link (without its query) is.
+    shown = title or (re.sub(r"^https?://", "", url.split("?")[0].split("#")[0]) if sniffed else filename)
+    resource = fetch.Resource({"id": f"refmap-url/{url}", "title": shown, "urls": [url], "filename": filename,
                                "checksum": fetch.RECORD_ON_FIRST_DOWNLOAD, "licence": licence or "unknown"})
     path = _fetch_into_registry(resource, root, session, progress, cancel, offline)
     if sniffed:

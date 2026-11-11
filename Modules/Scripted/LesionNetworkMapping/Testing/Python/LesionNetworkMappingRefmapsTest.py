@@ -637,6 +637,44 @@ class SourcesTest(RefmapsTestBase):
                     self.assertTrue(path.endswith(suffix) and os.path.isfile(path), path)
                     self.assertIn(os.path.relpath(path, fetch.cache_dir(self.root)).replace(os.sep, "/"), fetch.read_manifest(self.root)["files"])
 
+    def test_extensionless_url_failure_never_names_internal_download_file(self):
+        """BB-1: failures of extensionless links said 'page.download: ...' / 'download.download: ...'."""
+        import http.server
+        from unittest import mock
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path.startswith("/page"):
+                    body = b"<html><body>Log in</body></html>"
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    self.send_error(404)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        with mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}):
+            for name in ("/page", "/404", "/osf/abc/download"):
+                with self.subTest(name=name):
+                    with self.assertRaises(refmaps.RefmapsError) as raised:
+                        refmaps.add_url(base + name, root=self.root, offline=False)
+                    message = str(raised.exception)
+                    self.assertNotIn(".download", message)
+                    self.assertIn(base[len("http://"):] + name, message)
+            with self.assertRaises(refmaps.RefmapsError) as raised:
+                refmaps.add_url(base + "/404", title="My map", root=self.root, offline=False)
+            self.assertTrue(str(raised.exception).startswith("My map:"))
+
     def test_multi_volume_file_is_refused_up_front(self):
         """BB-1: a 3-volume NIfTI was added ('Added ...') and then failed with a traceback on every Compare."""
         four_d = os.path.join(self.tmp, "three_contrasts.nii.gz")
