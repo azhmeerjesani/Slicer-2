@@ -171,7 +171,9 @@ the Qt 5 of Ubuntu 24.04, which is why the image is based on Ubuntu 24.04.
 - **Quitting**: if you quit Slicer (File > Exit), it starts again after a few
   seconds, so the browser tab keeps working. "Restart Slicer" works as on the
   desktop. Use `stop` to stop everything. Stopping (`stop` or `Ctrl+C`) quits
-  Slicer as File > Exit does: the open project is saved first.
+  Slicer as File > Exit does: the open project is saved first (`local` starts
+  Slicer with `SLICER_STUDIO_STOP_ON_SIGTERM=1` for this; the container needs no
+  setting).
 - **Extensions**: the Extensions Manager needs a package built with the system
   OpenSSL 3 (`Slicer_USE_SYSTEM_OpenSSL=ON`). An image built from an older
   package that bundles OpenSSL 1.1 cannot download the extension catalog

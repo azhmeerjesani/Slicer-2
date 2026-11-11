@@ -121,6 +121,19 @@ def isDisabledByEnvironment():
     return slicer.util.mainWindow() is None
 
 
+#: Set to 1 by the web launcher's ``local`` mode, which stops Slicer with SIGTERM (Ctrl+C, ``stop``) like the container
+STOP_ON_SIGTERM_ENVIRONMENT = "SLICER_STUDIO_STOP_ON_SIGTERM"
+
+
+def quitsOnStopSignal():
+    """True when SIGTERM must quit as File > Exit does (the open project is saved): the web build (``docker stop``) and the
+    web launcher's ``local`` mode (``SLICER_STUDIO_STOP_ON_SIGTERM=1``).
+    """
+    from StudioLib import projects
+
+    return projects.isWebBuild() or os.environ.get(STOP_ON_SIGTERM_ENVIRONMENT) == "1"
+
+
 def onStartupCompleted():
     """Start the autosave service (called by the Studio module after the application started)."""
     global _service
@@ -128,10 +141,9 @@ def onStartupCompleted():
         return
     _service = AutosaveService()
     _service.start()
-    from StudioLib import projects
-
-    if projects.isWebBuild():
-        # The web launcher (Ctrl+C) and the container (docker stop) stop Slicer with SIGTERM: quit as File > Exit does
+    if quitsOnStopSignal():
+        # The web launcher (Ctrl+C, local or Docker) and the container (docker stop) stop Slicer with SIGTERM: quit as
+        # File > Exit does
         _service.installStopSignalHandler()
     # The Studio surfaces were installed before the service existed (the folder chooser, A-09, or the update check came
     # first): connect them now

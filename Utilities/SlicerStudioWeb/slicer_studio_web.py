@@ -93,6 +93,9 @@ LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
 # Process names of the Slicer launcher and application.
 SLICER_PROCESS_NAMES = ("Slicer", "SlicerApp-real")
 
+# Makes Slicer Studio quit as File > Exit does on SIGTERM in local mode (StudioLib/autosave.py)
+STOP_ON_SIGTERM_VARIABLE = "SLICER_STUDIO_STOP_ON_SIGTERM"
+
 # In-app updates (decision D-U1): the manifest of the latest public release (no GitHub API, no token). The
 # environment variable SLICER_STUDIO_UPDATE_FEED replaces the address (tests); "off" turns update checks off.
 UPDATE_REPOSITORY = "azhmeerjesani/Slicer-2"
@@ -1378,7 +1381,10 @@ class LocalSession:
 
     def start_slicer(self):
         info(f"Starting {self.slicer}")
-        self.slicer_process = self.start_process([str(self.slicer), *self.args.slicer_args], env=self.display_env())
+        env = self.display_env()
+        # stop() sends SIGTERM: Slicer then quits as File > Exit does and saves the open project (as in the container)
+        env[STOP_ON_SIGTERM_VARIABLE] = "1"
+        self.slicer_process = self.start_process([str(self.slicer), *self.args.slicer_args], env=env)
 
     def services_alive(self):
         return all(process.poll() is None for _, process in self.services)

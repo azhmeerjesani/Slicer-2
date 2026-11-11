@@ -8618,6 +8618,51 @@ class StudioProjectsTest(unittest.TestCase):
         service.dispose()
         self.assertIs(signal.getsignal(signal.SIGTERM), signal.SIG_DFL, "dispose() restores the default SIGTERM action")
 
+    def test_101b_local_web_launcher_turns_on_the_stop_signal_handler(self):
+        """BB-1: ``slicer_studio_web.py local`` (no SLICER_STUDIO_WEB, no /.dockerenv) stops Slicer with SIGTERM on Ctrl+C
+        and ``stop``, but the handler of test_101 was installed only in the web build, so Slicer died before aboutToQuit
+        saved the project: edits since the last save were lost and the project stayed "open" (a crash at next start). The
+        launcher now starts Slicer with SLICER_STUDIO_STOP_ON_SIGTERM=1, which turns the handler on.
+        """
+        import importlib.util
+
+        autosave, projects = self.autosave, self.projects
+        variable = autosave.STOP_ON_SIGTERM_ENVIRONMENT
+        savedValue, savedWeb = os.environ.get(variable), projects.isWebBuild
+        try:
+            projects.isWebBuild = lambda: False
+            os.environ.pop(variable, None)
+            self.assertFalse(autosave.quitsOnStopSignal(), "a desktop run keeps the default SIGTERM action")
+            os.environ[variable] = "1"
+            self.assertTrue(autosave.quitsOnStopSignal(), "the local web launcher's Slicer quits and saves on SIGTERM")
+            os.environ.pop(variable, None)
+            projects.isWebBuild = lambda: True
+            self.assertTrue(autosave.quitsOnStopSignal(), "the web build (docker stop) still does")
+        finally:
+            projects.isWebBuild = savedWeb
+            if savedValue is None:
+                os.environ.pop(variable, None)
+            else:
+                os.environ[variable] = savedValue
+        # The launcher's local mode sets the variable for Slicer
+        sourceDir = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        path = os.path.join(sourceDir, "Utilities", "SlicerStudioWeb", "slicer_studio_web.py")
+        if not os.path.exists(path):
+            self.skipTest("the web launcher source is not available")
+        spec = importlib.util.spec_from_file_location("slicer_studio_web_sigterm", path)
+        launcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(launcher)
+        self.assertEqual(launcher.STOP_ON_SIGTERM_VARIABLE, variable)
+        session = launcher.LocalSession.__new__(launcher.LocalSession)
+        session.slicer, session.display, session.xauthority = "Slicer", 99, os.path.join(self.tempDir, "Xauthority")
+        session.args = type("Args", (), {"slicer_args": []})()
+        started = []
+        session.start_process = lambda command, env=None, output=None: started.append((command, env)) or "process"
+        session.start_slicer()
+        self.assertEqual(len(started), 1)
+        self.assertEqual(started[0][1].get(variable), "1", "local mode starts Slicer with the stop-signal variable")
+        self.assertEqual(started[0][1].get("DISPLAY"), ":99")
+
 
     def test_102_project_in_a_read_only_folder_is_not_half_removed(self):
         """BB-1: Move to Trash of a project in a read-only Projects folder (a share where only Projects/ is locked) asked
