@@ -3387,14 +3387,21 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         except (OSError, ValueError) as exc:
             slicer.util.errorDisplay(_("The coordinates cannot be read: {error}").format(error=exc), windowTitle=_("Import coordinates"))
             return None
-        # Importing the same foci again (the same file twice) would add foci to the null sets of their study
+        return self._appendNewFoci(foci, path if not self.coordinateFoci else None)
+
+    def _appendNewFoci(self, foci, path):
+        """Append the foci that are not in the list yet, say how many were skipped, and return the appended ones.
+
+        Adding the same foci again (the same file imported twice, or the same point list added twice) would add foci
+        to their study, and the random-coordinate control draws each study's number of foci for its null sets.
+        """
         known = {_focusKey(focus) for focus in self.coordinateFoci}
         new = []
         for focus in foci:
             if _focusKey(focus) not in known:
                 known.add(_focusKey(focus))
                 new.append(focus)
-        self.setCoordinates(self.coordinateFoci + new, path if not self.coordinateFoci else None)
+        self.setCoordinates(self.coordinateFoci + new, path)
         skipped = len(foci) - len(new)
         if skipped:
             self.coordSummaryLabel.setText(self.coordSummaryLabel.text + " · " + (_("1 focus already in the list was skipped") if skipped == 1 else
@@ -3408,7 +3415,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.addMarkupsCoordinates(node)
 
     def addMarkupsCoordinates(self, node, study=None):
-        """Append the control points of a point list (RAS = MNI mm) as one study (named after the list)."""
+        """Append the control points of a point list (RAS = MNI mm) as one study (named after the list); points already in the list are skipped."""
         from LesionNetworkMappingLib import coords
 
         points = []
@@ -3419,8 +3426,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         if not points:
             return []
         foci = coords.foci_from_points(points, study=study or node.GetName())
-        self.setCoordinates(self.coordinateFoci + foci, None)
-        return foci
+        return self._appendNewFoci(foci, None)
 
     def _showCoordinates(self):
         from LesionNetworkMappingLib import coords
