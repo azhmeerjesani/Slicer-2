@@ -667,8 +667,7 @@ class VlsmTab(CohortTab):
             html.escape(_("{n} permutations{kind} · smallest attainable p {p:.2g} · {scheme}").format(
                 n=f"{nPerm:,}" if isinstance(nPerm, int) else nPerm, kind=_(" (exhaustive)") if permutation.get("exhaustive") else (_(" (preview)") if permutation.get("preview") else ""),
                 p=float(record.get("min_attainable_p") or record.get("min_p") or 1.0), scheme=permutation.get("reason") or permutation.get("scheme") or "")),
-            html.escape(_("FWE p ≤ 0.05: {n} voxels in {c} clusters (smallest FWE p {p})").format(n=fwe.get("n_significant", "?"), c=(record.get("clusters") or {}).get("n", len(clusters)),
-                                                                                                 p=_fmtP(fwe.get("min_p")))),
+            html.escape(_fweSummaryText(fwe.get("n_significant", "?"), (record.get("clusters") or {}).get("n", len(clusters)), _fmtP(fwe.get("min_p")))),
         ]
         excludedLine = _excludedText(record.get("excluded"))
         if excludedLine:
@@ -884,6 +883,14 @@ def _removeUnfinished(folder):
             shutil.rmtree(folder)
     except OSError:
         logging.exception("Lesion network mapping: the unfinished circuit folder could not be removed")
+
+
+def _fweSummaryText(nVoxels, nClusters, minP):
+    """The "FWE p ≤ 0.05" line of the result summary, with "voxel" and "cluster" singular when the count is 1."""
+    voxelWord = _("voxel") if nVoxels == 1 else _("voxels")
+    clusterWord = _("cluster") if nClusters == 1 else _("clusters")
+    return _("FWE p ≤ 0.05: {n} {voxelWord} in {c} {clusterWord} (smallest FWE p {p})").format(
+        n=nVoxels, voxelWord=voxelWord, c=nClusters, clusterWord=clusterWord, p=minP)
 
 
 def _excludedText(excluded, limit=8):
