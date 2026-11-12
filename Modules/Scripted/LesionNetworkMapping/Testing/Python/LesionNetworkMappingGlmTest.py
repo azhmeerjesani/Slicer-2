@@ -363,6 +363,9 @@ class DesignRunTest(_StudyTestCase):
         summary = glm.summary(glm_result, alpha=0.05)
         self.assertEqual(summary["fwe"]["n_significant"], 4)
         self.assertEqual(summary["fdr"]["n_significant"], 4)
+        note = summary["fdr"]["note"]  # typographic, like the card's pre-run line
+        self.assertIn("q \u2264 0.05", note)
+        self.assertNotIn("<=", note)
         self.assertEqual(int(np.count_nonzero(glm.passes_alpha(stored, 0.05))), summary["fwe"]["n_significant"])
         # The same rule serves the VLSM clusters
         from LesionNetworkMappingLib import vlsm

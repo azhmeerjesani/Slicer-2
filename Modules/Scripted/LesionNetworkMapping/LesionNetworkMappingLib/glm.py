@@ -1143,7 +1143,7 @@ def summary(glm_result, alpha=FWE_ALPHA):
             "min_q": float(result.q_fdr.min()) if result.q_fdr.size else None,
             "n_significant": int(np.count_nonzero(passes_alpha(result.q_fdr, result.fdr_alpha))),
             "note": (
-                f"The smallest attainable p is 1/(K+1) = {result.min_p:.3g} (K = {K}); BH-FDR reaches q <= {result.fdr_alpha:g} only when at least "
+                f"The smallest attainable p is 1/(K+1) = {result.min_p:.3g} (K = {K}); BH-FDR reaches q ≤ {result.fdr_alpha:g} only when at least "
                 f"{result.fdr_floor_voxels} voxels reach it. Use 10,000 permutations, or Export for PALM (tail acceleration), for smaller p-values."
             ),
         },

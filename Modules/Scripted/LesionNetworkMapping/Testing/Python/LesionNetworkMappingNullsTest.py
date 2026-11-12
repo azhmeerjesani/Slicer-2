@@ -231,6 +231,8 @@ class NullsTest(unittest.TestCase):
         np.testing.assert_allclose(maps["sensNullP"], p, rtol=1e-6)
         self.assertAlmostEqual(float(maps["sensNullP"][0]), 1 / (k + 1), places=7)
         self.assertAlmostEqual(numbers["min_attainable_p"], 1 / (k + 1))
+        self.assertIn("q \u2264 0.05", numbers["discreteness"])  # typographic, like the card's pre-run line
+        self.assertNotIn("<=", numbers["discreteness"])
         self.assertGreaterEqual(float(maps["sensNullP"].min()), 1 / (k + 1) - 1e-9)
         np.testing.assert_allclose(maps["sensNullQ"], glm.fdr_bh(p), rtol=1e-6)
         mean, sd = totals.mean(axis=0), totals.std(axis=0, ddof=1)

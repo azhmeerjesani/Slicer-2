@@ -894,7 +894,7 @@ class NullOverlap:
                 "false_positive_rate_note": "fraction of in-mask voxels where the classic rule passes, in the observed cohort and in each null cohort",
             },
             "discreteness": (
-                f"The smallest attainable p is 1/(K+1) = {min_p:.3g} (K = {k}); BH-FDR reaches q <= {ALPHA:g} only when at least "
+                f"The smallest attainable p is 1/(K+1) = {min_p:.3g} (K = {k}); BH-FDR reaches q ≤ {ALPHA:g} only when at least "
                 f"{fdr_floor_voxels(n_voxels, min_p)} voxels reach it."
             ),
         }
