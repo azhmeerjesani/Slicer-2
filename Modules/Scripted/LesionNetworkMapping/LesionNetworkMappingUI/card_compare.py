@@ -822,14 +822,14 @@ class CompareCard:
                         logging.warning(f"Lesion network mapping: the map {source.label} could not be loaded: {exc}")
                     else:
                         logging.exception(f"Lesion network mapping: the map {source.label} could not be loaded")
-                    problems.append(f"{source.label}: {str(exc).rstrip('. ')}.")
+                    problems.append(f"{source.name}: {str(exc).rstrip('. ')}.")
                     continue
                 if np.count_nonzero(np.isfinite(values)) < 3:
-                    problems.append(_("{label}: does not cover this connectome's voxels").format(label=source.label))
+                    problems.append(_("{label} does not cover this connectome's voxels.").format(label=source.name))
                     continue
                 finite = values[np.isfinite(values)]
                 if not float(np.ptp(finite)) > 0:
-                    problems.append(_("{label}: has no variance over this connectome's voxels (every value is the same)").format(label=source.label))
+                    problems.append(_("{label} has no variance over this connectome's voxels (every value is the same).").format(label=source.name))
                     continue
                 name = source.name
                 while name in maps:

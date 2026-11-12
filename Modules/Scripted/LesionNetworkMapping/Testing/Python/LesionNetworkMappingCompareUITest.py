@@ -197,6 +197,30 @@ class LesionNetworkMappingCompareUITest(unittest.TestCase):
         self.assertLess(self.card.results.minimumSizeHint.width(), HEATMAP_MAX_PX - 100)
         self.assertLess(self.card.heatmapScroll.minimumSizeHint.width(), HEATMAP_MAX_PX - 100)
 
+    def test_7_excluded_maps_notice_names_the_maps_one_sentence_each(self):
+        """The notice for left-out maps uses the short name (not the list label with the licence badge) and ends each sentence."""
+        import numpy as np
+
+        from LesionNetworkMappingUI.card_compare import MapSource
+
+        rng = np.random.default_rng(3)
+        data = {"x": np.full(200, np.nan), "y": np.full(200, np.nan), "const": np.ones(200), "a": rng.standard_normal(200), "b": rng.standard_normal(200)}
+        card = self.card
+        saved = (card.sources, card.checkedKeys, card.runState, card.vector)
+        try:
+            card.sources = {key: MapSource(key, f"Map {key} ● CC0-1.0", "other", None, {"kind": "map"}, name=f"Map {key}") for key in data}
+            card.checkedKeys = lambda: list(data)
+            card.runState = lambda: (True, "")
+            card.vector = lambda source: data[source.key].copy()
+            comparison = card.compare()
+        finally:
+            card.sources, card.checkedKeys, card.runState, card.vector = saved
+        self.assertIsNotNone(comparison)
+        notice = card.notice
+        self.assertNotIn("CC0", notice)
+        self.assertNotIn("●", notice)
+        self.assertIn("Map x does not cover this connectome's voxels. Map y does not cover", notice)
+        self.assertIn("Map const has no variance over this connectome's voxels (every value is the same). ", notice)
 
 
 if __name__ == "__main__":
