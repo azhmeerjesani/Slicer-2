@@ -5587,6 +5587,13 @@ class StudioRegressionTest(unittest.TestCase):
                 editor = section.editors[column]
                 self.assertEqual(str(editor.text), long, column)
                 self.assertEqual(editor.cursorPosition, 0, f"{column}: a field not being edited shows the start of its value")
+            # The user typed the value (the text already equals the stored value) and left the field: the cursor was at
+            # the end and stayed there, so the field showed the tail until another subject was selected
+            editor = section.editors["citation"]
+            editor.setCursorPosition(len(long))
+            self.assertFalse(editor.hasFocus())
+            section.refresh("sub-02")
+            self.assertEqual(editor.cursorPosition, 0, "a typed value shows its start once the field is left")
         finally:
             if host is not None:
                 host.deleteLater()

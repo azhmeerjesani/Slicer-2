@@ -1054,8 +1054,9 @@ class CaseSection:
             return
         if str(editor.text) != text:
             editor.setText(text)
-            # setText leaves the cursor at the end, so a value wider than the field showed its tail
-            editor.setCursorPosition(0)
+        # Typing or setText leaves the cursor at the end, so a value wider than the field showed its tail once
+        # the field was left: always show the start of a field that is not being edited
+        editor.setCursorPosition(0)
 
     def _warningOf(self, study, column, value):
         if _missing(value):
