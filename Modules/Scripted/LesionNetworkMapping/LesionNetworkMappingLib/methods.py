@@ -668,8 +668,45 @@ class Records:
             out.append({"rms_mm": rms, "loo_rms_mm": loo})
         return out
 
+    def lesionset_path(self):
+        """Path of the lesion-set diagnostics (lesionset.json) of this root, or None.
+
+        An extra folder's (the output folder of the pipeline run being exported) comes first; otherwise the newest of the
+        study's ``derivatives/lnm/lesionset.json`` (``lesionset.py`` CLI) and the output folders of the done pipeline runs
+        (their Lesion-set stage writes ``<out>/lesionset.json``, never the study's file).
+        """
+        if "lesionset_path" in self._cache:
+            return self._cache["lesionset_path"]
+        found = None
+        for folder in self.include_dirs:
+            path = os.path.join(folder, LESIONSET_JSON[-1])
+            if _read_json(path) is not None:
+                found = path
+                break
+        if found is None:
+            candidates = [self.path(*LESIONSET_JSON)]
+            for record in self.done_runs("pipeline"):
+                folder = self.run_dir(record)
+                if folder:
+                    candidates.append(os.path.join(folder, LESIONSET_JSON[-1]))
+            dated, seen = [], set()
+            for index, path in enumerate(candidates):
+                real = os.path.realpath(path)
+                if real in seen or _read_json(path) is None:
+                    continue
+                seen.add(real)
+                try:
+                    mtime = os.path.getmtime(path)
+                except OSError:
+                    continue
+                dated.append((mtime, -index, path))
+            found = max(dated)[2] if dated else None
+        self._cache["lesionset_path"] = found
+        return found
+
     def lesionset(self):
-        return _read_json(self.path(*LESIONSET_JSON))
+        path = self.lesionset_path()
+        return _read_json(path) if path else None
 
     def records_tsv(self):
         return _read_tsv(self.path(*RECORDS_TSV))

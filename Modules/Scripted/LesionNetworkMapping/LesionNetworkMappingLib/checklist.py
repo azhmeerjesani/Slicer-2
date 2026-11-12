@@ -106,7 +106,11 @@ def _a2_lesion_set(records):
     dice = summary.get("dice") or {}
     if isinstance(dice, dict) and dice.get("median") is not None:
         value += f"; median pairwise Dice {methods._number(dice['median'])}"
-    return DONE, value, [_file_evidence(records, records.path(*methods.LESIONSET_JSON))]
+    path = records.lesionset_path()
+    evidence = _file_evidence(records, path)
+    if os.path.isabs(evidence[len("file:"):]):
+        evidence = "file:" + os.path.basename(path)  # an output folder outside the root: the file next to checklist.md, never a local path
+    return DONE, value, [evidence]
 
 
 def _a3_control_set(records):

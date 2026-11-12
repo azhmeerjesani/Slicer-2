@@ -481,6 +481,31 @@ class ChecklistTest(_StudyCase):
         self.assertIn(export.DISCLAIMER, markdown)
         self.assertIn("never block", markdown)
 
+    def test_lesion_set_of_a_pipeline_output_folder(self):
+        # The pipeline's Lesion-set stage writes <out>/lesionset.json only (never the study's derivatives/lnm/lesionset.json):
+        # A2 reads it in the exported checklist.md (include_dirs) and in the app's Report card (done pipeline runs)
+        self.make_study([("sub-01", {"group": "case"})])
+        self.assertEqual(checklist.ITEMS_BY_ID["A2"].evaluate(self.root)["status"], checklist.NOT_RUN)
+        out = self.run_dir("conn-GSP1000MF")
+        export.write_json_atomic(os.path.join(out, "lesionset.json"), {"format": "slicer-lnm-lesionset", "summary": {"n": 10, "volume": {"median": 0.32}, "dice": {"median": 0.0}}})
+        written = export.write_methods(self.root, out, formats=("md",))
+        a2 = {item["id"]: item for item in written["items"]}["A2"]
+        self.assertEqual(a2["status"], checklist.DONE)
+        self.assertEqual(a2["value"], "10 lesions; median volume 0.32; median pairwise Dice 0")
+        self.assertEqual(a2["evidence"], ["file:derivatives/lnm/conn-GSP1000MF/lesionset.json"])
+        with open(written["checklist"], encoding="utf-8") as f:
+            self.assertNotIn("lesion-set diagnostics not run", f.read())
+        self.assertEqual(checklist.ITEMS_BY_ID["A2"].evaluate(self.root)["status"], checklist.NOT_RUN)  # not registered yet
+        self.register("pipeline", out)
+        a2 = checklist.ITEMS_BY_ID["A2"].evaluate(self.root)
+        self.assertEqual((a2["status"], a2["evidence"]), (checklist.DONE, ["file:derivatives/lnm/conn-GSP1000MF/lesionset.json"]))
+        # An output folder outside the study is cited by file name, never by a local path
+        outside = os.path.join(self.tmp, "elsewhere")
+        os.makedirs(outside)
+        export.write_json_atomic(os.path.join(outside, "lesionset.json"), {"summary": {"n": 3}})
+        a2 = checklist.ITEMS_BY_ID["A2"].evaluate(self.root, records=methods.Records(self.root, include_dirs=[outside]))
+        self.assertEqual((a2["status"], a2["value"], a2["evidence"]), (checklist.DONE, "3 lesions", ["file:lesionset.json"]))
+
     def test_volume_off_and_overlap_without_null_are_flagged(self):
         self.make_study([("sub-01", {"group": "case"})])
         self.glm(covariates=())
