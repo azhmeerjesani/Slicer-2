@@ -328,6 +328,19 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual((counts["excluded_screening"], counts["fulltext_excluded"]), (0, 1))
         self.assertEqual(counts["fulltext_excluded_reasons"], {"No usable lesion imaging": 1})
 
+    def test_prisma_figure_says_1_case_in_the_singular(self):
+        records = sources.Records.open(self.study)
+        sources.import_text(self.study, records, "10.9999/one\n")
+        rid = records.ids()[0]
+        for _ in range(3):
+            records.advance(rid)
+        sources.add_cases(self.study, records, rid, 1)
+        records.save()
+        _counts, paths = sources.export_prisma(self.study, records)
+        svg = open(paths[1]).read()
+        self.assertIn(">1 case</text>", svg)
+        self.assertNotIn("1 cases", svg)
+
     def test_exact_duplicates_merge(self):
         records = sources.Records.open(self.study)
         records.add([sources.draft(doi="10.1000/A", title="One")])

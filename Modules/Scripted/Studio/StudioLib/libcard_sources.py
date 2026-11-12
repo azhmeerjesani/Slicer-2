@@ -79,6 +79,15 @@ def _toast(text, ms=3000, **kwargs):
         logging.info(f"Studio sources: {text}")
 
 
+def _casesText(n):
+    """'1 case' / '5 cases' for a record's ``n_cases`` text (also used for the table tooltip)."""
+    try:
+        single = int(str(n).strip()) == 1
+    except ValueError:
+        single = False
+    return (_("{n} case") if single else _("{n} cases")).format(n=n)
+
+
 def stageText(stage):
     return _(dict(STAGE_LABELS).get(stage, stage))
 
@@ -412,7 +421,8 @@ class SourcesCard:
         self.caseCount.setObjectName("StudioSourcesCaseCount")
         self.caseCount.setRange(1, 999)
         self.caseCount.setValue(1)
-        self.caseCount.setSuffix(" " + _("cases"))
+        self.caseCount.setSuffix(" " + _("case"))
+        self.caseCount.connect("valueChanged(int)", self._caseCountSuffix)
         layout.addWidget(self.caseCount)
         self.addCasesGo = qt.QPushButton(_("Add"))
         self.addCasesGo.setObjectName("StudioSourcesAddCasesGo")
@@ -530,7 +540,7 @@ class SourcesCard:
             self._rows = [row["record_id"] for row in records.rows]
             for index, row in enumerate(records.rows):
                 cells = (row["record_id"], row["title"] or row["doi"] or row["pmid"] or "—", stageText(row["stage"]))
-                details = [row["year"], row["journal"], _("{n} cases").format(n=row["n_cases"]) if row["n_cases"] else ""]
+                details = [row["year"], row["journal"], _casesText(row["n_cases"]) if row["n_cases"] else ""]
                 for column, text in enumerate(cells):
                     item = self.table.item(index, column)
                     if item is None:
@@ -808,7 +818,8 @@ class SourcesCard:
         self.refresh()
         message = _("{added} added").format(added=len(report["added"]))
         if report["merged"]:
-            message += " · " + _("{n} duplicates merged").format(n=len(report["merged"]))
+            merged = len(report["merged"])
+            message += " · " + (_("{n} duplicate merged") if merged == 1 else _("{n} duplicates merged")).format(n=merged)
         _toast(message)
         return report
 
@@ -904,6 +915,9 @@ class SourcesCard:
     def showAddCases(self):
         self.addCasesForm.show()
         self.caseCount.setFocus()
+
+    def _caseCountSuffix(self, value):
+        self.caseCount.setSuffix(" " + (_("case") if value == 1 else _("cases")))
 
     def addCasesNow(self):
         return self.addCases(self.selectedId(), int(self.caseCount.value))

@@ -1277,7 +1277,7 @@ def prisma_flow_svg(counts):
     parts += _arrow(left + _BOX_W / 2, rows_y[1] + _BOX_H, left + _BOX_W / 2, rows_y[2])
     parts += _box(right, rows_y[2], _BOX_W, side_h, side)
     parts += _arrow(left + _BOX_W, rows_y[2] + _BOX_H / 2, right, rows_y[2] + _BOX_H / 2)
-    parts += _box(left, rows_y[3], _BOX_W, _BOX_H, [f"Studies included (n = {n['included']})", f"{n['cases']} cases"], fill="#e8f3ec")
+    parts += _box(left, rows_y[3], _BOX_W, _BOX_H, [f"Studies included (n = {n['included']})", f"{n['cases']} case" + ("" if n["cases"] == 1 else "s")], fill="#e8f3ec")
     parts += _arrow(left + _BOX_W / 2, rows_y[2] + _BOX_H, left + _BOX_W / 2, rows_y[3])
     parts.append("</svg>")
     return "\n".join(parts) + "\n"

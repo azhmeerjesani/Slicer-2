@@ -2202,6 +2202,19 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         counts = sources.prisma_counts(session.study, fresh.records)
         self.assertEqual((counts["excluded_screening"], counts["fulltext_excluded"]), (0, 1))
 
+    def test_sources_singular_case_counts(self):
+        """'1 case' in the record tooltip and the Add cases spin box (BB-1)."""
+        from StudioLib import libcard_sources
+
+        self.assertEqual(libcard_sources._casesText("1"), "1 case")
+        self.assertEqual(libcard_sources._casesText("3"), "3 cases")
+        card = libcard_sources.SourcesCard(None)
+        self.assertEqual(card.caseCount.suffix, " case")
+        card.caseCount.setValue(2)
+        self.assertEqual(card.caseCount.suffix, " cases")
+        card.caseCount.setValue(1)
+        self.assertEqual(card.caseCount.suffix, " case")
+
     def test_sources_prisma_export_on_read_only_study_is_plain(self):
         """A read-only study disables PRISMA export, and a permission error is said in plain words without a logged traceback (BB-1)."""
         import errno
