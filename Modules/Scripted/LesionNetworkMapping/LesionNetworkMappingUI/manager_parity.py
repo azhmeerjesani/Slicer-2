@@ -233,8 +233,13 @@ class ImportDialog(qt.QDialog):
         mapsTsv = next((event.get("path") for event in job.results if event.get("kind") == "maps"), None)
         self.fillTable(mapsTsv, record.get("path") if record else None)
         warnings = [event.get("message") for event in job.warnings if event.get("message")]
-        text = _("Imported {n} lesion maps into {folder}. Use them in the Cohort card (its maps.tsv); the folder's mask.nii.gz is the mask of the statistics.").format(
-            n=(job.doneEvent or {}).get("n", "?"), folder=os.path.dirname(mapsTsv) if mapsTsv else "?")
+        count = (job.doneEvent or {}).get("n", "?")
+        template = (
+            _("Imported {n} lesion map into {folder}. Use it in the Cohort card (its maps.tsv); the folder's mask.nii.gz is the mask of the statistics.")
+            if count == 1
+            else _("Imported {n} lesion maps into {folder}. Use them in the Cohort card (its maps.tsv); the folder's mask.nii.gz is the mask of the statistics.")
+        )
+        text = template.format(n=count, folder=os.path.dirname(mapsTsv) if mapsTsv else "?")
         self.statusLabel.setText(" ".join([text, *warnings]))
 
     def fillTable(self, mapsTsv, recordPath):
