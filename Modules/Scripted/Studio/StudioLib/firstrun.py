@@ -18,8 +18,9 @@ in Classic, which then behaves exactly as official Slicer.
   "Save lesion…" is the default; a cancelled file dialog keeps the application open) or nothing (the classic
   prompt). The autosave line (``autosave.unsavedSummary()``) is appended when the autosave service runs. While the
   scene is a project (A-09), the project is saved first and, when that succeeded, the question is only "All changes are
-  saved in Projects/<name>. Quit?" (Quit is the default); when saving failed, the classic prompt asks, and a message
-  gives the reason. While a study is open (a study has no Save: its current subject is written when the application
+  saved in Projects/<name>. Quit?" (Quit is the default); when saving failed, the Studio question names the reason and
+  offers "Save a copy…", "Quit without saving" and "Keep working" (the default), never the official Save Data dialog
+  (it would write over the project's files in place). While a study is open (a study has no Save: its current subject is written when the application
   quits), the subject is written first and, when that succeeded, the question is only "All changes are saved in study
   <name>. Quit?"; it never offers a "Don't save" that the study could not honour.
 """
@@ -302,9 +303,13 @@ def runningJobNotice(sceneOnly=False):
     return "\n".join(sentences)
 
 
+#: (project, reason) while the close prompt is about a project that could not be saved (``projectCloseSummary``), else None
+_unsavedProjectQuit = None
+
+
 def projectCloseSummary():
-    """``(mode, summary)`` of the close prompt while the scene is a project (A-09): the project is saved now; ``("", "")``
-    if there is no project or saving failed (the classic prompt then asks), else "All changes are saved…".
+    """``(mode, summary)`` of the close prompt while the scene is a project (A-09): the project is saved now; "All changes
+    are saved…", or when saving failed the Studio question about the unsaved project (``askCloseQuestion``).
     """
     try:
         from . import autosave
@@ -314,16 +319,17 @@ def projectCloseSummary():
     project = service.currentProject() if service is not None and hasattr(service, "currentProject") else None
     if project is None:
         return None
+    global _unsavedProjectQuit
     ok = service.flushForClose()
     if not ok:
         reason = getattr(service, "_projectPausedReason", "") or _("see the error log")
-        try:
-            from . import projects_ui
-
-            projects_ui.message(_("Not saved: {reason}").format(reason=reason), level="warning", ms=8000)
-        except Exception:
-            logging.warning(f"Slicer Studio: the project could not be saved: {reason}")
-        return "", ""
+        # The project could not be saved (a full disk, a folder that cannot be written). The classic "Save before exit?"
+        # would offer the official Save Data dialog, which writes over the project's own files in place: on a full disk
+        # that truncates the lesion saved before. The Studio question (``askCloseQuestion``) asks instead: "Save a copy…"
+        # elsewhere, quit without saving, or keep working.
+        _unsavedProjectQuit = (project, reason)
+        return CLOSE_MODE_LESION_SAVED, _("{project} could not be saved: {reason}. Quitting now discards its changes since the last "
+                                          "save. Quit?").format(project=project.relativeName(), reason=reason)
     return CLOSE_MODE_LESION_SAVED, _("All changes are saved in {project}. Quit?").format(project=project.relativeName())
 
 
@@ -409,6 +415,8 @@ def computeCloseSummary():
     """Set the close prompt properties of the main window (``closeSummaryRequested()``). Never raises: on an error the
     classic prompt runs, unless a job runs (then the question names it, see ``_runNoticeQuestion``).
     """
+    global _unsavedProjectQuit
+    _unsavedProjectQuit = None
     mainWindow = slicer.util.mainWindow()
     if mainWindow is None:
         return
@@ -514,8 +522,22 @@ def askCloseQuestion():
     """``closeQuestionRequested()``: ask the "lesionSaved" exit question in the Studio dialog and set
     ``SlicerStudioCloseAnswer``. Never raises: on an error the main window shows its standard message box.
     """
+    global _unsavedProjectQuit
     mainWindow = slicer.util.mainWindow()
     if mainWindow is None:
+        return
+    unsaved, _unsavedProjectQuit = _unsavedProjectQuit, None
+    if unsaved is not None:
+        # The project could not be saved: never the official Save Data dialog ("Save session…" writes over its files)
+        try:
+            from . import projects_ui
+
+            project, reason = unsaved
+            answer = projects_ui.askReplaceUnsavedProject(_("Quit"), project, reason, verb="quit", notice=runningJobNotice())
+            mainWindow.setProperty(CLOSE_ANSWER_PROPERTY, "quit" if answer in ("save", "discard") else "cancel")
+        except Exception:
+            logging.error(f"Studio: cannot ask about the project that could not be saved:\n{traceback.format_exc()}")
+            mainWindow.setProperty(CLOSE_ANSWER_PROPERTY, "cancel")
         return
     try:
         question = closeQuestionDialog(str(mainWindow.property(CLOSE_SUMMARY_PROPERTY) or ""), mainWindow)

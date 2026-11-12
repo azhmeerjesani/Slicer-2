@@ -345,7 +345,7 @@ class StudioProjectsTest(unittest.TestCase):
         projects_ui._question = lambda parent, title, text, buttons, default=0: (asked.append((title, text, default)), 1)[1]
         calls = []
         originalNew = service.newProject
-        service.newProject = lambda: calls.append("new")
+        service.newProject = lambda *args, **kwargs: calls.append("new")
         originalService = projects_ui._service
         projects_ui._service = lambda: service
         try:
@@ -9995,6 +9995,141 @@ sys.exit(web.command_local(args))
             mainWindow.loadSceneRequested()
         self.assertEqual(len(asked), 2)
         self.assertFalse(mainWindow.property("SlicerStudioLoadSceneAnswer"))
+
+    def test_113_close_or_quit_with_an_unsaveable_project_never_opens_the_official_save(self):
+        """Ctrl+W, Ctrl+N and quit while the open project could not be saved (disk full) fell back to the official "Save
+        before closing scene?" / "Save before exit?" question (BB-1). Its "Save scene" opened the official Save Data dialog
+        on the project folder, which wrote over the project's files in place: on the full disk the saved lesion was cut to
+        4096 bytes and both the edits and the saved version were lost. The Studio question asks instead ("Save a copy…",
+        close or quit without saving, "Keep working"); the project's files are never touched by it.
+        """
+        import shutil as shutilModule
+        from unittest import mock
+
+        from StudioLib import firstrun, projects_ui
+
+        mainWindow = slicer.util.mainWindow()
+        real = mainWindow.findChild("QAction", "FileCloseSceneAction")
+        self.assertIsNotNone(real)
+        real.setObjectName("FileCloseSceneActionHidden")
+        standIn = qt.QAction(mainWindow)
+        standIn.setObjectName("FileCloseSceneAction")
+        official = []
+        standIn.connect("triggered()", lambda: official.append(1))
+        service = self._service()
+        volume, _path = self._userVolume("Full disk", shape=(20, 24, 28))
+        segmentation, segmentId, array = self._lesion(volume, name="Lesion")
+        project = self._projectFor(service)
+        self._save(service)
+        lesionPath = os.path.join(project.path, "Segmentations", "Lesion.seg.nrrd")
+        saved = _md5File(lesionPath)
+        array[12:16, 12:16, 12:16] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, volume)
+        realDiskUsage = shutilModule.disk_usage
+        asked = []
+
+        def answer(index):
+            def question(parent, title, text, buttons, default=0):
+                asked.append((title, text, list(buttons), default))
+                return index
+            return question
+
+        running = self.autosave._service
+        self.autosave._service = service  # as the running service of the application (the quit question asks it)
+        try:
+            with mock.patch.object(shutilModule, "disk_usage", lambda path: realDiskUsage(path)._replace(free=1024)), \
+                    mock.patch.object(projects_ui, "_service", lambda: service), mock.patch.object(projects_ui, "_shell", lambda: None), \
+                    mock.patch.object(firstrun, "runningJobNotice", lambda sceneOnly=False: ""):
+                # Ctrl+W, "Keep working" (the default): nothing is closed, the official question is not asked
+                with mock.patch.object(projects_ui, "_question", answer(2)):
+                    self.assertFalse(projects_ui.closeScene())
+                self.assertEqual(official, [], "the official Close Scene question (and its Save Data dialog) is not used")
+                self.assertEqual(len(asked), 1)
+                title, text, buttons, default = asked[0]
+                self.assertEqual(title, "Close scene")
+                self.assertEqual(buttons, ["Save a copy…", "Close without saving", "Keep working"])
+                self.assertEqual(default, 2, "keeping the work is the default")
+                self.assertIn("free", text)
+                self.assertIs(service.project, project, "the project stays open with its edits")
+                self.assertIsNotNone(slicer.mrmlScene.GetNodeByID(segmentation.GetID()))
+
+                # Quit: the Studio question too, never "Save session…" (the official Save Data dialog)
+                mainWindow.setProperty(firstrun.CLOSE_ANSWER_PROPERTY, "")
+                mode, summary = firstrun.projectCloseSummary()
+                self.assertEqual(mode, firstrun.CLOSE_MODE_LESION_SAVED)
+                self.assertIn("could not be saved", summary)
+                with mock.patch.object(projects_ui, "_question", answer(2)):
+                    firstrun.askCloseQuestion()
+                self.assertEqual(mainWindow.property(firstrun.CLOSE_ANSWER_PROPERTY), "cancel", "Keep working cancels the quit")
+                self.assertEqual(asked[-1][0], "Quit")
+                self.assertEqual(asked[-1][2], ["Save a copy…", "Quit without saving", "Keep working"])
+                firstrun.projectCloseSummary()
+                with mock.patch.object(projects_ui, "_question", answer(1)):
+                    firstrun.askCloseQuestion()
+                self.assertEqual(mainWindow.property(firstrun.CLOSE_ANSWER_PROPERTY), "quit")
+                self.assertIsNone(firstrun._unsavedProjectQuit, "the question is asked once per close")
+
+                # Ctrl+N, "Close without saving": the scene is closed without the official question and without writing
+                with mock.patch.object(projects_ui, "_question", answer(1)):
+                    self.assertTrue(projects_ui.newProject())
+                self.assertEqual(asked[-1][0], "New project")
+                self.assertEqual(official, [])
+                self.io.backgroundWriter().drain(10.0)
+                self.assertIsNone(service.project, "the project is closed")
+                self.assertIsNone(slicer.mrmlScene.GetNodeByID(segmentation.GetID()))
+            self.assertEqual(_md5File(lesionPath), saved, "the lesion saved before is kept as it was")
+            self.assertTrue(service.openProject(project.path), "the project opens again with the version saved before")
+            self.io.backgroundWriter().drain(10.0)
+            self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")), 1)
+        finally:
+            self.autosave._service = running
+            mainWindow.setProperty(firstrun.CLOSE_ANSWER_PROPERTY, "")
+            firstrun._unsavedProjectQuit = None
+            standIn.setObjectName("")
+            standIn.deleteLater()
+            real.setObjectName("FileCloseSceneAction")
+
+    def test_113b_a_file_that_could_not_be_written_is_not_announced_or_saved(self):
+        """A lesion file that another program changed is kept and Studio writes "<name> (Slicer Studio).seg.nrrd" next to it.
+        When that write failed, the notice still said "Slicer Studio saved its version as ... (Slicer Studio).seg.nrrd" (no
+        such file existed) and the top bar said "Saved" while the edits were only in memory (BB-1). Now nothing is
+        announced, the save is "Not saved" with the lesion named, and the next save that can write announces the copy.
+        """
+        from unittest import mock
+
+        service = self._service()
+        volume, _path = self._userVolume("Conflict", shape=(20, 24, 28))
+        segmentation, segmentId, array = self._lesion(volume, name="Lesion")
+        project = self._projectFor(service)
+        self._save(service)
+        lesionPath = os.path.join(project.path, "Segmentations", "Lesion.seg.nrrd")
+        time.sleep(0.02)
+        with open(lesionPath, "ab") as f:
+            f.write(b"\n")  # another program changed the file
+        array[2:4, 2:4, 2:4] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, volume)
+        announced = []
+        service.setProjectAnnouncer(lambda event, project, **info: announced.append((event, info)))
+        ours = os.path.join(project.path, "Segmentations", "Lesion (Slicer Studio).seg.nrrd")
+
+        def refuse(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        with mock.patch.object(self.io._ProjectWriteJob, "_moveIntoPlace", refuse):
+            self.assertFalse(service.saveNow("test", progress=False))
+        self.io.backgroundWriter().drain(10.0)
+        self.assertFalse(os.path.exists(ours))
+        self.assertEqual([info for event, info in announced if event == "conflict"], [], "no copy that does not exist is announced")
+        status = service.status()
+        self.assertEqual(status.state, "error", "the top bar does not say Saved while the lesion is only in memory")
+        self.assertIn("Lesion", status.message)
+        self.assertTrue(segmentation.GetModifiedSinceRead())
+        # The next save writes the copy and announces it
+        service._pausedUntil = 0.0
+        self._save(service)
+        self.assertTrue(os.path.isfile(ours))
+        self.assertIn(("conflict", {"conflicts": [("Lesion.seg.nrrd", "Lesion (Slicer Studio).seg.nrrd")]}), announced)
+        self.assertEqual(service.status().state, "idle")
 
 def _sphere(center=(0, 0, 0)):
     import vtk

@@ -1325,7 +1325,7 @@ def closeScene():
     """
     service = _projectService()
     if service is not None:
-        service.newProject()
+        service.newProject(title=_("Close scene"))
         return
     mainWindow = slicer.util.mainWindow()
     action = mainWindow.findChild("QAction", "FileCloseSceneAction") if mainWindow is not None else None

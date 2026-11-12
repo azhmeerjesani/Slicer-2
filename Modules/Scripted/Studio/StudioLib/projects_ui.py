@@ -782,16 +782,29 @@ def _ensureRootOrTell():
     return True
 
 
-def askReplaceUnsavedProject(title, project, reason=""):
-    """The open project could not be saved and another scene is about to replace it (open a project, open a scene file).
-    Ask what to do instead of losing its edits: "save" (a copy was saved with "Save a copy as…"; the open goes on),
-    "discard" (open without saving) or "cancel" (keep working; the default, also Escape).
+def askReplaceUnsavedProject(title, project, reason="", verb="open", notice=""):
+    """The open project could not be saved and another scene is about to replace it (open a project, open a scene file;
+    ``verb`` "close": New project, Close scene; "quit": the application is closed). Ask what to do instead of losing its
+    edits: "save" (a copy was saved with "Save a copy as…"; the open, close or quit goes on), "discard" (go on without
+    saving) or "cancel" (keep working; the default, also Escape). Never the official Save Data dialog: it would write over
+    the project's own files in place, which on a full disk truncates the files saved before. ``notice`` (a running job
+    that is stopped) comes first.
     """
     name = project.relativeName() if project is not None else _("The open project")
-    text = _("{project} could not be saved: {reason}. Opening now discards its changes since the last save.").format(
-        project=name, reason=reason or _("see the error log"))
+    reason = reason or _("see the error log")
+    if verb == "quit":
+        text = _("{project} could not be saved: {reason}. Quitting now discards its changes since the last save.").format(project=name, reason=reason)
+        goOn = _("Quit without saving")
+    elif verb == "close":
+        text = _("{project} could not be saved: {reason}. Closing it now discards its changes since the last save.").format(project=name, reason=reason)
+        goOn = _("Close without saving")
+    else:
+        text = _("{project} could not be saved: {reason}. Opening now discards its changes since the last save.").format(project=name, reason=reason)
+        goOn = _("Open without saving")
+    if notice:
+        text = f"{notice}\n\n{text}"
     while True:
-        answer = _question(slicer.util.mainWindow(), title, text, [_("Save a copy…"), _("Open without saving"), _("Keep working")], default=2)
+        answer = _question(slicer.util.mainWindow(), title, text, [_("Save a copy…"), goOn, _("Keep working")], default=2)
         if answer == 1:
             return "discard"
         if answer != 0:
@@ -820,8 +833,7 @@ def newProject():
         return False
     if not _confirmStopRun(_("New project")):
         return False
-    service.newProject()
-    return True
+    return service.newProject() is not False
 
 
 def closeScene():
@@ -832,8 +844,7 @@ def closeScene():
         return False
     service = _service()
     if service is not None and (service.currentProject() is not None or service._studyOpen() or service.ensureProject() is not None):
-        service.newProject()
-        return True
+        return service.newProject(title=_("Close scene")) is not False
     mainWindow = slicer.util.mainWindow()
     action = mainWindow.findChild(qt.QAction, "FileCloseSceneAction") if mainWindow is not None else None
     if action is None:

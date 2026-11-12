@@ -2050,9 +2050,16 @@ class AutosaveService:
         if self.project is not None:
             self.project.lastSaveTime = now
             self.project.lastError = ""
-        self._projectPausedReason = ""
-        self._pausedUntil = 0.0
-        self._setState("idle")
+        # A node that could not be written keeps its previous file (or none): the project is not saved, and the top bar
+        # must not say "Saved" while that node's edits are only in memory
+        unwritten = [entry.get("name") or nodeId for nodeId, entry in (getattr(plan, "entries", None) or {}).items()
+                     if entry.get("kind") == "error"]
+        if unwritten:
+            self._projectFailed(_("{names} could not be written").format(names=", ".join(sorted(unwritten)[:3])))
+        else:
+            self._projectPausedReason = ""
+            self._pausedUntil = 0.0
+            self._setState("idle")
         conflicts = self.projectWriter.takeConflicts() if self.projectWriter is not None else []
         if conflicts:
             self._announce("conflict", conflicts=conflicts)
@@ -2815,10 +2822,26 @@ class AutosaveService:
             except Exception:
                 logging.error("Slicer Studio: following the moved templates failed:\n" + traceback.format_exc())
 
-    def newProject(self):
-        """New project (Ctrl+N): save and close the open project; the next data creates the next project."""
+    def newProject(self, title=None):
+        """New project (Ctrl+N): save and close the open project; the next data creates the next project. Return False if
+        the open project could not be saved and the user keeps working in it (the scene is not closed), else True.
+        """
         # Data opened less than one poll ago becomes its project first (as for Ctrl+S), or it would be discarded or asked about
         saved = self.ensureProject() is not None and self.saveNow("new project", progress=True)
+        answered = False
+        if not saved and self.project is not None and not self._studyOpen():
+            # The project could not be saved (a full disk, a folder that cannot be written). The official "Save before
+            # closing scene?" question would offer its Save Data dialog, which writes over the project's own files in
+            # place (no temporary file): on a full disk that truncates the lesion saved before. The user is asked as
+            # when another project is opened: "Save a copy…" elsewhere, close without saving, or keep working.
+            from StudioLib import projects_ui
+
+            answer = projects_ui.askReplaceUnsavedProject(title or _("New project"), self.project, self._projectPausedReason, verb="close")
+            if answer not in ("save", "discard"):
+                return False
+            # A copy holds the edits, or the user chose to drop them: the close does not try (and fail) to save again
+            self._discardOnClose = True
+            answered = True
         # A study that is open is closed (its subject's edits are written first; a study saves its own files, and the
         # project that was open before it was saved and released when it opened): what its scene still holds is saved
         # work, so the scene is closed unasked as for a saved project
@@ -2834,9 +2857,9 @@ class AutosaveService:
         # a storable node modified since read. With the project saved, such a node is one that is not saved with the scene
         # on purpose (the temporary or partial map of a Map run in progress): it is not saved work either
         modified = bool(scene.GetModifiedSinceRead()) or bool(scene.GetStorableNodesModifiedSinceRead())
-        if action is not None and not (saved and modified):
+        if action is not None and not answered and not (saved and modified):
             action.trigger()
-            return
+            return True
         scene.Clear(0)
         if action is not None:
             # The project is up to date, and what changed since its scene file was written is not saved as an edit (the
@@ -2846,6 +2869,7 @@ class AutosaveService:
 
             scene.SetURL("")
             slicer.app.coreIOManager().setDefaultSceneFileType(translate("qSlicerMainWindow", "MRML Scene") + " (.mrml)")
+        return True
 
     def finishInterruptedMove(self, run=None, notify=None):
         """Finish a move of the Slicer Studio folder that was interrupted (the app was closed or killed during ``moveRoot``).

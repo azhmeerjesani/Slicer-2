@@ -2154,6 +2154,8 @@ class ProjectPlan(GenerationPlan):
         self.orphans = []
         #: [(name of the file another program changed, name of the file Studio wrote)]
         self.conflicts = []
+        #: conflict -> ID of the node whose file it is (a conflict of a node that could not be written is not reported)
+        self.conflictOwners = {}
         self.projectJson = None
         #: the new content of .studio/sources.json, None when it did not change
         self.sourcesJson = None
@@ -2554,7 +2556,9 @@ class ProjectWriter(SlotWriter):
                     return current
                 # Changed by another program since it was read or written: keep it
                 destination = self._newPath(plan, os.path.dirname(current), f"{base}{CONFLICT_SUFFIX}{extension}")
-                plan.conflicts.append((os.path.basename(current), os.path.basename(destination)))
+                conflict = (os.path.basename(current), os.path.basename(destination))
+                plan.conflicts.append(conflict)
+                plan.conflictOwners[conflict] = node.GetID()
                 return destination
         folder = os.path.join(projectDir, projects.kindFolder(node))
         base = projects.sanitizeName(node.GetName() or projects.kindFolder(node), fallback="data")
@@ -2763,6 +2767,10 @@ class ProjectWriter(SlotWriter):
                 continue
             plan.orphans.append((path, record["stat"]))
             del self.records[path]
+        # Studio's version of a file that another program changed is only reported when it was written: a node that could
+        # not be written (a full disk) left no "(Slicer Studio)" file, and the notice would name a file that does not exist
+        plan.conflicts = [conflict for conflict in plan.conflicts
+                          if (plan.entries.get(plan.conflictOwners.get(conflict)) or {}).get("kind") != "error"]
         self.conflicts.extend(plan.conflicts)
         # The outside files of the nodes that are still in the scene, by the file of the project that holds each node now
         sources = {}
