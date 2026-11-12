@@ -349,6 +349,37 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
         finally:
             dialog.hide()
 
+    def test_import_lead_dbs_maps_needs_no_registered_connectome(self):
+        # Importing maps that Lead-DBS computed elsewhere uses no local connectome: with none registered the action is
+        # enabled in the manager and in the Manage menu, while the actions that read a bundle stay disabled
+        widget = self.widget
+        for path in self.paths:
+            self.logic.unregisterConnectome(path)
+        widget.refreshConnectomes()
+        _pump(100)
+        manager = widget.openManager()
+        manager.refresh()
+        _pump(100)
+        self.assertEqual(len(manager.rows), 0)
+        buttons = {str(button.objectName): button for button in manager.pluginButtons}
+        if "LNMManagerAction_leaddbsImport" not in buttons:
+            self.skipTest("the Lead-DBS actions are not installed")
+        self.assertTrue(buttons["LNMManagerAction_leaddbsImport"].enabled)
+        self.assertFalse(buttons["LNMManagerAction_leaddbsParity"].enabled)
+        widget._fillManageMenu()
+        actions = {str(action.text): action for action in widget.manageMenu.actions()}
+        self.assertTrue(actions["Import Lead-DBS maps…"].enabled)
+        self.assertFalse(actions["Verify against Lead-DBS…"].enabled)
+        # The action opens the import dialog without a connectome
+        buttons["LNMManagerAction_leaddbsImport"].click()
+        _pump(100)
+        from LesionNetworkMappingUI import manager_parity
+
+        dialog = manager_parity._dialogs.get("import")
+        self.assertIsNotNone(dialog)
+        self.assertTrue(dialog.visible)
+        dialog.hide()
+
     def _defaultButtons(self, dialog):
         """The text of every push button of the dialog (not of the dialogs it opened) that Return would click."""
         return [str(button.text) for button in dialog.findChildren("QPushButton") if button.isDefault() and button.window().objectName == dialog.objectName]

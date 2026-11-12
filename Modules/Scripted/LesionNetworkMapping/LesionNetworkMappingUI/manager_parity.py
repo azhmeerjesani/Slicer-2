@@ -590,6 +590,8 @@ def openParity(ctx, bundlePath):
 
 
 ACTIONS = [
-    {"id": "leaddbsImport", "label": _("Import Lead-DBS maps…"), "order": 60, "factory": openImport},
+    # "always": importing maps that Lead-DBS computed elsewhere needs no registered connectome (openImport ignores
+    # bundlePath; the records are pooled under "unknown:<label>"). Verify against Lead-DBS… needs a bundle.
+    {"id": "leaddbsImport", "label": _("Import Lead-DBS maps…"), "order": 60, "factory": openImport, "always": True},
     {"id": "leaddbsParity", "label": _("Verify against Lead-DBS…"), "order": 61, "factory": openParity},
 ]
