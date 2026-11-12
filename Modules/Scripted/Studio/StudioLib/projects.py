@@ -1626,12 +1626,45 @@ def temporaryLeftovers(projectPath):
     return [path for path in candidates if os.path.basename(path) not in sceneText]
 
 
+def makeOwnerWritable(path):
+    """Give the owner write access to a folder tree that this user owns (folders also read and search), so that it can
+    be written into and deleted: a copy of a read-only project (a colleague's shared project) keeps the read-only modes
+    of its files and folders. Symbolic links and entries of other users are left as they are. Worker-safe.
+    """
+    import stat
+
+    def allow(entry, bits):
+        try:
+            if not os.path.islink(entry):
+                mode = os.stat(entry).st_mode
+                if mode & bits != bits:
+                    os.chmod(entry, stat.S_IMODE(mode) | bits)
+        except OSError:
+            pass
+
+    folderBits = stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
+    if not os.path.isdir(path) or os.path.islink(path):
+        allow(path, stat.S_IWUSR)
+        return
+    allow(path, folderBits)
+    for root, folders, files in os.walk(path):
+        for name in folders:
+            allow(os.path.join(root, name), folderBits)  # before os.walk lists it
+        for name in files:
+            allow(os.path.join(root, name), stat.S_IWUSR)
+
+
 def removePaths(paths):
-    """Delete files and folders (no error if one is gone). Worker-safe."""
+    """Delete files and folders (no error if one is gone), also read-only ones of this user. Worker-safe."""
     for path in paths:
         try:
             if os.path.isdir(path) and not os.path.islink(path):
-                shutil.rmtree(path)
+                try:
+                    shutil.rmtree(path)
+                except PermissionError:
+                    # A read-only folder (a partial copy of a read-only project): its entries cannot be unlinked
+                    makeOwnerWritable(path)
+                    shutil.rmtree(path)
             else:
                 os.remove(path)
         except OSError:
@@ -2033,7 +2066,8 @@ def removeCopyLeftovers(rootPath=None):
         try:
             if os.path.lexists(path):
                 removePaths([path])
-                leftovers.append(name)
+                if not os.path.lexists(path):
+                    leftovers.append(name)
         finally:
             _unlockCopy(descriptor, lockPath)
     return leftovers
@@ -2093,6 +2127,9 @@ def duplicateFolder(path, onDone=None, onError=None):
             if os.path.lexists(temporary):
                 removePaths([temporary])
             shutil.copytree(path, temporary, ignore=shutil.ignore_patterns(LOCK_FILE, "*.studio-tmp*", ".studio-tmp-*", REMOVED_DIR))
+            # The copy is this user's own project: a read-only original (a colleague's shared project) must not make it
+            # read-only too (copytree copies the modes), or it could be neither completed below nor saved later
+            makeOwnerWritable(temporary)
             # Only a complete copy gets the name of the copy: its scene and project.json are there (they would be missing
             # if its folder was deleted while it was copied)
             for required in [os.path.join(PRIVATE_DIR, PROJECT_FILE)] + ([os.path.basename(scene)] if scene else []):

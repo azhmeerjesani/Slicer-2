@@ -4849,6 +4849,80 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertIn("could not be duplicated", toasts[0])
         self.assertEqual(sorted(os.listdir(parent)), ["Scan"])
 
+    def test_57e_duplicate_of_a_read_only_project_is_a_writable_copy(self):
+        """Library card > Duplicate of a read-only project (a colleague's shared project; Projects/ is writable) failed
+        with "Permission denied" for a user other than root, and left a read-only "<name> copy.studio-copy" that neither
+        the failed Duplicate nor the startup cleanup could delete (BB-1): copytree copies the read-only modes, so the copy
+        could not be completed (scene name, project.json), and a read-only folder's entries cannot be deleted. Every later
+        Duplicate of the project then failed with "File exists". The copy is now writable by its owner, and read-only
+        leftovers are deleted. The tests run as root, which ignores the modes: deleting is checked as a user would see it.
+        """
+        import shutil as shutilModule
+        import stat
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        project = projects.createProject("Shared")
+        os.makedirs(os.path.join(project.path, "Images"))
+        with open(os.path.join(project.path, "Images", "scan.nrrd"), "wb") as f:
+            f.write(b"\1" * 4096)
+        with open(os.path.join(project.path, "Shared.mrml"), "w", encoding="utf-8") as f:
+            f.write("<MRML></MRML>\n")
+        path = project.path
+        parent = os.path.dirname(path)
+
+        def treeModes(top):
+            modes = {"": stat.S_IMODE(os.stat(top).st_mode)}
+            for root, folders, files in os.walk(top):
+                for name in folders + files:
+                    entry = os.path.join(root, name)
+                    modes[os.path.relpath(entry, top)] = stat.S_IMODE(os.lstat(entry).st_mode)
+            return modes
+
+        def setReadOnly(top):
+            for relative, mode in sorted(treeModes(top).items(), key=lambda item: -len(item[0])):
+                os.chmod(os.path.join(top, relative), mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+
+        realRmtree = shutilModule.rmtree
+
+        def rmtreeAsUser(top, *args, **kwargs):
+            # Like a user other than root: the entries of a folder without write access cannot be deleted
+            readOnly = [relative for relative, mode in treeModes(top).items()
+                        if os.path.isdir(os.path.join(top, relative)) and not mode & stat.S_IWUSR]
+            if readOnly:
+                if kwargs.get("ignore_errors"):
+                    return None
+                raise PermissionError(13, "Permission denied", os.path.join(top, readOnly[0]))
+            return realRmtree(top, *args, **kwargs)
+
+        toasts = []
+        try:
+            setReadOnly(path)
+            with mock.patch.object(projects_ui, "message", side_effect=lambda text, **kwargs: toasts.append(str(text))):
+                copyPath = projects_ui.duplicate(path)
+                self.assertTrue(self.io.backgroundWriter().drain(30.0))
+            self.assertEqual(toasts, ["Duplicated as Shared copy"])
+            self.assertEqual(os.path.basename(copyPath), "Shared copy")
+            notWritable = [relative for relative, mode in treeModes(copyPath).items() if not mode & stat.S_IWUSR]
+            self.assertEqual(notWritable, [], "the copy of a read-only project is writable by its owner")
+            self.assertTrue(os.path.isfile(os.path.join(copyPath, "Shared copy.mrml")))
+            self.assertEqual(projects.readJson(projects.projectFile(copyPath))["name"], "Shared copy")
+            self.assertTrue(all(not mode & stat.S_IWUSR for mode in treeModes(path).values()), "the original is unchanged")
+            # A read-only partial copy (left by an earlier version) is deleted at startup, and only reported when it is gone
+            leftover = os.path.join(parent, "Shared copy 2.studio-copy")
+            os.makedirs(os.path.join(leftover, "Images"))
+            with open(os.path.join(leftover, "Images", "scan.nrrd"), "wb") as f:
+                f.write(b"\1" * 4096)
+            setReadOnly(leftover)
+            with mock.patch.object(shutilModule, "rmtree", side_effect=rmtreeAsUser):
+                self.assertEqual(projects.removeCopyLeftovers(), ["Shared copy 2.studio-copy"])
+            self.assertFalse(os.path.lexists(leftover))
+        finally:
+            projects.makeOwnerWritable(path)
+        self.assertEqual(sorted(os.listdir(parent)), ["Shared", "Shared copy"])
+
     def test_58_open_project_on_a_folder_outside_the_studio_folder_leaves_it_unchanged(self):
         """Open project… on a project folder outside the Slicer Studio folder (a colleague's project copied to the Desktop
         under another name) opens a copy in Projects/ and leaves the original byte-for-byte unchanged (A-09, BB-1). The
