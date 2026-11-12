@@ -262,6 +262,30 @@ class BalanceTest(unittest.TestCase):
         self.assertEqual(simple["pairs"][0][:2], ["sub-a", "sub-c"])
         self.assertEqual(simple["sids"], ["sub-a", "sub-c"])
 
+    def test_matching_with_fewer_controls_improves_balance(self):
+        # More cases than controls: the kept cases are those nearest to the controls, not a random share
+        rng = np.random.default_rng(1)
+        cases = {f"sub-c{k:03d}": {"volume_ml": float(v)} for k, v in enumerate(rng.lognormal(3.0, 1.0, 12))}
+        controls = {f"sub-k{k:03d}": {"volume_ml": float(v)} for k, v in enumerate(rng.lognormal(2.5, 1.0, 8))}
+        for seed in range(20):
+            matched = lesionset.matched_subsample(cases, controls, ["volume_ml"], seed=seed)
+            self.assertEqual(matched["matched_from"], "controls")
+            self.assertEqual(len(matched["pairs"]), 8)
+            self.assertEqual(len(matched["unmatched_cases"]), 4)
+            self.assertEqual(sorted(pair[1] for pair in matched["pairs"]), sorted(controls))
+            self.assertLess(abs(matched["smd_after"]["volume_ml"]), abs(matched["smd_before"]["volume_ml"]), f"seed {seed}")
+        # The obvious case: two controls, the two nearest of four cases are kept
+        simple = lesionset.matched_subsample({"sub-a": {"x": 1.0}, "sub-b": {"x": 2.0}, "sub-c": {"x": 50.0}, "sub-d": {"x": 60.0}}, {"sub-y": {"x": 1.5}, "sub-z": {"x": 2.5}}, ["x"], seed=0)
+        self.assertEqual(simple["sids"], ["sub-a", "sub-b", "sub-y", "sub-z"])
+        self.assertEqual(simple["unmatched_cases"], ["sub-c", "sub-d"])
+        # ratio 2 with five controls: two cases, each with two controls
+        two = lesionset.matched_subsample(cases, dict(list(controls.items())[:5]), ["volume_ml"], seed=3, ratio=2)
+        self.assertEqual(len(two["pairs"]), 4)
+        self.assertEqual(len({pair[0] for pair in two["pairs"]}), 2)
+        self.assertEqual(len({pair[1] for pair in two["pairs"]}), 4)
+        # Enough controls: matched from the cases' side as before
+        self.assertEqual(lesionset.matched_subsample(dict(list(cases.items())[:4]), controls, ["volume_ml"], seed=0)["matched_from"], "cases")
+
     def test_subset_never_edits_include(self):
         tmp = tempfile.mkdtemp(prefix="lnm-lesionset-subset-")
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)

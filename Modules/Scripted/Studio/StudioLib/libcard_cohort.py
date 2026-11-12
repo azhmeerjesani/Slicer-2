@@ -390,6 +390,7 @@ def createMatchedSubset(session, summary, name=None, covariates=("volume_ml",), 
     """Store a covariate-matched control subset as ``study.json`` ``subsets[name]`` (the include flags are never edited).
 
     Each case gets the nearest control on the standardized covariates, without replacement (``lesionset.matched_subsample``).
+    With fewer controls than cases, the cases nearest to the controls are kept (the rest are listed as without a control).
     Returns ``{"name", "sids", "matched"}``, or None when there are no cases or no controls.
     """
     lesionset = _lnm("lesionset")

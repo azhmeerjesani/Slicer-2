@@ -980,6 +980,13 @@ def matched_subsample(cases, controls, covariates, seed=0, ratio=1, caliper=None
     available control (Euclidean distance; ties go to the earlier control of a seeded random
     order), ``ratio`` rounds. Rows with a missing covariate are left out and listed.
 
+    When there are fewer controls than ``ratio`` x cases, every control is used anyway, and
+    matching from the cases' side would only drop the cases that come last in the random order
+    (which can make the balance worse). The cases are then chosen from the controls' side first:
+    controls are taken in a seeded random order and each picks the nearest available case, until
+    ``len(controls) // ratio`` cases are chosen; those cases are then matched as above
+    (``"matched_from": "controls"``; otherwise ``"cases"``).
+
     :param cases, controls: {sid: {covariate: value}} or [(sid, {covariate: value})].
     :param covariates: covariate names.
     :param caliper: optional largest distance (in SD units) of a match.
@@ -1012,9 +1019,32 @@ def matched_subsample(cases, controls, covariates, seed=0, ratio=1, caliper=None
     case_order = rng.permutation(len(case_rows))
     control_rank = np.empty(len(control_rows), dtype=np.int64)
     control_rank[rng.permutation(len(control_rows))] = np.arange(len(control_rows))
+    ratio = max(1, int(ratio))
+    matched_from = "cases"
+    if 0 < len(control_rows) < ratio * len(case_rows):
+        # Too few controls: choose the cases nearest to the controls (seeded control order), not a random share
+        matched_from = "controls"
+        n_keep = len(control_rows) // ratio
+        case_free = np.ones(len(case_rows), dtype=bool)
+        case_rank = np.empty(len(case_rows), dtype=np.int64)
+        case_rank[case_order] = np.arange(len(case_rows))
+        chosen = []
+        for j in rng.permutation(len(control_rows)):
+            if len(chosen) >= n_keep or not case_free.any():
+                break
+            distance = np.sqrt(((case_z - control_z[j]) ** 2).sum(axis=1))
+            distance[~case_free] = np.inf
+            best = np.flatnonzero(distance == distance.min())
+            c = int(best[np.argmin(case_rank[best])])
+            if caliper is not None and distance[c] > caliper:
+                continue
+            case_free[c] = False
+            chosen.append(c)
+        chosen = set(chosen)
+        case_order = np.array([c for c in case_order if c in chosen], dtype=np.int64)
     available = np.ones(len(control_rows), dtype=bool)
     pairs, matched_cases = [], set()
-    for _ in range(int(ratio)):
+    for _ in range(ratio):
         for c in case_order:
             if not available.any():
                 break
@@ -1042,6 +1072,7 @@ def matched_subsample(cases, controls, covariates, seed=0, ratio=1, caliper=None
         "seed": int(seed),
         "ratio": int(ratio),
         "caliper": caliper,
+        "matched_from": matched_from,
         "covariates": covariates,
         "smd_before": smds([sid for sid, _ in case_rows], [sid for sid, _ in control_rows]),
         "smd_after": smds(sorted(matched_cases), matched_controls),
