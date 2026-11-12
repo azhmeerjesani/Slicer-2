@@ -1110,6 +1110,28 @@ def _overrides(config):
     return sorted(overrides)
 
 
+def _primary_rule_refused(config, n, v):
+    """The reason the primary threshold rule is refused for a connectome of ``n`` subjects (the |T| >= 7 convention on a
+    small connectome), or None. A run with such a rule would make no sensitivity maps for the stages after the overlap,
+    so the plan blocks it before any output changes (``--allow-rule-anyway`` or a rule with "override" applies it anyway).
+    """
+    from . import thresholds
+
+    try:
+        rule = thresholds.normalize_rule(config.rule)
+    except (ValueError, TypeError):
+        return None  # preflight reports an invalid rule
+    if config.allow_rule_anyway or rule.get("override") or rule["kind"] == "top_pct" or (rule["kind"] == "fwe_bonferroni" and n >= 2):
+        return None  # FWE is valid at any N >= 2 (skip resolving it, which imports scipy); a rank rule needs the map values
+    try:
+        resolved = thresholds.resolve(rule, n, v)
+    except (ValueError, TypeError):
+        return None
+    if resolved.allowed:
+        return None
+    return f"The threshold rule {thresholds.rule_label(rule)} cannot be used: {resolved.banner or f'it is not allowed for N = {n}.'}"
+
+
 def _builtin_row_checks(study, config):
     """{sid: reason} of the rows the plan's own checks exclude (the fallback of preflight.run_preflight)."""
     from . import nifti
@@ -1362,6 +1384,9 @@ def plan(config, hash_lesions=True, providers=None):
     specificity, specificity_reason = _specificity_decision(config, groups)
     if specificity == "glm" and not providers["specificity"].available:
         specificity, specificity_reason = "unavailable", NOT_AVAILABLE
+    refused = _primary_rule_refused(config, len(subject_ids), bundle.n_voxels)
+    if refused:
+        blocks.append({"id": "rule_refused", "message": refused, "fix": "Use FWE or effect size, or run with --allow-rule-anyway"})
     if specificity == "block":
         blocks.append({"id": "contrast_group_size", "message": f"Specificity is on (--specificity glm) but the GLM {specificity_reason}.", "fix": "Add subjects, or run with --specificity off"})
     score_columns = []
@@ -2565,7 +2590,9 @@ class Runner:
 
         # the nulls job takes the cases from --participants: the group of every mapped subject is a parameter
         population = self._population(self.mapped_rows)[0]
-        params = {"mode": mode, "kind": "rl_independent", "rule": self.config.rule, "overlap": self.config.sensitivity, "seed": self.config.null_seed, "k": 1000, "groups": self._groups_fp(),
+        # --allow-rule-anyway applies a rule that is refused for this N here too, as in the overlap stage
+        rule = {**self.config.rule, "override": True} if self.config.allow_rule_anyway else self.config.rule
+        params = {"mode": mode, "kind": "rl_independent", "rule": rule, "overlap": self.config.sensitivity, "seed": self.config.null_seed, "k": 1000, "groups": self._groups_fp(),
                   "population": population}
         fp, reused = self._cached("nulls", params, ("maps",))
         if reused:
@@ -2574,7 +2601,7 @@ class Runner:
             self.info("The null models compare the cases with their null cohorts; the overlap maps use all mapped lesions (--sensitivity-population all).", code="nulls_population")
         start = _now_iso()
         folder = self.stage_dir("nulls")
-        args = ["--maps", self.maps_tsv, "--bundle", self.bundle.path, "--kind", "rl_independent", "--mode", mode, "--k", "1000", "--rule", thresholds.rule_to_json(self.config.rule),
+        args = ["--maps", self.maps_tsv, "--bundle", self.bundle.path, "--kind", "rl_independent", "--mode", mode, "--k", "1000", "--rule", thresholds.rule_to_json(rule),
                 "--overlap", f"{self.config.sensitivity:g}", "--seed", str(self.config.null_seed), "--participants", self.participants_tsv, "--out", folder]
         if self.config.memory_budget_gb:
             args += ["--budget-gb", f"{float(self.config.memory_budget_gb):g}"]
@@ -2591,7 +2618,7 @@ class Runner:
                 desc = re.search(r"_desc-([A-Za-z0-9]+)_map", name).group(1)
                 kind = NULL_MAP_KINDS.get(desc, "p" if desc.endswith(("P", "Q", "PFwe")) else "stat")
                 desc, target, side = self._copy_group(os.path.join(folder, name), kind, "nulls", statistic=record.get("statistic"), caption=record.get("caption"), mode=record.get("mode_label"),
-                                                      k=record.get("k"), k_pool=record.get("k_pool"), rule=self.config.rule, sign=record.get("sign"))
+                                                      k=record.get("k"), k_pool=record.get("k_pool"), rule=rule, sign=record.get("sign"))
                 groups.append(desc)
                 outputs += [target, side]
         result = {key: record.get(key) for key in ("kind", "mode", "mode_label", "approximate", "k", "k_pool", "min_attainable_p", "min_attainable_q", "fdr_floor_voxels", "caption", "classic_rule", "group_qa")}
@@ -2968,6 +2995,9 @@ class Runner:
         from .export import group_map_path
 
         k = overlap.get("k", round(self.config.sensitivity))
+        primary = next((entry for entry in overlap.get("thresholds") or [] if entry.get("primary")), {})
+        if primary.get("refused"):
+            return self._skip("conjunction", f"the threshold rule was refused, so there is no sensitivity map: {primary['refused']}")
         t = self._load_vector(group_map_path(self.out, self.bundle.name, spec["descs"]["stat"]))
         p = self._load_vector(group_map_path(self.out, self.bundle.name, spec["descs"]["p_fwe"]))
         significant = glm.passes_alpha(p, self.config.alpha).astype(np.uint8)

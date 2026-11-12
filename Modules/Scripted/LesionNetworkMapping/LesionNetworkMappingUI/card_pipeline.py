@@ -1493,6 +1493,11 @@ class PipelineCard:
             return False, _("The study {name} is read-only: ask for write access, or open a copy of the study folder.").format(name=study.name)
         if self.eligibleCount() < 2:
             return False, _("The analysis needs at least 2 lesions that can be mapped.")
+        if self.plan is not None and self.planKey == self._currentPlanKey():
+            # A threshold rule that is refused for the N of the connectome (as the Map card refuses it): the pipeline would block
+            refused = [block for block in self.plan.get("blocks") or [] if block.get("id") == "rule_refused"]
+            if refused:
+                return False, refused[0].get("message") or _("The threshold rule cannot be used for this connectome: use FWE or effect size.")
         if not self._termsAccepted(bundle):
             return False, _("Accept the data use terms in the Connectome card.")
         if self.externalRunning():

@@ -666,6 +666,35 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
         _pump(self.cp.APPLY_MS + 50)
         self.assertTrue(card.canRun(), card.runButton.toolTip)
 
+    def test_b2_refused_rule_is_refused_before_the_run(self):
+        """A primary rule refused for the connectome's N (|T| >= 7 convention, N = 20) disables Run everything with the rule's
+        banner (as the Map card refuses it); a click starts no run, so the last run's report stays.
+        """
+        from unittest import mock
+
+        card = self.card
+        self._settle()
+        self.assertTrue(card.canRun(), card.runButton.toolTip)
+        report = os.path.join(self._out(), "report.html")
+        self.assertTrue(os.path.isfile(report))
+        t7 = {"kind": "t_convention", "value": 7.0, "reference_n": 1000}
+        with mock.patch.object(card, "rule", return_value=t7):
+            self._settle()
+            enabled, reason = card.runState()
+            self.assertFalse(enabled)
+            self.assertIn("N≈1000", reason)
+            self.assertIn("N=20", reason)
+            self.assertFalse(card.runButton.enabled)
+            self.assertIsNone(card.run())
+            _pump(200)
+            self.assertEqual(self.cp.pipelineJobs(), [], "Run everything started with a refused rule")
+            with mock.patch.object(card, "rule", return_value=dict(t7, override=True)):  # "Use anyway" in the Map card
+                self._settle()
+                self.assertTrue(card.canRun(), card.runButton.toolTip)
+        self._settle()
+        self.assertTrue(card.canRun(), card.runButton.toolTip)
+        self.assertTrue(os.path.isfile(report))
+
     def test_c_other_study_never_run(self):
         """After a run on study A, a never-run study B shows 'Never run' (no glyph, warning or result of A's run)."""
         import lnm_pipeline_fixture as fixture

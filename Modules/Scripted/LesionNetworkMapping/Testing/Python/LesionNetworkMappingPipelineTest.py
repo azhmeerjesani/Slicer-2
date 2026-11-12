@@ -577,6 +577,40 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
             expected = thresholds.resolve(rule, n, self.bundle.n_voxels, values=masked(export.map_paths(out, sid, self.bundle.name)["AvgFz"], self.bundle))
             self.assertAlmostEqual(sidecar["threshold"]["resolved"]["value"], expected.value, places=5)
 
+    def test_refused_primary_rule_blocks_and_keeps_the_previous_run(self):
+        """A primary rule refused for the connectome's N (|T| >= 7 convention, N = 20) blocks the run in Prepare (exit 5, the
+        rule's banner), so no stage after the overlap meets a missing sensitivity map and the previous run's report and
+        group maps stay; --allow-rule-anyway applies it to every stage (the nulls too) and the run completes.
+        """
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-rule"), n_cases=6, n_controls=4, extra_rows=False)
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, "--null-relocations", "0"))
+        self.assertEqual(code, 0, stderr[-2000:] + str(done_event(events)))
+        out = fx["out"]
+        kept = sorted(name for name in os.listdir(out) if name == "report.html" or re.search(r"desc-(sens|overlap|conj)", name))
+        self.assertIn("report.html", kept)
+        self.assertTrue(any("sens90Pos" in name for name in kept) and any("conjPos" in name for name in kept), kept)
+        digests = {name: sha256(os.path.join(out, name)) for name in kept}
+        rule = json.dumps({"kind": "t_convention", "value": 7.0, "reference_n": 1000})
+        config = pipeline.config_from_args(pipeline._parser().parse_args(run_args(fx, "--rule", rule)))
+        blocks = [block for block in pipeline.plan(config, hash_lesions=False).blocks if block["id"] == "rule_refused"]
+        self.assertEqual(len(blocks), 1, "the plan refuses the rule")
+        self.assertIn("N≈1000", blocks[0]["message"])
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, "--null-relocations", "0", "--rule", rule))
+        error = done_event(events)
+        self.assertEqual(code, pipeline.EXIT_BLOCKED, stderr[-2000:] + str(error))
+        self.assertEqual(error["code"], "blocked")
+        self.assertIn("N=20", error["message"])
+        self.assertNotIn("FileNotFoundError", error["message"])
+        self.assertNotIn(self.tmp, error["message"])
+        self.assertEqual({name: sha256(os.path.join(out, name)) for name in kept if os.path.isfile(os.path.join(out, name))}, digests, "the previous run's outputs stay")
+        # Applied anyway: every stage runs (the nulls and the conjunction with the overridden rule)
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, "--null-relocations", "0", "--rule", rule, "--allow-rule-anyway"))
+        self.assertEqual(code, 0, stderr[-2000:] + str(done_event(events)))
+        statuses = stage_status(events)
+        for name in ("nulls", "overlap", "conjunction", "report"):
+            self.assertIn(statuses.get(name), ("done", "reused"), (name, statuses))
+        self.assertTrue(os.path.isfile(os.path.join(out, "report.html")))
+
     def test_locked_plan_contrast_is_run(self):
         """Run everything runs the locked plan's one-sided contrast (Ferguson 2019: A>B, case > control), not a two-sided GLM (BB-1)."""
         if self.baseline:
