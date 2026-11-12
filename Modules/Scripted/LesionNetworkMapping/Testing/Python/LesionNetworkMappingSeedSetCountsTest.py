@@ -54,6 +54,20 @@ class SeedSetCountsTest(unittest.TestCase):
         self.assertEqual(text(1, "X", 120, 0), "Lesion maps: 1 lesion · conn-X · N=120 (0 from the cache)")
         self.assertEqual(text(5, "X", 120, 2), "Lesion maps: 5 lesions · conn-X · N=120 (2 from the cache)")
 
+    def test_cohort_card_calls_seed_sets_seeds(self):
+        text = self.cohort.cohortMapsStatusText
+        self.assertEqual(text(1, "X", 120, 0, seeds=True), "Seed maps: 1 seed · conn-X · N=120 (0 from the cache)")
+        self.assertEqual(text(4, "X", 120, 0, seeds=True), "Seed maps: 4 seeds · conn-X · N=120 (0 from the cache)")
+        widget = slicer.modules.LesionNetworkMappingWidget
+        original = widget.seedMode
+        try:
+            for mode, expected in (("coordinates", True), ("stimulation", True), ("cohort", False), ("lesion", False)):
+                widget.seedMode = lambda mode=mode: mode
+                self.assertEqual(self.cohort._seedSetMode(), expected, mode)
+        finally:
+            del widget.seedMode
+            self.assertEqual(widget.seedMode, original)
+
     def test_summary_labels_of_the_widget(self):
         widget = slicer.modules.LesionNetworkMappingWidget
         items = list(getattr(widget, "stimulationItems", []) or [])

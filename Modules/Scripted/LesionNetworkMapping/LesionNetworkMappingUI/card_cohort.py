@@ -56,8 +56,21 @@ def _mapWidget():
     return getattr(slicer.modules, "LesionNetworkMappingWidget", None)
 
 
-def cohortMapsStatusText(mapped, label, subjects, hits):
-    """"Lesion maps: 3 lesions · conn-X · N=120 (0 from the cache)", with "1 lesion" for one."""
+def _seedSetMode():
+    """True when the current seed mode is Coords or Stim: the maps are of study seeds, not of traced lesions."""
+    widget = _mapWidget()
+    try:
+        return widget is not None and widget.seedMode() in ("coordinates", "stimulation")
+    except Exception:
+        return False
+
+
+def cohortMapsStatusText(mapped, label, subjects, hits, seeds=False):
+    """"Lesion maps: 3 lesions · conn-X · N=120 (0 from the cache)", with "1 lesion" for one; "Seed maps: 3 seeds ..." for seed sets."""
+    if seeds:
+        if mapped == 1:
+            return _("Seed maps: 1 seed · conn-{label} · N={subjects} ({hits} from the cache)").format(label=label, subjects=subjects, hits=hits)
+        return _("Seed maps: {n} seeds · conn-{label} · N={subjects} ({hits} from the cache)").format(n=mapped, label=label, subjects=subjects, hits=hits)
     if mapped == 1:
         return _("Lesion maps: 1 lesion · conn-{label} · N={subjects} ({hits} from the cache)").format(label=label, subjects=subjects, hits=hits)
     return _("Lesion maps: {n} lesions · conn-{label} · N={subjects} ({hits} from the cache)").format(n=mapped, label=label, subjects=subjects, hits=hits)
@@ -242,11 +255,11 @@ class OverlapTab:
             try:
                 resolved = thresholds.resolve(rule, int(n), bundle.n_voxels, gsr=(meta.get("bundle") or {}).get("gsr"))
                 line = thresholds.describe(resolved)
-                self.ruleLabel.setText(_("Each lesion's {statistic} map: {rule} {line}").format(statistic=statistic, rule=thresholds.rule_label(rule), line=line))
+                self.ruleLabel.setText((_("Each seed's {statistic} map: {rule} {line}") if _seedSetMode() else _("Each lesion's {statistic} map: {rule} {line}")).format(statistic=statistic, rule=thresholds.rule_label(rule), line=line))
             except Exception as exc:
                 self.ruleLabel.setText(str(exc))
         else:
-            self.ruleLabel.setText(_("Each lesion's map is thresholded with the Result card's rule: {rule}.").format(rule=thresholds.rule_label(rule)))
+            self.ruleLabel.setText((_("Each seed's map is thresholded with the Result card's rule: {rule}.") if _seedSetMode() else _("Each lesion's map is thresholded with the Result card's rule: {rule}.")).format(rule=thresholds.rule_label(rule)))
         groups = self._groups()
         twoGroups = groups.get("case", 0) >= 2 and groups.get("control", 0) >= 2
         self.legacyCheckBox.setEnabled(twoGroups)
@@ -537,11 +550,14 @@ class CohortCard:
         if mapsTsv:
             lesions = record.get("lesions") or {}
             self.statusLabel.setText(cohortMapsStatusText(
-                lesions.get("mapped", "?"), (record.get("bundle") or {}).get("label", "?"), record.get("n", "?"), lesions.get("cache_hits", 0)))
+                lesions.get("mapped", "?"), (record.get("bundle") or {}).get("label", "?"), record.get("n", "?"), lesions.get("cache_hits", 0), seeds=_seedSetMode()))
+        elif info and info.get("n") and _seedSetMode():
+            self.statusLabel.setText((_("The seed of the study is not mapped with this connectome yet.") if info["n"] == 1 else _("The {n} seeds of the study are not mapped with this connectome yet.")).format(n=info["n"]))
         elif info and info.get("n"):
             self.statusLabel.setText((_("The lesion of the study is not mapped with this connectome yet.") if info["n"] == 1 else _("The {n} lesions of the study are not mapped with this connectome yet.")).format(n=info["n"]))
         else:
             self.statusLabel.setText(_("Open a study with traced lesions in the Seed card."))
+        self.browseButton.setText(_("Browse seed maps") if _seedSetMode() else _("Browse lesion maps"))
         running = widget is not None and widget.cohortJob is not None and not widget.cohortJob.isFinished()
         self.mapButton.setVisible(not mapsTsv)
         self.mapButton.setEnabled(widget is not None and widget.cohortComputeState()[0] and not running)
