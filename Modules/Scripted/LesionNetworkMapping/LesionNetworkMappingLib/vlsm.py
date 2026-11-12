@@ -534,7 +534,6 @@ def vlsm(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESION
         record = {"format": FORMAT_NAME, "version": FORMAT_VERSION, "run_id": run_id, "status": "running", "argv": list(argv or []), "start": now_iso(), "end": None}
         two_sided = design.tails == 2 and design.stat != "F"
         tfce_grid = tfcelib.TfceGrid(matrix.tested_mask()) if spec.inference.get("tfce") else None
-        _remove_previous_outputs(out_dir)
         emit("stage", name="permutations", index=2, total=3, total_permutations=prepared.count - 1, run_id=run_id, n=design.n, p=design.p, n_voxels=matrix.n_voxels, min_count=matrix.min_count, stat=design.stat,
              tails=design.tails, design_type=design.design_type, permute=design.permute, permute_reason=design.permute_reason, n_perm=prepared.count, exhaustive=prepared.exhaustive,
              tfce=tfce_grid is not None, tfce_eta_s=tfcelib.tfce_eta(tfce_grid, prepared.count, two_sided) if tfce_grid is not None else None)
@@ -554,6 +553,8 @@ def vlsm(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESION
 
         emit("stage", name="write", index=3, total=3)
         tic = time.monotonic()
+        # Only now that this run has its result: a run stopped or failed before this keeps the earlier finished result of out_dir
+        _remove_previous_outputs(out_dir)
         paths = write_maps(glm_result, prepared, out_dir, space_label, fwe=bool(spec.inference.get("fwe", True)), fdr=bool(spec.inference.get("fdr", True)))
         design_json, design_tsv = designlib.save_design(design, out_dir)
         lesions_tsv = write_lesions_tsv(os.path.join(out_dir, LESIONS_TSV), lesion_rows(prepared))
@@ -645,7 +646,9 @@ def vlsm(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESION
     except jobs.Cancelled as exc:
         if record is not None:
             record.update({"status": "cancelled", "end": now_iso(), "stop_reason": exc.reason, "permutations_done": exc.done})
-            write_record(os.path.join(out_dir, VLSM_JSON), record)
+            previous = read_record(out_dir)
+            if not previous or previous.get("status") != "done":  # never replace a finished result's record with a stub
+                write_record(os.path.join(out_dir, VLSM_JSON), record)
         if run_id:
             runs.update(run_root, run_id, status="cancelled", ended=now_iso())
         raise

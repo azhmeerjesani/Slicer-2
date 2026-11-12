@@ -602,7 +602,11 @@ class VlsmTab(CohortTab):
         os.makedirs(outDir, exist_ok=True)
         self._jobFolder = outDir
         spec = self.spec()
-        designPath = spec.save(os.path.join(outDir, "design.json"))
+        # The job's input spec goes next to its log (<runRoot>/logs), not into outDir: outDir/design.json belongs to the
+        # finished result there until this run finishes (vlsm.vlsm then writes the resolved design.json)
+        logDir = os.path.join(os.path.dirname(outDir), "logs")
+        os.makedirs(logDir, exist_ok=True)
+        designPath = spec.save(os.path.join(logDir, f"vlsm-{os.path.basename(outDir)}-design.json"))
         minLesions, minPercent = self.minimumOverlap()
         study = self.ctx.study.path
         args = ["run", "--study", study, "--design", designPath, "--out", outDir, "--run-root", study, "--min-lesions", str(minLesions), "--min-percent", f"{minPercent:g}"]

@@ -236,6 +236,48 @@ class VlsmRunTest(unittest.TestCase):
         with self.assertRaisesRegex(jobs.JobError, "No voxel is lesioned in at least 40"):
             vlsm.vlsm(self.study.path, score_spec(), grid=self.grid, space=SPACE, min_lesions=40, n_perm=200, out_dir=os.path.join(self.tmp, "none"), register=False)
 
+    def test_stopped_or_failed_rerun_keeps_finished_result(self):
+        """A rerun into the folder of a finished result that is stopped (or fails) during the permutations leaves that
+        result whole: its maps, design.json, lesions.tsv and its vlsm.json (status done), and find_results still lists it.
+        """
+        study, _scores = make_study(os.path.join(self.tmp, "rerun-study"), seed=2)  # its own study: find_results of the class study stays one result
+        out = vlsm.default_out_dir(study.path, vlsm.prepare(study.path, score_spec(), grid=self.grid, space=SPACE).design)  # the folder the VLSM tab reruns into
+        first = vlsm.vlsm(study.path, score_spec(), grid=self.grid, space=SPACE, n_perm=200, out_dir=out, register=False)
+
+        def snapshot():
+            found = {}
+            for name in sorted(os.listdir(out)):
+                with open(os.path.join(out, name), "rb") as handle:
+                    found[name] = handle.read()
+            return found
+
+        before = snapshot()
+        self.assertTrue(all(name in before for name in first["outputs"].values()))
+        token = jobs.CancelToken(signals=False)
+
+        def emit(event, **fields):
+            if event == "progress" and fields.get("stage") == "permutations":
+                token.cancel("stopped")
+
+        with self.assertRaises(jobs.Cancelled):
+            vlsm.vlsm(study.path, score_spec(), grid=self.grid, space=SPACE, min_lesions=3, n_perm=5000, seed=4, out_dir=out, register=False, cancel=token, emit=emit,
+                      batch=50)
+        self.assertEqual(snapshot(), before)
+
+        def failing_emit(event, **fields):
+            if event == "progress" and fields.get("stage") == "permutations":
+                raise RuntimeError("disk full")
+
+        with self.assertRaises(RuntimeError):
+            vlsm.vlsm(study.path, score_spec(), grid=self.grid, space=SPACE, min_lesions=3, n_perm=5000, seed=4, out_dir=out, register=False, emit=failing_emit, batch=50)
+        self.assertEqual(snapshot(), before)
+        self.assertEqual(vlsm.read_record(out)["status"], "done")
+        self.assertIn(out, vlsm.find_results(study.path))
+        # A rerun that finishes replaces the earlier result (no map of it is left next to the new one)
+        again = vlsm.vlsm(study.path, score_spec(), grid=self.grid, space=SPACE, min_lesions=3, n_perm=200, seed=4, out_dir=out, register=False)
+        self.assertEqual(again["min_overlap"]["min_lesions"], 3)
+        self.assertEqual(sorted(os.listdir(out)), sorted([*again["outputs"].values(), vlsm.VLSM_JSON, again["design_json"], again["design_matrix"], again["lesions_tsv"]]))
+
     def test_command_line(self):
         out = os.path.join(self.tmp, "cli")
         design = score_spec().save(os.path.join(self.tmp, "design.json"))
