@@ -1363,7 +1363,7 @@ def _format_number(value):
     return text.replace("-", "\u2212")  # the minus sign of the addendum's verdicts
 
 
-def verdict_text(delta, ci, baseline_label, metric="auc", p_perm=None, subject="the circuit"):
+def verdict_text(delta, ci, baseline_label, metric="auc", p_perm=None, subject="the circuit", p_floor=None):
     """Neutral verdict of a comparison with a baseline, e.g. "the circuit does not exceed the degree baseline
     (ΔAUC 0.01, 95% CI -0.04 to 0.06)", printed with minus signs. "exceeds" only when the difference and the whole CI
     are above 0, "falls below" only when both are below 0.
@@ -1378,7 +1378,12 @@ def verdict_text(delta, ci, baseline_label, metric="auc", p_perm=None, subject="
         verb = "falls below"
     else:
         verb = "does not exceed"
-    p_text = "" if p_perm is None or not np.isfinite(p_perm) else f"; p_perm = {p_perm:.3g}"
+    if p_perm is None or not np.isfinite(p_perm):
+        p_text = ""
+    elif p_floor and p_perm <= p_floor * (1 + 1e-9):  # at the smallest attainable p: "<=", as the card prints it
+        p_text = f"; p_perm \u2264 {p_perm:.3g}"
+    else:
+        p_text = f"; p_perm = {p_perm:.3g}"
     return f"{subject} {verb} the {baseline_label} ({name} {_format_number(delta)}, {round(CI_LEVEL * 100)}% CI {_format_number(ci[0])} to {_format_number(ci[1])}{p_text})"
 
 
@@ -1526,7 +1531,8 @@ def _assemble(prep, folds, observed, boot, null, n_boot, n_perm, timings):
         details = interval_details([delta(run, "circuit", "volume") for run in boot], value)
         ci = details["ci"]
         p = permutation_p([delta(run, "circuit", "volume") for run in null], value) if n_perm else None
-        incremental.update({"delta": value, "ci": ci, "p_perm": p, "ci_percentile": details["ci_percentile"], "boot_median": details["boot_median"], "z0": details["z0"], "ci_method": details["method"], "text": verdict_text(value, ci, BASELINE_LABELS["volume"], primary, p, "volume + circuit")})
+        floor = 1.0 / (n_perm + 1) if n_perm else None
+        incremental.update({"delta": value, "ci": ci, "p_perm": p, "ci_percentile": details["ci_percentile"], "boot_median": details["boot_median"], "z0": details["z0"], "ci_method": details["method"], "text": verdict_text(value, ci, BASELINE_LABELS["volume"], primary, p, "volume + circuit", p_floor=floor)})
     comparisons = []
     for item in prep.predictors:
         if item.role != "baseline":

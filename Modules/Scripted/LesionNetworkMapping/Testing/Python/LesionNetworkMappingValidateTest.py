@@ -233,6 +233,13 @@ class MetricsTest(unittest.TestCase):
         self.assertIn("does not exceed", validate.verdict_text(0.01, [-0.09, -0.04], "lesion-volume baseline"))
         self.assertIn("exceeds", validate.verdict_text(0.06, [0.04, 0.09], "lesion-volume baseline"))
 
+    def test_verdict_reports_a_p_at_the_permutation_floor_as_at_most(self):
+        floor = 1.0 / 1001
+        text = validate.verdict_text(0.75, [-0.16, 1.45], "lesion-volume baseline", "r2", floor, "volume + circuit", p_floor=floor)
+        self.assertIn("p_perm \u2264 0.000999", text)
+        self.assertNotIn("p_perm = ", text)
+        self.assertIn("p_perm = 0.11", validate.verdict_text(0.75, [-0.16, 1.45], "x", "r2", 0.11, p_floor=floor))
+
     def test_verdict_prints_values_that_round_to_zero_without_a_sign(self):
         text = validate.verdict_text(-0.001, (-0.004, 0.003), "degree baseline", metric="r2")
         self.assertIn("(ΔR² 0.00, 95% CI 0.00 to 0.00)", text)
