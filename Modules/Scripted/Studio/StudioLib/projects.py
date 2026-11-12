@@ -2451,7 +2451,9 @@ def _mergeMove(source, destination, sameVolume, progress=None, renamed=None, uni
     delete the original. When ``source`` and ``destination`` are both folders (a kind folder such as Projects/, as
     ``moveContent`` passes them) their items are merged: an item whose name exists there moves under another name (" 2"),
     whatever its name, so a project, study or folder is never merged into another one of the same name (a project named
-    "LNM" or "Studies" is a project like "MRHead"). Worker-safe.
+    "LNM" or "Studies" is a project like "MRHead"). Those items move after the others, so their other name is never the
+    name of another moved item that was free there ("LNM 2" of ``source`` keeps its name, its "LNM" becomes "LNM 3").
+    Worker-safe.
 
     A copy is made under a hidden name (``MOVE_MARKER``) and gets its name only once it is complete and checked, so a
     move that is interrupted (a crash during the copy) leaves no partial copy under the real name: a retry would keep
@@ -2467,6 +2469,10 @@ def _mergeMove(source, destination, sameVolume, progress=None, renamed=None, uni
         return
     if os.path.isdir(source) and os.path.isdir(destination):
         _removeMoveLeftovers(destination)
+        # The items whose name is free there move first, under their names; only then do the others get another name, so
+        # that name is never the free name of another item of ``source`` (A's "LNM" taking "LNM 2" from A's own "LNM 2",
+        # which would become "LNM 2 2"), whatever order the folder lists them in (sorted on APFS)
+        taken = []
         for name in os.listdir(source):
             if isMoveLeftover(name):
                 removePaths([os.path.join(source, name)])  # what an interrupted move left here (copied elsewhere, or partial)
@@ -2475,12 +2481,16 @@ def _mergeMove(source, destination, sameVolume, progress=None, renamed=None, uni
                 continue
             target = os.path.join(destination, name)
             if os.path.exists(target):
-                if uniqueNameFor is not None:
-                    target = os.path.join(destination, uniqueNameFor(destination, name))
-                else:
-                    target = os.path.join(destination, uniqueName(destination, name, isFile=os.path.isfile(os.path.join(source, name))))
-                if renamed is not None:
-                    renamed[os.path.join(source, name)] = target
+                taken.append(name)
+                continue
+            _mergeMove(os.path.join(source, name), target, sameVolume, progress, renamed)
+        for name in sorted(taken):
+            if uniqueNameFor is not None:
+                target = os.path.join(destination, uniqueNameFor(destination, name))
+            else:
+                target = os.path.join(destination, uniqueName(destination, name, isFile=os.path.isfile(os.path.join(source, name))))
+            if renamed is not None:
+                renamed[os.path.join(source, name)] = target
             _mergeMove(os.path.join(source, name), target, sameVolume, progress, renamed)
         try:
             os.rmdir(source)
@@ -2581,6 +2591,7 @@ def _mergeLnm(source, destination, sameVolume, progress=None, renamed=None):
         _mergeMove(source, destination, sameVolume, progress, renamed)
         return
     _removeMoveLeftovers(destination)
+    taken = []  # moved after the others, as in ``_mergeMove``: another name never takes the free name of another item
     for name in os.listdir(source):
         item = os.path.join(source, name)
         if isMoveLeftover(name):
@@ -2599,9 +2610,14 @@ def _mergeLnm(source, destination, sameVolume, progress=None, renamed=None):
             if _mergeReferenceMaps(item, target, sameVolume, progress, renamed):
                 continue
         if os.path.exists(target):
-            target = os.path.join(destination, uniqueName(destination, name, isFile=os.path.isfile(item)))
-            if renamed is not None:
-                renamed[item] = target
+            taken.append(name)
+            continue
+        _mergeMove(item, target, sameVolume, progress, renamed)
+    for name in sorted(taken):
+        item = os.path.join(source, name)
+        target = os.path.join(destination, uniqueName(destination, name, isFile=os.path.isfile(item)))
+        if renamed is not None:
+            renamed[item] = target
         _mergeMove(item, target, sameVolume, progress, renamed)
     try:
         os.rmdir(source)

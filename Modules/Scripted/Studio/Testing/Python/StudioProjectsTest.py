@@ -4282,6 +4282,10 @@ class StudioProjectsTest(unittest.TestCase):
             service.moveRoot(newRoot, moveContent=True)
             ours = os.path.join(os.path.normpath(newRoot), projects.PROJECTS_DIR, name + " 2")
             self.assertTrue(os.path.isdir(ours))
+            # What the message after the move names (``projects_ui.changeRootDialog``)
+            self.assertEqual({os.path.normpath(key): os.path.normpath(value) for key, value in service.lastMoveRenamed.items()},
+                             {os.path.join(projects.PROJECTS_DIR, name): os.path.join(projects.PROJECTS_DIR, name + " 2"),
+                              os.path.join(projects.STUDIES_DIR, "Study A"): os.path.join(projects.STUDIES_DIR, "Study A 2")})
             self.assertIs(service.project, project)
             self.assertEqual(os.path.normpath(service.project.path), ours, "the open project follows its own moved folder")
             self.assertEqual(service.project.name, name + " 2")
@@ -10130,6 +10134,61 @@ sys.exit(web.command_local(args))
         self.assertTrue(os.path.isfile(ours))
         self.assertIn(("conflict", {"conflicts": [("Lesion.seg.nrrd", "Lesion (Slicer Studio).seg.nrrd")]}), announced)
         self.assertEqual(service.status().state, "idle")
+
+    def test_114_root_move_never_gives_a_free_name_to_another_moved_item(self):
+        """Change folder > Move into a folder that already has a project "LNM" and a study "Stroke" (BB-1): only the items
+        whose names are taken there get another name. The moved "LNM 2" and "Stroke 2" keep theirs (the new folder has no
+        such item), and the moved "LNM" and "Stroke" become "LNM 3" and "Stroke 3", whatever order the folder lists them in
+        (sorted on APFS). It used to move "LNM" first as "LNM 2", and the user's own "LNM 2" became "LNM 2 2": the card
+        named "LNM 2" then opened another patient's scan. The message after the move names the renamed items.
+        """
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        realListdir = os.listdir
+        for order in ("sorted", "reversed"):
+            with self.subTest(order=order):
+                oldRoot = os.path.join(self.tempDir, order, "A")
+                newRoot = os.path.join(self.tempDir, order, "B")
+                for root, names, label in ((oldRoot, ("LNM 2", "LNM"), "A"), (newRoot, ("LNM",), "B")):
+                    for name in names:
+                        project = projects.createProject(name, rootPath=root)
+                        self.assertEqual(project.name, name)
+                        with open(os.path.join(project.path, "owner.txt"), "w") as f:
+                            f.write(f"{label}:{name}")
+                    studyNames = ("Stroke 2", "Stroke") if label == "A" else ("Stroke",)
+                    for name in studyNames:
+                        os.makedirs(os.path.join(root, projects.STUDIES_DIR, name))
+                        with open(os.path.join(root, projects.STUDIES_DIR, name, "owner.txt"), "w") as f:
+                            f.write(f"{label}:{name}")
+
+                def listed(path, reverse=(order == "reversed")):
+                    return sorted(realListdir(path), reverse=reverse)
+
+                renamed = {}
+                with mock.patch.object(projects.os, "listdir", listed):
+                    projects.moveContent(oldRoot, newRoot, renamed=renamed)
+
+                def owners(kind, newRoot=newRoot):
+                    folder = os.path.join(newRoot, kind)
+                    found = {}
+                    for name in realListdir(folder):
+                        path = os.path.join(folder, name, "owner.txt")
+                        if os.path.isfile(path):
+                            with open(path) as f:
+                                found[name] = f.read()
+                    return found
+
+                self.assertEqual(owners(projects.PROJECTS_DIR), {"LNM": "B:LNM", "LNM 2": "A:LNM 2", "LNM 3": "A:LNM"})
+                self.assertEqual(owners(projects.STUDIES_DIR), {"Stroke": "B:Stroke", "Stroke 2": "A:Stroke 2", "Stroke 3": "A:Stroke"})
+                self.assertEqual({os.path.normpath(key): os.path.normpath(value) for key, value in renamed.items()},
+                                 {os.path.join(projects.PROJECTS_DIR, "LNM"): os.path.join(projects.PROJECTS_DIR, "LNM 3"),
+                                  os.path.join(projects.STUDIES_DIR, "Stroke"): os.path.join(projects.STUDIES_DIR, "Stroke 3")})
+                text = projects_ui._movedUnderOtherNamesText(renamed)
+                self.assertIn("“LNM” is now “LNM 3”", text)
+                self.assertIn("“Stroke” is now “Stroke 3”", text)
 
 def _sphere(center=(0, 0, 0)):
     import vtk

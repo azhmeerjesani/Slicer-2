@@ -1128,12 +1128,13 @@ def changeRootDialog(parent=None):
     elif not _usableOrNotice(parent, newRoot):
         return None
     service = _service()
+    renamed = {}
     try:
         if service is not None:
             moved = service.moveRoot(newRoot, moveContent=move,
                                      run=lambda function: _runWithProgress(function, _("Moving your projects and studies…"), parent))
+            renamed = dict(getattr(service, "lastMoveRenamed", None) or {})
         else:
-            renamed = {}
             renamedIds = {}
             moved = _runWithProgress(lambda: projects.moveContent(oldRoot, newRoot, renamed=renamed, renamedIds=renamedIds),
                                      _("Moving your projects and studies…"), parent) if move else []
@@ -1166,9 +1167,24 @@ def changeRootDialog(parent=None):
         if moved:
             text = _("Moved to {folder}.").format(folder=projects.shortPath(newRoot)) + " " + text
         message(text, "warning", toolTip=partial[1], ms=8000)
+    elif moved and renamed:
+        # Items whose names the new folder already had: the user's names (and notes) now mean the items there
+        text = _("Moved to {folder}.").format(folder=projects.shortPath(newRoot)) + " " + _movedUnderOtherNamesText(renamed)
+        message(text, "warning", toolTip=newRoot, ms=10000, sticky=True)
     elif moved:
         message(_("Moved to {folder}").format(folder=projects.shortPath(newRoot)), toolTip=newRoot)
     return newRoot
+
+
+def _movedUnderOtherNamesText(renamed, limit=4):
+    """The message naming the items that a move put under another name because the new folder had theirs (``renamed``:
+    ``{relative old path: relative new path}``, as ``projects.moveContent`` fills it): "“LNM” is now “LNM 3”".
+    """
+    pairs = sorted((os.path.basename(os.path.normpath(old)), os.path.basename(os.path.normpath(new))) for old, new in renamed.items())
+    items = [_("“{old}” is now “{new}”").format(old=old, new=new) for old, new in pairs[:limit]]
+    if len(pairs) > limit:
+        items.append(_("{count} more").format(count=len(pairs) - limit))
+    return _("The new folder already had these names, so they were renamed: {items}.").format(items=", ".join(items))
 
 
 #

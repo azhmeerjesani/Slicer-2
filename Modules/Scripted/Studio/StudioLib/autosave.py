@@ -2670,6 +2670,9 @@ class AutosaveService:
         oldRoot = projects.root()
         newRoot = os.path.normpath(os.path.abspath(newRoot))
         moved = []
+        # What this move put under another name because the name was taken there (``{relative old: relative new}``): the
+        # message after the move names them (``projects_ui.changeRoot``)
+        self.lastMoveRenamed = {}
         if moveContent and os.path.normcase(os.path.realpath(oldRoot)) != os.path.normcase(os.path.realpath(newRoot)):
             projects.checkMoveTarget(oldRoot, newRoot)  # before the open project is saved and unlocked
             # A project or study that another Slicer Studio has open would move away from under it (it would go on saving there)
@@ -2774,6 +2777,7 @@ class AutosaveService:
                 movedKinds += [name for name in (projects.PROJECTS_DIR, projects.STUDIES_DIR, projects.LNM_DIR, projects.TEMPLATES_DIR)
                                if name not in movedKinds]
             _updateMovedPathSettings(oldRoot, newRoot, movedKinds, renamed)
+            self.lastMoveRenamed = dict(renamed)
             if renamedIds:
                 from StudioLib import templates
 
