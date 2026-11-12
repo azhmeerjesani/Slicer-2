@@ -2567,6 +2567,23 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         node = self._parameterNode
         return node.seedMode if node is not None and node.seedMode else "lesion"
 
+    def _forgetSeedSetRefusal(self, mode):
+        """The seeds of seed mode ``mode`` changed: a refusal of the earlier seeds (``computeSeedSet()``) no longer applies."""
+        refusal = getattr(self, "_seedSetRefusal", None)
+        if refusal is None or refusal[0] != mode:
+            return
+        self._seedSetRefusal = None
+        self.widgets.setBannerText(self.computeBanner, "")
+        self.computeBanner.hide()
+
+    def _showSeedSetRefusal(self):
+        """The Compute banner shared by every seed mode shows a seed set refusal only in the mode that was refused."""
+        refusal = getattr(self, "_seedSetRefusal", None)
+        if refusal is None:
+            return
+        self.widgets.setBannerText(self.computeBanner, refusal[1])
+        self.computeBanner.setVisible(refusal[0] == self.seedMode())
+
     def _visibleCardIds(self, mode=None):
         """The ids of the cards shown for seed mode ``mode`` (the current one by default)."""
         from LesionNetworkMappingUI import visibleSpecs
@@ -3087,6 +3104,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         wasHidden = self._mapHiddenBySeedMode()
         self._parameterNode.seedMode = self.seedModes[index]
         self._showSeedMode()
+        self._showSeedSetRefusal()
         self.updateCardVisibility()
         self._followSeedModeInViews(wasHidden)
         self.updateComputeState()
@@ -3380,6 +3398,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.coordinateFoci = list(foci)
         self.coordinateSource = source
         self.coordinateMapsPath = None
+        self._forgetSeedSetRefusal("coordinates")
         self._publishCohortMaps()
         self._showCoordinates()
         self.updateCardVisibility()
@@ -3573,6 +3592,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self._parameterNode.stimulationWeighting = ""
             self.stimulationItems, self.stimulationSource, self.stimulationColumns = [], None, []
             self.stimulationMapsPath = None
+            self._forgetSeedSetRefusal("stimulation")
             self._publishCohortMaps()
         self._fillStimulationWeightings(kind)
         self._showStimulation()
@@ -3611,6 +3631,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                     item["space"] = None  # an unreadable file is reported when the seeds are made
         self.stimulationItems, self.stimulationSource, self.stimulationColumns = items, path, columns
         self.stimulationMapsPath = None
+        self._forgetSeedSetRefusal("stimulation")
         wasUpdating, self._updatingGui = self._updatingGui, True
         try:
             self.stimOutcomeCombo.clear()
@@ -7253,6 +7274,21 @@ class LesionNetworkMappingTest(ScriptedLoadableModuleTest):
         bannerText = widget.computeBanner.findChild(qt.QLabel, "LNMBannerText").text
         self.assertIn("Out 2021 lies outside the connectome's brain mask", bannerText)
         self.assertTrue(widget.computeBanner.isVisibleTo(widget.parent))
+        self.delayDisplay("The refusal belongs to the refused seed list: not shown in the other seed modes, gone when the list changes")
+        for mode in ("lesion", "stimulation"):
+            widget.seedModeGroup.button(widget.seedModes.index(mode)).click()
+            self.assertFalse(widget.computeBanner.isVisibleTo(widget.parent), mode)
+        widget.seedModeGroup.button(widget.seedModes.index("coordinates")).click()
+        self.assertTrue(widget.computeBanner.isVisibleTo(widget.parent))
+        self.assertIn("Out 2021 lies outside", widget.computeBanner.findChild(qt.QLabel, "LNMBannerText").text)
+        refusedFoci = list(widget.coordinateFoci)
+        widget.coordClearButton.click()
+        self.assertFalse(widget.computeBanner.isVisibleTo(widget.parent))
+        self.assertIsNone(widget._seedSetRefusal)
+        widget.setCoordinates(refusedFoci[:1])
+        self.assertFalse(widget.computeBanner.isVisibleTo(widget.parent))
+        self.assertNotIn("The seeds cannot be made", str(computeCard.property("studioStepSummary") or ""))
+        widget.setCoordinates(refusedFoci)
         widget.seedModeGroup.button(widget.seedModes.index("stimulation")).click()
         self.assertTrue(widget.stimulationSeedPanel.isVisibleTo(widget.parent))
         self.assertFalse(widget.coordinateSeedPanel.isVisibleTo(widget.parent))
