@@ -678,6 +678,20 @@ class RecentList(qt.QObject):
         ui.bindStyleSheet(self.widget, self._styleSheet)
         _installEventFilter(self.widget, self)
         _watchRecentMenu(self._onRecentFilesChanged)
+        self._listensToProjects = False
+        if outsideRootOnly:
+            # The Slicer Studio folder changes while the page is shown (Change... > Keep them where they are): no show event follows
+            try:
+                from . import projects
+
+                projects.addListener(self._onProjectsChanged)
+                self._listensToProjects = True
+            except ImportError:
+                pass
+
+    def _onProjectsChanged(self):
+        if _isAlive(self.widget) and self.widget.isVisible():
+            self.refresh(force=False)
 
     def _createRow(self):
         index = len(self.rows)
@@ -827,6 +841,11 @@ class RecentList(qt.QObject):
 
     def dispose(self):
         _unwatchRecentMenu(self._onRecentFilesChanged)
+        if self._listensToProjects:
+            self._listensToProjects = False
+            from . import projects
+
+            projects.removeListener(self._onProjectsChanged)
         if _isAlive(self.widget):
             ui.bindStyleSheet(self.widget, None)
 

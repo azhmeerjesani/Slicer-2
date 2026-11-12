@@ -928,6 +928,18 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         roots[0] = os.path.realpath(newRoot)
         recent.refresh(force=False)
         self.assertEqual([e.path for e in recent.entries if e.kind == "file"], [project])
+        # The page is shown while the folder changes (no show event follows): the change notice refreshes the list
+        from StudioLib import projects
+
+        roots[0] = os.path.realpath(oldRoot)
+        recent.refresh(force=True)
+        self.assertEqual([e.path for e in recent.entries if e.kind == "file"], [])
+        recent.widget.show()
+        self.cleanup.append(recent.widget.hide)
+        self._pump(3)
+        roots[0] = os.path.realpath(newRoot)
+        projects.notifyChanged()
+        self.assertEqual([e.path for e in recent.entries if e.kind == "file"], [project])
 
     #
     # Folder card
