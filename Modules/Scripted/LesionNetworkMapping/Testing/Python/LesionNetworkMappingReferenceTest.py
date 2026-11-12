@@ -445,6 +445,15 @@ class ExternalMapTest(_Base):
 
 
 class CommandLineTest(_Base):
+    def test_estimate_of_a_very_fast_build_stays_positive(self):
+        # A frozen clock measures 0 s everywhere: the estimate is still a measured time, not 0.0 (which reads as "not measured")
+        from unittest import mock
+
+        with mock.patch.object(reference.time, "perf_counter", return_value=1.0):
+            info = reference.estimate(self.bundle, subjects=3, n_seeds=500)
+        self.assertIsNotNone(info["seconds"])
+        self.assertGreater(info["seconds"], 0)
+
     def run_cli(self, *args):
         result = subprocess.run([sys.executable, "-m", "LesionNetworkMappingLib.reference", *args], check=False, capture_output=True, text=True, env=_env(), cwd=self.tmp, timeout=600)
         events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]

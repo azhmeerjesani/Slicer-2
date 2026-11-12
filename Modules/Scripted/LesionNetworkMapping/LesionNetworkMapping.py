@@ -2310,10 +2310,10 @@ class ConnectomeManagerDialog(qt.QDialog):
                 self.statusLabel.setText(_("The reference build cannot be estimated: {reason}").format(reason=job.failureReason))
                 return
             seconds = info.get("seconds")
-            minutes = max(1, round(seconds / 60)) if seconds else None
+            minutes = max(1, round(seconds / 60)) if seconds is not None else None
             disk = int(info.get("output_bytes") or 0) + int(info.get("n_voxels", 0)) * 4 * int(info.get("columns") or 10) * 2
             text = _("Build reference maps ({time})? They read the connectome {passes} times ({read}) and use about {disk} of disk in the bundle folder.").format(
-                time=_("~{m} min").format(m=minutes) if minutes else _("time unknown"), passes=info.get("passes"), read=_formatBytes(int(info.get("read_bytes") or 0)),
+                time=_("~{m} min").format(m=minutes) if minutes is not None else _("time unknown"), passes=info.get("passes"), read=_formatBytes(int(info.get("read_bytes") or 0)),
                 disk=_formatBytes(disk))
             self.lastReferenceEstimate = dict(info, disk_bytes=disk, text=text)
             if confirm and not slicer.util.confirmYesNoDisplay(text, windowTitle=_("Build reference maps")):

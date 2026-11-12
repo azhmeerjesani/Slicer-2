@@ -595,7 +595,8 @@ def estimate(bundle, subjects=None, subject_list=None, n_seeds=DEFAULT_SEEDS, k=
     per_maps = max(read_rate * mean_bytes, maps_s) if prefetch else read_rate * mean_bytes + maps_s
     per_pcs = max(read_rate * mean_bytes, pcs_s)
     info["seconds_per_subject"] = {"maps": round(per_maps, 4), "pcs": round(per_pcs, 4), "read": round(read_rate * mean_bytes, 4)}
-    info["seconds"] = round(len(ids) * (per_maps + _n_steps(power_iters) * per_pcs), 1)
+    # A measured time never rounds to 0.0 (None means "not measured"): small bundles take milliseconds
+    info["seconds"] = max(0.001, round(len(ids) * (per_maps + _n_steps(power_iters) * per_pcs), 3))
     return info
 
 
