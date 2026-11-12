@@ -138,6 +138,10 @@ def connectomes():
 #
 
 
+def controlsets_unreadable():
+    return _lnm("controlsets").SKIPPED_UNREADABLE
+
+
 def setSummary(entry):
     """"490 lesions · MNI152NLin6Asym · 12 2D"."""
     parts = [(_("{n} lesion") if entry["n"] == 1 else _("{n} lesions")).format(n=entry["n"]), str(entry.get("space") or "")]
@@ -390,7 +394,12 @@ class AddControlSetDialog:
         session = _session()
         if self.linkCheck.isChecked() and session is not None:
             linkSet(session, entry)
-        _toast(_("Control set {name} registered: {summary}").format(name=entry["name"], summary=setSummary(entry)), 4000)
+        message = _("Control set {name} registered: {summary}").format(name=entry["name"], summary=setSummary(entry))
+        damaged = [item for item in entry.get("skipped") or [] if str(item.get("reason", "")).startswith(controlsets_unreadable())]
+        if damaged:
+            names = ", ".join(os.path.basename(str(item["rel"])) for item in damaged[:3]) + (" …" if len(damaged) > 3 else "")
+            message += "\n" + (_("{n} file could not be read and was left out: {names}") if len(damaged) == 1 else _("{n} files could not be read and were left out: {names}")).format(n=len(damaged), names=names)
+        _toast(message, 8000 if damaged else 4000)
         refreshCards(entry["name"])
         self.dialog.accept()
 

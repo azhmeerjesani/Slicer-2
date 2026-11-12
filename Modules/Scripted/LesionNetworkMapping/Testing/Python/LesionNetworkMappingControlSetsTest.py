@@ -158,6 +158,36 @@ class RegistryTest(ControlSetsTestBase):
             self.register()
         self.assertEqual(self.register(replace=True)["content_sha256"], entry["content_sha256"])
 
+    def test_damaged_lesion_is_reported_without_a_local_path(self):
+        folder = os.path.join(self.tmp, "damaged")
+        for name, center, radius in CONTROLS[:2]:
+            _sphere(os.path.join(folder, name), NLIN6, center, radius)
+        bad = _sphere(os.path.join(folder, "ctl_009_lesion.nii.gz"), NLIN6, (0.0, 0.0, 0.0), 5.0)
+        with open(bad, "rb") as f:
+            raw = f.read()
+        with open(bad, "wb") as f:
+            f.write(raw[: len(raw) // 2])
+        entry = controlsets.register_folder(folder, "Damaged", root=self.root)
+        self.assertEqual(entry["n"], 2)
+        reasons = {item["rel"]: item["reason"] for item in entry["skipped"]}
+        reason = reasons["ctl_009_lesion.nii.gz"]
+        self.assertTrue(reason.startswith(controlsets.SKIPPED_UNREADABLE + ": "), reasons)
+        self.assertNotIn(os.sep, reason)  # no directory, no path: the sidecar is shared
+        self.assertFalse(reason.rstrip().endswith(":"), reason)
+        with open(os.path.join(self.root, "Damaged", controlsets.CONTROLSET_JSON), encoding="utf-8") as f:
+            sidecar = f.read()
+        self.assertNotIn(self.tmp, sidecar)
+        self.assertNotIn(os.path.basename(folder) + os.sep, sidecar)
+        # The reason never depends on the order the path forms are stripped in (hash randomization).
+        path = os.path.join(self.tmp, "a b", "ctl_001_lesion.nii.gz")
+        for message in (f"Truncated NIfTI image data (1 of 2 bytes): {path}", f"Invalid number of dimensions (9) in {path}",
+                        f"[Errno 2] No such file or directory: {path!r}", f"Corrupt compressed data (bad crc): {path}"):
+            cleaned = controlsets._unreadable(ValueError(message), path)
+            self.assertNotIn(os.sep, cleaned, cleaned)
+            self.assertNotIn("a b", cleaned, cleaned)
+            self.assertTrue(cleaned.startswith(controlsets.SKIPPED_UNREADABLE + ": "), cleaned)
+            self.assertGreater(len(cleaned), len(controlsets.SKIPPED_UNREADABLE) + 10, cleaned)
+
     def test_names_are_validated(self):
         for name in ("", "../x", "a/b", ".hidden", "x" * 65, "with space"):
             with self.assertRaises(ValueError, msg=name):

@@ -351,7 +351,7 @@ def scan_folder(folder, lesion_rule=None, id_regex=None):
         try:
             header = read_nifti_header(path)
         except (OSError, ValueError) as exc:
-            skipped.append({"rel": rel, "reason": f"{SKIPPED_UNREADABLE}: {exc}"})
+            skipped.append({"rel": rel, "reason": _unreadable(exc, path)})
             continue
         shape = tuple(header["shape"])
         if len(shape) > 3 and any(int(n) != 1 for n in shape[3:]):
@@ -496,6 +496,22 @@ def _check_cancel(cancel, done):
         raise Cancelled(done=done)
 
 
+def _unreadable(exc, path):
+    """The skip reason of a damaged file: the error text without the file's absolute path (shared sidecar)."""
+    text = str(exc)
+    # Longest forms first, in a fixed order (a set would sometimes strip the bare file name before the full
+    # path and leave the directory behind); the bare file name is kept, it holds no local path.
+    names = []
+    for name in (os.path.abspath(str(path)), str(path)):
+        if name and name not in names:
+            names.append(name)
+    for name in names:
+        for quoted in (repr(name), f'"{name}"', name):  # OSError quotes the path: [Errno 2] ...: '/a/b'
+            for pattern in (f": {quoted}", f" in {quoted}", quoted):
+                text = text.replace(pattern, "")
+    return f"{SKIPPED_UNREADABLE}: {text.strip().rstrip(':').strip()}"
+
+
 def _read_lesion(item, space):
     """The registry record of a scanned lesion (its file is read once), or the reason it is skipped."""
     from .nifti import read_nifti
@@ -505,7 +521,7 @@ def _read_lesion(item, space):
             sha = hashlib.sha256(f.read()).hexdigest()
         image, affine, _header = read_nifti(item["path"])
     except (OSError, ValueError, EOFError) as exc:
-        return f"{SKIPPED_UNREADABLE}: {exc}"
+        return _unreadable(exc, item["path"])
     if image.ndim > 3:
         image = image.reshape(image.shape[:3])
     stats = _lesion_stats(image, affine)
