@@ -193,6 +193,9 @@ Run with the main window and testing enabled::
 - ``test_16b_read_only_study_says_so_and_logs_one_line_warnings`` (BB-1): a study folder that cannot be written is said
   when it opens, its save status is not "All changes saved", PermissionErrors of the heartbeat, the study save and the lesion
   QC jobs are one-line warnings (no traceback, no errno or lock name in the toast) and the quit prompt names the tracing.
+- ``test_97_sliders_with_a_range_over_two_billion_steps_paint`` (BB-1): a slider or scroll bar whose integer range is 2^31
+  steps or more (QSlider [INT_MIN, 0], the slice offset slider of a volume whose voxel size is 1e12 mm) paints and is
+  hit-tested without SIGFPE (QStyle::sliderPositionFromValue() divided by zero on the int overflow of "max - min").
 """
 
 import inspect
@@ -8187,3 +8190,44 @@ class StudioRegressionTest(unittest.TestCase):
             studioShell.dispose()
             for _ in range(4):
                 slicer.app.processEvents()
+
+    def test_97_sliders_with_a_range_over_two_billion_steps_paint(self):
+        intMin, intMax = -(2**31), 2**31 - 1
+        widgets = []
+        for low, high, value in ((intMin, 0, -(2**30)), (intMin, intMax, 0), (0, intMax, 2**30)):
+            for orientation in (qt.Qt.Horizontal, qt.Qt.Vertical):
+                slider = qt.QSlider(orientation)
+                slider.setRange(low, high)
+                slider.setValue(value)
+                horizontal = orientation == qt.Qt.Horizontal
+                slider.resize(200 if horizontal else 24, 24 if horizontal else 200)
+                scrollBar = qt.QScrollBar(orientation)
+                scrollBar.setRange(low, high)
+                scrollBar.setValue(value)
+                scrollBar.resize(slider.size)
+                widgets += [slider, scrollBar]
+        for widget in widgets:
+            widget.show()
+        slicer.app.processEvents()
+        for widget in widgets:
+            # Painted (QSlider::paintEvent -> subControlRect) and hit-tested (hover) without SIGFPE
+            self.assertFalse(widget.grab().isNull())
+            center = qt.QPoint(widget.width // 2, widget.height // 2)
+            qt.QApplication.sendEvent(widget, qt.QMouseEvent(qt.QEvent.MouseMove, qt.QPointF(center), qt.Qt.NoButton, qt.Qt.NoButton, qt.Qt.NoModifier))
+        for widget in widgets:
+            widget.deleteLater()
+        # A volume whose voxel size is 1e12 mm in the slice views: the slice offset sliders get [INT_MIN, 0] or [0, INT_MAX]
+        import vtk
+
+        image = vtk.vtkImageData()
+        image.SetDimensions(16, 16, 16)
+        image.AllocateScalars(vtk.VTK_SHORT, 1)
+        volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "huge voxels")
+        self.addCleanup(slicer.mrmlScene.RemoveNode, volume)
+        volume.SetAndObserveImageData(image)
+        volume.SetSpacing(1e12, 1e12, 1e12)
+        volume.CreateDefaultDisplayNodes()
+        slicer.util.setSliceViewerLayers(background=volume, fit=True)
+        for _ in range(4):
+            slicer.app.processEvents()
+        self.assertFalse(slicer.util.mainWindow().grab().isNull())

@@ -718,6 +718,35 @@ bool isInFlatViewBar(const QWidget* widget)
 }
 
 //------------------------------------------------------------------------------
+/// Copy into \a fitted a slider or scroll bar option whose integer range (maximum - minimum) does not fit in an int, with
+/// its range, positions and steps halved until it fits. Return false (and leave \a fitted alone) when the range fits.
+///
+/// QStyle::sliderPositionFromValue() computes "max - min" in int arithmetic. When it overflows (a range of 2^31 or more,
+/// for example [INT_MIN, 0], which ctkDoubleSlider sets for a slice offset slider of -6e13 .. 0 mm when a volume has a
+/// voxel size of 1e12 mm), some Qt 5.15 builds (the Linux system Qt among them) take the integer path and divide by zero:
+/// SIGFPE when the slider is painted or hit-tested. Halving the values keeps the handle position (to one part in 2^31).
+bool fitSliderRange(const QStyleOptionComplex* option, QStyleOptionSlider& fitted)
+{
+  const QStyleOptionSlider* slider = qstyleoption_cast<const QStyleOptionSlider*>(option);
+  if (!slider || qint64(slider->maximum) - qint64(slider->minimum) <= qint64(INT_MAX))
+  {
+    return false;
+  }
+  fitted = *slider;
+  // Arithmetic shift: rounds toward minus infinity, so the order of the values is kept
+  auto half = [](int value) { return int(qint64(value) >> 1); };
+  auto halfStep = [](int step) { return step > 0 ? qMax(1, step / 2) : step; };
+  fitted.minimum = half(slider->minimum);
+  fitted.maximum = half(slider->maximum);
+  fitted.sliderPosition = half(slider->sliderPosition);
+  fitted.sliderValue = half(slider->sliderValue);
+  fitted.singleStep = halfStep(slider->singleStep);
+  fitted.pageStep = halfStep(slider->pageStep);
+  fitted.tickInterval = halfStep(slider->tickInterval);
+  return true;
+}
+
+//------------------------------------------------------------------------------
 /// Draw the neutral slider of a flat view bar: a 2 px track (#3f3f46 on dark, "border" on light) filled with "text2"
 /// up to a 10 px round thumb.
 void drawViewBarSlider(const QStyleOptionSlider* slider, QPainter* painter, const QWidget* widget, const QStyle* style)
@@ -2066,6 +2095,11 @@ QStyle::SubControl qSlicerStyle::hitTestComplexControl(ComplexControl cc, const 
 //------------------------------------------------------------------------------
 QRect qSlicerStyle::subControlRect(ComplexControl control, const QStyleOptionComplex* option, SubControl subControl, const QWidget* widget) const
 {
+  QStyleOptionSlider fitted;
+  if ((control == QStyle::CC_Slider || control == QStyle::CC_ScrollBar) && fitSliderRange(option, fitted))
+  {
+    option = &fitted;
+  }
   if (control == QStyle::CC_ScrollBar && qSlicerStyle::density() == qSlicerStyle::Comfortable)
   {
     if (const QStyleOptionSlider* scrollBar = qstyleoption_cast<const QStyleOptionSlider*>(option))
@@ -2779,6 +2813,11 @@ void qSlicerStyle::drawControl(ControlElement element, const QStyleOption* optio
 //------------------------------------------------------------------------------
 void qSlicerStyle::drawComplexControl(ComplexControl control, const QStyleOptionComplex* option, QPainter* painter, const QWidget* widget) const
 {
+  QStyleOptionSlider fitted;
+  if ((control == QStyle::CC_Slider || control == QStyle::CC_ScrollBar) && fitSliderRange(option, fitted))
+  {
+    option = &fitted;
+  }
   if (control == QStyle::CC_ToolButton && option)
   {
     const QByteArray role = widgetRole(widget);
