@@ -465,14 +465,17 @@ def _design_info(design, spec=None):
         "permute": design.permute,
         "block_column": design.block_column,
         "covariates": list(spec.covariates),
+        "transforms": dict(spec.transforms),
         "input": spec.input,
         "method": method,
     }
 
 
 #: The fields of a record's "design" that identify the configured analysis. The run folder is named by the contrast
-#: label only, so a covariate, permutation or block change reuses it: these fields tell the designs apart.
-DESIGN_IDENTITY = ("test", "design_type", "n", "contrast", "exchange", "permute", "block_column", "covariates", "input", "method")
+#: label only, so a covariate, transform (log volume), statistic (Aspin-Welch v), permutation or block change reuses
+#: it: these fields tell the designs apart. A record written before "transforms" was stored has None there, so it is
+#: out of date rather than assumed untransformed.
+DESIGN_IDENTITY = ("test", "design_type", "n", "stat", "contrast", "exchange", "permute", "block_column", "covariates", "transforms", "input", "method")
 
 
 def design_identity(info):
@@ -858,7 +861,7 @@ def group_design(data, kind="glm"):
             out["method"] = data["method"]
     elif "test" in data:
         out["test"] = data["test"]
-    for key in ("design_type", "n", "covariates"):
+    for key in ("design_type", "n", "covariates", "transforms", "stat"):
         if key in data:
             out[key] = data[key]
     contrast = data.get("contrast")

@@ -251,6 +251,36 @@ class DesignMatchTest(_CalibrateTestCase):
         self.assertEqual(calibrate.checklist_evidence(study.path, design=without)[2], [newer])
         self.assertEqual(calibrate.checklist_evidence(study.path, design=with_volume)[0], "not_run")
 
+    def test_evidence_follows_transforms_and_statistic(self):
+        """A t calibration of untransformed covariates is out of date for log(volume) or the Aspin-Welch v statistic
+        (BB-1 calibration-stays-current-after-log-volume-or-welch-change), in the card's identity and in glm.json.
+        """
+        study = self.make_study(8, 8)
+
+        def build(**kwargs):
+            return designlib.build_design(study, designlib.DesignSpec(test="two_group", levels=["case", "control"], covariates=["volume_ml"], inference={"n_perm": 1000}, **kwargs))
+
+        plain, logged, welch = build(), build(transforms={"volume_ml": "log"}), build(variance_groups=True)
+        self.assertEqual((plain.stat, welch.stat), ("t", "v"))
+        run_id = self.register(study, plain, "caseVsControl")
+        record = calibrate.read_record(self.path("study", "derivatives", "lnm", "calibration", "caseVsControl", calibrate.CALIBRATION_JSON))
+        self.assertTrue(calibrate.matches_design(record, plain))
+        self.assertFalse(calibrate.matches_design(record, logged))
+        self.assertFalse(calibrate.matches_design(record, welch))
+        self.assertNotEqual(calibrate.design_identity(record["design"]), calibrate.design_identity(calibrate._design_info(logged, logged.spec)))
+        self.assertEqual(calibrate.checklist_evidence(study.path, design=plain)[2], [run_id])
+        self.assertEqual(calibrate.checklist_evidence(study.path, design=logged)[0], "not_run")
+        self.assertEqual(calibrate.checklist_evidence(study.path, design=welch)[0], "not_run")
+        # glm.json of the group analysis (checklist F8): the transforms and the statistic are compared too
+        glm_record = {"test": "two_group", "design_type": plain.design_type, "n": plain.n, "covariates": ["volume_ml"], "transforms": {}, "stat": "t",
+                      "contrast": {"spec": plain.spec.contrast}, "permutation": {"scheme": plain.permute, "exchange": plain.exchange, "block_column": plain.block_column}}
+        self.assertTrue(calibrate.matches_group(record, glm_record, "glm"))
+        self.assertFalse(calibrate.matches_group(record, dict(glm_record, transforms={"volume_ml": "log"}), "glm"))
+        self.assertFalse(calibrate.matches_group(record, dict(glm_record, stat="v"), "glm"))
+        # A record written before the transforms were stored is out of date rather than assumed untransformed
+        old = dict(record, design={key: value for key, value in record["design"].items() if key != "transforms"})
+        self.assertFalse(calibrate.matches_design(old, plain))
+
 
 class SensitivityTest(unittest.TestCase):
     def test_routes(self):

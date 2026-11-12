@@ -109,6 +109,17 @@ def _statusText(job):
     return f"{text} · {eta}" if eta else text
 
 
+def designText(covariates, transforms=None, stat=None):
+    """The covariates of a design for the card's design and out-of-date lines: a transformed covariate is named with
+    its transform ("volume_ml (log)") and the Aspin-Welch v statistic is named, so these design changes are visible.
+    """
+    transforms = transforms or {}
+    text = ", ".join(f"{name} ({transforms[name]})" if transforms.get(name) else name for name in covariates or []) or _("none")
+    if stat == "v":
+        text += " · " + _("statistic: Aspin-Welch v")
+    return text
+
+
 def powerChart(effects, width=CHART_SIZE[0], height=CHART_SIZE[1], palette=None):
     """A ``qt.QPixmap`` of the power curve: power (0-1) against β, with the 95% CI of each point and a dotted 0.8 line."""
     palette = palette or slicer.app.palette()
@@ -504,7 +515,7 @@ class CalibrateCard:
             return
         spec, design, error = self.currentSpec() if self.ctx.study is not None else (None, None, None)
         if design is not None:
-            covariates = ", ".join(design.spec.covariates) or _("none")
+            covariates = designText(design.spec.covariates, design.spec.transforms, design.stat)
             kind = design.spec.test.replace("_", " ")
             if design.design_type != design.spec.test:
                 kind += " · " + design.design_type.replace("_", " ")
@@ -695,7 +706,7 @@ class CalibrateCard:
         self.chart.setVisible(bool(effects))
         self._fillTable(effects)
         if not self.resultCurrent:
-            covariates = ", ".join(design.get("covariates") or []) or _("none")
+            covariates = designText(design.get("covariates"), design.get("transforms"), design.get("stat"))
             self.evidenceLabel.setText(_("Out of date: this calibration was run for another design (covariates: {covariates} · permute: {permute}). "
                                          "It does not count for the checklist; calibrate this analysis again.").format(covariates=covariates, permute=design.get("permute") or "—"))
         else:

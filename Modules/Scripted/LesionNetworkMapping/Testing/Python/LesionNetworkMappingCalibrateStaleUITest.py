@@ -160,6 +160,33 @@ class LesionNetworkMappingCalibrateStaleUITest(unittest.TestCase):
         self.assertCurrent(card, True)
         self.assertEqual(os.path.basename(card.result[0]), "caseVsControlNoVolume")
 
+    def test_log_volume_and_welch_are_another_design(self):
+        """log(volume) or the Aspin-Welch v statistic is another design than the plain t calibration (BB-1
+        calibration-stays-current-after-log-volume-or-welch-change); the design lines name them.
+        """
+        from LesionNetworkMappingLib import design as designlib
+        from LesionNetworkMappingUI import card_calibrate
+
+        def build(**kwargs):
+            return designlib.build_design(self.study, designlib.DesignSpec(test="two_group", levels=["case", "control"], inference={"n_perm": 1000}, **kwargs))
+
+        self.calibrated(self.withVolume, "caseVsControl", 1_000_000)
+        self.tab.design = self.withVolume
+        self.card = card = card_calibrate.CalibrateCard(_Ctx(self.study, _Cohort(self.tab)))
+        self.assertCurrent(card, True)
+        self.tab.design = build(transforms={"volume_ml": "log"})
+        card.refresh()
+        self.assertIn("covariates: volume_ml (log)", card.designLabel.text)
+        self.assertCurrent(card, False)
+        self.assertIn("covariates: volume_ml ·", card.evidenceLabel.text)  # the calibrated design: untransformed
+        self.tab.design = build(variance_groups=True)
+        card.refresh()
+        self.assertIn("Aspin-Welch v", card.designLabel.text)
+        self.assertCurrent(card, False)
+        self.tab.design = self.withVolume
+        card.refresh()
+        self.assertCurrent(card, True)
+
 
 if __name__ == "__main__":
     unittest.main()
