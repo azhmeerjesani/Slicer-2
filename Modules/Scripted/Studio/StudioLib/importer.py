@@ -2136,6 +2136,10 @@ def _showLoaded(result, shell, scans, openScans, openLesions):
     lesions = result.segmentations or openLesions
     if result.pairedLesion is not None and not lesions and slicer.mrmlScene.IsNodePresent(result.pairedLesion):
         lesions = [result.pairedLesion]
+    if scans and not lesions:
+        # A scan dropped after its lesion (opened alone, so unbound): the lesion is bound to it and Draw edits it, as when
+        # both are dropped together (never a new empty lesion next to it)
+        lesions = _adoptOpenLesions(scans)
     # Every lesion of the load is bound to the scan whose grid it is on (several subjects may be opened at once), and
     # Draw shows the first lesion on its own scan
     _bindLoadedLesions(result.segmentations, scans + [node for node in openScans if not any(_sameNode(node, scan) for scan in scans)])
@@ -2292,6 +2296,37 @@ def _bindLoadedLesions(lesions, scans):
         for _rank, scan in sorted(candidates, key=lambda item: item[0]):
             if _bindToScanGrid(lesion, scan):
                 break
+
+
+def _adoptOpenLesions(scans):
+    """Bind the open lesions that are not bound to a scan to the newly loaded scan of ``scans`` that is their own.
+
+    A lesion is the own lesion of a scan when it is on the scan's grid and both name the same BIDS subject, or, when the
+    lesion names no subject (generic names such as ``patient01/lesion.nii.gz`` and ``patient01/T1.nii.gz``), when both
+    files are in the same folder. A lesion of a loaded set is adopted only by its BIDS subject; a lesion hidden from the
+    editors, or with no file, never. Return the adopted lesions, in scene order.
+    """
+    role = slicer.vtkMRMLSegmentationNode.GetReferenceImageGeometryReferenceRole()
+    adopted = []
+    for lesion in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):
+        if lesion.GetHideFromEditors() or lesion.GetNodeReference(role) is not None or not _lesionFilePath(lesion):
+            continue
+        subject = _nodeSubject(lesion)
+        lesionFolder = _fileFolder(_lesionFilePath(lesion))
+        own = []
+        for scan in scans:
+            scanSubject = _nodeSubject(scan)
+            if subject:
+                if scanSubject and subject.lower() == scanSubject.lower():
+                    own.append(scan)
+            elif not scanSubject and lesionFolder is not None and lesionFolder == _fileFolder(_lesionFilePath(scan)) and not (
+                    _loadedSet is not None and _loadedSet.contains(lesion)):
+                own.append(scan)
+        if own:
+            _bindLoadedLesions([lesion], own)
+            if any(_isBoundTo(lesion, scan) for scan in own):
+                adopted.append(lesion)
+    return adopted
 
 
 def _fileFolder(path):

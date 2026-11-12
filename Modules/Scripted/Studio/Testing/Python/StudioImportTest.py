@@ -2757,6 +2757,51 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName(importer.scanLesionSegmentationName(scan)), route)
             self.assertEqual(studioShell.currentWorkspace(), "draw", route)
 
+    def test_scan_dropped_after_its_lesion_is_the_lesion_scan(self):
+        """BB-1: a lesion opened alone (unbound), then its own scan dropped (same grid, and same BIDS subject or, with
+        generic names, same folder): the lesion is bound to the scan and Draw edits it, as when both are dropped together
+        (no new empty "Lesions (<scan>)"). The scan of another BIDS subject on the same grid never adopts it.
+        """
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        role = slicer.vtkMRMLSegmentationNode.GetReferenceImageGeometryReferenceRole()
+        cases = (("sub-12_lesion.nii.gz", "sub-12_T1w.nii.gz", None, "sub-12_lesion"),
+                 ("lesion.nii.gz", "T1.nii.gz", "patient01", "lesion"))
+        for maskName, scanName, folder, lesionName in cases:
+            slicer.mrmlScene.Clear(0)
+            self._pump()
+            maskPath = self._writeMask(maskName, GRID_SHIFTED, subdirectory=folder)
+            scanPath = self._writeVolume(scanName, GRID_SHIFTED, subdirectory=folder)
+            importer.handleDrop([maskPath], shell=studioShell)
+            self._pump(6)
+            lesion = slicer.util.getFirstNodeByClassByName("vtkMRMLSegmentationNode", lesionName)
+            self.assertIsNotNone(lesion, scanName)
+            self.assertIsNone(lesion.GetNodeReference(role), scanName)
+            voxels = self._voxels(lesion)
+            importer.handleDrop([scanPath], shell=studioShell)
+            self._pump(6)
+            scan = self._editor().sourceVolumeNode()
+            self.assertIsNotNone(scan, scanName)
+            self.assertEqual(scan.GetName(), scanName.split(".")[0])
+            self.assertEqual(self._editor().segmentationNode().GetID(), lesion.GetID(), scanName)
+            self.assertTrue(importer._isBoundTo(lesion, scan), scanName)
+            self.assertEqual(self._voxels(lesion), voxels, scanName)
+            self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")), 1, scanName)
+            self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName(importer.scanLesionSegmentationName(scan)), scanName)
+        # Another BIDS subject on the same grid: the lesion stays unbound, Draw edits a lesion of that scan
+        slicer.mrmlScene.Clear(0)
+        self._pump()
+        maskPath = self._writeMask("sub-13_lesion.nii.gz", GRID_SHIFTED)
+        otherScanPath = self._writeVolume("sub-14_T1w.nii.gz", GRID_SHIFTED)
+        importer.handleDrop([maskPath], shell=studioShell)
+        self._pump(6)
+        importer.handleDrop([otherScanPath], shell=studioShell)
+        self._pump(6)
+        lesion = slicer.util.getFirstNodeByClassByName("vtkMRMLSegmentationNode", "sub-13_lesion")
+        self.assertIsNone(lesion.GetNodeReference(role))
+        self.assertNotEqual(self._editor().segmentationNode().GetID(), lesion.GetID())
+
     def _writeDicomSeries(self, folderName, slices=6, size=24):
         """A synthetic axial MR series of one series UID written with pydicom; return its folder (None without pydicom)."""
         try:
