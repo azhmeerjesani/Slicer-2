@@ -157,6 +157,24 @@ class LesionNetworkMappingVlsmUITest(unittest.TestCase):
         _pump(50)
         self.assertEqual(str(tab.reasonLabel.text), "")
 
+    def test_result_names_the_subjects_not_analysed(self):
+        # A lesion off the template grid and a listwise exclusion leave the result's n: the summary says so (BB-1)
+        tab = self.vlsm
+        record = {"test": "continuous", "n": 20, "contrast": {"spec": "two_sided", "columns": ["intercept", "score"]},
+                  "excluded": {"outside the template2mm grid": ["sub-04"], "missing score": ["sub-03", "sub-06", "sub-10"]}, "n_excluded": 4,
+                  "checks": [{"level": "info", "code": "lesions_not_loaded", "message": "1 subject(s) are not analysed"}]}
+        tab.showResult(self.tmp, record)
+        _pump(50)
+        text = str(tab.summaryLabel.text)
+        self.assertIn("n = 20", text)
+        self.assertIn("4 subject(s) not analysed", text)
+        self.assertIn("outside the template2mm grid: 1 (sub-04)", text)
+        self.assertIn("missing score: 3 (sub-03, sub-06, sub-10)", text)
+        record["excluded"], record["n_excluded"] = {}, 0
+        tab.showResult(self.tmp, record)
+        _pump(50)
+        self.assertNotIn("not analysed", str(tab.summaryLabel.text))
+
 
 class LesionNetworkMappingSingleLevelUITest(unittest.TestCase):
     """A cases-only study has one group level: the Contrast and VLSM tabs do not offer "case vs case"."""

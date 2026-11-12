@@ -670,6 +670,9 @@ class VlsmTab(CohortTab):
             html.escape(_("FWE p ≤ 0.05: {n} voxels in {c} clusters (smallest FWE p {p})").format(n=fwe.get("n_significant", "?"), c=(record.get("clusters") or {}).get("n", len(clusters)),
                                                                                                  p=_fmtP(fwe.get("min_p")))),
         ]
+        excludedLine = _excludedText(record.get("excluded"))
+        if excludedLine:
+            lines.insert(1, html.escape(excludedLine))
         effectRange = (record.get("effect_size") or {}).get("range")
         if effectRange:
             lines.append(html.escape(_("{effect} from {low:.2f} to {high:.2f}").format(effect=effectText, low=effectRange[0], high=effectRange[1])))
@@ -881,6 +884,27 @@ def _removeUnfinished(folder):
             shutil.rmtree(folder)
     except OSError:
         logging.exception("Lesion network mapping: the unfinished circuit folder could not be removed")
+
+
+def _excludedText(excluded, limit=8):
+    """The subjects a VLSM did not analyse (``vlsm.json`` "excluded": {reason: [sids]}), as one line, or "" when none.
+
+    Lesions off the template grid and listwise exclusions (a missing score, group or covariate) both leave the n of the
+    result: the line names the count, each reason and its subjects (the first ``limit`` of each).
+    """
+    if not isinstance(excluded, dict):
+        return ""
+    parts, total = [], 0
+    for reason, sids in excluded.items():
+        sids = [str(sid) for sid in (sids or [])]
+        if not sids:
+            continue
+        total += len(sids)
+        shown = ", ".join(sids[:limit]) + (", …" if len(sids) > limit else "")
+        parts.append(_("{reason}: {n} ({sids})").format(reason=reason, n=len(sids), sids=shown))
+    if not total:
+        return ""
+    return _("{n} subject(s) not analysed: {reasons}").format(n=total, reasons=" · ".join(parts))
 
 
 def _whereText(x, y, z):
