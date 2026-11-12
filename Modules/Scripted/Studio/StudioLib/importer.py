@@ -4899,6 +4899,26 @@ class _FigureReference(VTKObservationMixin):
 VIEWS_BEFORE_FIGURE_ATTRIBUTE = "Studio.ViewsBeforeFigure"
 
 
+def _settledMTime(node):
+    """The modification time of ``node`` as the autosave sees it (an earlier settled change counts as not made)."""
+    try:
+        from . import autosave_io
+
+        return autosave_io.settledMTime(node)
+    except Exception:
+        return node.GetMTime()
+
+
+def _settleNode(node, mtimeBefore):
+    """Tell the autosave that the bookkeeping just done to ``node`` is not an edit (see ``autosave_io.settleNode``)."""
+    try:
+        from . import autosave_io
+
+        autosave_io.settleNode(node, mtimeBefore)
+    except Exception:
+        logging.debug("Studio: could not settle a display node:\n" + traceback.format_exc())
+
+
 class _FigureViewExclusion(VTKObservationMixin):
     """Segmentations and models are not drawn in a figure view (a slice view whose background is a figure).
 
@@ -5007,18 +5027,22 @@ class _FigureViewExclusion(VTKObservationMixin):
             # Nothing to take out: the node has (or gets back) its own views
             if before is not None:
                 self._applied.pop(nodeId, None)
+                mtimeBefore = _settledMTime(displayNode)
                 wasModifying = displayNode.StartModify()
                 if current != original:
                     displayNode.SetViewNodeIDs(original)
                 displayNode.RemoveAttribute(VIEWS_BEFORE_FIGURE_ATTRIBUTE)
                 displayNode.EndModify(wasModifying)
+                _settleNode(displayNode, mtimeBefore)  # bookkeeping, not an edit
             return
+        mtimeBefore = _settledMTime(displayNode)
         wasModifying = displayNode.StartModify()
         if before is None:
             displayNode.SetAttribute(VIEWS_BEFORE_FIGURE_ATTRIBUTE, " ".join(original))
         if current != wanted:
             displayNode.SetViewNodeIDs(wanted)
         displayNode.EndModify(wasModifying)
+        _settleNode(displayNode, mtimeBefore)  # bookkeeping, not an edit: opening a project must not rewrite it
         self._applied[nodeId] = wanted
 
     def suspend(self):

@@ -3310,6 +3310,30 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(list(loaded.GetDisplayNode().GetViewNodeIDs()), [])
         self.assertIsNone(loaded.GetDisplayNode().GetAttribute(importer.VIEWS_BEFORE_FIGURE_ATTRIBUTE))
 
+    def test_figure_view_bookkeeping_is_not_an_edit(self):
+        """Taking a figure view out of a segmentation's views (a project from an earlier build opens with a figure) is
+        bookkeeping: the autosave fingerprint stays the same, so opening the project does not rewrite it.
+        """
+        from StudioLib import autosave_io, importer
+
+        mask = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "bookkeeping_mask")
+        mask.CreateDefaultDisplayNodes()
+        self._pump(4)
+        exclusion = importer._FigureViewExclusion.__new__(importer._FigureViewExclusion)
+        exclusion._applied = {}
+        display = mask.GetDisplayNode()
+        views = [node.GetID() for node in slicer.util.getNodesByClass("vtkMRMLAbstractViewNode")]
+        self.assertGreaterEqual(len(views), 2)
+        before = autosave_io.sceneFingerprint(slicer.mrmlScene, autosave_io.sentinelIds())
+        exclusion._updateDisplayNode(display, [views[0]], views[1:])
+        self.assertIsNotNone(display.GetAttribute(importer.VIEWS_BEFORE_FIGURE_ATTRIBUTE))
+        self.assertEqual(autosave_io.sceneFingerprint(slicer.mrmlScene, autosave_io.sentinelIds()), before)
+        exclusion._updateDisplayNode(display, [], views)
+        self.assertEqual(autosave_io.sceneFingerprint(slicer.mrmlScene, autosave_io.sentinelIds()), before)
+        # A later change by the user still counts as an edit
+        display.SetOpacity(0.3)
+        self.assertNotEqual(autosave_io.sceneFingerprint(slicer.mrmlScene, autosave_io.sentinelIds()), before)
+
     def test_figure_classic_untouched(self):
         """In Classic, the figure controller leaves the views alone: Link views stays linked, a new Yellow volume stays."""
         from StudioLib import importer
