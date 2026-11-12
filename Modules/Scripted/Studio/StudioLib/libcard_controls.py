@@ -453,7 +453,10 @@ def linkSet(session, entry, ids=None):
     session.flush()
     _notify(session)
     added, updated, removed = len(report["added"]), len(report["updated"]), len(report.get("removed") or [])
-    text = _("{n} control lesions linked (no files copied)").format(n=added) if added else _("{n} control rows updated").format(n=updated)
+    if added:
+        text = (_("{n} control lesion linked (no files copied)") if added == 1 else _("{n} control lesions linked (no files copied)")).format(n=added)
+    else:
+        text = (_("{n} control row updated") if updated == 1 else _("{n} control rows updated")).format(n=updated)
     if removed:
         text += " · " + (_("{n} row no longer in the set removed") if removed == 1 else _("{n} rows no longer in the set removed")).format(n=removed)
     if report["skipped"]:
@@ -466,7 +469,8 @@ def unlinkSet(session, name):
     removed = session.study.unlink_control_set(name)
     session.flush()
     _notify(session)
-    _toast(_("{n} control rows removed from the study (the control set is kept)").format(n=len(removed)), 4000)
+    text = _("{n} control row removed from the study (the control set is kept)") if len(removed) == 1 else _("{n} control rows removed from the study (the control set is kept)")
+    _toast(text.format(n=len(removed)), 4000)
     return removed
 
 
@@ -604,7 +608,7 @@ class ControlSetsCard:
         rows = controlsets.linked_rows(study, entry["name"])
         record = next((item for item in study.control_sets if item["name"] == entry["name"]), None)
         if rows:
-            text = _("Linked: {n} control rows").format(n=len(rows))
+            text = (_("Linked: {n} control row") if len(rows) == 1 else _("Linked: {n} control rows")).format(n=len(rows))
             if record and record.get("sha256") and record["sha256"] != entry.get("content_sha256"):
                 text += " · " + _("the set changed since it was linked: link again")
             self.linkLabel.setText(text)

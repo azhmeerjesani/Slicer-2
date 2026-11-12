@@ -2323,6 +2323,40 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(len(submitted), 1)
         self.assertEqual(submitted[0].args[submitted[0].args.index("--dest") + 1], ok)
 
+    def test_control_set_toasts_use_the_singular_for_one(self):
+        """One linked lesion reads '1 control lesion linked', one removed row '1 control row removed' (not the plural)."""
+        import types
+
+        from StudioLib import libcard_controls
+
+        toasts = []
+        study = types.SimpleNamespace()
+        session = types.SimpleNamespace(study=study, flush=lambda: None)
+        saved = libcard_controls._toast, libcard_controls._notify, libcard_controls.registryRoot
+        libcard_controls._toast = lambda text, ms=3000, **kw: toasts.append(text)
+        libcard_controls._notify = lambda session: None
+        libcard_controls.registryRoot = lambda: ""
+        try:
+            for added, updated, removed in ((["a"], [], []), (["a", "b"], [], []), ([], ["a"], []), ([], ["a", "b"], [])):
+                study.link_control_set = lambda name, ids=None, root=None, a=added, u=updated, r=removed: {"added": a, "updated": u, "removed": r, "skipped": []}
+                libcard_controls.linkSet(session, {"name": "ctl"})
+            for gone in (["a"], ["a", "b"]):
+                study.unlink_control_set = lambda name, g=gone: g
+                libcard_controls.unlinkSet(session, "ctl")
+        finally:
+            libcard_controls._toast, libcard_controls._notify, libcard_controls.registryRoot = saved
+        self.assertEqual(
+            toasts,
+            [
+                "1 control lesion linked (no files copied)",
+                "2 control lesions linked (no files copied)",
+                "1 control row updated",
+                "2 control rows updated",
+                "1 control row removed from the study (the control set is kept)",
+                "2 control rows removed from the study (the control set is kept)",
+            ],
+        )
+
     def test_control_sets_list_elides_long_rows_without_a_scroll_bar(self):
         """A row of the Control sets list that does not fit is elided with an ellipsis: the list has no horizontal scroll bar (the
         row was as wide as its text, so it was cut mid-word at the panel edge and the bar took height from the fixed-height list).
