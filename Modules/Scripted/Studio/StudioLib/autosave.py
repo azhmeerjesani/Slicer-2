@@ -2290,6 +2290,18 @@ class AutosaveService:
             return False
         return same and (stat.st_size, stat.st_mtime_ns) == record[2]
 
+    def isOpenProjectScene(self, path):
+        """True if ``path`` is the scene file of the open project (opening it again loads nothing)."""
+        current = self.project
+        if current is None:
+            return False
+        try:
+            scenePath = self._projects().sceneFile(current.path)
+            return scenePath is not None and os.path.normcase(os.path.realpath(scenePath)) == \
+                os.path.normcase(os.path.realpath(str(path)))
+        except OSError:
+            return False
+
     def openSceneFile(self, path):
         """Open a scene file (.mrml/.mrb) as its own project while a project is open (``opensSceneAsProject()``).
 

@@ -1940,7 +1940,7 @@ def loadFiles(paths, shell=None, pairedLesion=None):
                 try:
                     if kind == "scene":
                         service = _sceneProjectService(shell)
-                        if service is not None and service.isOpenCopyOf(path):
+                        if service is not None and (service.isOpenCopyOf(path) or service.isOpenProjectScene(path)):
                             result.alreadyOpenScenes.append(service.project.name)
                             loadedPaths.append(path)
                             continue

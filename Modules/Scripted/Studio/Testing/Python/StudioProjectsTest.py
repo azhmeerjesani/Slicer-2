@@ -1763,7 +1763,11 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("First scan"))
             self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName("MR Head"))
             # The open project's own scene file: nothing is added again
-            importer.loadFiles([projects.sceneFile(firstPath)], studioShell)
+            again = importer.loadFiles([projects.sceneFile(firstPath)], studioShell)
+            self.assertEqual(again.scenes, [], "nothing was loaded: no 'Loaded <name>.mrml' message")
+            self.assertEqual(again.alreadyOpenScenes, [service.project.name])
+            self.assertTrue(service.isOpenProjectScene(projects.sceneFile(firstPath)))
+            self.assertFalse(service.isOpenProjectScene(bundlePath))
             self.assertEqual(service.project.path, firstPath)
             self.assertEqual(len(slicer.util.getNodes("First scan", useLists=True).get("First scan", [])), 1)
         finally:
