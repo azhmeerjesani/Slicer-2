@@ -319,6 +319,31 @@ def _recovery():
     return recovery
 
 
+def _dataFileCutShort(storageNode):
+    """True if the file that ``storageNode`` read is a NIfTI, NRRD or MetaImage image whose data stops before the end that
+    its header announces (logged with the byte counts). The readers zero-fill the missing voxels and report success, so a
+    scene or project load would open the damaged image silently (a lesion with part of its volume missing).
+    """
+    try:
+        path = storageNode.GetFullNameFromFileName() or storageNode.GetFileName()
+    except Exception:
+        return False
+    if not path:
+        return False
+    try:
+        from StudioLib import importer
+
+        shortfall = importer._niftiDataShortfall(path) or importer._nrrdMhaDataShortfall(path)
+    except Exception:
+        logging.info(f"Slicer Studio: the data of {os.path.basename(path)} could not be checked:\n{traceback.format_exc()}")
+        return False
+    if shortfall is None:
+        return False
+    logging.warning(f"Slicer Studio: {os.path.basename(path)} is damaged: its image data stops after {shortfall[0]:,} of "
+                    f"the {shortfall[1]:,} bytes that its header announces; it is left out and the file is left as it is")
+    return True
+
+
 def _sceneFileParses(path):
     """True if the scene file ``path`` is well-formed XML (or cannot be checked). A scene file that was cut short (an
     interrupted save, a sync conflict) does not parse: vtkMRMLScene::Import then reads no node at all ("Syntax error in
@@ -2519,6 +2544,14 @@ class AutosaveService:
                 name = projects.displayName(os.path.basename(source))
                 self._refuseUnreadableScene(name, url, os.path.dirname(source), reason=_(
                     "{name} is damaged and could not be read: nothing was opened, and the file is left as it is.").format(name=name))
+            elif unread:
+                # Its data files are missing or damaged (a file cut short reads as a zero-filled image): say so, or the
+                # drop would end with nothing open and no word
+                sceneFile = source or url
+                name = projects.displayName(os.path.basename(sceneFile))
+                self._announce("not-opened", None, name=name, missing=False, damaged=True, path=os.path.dirname(sceneFile), reason=_(
+                    "{name} was not opened: its data could not be loaded ({names}), the files are missing or damaged. The "
+                    "files are left as they are.").format(name=name, names=", ".join(unread)))
             return
         name = projects.displayName(os.path.basename(source or url))
         project = self.createProject(name, announce=None if unread else "copy")
@@ -2556,8 +2589,16 @@ class AutosaveService:
             node = nodes.GetItemAsObject(index)
             for storageIndex in range(node.GetNumberOfStorageNodes()):
                 storageNode = node.GetNthStorageNode(storageIndex)
-                if storageNode is None or storageNode.GetStoredTime().GetMTime() != 0:
-                    continue  # read (a successful read sets the stored time)
+                if storageNode is None:
+                    continue
+                if storageNode.GetStoredTime().GetMTime() != 0:
+                    # Read (a successful read sets the stored time). A NIfTI, NRRD or MetaImage file whose data stops
+                    # before the end that its header announces (an interrupted copy or sync) also "reads": the reader
+                    # zero-fills the missing voxels. It is left out like a damaged file, as opening it directly refuses it.
+                    if _dataFileCutShort(storageNode):
+                        unread.append(node)
+                        break
+                    continue
                 messages = storageNode.GetUserMessages()
                 if messages is not None and messages.GetNumberOfMessagesOfType(vtk.vtkCommand.ErrorEvent) > 0:
                     unread.append(node)

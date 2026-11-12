@@ -10190,6 +10190,86 @@ sys.exit(web.command_local(args))
                 self.assertIn("“LNM” is now “LNM 3”", text)
                 self.assertIn("“Stroke” is now “Stroke 3”", text)
 
+    def test_115_cut_short_data_file_of_a_scene_or_project_is_named_not_opened_zero_filled(self):
+        """A NIfTI data file cut short (an interrupted copy or sync) in a project or in a scene from elsewhere (BB-1). The
+        reader zero-fills the missing voxels and reports success, so the scan opened with black slices (a lesion with part
+        of its volume missing) without a word, and the damaged image was copied into the new project. It is now left out
+        and named, as a file that cannot be read; the damaged file itself is left as it is.
+        """
+        service = self._service()
+        announced = []
+        service.setProjectAnnouncer(lambda event, project, **info: announced.append((event, info)))
+
+        # A project whose compressed scan was cut short
+        for name in ("Keep", "Cut"):
+            self._userVolume(name, shape=(12, 14, 16), extension=".nii.gz")
+        project = self._projectFor(service)
+        self._save(service)
+        projectPath = project.path
+        files = self._projectFiles(project)
+        cutPath = os.path.join(projectPath, next(path for path in files if os.path.basename(path).startswith("Cut.")))
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertIsNone(service.project)
+        with open(cutPath, "r+b") as file:
+            file.truncate(os.path.getsize(cutPath) * 6 // 10)
+        with open(cutPath, "rb") as file:
+            cutBytes = file.read()
+        del announced[:]
+        self.assertTrue(service.openProject(projectPath), "the project opens with the data that could be read")
+        self.assertEqual([event for event, _info in announced], ["opened"])
+        self.assertEqual(announced[0][1].get("unread"), ["Cut"], "the damaged file is named")
+        self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Keep"))
+        self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName("Cut"), "a zero-filled image is not opened")
+        with open(cutPath, "rb") as file:
+            self.assertEqual(file.read(), cutBytes, "the damaged file is left as it is")
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+
+        # A scene from elsewhere with an uncompressed lesion cut short: the copy holds the rest and names the lesion
+        outside = os.path.join(self.tempDir, "outside cut")
+        os.makedirs(outside)
+        scan, _scanPath = self._userVolume("Scan", shape=(12, 14, 16), extension=".nii")
+        lesion = slicer.util.addVolumeFromArray(np.ones((12, 14, 16), np.uint8), name="Lesion")
+        lesionPath = os.path.join(outside, "Lesion.nii")
+        self.assertTrue(slicer.util.saveNode(lesion, lesionPath))
+        scenePath = os.path.join(outside, "Cut study.mrml")
+        self.assertTrue(slicer.util.saveScene(scenePath))
+        slicer.mrmlScene.RemoveNode(scan)
+        lonePath = os.path.join(outside, "Lone.mrml")
+        self.assertTrue(slicer.util.saveScene(lonePath), "a scene whose only image is the lesion")
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertIsNone(service.project)
+        with open(lesionPath, "r+b") as file:
+            file.truncate(os.path.getsize(lesionPath) * 6 // 10)
+        del announced[:]
+        service.setPendingSceneSource(scenePath)
+        slicer.util.loadScene(scenePath)
+        copy = service.project
+        self.assertIsNotNone(copy, "the data that loaded opens as a copy")
+        self.assertEqual([event for event, _info in announced], ["copy-incomplete"], "no 'Opened a copy' message")
+        self.assertEqual(announced[0][1].get("unread"), ["Lesion"])
+        self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName("Lesion"), "a lesion with part of its volume missing is not opened")
+        self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Scan"))
+        self._save(service)
+        self.assertFalse(any("Lesion" in path for path in self._projectFiles(copy)), "the damaged file is not copied")
+
+        # A scene whose only image is cut short: nothing opens, no project is made, and the user is told why
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertIsNone(service.project)
+        projectsBefore = sorted(info.name for info in self.projects.listProjects())
+        del announced[:]
+        service.setPendingSceneSource(lonePath)
+        slicer.util.loadScene(lonePath)
+        self.assertIsNone(service.project, "no project of nothing")
+        self.assertEqual(sorted(info.name for info in self.projects.listProjects()), projectsBefore)
+        self.assertEqual([(event, info.get("damaged")) for event, info in announced], [("not-opened", True)])
+        self.assertIn("(Lesion)", announced[0][1]["reason"])
+        self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName("Lesion"))
+
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 

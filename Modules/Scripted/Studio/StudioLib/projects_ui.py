@@ -2451,15 +2451,16 @@ def announce(event, project, **info):
                 action=lambda *_args: renameDialog(), actionText=_("Rename"), toolTip=project.path if project is not None else None)
     elif event == "copy-incomplete":
         unread = info.get("unread") or []
+        # sticky: the "Loaded x" that ends the drop would replace it at once, and the missing data would go unnoticed
         message(_("Some data could not be loaded ({names}): {project} holds the rest. The original is not changed.").format(
                 project=name, names=", ".join(unread)), level="warning", action=lambda *_args: renameDialog(), actionText=_("Rename"),
-                toolTip=project.path if project is not None else None)
+                toolTip=project.path if project is not None else None, sticky=True)
     elif event == "opened":
         unread = info.get("unread") or []
         if unread:
             message(_("Some data of {project} could not be loaded ({names}): their files are missing or damaged. The rest is open.").format(
                     project=name, names=", ".join(unread)), level="warning", action=showProjectFolder, actionText=_("Show"),
-                    toolTip=project.path if project is not None else None)
+                    toolTip=project.path if project is not None else None, sticky=True)
         else:
             message(_("Continuing {project}").format(project=name), ms=2500)
     elif event == "locked" and info.get("opened") is False:
@@ -2529,7 +2530,7 @@ def announce(event, project, **info):
         folder = info.get("path") if info.get("damaged") else None
         if folder:
             message(info.get("reason") or "", level="warning", ms=12000, action=lambda *_args: projects.showInFileManager(folder),
-                    actionText=_("Show"), toolTip=folder)
+                    actionText=_("Show"), toolTip=folder, sticky=True)
         else:
             message(info.get("reason") or "", level="warning", ms=8000)
         if info.get("missing"):
