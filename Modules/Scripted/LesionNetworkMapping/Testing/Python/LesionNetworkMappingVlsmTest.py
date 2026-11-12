@@ -257,6 +257,22 @@ class VlsmRunTest(unittest.TestCase):
         self.assertIn("smallest attainable p 0.001", legacy)
         self.assertNotIn("min_p", legacy)
 
+    def test_methods_cite_only_the_run_whose_outputs_are_in_the_folder(self):
+        """Two VLSM runs into the same folder: the methods cite only the later one (bug bash: the overwritten run was
+        cited too, as a fallback paragraph "vlsm.json not recorded").
+        """
+        from LesionNetworkMappingLib import methods
+
+        study, _scores = make_study(os.path.join(self.tmp, "twice-study"), n=24, seed=5)
+        spec = designlib.DesignSpec(test="continuous", score_column="score", contrast="negative", group_column=None, covariates=["volume_ml"])
+        first = vlsm.vlsm(study.path, spec, grid=self.grid, space=SPACE, min_lesions=6, min_percent=0, n_perm=200, seed=3)
+        second = vlsm.vlsm(study.path, spec, grid=self.grid, space=SPACE, min_lesions=6, min_percent=0, n_perm=200, seed=3)
+        self.assertNotEqual(first["run_id"], second["run_id"])
+        text = methods.render([methods.find_section(methods.methods_sections(study.path), "statistics")], "txt")
+        self.assertEqual(text.count("Voxel-based lesion-symptom mapping (run"), 1, text)
+        self.assertIn(second["run_id"], text)
+        self.assertNotIn(first["run_id"], text)
+
     def test_share_export_describes_vlsm_maps(self):
         """The share-safe export and the NeuroVault metadata describe VLSM maps as lesion-location maps (not network
         maps), the coverage map as a lesion count, and record the sign coding (the "negative" score contrast flips the

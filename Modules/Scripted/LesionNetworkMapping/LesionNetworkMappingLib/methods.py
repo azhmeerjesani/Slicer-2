@@ -1128,6 +1128,10 @@ def statistics_section(records, used):
         for record in records.done_runs(kind):
             if kind == "robustness" and records.overwritten(record):
                 continue  # a later Robust run wrote its results to the same folder: only that run is cited
+            if kind == "vlsm" and record["id"] not in vlsm_records:
+                other = records.run_json(record, VLSM_JSON)
+                if isinstance(other, dict) and other.get("run_id") not in (None, record["id"]):
+                    continue  # a later VLSM run wrote its results to the same folder: only that run is cited
             found = True
             if kind == "vlsm":
                 # VLSM tests lesion location (not a network): its own paragraph from vlsm.json, never the summary keys
