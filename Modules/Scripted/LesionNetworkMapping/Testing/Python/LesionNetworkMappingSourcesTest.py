@@ -270,6 +270,53 @@ class SourcesTest(unittest.TestCase):
         # An empty table is used as given, not replaced by the file on disk
         self.assertEqual(sources.prisma_counts(self.study, sources.Records(self.study.path))["screened"], 0)
 
+    def test_unreadable_stage_log_is_reported_not_dropped(self):
+        """A stage_log.tsv that cannot be read raises SourcesError: it is not dropped, so PRISMA does not move full-text
+        exclusions to screening and the history is never written over (BB-1).
+        """
+        records = sources.Records.open(self.study)
+        records.add([sources.draft(doi=f"10.9999/{n}") for n in "abc"])
+        first, second, _third = records.ids()
+        records.advance(first)
+        records.advance(first)
+        records.exclude(first, "No usable lesion imaging")
+        records.save()
+        counts = sources.prisma_counts(self.study, sources.Records.open(self.study))
+        self.assertEqual((counts["excluded_screening"], counts["fulltext_excluded"]), (0, 1))
+        with open(records.path, "rb") as f:
+            table = f.read()
+        for damage in (b"x\ty\tz\te1\te2\te3\n", b"\xff\xfe bad\n"):  # too many fields; not UTF-8 text
+            with open(records.log_path, "rb") as f:
+                good = f.read()
+            with open(records.log_path, "ab") as f:
+                f.write(damage)
+            with open(records.log_path, "rb") as f:
+                damaged = f.read()
+            with self.assertRaises(sources.SourcesError) as raised:
+                sources.Records.open(self.study)
+            self.assertIn("stage_log.tsv", str(raised.exception))
+            with self.assertRaises(sources.SourcesError):
+                sources.prisma_counts(self.study)
+            # The stand-in the Sources card uses refuses to save: neither file is written over
+            stand_in = sources.Records(self.study.path)
+            stand_in.unreadable = str(raised.exception)
+            with self.assertRaises(sources.SourcesError) as refused:
+                stand_in.save()
+            self.assertIn("stage_log.tsv", str(refused.exception))
+            with open(records.log_path, "rb") as f:
+                self.assertEqual(f.read(), damaged)
+            with open(records.path, "rb") as f:
+                self.assertEqual(f.read(), table)
+            with open(records.log_path, "wb") as f:
+                f.write(good)
+        # Once fixed, the history is back and the next change keeps it
+        again = sources.Records.open(self.study)
+        again.advance(second)
+        again.save()
+        counts = sources.prisma_counts(self.study, sources.Records.open(self.study))
+        self.assertEqual((counts["excluded_screening"], counts["fulltext_excluded"]), (0, 1))
+        self.assertEqual(counts["fulltext_excluded_reasons"], {"No usable lesion imaging": 1})
+
     def test_exact_duplicates_merge(self):
         records = sources.Records.open(self.study)
         records.add([sources.draft(doi="10.1000/A", title="One")])

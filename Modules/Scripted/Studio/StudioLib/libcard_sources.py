@@ -457,15 +457,13 @@ class SourcesCard:
             self.records = None
             return None
         sources = _sources()
-        path = os.path.join(studyObject.path, *sources.RECORDS_TSV)
-        try:
-            stat = os.stat(path)
-            signature = (studyObject.path, stat.st_mtime_ns, stat.st_size)
-        except OSError:
-            signature = (studyObject.path, None, None)
+        signature = self._fileSignature(studyObject)
         if force or self.records is None or signature != self._signature:
+            wasUnreadable = getattr(self.records, "unreadable", None)
             try:
                 self.records = sources.Records.open(studyObject)
+                if wasUnreadable:
+                    self._showError("")  # the file was fixed: its message goes
             except sources.SourcesError as e:
                 # An empty stand-in that refuses to save: the unreadable file is never written over
                 self.records = sources.Records(studyObject.path)
@@ -475,16 +473,23 @@ class SourcesCard:
             self._lastChange = None
         return self.records
 
+    @staticmethod
+    def _fileSignature(studyObject):
+        """What tells a changed sources/records.tsv or stage_log.tsv on disk (a fixed file is then read again)."""
+        sources = _sources()
+        signature = [studyObject.path]
+        for parts in (sources.RECORDS_TSV, sources.STAGE_LOG_TSV):
+            try:
+                stat = os.stat(os.path.join(studyObject.path, *parts))
+                signature += [stat.st_mtime_ns, stat.st_size]
+            except OSError:
+                signature += [None, None]
+        return tuple(signature)
+
     def _save(self):
         """Write the records and the study (the search log, new cases)."""
-        sources = _sources()
         self.records.save()
-        studyObject = self._study()
-        try:
-            stat = os.stat(os.path.join(studyObject.path, *sources.RECORDS_TSV))
-            self._signature = (studyObject.path, stat.st_mtime_ns, stat.st_size)
-        except OSError:
-            self._signature = None
+        self._signature = self._fileSignature(self._study())
         session = _session()
         if session is not None:
             session.setValues([], {})
@@ -497,7 +502,7 @@ class SourcesCard:
         return self._rows[row]
 
     def _showError(self, text):
-        # While records.tsv cannot be read, its message stays visible above any other one
+        # While records.tsv or stage_log.tsv cannot be read, its message stays visible above any other one
         unreadable = getattr(self.records, "unreadable", None)
         if unreadable:
             text = unreadable if not text or text == unreadable else f"{unreadable}\n{text}"
@@ -787,7 +792,7 @@ class SourcesCard:
         report = None
         self._showError("")
         if records.unreadable:
-            self._showError(_("Nothing was imported: fix sources/records.tsv (save it as UTF-8 text) or move it away first."))
+            self._showError(_("Nothing was imported: fix the file named above (save it as UTF-8 text) or move it away first."))
             return None
         try:
             if path:

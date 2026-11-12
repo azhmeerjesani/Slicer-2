@@ -528,8 +528,8 @@ class Records:
         self.rows = list(rows or [])
         self.extra_columns = list(extra_columns)
         self.log = list(log or [])
-        # Why sources/records.tsv could not be read, when this empty table stands in for it: save() then refuses, so the
-        # user's records and stage log are never written over
+        # Why sources/records.tsv or stage_log.tsv could not be read, when this empty table stands in for them: save()
+        # then refuses, so the user's records and stage log are never written over
         self.unreadable = None
 
     # Storage
@@ -544,7 +544,10 @@ class Records:
 
     @classmethod
     def open(cls, study_or_path):
-        """The records of a study (an empty table when there is no file yet)."""
+        """The records of a study (an empty table when there is no file yet).
+
+        :raises SourcesError: when ``sources/records.tsv`` or ``sources/stage_log.tsv`` cannot be read.
+        """
         base = getattr(study_or_path, "path", study_or_path)
         records = cls(base)
         if os.path.isfile(records.path):
@@ -562,14 +565,16 @@ class Records:
             try:
                 _columns, rows = study_module.read_tsv(records.log_path)
                 records.log = [{column: ("" if row.get(column, NA) == NA else row[column]) for column in LOG_COLUMNS} for row in rows]
-            except (OSError, ValueError):
-                records.log = []
+            except (OSError, ValueError) as e:
+                # As for records.tsv: without the log, PRISMA would count full-text exclusions as screening ones and the
+                # next save would write the history over
+                raise SourcesError(f"sources/stage_log.tsv (the screening history) cannot be read: {e}") from e
         return records
 
     def save(self):
         """Write ``sources/records.tsv`` and ``stage_log.tsv`` (atomic)."""
         if self.unreadable:
-            raise SourcesError("sources/records.tsv cannot be read, so nothing was saved: fix or move the file first")
+            raise SourcesError(f"Nothing was saved: {self.unreadable}. Fix or move the file first")
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         study_module.write_tsv(self.path, [*COLUMNS, *self.extra_columns], self.rows)
         if self.log:

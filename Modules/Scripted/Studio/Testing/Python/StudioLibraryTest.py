@@ -2131,6 +2131,65 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertFalse(fresh.errorLabel.isVisible())
         self.assertEqual(len(fresh.records), 3)
 
+    def test_sources_unreadable_stage_log_is_reported_and_kept(self):
+        """A stage_log.tsv that cannot be read is said on the card, P/X/U and Import do not write over it, and once it is
+        fixed (records.tsv unchanged) the card reads it again with the full-text exclusion in place (BB-1).
+        """
+        from LesionNetworkMappingLib import sources
+        from LesionNetworkMappingLib.study import Study
+        from StudioLib import libcard_sources, study_ui
+
+        path = os.path.join(self.directory, "LitLog")
+        Study.create(path, name="LitLog").save()
+        session = study_ui.openStudy(path, None)
+        self.cleanup.append(study_ui.closeStudy)
+        original = libcard_sources._toast
+        libcard_sources._toast = lambda *args, **kwargs: None
+        self.cleanup.append(lambda: setattr(libcard_sources, "_toast", original))
+        card = libcard_sources.SourcesCard(session)
+        self.cleanup.append(card.widget.close)
+        self.assertIsNotNone(card.importRecords(text="10.9999/one\n10.9999/two\n"))
+        records = card.load()
+        first, _second = records.ids()
+        records.advance(first)
+        records.advance(first)
+        records.exclude(first, "No usable lesion imaging")
+        records.save()
+        logPath = records.log_path
+        with open(records.path, "rb") as f:
+            table = f.read()
+        with open(logPath, "rb") as f:
+            good = f.read()
+        with open(logPath, "ab") as f:
+            f.write(b"x\ty\tz\te1\te2\te3\n")
+        with open(logPath, "rb") as f:
+            damaged = f.read()
+
+        fresh = libcard_sources.SourcesCard(session)
+        self.cleanup.append(fresh.widget.close)
+        fresh.widget.show()
+        fresh.refresh()
+        self._pump()
+        self.assertTrue(fresh.errorLabel.isVisible())
+        self.assertIn("stage_log.tsv", fresh.errorLabel.text)
+        self.assertIsNone(fresh.importRecords(text="10.9999/after.damage\n"))
+        with self.assertRaises(sources.SourcesError):
+            fresh.records.save()
+        with open(logPath, "rb") as f:
+            self.assertEqual(f.read(), damaged)
+        with open(records.path, "rb") as f:
+            self.assertEqual(f.read(), table)
+
+        with open(logPath, "wb") as f:
+            f.write(good)
+        fresh.refresh()
+        self._pump()
+        self.assertIsNone(fresh.records.unreadable)
+        self.assertEqual(len(fresh.records), 2)
+        self.assertFalse(fresh.errorLabel.isVisible())
+        counts = sources.prisma_counts(session.study, fresh.records)
+        self.assertEqual((counts["excluded_screening"], counts["fulltext_excluded"]), (0, 1))
+
     def test_sources_prisma_export_on_read_only_study_is_plain(self):
         """A read-only study disables PRISMA export, and a permission error is said in plain words without a logged traceback (BB-1)."""
         import errno
