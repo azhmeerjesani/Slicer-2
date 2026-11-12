@@ -1086,17 +1086,17 @@ def changeRootDialog(parent=None):
         try:
             projects.checkMoveTarget(oldRoot, newRoot)
         except OSError as error:
-            slicer.util.infoDisplay(str(error), windowTitle=_("Change the Slicer Studio folder"))
+            _notice(parent, _("Change the Slicer Studio folder"), str(error))
             return None
         if _studyOpen():
-            slicer.util.infoDisplay(_("Close the open study first: its files are in the Slicer Studio folder."),
-                                    windowTitle=_("Change the Slicer Studio folder"))
+            _notice(parent, _("Change the Slicer Studio folder"),
+                    _("Close the open study first: its files are in the Slicer Studio folder."))
             return None
         try:
             # A project or study open in another Slicer Studio would move away from under it (and drop out of its Library)
             projects.checkNotOpenElsewhere(oldRoot)
         except OSError as error:
-            slicer.util.infoDisplay(str(error), windowTitle=_("Change the Slicer Studio folder"))
+            _notice(parent, _("Change the Slicer Studio folder"), str(error))
             return None
         # The new folder is made and checked before the question and before anything moves or the setting changes, as the
         # first-start chooser does: a folder that cannot be written (a read-only drive) is refused right away
@@ -1131,7 +1131,7 @@ def changeRootDialog(parent=None):
         projects.ensureRoot(newRoot, recreate=True)
     except projects.OpenElsewhereError as error:
         # Refused before anything was moved (opened elsewhere after the check above)
-        slicer.util.infoDisplay(str(error), windowTitle=_("Change the Slicer Studio folder"))
+        _notice(parent, _("Change the Slicer Studio folder"), str(error))
         projects.notifyChanged()
         return None
     except OSError as error:

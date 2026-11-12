@@ -2739,7 +2739,7 @@ def checkMoveTarget(oldRoot, newRoot):
     """
     if newRoot and oldRoot and os.path.normcase(os.path.realpath(oldRoot)) != os.path.normcase(os.path.realpath(newRoot)) and isInside(newRoot, oldRoot):
         raise OSError(_("The new folder is inside the current Slicer Studio folder, so your projects cannot be moved into it. "
-                        "Choose a folder outside {folder}.").format(folder=oldRoot))
+                        "Choose a folder outside {folder}.").format(folder=shortPath(oldRoot)))
     same = bool(newRoot and oldRoot and os.path.normcase(os.path.realpath(oldRoot)) == os.path.normcase(os.path.realpath(newRoot)))
     if newRoot and oldRoot and not same:
         for kind in _MOVABLE_FOLDERS:

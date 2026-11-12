@@ -2757,7 +2757,8 @@ class StudioProjectsTest(unittest.TestCase):
 
             with mock.patch.object(projects_ui, "FolderChooserDialog", FakeChooser), \
                     mock.patch.object(projects_ui, "_question", fail), \
-                    mock.patch.object(slicer.util, "infoDisplay", lambda text, *a, **k: shown.append(text)), \
+                    mock.patch.object(projects_ui, "_notice", lambda parent, title, text: shown.append(text)), \
+                    mock.patch.object(slicer.util, "infoDisplay", lambda *a, **k: self.fail("legacy message box")), \
                     mock.patch.object(slicer.util, "errorDisplay", lambda text, *a, **k: shown.append(text)):
                 self.assertIsNone(projects_ui.changeRootDialog(None))
             self.assertEqual(len(shown), 1, shown)
@@ -3292,7 +3293,8 @@ class StudioProjectsTest(unittest.TestCase):
 
             with mock.patch.object(projects_ui, "FolderChooserDialog", FakeChooser), \
                     mock.patch.object(projects_ui, "_question", fail), \
-                    mock.patch.object(slicer.util, "infoDisplay", lambda text, *a, **k: shown.append(text)), \
+                    mock.patch.object(projects_ui, "_notice", lambda parent, title, text: shown.append(text)), \
+                    mock.patch.object(slicer.util, "infoDisplay", lambda *a, **k: self.fail("legacy message box")), \
                     mock.patch.object(slicer.util, "errorDisplay", lambda text, *a, **k: shown.append(text)):
                 self.assertIsNone(projects_ui.changeRootDialog(None))
             self.assertEqual(len(shown), 1, shown)
@@ -4581,7 +4583,8 @@ class StudioProjectsTest(unittest.TestCase):
 
             with mock.patch.object(projects_ui, "FolderChooserDialog", FakeChooser), \
                     mock.patch.object(projects_ui, "_question", fail), \
-                    mock.patch.object(slicer.util, "infoDisplay", lambda text, *a, **k: shown.append(text)), \
+                    mock.patch.object(projects_ui, "_notice", lambda parent, title, text: shown.append(text)), \
+                    mock.patch.object(slicer.util, "infoDisplay", lambda *a, **k: self.fail("legacy message box")), \
                     mock.patch.object(slicer.util, "errorDisplay", lambda text, *a, **k: shown.append(text)):
                 self.assertIsNone(projects_ui.changeRootDialog(None))
             self.assertEqual(len(shown), 1, shown)
@@ -8834,7 +8837,7 @@ class StudioProjectsTest(unittest.TestCase):
                         mock.patch.object(projects_ui, "_question", lambda *args, **kwargs: answer), \
                         mock.patch.object(projects_ui, "_runWithProgress", lambda function, *args, **kwargs: function()), \
                         mock.patch.object(projects_ui, "_notice", lambda parent, title, text: shown.append(text)), \
-                        mock.patch.object(slicer.util, "infoDisplay", lambda text, *a, **k: shown.append(text)), \
+                        mock.patch.object(slicer.util, "infoDisplay", lambda *a, **k: self.fail("legacy message box")), \
                         mock.patch.object(slicer.util, "errorDisplay", lambda text, *a, **k: shown.append(text)), \
                         mock.patch.object(os, "access", access):
                     return projects_ui.changeRootDialog(None), shown
