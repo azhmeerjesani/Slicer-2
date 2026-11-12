@@ -195,6 +195,20 @@ def distinct_count(points):
     return len(kept)
 
 
+def _template_degenerate(dst):
+    """Message when the template (destination) landmarks coincide or lie on one line, else None.
+
+    Such landmarks make a fit come out with scale <= 0 or determinant <= 0, which is not an L/R problem.
+    """
+    centered = dst - dst.mean(axis=0)
+    singular = np.linalg.svd(centered, compute_uv=False)
+    if singular[0] <= 1e-9 * max(1.0, float(np.abs(dst).max())):
+        return "the template landmarks coincide: place them again at distinct points"
+    if singular[1] <= 1e-6 * singular[0]:
+        return "the template landmarks lie on one line: place them again at distinct points"
+    return None
+
+
 def umeyama_similarity(src_xy, dst_xy):
     """Least-squares 2D similarity (scale, rotation, translation; 4 DOF) from src to dst (Umeyama 1991).
 
@@ -217,6 +231,9 @@ def umeyama_similarity(src_xy, dst_xy):
     rotation = u @ sign @ vt
     scale = float(np.trace(np.diag(singular) @ sign)) / variance
     if scale <= 0:
+        degenerate = _template_degenerate(dst)
+        if degenerate:
+            raise ValueError(f"similarity fit: {degenerate}")
         raise ValueError("similarity fit: no proper rotation matches the landmarks (check the L/R convention)")
     matrix = np.eye(3)
     matrix[:2, :2] = scale * rotation
@@ -253,6 +270,9 @@ def _affine_lstsq(src, dst, min_pairs):
     matrix = np.eye(3)
     matrix[:2, :] = solution.T
     if np.linalg.det(matrix[:2, :2]) <= 0:
+        degenerate = _template_degenerate(dst)
+        if degenerate:
+            raise ValueError(f"affine fit: {degenerate}")
         raise ValueError("affine fit: the landmarks need a reflection (check the L/R convention)")
     return matrix
 

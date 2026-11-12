@@ -2364,6 +2364,8 @@ class FigureCard:
         self.modelGroup.button(0 if model == "similarity" else 1).setChecked(True)
         if panel.fit is not None:
             text, level = figurefit.residual_chip(panel.fit.rms_mm, panel.fit.loo_rms_mm, panel.fit.n_pairs)
+        elif panel.fitError:
+            text, level = _("No fit: see the warning below"), figurefit.residual_level(None)
         else:
             text, level = _("No fit yet: {n} of 2 pairs").format(n=pairs), figurefit.residual_level(None)
         self.residualChip.setText(text)

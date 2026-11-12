@@ -146,6 +146,20 @@ class FitTest(unittest.TestCase):
         # reflected folds give no LOO RMS
         self.assertIsNone(figurefit.loo_rms("affine", FIG_PX, dst))
 
+    def test_degenerate_template_landmarks_not_blamed_on_convention(self):
+        same = np.tile([[10.0, 20.0]], (len(FIG_PX), 1))
+        with self.assertRaisesRegex(ValueError, "template landmarks coincide"):
+            figurefit.umeyama_similarity(FIG_PX, same)
+        with self.assertRaisesRegex(ValueError, "template landmarks coincide"):
+            figurefit.affine_2d(FIG_PX, same)
+        line = np.column_stack([np.zeros(len(FIG_PX)), np.arange(len(FIG_PX), dtype=float) * 7.0])
+        with self.assertRaisesRegex(ValueError, "template landmarks lie on one line"):
+            figurefit.affine_2d(FIG_PX, line)
+        # a genuine mirror still names the convention
+        mirrored = figurefit.apply_2d(AFFINE @ np.diag([-1.0, 1.0, 1.0]), FIG_PX)
+        with self.assertRaisesRegex(ValueError, "L/R convention"):
+            figurefit.affine_2d(FIG_PX, mirrored)
+
     def test_noise_loo_above_rms(self):
         rng = np.random.default_rng(22)
         for kind, truth in (("similarity", similarity_matrix(0.5, -4.0, [-75.0, -85.0])), ("affine", AFFINE)):
