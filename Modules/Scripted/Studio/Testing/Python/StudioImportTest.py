@@ -756,6 +756,55 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertFalse([r for r in records if "Traceback" in r.getMessage() or r.levelno >= logging.ERROR])
         self.assertEqual(slicer.mrmlScene.GetNodesByClass("vtkMRMLSegmentationNode").GetNumberOfItems(), 0)
 
+    def test_nifti_with_zero_voxel_size_is_refused_in_plain_words(self):
+        """BB-1: a NIfTI with a voxel size of 0 and an all-zero affine reached the ITK reader, which showed the raw 'Slicer
+        error' box (a list of ITK readers) and raised the error badge. It is refused in plain words, with no ERROR records;
+        a zero voxel size that a valid affine overrides, or on an axis that the image does not have, still opens.
+        """
+        from StudioLib import importer
+
+        def write(name, pixdim, srow, sformCode=1, dim=3):
+            header = bytearray(348)
+            struct.pack_into("<i", header, 0, 348)
+            struct.pack_into("<8h", header, 40, dim, 8, 8, 6 if dim == 3 else 1, 1, 1, 1, 1)
+            struct.pack_into("<hh", header, 70, 2, 8)  # uint8
+            struct.pack_into("<8f", header, 76, 1, *pixdim, 1, 0, 0, 0)
+            struct.pack_into("<f", header, 108, 352)
+            struct.pack_into("<2h", header, 252, 0, sformCode)
+            struct.pack_into("<12f", header, 280, *srow)
+            header[344:348] = b"n+1\0"
+            path = os.path.join(self.directory, name)
+            with open(path, "wb") as f:
+                f.write(bytes(header) + bytes(4) + bytes([1]) * (8 * 8 * (6 if dim == 3 else 1)))
+            return path
+
+        identity = (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0)
+        zeros = (0,) * 12
+        singular = write("sub-15_T1w.nii", (0, 0, 0), zeros)
+        zeroNoAffine = write("sub-16_T1w.nii", (1, 0, 1), zeros, sformCode=0)
+        overridden = write("sub-17_T1w.nii", (0, 0, 0), identity)
+        flat = write("sub-18_T1w.nii", (1, 1, 0), identity, sformCode=0, dim=2)
+        self.assertTrue(importer._niftiHasDegenerateGeometry(singular))
+        self.assertTrue(importer._niftiHasDegenerateGeometry(zeroNoAffine))
+        self.assertFalse(importer._niftiHasDegenerateGeometry(overridden))
+        self.assertFalse(importer._niftiHasDegenerateGeometry(flat))
+        for path in (overridden, flat):
+            importer._checkNiftiComplete(path)  # no RefusedFileError
+        studioShell = self._applyStudio()
+        recorder = logging.Handler()
+        records = []
+        recorder.emit = records.append
+        logging.getLogger().addHandler(recorder)
+        try:
+            result = importer.loadFiles([singular, zeroNoAffine], studioShell)
+        finally:
+            logging.getLogger().removeHandler(recorder)
+        self._pump()
+        self.assertEqual(len(result.errors), 2)
+        for _path, message in result.errors:
+            self.assertIn("voxel size of 0", message)
+        self.assertFalse([r for r in records if "Traceback" in r.getMessage() or r.levelno >= logging.ERROR])
+
     def test_uncompressed_nifti_named_nii_gz_opens(self):
         """BB-1: a valid NIfTI saved without compression but named ``.nii.gz`` (a browser or server unpacked a download and
         kept the name) opens as a scan and as a lesion, as in official 3D Slicer, whose reader reads it as plain data. A

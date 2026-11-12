@@ -816,6 +816,40 @@ def _niftiHasInvalidGeometry(path):
     return False
 
 
+def _niftiHasDegenerateGeometry(path):
+    """True if the NIfTI header of ``path`` gives an image no extent in space: a voxel size of 0 along one of its axes
+    (``pixdim[1..3]`` of the dimensions it has), or, when ``sform_code`` > 0 (the affine that the readers use first), an
+    affine whose columns for those axes are zero. The ITK reader refuses such a header without saying why.
+    """
+    header = _niftiHeader(path, 540)
+    if header is None or len(header) < 348:
+        return False
+    for byteOrder in ("<", ">"):
+        size = struct.unpack(byteOrder + "i", header[0:4])[0]
+        if size == 348:
+            dims = struct.unpack(byteOrder + "8h", header[40:56])
+            pixdim = struct.unpack(byteOrder + "8f", header[76:108])
+            sformCode = struct.unpack(byteOrder + "h", header[254:256])[0]
+            srow = struct.unpack(byteOrder + "12f", header[280:328])
+        elif size == 540 and len(header) >= 540:
+            dims = struct.unpack(byteOrder + "8q", header[16:80])
+            pixdim = struct.unpack(byteOrder + "8d", header[104:168])
+            sformCode = struct.unpack(byteOrder + "i", header[348:352])[0]
+            srow = struct.unpack(byteOrder + "12d", header[400:496])
+        else:
+            continue
+        if not 1 <= dims[0] <= 7:
+            return False
+        axes = range(max(1, min(3, dims[0])))
+        if not all(math.isfinite(value) for value in list(pixdim[1:4]) + list(srow)):
+            return False  # reported by _niftiHasInvalidGeometry
+        if sformCode > 0:
+            # srow_x/y/z are the rows of the 3x4 affine: column ``axis`` is the voxel step along that axis
+            return any(all(srow[4 * row + axis] == 0 for row in range(3)) for axis in axes)
+        return any(pixdim[1 + axis] == 0 for axis in axes)
+    return False
+
+
 def _checkNiftiComplete(path):
     """Raise ``RuntimeError`` (a message for the user) if the data of the NIfTI file ``path`` stops before the end that its
     header promises: the voxels that are missing would be read as 0, and a lesion would lose part of its volume.
@@ -838,6 +872,10 @@ def _checkNiftiComplete(path):
             raise RefusedFileError(
                 _("{name} is damaged: its header gives an invalid position or orientation (a voxel size or a "
                   "position value that is not a number), so it was not opened.").format(name=name))
+        if _niftiHasDegenerateGeometry(path):
+            raise RefusedFileError(
+                _("{name} is damaged: its header gives a voxel size of 0 (or an affine with no extent), so the image "
+                  "has no size in space and it was not opened.").format(name=name))
     _checkNrrdMhaComplete(path)
     shortfall = _niftiDataShortfall(path)
     if shortfall is not None:
