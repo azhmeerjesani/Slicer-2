@@ -185,6 +185,19 @@ class LesionNetworkMappingCompareUITest(unittest.TestCase):
             card_compare.AddReferenceDialog.loadTerms = saved
             dialog.deleteLater()
 
+    def test_6_heat_map_does_not_widen_the_inspector(self):
+        """The heat map picture (a fixed 380 px) sits in a scroll area, so the Compare results ask for far less width than the picture."""
+        from LesionNetworkMappingUI.card_compare import HEATMAP_MAX_PX
+
+        self._compare(withReference=True)
+        self.card.showComparison()
+        heatmap = self.card.results.findChild("QLabel", "LNMCompareHeatmap")
+        self.assertIsNotNone(heatmap)
+        self.assertGreater(heatmap.width, 100)  # the picture is drawn at its own size
+        self.assertLess(self.card.results.minimumSizeHint.width(), HEATMAP_MAX_PX - 100)
+        self.assertLess(self.card.heatmapScroll.minimumSizeHint.width(), HEATMAP_MAX_PX - 100)
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -294,7 +294,16 @@ class CompareCard:
         self.heatmap.setObjectName("LNMCompareHeatmap")
         self.heatmap.setAlignment(qt.Qt.AlignLeft | qt.Qt.AlignTop)
         self.heatmap.setToolTip(_("Pearson r below the diagonal, partial r given μC_r and PC1 above it; the numbers are the maps' order"))
-        results.addWidget(self.heatmap)
+        # The picture is as wide as HEATMAP_MAX_PX; in a scroll area it never widens the inspector (a wider picture scrolls).
+        self.heatmapScroll = qt.QScrollArea()
+        self.heatmapScroll.setObjectName("LNMCompareHeatmapScroll")
+        self.heatmapScroll.setFrameShape(qt.QFrame.NoFrame)
+        self.heatmapScroll.setWidgetResizable(False)
+        self.heatmapScroll.setVerticalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        self.heatmapScroll.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
+        self.heatmapScroll.setWidget(self.heatmap)
+        self.heatmapScroll.setFixedHeight(0)
+        results.addWidget(self.heatmapScroll)
         self.legendLabel = label("", "LNMCompareLegend", "secondaryText")
         results.addWidget(self.legendLabel)
         self.pairsTable = widgets.tableView([title for title, _tip in PAIR_COLUMNS])
@@ -896,11 +905,15 @@ class CompareCard:
         from LesionNetworkMappingLib import refmaps
 
         comparison = self.comparison
+        drawn = False
         try:
             self.heatmap.setPixmap(self._heatmapPixmap())
+            drawn = True
         except Exception:
             logging.exception("Lesion network mapping: the heat map could not be drawn")
             self.heatmap.clear()
+        self.heatmap.adjustSize()
+        self.heatmapScroll.setFixedHeight(self.heatmap.height + 20 if drawn else 0)
         self.legendLabel.setText("  ".join(f"{index + 1} {name}" for index, name in enumerate(comparison.names)))
         rows = refmaps.pairs_rows(comparison, self.tests, {name: source.spec for name, source in zip(comparison.names, self.comparedSources, strict=True)})
         self.pairsTable.setRowCount(0)
