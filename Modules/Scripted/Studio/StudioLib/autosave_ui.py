@@ -338,11 +338,11 @@ class AutosaveUi:
         return service.sessionDirectory() or service.rootDirectory()
 
     def openFolder(self):
-        path = self.folder()
-        if path and os.path.isdir(path):
-            from . import projects
+        from . import recovery
 
-            projects.showInFileManager(path)
+        service = self.service
+        root = service.rootDirectory() if service is not None else None
+        recovery.showAutosaveFolder(self.folder(), root=root)
 
     #
     # Recovery

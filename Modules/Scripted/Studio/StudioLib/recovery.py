@@ -68,6 +68,24 @@ def _parseTime(text):
         return 0.0
 
 
+def showAutosaveFolder(path, root=None, parent=None):
+    """Show an autosave folder in the file manager. Studio project work does not autosave, so the recovery folder may not exist
+    yet: create it (as the first autosave does) instead of doing nothing, or say why it could not be shown.
+    """
+    from . import projects
+
+    root = root or io.defaultRoot()
+    if not path or not os.path.isdir(path):
+        path = root
+        try:
+            io.ensureRoot(path)
+        except OSError:
+            qt.QMessageBox.information(parent, _("Recovery location"),
+                                       _("Nothing has been autosaved yet, and the folder could not be created:") + "\n" + str(path))
+            return False
+    return projects.showInFileManager(path)
+
+
 class SlotInfo:
     """One autosaved scene (``scene-<n>``) of a session."""
 
@@ -1146,10 +1164,7 @@ class RecoveryDialog(qt.QDialog):
     def onOpenFolder(self):
         slot = self.currentSlot()
         path = slot.session.path if slot is not None else (self.root or io.defaultRoot())
-        if os.path.isdir(path):
-            from . import projects
-
-            projects.showInFileManager(path)
+        showAutosaveFolder(path, root=self.root or io.defaultRoot(), parent=self)
 
     def onSettings(self):
         from . import autosave
