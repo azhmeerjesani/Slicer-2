@@ -463,7 +463,7 @@ class MoveJournal:
         self.newRoot = os.path.normpath(newRoot)
         self._lock = threading.Lock()
         self._data = {"from": self.oldRoot, "to": self.newRoot, "renamed": {}, "renamedIds": {}, "templatesBefore": None,
-                      "projectsBefore": None, "named": {}}
+                      "projectsBefore": None, "named": {}, "controlSetsBefore": None}
         if not path:
             return
         if resume:
@@ -487,6 +487,8 @@ class MoveJournal:
                     self._data["templatesBefore"] = [str(name) for name in data["templatesBefore"]]
                 if isinstance(data.get("projectsBefore"), list):
                     self._data["projectsBefore"] = [str(name) for name in data["projectsBefore"]]
+                if isinstance(data.get("controlSetsBefore"), dict):
+                    self._data["controlSetsBefore"] = data["controlSetsBefore"]
                 return
         # A new move: what an earlier one wrote is not this move's
         with contextlib.suppress(OSError):
@@ -567,6 +569,15 @@ class MoveJournal:
     def setProjectsBefore(self, names):
         with self._lock:
             self._data["projectsBefore"] = sorted(names)
+            self._write()
+
+    def controlSetsBefore(self):
+        """What ``_controlSetsBefore`` read from the old folder before the move (a dict), or None when not recorded."""
+        return self._data["controlSetsBefore"]
+
+    def setControlSetsBefore(self, data):
+        with self._lock:
+            self._data["controlSetsBefore"] = data
             self._write()
 
     def completedRenames(self):
@@ -2280,6 +2291,9 @@ LNM_REFERENCE_MAPS_DIR = "ReferenceMaps"
 #: results (``LNM.Normalization`` is "normalization/<scan>/..."), control sets and connectomes. A move into a folder whose
 #: LNM/ has them too merges each of them (an item inside is renamed only when its name is taken there)
 _LNM_APP_FOLDERS = (LNM_REFERENCE_MAPS_DIR, "normalization", "ControlSets", "connectomes", "Connectomes")
+#: The control-set registry in LNM/ (``LesionNetworkMappingLib.controlsets.REGISTRY_DIR``: one folder per set, named as
+#: the set; studies link a set by that name)
+LNM_CONTROL_SETS_DIR = "ControlSets"
 
 
 def movableItems(rootPath):
@@ -2420,7 +2434,7 @@ def _removeMoveLeftovers(folder):
     removePaths([os.path.join(folder, name) for name in names if isMoveLeftover(name)])
 
 
-def _mergeMove(source, destination, sameVolume, progress=None, renamed=None):
+def _mergeMove(source, destination, sameVolume, progress=None, renamed=None, uniqueNameFor=None):
     """Move ``source`` (a file or folder) to ``destination``: a rename on the same volume, else copy, check the sizes and
     delete the original. When ``source`` and ``destination`` are both folders (a kind folder such as Projects/, as
     ``moveContent`` passes them) their items are merged: an item whose name exists there moves under another name (" 2"),
@@ -2434,7 +2448,8 @@ def _mergeMove(source, destination, sameVolume, progress=None, renamed=None):
     deleted by the next move.
 
     ``renamed`` (a dict) receives ``{source: destination}`` for each item that moved under another name (" 2") because
-    its name was taken there.
+    its name was taken there. ``uniqueNameFor(folder, name)`` gives that other name instead of ``uniqueName`` (the items
+    of a merged folder only).
     """
     if _finishNamedCopy(source, renamed, progress):
         return
@@ -2448,7 +2463,10 @@ def _mergeMove(source, destination, sameVolume, progress=None, renamed=None):
                 continue
             target = os.path.join(destination, name)
             if os.path.exists(target):
-                target = os.path.join(destination, uniqueName(destination, name, isFile=os.path.isfile(os.path.join(source, name))))
+                if uniqueNameFor is not None:
+                    target = os.path.join(destination, uniqueNameFor(destination, name))
+                else:
+                    target = os.path.join(destination, uniqueName(destination, name, isFile=os.path.isfile(os.path.join(source, name))))
                 if renamed is not None:
                     renamed[os.path.join(source, name)] = target
             _mergeMove(os.path.join(source, name), target, sameVolume, progress, renamed)
@@ -2558,6 +2576,11 @@ def _mergeLnm(source, destination, sameVolume, progress=None, renamed=None):
             continue
         target = os.path.join(destination, name)
         if name in _LNM_APP_FOLDERS and os.path.isdir(item) and os.path.isdir(target):
+            if name == LNM_CONTROL_SETS_DIR:
+                # Its sets: "<name>-2" when the name is taken (a set name allows no space, a set "Pool 2" would not be
+                # listed). The set and the moved studies' links follow the new name (_controlSetsFollowMove)
+                _mergeMove(item, target, sameVolume, progress, renamed, uniqueNameFor=_uniqueControlSetName)
+                continue
             if name != LNM_REFERENCE_MAPS_DIR:
                 _mergeMove(item, target, sameVolume, progress, renamed)  # its items, " 2" when the name is taken
                 continue
@@ -2572,6 +2595,88 @@ def _mergeLnm(source, destination, sameVolume, progress=None, renamed=None):
         os.rmdir(source)
     except OSError:
         pass
+
+
+def _uniqueControlSetName(folder, name):
+    """A free control-set name for ``name`` in the registry ``folder``: "<name>-2", "<name>-3"... (``controlsets.unique_name``;
+    a set name allows letters, digits, "_", "." and "-" only). Worker-safe.
+    """
+    try:
+        from LesionNetworkMappingLib import controlsets
+    except ImportError:
+        return uniqueName(folder, name, isFile=False)
+    return controlsets.unique_name(folder, name)
+
+
+def _controlSetsBefore(oldRoot):
+    """What a move of ``oldRoot`` needs to make its control sets follow it (``_controlSetsFollowMove``), read before
+    anything moves: ``{"sets": {set folder name: absolute lesion folder}, "studies": [study folder names]}``, or None when
+    LNM/ControlSets/ of ``oldRoot`` has no set. Worker-safe; never raises.
+    """
+    registry = os.path.join(oldRoot, LNM_DIR, LNM_CONTROL_SETS_DIR)
+    sets = {}
+    for name in sorted(_visibleNames(registry)):
+        directory = os.path.join(registry, name)
+        data = readJson(os.path.join(directory, "controlset.json"))
+        folder = (data.get("folder") or ".") if isinstance(data, dict) else None
+        if not isinstance(folder, str):
+            continue
+        sets[name] = os.path.normpath(folder if os.path.isabs(folder) else os.path.join(directory, *folder.split("/")))
+    if not sets:
+        return None
+    return {"sets": sets, "studies": sorted(_visibleNames(os.path.join(oldRoot, STUDIES_DIR)))}
+
+
+def _controlSetsFollowMove(before, oldRoot, newRoot, absoluteRenames):
+    """Make the control sets that moved from ``oldRoot`` (``before``: ``_controlSetsBefore``) and the studies that moved
+    with them follow the move. A set's lesion folder is stored relative to the set folder, so the set records it again
+    from its new place (a lesion folder that moved with the folder is followed there). A set that moved under another
+    name ("Pool-2": the new folder had a set "Pool") is named so in its controlset.json, and the moved studies' rows
+    "controlset:Pool/..." link "Pool-2": by name they would resolve to the new folder's own set "Pool" (other lesions).
+    The new folder's own studies keep linking its own sets. Worker-safe; never raises.
+    """
+    if not before:
+        return
+    try:
+        from LesionNetworkMappingLib import controlsets
+        from LesionNetworkMappingLib.study import Study
+    except ImportError:
+        return
+    renamed = {}
+    for source, destination in absoluteRenames.items():
+        with contextlib.suppress(ValueError):
+            renamed[os.path.normpath(os.path.relpath(source, oldRoot))] = os.path.normpath(os.path.relpath(destination, newRoot))
+
+    def after(path):
+        """Where ``path`` (in ``oldRoot``) is now: None when it did not move (still there, or not moved there)."""
+        moved = pathAfterMove(path, oldRoot, newRoot, renamed)
+        return moved if moved != path and not os.path.lexists(path) and os.path.lexists(moved) else None
+
+    registry = os.path.join(oldRoot, LNM_DIR, LNM_CONTROL_SETS_DIR)
+    names = {}
+    for name, lesionFolder in (before.get("sets") or {}).items():
+        directory = after(os.path.join(registry, name))
+        if directory is None:
+            continue
+        try:
+            controlsets.relocate(directory, after(lesionFolder) or lesionFolder)
+        except Exception:
+            logging.warning(f"Slicer Studio: the moved control set {directory} could not follow the move", exc_info=True)
+            continue
+        if os.path.basename(directory) != name:
+            names[name] = os.path.basename(directory)
+    if not names:
+        return
+    for name in before.get("studies") or ():
+        folder = after(os.path.join(oldRoot, STUDIES_DIR, name))
+        if folder is None or not os.path.isfile(os.path.join(folder, "study.json")):
+            continue
+        try:
+            study = Study.open(folder)
+            if controlsets.rename_sets_in_study(study, names):
+                study.save(lock_timeout=5)
+        except Exception:
+            logging.warning(f"Slicer Studio: the moved study {folder} could not follow its renamed control sets", exc_info=True)
 
 
 def checkMoveTarget(oldRoot, newRoot):
@@ -2728,6 +2833,7 @@ def moveContent(oldRoot, newRoot, progress=None, renamed=None, renamedIds=None, 
     templatesBefore = None
     templatesChecked = False
     projectsBefore = None
+    controlSetsBefore = None
     if journal is not None:
         # What the interrupted run of this move renamed before it was killed (already in the journal)
         dict.update(absoluteRenames, journal.completedRenames())
@@ -2735,6 +2841,12 @@ def moveContent(oldRoot, newRoot, progress=None, renamed=None, renamedIds=None, 
             renamedIds.update(journal.completedIds(os.path.join(newRoot, TEMPLATES_DIR)))
         templatesBefore = journal.templatesBefore()
         projectsBefore = journal.projectsBefore()
+        controlSetsBefore = journal.controlSetsBefore()
+    if controlSetsBefore is None:
+        # Before anything moves (the journal keeps it for the move that finishes an interrupted one)
+        controlSetsBefore = _controlSetsBefore(oldRoot) or {}
+        if journal is not None:
+            journal.setControlSetsBefore(controlSetsBefore)
     try:
         for name in movableItems(oldRoot):
             target = os.path.join(newRoot, name)
@@ -2778,6 +2890,7 @@ def moveContent(oldRoot, newRoot, progress=None, renamed=None, renamedIds=None, 
         if renamedIds:
             _movedNormalizationsFollowRenamedIds(newRoot, renamedIds)
         _studiesFollowRenamedFolders(absoluteRenames, newRoot)  # also after a failed move: what moved is listed there
+        _controlSetsFollowMove(controlSetsBefore, oldRoot, newRoot, absoluteRenames)
         if renamed is not None:
             for source, destination in absoluteRenames.items():
                 renamed[os.path.normpath(os.path.relpath(source, oldRoot))] = os.path.normpath(os.path.relpath(destination, newRoot))

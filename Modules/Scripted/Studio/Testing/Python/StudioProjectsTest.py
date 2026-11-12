@@ -6705,6 +6705,77 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertNotIn(os.path.join(projects.LNM_DIR, "ReferenceMaps"), renamed)
         self.assertFalse(os.path.exists(os.path.join(oldRoot, projects.LNM_DIR)), "everything moved")
 
+    def test_79b_root_move_keeps_a_control_set_with_a_taken_name_listed_and_linked(self):
+        """Change folder > Move into a folder (deeper) whose LNM/ControlSets/ has a set "Pool" too (BB-1). The moved set
+        landed as "Pool 2", a name a set cannot have (no space), so it was no longer listed, and the moved study's rows
+        "controlset:Pool/..." resolved by name to the new folder's own "Pool": other lesions, silently. The moved set gets a
+        valid name ("Pool-2"), stays listed with its own lesions (its lesion folder is relative to the set folder, which
+        moved deeper), and the moved study links it; the new folder's own study keeps its own set.
+        """
+        try:
+            import numpy as np
+            from LesionNetworkMappingLib import controlsets, nifti
+            from LesionNetworkMappingLib.geometry import GRID_BY_ID
+            from LesionNetworkMappingLib.study import Study
+        except ImportError:
+            self.skipTest("the Map module is not available")
+        projects = self.projects
+        oldRoot = os.path.join(self.tempDir, "A", "Slicer Studio")
+        newRoot = os.path.join(self.tempDir, "B", "deep", "er", "Slicer Studio")
+        grid = GRID_BY_ID["NLin6-2mm"]
+        ijk = np.indices(grid.shape).reshape(3, -1).T
+        world = ijk @ grid.affine[:3, :3].T + grid.affine[:3, 3]
+
+        def lesions(tag, dx):
+            folder = os.path.join(self.userDir, tag)
+            for n in range(2):
+                inside = np.linalg.norm(world - np.asarray((dx, n * 8, 0), float), axis=1) <= 5 + n
+                os.makedirs(folder, exist_ok=True)
+                nifti.write_nifti(os.path.join(folder, f"ctl_{n:03d}_lesion.nii.gz"), inside.reshape(grid.shape).astype(np.uint8), grid.affine)
+            return folder
+
+        def registry(rootPath):
+            return controlsets.root_for_data_directory(os.path.join(rootPath, projects.LNM_DIR))
+
+        def study(rootPath, name, sets):
+            created = Study.create(os.path.join(rootPath, projects.STUDIES_DIR, name), name=name, space="MNI152NLin6Asym")
+            for setName in sets:
+                created.link_control_set(setName, root=registry(rootPath))
+            created.save()
+            return created
+
+        def resolved(path, rootPath):
+            opened = Study.open(path)
+            opened.controlset_root = registry(rootPath)
+            return {os.path.dirname(opened.abspath(row["lesion"])) for row in controlsets.linked_rows(opened)}
+
+        folders = {tag: lesions(tag, dx) for tag, dx in (("ctlA", -20), ("ctlA2", 0), ("ctlB", 20))}
+        controlsets.register_folder(folders["ctlB"], "Pool", root=registry(newRoot), space="MNI152NLin6Asym")
+        controlsets.register_folder(folders["ctlA"], "Pool", root=registry(oldRoot), space="MNI152NLin6Asym")
+        controlsets.register_folder(folders["ctlA2"], "Pool-2", root=registry(oldRoot), space="MNI152NLin6Asym")
+        study(newRoot, "Stroke", ["Pool"])
+        study(oldRoot, "Stroke", ["Pool", "Pool-2"])
+        self.assertEqual(resolved(os.path.join(oldRoot, projects.STUDIES_DIR, "Stroke"), oldRoot), {folders["ctlA"], folders["ctlA2"]})
+
+        projects.moveContent(oldRoot, newRoot, renamed={})
+
+        sets = controlsets.list_sets(registry(newRoot))
+        self.assertEqual(len(sets), 3, ("every set stays listed", os.listdir(registry(newRoot)), [entry["name"] for entry in sets]))
+        self.assertEqual(sorted(os.path.normpath(entry["folder_path"]) for entry in sets), sorted(folders.values()),
+                         "each set keeps its own lesions")
+        for entry in sets:
+            self.assertEqual(entry["name"], os.path.basename(entry["dir"]))
+            for lesion in entry["lesions"]:
+                self.assertTrue(os.path.isfile(os.path.join(entry["folder_path"], lesion["rel"])), lesion["rel"])
+        movedStudy = os.path.join(newRoot, projects.STUDIES_DIR, "Stroke 2")
+        self.assertEqual(resolved(movedStudy, newRoot), {folders["ctlA"], folders["ctlA2"]}, "the moved study keeps its own controls")
+        self.assertEqual(resolved(os.path.join(newRoot, projects.STUDIES_DIR, "Stroke"), newRoot), {folders["ctlB"]}, "the study there keeps its set")
+        opened = Study.open(movedStudy)
+        byName = {entry["name"]: entry for entry in sets}
+        for item in opened.control_sets:
+            self.assertEqual(item["sha256"], byName[item["name"]]["content_sha256"], "the link records the set it resolves to")
+            self.assertEqual(len(controlsets.study_control_lesions(opened, item["name"], registry(newRoot))), 2)
+
     def test_80_interrupted_root_move_to_another_volume_leaves_no_partial_copy_under_the_real_name(self):
         """Change folder > Move to another volume, killed during the copy, then the same move again (BB-1). The copy went
         straight to its real name (Projects/, or Projects/P2 when the new folder had Projects/ already), so the kill left

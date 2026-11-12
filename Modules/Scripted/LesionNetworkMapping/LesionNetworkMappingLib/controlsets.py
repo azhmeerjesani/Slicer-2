@@ -301,6 +301,50 @@ def unregister(name, root=None):
     shutil.rmtree(folder)
 
 
+def unique_name(registry, name):
+    """A valid set name for ``name`` that no folder of ``registry`` has (compared case-insensitively): ``name`` when it is
+    free, else "<name>-2", "<name>-3"... (a space is not allowed in a set name, so not "<name> 2"). At most 64 characters.
+    """
+    try:
+        taken = {entry.lower() for entry in os.listdir(registry)}
+    except OSError:
+        taken = set()
+    name = str(name or "set")
+    if NAME_PATTERN.match(name) and name.lower() not in taken:
+        return name
+    base = re.sub(r"[^A-Za-z0-9_.-]", "_", name).lstrip("_.-") or "set"
+    index = 2
+    while True:
+        suffix = f"-{index}"
+        candidate = base[:64 - len(suffix)] + suffix
+        if candidate.lower() not in taken:
+            return candidate
+        index += 1
+
+
+def relocate(directory, lesion_folder):
+    """A set folder ``directory`` that moved (a move of the Slicer Studio folder, maybe under another name): its
+    controlset.json gets the folder's name as its name and ``lesion_folder`` (the absolute lesion folder, where it is now)
+    relative to the new place; lesions.tsv follows. The lesions, their sha256 and the content sha256 are unchanged.
+    Return True when a file was rewritten.
+    """
+    json_path = os.path.join(directory, CONTROLSET_JSON)
+    entry = dict(_read_entry(json_path))
+    name = validate_name(os.path.basename(os.path.normpath(directory)))
+    folder = os.fspath(entry.get("folder") or ".")
+    new_folder = folder if os.path.isabs(folder) else _rel(lesion_folder, directory)
+    if entry.get("name") == name and new_folder == folder:
+        return False
+    entry["name"] = name
+    entry["folder"] = new_folder
+    lesion_folder = _join(directory, new_folder)
+    rows = "".join(f"{lesion['id']}\t{_rel(_join(lesion_folder, lesion['rel']), directory)}\t{lesion['sha256']}\n" for lesion in entry["lesions"])
+    _write_text_atomic(os.path.join(directory, LESIONS_TSV), "participant_id\tlesion\tlesion_sha256\n" + rows)
+    _write_text_atomic(json_path, json.dumps(entry, indent=1) + "\n")
+    _entries_cache.pop(json_path, None)
+    return True
+
+
 def set_lesions(entry, ids=None):
     """[(participant id, absolute lesion path, sha256)] of a set (all lesions, or those whose id is in ``ids``)."""
     entry = load(entry)
@@ -728,6 +772,32 @@ def is_control_row(row, name=None):
 def linked_rows(study, name=None):
     """The study rows linked from control sets (from the set ``name``)."""
     return [row for row in study.subjects if is_control_row(row, name)]
+
+
+def rename_sets_in_study(study, names):
+    """Make a study's links follow renamed sets: ``names`` is {old name: new name}, applied at once (a set renamed to the
+    old name of another one is not renamed twice). Rows ``controlset:<old>/<rel>`` become ``controlset:<new>/<rel>``
+    (source_dataset too), and study.json ``control_sets`` records the new names. Participant ids are kept. Return True
+    when the study changed (the caller saves it).
+    """
+    names = {old: new for old, new in names.items() if old != new}
+    changed = False
+    for row in linked_rows(study):
+        old, rel = parse_path(row["lesion"])
+        if old not in names:
+            continue
+        values = {"lesion": controlset_path(names[old], rel)}
+        if row.get("source_dataset") == old:
+            values["source_dataset"] = names[old]
+        study.set(row["participant_id"], values)
+        changed = True
+    sets = study.control_sets
+    if any(item["name"] in names for item in sets):
+        for item in sets:
+            item["name"] = names.get(item["name"], item["name"])
+        study.metadata["control_sets"] = sets
+        changed = True
+    return changed
 
 
 def study_maps_cache_roots(study, root=None):
