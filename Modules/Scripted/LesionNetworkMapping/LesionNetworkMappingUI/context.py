@@ -76,6 +76,7 @@ class MapContext:
         self._cards = {}
         self._focusHandler = None
         self._primaryOverrides = {}
+        self._primaryOverrideReasons = {}
         self._computeDisabled = {}
         #: True while the primary button is pinned in the Studio inspector footer (a card then keeps no second Run button)
         self.primaryPinned = False
@@ -203,18 +204,31 @@ class MapContext:
     # Primary action and compute state
     #
 
-    def setPrimaryOverride(self, mode, label, callback, enabledFn=None):
+    def setPrimaryOverride(self, mode, label, callback, enabledFn=None, reasonFn=None):
         """Make ``callback`` the primary action (the blue button and Ctrl+Enter) in seed ``mode``.
 
         ``label`` is the button text ("Run everything · 12 lesions"); ``enabledFn() -> bool`` (optional)
-        tells whether it can run. Notifies ``primaryOverrideChanged(mode)``.
+        tells whether it can run, and ``reasonFn() -> str`` (optional) why it cannot (shown under the button).
+        Notifies ``primaryOverrideChanged(mode)``.
         """
         self._primaryOverrides[mode] = (label, callback, enabledFn)
+        self._primaryOverrideReasons[mode] = reasonFn
         self._notify("primaryOverrideChanged", mode)
 
     def clearPrimaryOverride(self, mode):
+        self._primaryOverrideReasons.pop(mode, None)
         if self._primaryOverrides.pop(mode, None) is not None:
             self._notify("primaryOverrideChanged", mode)
+
+    def primaryOverrideReason(self, mode):
+        """Why the primary action override of ``mode`` cannot run ("" when it can, or when its owner gave no reason)."""
+        reasonFn = self._primaryOverrideReasons.get(mode)
+        if reasonFn is None:
+            return ""
+        try:
+            return str(reasonFn() or "")
+        except Exception:
+            return ""
 
     def primaryOverride(self, mode):
         """``(label, callback, enabledFn)`` of the primary action override of ``mode``, or None."""
@@ -296,5 +310,6 @@ class MapContext:
         self.afterRun.clear()
         self._cards.clear()
         self._primaryOverrides.clear()
+        self._primaryOverrideReasons.clear()
         self._computeDisabled.clear()
         self._focusHandler = None

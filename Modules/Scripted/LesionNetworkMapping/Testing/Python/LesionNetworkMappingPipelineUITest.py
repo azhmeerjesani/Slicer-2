@@ -656,6 +656,7 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
             self.assertEqual(card.runState(), (False, reason))
             self.assertFalse(card.runButton.enabled)
             self.assertFalse(widget.computeButton.enabled, "the primary override follows the block")
+            self.assertEqual(widget.computeReasonLabel.text, reason, "the reason is shown under the primary button")
             self.assertIsNone(card.run())
             widget.onPrimary()  # the Ctrl+Enter path
             card.runButton.click()
@@ -665,6 +666,28 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
             widget.ctx.setComputeEnabled(True, key="test-block")
         _pump(self.cp.APPLY_MS + 50)
         self.assertTrue(card.canRun(), card.runButton.toolTip)
+
+    def test_b1_disabled_primary_shows_the_card_reason(self):
+        """A disabled Run everything shows the card's reason under the primary button, not a bare 'Not ready' (in Studio the
+        card's own Run button, whose tooltip holds the reason, is hidden).
+        """
+        from unittest import mock
+
+        card, widget = self.card, self.widget
+        self._settle()
+        self.assertTrue(card.canRun(), card.runButton.toolTip)
+        with mock.patch.object(card, "eligibleCount", return_value=1):
+            self._settle()
+            enabled, reason = card.runState()
+            self.assertFalse(enabled)
+            self.assertEqual(reason, "The analysis needs at least 2 lesions that can be mapped.")
+            self.assertFalse(widget.computeButton.enabled)
+            self.assertEqual(widget.computeState(), (False, reason))
+            self.assertEqual(widget.computeReasonLabel.text, reason)
+        self._settle()
+        self.assertTrue(card.canRun(), card.runButton.toolTip)
+        self.assertTrue(widget.computeButton.enabled, widget.computeReasonLabel.text)
+        self.assertEqual(widget.computeReasonLabel.text, "")
 
     def test_b2_refused_rule_is_refused_before_the_run(self):
         """A primary rule refused for the connectome's N (|T| >= 7 convention, N = 20) disables Run everything with the rule's

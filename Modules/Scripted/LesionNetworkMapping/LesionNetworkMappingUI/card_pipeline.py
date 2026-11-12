@@ -1526,6 +1526,11 @@ class PipelineCard:
     def canRun(self):
         return self.runState()[0]
 
+    def primaryReason(self):
+        """Why Run everything cannot run ("" when it can), shown under the primary button."""
+        enabled, reason = self.runState()
+        return "" if enabled else reason
+
     def primaryLabel(self):
         n = self.eligibleCount()
         return (_("Run everything · 1 lesion") if n == 1 else _("Run everything · {n} lesions").format(n=n)) if n else _("Run everything")
@@ -1787,7 +1792,7 @@ class PipelineCard:
         failed = model is not None and model.state == jobrunner.FAILED
         _setText(self.warningsButton, _("Details (log)") if failed else _("Warnings ({n})").format(n=len(warnings)))
         _setVisible(self.warningsButton, bool(warnings) or failed)
-        primary = (self.primaryLabel(), enabled)
+        primary = (self.primaryLabel(), enabled, "" if enabled else reason)
         if primary != self._publishedPrimary or (running or external) != self._computeBlocked:
             qt.QTimer.singleShot(0, self._publishState)  # the Map widget updates its buttons in its own event
         if external and not self.externalTimer.isActive():
@@ -1809,10 +1814,13 @@ class PipelineCard:
         """The primary action of Seed = Cohort (D-A26): "Run everything · N lesions" (re-published when it changes)."""
         if not hasattr(self.ctx, "setPrimaryOverride"):
             return
-        state = (self.primaryLabel(), self.canRun())
+        enabled, reason = self.runState()
+        state = (self.primaryLabel(), enabled, "" if enabled else reason)
         if state != self._publishedPrimary:
             self._publishedPrimary = state
-            self.ctx.setPrimaryOverride("cohort", state[0], self.run, self.canRun)
+            # The reason goes with the action: in Studio the card's Run button (its tooltip) is hidden, so the Map widget
+            # shows it under the primary button
+            self.ctx.setPrimaryOverride("cohort", state[0], self.run, self.canRun, self.primaryReason)
 
     def _blockCompute(self, blocked):
         """Map network and Maps only are disabled (with the reason) while the pipeline runs."""

@@ -5044,7 +5044,10 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                 enabled = True if enabledFn is None else bool(enabledFn())
             except Exception:
                 enabled = False
-            return enabled, "" if enabled else _("Not ready")
+            if enabled:
+                return True, ""
+            reason = self.ctx.primaryOverrideReason(mode) if hasattr(self.ctx, "primaryOverrideReason") else ""
+            return False, reason or _("Not ready")
         if self.job is not None and (self.job.isRunning() or self.job.isQueued()):
             return False, _("Mapping…")
         if mode == "cohort":
