@@ -867,7 +867,9 @@ class CaseStrip:
         shell = _shell()
         if not others or shell is None:
             return
-        shell.toast(_("Changed for {sid}. The paper has {n} other cases with the old value").format(sid=sid, n=len(others)), ms=8000,
+        message = (_("Changed for {sid}. The paper has 1 other case with the old value") if len(others) == 1
+                   else _("Changed for {sid}. The paper has {n} other cases with the old value")).format(sid=sid, n=len(others))
+        shell.toast(message, ms=8000,
                     action=lambda: session.setValues(others, paperChanges), actionText=_("Apply to {n}").format(n=len(others)), level="consequence")
 
     def cancelEdit(self):

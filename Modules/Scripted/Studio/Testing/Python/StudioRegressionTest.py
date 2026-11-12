@@ -8195,6 +8195,27 @@ class StudioRegressionTest(unittest.TestCase):
             for _ in range(4):
                 slicer.app.processEvents()
 
+    def test_98_case_strip_paper_offer_uses_singular_for_one_other_case(self):
+        from types import SimpleNamespace
+
+        from StudioLib import casestrip, shell
+
+        toasts = []
+        fakeShell = SimpleNamespace(toast=lambda message, **kw: toasts.append(message))
+        original = shell.instance
+        shell.instance = lambda: fakeShell
+        try:
+            for others, expected in ((1, "1 other case with"), (2, "2 other cases with")):
+                rows = [{"participant_id": "sub-%d" % i, "record_id": "smith2019", "doi": "10.1/old"} for i in range(others + 1)]
+                session = SimpleNamespace(study=SimpleNamespace(subjects=rows), setValues=lambda *a: None)
+                del toasts[:]
+                casestrip.CaseStrip._offerForPaper(SimpleNamespace(), session, "sub-0", dict(rows[0]), {"doi": "10.1/new"})
+                self.assertEqual(len(toasts), 1)
+                self.assertIn(expected, toasts[0])
+                self.assertNotIn("1 other cases", toasts[0])
+        finally:
+            shell.instance = original
+
     def test_97_sliders_with_a_range_over_two_billion_steps_paint(self):
         intMin, intMax = -(2**31), 2**31 - 1
         widgets = []
