@@ -1076,8 +1076,12 @@ def statistics_section(records, used):
     if records.done_runs("calibration"):
         from . import calibrate  # numpy: imported only when a calibration was run
 
+        # A calibration counts for the reported analyses only when it was run for the design of one of them (as
+        # checklist item F8 decides); one of another design is described as such, without its rates.
+        groups = [("glm", data) for _, data in records.group_records("glm.json", "glm")] + [("slnm", data) for _, data in records.group_records("slnm.json", "slnm")]
         for run_id, data in reversed(calibrate.finished_records(records.root, records.runs)):
-            section.paragraph(calibration_paragraph(data, run_id, calibrate.rate_text))
+            current = not groups or any(calibrate.matches_group(data, group, kind) for kind, group in groups)
+            section.paragraph(calibration_paragraph(data, run_id, calibrate.rate_text) if current else stale_calibration_paragraph(data, run_id))
     for kind in [*STATISTICS_KINDS[3:], *sorted({r.get("kind") for r in records.runs.values()} - set(STATISTICS_KINDS) - {"map", "cohortmaps", "reference", "preflight", "figure", "report", "export", "normalization", "pipeline", "fastindex", "calibration", "parity", None})]:
         for record in records.done_runs(kind):
             if kind == "robustness" and records.overwritten(record):
@@ -1362,6 +1366,30 @@ def calibration_paragraph(data, run_id=None, rate_text=None):
         powers = "; ".join(f"beta = {_number(effect.get('beta'))}: {rate_text(effect.get('power'))}" for effect in effects)
         text += f". Planted-network recovery ({_or_nr(planted.get('n_sims'))} simulations per effect), power (any FWE voxel in the target): {powers}"
     return text + "."
+
+
+def _calibration_design_text(design):
+    """The design of a calibration.json record: contrast, test, n, covariates (with their transforms), statistic and
+    permutation scheme.
+    """
+    transforms = design.get("transforms") or {}
+    covariates = [f"{transforms[name]}({name})" if transforms.get(name) else str(name) for name in design.get("covariates") or []]
+    covariate_text = ", ".join(covariates) if covariates else "none" if design.get("covariates") is not None else NOT_RECORDED
+    return (
+        f"{_or_nr(design.get('label'))}, test {_or_nr(design.get('test'))}, n = {_or_nr(design.get('n'))}, covariates: {covariate_text}, "
+        f"statistic {_or_nr(design.get('stat'))}, permutation {_or_nr(design.get('permute'))}"
+    )
+
+
+def stale_calibration_paragraph(data, run_id=None):
+    """Methods text of a calibration.json record run for another design than every reported group analysis: it is
+    out of date (checklist item F8), so its rates are not cited as a calibration of the reported analyses.
+    """
+    design = data.get("design") or {}
+    return (
+        f"Pipeline calibration (run {run_id or data.get('run_id') or NOT_RECORDED}): out of date. It was run for another design "
+        f"({_calibration_design_text(design)}) than the group analyses reported here, so it does not calibrate them and its rates are not reported."
+    )
 
 
 def thresholds_section(records):

@@ -442,6 +442,16 @@ class CommandLineTest(_CalibrateTestCase):
         self.assertIn("calibration: out of date", item["value"])
         self.assertIn(calibration_id, item["evidence"])
         self.assertEqual(dot["colour"], checklist.AMBER)
+        # The methods do not cite it as a calibration of the configured analysis (BB-1
+        # methods-cite-out-of-date-calibration-as-configured-analysis): they say it was run for another design
+        text = methods.render(methods.methods_sections(study.path), fmt="txt")
+        self.assertIn(f"Pipeline calibration (run {calibration_id}): out of date", text)
+        self.assertIn("covariates: none", text)
+        self.assertNotIn("the configured analysis", text)
+        self.assertNotIn("Empirical family-wise error rate", text)
+        raw["design"]["covariates"], raw["design"]["transforms"] = ["volume_ml"], {"volume_ml": "log"}
+        calibrate.write_record(record_path, raw)
+        self.assertIn("covariates: log(volume_ml)", methods.render(methods.methods_sections(study.path), fmt="txt"))
 
     def test_blocked_and_usage(self):
         study = self.make_study(4, 0)
