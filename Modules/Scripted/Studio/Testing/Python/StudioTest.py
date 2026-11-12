@@ -1047,16 +1047,20 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
 
         handler = _Handler()
         logging.getLogger().addHandler(handler)
-        originalDisplay = slicer.util.errorDisplay
-        slicer.util.errorDisplay = lambda text, **kwargs: shown.append((text, kwargs))
+        # An unwritable folder is a refusal, not an error: it is reported with warningDisplay
+        originalDisplay, originalError, errors = slicer.util.warningDisplay, slicer.util.errorDisplay, []
+        slicer.util.warningDisplay = lambda text, **kwargs: shown.append((text, kwargs))
+        slicer.util.errorDisplay = lambda text, **kwargs: errors.append((text, kwargs))
         os.access = lambda p, mode, *a, **k: False if os.path.normpath(str(p)) == os.path.normpath(folder) else originalAccess(p, mode, *a, **k)
         try:
             self.assertIsNone(draw.saveLesionDialog(studioShell, path=target))
         finally:
             os.access = originalAccess
-            slicer.util.errorDisplay = originalDisplay
+            slicer.util.warningDisplay = originalDisplay
+            slicer.util.errorDisplay = originalError
             logging.getLogger().removeHandler(handler)
         self.assertEqual(len(shown), 1)
+        self.assertEqual(errors, [])
         self.assertIn("the folder", shown[0][0])
         self.assertIn("cannot be written", shown[0][0])
         self.assertEqual(open(target, "rb").read(), b"old")
