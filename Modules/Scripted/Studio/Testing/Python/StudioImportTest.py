@@ -1230,6 +1230,43 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             slicer.util.errorDisplay, slicer.util.warningDisplay, importer.openAddDataDialog = original
 
+    def test_damaged_png_figure_refused_without_error_rows(self):
+        """A text file or a cut-off file named .png is refused with the box only: the volume readers never run on it, so no
+        ERROR row is logged and the error badge stays down (as for a damaged NIfTI).
+        """
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("library")
+        self._pump()
+        textPath = os.path.join(self.directory, "fig_text.png")
+        with open(textPath, "w") as stream:
+            stream.write("this is not an image\n" * 20)
+        good = self._writeFigure("fig_good.png")
+        with open(good, "rb") as stream:
+            data = stream.read()
+        cut = os.path.join(self.directory, "fig_cut.png")
+        with open(cut, "wb") as stream:
+            stream.write(data[: len(data) // 2])
+        model = slicer.app.errorLogModel()
+
+        def errorRows():
+            return sum(1 for row in range(model.rowCount()) if "rror" in str(model.index(row, 2).data()))
+
+        shown = []
+        original = (slicer.util.errorDisplay, slicer.util.warningDisplay)
+        slicer.util.errorDisplay = slicer.util.warningDisplay = lambda text, **kw: shown.append(text)
+        try:
+            before = errorRows()
+            for path in (textPath, cut):
+                result = importer.handleDrop([path], shell=studioShell)
+                self._pump(5)
+                self.assertEqual(len(result.figures), 0, path)
+            self.assertEqual(len(shown), 2)
+            self.assertEqual(errorRows(), before)
+        finally:
+            slicer.util.errorDisplay, slicer.util.warningDisplay = original
+
     @staticmethod
     def _lastEmptyReason(path):
         from StudioLib import importer

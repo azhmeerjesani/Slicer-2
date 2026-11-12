@@ -5110,6 +5110,23 @@ def adoptShownFigure(shell=None):
     return background
 
 
+def _checkPlainImageReadable(path):
+    """Refuse a damaged .png/.jpg/.bmp before a reader runs on it: the volume readers log ERROR rows (and light the error
+    badge) for a file that is cleanly refused here. Other formats are left to the volume readers.
+    """
+    if os.path.splitext(str(path))[1].lower() not in (".png", ".jpg", ".jpeg", ".bmp"):
+        return
+    extension = os.path.splitext(str(path))[1].lower()
+    with open(path, "rb") as stream:
+        head = stream.read(8)
+    # A .png must be a PNG (ITK reads by extension); QImage reads the whole file, so a cut file fails too
+    wrongKind = extension == ".png" and head != b"\x89PNG\r\n\x1a\n"
+    image = qt.QImage()
+    if wrongKind or not image.load(str(path)) or image.isNull():
+        raise RefusedFileError(_("{name} could not be read as an image (it may be damaged, or another kind of file saved under "
+                                 "this name), so it was not opened.").format(name=os.path.basename(str(path))))
+
+
 def _routeFigure(path, shell, result, figureNode=None):
     """Show a figure next to the template (module documentation). On error, the Add Data dialog opens with it (3D Slicer's route).
 
@@ -5130,6 +5147,7 @@ def _routeFigure(path, shell, result, figureNode=None):
                 raise RefusedFileError(_("{name} was not opened: the file no longer exists.").format(name=os.path.basename(str(path))))
             if os.path.getsize(path) == 0:
                 raise RefusedFileError(_("{name} is empty (0 bytes), so it was not opened.").format(name=os.path.basename(path)))
+            _checkPlainImageReadable(path)
             with slicer.util.WaitCursor():
                 figureNode = slicer.util.loadVolume(path, {"singleFile": True, "show": False})
         except Exception as e:
