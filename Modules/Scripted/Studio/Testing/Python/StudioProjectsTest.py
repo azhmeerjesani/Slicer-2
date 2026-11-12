@@ -9787,6 +9787,85 @@ sys.exit(web.command_local(args))
             slicer.app.processEvents()
 
 
+    def test_112_classic_load_scene_asks_when_the_open_project_cannot_be_saved(self):
+        """Classic File > Load Scene while the open project could not be saved (disk full, read-only folder) asked nothing:
+        clearing the scene released the project and its edits were lost, with no recovery slot (BB-1). The main window now
+        announces the load (loadSceneRequested) and the user is asked as for Open scene: "Keep working" loads nothing and
+        keeps the project open with its edits; "Open without saving" lets the load go on, for that load only.
+        """
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        mainWindow = slicer.util.mainWindow()
+        action = mainWindow.findChild(qt.QAction, "FileLoadSceneAction") if mainWindow is not None else None
+        if action is None or not hasattr(mainWindow, "loadSceneRequested"):
+            self.skipTest("the main window has no Load Scene hook")
+        service = self._service()
+        self.assertTrue(service.connectCloseSummary())  # disconnected by dispose() in tearDown
+        volume, _path = self._userVolume("Scan", shape=(12, 14, 16), extension=".nrrd")
+        project = self._projectFor(service)
+        self._save(service)
+        array = slicer.util.arrayFromVolume(volume)
+        array[:] = 321  # the edit that cannot be saved
+        slicer.util.arrayFromVolumeModified(volume)
+
+        asked = []
+
+        def answer(index):
+            def question(parent, title, text, buttons, default=0):
+                asked.append((title, text, list(buttons), default))
+                return index
+            return question
+
+        dialogs = []
+        with mock.patch.object(service, "saveNow", lambda *args, **kwargs: False), mock.patch.object(projects_ui, "_shell", lambda: None):
+            service._projectPausedReason = "less than 1.2 MB free on the disk"
+            with mock.patch.object(projects_ui, "_question", answer(2)):
+                # Keep working: the file dialog is not even shown (it would block the test), nothing is loaded
+                timer = qt.QTimer()
+                timer.setSingleShot(True)
+                timer.setInterval(500)
+
+                def closeDialogs():
+                    for widget in qt.QApplication.topLevelWidgets():
+                        if widget.isVisible() and widget.inherits("QFileDialog"):
+                            dialogs.append(widget)
+                            widget.reject()
+                timer.connect("timeout()", closeDialogs)
+                timer.start()
+                action.trigger()
+                timer.stop()
+            self.assertEqual(dialogs, [], "Keep working: no file dialog is shown")
+            self.assertEqual(len(asked), 1, "the user is asked before the scene with unsaved edits is replaced")
+            title, text, buttons, default = asked[0]
+            self.assertEqual(title, "Open scene")
+            self.assertEqual(len(buttons), 3)
+            self.assertIn("less than 1.2 MB free", text)
+            self.assertEqual(default, 2, "keeping the work is the default")
+            self.assertIs(service.project, project, "the project that could not be saved stays open")
+            self.assertIsNotNone(slicer.mrmlScene.GetNodeByID(volume.GetID()))
+            self.assertTrue((slicer.util.arrayFromVolume(volume) == 321).all(), "its edits are kept")
+            self.assertFalse(mainWindow.property("SlicerStudioLoadSceneAnswer"), "the answer is cleared after use")
+
+            # Open without saving: the load may go on (the close then does not try and fail to save again), for that load only
+            with mock.patch.object(projects_ui, "_question", answer(1)):
+                mainWindow.setProperty("SlicerStudioLoadSceneAnswer", "")
+                mainWindow.loadSceneRequested()
+            self.assertEqual(len(asked), 2)
+            self.assertNotEqual(mainWindow.property("SlicerStudioLoadSceneAnswer"), "cancel")
+            self.assertTrue(service._discardOnClose)
+            mainWindow.loadSceneFinished()
+            self.assertFalse(service._discardOnClose, "the choice applies to that load only (its file dialog may be cancelled)")
+
+        # Without a project the official Load Scene is unchanged: nothing is asked
+        service.releaseProject()
+        with mock.patch.object(projects_ui, "_question", answer(2)):
+            mainWindow.setProperty("SlicerStudioLoadSceneAnswer", "")
+            mainWindow.loadSceneRequested()
+        self.assertEqual(len(asked), 2)
+        self.assertFalse(mainWindow.property("SlicerStudioLoadSceneAnswer"))
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 

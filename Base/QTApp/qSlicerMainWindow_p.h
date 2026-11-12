@@ -64,6 +64,8 @@ public:
   virtual bool isSceneContentModifiedSinceRead(QString& details);
   virtual bool confirmCloseApplication();
   virtual bool confirmCloseScene();
+  /// False if a handler of loadSceneRequested() answered "cancel" (the scene must not be replaced).
+  bool confirmLoadScene();
 
   /// Exit confirmations described by the application (closeSummaryRequested()). Return true to close.
   bool confirmCloseApplicationUnsavedLesion(const QString& summary);

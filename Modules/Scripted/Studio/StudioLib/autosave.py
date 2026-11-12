@@ -552,6 +552,11 @@ class AutosaveService:
             mainWindow = slicer.util.mainWindow()
             if mainWindow is not None:
                 mainWindow.disconnect("closeSummaryRequested()", self.flushForClose)
+                if hasattr(mainWindow, "closeSceneSummaryRequested"):
+                    mainWindow.disconnect("closeSceneSummaryRequested()", self.flushForClose)
+                if hasattr(mainWindow, "loadSceneRequested") and hasattr(mainWindow, "loadSceneFinished"):
+                    mainWindow.disconnect("loadSceneRequested()", self._onLoadSceneRequested)
+                    mainWindow.disconnect("loadSceneFinished()", self._onLoadSceneFinished)
             self._closeSummaryConnected = False
         self._removeObservers()
         self._removePlanObservers()
@@ -2123,8 +2128,32 @@ class AutosaveService:
         mainWindow.connect("closeSummaryRequested()", self.flushForClose)
         if hasattr(mainWindow, "closeSceneSummaryRequested"):
             mainWindow.connect("closeSceneSummaryRequested()", self.flushForClose)
+        if hasattr(mainWindow, "loadSceneRequested") and hasattr(mainWindow, "loadSceneFinished"):
+            mainWindow.connect("loadSceneRequested()", self._onLoadSceneRequested)
+            mainWindow.connect("loadSceneFinished()", self._onLoadSceneFinished)
         self._closeSummaryConnected = True
         return True
+
+    def _onLoadSceneRequested(self):
+        """File > Load Scene (or a recently loaded scene) of the main window is about to replace the scene (Classic, or an
+        action triggered directly): the open project is saved first, and if that fails the user is asked as for Open scene
+        (``confirmReplaceProject``), instead of the scene close releasing the project and losing its edits silently.
+        Without a project open, the official behaviour is kept (the closed scene keeps its autosave slot).
+        """
+        mainWindow = slicer.util.mainWindow()
+        if mainWindow is None or self.project is None or self._recovering != 0 or not self.enabled():
+            return
+        try:
+            keep = not self.confirmReplaceProject(_("Open scene"))
+        except Exception:
+            logging.error("Slicer Studio: saving the project before Load Scene failed:\n" + traceback.format_exc())
+            keep = False
+        if keep:
+            mainWindow.setProperty("SlicerStudioLoadSceneAnswer", "cancel")
+
+    def _onLoadSceneFinished(self):
+        # "Open without saving" / "Save a copy…" apply to that load only (its file dialog may have been cancelled)
+        self._discardOnClose = False
 
     def flushForClose(self):
         """The application is closing: save the project now (nothing is asked when this succeeds). Return the result."""

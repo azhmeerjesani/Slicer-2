@@ -218,6 +218,15 @@ signals:
   /// \sa closeSummaryRequested()
   void closeQuestionRequested();
 
+  /// Emitted before File > Load Scene (or a recently loaded scene that replaces the scene) clears the scene, after
+  /// the main window property SlicerStudioLoadSceneAnswer is cleared. A handler connected with a direct connection
+  /// may set it to "cancel": nothing is loaded (for example, the open project could not be saved and the user keeps
+  /// working in it). loadSceneFinished() is emitted afterwards in every case.
+  void loadSceneRequested();
+
+  /// Emitted after the load that loadSceneRequested() announced is done, cancelled or failed.
+  void loadSceneFinished();
+
 protected slots:
   virtual void onModuleLoaded(const QString& moduleName);
   virtual void onModuleAboutToBeUnloaded(const QString& moduleName);

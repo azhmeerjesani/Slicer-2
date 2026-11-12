@@ -804,6 +804,17 @@ bool qSlicerMainWindowPrivate::isSceneContentModifiedSinceRead(QString& details)
 }
 
 //-----------------------------------------------------------------------------
+bool qSlicerMainWindowPrivate::confirmLoadScene()
+{
+  Q_Q(qSlicerMainWindow);
+  q->setProperty("SlicerStudioLoadSceneAnswer", QVariant());
+  emit q->loadSceneRequested();
+  const bool load = q->property("SlicerStudioLoadSceneAnswer").toString() != "cancel";
+  q->setProperty("SlicerStudioLoadSceneAnswer", QVariant());
+  return load;
+}
+
+//-----------------------------------------------------------------------------
 bool qSlicerMainWindowPrivate::confirmCloseScene()
 {
   Q_Q(qSlicerMainWindow);
@@ -1314,7 +1325,12 @@ void qSlicerMainWindow::on_FileImportSceneAction_triggered()
 //---------------------------------------------------------------------------
 void qSlicerMainWindow::on_FileLoadSceneAction_triggered()
 {
-  qSlicerApplication::application()->ioManager()->openLoadSceneDialog();
+  Q_D(qSlicerMainWindow);
+  if (d->confirmLoadScene())
+  {
+    qSlicerApplication::application()->ioManager()->openLoadSceneDialog();
+  }
+  emit loadSceneFinished();
 }
 
 //---------------------------------------------------------------------------
@@ -1589,8 +1605,19 @@ void qSlicerMainWindow::onFileRecentLoadedActionTriggered()
 
   qSlicerApplication* app = qSlicerApplication::application();
 
+  // A scene loaded with "clear" replaces the scene: the application may keep it (see loadSceneRequested())
+  const bool replacesScene = fileType == QString("SceneFile") && fileProperties.value("clear").toBool();
+  if (replacesScene && !d->confirmLoadScene())
+  {
+    emit loadSceneFinished();
+    return;
+  }
   vtkNew<vtkMRMLMessageCollection> userMessages;
   bool success = app->coreIOManager()->loadNodes(fileType, fileProperties, nullptr, userMessages);
+  if (replacesScene)
+  {
+    emit loadSceneFinished();
+  }
   qSlicerIOManager::showLoadNodesResultDialog(success, userMessages);
 }
 
