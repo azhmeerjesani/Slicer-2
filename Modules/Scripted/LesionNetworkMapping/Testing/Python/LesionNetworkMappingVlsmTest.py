@@ -224,6 +224,39 @@ class VlsmRunTest(unittest.TestCase):
         self.assertNotIn("volume_off", [check.code for check in reason.design.warnings])
         self.assertEqual(reason.design.spec.volume_off_reason, "matched volumes")
 
+    def test_methods_paragraph_describes_the_run(self):
+        """The Statistics methods text of a VLSM run names the rule actually used (overlap rule, contrast, covariates,
+        permutation method, corrections), the smallest observed FWE p rather than the attainable floor 1/n_perm, and
+        describes VLSM as location, not as a network (bug bash: it was a dump of the registry summary keys).
+        """
+        from LesionNetworkMappingLib import methods
+
+        study, _scores = make_study(os.path.join(self.tmp, "methods-study"), n=24, seed=5)
+        spec = designlib.DesignSpec(test="continuous", score_column="score", contrast="negative", group_column=None, covariates=["volume_ml"])
+        record = vlsm.vlsm(study.path, spec, grid=self.grid, space=SPACE, min_lesions=6, min_percent=0, n_perm=1000, seed=3)
+        text = methods.render([methods.find_section(methods.methods_sections(study.path), "statistics")], "txt")
+        self.assertIn("at least 6 lesions were tested", text)
+        self.assertIn(f"{record['min_overlap']['n_voxels_tested']} voxels", text)
+        self.assertIn(f"contrast {record['contrast']['label']} (negative)", text)
+        self.assertIn("covariates: volume_ml (total lesion volume).", text)
+        self.assertIn("Freedman-Lane", text)
+        self.assertIn("1000 permutations, seed 3", text)
+        self.assertIn("voxelwise max-statistic FWE (primary, alpha 0.05) and Benjamini-Hochberg FDR", text)
+        observed = methods._number(record["fwe"]["min_p"])
+        self.assertIn(f"the smallest observed FWE p was {observed} (the smallest attainable p is 0.001)", text)
+        self.assertNotIn("min_p", text)
+        self.assertNotIn("network associated with", text)
+        self.assertIn("VLSM tests location, not the network", text)
+        self.assertEqual(methods.lint_wording(text), [])
+        # The registry summary names the attainable floor as such and keeps the observed FWE minimum
+        summary = runs.load(study.path)[record["run_id"]]["summary"]
+        self.assertNotIn("min_p", summary)
+        self.assertEqual((summary["min_attainable_p"], summary["fwe_min_p"]), (record["min_attainable_p"], record["fwe"]["min_p"]))
+        # Without vlsm.json (or a registry written before), the old summary "min_p" is called the attainable p
+        legacy = methods.vlsm_summary_text({"n": 24, "n_voxels": 73, "n_perm": 1000, "fwe_significant": 0, "min_p": 0.001}, "vlsm-old")
+        self.assertIn("smallest attainable p 0.001", legacy)
+        self.assertNotIn("min_p", legacy)
+
     def test_group_contrast_and_refusals(self):
         out = os.path.join(self.tmp, "groups")
         record = vlsm.vlsm(self.study.path, designlib.DesignSpec(levels=["case", "control"], contrast="A>B"), grid=self.grid, space=SPACE, n_perm=200, out_dir=out, register=False)

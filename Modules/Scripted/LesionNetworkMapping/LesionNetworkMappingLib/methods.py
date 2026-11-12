@@ -103,6 +103,9 @@ KIND_LABELS = {
     "vlsm": "Voxel-based lesion-symptom mapping",
     "circuits": "Circuits",
 }
+VLSM_JSON = "vlsm.json"
+#: How VLSM results are described: VLSM tests lesion location, not a network (vlsm.INTERPRETATION)
+VLSM_CLAIM = "Voxel-based lesion-symptom mapping results are described as lesion locations associated with the tested contrast or score; VLSM tests location, not the network."
 NULL_CAPTION = "Null models benchmark significance; they do not by themselves establish disease specificity (van den Heuvel et al. 2026b); see also Zalesky & Cash 2026; Siddiqi et al. 2026."
 #: Inflections of "localize" (claim wording); "localization" stays allowed (the title of Boes et al., 2015)
 _LOCALIZE_INFLECTIONS = r"locali[sz](?:e|es|ed|ing)"
@@ -1082,11 +1085,22 @@ def statistics_section(records, used):
         for run_id, data in reversed(calibrate.finished_records(records.root, records.runs)):
             current = not groups or any(calibrate.matches_group(data, group, kind) for kind, group in groups)
             section.paragraph(calibration_paragraph(data, run_id, calibrate.rate_text) if current else stale_calibration_paragraph(data, run_id))
+    network_found = found
+    vlsm_records = dict(records.group_records(VLSM_JSON, "vlsm"))
     for kind in [*STATISTICS_KINDS[3:], *sorted({r.get("kind") for r in records.runs.values()} - set(STATISTICS_KINDS) - {"map", "cohortmaps", "reference", "preflight", "figure", "report", "export", "normalization", "pipeline", "fastindex", "calibration", "parity", None})]:
         for record in records.done_runs(kind):
             if kind == "robustness" and records.overwritten(record):
                 continue  # a later Robust run wrote its results to the same folder: only that run is cited
             found = True
+            if kind == "vlsm":
+                # VLSM tests lesion location (not a network): its own paragraph from vlsm.json, never the summary keys
+                data = vlsm_records.get(record["id"])
+                used.update(("winkler2014", "benjamini1995"))
+                if data is not None and (data.get("tfce") or {}).get("enabled"):
+                    used.add("smith2009")
+                section.paragraph(vlsm_paragraph(data, record["id"]) if data is not None else vlsm_summary_text(records.summary(record) or {}, record["id"]))
+                continue
+            network_found = True
             summary = records.summary(record) or {}
             if kind == "robustness":
                 body = robustness_text(summary, records.params(record), records.seeds(record))
@@ -1098,8 +1112,88 @@ def statistics_section(records, used):
             section.paragraph(text)
     if not found:
         section.paragraph(f"Group statistics: {NOT_RUN} (no group analysis in the run registry).")
-    section.paragraph(f"Results are described as the {CLAIM_TEMPLATE.format('the tested contrast or score')}; no test gives an automatic verdict on specificity.")
+    vlsm_done = bool(records.done_runs("vlsm"))
+    if network_found or not vlsm_done:
+        section.paragraph(f"Results are described as the {CLAIM_TEMPLATE.format('the tested contrast or score')}; no test gives an automatic verdict on specificity.")
+    if vlsm_done:
+        section.paragraph(VLSM_CLAIM)
     return section
+
+
+def _covariate_text(data):
+    covariates = data.get("covariates")
+    text = ", ".join(f"{covariate} (total lesion volume)" if covariate == "volume_ml" else str(covariate) for covariate in covariates) if covariates else "none"
+    if data.get("volume_off_reason"):
+        text += f" (lesion volume off: {data['volume_off_reason']})"
+    return text
+
+
+def _overlap_rule_text(overlap):
+    """'6 lesions', or 'max(5, 10%) of the lesions (here 8 lesions)', of a vlsm.json min_overlap record."""
+    rule, count = overlap.get("rule"), overlap.get("min_count")
+    if not rule:
+        return f"{_or_nr(count)} lesions"
+    if re.fullmatch(r"\d+ lesions?", str(rule)):
+        return str(rule)
+    return f"{rule} of the lesions (here {_or_nr(count)} lesions)"
+
+
+def vlsm_paragraph(data, run_id=None):
+    """Methods text of a vlsm.json record (voxel-based lesion-symptom mapping, L-50): binary lesion masks, the design
+    and contrast, the covariates, the minimum-overlap rule and the voxels it left, the permutation method, the
+    corrections and the smallest observed FWE p (next to the smallest attainable p, which is not a result).
+    """
+    contrast = data.get("contrast") or {}
+    overlap = data.get("min_overlap") or {}
+    fwe, fdr = data.get("fwe") or {}, data.get("fdr") or {}
+    tfce = data.get("tfce") or {}
+    direction = contrast.get("spec")
+    contrast_text = _or_nr(contrast.get("label"))
+    if direction and direction != contrast.get("label"):
+        contrast_text += f" ({direction})"
+    binarize = _number(overlap.get("binarize_at"))
+    all_lesioned = overlap.get("n_voxels_all_lesioned")
+    tested = overlap.get("n_voxels_tested", data.get("n_voxels"))
+    text = (
+        f"{KIND_LABELS['vlsm']} (run {run_id or data.get('run_id') or NOT_RECORDED}): binary lesion masks"
+        f"{f' (occupancy ≥ {binarize})' if binarize else ''} as the voxelwise outcome; design {_or_nr(data.get('design_type'))} (test {_or_nr(data.get('test'))}), "
+        f"contrast {contrast_text}, n = {_or_nr(data.get('n'))} ({_or_nr(data.get('n_excluded', 0))} excluded listwise); covariates: {_covariate_text(data)}. "
+        f"Minimum overlap: only voxels lesioned in at least {_overlap_rule_text(overlap)} were tested, {_or_nr(tested)} voxels"
+    )
+    if all_lesioned:
+        text += f" ({all_lesioned} voxels lesioned in every lesion were not tested: no variance)"
+    tfce_text = (
+        f"TFCE (H = {_number(tfce.get('H')) or NOT_RECORDED}, E = {_number(tfce.get('E')) or NOT_RECORDED}) with FWE from the maximum TFCE of each permutation (Smith & Nichols, 2009)"
+        if tfce.get("enabled")
+        else "TFCE was not used"
+    )
+    alpha = _number(fwe.get("alpha")) or NOT_RECORDED
+    text += (
+        f". Inference: {_permutation_text(data.get('permutation'))}; statistic {_or_nr(data.get('stat'))}, {_tails_text(data.get('tails'))}, df = {_or_nr(data.get('df'))}. "
+        f"Correction: voxelwise max-statistic FWE (primary, alpha {alpha}) and Benjamini-Hochberg FDR (secondary, q {_number(fdr.get('alpha')) or NOT_RECORDED}); {tfce_text}; "
+        "no cluster-extent inference (cluster tables are descriptive). "
+        f"Result: {_or_nr(fwe.get('n_significant'))} voxels with FWE p ≤ {alpha}, {_or_nr(fdr.get('n_significant'))} with FDR q ≤ {_number(fdr.get('alpha')) or NOT_RECORDED}; "
+        f"the smallest observed FWE p was {_number(fwe.get('min_p')) or NOT_RECORDED} (the smallest attainable p is {_number(data.get('min_attainable_p', data.get('min_p'))) or NOT_RECORDED})."
+    )
+    return text
+
+
+def vlsm_summary_text(summary, run_id=None):
+    """Methods text of a VLSM run whose vlsm.json is gone: the registry summary, named in words. Its "min_p" (registries
+    written before "min_attainable_p") is the smallest attainable p, never an observed one.
+    """
+    attainable = summary.get("min_attainable_p", summary.get("min_p"))
+    parts = [
+        f"design {_or_nr(summary.get('design_type'))}",
+        f"n = {_or_nr(summary.get('n'))}",
+        f"{_or_nr(summary.get('n_voxels'))} voxels tested after the minimum-overlap rule",
+        f"{_or_nr(summary.get('n_perm'))} permutations",
+        f"{_or_nr(summary.get('fwe_significant'))} voxels with voxelwise max-statistic FWE p ≤ 0.05",
+    ]
+    if summary.get("fwe_min_p") is not None:
+        parts.append(f"smallest observed FWE p {_number(summary['fwe_min_p']) or NOT_RECORDED}")
+    parts.append(f"smallest attainable p {_number(attainable) or NOT_RECORDED}")
+    return f"{KIND_LABELS['vlsm']} (run {run_id or NOT_RECORDED}; vlsm.json {NOT_RECORDED}): {'; '.join(parts)}."
 
 
 def _generic_text(data, keys=None):

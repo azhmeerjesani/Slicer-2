@@ -634,8 +634,8 @@ def vlsm(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESION
             emit("result", kind="vlsm", path=path)
         if run_id:
             runs.update(run_root, run_id, status="done", ended=record["end"], outputs=[os.path.basename(path) for path in outputs],
-                        summary={"n": design.n, "n_voxels": matrix.n_voxels, "n_perm": int(result.n_perm), "fwe_significant": numbers["fwe"]["n_significant"], "min_p": result.min_p,
-                                 "design_type": design.design_type})
+                        summary={"n": design.n, "n_voxels": matrix.n_voxels, "n_perm": int(result.n_perm), "fwe_significant": numbers["fwe"]["n_significant"],
+                                 "fwe_min_p": numbers["fwe"]["min_p"], "min_attainable_p": result.min_p, "design_type": design.design_type})
         emit("done", outputs=outputs, elapsed=round(time.monotonic() - started, 3), run_id=run_id, n_perm=int(result.n_perm), n_voxels=matrix.n_voxels)
         out = read_record(json_path)
         out["record"] = json_path
