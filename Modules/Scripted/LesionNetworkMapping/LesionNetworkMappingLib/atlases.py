@@ -522,6 +522,8 @@ def _label_atlas(occ, affine, total, atlas, top, min_pct, result):
             continue
         region = counts[value] * voxel
         name = atlas.label_name(value)
+        if atlas.id in _CEREBELLAR_ATLASES:  # the provider's table misspells "Netowrk6": name it as the Result card does
+            name = _cerebellar_text(atlas, value, name)
         row = LabelRow(atlas.id, name, pct_mask, 100.0 * float(volumes[index]) / region)
         rows.append(row)
         result.details.append(

@@ -123,6 +123,21 @@ class PeakRegionsTest(unittest.TestCase):
             names = atlases.peak_regions(points, space="MNI152NLin6Asym", cache=tempfile.gettempdir())
         self.assertEqual(names, ["R cerebellum (Cont network)", "Cerebellum (SalVentAttn network)", "L cerebellum (network 12)", "L caudate"])
 
+    def test_cluster_labels_of_the_buckner_atlas_fix_the_provider_typo(self):
+        # The Clusters card and clusters.tsv name a cerebellar label like the Result card, not "Netowrk6" / "Network7"
+        data = np.zeros(SHAPE, np.int16)
+        data[12:16, 2:6, 2:6] = 6
+        data[8:12, 2:6, 8:12] = 7
+        buckner = atlases.Atlas("buckner2011-cerebellum-7n-1mm", data, AFFINE, {6: "Netowrk6", 7: "Network7"}, family="fsl6",
+                                space="MNI152NLin6Asym", networks="yeo7")
+        occupancy = np.zeros(SHAPE)
+        occupancy[12:16, 2:6, 2:6] = 1
+        occupancy[8:12, 2:6, 8:12] = 1
+        result = atlases.label_mask(occupancy, AFFINE, [buckner], allow_cross_family=True)
+        names = sorted(row.label for row in result)
+        self.assertEqual(names, ["Cerebellum (Cont network)", "Cerebellum (Default network)"])
+        self.assertFalse(any("Netowrk" in str(detail["label"]) for detail in result.details))
+
     def test_outside_the_atlas_grid(self):
         names = atlases.peak_regions([[500.0, 0.0, 0.0]], atlases=[subcortical()])
         self.assertEqual(names, [atlases.OUTSIDE_ATLAS])
