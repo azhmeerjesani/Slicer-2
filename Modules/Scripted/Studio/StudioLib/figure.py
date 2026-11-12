@@ -625,6 +625,8 @@ class FigureSession:
         self._placing = None
         self._interactionObservation = None
         self._pendingTemplate = None
+        #: (scene, tag): a landmark list removed from the scene gets replaced (``_onNodeRemoved``)
+        self._sceneObservation = None
         self._guard = _ViewGuard(FIGURE_VIEW)
         self._refitTimer = qt.QTimer()
         self._refitTimer.setSingleShot(True)
@@ -671,23 +673,8 @@ class FigureSession:
         transform = scene.AddNewNodeByClass("vtkMRMLLinearTransformNode", scene.GenerateUniqueName(f"{name} placement"))
         _tag(transform, panel.index)
         panel.transformId = transform.GetID()
-        suffix = "" if panel.index == 1 else f"_{panel.index}"
-        for kind, baseName in (("figure", FIGURE_LANDMARKS_NAME), ("template", TEMPLATE_LANDMARKS_NAME)):
-            markups = scene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", baseName + suffix)
-            _tag(markups, panel.index)
-            markups.CreateDefaultDisplayNodes()
-            display = markups.GetDisplayNode()
-            wasModifying = display.StartModify()
-            display.SetSelectedColor(*LANDMARK_COLORS[kind])
-            display.SetColor(*LANDMARK_COLORS[kind])
-            display.SetGlyphScale(2.0)
-            display.SetTextScale(2.5)
-            display.EndModify(wasModifying)
-            if kind == "figure":
-                markups.SetAndObserveTransformNodeID(transform.GetID())
-                panel.figureLandmarksId = markups.GetID()
-            else:
-                panel.templateLandmarksId = markups.GetID()
+        for kind in ("figure", "template"):
+            self._makeLandmarkList(panel, kind)
         for role, nodeId in ((TRANSFORM_REFERENCE, panel.transformId), (FIGURE_LANDMARKS_REFERENCE, panel.figureLandmarksId),
                              (TEMPLATE_LANDMARKS_REFERENCE, panel.templateLandmarksId)):
             figureNode.SetNodeReferenceID(role, nodeId)
@@ -703,6 +690,29 @@ class FigureSession:
             self.selectPanel(len(self.panels) - 1)
         self.changed()
         return panel
+
+    @staticmethod
+    def _makeLandmarkList(panel, kind):
+        """A new, empty landmark list of ``panel`` ("figure": under its placement transform, or "template")."""
+        scene = slicer.mrmlScene
+        suffix = "" if panel.index == 1 else f"_{panel.index}"
+        baseName = FIGURE_LANDMARKS_NAME if kind == "figure" else TEMPLATE_LANDMARKS_NAME
+        markups = scene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", baseName + suffix)
+        _tag(markups, panel.index)
+        markups.CreateDefaultDisplayNodes()
+        display = markups.GetDisplayNode()
+        wasModifying = display.StartModify()
+        display.SetSelectedColor(*LANDMARK_COLORS[kind])
+        display.SetColor(*LANDMARK_COLORS[kind])
+        display.SetGlyphScale(2.0)
+        display.SetTextScale(2.5)
+        display.EndModify(wasModifying)
+        if kind == "figure":
+            markups.SetAndObserveTransformNodeID(panel.transformId)
+            panel.figureLandmarksId = markups.GetID()
+        else:
+            panel.templateLandmarksId = markups.GetID()
+        return markups
 
     def _initialZ(self, plane, template):
         """The plane coordinate of Red's current slice, inside the template."""
@@ -830,7 +840,74 @@ class FigureSession:
 
     # Observation
 
+    def _observeScene(self):
+        if self._sceneObservation is None:
+            scene = slicer.mrmlScene
+            self._sceneObservation = (scene, scene.AddObserver(scene.NodeRemovedEvent, self._onNodeRemoved))
+
+    def _unobserveScene(self):
+        if self._sceneObservation is not None:
+            with contextlib.suppress(Exception):
+                self._sceneObservation[0].RemoveObserver(self._sceneObservation[1])
+            self._sceneObservation = None
+
+    @vtk.calldata_type(vtk.VTK_OBJECT)
+    def _onNodeRemoved(self, caller, event, node=None):
+        """A landmark list removed from the scene behind the card's back (the view menu's "Delete Point List").
+
+        The panel would keep a fit of points that are gone and could get no landmarks any more: once the removal is
+        over, it gets new, empty lists (pairs need both lists, so the other one is emptied) and its fit is reset.
+        """
+        nodeId = node.GetID() if node is not None else None
+        if not nodeId:
+            return
+        for panel in self.panels:
+            if nodeId in (panel.figureLandmarksId, panel.templateLandmarksId):
+                qt.QTimer.singleShot(0, lambda panel=panel: self._restoreLandmarkLists(panel))
+                return
+
+    def restoreLandmarkLists(self, panel=None):
+        """Give ``panel`` new landmark lists for those that are no longer in the scene (see ``_onNodeRemoved``)."""
+        return self._restoreLandmarkLists(panel or self.panel())
+
+    def _restoreLandmarkLists(self, panel):
+        if panel is None or panel not in self.panels or panel.figure() is None:
+            return False
+        missing = [kind for kind, markups in (("figure", panel.figureLandmarks()), ("template", panel.templateLandmarks()))
+                   if markups is None or not slicer.mrmlScene.IsNodePresent(markups)]
+        if not missing:
+            return False
+        self._unobservePanel(panel)
+        if self._placing is not None and self._placing[0] is panel:
+            self._placing = None
+            interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+            if interactionNode is not None and interactionNode.GetCurrentInteractionMode() == interactionNode.Place:
+                interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
+        if self._pendingTemplate is panel:
+            self._pendingTemplate = None
+        with self._syncingPairs():
+            for kind in ("figure", "template"):
+                if kind in missing:
+                    self._makeLandmarkList(panel, kind)
+                else:
+                    survivor = panel.figureLandmarks() if kind == "figure" else panel.templateLandmarks()
+                    survivor.RemoveAllControlPoints()
+        figureNode = panel.figure()
+        for role, nodeId in ((FIGURE_LANDMARKS_REFERENCE, panel.figureLandmarksId), (TEMPLATE_LANDMARKS_REFERENCE, panel.templateLandmarksId)):
+            figureNode.SetNodeReferenceID(role, nodeId)
+        self._observePanel(panel)
+        if self.tracing:
+            self._showLandmarksIn(self.panel())
+        else:
+            for markups in (panel.figureLandmarks(), panel.templateLandmarks()):
+                display = markups.GetDisplayNode()
+                if display is not None:
+                    display.SetVisibility(False)
+        self.updateFit(panel)
+        return True
+
     def _observePanel(self, panel):
+        self._observeScene()
         for node in (panel.figureLandmarks(), panel.templateLandmarks()):
             if node is None:
                 continue
@@ -916,6 +993,8 @@ class FigureSession:
             return
         if not self.tracing:
             self.enterTrace()
+        # A landmark list deleted from a view menu is replaced at once (else on the next event loop pass)
+        self._restoreLandmarkLists(panel)
         self._startPlacing(panel, "figure")
 
     def _nextName(self, panel):
@@ -932,6 +1011,8 @@ class FigureSession:
         if kind == "figure":
             # A figure point left without its template point (Esc) would pair with the next template point
             templateList = panel.templateLandmarks()
+            if templateList is None:
+                return
             with self._syncingPairs():
                 while markups.GetNumberOfControlPoints() > templateList.GetNumberOfControlPoints():
                     markups.RemoveNthControlPoint(markups.GetNumberOfControlPoints() - 1)
@@ -1785,6 +1866,7 @@ class FigureSession:
             card.refresh()
 
     def dispose(self, removeNodes=False):
+        self._unobserveScene()
         self._refitTimer.stop()
         if self._interactionObservation is not None:
             with contextlib.suppress(Exception):

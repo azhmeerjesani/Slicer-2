@@ -2887,6 +2887,89 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         figureList.RemoveAllControlPoints()
         self.assertEqual(templateList.GetNumberOfControlPoints(), 0)
 
+    def test_33e_figure_landmark_list_deleted_from_the_view_menu_is_replaced(self):
+        """A landmark list deleted from the view menu ("Delete Point List") is replaced by an empty one: the fit is
+        reset (the card no longer shows the old pairs) and "Add pair" still starts a placement.
+        """
+        import os
+        import tempfile
+
+        import numpy as np
+        import vtk
+
+        if not _hasFigureTracing():
+            self.skipTest("figure tracing is not in this build")
+        from LesionNetworkMappingLib import figurefit
+        from StudioLib import figure, importer
+
+        studioShell = self._applyStudio()
+        self._startOnTemplate(studioShell)
+        self.addCleanup(lambda: figure.closeFigure(removeNodes=True))
+        directory = tempfile.mkdtemp(prefix="StudioTestFigureDeleteList", dir=slicer.app.temporaryPath)
+        image = qt.QImage(200, 220, qt.QImage.Format_RGB32)
+        image.fill(qt.QColor(20, 20, 20))
+        path = os.path.join(directory, "case-4_fig1.png")
+        self.assertTrue(image.save(path))
+        importer.handleDrop([path], shell=studioShell)
+        self._pump(10)
+        session = figure.session()
+        panel = session.panel()
+        session.setPlane("axial")
+        session.setCut(z=10.0)
+        session.setConvention("radiological")
+        cut = panel.cut()
+        pixels = np.array([(30, 40), (170, 50), (100, 190), (50, 150), (160, 140)], float)
+        ras = cut.to_ras(((pixels - [100, 110]) @ figurefit.convention_matrix("radiological")[:2, :2].T) * 0.8)
+        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+        selectionNode = slicer.app.applicationLogic().GetSelectionNode()
+        self.addCleanup(lambda: interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform))
+
+        def placeFivePairs():
+            figureList, templateList = panel.figureLandmarks(), panel.templateLandmarks()
+            for index in range(5):
+                figureList.AddControlPoint(vtk.vtkVector3d(*panel.localOf(pixels[index])))
+                templateList.AddControlPointWorld(vtk.vtkVector3d(*ras[index]))
+            session.updateFit()
+            self.assertEqual(panel.pairCount(), 5)
+            self.assertLess(panel.fit.rms_mm, 0.5)
+
+        for deleted in ("template", "figure"):
+            placeFivePairs()
+            figureList, templateList = panel.figureLandmarks(), panel.templateLandmarks()
+            gone, kept = (templateList, figureList) if deleted == "template" else (figureList, templateList)
+            goneId = gone.GetID()
+            # What the view menu's "Delete Point List" does
+            slicer.mrmlScene.RemoveNode(gone)
+            self._wait(200)
+            newList = panel.templateLandmarks() if deleted == "template" else panel.figureLandmarks()
+            self.assertIsNotNone(newList, deleted)
+            self.assertNotEqual(newList.GetID(), goneId)
+            self.assertTrue(slicer.mrmlScene.IsNodePresent(newList))
+            self.assertEqual(newList.GetNumberOfControlPoints(), 0)
+            # Pairs need both lists: the one that stayed is emptied, and the fit is reset
+            self.assertIs(panel.figureLandmarks() if deleted == "template" else panel.templateLandmarks(), kept)
+            self.assertEqual(kept.GetNumberOfControlPoints(), 0)
+            self.assertEqual(panel.pairCount(), 0)
+            self.assertIsNone(panel.fit)
+            role = figure.TEMPLATE_LANDMARKS_REFERENCE if deleted == "template" else figure.FIGURE_LANDMARKS_REFERENCE
+            self.assertEqual(panel.figure().GetNodeReferenceID(role), newList.GetID())
+            if deleted == "figure":
+                self.assertEqual(newList.GetTransformNodeID(), panel.transformId)
+            # "Add pair" starts a placement on the figure list (it raised AttributeError before)
+            session.addLandmarkPair()
+            self.assertIsNotNone(session._placing)
+            self.assertEqual(session._placing[1], "figure")
+            self.assertEqual(selectionNode.GetActivePlaceNodeID(), panel.figureLandmarksId)
+            interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
+            self._wait(200)
+            session._placing = None
+            # The new lists are observed: pairs placed in them are fitted again
+            placeFivePairs()
+            panel.figureLandmarks().RemoveAllControlPoints()
+            self._wait(200)
+            self.assertEqual(panel.templateLandmarks().GetNumberOfControlPoints(), 0)
+            session.updateFit()
+
     def test_33c_figure_tracing_resumes_after_the_scene_is_opened_again(self):
         """A figure traced in a scene that is saved, closed and opened again (a project reopened from the Library) is
         resumed from its saved nodes: the same figure volume, crop, plane, convention, landmarks and fit, and the trace
