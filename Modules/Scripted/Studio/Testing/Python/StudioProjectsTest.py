@@ -5202,6 +5202,46 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertEqual(sorted(fileItems().values()), [1, 1], "the project scene is repaired at the next save")
 
 
+    def test_61b_ctrl_s_with_unwritable_studio_folder_explains_instead_of_official_save_dialog(self):
+        """Ctrl+S when the Slicer Studio folder cannot be written (BB-1): no project exists, and the official Save dialog
+        would aim every row at the read-only folder the data came from, ask to replace the originals and then fail. Ctrl+S
+        says "Not saved" with Change folder… instead; the official dialog stays for an empty scene.
+        """
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        blocker = os.path.join(self.tempDir, "a file 61b")
+        with open(blocker, "w") as f:
+            f.write("not a folder")
+        os.environ[projects.ROOT_ENVIRONMENT] = os.path.join(blocker, "Slicer Studio")
+        mainWindow = slicer.util.mainWindow()
+        real = mainWindow.findChild("QAction", "FileSaveSceneAction")
+        real.setObjectName("FileSaveSceneActionHidden")
+        standIn = qt.QAction(mainWindow)
+        standIn.setObjectName("FileSaveSceneAction")
+        classicDialogs = []
+        standIn.connect("triggered()", lambda: classicDialogs.append(1))
+        toasts = []
+        original = projects_ui.message
+        projects_ui.message = lambda text, **kwargs: toasts.append((text, kwargs))
+        running = self.autosave._service
+        service = self._service()
+        try:
+            self.autosave._service = service
+            self._userVolume()
+            service.poll()
+            self.assertIsNone(service.project)
+            self.assertTrue(service.rootUnwritable())
+            self.assertFalse(projects_ui.saveNow())
+            self.assertEqual(classicDialogs, [], "the official Save dialog did not open")
+            self.assertTrue(any(text.startswith("Not saved") for text, _kwargs in toasts), toasts)
+        finally:
+            projects_ui.message = original
+            self.autosave._service = running
+            standIn.setObjectName("")
+            standIn.deleteLater()
+            real.setObjectName("FileSaveSceneAction")
+
     def test_62_unwritable_studio_folder_is_reported_once_not_after_every_edit(self):
         """The Slicer Studio folder cannot be created (a read-only volume, BB-1): no project can be made, and every new
         scene fingerprint tries again. The user is told once, in plain words (no error number, no path, no Retry that would

@@ -559,6 +559,13 @@ def saveNow(shell=None):
     project = service.currentProject() if service is not None else None
     if project is None and service is not None:
         project = service.ensureProject()
+    if project is None and service is not None and service.rootUnwritable():
+        # The Slicer Studio folder cannot be written and the data's folder is still the project it was opened from (read-only
+        # too): the official Save dialog would aim every row at that folder, ask to replace the originals and then fail
+        change = None if projects.isRootFromEnvironment() else (lambda *_args: changeRootDialog())
+        message(_("Not saved: the Slicer Studio folder cannot be written. Choose another folder to save into."), level="warning",
+                action=change, actionText=_("Change folder…") if change else None, ms=8000, toolTip=projects.root())
+        return False
     if project is None:
         mainWindow = slicer.util.mainWindow()
         action = mainWindow.findChild(qt.QAction, "FileSaveSceneAction") if mainWindow is not None else None
