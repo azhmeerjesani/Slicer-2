@@ -9114,6 +9114,67 @@ sys.exit(web.command_local(args))
         self.assertFalse(any("Errno" in r[1] for r in records), records)
         self.assertEqual(shown, ["warning"], "Save lesion shows a warning box, not a Slicer error box")
 
+    def test_109_opening_a_study_asks_when_the_open_project_cannot_be_saved(self):
+        """Opening a study while the open project could not be saved (disk full) asked nothing: the project was released
+        anyway with its edits only in memory, and Ctrl+N or Ctrl+W in the study then cleared them unasked (BB-1). As for
+        Open project, the user is asked first: "Keep working" opens no study and keeps the project open, "Open without
+        saving" opens the study.
+        """
+        from unittest import mock
+
+        from StudioLib import projects_ui, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("studies are not part of this build")
+        studyFolder = os.path.join(self.projects.studiesFolder(), "Unsaved")
+        os.makedirs(studyFolder)
+        _subjectVolume, scanPath = self._userVolume("sub-01_T1w", shape=(12, 14, 16))
+        shutil.copy(scanPath, os.path.join(studyFolder, "sub-01_T1w.nii.gz"))
+        study_ui.createStudy([os.path.join(studyFolder, "sub-01_T1w.nii.gz")], folder=studyFolder, openIt=False)
+        slicer.mrmlScene.Clear(0)
+
+        service = self._service()
+        running = self.autosave._service
+        self.autosave._service = service  # as the running service of the application
+        self.addCleanup(setattr, self.autosave, "_service", running)
+        self.addCleanup(study_ui.closeStudy)
+        volume, _path = self._userVolume("Scan", shape=(12, 14, 16), extension=".nrrd")
+        project = self._projectFor(service)
+        self._save(service)
+        array = slicer.util.arrayFromVolume(volume)
+        array[:] = 321  # the edit that cannot be saved
+        slicer.util.arrayFromVolumeModified(volume)
+
+        asked = []
+
+        def answer(index):
+            def question(parent, title, text, buttons, default=0):
+                asked.append((title, text, list(buttons), default))
+                return index
+            return question
+
+        with mock.patch.object(service, "saveNow", lambda *args, **kwargs: False), mock.patch.object(projects_ui, "_shell", lambda: None):
+            service._projectPausedReason = "less than 1.2 MB free on the disk"
+            with mock.patch.object(projects_ui, "_question", answer(2)):
+                self.assertIsNone(study_ui.openStudy(studyFolder), "Keep working: the study is not opened")
+            self.assertEqual(len(asked), 1, "the user is asked before the project with unsaved edits is released")
+            title, text, buttons, default = asked[0]
+            self.assertEqual(title, "Open study")
+            self.assertEqual(len(buttons), 3)
+            self.assertIn("less than 1.2 MB free", text)
+            self.assertEqual(default, 2, "keeping the work is the default")
+            self.assertIsNone(study_ui.session())
+            self.assertIs(service.project, project, "the project that could not be saved stays open")
+            self.assertTrue((slicer.util.arrayFromVolume(volume) == 321).all(), "its edits are kept")
+
+            with mock.patch.object(projects_ui, "_question", answer(1)):
+                session = study_ui.openStudy(studyFolder)
+            self.assertEqual(len(asked), 2)
+            self.assertIsNotNone(session, "Open without saving: the study opens")
+            self.assertIs(study_ui.session(), session)
+            self.assertIsNone(service.project, "the project is released for the study")
+        self.assertFalse(service._discardOnClose, "the choice applies to that open only")
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

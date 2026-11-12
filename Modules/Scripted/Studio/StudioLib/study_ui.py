@@ -1118,6 +1118,11 @@ def createStudy(files, shell=None, folder=None, groupColumn=None, groupMapping=N
     if not openIt:
         return studyObject
     session = openStudy(studyObject, shell)
+    if session is None:
+        # The open project could not be saved and the user keeps working in it: the study is made, Library opens it later
+        text = _("Study {name}: {n} subjects") if how == "opened" else _("Study {name} created: {n} subjects")
+        _toast(_currentShell(shell), text.format(name=studyObject.name, n=len(studyObject)), ms=5000, action=lambda: _showFolder(folder), actionText=_("Show folder"), level="consequence")
+        return None
     session.creationReport = {"how": how, "seconds": elapsed, "report": report, "files": len(files)}
     session._gridRows = gridRows
     shell = _currentShell(shell)
@@ -1370,7 +1375,8 @@ def openStudy(pathOrStudy, shell=None, subject=None, showLibrary=True):
     """Open a study (a folder, its study.json or a ``Study``) as the current session and return it.
 
     The study that was open is closed first. In Studio, Library shows its subject list. With ``subject``, that subject
-    is opened in Draw.
+    is opened in Draw. Return None if nothing was opened: the open project could not be saved and the user keeps
+    working in it (``autosave.confirmReplaceProject``).
     """
     global _session
     studyModule = _lnm("study")
@@ -1381,6 +1387,9 @@ def openStudy(pathOrStudy, shell=None, subject=None, showLibrary=True):
             if subject:
                 _session.open(subject)
             return _session
+    if not _confirmReleaseProject():
+        return None  # the open project could not be saved and the user keeps working in it
+    if _session is not None:
         closeStudy()
     shell = _currentShell(shell)
     # The open project is saved as it is shown and stops here (a study saves its own files) before its lesions are hidden
@@ -1414,6 +1423,22 @@ def openStudy(pathOrStudy, shell=None, subject=None, showLibrary=True):
     if subject:
         studySession.open(subject)
     return studySession
+
+
+def _confirmReleaseProject():
+    """True if the open project (if any) is saved, or its save failed and the user chose to go on (a copy was saved, or
+    Open without saving); False if the user keeps working in it. As for Open project and Open scene: a study releases the
+    project, and a save that fails (disk full, folder not writable) would otherwise drop its edits silently at the next
+    New project or Close scene of the study.
+    """
+    try:
+        from . import autosave
+    except ImportError:
+        return True
+    service = autosave.instance()
+    if service is None:
+        return True
+    return service.confirmReplaceProject(_("Open study"))
 
 
 def _releaseProjectForStudy():
@@ -4759,9 +4784,12 @@ def _recover(slot):
         # A second tracing or an adjudication: the study opens and the state reopens its subject (a second tracing then
         # offers its journal); the subject itself is never opened by the session (blinding)
         session = openStudy(record["path"])
+        if session is None:
+            return  # the open project could not be saved and the user keeps working in it
         _reopenAgreement(session, agreementRecord.get("queue"), agreementRecord["subject"])
     else:
-        openStudy(record["path"], subject=record.get("subject") or None)
+        if openStudy(record["path"], subject=record.get("subject") or None) is None:
+            return  # the open project could not be saved and the user keeps working in it
     # The study restores its subject (its journal holds the edits of the lesion); the other autosaved data of the scene
     # (point lists, tables, models... that the recovery card lists) is added to it (SPEC 9.9: Recover loads the scene)
     if hasattr(slot, "scenePath"):

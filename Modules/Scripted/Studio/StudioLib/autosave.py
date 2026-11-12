@@ -1808,7 +1808,10 @@ class AutosaveService:
         """
         if self.project is None:
             return False
-        self.saveNow("study", progress=False)
+        # The user chose to go on without saving (``confirmReplaceProject``: a copy holds the edits, or they are dropped)
+        discard, self._discardOnClose = self._discardOnClose, False
+        if not discard:
+            self.saveNow("study", progress=False)
         self.releaseProject()
         return True
 
