@@ -512,7 +512,7 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual((counts["included"], counts["cases"], counts["unscreened"]), (1, 4, 1))
         self.assertEqual([entry["database"] for entry in counts["search"]], ["PubMed", "Scopus", "PubMed"])
         self.assertEqual(counts["search"][0]["query"], "lesion network mapping")
-        self.assertEqual(counts["identified_by_origin"], {"database": 4, "citation": 0, "other": 0})
+        self.assertEqual(counts["identified_by_origin"], {"database": 6, "citation": 0, "other": 0})
         # a manual merge counts as a removed duplicate and survives a reload
         records.add([sources.draft(title="Hallucinations after thalamic stroke", authors="X, Y", year="2018")])
         offers = records.merge_offers()
@@ -582,6 +582,16 @@ class SourcesTest(unittest.TestCase):
         counts = sources.prisma_counts(self.study)
         self.assertEqual((counts["identified"], counts["included"]), (0, 0))
         ET.fromstring(sources.prisma_flow_svg(counts))
+
+    def test_identified_by_origin_adds_up_to_identified(self):
+        records = sources.Records.open(self.study)
+        sources.import_text(self.study, records, NBIB, "pubmed.nbib", database="PubMed")
+        sources.import_text(self.study, records, NBIB, "again.nbib", database="PubMed")  # duplicates of the first
+        sources.import_text(self.study, records, NBIB, "cited.nbib", origin="citation", database="Citation searching")  # same records
+        counts = sources.prisma_counts(self.study, records)
+        self.assertGreater(counts["duplicates_removed"], 0)
+        self.assertEqual(sum(counts["identified_by_origin"].values()), counts["identified"])
+        self.assertGreater(counts["identified_by_origin"]["citation"], 0)
 
     def test_search_log_in_study_json(self):
         sources.add_search(self.study, "PubMed", "query", "2026-01-02", records=10, duplicates=1)

@@ -999,9 +999,15 @@ def search_log(study):
     return [dict(entry) for entry in entries if isinstance(entry, dict)] if isinstance(entries, list) else []
 
 
-def add_search(study, database, query="", date=None, records=None, duplicates=None):
-    """Append a search to ``study.json`` ``search`` (the caller saves the study). Return the entry."""
+def add_search(study, database, query="", date=None, records=None, duplicates=None, origin=None):
+    """Append a search to ``study.json`` ``search`` (the caller saves the study). Return the entry.
+
+    ``origin`` (one of :data:`ORIGINS`, optional) is where the records came from; the PRISMA counts attribute the
+    search's duplicates to it (a search without one counts as a database search).
+    """
     entry = {"database": _clean(database) or "Other", "query": _clean(query), "date": date or datetime.date.today().isoformat()}
+    if origin in ORIGINS:
+        entry["origin"] = origin
     if records is not None:
         entry["records"] = int(records)
     if duplicates is not None:
@@ -1023,7 +1029,7 @@ def import_text(study, records, text, name="", origin="database", database=None,
     report = records.add(drafts, origin=origin, n_cases=n_cases)
     report["format"], report["parsed"] = kind, len(drafts)
     add_search(study, database or ("Pasted identifiers" if kind == "identifiers" else os.path.basename(name) or kind.upper()), query,
-               records=len(drafts), duplicates=len(report["merged"]))
+               records=len(drafts), duplicates=len(report["merged"]), origin=origin)
     return report
 
 
@@ -1039,9 +1045,18 @@ def prisma_counts(study, records=None):
     searches = search_log(study)
     duplicates = sum(int(entry.get("duplicates") or 0) for entry in searches) + records.merged_count()
     unique = len(records.rows)
+    # ``identified_by_origin`` adds up to ``identified``: each duplicate counts under the origin it came from (the origin
+    # of its search, or of the record that absorbed it when merged by hand)
     by_origin = dict.fromkeys(ORIGINS, 0)
     for row in records.rows:
         by_origin[row["origin"] if row["origin"] in ORIGINS else "other"] += 1
+    for entry in searches:
+        by_origin[entry["origin"] if entry.get("origin") in ORIGINS else "database"] += int(entry.get("duplicates") or 0)
+    by_id = {row["record_id"]: row for row in records.rows}
+    for entry in records.log:
+        if entry["to"] == MERGED:
+            merged_origin = by_id.get(entry["record_id"], {}).get("origin")
+            by_origin[merged_origin if merged_origin in ORIGINS else "other"] += 1
     rank = {stage: index for index, stage in enumerate(ADVANCE)}
     excluded_screening, reasons = 0, {}
     sought = included = cases = 0
