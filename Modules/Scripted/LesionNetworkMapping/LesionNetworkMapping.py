@@ -3155,6 +3155,13 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.coordTable = self.widgets.tableView([_("Study"), "x", "y", "z", _("Space")])
         self.coordTable.setObjectName("LNMCoordTable")
         self.coordTable.setMaximumHeight(150)
+        # x, y, z and Space are short: they take what they need and the Study name gets the rest (equal columns cut
+        # "studyA-1" and "studyB-c2" both to "stud...")
+        header = self.coordTable.horizontalHeader()
+        header.setSectionResizeMode(0, qt.QHeaderView.Stretch)
+        for column in range(1, 5):
+            header.setSectionResizeMode(column, qt.QHeaderView.ResizeToContents)
+        self.coordTable.setTextElideMode(qt.Qt.ElideMiddle)
         self.coordTable.setToolTip(_("The foci; the foci of one study make one seed (the union of their spheres)"))
         layout.addWidget(self.coordTable)
         self.coordSummaryLabel = self._label("", role="secondaryText", objectName="LNMCoordSummary")
@@ -3451,6 +3458,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             for column, value in enumerate((focus.study, f"{focus.x:g}", f"{focus.y:g}", f"{focus.z:g}", "Talairach" if focus.space == "TAL" else "MNI")):
                 item = qt.QTableWidgetItem(value)
                 item.setFlags(qt.Qt.ItemIsSelectable | qt.Qt.ItemIsEnabled)
+                item.setToolTip(focus.study)
                 self.coordTable.setItem(row, column, item)
         self.coordTable.setVisible(bool(foci))
         self.coordClearButton.setVisible(bool(foci))
