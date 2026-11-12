@@ -124,6 +124,11 @@ ORTHO_ORIENTATION = {"axial": "Sagittal", "coronal": "Sagittal", "sagittal": "Co
 LANDMARK_COLORS = {"figure": (0.98, 0.75, 0.18), "template": (0.25, 0.80, 0.95)}
 
 
+def pairsText(n):
+    """"1 pair" / "{n} pairs" (the landmark count on the Figure card)."""
+    return _("1 pair") if n == 1 else _("{n} pairs").format(n=n)
+
+
 def _figurefit():
     import importlib
 
@@ -2343,7 +2348,7 @@ class FigureCard:
         # Landmarks and fit
         pairs = panel.pairCount()
         placing = current._placing is not None and current._placing[0] is panel
-        self.pairLabel.setText(_("{n} pairs").format(n=pairs) if not placing else _("placing “{name}”…").format(name=current._placing[2]))
+        self.pairLabel.setText(pairsText(pairs) if not placing else _("placing “{name}”…").format(name=current._placing[2]))
         self.removePairButton.setEnabled(pairs > 0 or (panel.figureLandmarks() is not None and panel.figureLandmarks().GetNumberOfControlPoints() > 0))
         affineButton = self.modelGroup.button(1)
         distinct = panel.distinctPairCount()

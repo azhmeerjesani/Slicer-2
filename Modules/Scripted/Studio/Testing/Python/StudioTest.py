@@ -2739,6 +2739,14 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._pump(2)
         self.assertTrue(paste[0].enabled)
 
+    def test_33a_figure_card_pair_count_is_singular_for_one_pair(self):
+        """The Figure card's landmark count reads '1 pair', not '1 pairs'."""
+        from StudioLib import figure
+
+        self.assertEqual(figure.pairsText(0), "0 pairs")
+        self.assertEqual(figure.pairsText(1), "1 pair")
+        self.assertEqual(figure.pairsText(2), "2 pairs")
+
     def test_33b_figure_card_text_fits_the_340_px_inspector(self):
         """In the default 340 px inspector the Figure card's step labels ('4 Landmarks') get their full width and its
         word-wrapped notes (the residual note, the mirror warning) the height of all their lines: nothing is cut.
