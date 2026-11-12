@@ -2169,9 +2169,18 @@ class AutosaveService:
         working in it (the open must not go ahead). Loading a scene closes the project unasked (``_closeProjectOnSceneClose``),
         so a save that fails here (disk full, folder not writable) would otherwise lose the edits silently; Ctrl+N and quit
         fall back to the classic "Save before closing scene?" question in that case.
+
+        Without a project that saves the scene (saving is off in Settings, the projects folder is not chosen or cannot be
+        written, projects are off) the scene is not saved anywhere: unsaved data is asked about with that same question
+        (``_confirmCloseUnsavedScene``), as Ctrl+N asks in that state, instead of being dropped by the load.
         """
-        if self.project is None or self._recovering != 0 or not self.enabled():
+        if self._recovering != 0:
             return True
+        if self.project is None and self.enabled():
+            # Data opened less than one poll ago becomes its project first (as for Ctrl+N and Ctrl+S)
+            self.ensureProject()
+        if self.project is None or not self.enabled():
+            return self._confirmCloseUnsavedScene()
         try:
             if self.saveNow("open", progress=True, ignoreBusy=True):
                 return True
@@ -2185,6 +2194,34 @@ class AutosaveService:
             self._discardOnClose = True
             return True
         return False
+
+    def _confirmCloseUnsavedScene(self):
+        """No project saves the scene: if it holds data of the user with changes that are not saved, ask the official
+        "Save before closing scene?" question (File > Close Scene, as Ctrl+N does without a project). Return True if there
+        is nothing to ask about or the scene was closed (saved, or the user chose to discard the changes); False if the user
+        cancelled (the open must not go ahead). A study saves its own files: nothing is asked while one is open.
+        """
+        if self._studyOpen():
+            return True
+        scene = slicer.mrmlScene
+        try:
+            modified = bool(scene.GetStorableNodesModifiedSinceRead()) or bool(scene.GetModifiedSinceRead())
+            if not modified or not self._projects().sceneHasUserData(scene):
+                return True
+        except Exception:
+            logging.error("Slicer Studio: checking the scene for unsaved changes failed:\n" + traceback.format_exc())
+            return True
+        mainWindow = slicer.util.mainWindow()
+        action = mainWindow.findChild(qt.QAction, "FileCloseSceneAction") if mainWindow is not None else None
+        if action is None:
+            return True
+        closed = []
+        tag = scene.AddObserver(slicer.vtkMRMLScene.EndCloseEvent, lambda caller, event: closed.append(True))
+        try:
+            action.trigger()
+        finally:
+            scene.RemoveObserver(tag)
+        return bool(closed)
 
     def openProject(self, path):
         """Open a project folder (its scene file): the current project is saved and closed first. Return True if loaded."""

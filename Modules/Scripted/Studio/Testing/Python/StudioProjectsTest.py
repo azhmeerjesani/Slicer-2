@@ -9175,6 +9175,76 @@ sys.exit(web.command_local(args))
             self.assertIsNone(service.project, "the project is released for the study")
         self.assertFalse(service._discardOnClose, "the choice applies to that open only")
 
+    def test_110_open_project_with_saving_off_asks_about_unsaved_edits(self):
+        """With "Save automatically" off no project saves the scene: opening a project replaced it unasked and the painted
+        lesion was lost (it is in no project and in no recovery folder), while Ctrl+N in the same state asks "Save before
+        closing scene?" (BB-1). Opening a project now asks that same question: Cancel opens nothing and keeps the edits,
+        "Close scene (discard modifications)" opens the project.
+        """
+        from unittest import mock
+
+        mainWindow = slicer.util.mainWindow()
+        if mainWindow is None or mainWindow.findChild(qt.QAction, "FileCloseSceneAction") is None:
+            self.skipTest("needs the main window")
+        settings = qt.QSettings()
+        dontAsk = settings.value("MainWindow/DontConfirmSceneClose")
+        settings.remove("MainWindow/DontConfirmSceneClose")
+        if dontAsk is not None:
+            self.addCleanup(settings.setValue, "MainWindow/DontConfirmSceneClose", dontAsk)
+        service = self._service()
+        self._userVolume("Project scan", shape=(12, 14, 16))
+        project = self._projectFor(service)
+        self._save(service)
+        projectPath = project.path
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        self.assertIsNone(service.project)
+
+        asked = []
+
+        def answerWith(prefix):
+            def answer():
+                modal = slicer.app.activeModalWidget()
+                if modal is None:
+                    return
+                asked.append(modal.windowTitle)
+                for button in modal.buttons():
+                    if prefix is not None and str(button.text).startswith(prefix):
+                        button.click()
+                        return
+                modal.reject()
+            return answer
+
+        with mock.patch.object(service, "enabled", lambda: False):
+            volume, _path = self._userVolume("Unsaved scan", shape=(12, 14, 16))
+            self._lesion(volume, name="Painted lesion")
+            service.poll()
+            self.assertIsNone(service.project, "saving is off: no project is created")
+            for prefix, opened in ((None, False), ("Close scene", True)):
+                timer = qt.QTimer()
+                timer.setInterval(100)
+                timer.connect("timeout()", answerWith(prefix))
+                timer.start()
+                try:
+                    result = service.openProject(projectPath)
+                finally:
+                    timer.stop()
+                self.assertEqual(asked[-1:], ["Save before closing scene?"], "the user is asked before the edits are dropped")
+                # (with saving off the project's scene is loaded but no project is attached: the result says that)
+                self.assertEqual(slicer.mrmlScene.GetFirstNodeByName("Project scan") is not None, opened)
+                if not opened:
+                    self.assertFalse(result)
+                    self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Painted lesion"), "Cancel keeps the edits")
+                    self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName("Project scan"), "Cancel opens nothing")
+            self.assertEqual(len(asked), 2)
+            self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName("Painted lesion"))
+            self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Project scan"), "the project is opened")
+            # An empty scene (nothing unsaved): the project opens unasked
+            slicer.mrmlScene.Clear(0)
+            service.openProject(projectPath)
+            self.assertEqual(len(asked), 2)
+            self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Project scan"))
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk
