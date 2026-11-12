@@ -1271,6 +1271,11 @@ def _renameLesionForSpace(studyObject, sid, space):
                     os.replace(destination, source)
             raise
         studyObject.set(sid, lesion=studyObject.relpath(target))
+        if len(moves) > 1:
+            try:  # the moved sidecar names the new space too (file name, row and sidecar agree)
+                studyObject.write_lesion_sidecar(sid, studio={"space": space})
+            except Exception:
+                logging.warning(f"Studio: the sidecar of {sid} could not be updated to the space {space}:\n{traceback.format_exc()}")
         return target
     except Exception:
         logging.warning(f"Studio: the lesion file of {sid} could not be renamed to the answered space {space}:\n{traceback.format_exc()}")

@@ -8131,6 +8131,9 @@ class StudioRegressionTest(unittest.TestCase):
             for extension in (".nii.gz", ".json"):
                 with open(os.path.join(folder, names[sid].replace(".nii.gz", extension)), "w", encoding="utf-8") as f:
                     f.write(sid)
+        os.remove(study.lesion_sidecar_path("sub-04"))
+        study.write_lesion_sidecar("sub-04")  # a real sidecar: SlicerStudio.space says the guessed space
+        self.assertEqual(study.read_lesion_sidecar("sub-04")["SlicerStudio"]["space"], "MNI152NLin2009cAsym")
         # sub-05: the answered name is already taken, so nothing is overwritten
         with open(os.path.join(lesions, "sub-05_space-MNI152NLin2009aSym_desc-lesion_mask.nii.gz"), "w", encoding="utf-8") as f:
             f.write("other")
@@ -8144,6 +8147,7 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertEqual(study.subject("sub-04")["lesion"], f"lesions/sub-04_space-{answer}_desc-lesion_mask.nii.gz")
         self.assertEqual(sorted(name for name in os.listdir(lesions) if name.startswith("sub-04")),
                          [f"sub-04_space-{answer}_desc-lesion_mask.json", f"sub-04_space-{answer}_desc-lesion_mask.nii.gz"])
+        self.assertEqual(study.read_lesion_sidecar("sub-04")["SlicerStudio"]["space"], answer, "the renamed sidecar states the new space")
         self.assertEqual(study.subject("sub-05")["lesion"], names["sub-05"])
         self.assertTrue(os.path.isfile(os.path.join(folder, names["sub-05"])))
         self.assertEqual(study.subject("sub-06")["lesion"], "lesions/custom.nii.gz")
