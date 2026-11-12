@@ -8876,6 +8876,73 @@ class StudioProjectsTest(unittest.TestCase):
             qt.QSettings().remove(projects.ROOT_CHOSEN_KEY)
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
 
+    def test_96b_change_folder_checks_the_folder_before_asking_to_move_and_names_a_read_only_drive(self):
+        """A folder on a read-only drive is refused before "Move your projects…?" is asked, and the reason says
+        "Read-only file system", not "Permission denied" (BB-1).
+        """
+        import errno
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        oldRoot = os.path.normpath(self.root)
+        qt.QSettings().setValue(projects.ROOT_KEY, oldRoot)
+        os.makedirs(os.path.join(oldRoot, projects.TEMPLATES_DIR, "Kept"), exist_ok=True)
+        with open(os.path.join(oldRoot, projects.TEMPLATES_DIR, "Kept", "template.json"), "w") as f:
+            f.write("{}")
+        readOnly = os.path.join(self.tempDir, "ro-drive", projects.ROOT_FOLDER_NAME)
+        os.makedirs(readOnly)
+        realAccess = os.access
+        realStatvfs = os.statvfs
+        asked, shown = [], []
+
+        class FakeChooser:
+            path = readOnly
+            continueButton = mock.Mock()
+            setWindowTitle = mock.Mock()
+            choose = mock.Mock()
+            exec = mock.Mock()
+            exec_ = mock.Mock()
+            deleteLater = mock.Mock()
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+        def access(path, mode, *args, **kwargs):
+            if os.path.normpath(str(path)) == os.path.normpath(readOnly) and mode & os.W_OK:
+                return False
+            return realAccess(path, mode, *args, **kwargs)
+
+        def statvfs(path):
+            result = realStatvfs(path)
+            if os.path.normpath(str(path)) == os.path.normpath(readOnly):
+                return mock.Mock(f_flag=result.f_flag | os.ST_RDONLY)
+            return result
+
+        try:
+            with mock.patch.object(projects_ui, "FolderChooserDialog", FakeChooser), \
+                    mock.patch.object(projects_ui, "_question", lambda *args, **kwargs: asked.append(1) or 1), \
+                    mock.patch.object(projects_ui, "_notice", lambda parent, title, text: shown.append(text)), \
+                    mock.patch.object(os, "access", access), mock.patch.object(os, "statvfs", statvfs):
+                self.assertIsNone(projects_ui.changeRootDialog(None))
+                with self.assertRaises(OSError) as caught:
+                    projects_ui._makeUsableRoot(readOnly)
+            self.assertEqual(caught.exception.errno, errno.EROFS)
+            self.assertEqual(asked, [], "the folder is checked before the question")
+            self.assertEqual(len(shown), 1, shown)
+            self.assertIn("Read-only file system", shown[0])
+            self.assertNotIn("Permission denied", shown[0])
+            self.assertEqual(projects.root(), oldRoot)
+            # Without the read-only flag it stays a permissions problem
+            with mock.patch.object(os, "access", access), self.assertRaises(PermissionError):
+                projects_ui._makeUsableRoot(readOnly)
+        finally:
+            qt.QSettings().remove(projects.ROOT_KEY)
+            qt.QSettings().remove(projects.ROOT_CHOSEN_KEY)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
     def test_97_save_a_copy_over_an_older_copy_that_cannot_be_written_is_not_reported_saved(self):
         """"Save a copy as…" onto an older copy in a folder that cannot be written (or onto a read-only older copy) fails, and
         says so, naming the folder or the file. It said "Saved a copy as MRHead.mrb" and returned the path because the older

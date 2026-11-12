@@ -498,6 +498,12 @@ def _makeUsableRoot(path):
     """
     projects.ensureRoot(path, recreate=True)
     if not os.access(path, os.W_OK | os.X_OK):
+        try:
+            readOnly = bool(os.statvfs(path).f_flag & getattr(os, "ST_RDONLY", 1))
+        except (OSError, AttributeError):
+            readOnly = False
+        if readOnly:
+            raise OSError(errno.EROFS, os.strerror(errno.EROFS))
         raise PermissionError(errno.EACCES, os.strerror(errno.EACCES))
     return path
 
@@ -506,6 +512,17 @@ def _cannotUseMessage(path, error):
     """"The folder … cannot be used: <reason>. Choose another folder." for an OSError of ``_makeUsableRoot``."""
     reason = (getattr(error, "strerror", None) or str(error)).strip()
     return _("The folder {path} cannot be used: {reason}. Choose another folder.").format(path=projects.shortPath(path), reason=reason)
+
+
+def _usableOrNotice(parent, newRoot):
+    """True when ``newRoot`` was made and can be written; otherwise the reason is shown and False returned."""
+    try:
+        _makeUsableRoot(newRoot)
+    except OSError as error:
+        logging.warning(f"Slicer Studio: the folder {newRoot} cannot be used: {getattr(error, 'strerror', None) or 'not writable'}")
+        _notice(parent, _("Change the Slicer Studio folder"), _cannotUseMessage(newRoot, error))
+        return False
+    return True
 
 
 def showChooser(then=None, parent=None):
@@ -1064,7 +1081,8 @@ def changeRootDialog(parent=None):
             return oldRoot
         return None
     move = False
-    if projects.hasContent(oldRoot):
+    hasContent = projects.hasContent(oldRoot)
+    if hasContent:
         try:
             projects.checkMoveTarget(oldRoot, newRoot)
         except OSError as error:
@@ -1080,19 +1098,17 @@ def changeRootDialog(parent=None):
         except OSError as error:
             slicer.util.infoDisplay(str(error), windowTitle=_("Change the Slicer Studio folder"))
             return None
+        # The new folder is made and checked before the question and before anything moves or the setting changes, as the
+        # first-start chooser does: a folder that cannot be written (a read-only drive) is refused right away
+        if not _usableOrNotice(parent, newRoot):
+            return None
         answer = _question(parent, _("Change the Slicer Studio folder"),
                            _("Move your projects, studies and templates to the new folder?\n\n{old}\n→ {new}").format(old=oldRoot, new=newRoot),
                            [_("Move"), _("Keep them where they are"), _("Cancel")])
         if answer in (-1, 2):
             return None
         move = answer == 0
-    try:
-        # The new folder is made and checked before anything moves or the setting changes, as the first-start chooser does:
-        # a folder that cannot be written (a read-only drive) was stored first, and its error reported as a failed move
-        _makeUsableRoot(newRoot)
-    except OSError as error:
-        logging.warning(f"Slicer Studio: the folder {newRoot} cannot be used: {getattr(error, 'strerror', None) or 'not writable'}")
-        _notice(parent, _("Change the Slicer Studio folder"), _cannotUseMessage(newRoot, error))
+    elif not _usableOrNotice(parent, newRoot):
         return None
     service = _service()
     try:
