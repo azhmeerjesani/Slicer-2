@@ -1383,6 +1383,20 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(self._background("Yellow").GetID(), loaded.GetID())
         self.assertGreaterEqual(len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")), 1)
 
+    def test_grey_alpha_figure_is_one_grey_component(self):
+        """A grey+alpha PNG figure loads as a 1-component grey volume (not a 2-component vector shown in false colours)."""
+        from PIL import Image
+
+        from StudioLib import importer
+
+        path = os.path.join(self.directory, "fig_la.png")
+        Image.new("LA", (40, 30), (120, 200)).save(path)
+        node = importer.loadFigureVolume(path)
+        self.assertIsNotNone(node)
+        self.assertFalse(node.IsA("vtkMRMLVectorVolumeNode"))
+        self.assertEqual(node.GetImageData().GetNumberOfScalarComponents(), 1)
+        self.assertEqual(int(node.GetImageData().GetScalarComponentAsDouble(5, 5, 0, 0)), 120)
+
     def test_figure_keeps_scan_view_slice_and_zoom(self):
         """Opening a figure (Compare layout) leaves the slice and zoom the user was on in the scan view (USABILITY P4):
         only the figure is fitted, in Yellow.

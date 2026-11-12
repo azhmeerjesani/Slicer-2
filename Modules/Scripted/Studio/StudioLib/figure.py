@@ -1872,7 +1872,7 @@ def openFigure(path, shell=None, result=None):
     if current is not None and current.tracing and current.panels:
         try:
             with importer._ownLoad(), slicer.util.WaitCursor():
-                figureNode = slicer.util.loadVolume(path, {"singleFile": True, "show": False})
+                figureNode = importer.loadFigureVolume(path)
         except Exception:
             logging.error(f"Studio: cannot open the figure {path}:\n{traceback.format_exc()}")
             result.errors.append((path, _("Cannot load the figure")))

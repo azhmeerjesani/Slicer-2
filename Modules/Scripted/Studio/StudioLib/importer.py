@@ -5110,6 +5110,30 @@ def adoptShownFigure(shell=None):
     return background
 
 
+def loadFigureVolume(path):
+    """Load a picture as a figure volume. A grey+alpha picture loads as a 2-component vector volume that the views
+    would show as false colours (and log errors on every render): it is reduced to a 1-component grey volume.
+    """
+    node = slicer.util.loadVolume(path, {"singleFile": True, "show": False})
+    image = node.GetImageData() if node is not None else None
+    if node is None or not node.IsA("vtkMRMLVectorVolumeNode") or image is None or image.GetNumberOfScalarComponents() != 2:
+        return node
+    extract = vtk.vtkImageExtractComponents()
+    extract.SetInputData(image)
+    extract.SetComponents(0)
+    extract.Update()
+    grey = vtk.vtkImageData()
+    grey.DeepCopy(extract.GetOutput())
+    scalar = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", node.GetName())
+    matrix = vtk.vtkMatrix4x4()
+    node.GetIJKToRASMatrix(matrix)
+    scalar.SetIJKToRASMatrix(matrix)
+    scalar.SetAndObserveImageData(grey)
+    scalar.CreateDefaultDisplayNodes()
+    slicer.mrmlScene.RemoveNode(node)
+    return scalar
+
+
 def _checkPlainImageReadable(path):
     """Refuse a damaged .png/.jpg/.bmp before a reader runs on it: the volume readers log ERROR rows (and light the error
     badge) for a file that is cleanly refused here. Other formats are left to the volume readers.
@@ -5149,7 +5173,7 @@ def _routeFigure(path, shell, result, figureNode=None):
                 raise RefusedFileError(_("{name} is empty (0 bytes), so it was not opened.").format(name=os.path.basename(path)))
             _checkPlainImageReadable(path)
             with slicer.util.WaitCursor():
-                figureNode = slicer.util.loadVolume(path, {"singleFile": True, "show": False})
+                figureNode = loadFigureVolume(path)
         except Exception as e:
             if isinstance(e, RefusedFileError):
                 reason = str(e)
