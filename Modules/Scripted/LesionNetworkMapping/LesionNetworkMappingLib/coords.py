@@ -346,7 +346,11 @@ def read_csv(path, default_space="MNI", default_study=None):
     """
     columns, rows = read_table(path)
     study = default_study or re.sub(r"\.(csv|tsv|txt)$", "", os.path.basename(os.fspath(path)), flags=re.IGNORECASE)
-    return foci_from_rows(columns, rows, default_space, study, where=os.path.basename(os.fspath(path)))
+    name = os.path.basename(os.fspath(path))
+    foci = foci_from_rows(columns, rows, default_space, study, where=name)
+    if not foci:
+        raise ValueError(f"{name} holds no coordinates")
+    return foci
 
 
 _SLEUTH_REFERENCE = re.compile(r"^//\s*reference\s*=\s*(?P<space>.+?)\s*$", re.IGNORECASE)

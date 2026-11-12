@@ -93,6 +93,10 @@ class ParserTest(CoordsTestCase):
     def test_csv_errors(self):
         with self.assertRaisesRegex(ValueError, "radius and a diameter"):
             coords.read_csv(self.write("both.csv", "x,y,z,radius,diameter\n1,2,3,4,8\n"))
+        with self.assertRaisesRegex(ValueError, "header_only.csv holds no coordinates"):
+            coords.read_foci(self.write("header_only.csv", "x,y,z\n"))
+        with self.assertRaisesRegex(ValueError, "header_nonl.csv holds no coordinates"):
+            coords.read_csv(self.write("header_nonl.csv", "x,y,z"))
         with self.assertRaisesRegex(ValueError, "no z column"):
             coords.read_csv(self.write("noz.csv", "x,y\n1,2\n"))
         with self.assertRaisesRegex(ValueError, "Unknown coordinate space"):
