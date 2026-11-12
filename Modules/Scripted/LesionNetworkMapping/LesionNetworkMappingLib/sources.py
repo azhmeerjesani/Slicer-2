@@ -32,6 +32,7 @@ imported only by the lookup); shared files hold no absolute paths.
 import csv
 import datetime
 import difflib
+import html
 import io
 import json
 import os
@@ -108,6 +109,23 @@ def normalize_pmid(value):
     return match.group(1).lstrip("0") if match else ""
 
 
+def plain_text(value):
+    """A title or journal name from a web service as plain text: JATS/HTML tags removed, entities decoded.
+
+    Crossref sends ``Imaging in<i>Drosophila</i>`` and double-escaped quotes (``&amp;ldquo;``), which would show up
+    in tables and exports and keep the same paper from matching an imported record.
+    """
+    text = _clean(value)
+    if "<" in text:
+        text = re.sub(r"(?<=\w)(?=<(?:i|em|b|strong)\b[^>]*>)", " ", text, flags=re.IGNORECASE)  # "in<i>Fly</i>"
+        text = re.sub(r"</?[A-Za-z][^<>]*>", "", text)
+    for _ in range(2):  # Crossref escapes twice
+        if "&" not in text:
+            break
+        text = html.unescape(text)
+    return _clean(text)
+
+
 def normalize_title(value):
     """Lower case, accents and punctuation removed, one space between words, in any script.
 
@@ -117,7 +135,7 @@ def normalize_title(value):
     """
     kept = []
     base = ""
-    for char in unicodedata.normalize("NFKD", _clean(value)):
+    for char in unicodedata.normalize("NFKD", plain_text(value)):
         if unicodedata.combining(char):
             if base and ord(base) < 0x0530:  # an accent on a Latin, Greek or Cyrillic letter
                 continue
@@ -808,7 +826,7 @@ def _http_json(url, params=None, timeout=LOOKUP_TIMEOUT_S):
 
 
 def _crossref_record(message):
-    title = (message.get("title") or [""])[0]
+    title = plain_text((message.get("title") or [""])[0])
     authors = "; ".join(f"{a.get('family', '')}, {a.get('given', '')}".strip(", ") for a in message.get("author") or [] if a.get("family") or a.get("name"))
     year = ""
     for key in ("issued", "published-print", "published-online", "created"):
@@ -816,7 +834,7 @@ def _crossref_record(message):
         if parts and parts[0]:
             year = str(parts[0][0])
             break
-    journal = (message.get("container-title") or [""])[0]
+    journal = plain_text((message.get("container-title") or [""])[0])
     return draft(title=title, authors=authors, year=year, journal=journal, doi=message.get("DOI"))
 
 
@@ -826,7 +844,7 @@ def _esummary_record(entry):
         if item.get("idtype") == "doi":
             doi = item.get("value", "")
     authors = "; ".join(a.get("name", "") for a in entry.get("authors") or [] if a.get("name"))
-    return draft(title=entry.get("title"), authors=authors, year=entry.get("pubdate"), journal=entry.get("source"), doi=doi, pmid=entry.get("uid"))
+    return draft(title=plain_text(entry.get("title")), authors=authors, year=entry.get("pubdate"), journal=plain_text(entry.get("source")), doi=doi, pmid=entry.get("uid"))
 
 
 def _lookup_failure_text(error, kind):

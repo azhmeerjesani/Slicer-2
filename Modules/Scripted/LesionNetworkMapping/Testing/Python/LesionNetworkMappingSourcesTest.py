@@ -327,6 +327,15 @@ class SourcesTest(unittest.TestCase):
         report = records.add([sources.draft(doi=a, title="Paper A on page 821"), sources.draft(doi=b, title="A different paper on page 835")])
         self.assertEqual((len(report["added"]), report["merged"], [r["doi"] for r in records.rows]), (2, [], [a, b]))
 
+    def test_crossref_titles_are_plain_text_and_still_match(self):
+        raw = "Neuroscience Discovers Power of &amp;ldquo;Lesion Network Mapping&amp;rdquo;"
+        self.assertEqual(sources._crossref_record({"title": [raw]})["title"], "Neuroscience Discovers Power of \u201cLesion Network Mapping\u201d")
+        fly = sources._crossref_record({"title": ["Ex Vivo Brain Imaging in<i>Drosophila</i>"], "container-title": ["Cold Spring <i>Harb</i> Protoc"]})
+        self.assertEqual(fly["title"], "Ex Vivo Brain Imaging in Drosophila")
+        self.assertEqual(fly["journal"], "Cold Spring Harb Protoc")
+        self.assertEqual(sources.plain_text("H<sub>2</sub>O and a < b"), "H2O and a < b")
+        self.assertEqual(sources.normalize_title("Ex Vivo Brain Imaging in<i>Drosophila</i>"), sources.normalize_title("Ex vivo brain imaging in Drosophila"))
+
     def test_lookup_crossref_and_esummary(self):
         calls = []
 
