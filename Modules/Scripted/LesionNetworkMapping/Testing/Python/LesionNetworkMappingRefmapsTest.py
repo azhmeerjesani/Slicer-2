@@ -466,7 +466,17 @@ class SourcesTest(RefmapsTestBase):
         one = refmaps.add_file(path, root=self.root)
         two = refmaps.add_file(path, root=self.root)
         self.assertEqual(two["id"], one["id"])
-        self.assertEqual(sorted(item["id"] for item in refmaps.entries(self.root)), sorted([first["id"], one["id"]]))
+        # The same bytes added by another route are the same map: one entry, never compared with itself
+        self.assertEqual(one["id"], first["id"])
+        self.assertEqual([item["id"] for item in refmaps.entries(self.root)], [first["id"]])
+        self.assertEqual(len(os.listdir(os.path.join(self.root, "files"))), 1)
+        # A more informative second addition fills what the entry lacks
+        path2 = os.path.join(self.tmp, "other-name.nii.gz")
+        shutil.copyfile(path, path2)
+        three = refmaps.add_file(path2, licence="CC0-1.0", citation="Roe 2024", root=self.root)
+        self.assertEqual(three["id"], first["id"])
+        self.assertEqual(three["licence"], "CC0-1.0")
+        self.assertEqual(refmaps.entries(self.root)[0]["citation"], "Roe 2024")
 
     def test_add_file_unwritable_folder_says_so(self):
         """A data folder that cannot be written gives a sentence (no raw errno, no path of a temporary name), and nothing is registered."""

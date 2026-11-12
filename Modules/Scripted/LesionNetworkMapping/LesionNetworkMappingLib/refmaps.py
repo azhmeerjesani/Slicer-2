@@ -237,8 +237,19 @@ def _unique_id(base, existing):
     return candidate
 
 
-def _register(entry, root=None, replace=True):
-    """Add (or replace, by id) an entry; return it."""
+def _same_map(entry, entries):
+    """The existing entry (with another id) that holds the same file bytes, space and kind as ``entry``, or None."""
+    digest = entry.get("sha256")
+    if not digest:
+        return None
+    for item in entries:
+        if item.get("id") != entry.get("id") and item.get("sha256") == digest and item.get("space") == entry.get("space") and item.get("kind") == entry.get("kind"):
+            return item
+    return None
+
+
+def _register(entry, root=None, replace=True, dedupe=False):
+    """Add (or replace, by id) an entry; return it. With ``dedupe`` (a default, not an explicit, id), an entry already holding the same file is reused."""
     from .fetch import badge_for
 
     data = load_registry(root)
@@ -246,6 +257,23 @@ def _register(entry, root=None, replace=True):
     entry.setdefault("badge", badge_for(entry.get("licence")))
     entry.setdefault("redistribute", entry.get("source", {}).get("type") != "vdh" and entry.get("badge") == "green")
     entry.setdefault("added", _now())
+    same = _same_map(entry, data["entries"]) if replace and dedupe else None
+    if same is not None:
+        # The same bytes added by another route (NeuroVault id, download link, local file) are one map: keep the existing entry, fill what it
+        # lacks (licence, citation, condition) from the new one, and drop the duplicate file, so the map is not listed twice or compared with itself.
+        for key in ("citation", "condition", "licence_note"):
+            if not same.get(key) and entry.get(key):
+                same[key] = entry[key]
+        if str(same.get("licence") or "unknown") == "unknown" and str(entry.get("licence") or "unknown") != "unknown":
+            same["licence"] = entry["licence"]
+            same["badge"] = entry.get("badge", same.get("badge"))
+            same["redistribute"] = entry.get("redistribute", same.get("redistribute"))
+            if entry.get("source"):
+                same["source"] = entry["source"]
+        if _file_folder(entry) != _file_folder(same):
+            _remove_entry_folder(entry, data["entries"], root)
+        save_registry(data, root)
+        return same
     kept = [item for item in data["entries"] if item.get("id") != entry["id"]]
     if not replace and len(kept) != len(data["entries"]):
         raise RefmapsError(f"A reference map {entry['id']!r} is already in the library")
@@ -542,6 +570,7 @@ def add_file(path, title=None, licence="unknown", citation="", condition=None, s
     _check_map(path, name)
     # The default id carries the file's hash, so adding the same file again replaces its entry (as a NeuroVault image added
     # twice does) instead of listing it twice and comparing it with itself.
+    dedupe = not entry_id
     entry_id = entry_id or f"file-{_slug(stem, 32)}-{_sha256(path)[:8]}"
     folder = os.path.join(registry_root(root), FILES_DIR, _slug(entry_id, 64))
     target = os.path.join(folder, name)
@@ -552,7 +581,7 @@ def add_file(path, title=None, licence="unknown", citation="", condition=None, s
             os.replace(target + ".tmp", target)
         entry = _base_entry(target, root, id=entry_id, title=title or stem, source={"type": "file", "name": name}, licence=licence or "unknown",
                             licence_note=licence_note, citation=citation or "", condition=condition or None, kind=kind, space=space)
-        return _register(entry, root)
+        return _register(entry, root, dedupe=dedupe)
     except OSError as exc:
         # A data folder that cannot be written (read-only, full) is said in a sentence, not as "[Errno 13] ... '<temporary name>'".
         raise RefmapsError(_library_error_text(exc, registry_root(root))) from exc
@@ -631,10 +660,11 @@ def add_url(url, title=None, licence="unknown", citation="", condition=None, spa
         filename = os.path.basename(path)
     _check_download(path, root, f"{title or filename} (from {url})")
     # The default id carries the URL's hash, so adding the same URL again refreshes its entry instead of listing it twice.
+    dedupe = not entry_id
     entry_id = entry_id or f"url-{_slug(re.sub(r'.nii(.gz)?$', '', filename), 32)}-{hashlib.sha256(url.encode()).hexdigest()[:8]}"
     entry = _base_entry(path, root, id=entry_id, title=title or shown_name, source={"type": "url", "url": url}, licence=licence or "unknown",
                         licence_note=licence_note, citation=citation or "", condition=condition or None, kind=kind, space=space)
-    return _register(entry, root)
+    return _register(entry, root, dedupe=dedupe)
 
 
 def _https(url):
@@ -790,7 +820,7 @@ def _add_neurovault_images(images, collection_id, citation, condition, root, ses
                                     "url": f"{NEUROVAULT_SITE}/images/{nv_id}/", "map_type": image.get("map_type"), "template": template or None},
                             licence=NEUROVAULT_LICENCE, licence_note=NEUROVAULT_LICENCE_NOTE, citation=citation, condition=condition or None,
                             kind="map", space=template if _known_space(template) else None)
-        out.append(_register(entry, root))
+        out.append(_register(entry, root, dedupe=True))
 
 
 def vdh_catalog(path=None):
