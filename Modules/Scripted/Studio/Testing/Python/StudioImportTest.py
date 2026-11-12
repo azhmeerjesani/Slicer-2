@@ -1237,8 +1237,9 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertEqual(self._voxels(segmentationNode), int(np.count_nonzero(lesion)))
             slicer.mrmlScene.Clear(0)
             slicer.util.loadLabelVolume = failingLoadLabelVolume
-            with self.assertRaises(MemoryError):
+            with self.assertRaises(importer.RefusedFileError) as refused:
                 importer.loadLesion(path)
+            self.assertIn("too large for this computer's memory", str(refused.exception))
             assertSceneEmpty("MemoryError")
         finally:
             slicer.util.loadSegmentation, slicer.util.loadLabelVolume = originals

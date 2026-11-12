@@ -3665,6 +3665,10 @@ class StudySession:
                 return False
             try:
                 damaged = self._load(sid)
+            except _importer().RefusedFileError as e:
+                logging.warning(f"Studio: {sid} was not opened: {e}")  # planned refusal: no traceback
+                _toast(shell, _("{sid} could not be opened: {error}").format(sid=sid, error=e), ms=6000, level="warning")
+                return False
             except Exception as e:
                 logging.error(f"Studio: cannot open {sid}:\n{traceback.format_exc()}")
                 _toast(shell, _("{sid} could not be opened: {error}").format(sid=sid, error=e), ms=6000, level="warning")

@@ -1020,6 +1020,64 @@ class StudioRegressionTest(unittest.TestCase):
 
     # Two windows on one study (BB-1)
 
+    def test_4b_open_subject_with_lesion_too_large_for_memory(self):
+        """BB-1: a subject whose lesion cannot be allocated is refused in plain words (as when the file is dropped), with
+        no reader text (paths, ITK source file and line) in the toast and no traceback in the log.
+        """
+        from LesionNetworkMappingLib.study import Study
+        from StudioLib import study_ui
+
+        folder = os.path.join(self.directory, "Too large lesion")
+        study = Study.create(folder, name="Too large lesion")
+        node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "StudioTestScan")
+        slicer.util.updateVolumeFromArray(node, np.ones((8, 8, 8), np.int16))
+        scan = os.path.join(self.directory, "sub-01_T1w.nii.gz")
+        self.assertTrue(slicer.util.saveNode(node, scan))
+        slicer.mrmlScene.RemoveNode(node)
+        lesion = os.path.join(self.directory, "sub-01_desc-lesion_mask.nii.gz")
+        node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "StudioTestLesion")
+        slicer.util.updateVolumeFromArray(node, np.ones((8, 8, 8), np.uint8))
+        self.assertTrue(slicer.util.saveNode(node, lesion))
+        slicer.mrmlScene.RemoveNode(node)
+        study.add_subject("sub-01", scan=study.relpath(scan), lesion=study.relpath(lesion), status="traced")
+        study.save()
+
+        toasts = []
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: toasts.append(str(text))
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+
+        def failingLoadSegmentation(filename, properties=None, returnNode=False):
+            raise MemoryError("std::bad_alloc")
+
+        def failingLoadLabelVolume(filename, properties=None, returnNode=False):
+            raise RuntimeError(f"Failed to load node from file: {filename} - Error: itk::MemoryAllocationError "
+                               "File: itkImportImageContainer.hxx Line: 179")
+
+        class Capture(logging.Handler):
+            def __init__(self):
+                super().__init__()
+                self.records = []
+
+            def emit(self, record):
+                self.records.append(record)
+
+        capture = Capture()
+        logging.getLogger().addHandler(capture)
+        originals = slicer.util.loadSegmentation, slicer.util.loadLabelVolume
+        try:
+            session = study_ui.openStudy(folder, None, subject=None, showLibrary=False)
+            slicer.util.loadSegmentation, slicer.util.loadLabelVolume = failingLoadSegmentation, failingLoadLabelVolume
+            self.assertFalse(session.open("sub-01", switchToDraw=False))
+        finally:
+            slicer.util.loadSegmentation, slicer.util.loadLabelVolume = originals
+            logging.getLogger().removeHandler(capture)
+        self.assertEqual(len(toasts), 1, toasts)
+        self.assertIn("too large for this computer's memory", toasts[0])
+        for raw in ("MemoryAllocationError", "itkImportImageContainer", "Failed to load node", folder):
+            self.assertNotIn(raw, toasts[0])
+        self.assertEqual([r for r in capture.records if r.levelno >= logging.ERROR], [], "no error badge, no traceback")
+
     def test_4_two_windows_same_study(self):
         import glob
         import socket

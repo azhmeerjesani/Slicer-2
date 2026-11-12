@@ -1225,9 +1225,12 @@ def loadLesion(path):
                 slicer.vtkSegmentationConverter.GetReferenceImageGeometryParameterName(), _volumeGeometry(labelmapNode))
             if not slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(labelmapNode, segmentationNode):
                 raise RuntimeError(_("Failed to convert {path} to a segmentation").format(path=path))
-        except Exception:
+        except Exception as e:
             _removeNodesNotIn(existing, segmentationClasses)
             _removeNodesNotIn(existingLabelmaps, labelmapClasses)
+            if _isAllocationFailure(e):
+                # too large for the memory: a plain refusal, not the reader's text (paths, source file and line)
+                raise RefusedFileError(_tooLargeMessage(path)) from e
             raise
         slicer.mrmlScene.RemoveNode(labelmapNode)
     fractional = None if storesSegments(path) else _fractionalMask(path)
