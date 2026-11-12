@@ -8311,3 +8311,25 @@ class StudioRegressionTest(unittest.TestCase):
             study_ui.closeStudy()
             for _ in range(4):
                 slicer.app.processEvents()
+
+    def test_100_columns_refuses_numeric_type_over_text_values(self):
+        """BB-1: Columns... accepted the numeric type for a column whose values are words, and participants.json kept the Levels of
+        those words on a column declared numeric. The change is refused with a message; numeric values are still accepted.
+        """
+        from StudioLib import libcard_columns as lc
+        from StudioLib import study_ui
+
+        study = self._study([(f"sub-0{index}", {"alpha_first": "xyz"[index - 1], "nihss": str(index)}, False) for index in range(1, 4)])
+        session = study_ui.openStudy(study.path, None, showLibrary=False)
+        self.addCleanup(study_ui.closeStudy)
+        slicer.app.processEvents()
+        result = lc.applyChanges(session, {"alpha_first": {"role": "block", "levels": {"x": "Site X", "y": "Site Y", "z": "z"}}})
+        self.assertEqual(result["applied"], ["alpha_first"], result)
+        result = lc.applyChanges(session, {"alpha_first": {"role": "block", "type": "numeric"}})
+        self.assertEqual(result["applied"], [], result)
+        self.assertIn("not all numbers", result["errors"].get("alpha_first", ""))
+        with open(os.path.join(study.path, "participants.json"), encoding="utf-8") as f:
+            entry = json.load(f)["alpha_first"]
+        self.assertNotEqual(entry.get("SlicerStudio", {}).get("type"), "numeric")
+        result = lc.applyChanges(session, {"nihss": {"role": "score", "type": "numeric"}})
+        self.assertEqual(result["applied"], ["nihss"], result)
