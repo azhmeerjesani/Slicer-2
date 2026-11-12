@@ -245,6 +245,11 @@ class VlsmRunTest(unittest.TestCase):
         observed = methods._number(record["fwe"]["min_p"])
         self.assertIn(f"the smallest observed FWE p was {observed} (the smallest attainable p is 0.001)", text)
         self.assertNotIn("min_p", text)
+        # The FDR floor is stated, as in the GLM paragraph (bug bash: "0 with FDR q" next to FWE voxels went unexplained)
+        fdr = record["fdr"]
+        self.assertIn(f"BH-FDR reaches q ≤ 0.05 only when at least {fdr['floor_voxels']} voxels reach the smallest attainable p (FDR floor); "
+                      f"{fdr['voxels_at_floor']} voxels reached it.", text)
+        self.assertNotIn("FDR floor", methods.vlsm_paragraph({**record, "fdr": {**fdr, "enabled": False}}))
         self.assertNotIn("network associated with", text)
         self.assertIn("VLSM tests location, not the network", text)
         self.assertEqual(methods.lint_wording(text), [])

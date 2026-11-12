@@ -1216,6 +1216,12 @@ def vlsm_paragraph(data, run_id=None):
         f"Result: {_or_nr(fwe.get('n_significant'))} voxels with FWE p ≤ {alpha}, {_or_nr(fdr.get('n_significant'))} with FDR q ≤ {_number(fdr.get('alpha')) or NOT_RECORDED}; "
         f"the smallest observed FWE p was {_number(fwe.get('min_p')) or NOT_RECORDED} (the smallest attainable p is {_number(data.get('min_attainable_p', data.get('min_p'))) or NOT_RECORDED})."
     )
+    if fdr and fdr.get("enabled", True):
+        # The FDR floor, as in glm_paragraph: FDR 0 next to FWE-significant voxels is often this floor, not a result
+        text += f" BH-FDR reaches q ≤ {_number(fdr.get('alpha')) or 0.05} only when at least {_or_nr(fdr.get('floor_voxels'))} voxels reach the smallest attainable p (FDR floor)"
+        if fdr.get("voxels_at_floor") is not None:
+            text += f"; {fdr['voxels_at_floor']} voxels reached it"
+        text += "."
     return text
 
 

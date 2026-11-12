@@ -677,6 +677,10 @@ class VlsmTab(CohortTab):
             lines.append(html.escape(_("{effect} from {low:.2f} to {high:.2f}").format(effect=effectText, low=effectRange[0], high=effectRange[1])))
         if fdr.get("enabled", True) and fdr:
             lines.append(html.escape(_("FDR q ≤ 0.05: {n} voxels").format(n=fdr.get("n_significant", "?"))))
+            # The FDR floor (smallest attainable p and the voxels BH-FDR needs at it), as in the Contrast tab: FDR 0
+            # next to FWE-significant voxels is often this floor, not a result
+            if fdr.get("note"):
+                lines.append(html.escape(fdr["note"]))
         self.summaryLabel.setText("".join(f"<div>{line}</div>" for line in lines))
         notes = []
         if record.get("interpretation"):

@@ -175,6 +175,25 @@ class LesionNetworkMappingVlsmUITest(unittest.TestCase):
         _pump(50)
         self.assertNotIn("not analysed", str(tab.summaryLabel.text))
 
+    def test_result_states_the_fdr_floor(self):
+        # "FDR q ≤ 0.05: 0 voxels" next to FWE-significant voxels: the summary states the FDR floor, as the Contrast tab
+        # does (BB-1: vlsm.json's fdr note was not shown)
+        tab = self.vlsm
+        note = ("The smallest attainable p is 1/(K+1) = 0.001 (K = 999); BH-FDR reaches q ≤ 0.05 only when at least 259 voxels reach it. "
+                "Use 10,000 permutations, or Export for PALM (tail acceleration), for smaller p-values.")
+        record = {"test": "continuous", "n": 30, "contrast": {"spec": "two_sided", "columns": ["intercept", "score"]},
+                  "min_attainable_p": 0.001, "fwe": {"n_significant": 13, "min_p": 0.002},
+                  "fdr": {"enabled": True, "n_significant": 0, "floor_voxels": 259, "voxels_at_floor": 40, "note": note}}
+        tab.showResult(self.tmp, record)
+        _pump(50)
+        text = str(tab.summaryLabel.text)
+        self.assertIn("FDR q ≤ 0.05: 0 voxels", text)
+        self.assertIn("only when at least 259 voxels reach it", text)
+        record["fdr"]["enabled"] = False
+        tab.showResult(self.tmp, record)
+        _pump(50)
+        self.assertNotIn("259 voxels", str(tab.summaryLabel.text))
+
 
 class LesionNetworkMappingSingleLevelUITest(unittest.TestCase):
     """A cases-only study has one group level: the Contrast and VLSM tabs do not offer "case vs case"."""
