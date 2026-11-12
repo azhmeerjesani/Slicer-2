@@ -704,6 +704,23 @@ class LesionNetworkMappingNetworksUITest(unittest.TestCase):
         self.assertIn("templateflow.\u200bs3.\u200bamazonaws.\u200bcom", broken)
         self.assertEqual(broken.replace("\u200b", ""), manager.message)
 
+    def test_renamed_banner_keeps_its_border_and_level_edge(self):
+        from LesionNetworkMappingUI import widgets
+
+        edges = {}
+        for name in ("LNMBanner", "LNMStimSpaceBanner"):
+            frame = widgets.banner("Not confirmed as MNI space", level="warn")
+            frame.setObjectName(name)
+            frame.resize(300, 40)
+            frame.show()
+            slicer.app.processEvents()
+            image = frame.grab().toImage()
+            edges[name] = image.pixel(1, 20)
+            frame.hide()
+            frame.deleteLater()
+        self.assertEqual(edges["LNMStimSpaceBanner"], edges["LNMBanner"])
+        self.assertNotEqual(edges["LNMBanner"], 0)
+
     def test_banner_with_a_long_action_label_keeps_the_note_wide_and_the_button_whole(self):
         """A banner whose action label is long puts the button under the note: the note is not squeezed into a
         narrow column beside it and the button text is not elided (the template-family check of the preflight).

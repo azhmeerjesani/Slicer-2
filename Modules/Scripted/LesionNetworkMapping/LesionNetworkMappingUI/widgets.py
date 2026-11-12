@@ -481,8 +481,11 @@ def banner(text, actions=(), level="warn"):
     return frame
 
 
-def _bannerStyleSheet(level):
-    """Stylesheet of a banner frame only (its border; the left edge has the level's colour)."""
+def _bannerStyleSheet(level, selector="QFrame[bannerLevel]"):
+    """Stylesheet of a banner frame only (its border; the left edge has the level's colour).
+
+    The frame is selected by its ``bannerLevel`` property, not its object name: callers rename banner frames.
+    """
     ui = _studioUi()
     if ui is not None and level in ("ok", "warn", "danger", "busy"):
         edge = ui.token({"ok": "success", "warn": "warning", "danger": "danger", "busy": "accent"}[level]).name()
@@ -491,8 +494,8 @@ def _bannerStyleSheet(level):
         edge = _paletteChipColors(level)[1]
         hairline = slicer.app.palette().color(qt.QPalette.Active, qt.QPalette.Mid).name()
     return (
-        f"QFrame#LNMBanner {{ border: 1px solid {hairline}; border-left: 3px solid {edge}; border-radius: 6px; }}"
-        "QFrame#LNMBanner QLabel { border: none; background: transparent; }")
+        f"{selector} {{ border: 1px solid {hairline}; border-left: 3px solid {edge}; border-radius: 6px; }}"
+        f"{selector} QLabel {{ border: none; background: transparent; }}")
 
 
 def setBannerText(bannerFrame, text):
@@ -554,7 +557,7 @@ def noticeLine(objectName="LNMNoticeLine"):
 
         ui.bindStyleSheet(frame, styleSheet)
     else:
-        frame.setStyleSheet(_bannerStyleSheet("warn").replace("LNMBanner", objectName))
+        frame.setStyleSheet(_bannerStyleSheet("warn", f"QFrame#{objectName}"))
     frame.hide()
     return frame
 
