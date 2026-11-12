@@ -32,6 +32,7 @@ This module imports neither numpy nor xml: ``autosave_io`` and ``recovery`` are 
 """
 
 import contextlib
+import json
 import logging
 import os
 import sys
@@ -3107,7 +3108,11 @@ MOVED_PATH_KEYS = (
     "Studio/LNM/FetchDestination",
     "Studio/LNM/DataDirectory",
     "Studio/LNM/RecipeFolders",
+    "Studio/LNM/LastExportFolder",
+    "Studio/NiftiExport/LastFolder",
 )
+#: Fork-only settings that hold a JSON object whose "path" is such a path (the Nulls card's control set)
+MOVED_JSON_PATH_KEYS = ("Studio/LNM/NullsControlSet",)
 
 
 def _updateMovedPathSettings(oldRoot, newRoot, moved, renamed=None, movedTo=None):
@@ -3144,6 +3149,17 @@ def _updateMovedPathSettings(oldRoot, newRoot, moved, renamed=None, movedTo=None
                 continue
         if newValue != value:
             settings.setValue(key, newValue)
+    for key in MOVED_JSON_PATH_KEYS:
+        try:
+            raw = settings.value(key)
+            data = json.loads(str(raw)) if raw else None
+            if isinstance(data, dict) and isinstance(data.get("path"), str) and data["path"]:
+                newPath = movedPath(data["path"])
+                if newPath != data["path"]:
+                    data["path"] = newPath
+                    settings.setValue(key, json.dumps(data))
+        except (TypeError, ValueError):
+            continue
     # What is already open in this session (the Map module's remembered bundles, its connectome, run and Cohort study)
     module = sys.modules.get("LesionNetworkMapping")
     follow = getattr(module, "followMovedPaths", None) if module is not None else None

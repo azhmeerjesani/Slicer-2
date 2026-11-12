@@ -820,7 +820,7 @@ class StudioProjectsTest(unittest.TestCase):
 
         projects = self.projects
         service = self._service()
-        keys = self.autosave.MOVED_PATH_KEYS
+        keys = self.autosave.MOVED_PATH_KEYS + self.autosave.MOVED_JSON_PATH_KEYS
         settings = qt.QSettings()
         saved = {key: settings.value(key) for key in keys}
         known = dict(lnm.LesionNetworkMappingLogic._knownConnectomes)
@@ -841,9 +841,17 @@ class StudioProjectsTest(unittest.TestCase):
                 json.dump({"name": "Study A"}, f)
             settings.setValue(lnm.COHORT_STUDY_SETTING, os.path.join(self.root, "Studies", "Study A"))
             settings.setValue("Studio/LNM/FetchDestination", os.path.join(self.root, "LNM", "Connectomes"))
+            controlTsv = os.path.join(self.root, "LNM", "ControlSets", "Pool A", "maps.tsv")
+            settings.setValue("Studio/LNM/NullsControlSet", json.dumps({"kind": "pool_maps", "path": controlTsv}))
+            settings.setValue("Studio/LNM/LastExportFolder", os.path.join(self.root, "LNM", "Exports"))
+            settings.setValue("Studio/NiftiExport/LastFolder", outside)
             newRoot = os.path.join(self.tempDir, "moved", "Slicer Studio")
             moved = service.moveRoot(newRoot, moveContent=True)
             self.assertIn("LNM", moved)
+            control = json.loads(str(settings.value("Studio/LNM/NullsControlSet")))
+            self.assertEqual(control, {"kind": "pool_maps", "path": os.path.join(os.path.normpath(newRoot), "LNM", "ControlSets", "Pool A", "maps.tsv")})
+            self.assertEqual(str(settings.value("Studio/LNM/LastExportFolder")), os.path.join(os.path.normpath(newRoot), "LNM", "Exports"))
+            self.assertEqual(str(settings.value("Studio/NiftiExport/LastFolder")), outside)
             newBundle = os.path.join(os.path.normpath(newRoot), "LNM", "connectomes", "Demo.lnmc")
             self.assertTrue(os.path.isfile(os.path.join(newBundle, "connectome.json")))
             self.assertEqual(lnm.LesionNetworkMappingLogic.registeredConnectomes(), [newBundle, outside, notMoved])
