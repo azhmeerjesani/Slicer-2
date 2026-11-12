@@ -1272,8 +1272,16 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
             if any(abs(current.GetElement(row, column) - matrix.GetElement(row, column)) > 1e-9 for row in range(4) for column in range(4)):
                 volumeNode.SetIJKToRASMatrix(matrix)
             slicer.util.updateVolumeFromArray(volumeNode, data)
-            if name:
+            if name and name != volumeNode.GetName():
                 volumeNode.SetName(name)
+                # A new map: the file the previous map was saved in (a project's "Maps/<old name>.nrrd") is not its file;
+                # without storage the next save names the file after the new map
+                scene = volumeNode.GetScene()
+                storages = [volumeNode.GetNthStorageNode(index) for index in range(volumeNode.GetNumberOfStorageNodes())]
+                volumeNode.SetAndObserveStorageNodeID(None)
+                for storage in storages:
+                    if storage is not None:
+                        scene.RemoveNode(storage)
         volumeNode.SetAttribute(display.RESULT_ATTRIBUTE, "1")
         for key, value in (attributes or {}).items():
             if value is None:
