@@ -177,6 +177,10 @@ class FitTest(unittest.TestCase):
         text, level = figurefit.residual_chip(1.6, 2.3, 5)
         self.assertEqual(text, "RMS 1.6 mm · LOO 2.3 mm (5 pairs)")
         self.assertEqual(level.level, "amber")  # follows the larger LOO RMS
+        self.assertTrue(level.text.startswith("LOO 2.3 mm — "), level.text)  # the tooltip names the value it grades
+        self.assertTrue(figurefit.residual_chip(7.1, 21.7, 3)[1].text.startswith("LOO 21.7 mm — "))
+        self.assertTrue(figurefit.residual_chip(3.0, 1.0, 3)[1].text.startswith("RMS 3.0 mm — "))
+        self.assertTrue(figurefit.residual_chip(3.0, None, 2)[1].text.startswith("RMS 3.0 mm — "))
         self.assertEqual(figurefit.residual_chip(0.5, None, 2)[0], "RMS 0.5 mm · LOO n/a (2 pairs)")
 
     def test_initial_pixel_size(self):

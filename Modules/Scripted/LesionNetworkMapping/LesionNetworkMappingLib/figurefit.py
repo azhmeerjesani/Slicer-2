@@ -341,8 +341,11 @@ class ResidualLevel(NamedTuple):
     text: str
 
 
-def residual_level(rms_mm):
-    """Green below 2 mm, amber 2 to 4 mm, red above 4 mm ("none" when no residual is available)."""
+def residual_level(rms_mm, label="RMS"):
+    """Green below 2 mm, amber 2 to 4 mm, red above 4 mm ("none" when no residual is available).
+
+    ``label`` names the value in the text ("RMS" or "LOO").
+    """
     if rms_mm is None or not math.isfinite(float(rms_mm)):
         return ResidualLevel("none", f"No residual yet; the residual {RESIDUAL_NOTE}.")
     # classify the value as displayed (one decimal), so that "2.0 mm" is never green
@@ -353,7 +356,7 @@ def residual_level(rms_mm):
         level = "amber"
     else:
         level = "red"
-    return ResidualLevel(level, f"RMS {value:.1f} mm — the residual {RESIDUAL_NOTE}.")
+    return ResidualLevel(level, f"{label} {value:.1f} mm — the residual {RESIDUAL_NOTE}.")
 
 
 def residual_chip(rms_mm, loo_rms_mm, n_pairs):
@@ -365,7 +368,9 @@ def residual_chip(rms_mm, loo_rms_mm, n_pairs):
     """
     parts = ["RMS n/a" if rms_mm is None else f"RMS {float(rms_mm):.1f} mm", "LOO n/a" if loo_rms_mm is None else f"LOO {float(loo_rms_mm):.1f} mm"]
     known = [float(value) for value in (rms_mm, loo_rms_mm) if value is not None]
-    level = residual_level(max(known) if known else None)
+    # the tooltip names the value that decides the level
+    graded_is_loo = loo_rms_mm is not None and float(loo_rms_mm) > (float(rms_mm) if rms_mm is not None else -math.inf)
+    level = residual_level(max(known) if known else None, "LOO" if graded_is_loo else "RMS")
     if loo_rms_mm is None and level.level == "green":
         level = ResidualLevel("none", f"{level.text[:-1]}; no leave-one-out RMS: add landmark pairs at other points to check the fit.")
     return f"{' · '.join(parts)} ({int(n_pairs)} pair{'' if int(n_pairs) == 1 else 's'})", level
