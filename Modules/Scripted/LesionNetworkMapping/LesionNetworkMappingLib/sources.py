@@ -716,6 +716,9 @@ class Records:
     def merge(self, keep, drop):
         """Merge record ``drop`` into ``keep`` (empty fields filled, ``n_cases`` and notes combined). Return the kept row.
 
+        The kept record takes the stage of ``drop`` when ``drop`` went further (an excluded ``keep`` too, when ``drop``
+        passed the stage ``keep`` was excluded at).
+
         The attachments folder of ``drop`` is left where it is. Cases that cite ``drop`` are not changed here; the
         caller relinks them with :func:`relink_cases`.
         """
@@ -728,6 +731,11 @@ class Records:
         rank = {stage: index for index, stage in enumerate(ADVANCE)}
         if row["stage"] != EXCLUDED and other["stage"] in rank and rank.get(row["stage"], 0) < rank[other["stage"]]:
             row["stage"] = other["stage"]
+        elif row["stage"] == EXCLUDED and other["stage"] in rank and rank.get(self.excluded_at(row), 0) < rank[other["stage"]]:
+            # The kept copy was excluded, but the duplicate went past the stage it was excluded at (included, say): the
+            # further decision wins, so the merge does not silently undo an inclusion (and drop its cases from PRISMA).
+            # Logged, so undo brings the exclusion back with its reason.
+            self._stamp(row, other["stage"], "")
         self.rows = [item for item in self.rows if item is not other]
         # The stage lines of ``drop`` go (they would feed undo and excluded_at of a record that is gone), but the merges it
         # absorbed earlier move to ``keep``: each one is a duplicate removed and stays counted (merged_count)

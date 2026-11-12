@@ -665,6 +665,36 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual(len(sources.linked_subjects(self.study, a)), 2)
         self.assertEqual(sources.linked_subjects(self.study, b), [])
 
+    def test_merge_keeps_inclusion_of_dropped_duplicate(self):
+        """Merging an excluded record with its included duplicate keeps the inclusion: PRISMA included and cases stay."""
+        title = "Pure alexia after occipital stroke"
+        records = sources.Records.open(self.study)
+        records.add([sources.draft(title=title, year="2017"), sources.draft(title=title + ".", year="2017")])
+        keep, drop = records.ids()
+        self.assertEqual([offer[:2] for offer in records.merge_offers()], [(keep, drop)])
+        records.exclude(keep, "Not a case report")
+        for _step in range(3):
+            records.advance(drop)
+        sources.add_cases(self.study, records, drop, 2)
+        before = sources.prisma_counts(self.study, records)
+        records.merge(keep, drop)
+        sources.relink_cases(self.study, keep, drop)
+        after = sources.prisma_counts(self.study, records)
+        row = records.get(keep)
+        self.assertEqual((row["stage"], row["exclusion_reason"], row["n_cases"]), (sources.INCLUDED, "", "2"))
+        self.assertEqual((after["included"], after["cases"]), (before["included"], before["cases"]))
+        self.assertEqual(after["duplicates_removed"], before["duplicates_removed"] + 1)
+        # undo brings the exclusion back with its reason
+        self.assertEqual(records.undo(keep), sources.EXCLUDED)
+        self.assertEqual(records.get(keep)["exclusion_reason"], "Not a case report")
+        # a duplicate that did not pass the stage the kept copy was excluded at leaves the exclusion as it was
+        other = sources.Records(os.path.join(self.root, "other"))
+        other.add([sources.draft(title=title, year="2017"), sources.draft(title=title + ".", year="2017")])
+        keep, drop = other.ids()
+        other.exclude(keep, "Not a case report")
+        other.merge(keep, drop)
+        self.assertEqual((other.get(keep)["stage"], other.get(keep)["exclusion_reason"]), (sources.EXCLUDED, "Not a case report"))
+
 
 if __name__ == "__main__":
     unittest.main()
