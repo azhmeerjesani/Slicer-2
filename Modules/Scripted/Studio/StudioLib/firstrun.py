@@ -240,15 +240,33 @@ def _autosaveLine():
         return ""
 
 
-#: Jobs that quitting stops (job name -> what the user knows it as); Ctrl+N / Ctrl+W stop only the first two
-_RUN_LABELS = {"engine": "Map network", "normalize": "Normalize to MNI", "normalize-batch": "Normalize to MNI"}
+#: Jobs that quitting stops (job name -> what the user knows it as); Ctrl+N / Ctrl+W stop only the scene-bound ones.
+#: Quitting stops every running job: any other heavy job is named by its title (the status chip's text).
+_RUN_LABELS = {"engine": "Map network", "normalize": "Normalize to MNI", "normalize-batch": "Normalize to MNI",
+               "glm": "Contrast", "nulls": "Null models", "validate": "Validation", "validate-frozen": "Frozen circuit",
+               "pipeline": "Run everything", "reference": "Reference maps", "fastindex": "Fast index", "degree": "Degree map"}
 _SCENE_BOUND_RUNS = ("engine", "normalize")
+#: Jobs that keep their completed work when stopped: the next run continues from it (pipeline outputs, reference build)
+_RESUMABLE_RUNS = ("pipeline", "reference")
+
+
+def _runLabel(job):
+    """What the user knows a running job as ("Map network", "Contrast", "Null models"...)."""
+    name = getattr(job.spec, "name", None)
+    labels = {"engine": _("Map network"), "normalize": _("Normalize to MNI"), "normalize-batch": _("Normalize to MNI"),
+              "glm": _("Contrast"), "nulls": _("Null models"), "validate": _("Validation"), "validate-frozen": _("Frozen circuit"),
+              "pipeline": _("Run everything"), "reference": _("Reference maps"), "fastindex": _("Fast index"), "degree": _("Degree map")}
+    if name in labels:
+        return labels[name]
+    return str(getattr(job.spec, "title", "") or name or _("A job"))
 
 
 def runningJobNotice(sceneOnly=False):
-    """The sentence that tells that a Map network or Normalize run is going and what leaving does to it, "" if none runs.
+    """The sentence that tells that a long job (Map network, Normalize, Contrast, Null models, Validation, Run
+    everything, Reference maps...) is running and what leaving does to it, "" if none runs.
 
-    ``sceneOnly``: only the runs that closing the scene (Ctrl+N, Ctrl+W) stops; quitting stops every one of them.
+    ``sceneOnly``: only the runs that closing the scene (Ctrl+N, Ctrl+W) stops; quitting stops every running job
+    (``JobRunner._onAboutToQuit``), and every heavy job or job named in ``_RUN_LABELS`` is named.
     """
     import sys
 
@@ -259,18 +277,29 @@ def runningJobNotice(sceneOnly=False):
         jobs = module.instance().runningJobs()
     except Exception:
         return ""
-    names = _SCENE_BOUND_RUNS if sceneOnly else tuple(_RUN_LABELS)
+    sentences = []
     for job in jobs:
-        name = getattr(job.spec, "name", None)
-        if name not in names or job.isFinished():
+        try:
+            if job.isFinished():
+                continue
+            name = getattr(job.spec, "name", None)
+            if sceneOnly:
+                if name not in _SCENE_BOUND_RUNS:
+                    continue
+            elif name not in _RUN_LABELS and not getattr(job, "heavy", getattr(job.spec, "heavy", False)):
+                continue
+            label = _runLabel(job)
+            progress = getattr(job, "progress", None)
+        except Exception:
             continue
-        label = _("Map network") if name == "engine" else _("Normalize to MNI")
-        progress = getattr(job, "progress", None)
         running = _("{what} is running ({pct}%).").format(what=label, pct=round(100 * progress)) if progress is not None else _("{what} is running.").format(what=label)
         if sceneOnly:
-            return _("{running} Closing the scene stops it and its result will be lost.").format(running=running)
-        return _("{running} Quitting stops it and its result will be lost.").format(running=running)
-    return ""
+            sentences.append(_("{running} Closing the scene stops it and its result will be lost.").format(running=running))
+        elif name in _RESUMABLE_RUNS:
+            sentences.append(_("{running} Quitting stops it; the work done so far is kept and the next run continues from it.").format(running=running))
+        else:
+            sentences.append(_("{running} Quitting stops it and its result will be lost.").format(running=running))
+    return "\n".join(sentences)
 
 
 def projectCloseSummary():
@@ -346,9 +375,39 @@ def _withRunNotice(summary):
     return f"{notice}\n\n{summary}" if notice else summary
 
 
+def _sceneModified():
+    """True when the classic prompt would ask "Save before exit?" (modified data or scene, as
+    ``qSlicerMainWindowPrivate::isSceneContentModifiedSinceRead``).
+    """
+    if _modifiedStorableNodes():
+        return True
+    collection = vtk.vtkCollection()
+    return bool(slicer.mrmlScene.GetModifiedSinceRead(collection))
+
+
+def _runNoticeQuestion(mainWindow):
+    """No Studio close question applies (nothing open, or the classic prompt would ask): when a job runs, ask the Studio
+    question anyway so that it names the job that quitting stops ("Save session…" saves unsaved data first). Without
+    a running job the classic prompt runs.
+    """
+    try:
+        notice = runningJobNotice()
+        if not notice:
+            return
+        if _sceneModified():
+            question = _("The scene has changes that are not saved: Save session… saves them before quitting. Quit?")
+        else:
+            question = _("Quit?")
+    except Exception:
+        logging.error(f"Studio: cannot describe the running job:\n{traceback.format_exc()}")
+        return
+    mainWindow.setProperty(CLOSE_SUMMARY_PROPERTY, f"{notice}\n\n{question}")
+    mainWindow.setProperty(CLOSE_MODE_PROPERTY, CLOSE_MODE_LESION_SAVED)
+
+
 def computeCloseSummary():
     """Set the close prompt properties of the main window (``closeSummaryRequested()``). Never raises: on an error the
-    classic prompt runs.
+    classic prompt runs, unless a job runs (then the question names it, see ``_runNoticeQuestion``).
     """
     mainWindow = slicer.util.mainWindow()
     if mainWindow is None:
@@ -364,6 +423,8 @@ def computeCloseSummary():
             summary = _withRunNotice(summary)
             mainWindow.setProperty(CLOSE_SUMMARY_PROPERTY, summary)
             mainWindow.setProperty(CLOSE_MODE_PROPERTY, mode)
+        else:
+            _runNoticeQuestion(mainWindow)
         return
     try:
         projectSummary = projectCloseSummary()
@@ -376,6 +437,8 @@ def computeCloseSummary():
             summary = _withRunNotice(summary)
             mainWindow.setProperty(CLOSE_SUMMARY_PROPERTY, summary)
             mainWindow.setProperty(CLOSE_MODE_PROPERTY, mode)
+        else:
+            _runNoticeQuestion(mainWindow)
         return
     try:
         mode, summary = closeSummary()
@@ -383,6 +446,7 @@ def computeCloseSummary():
         logging.error(f"Studio: cannot describe the unsaved data:\n{traceback.format_exc()}")
         mode, summary = "", ""
     if not mode:
+        _runNoticeQuestion(mainWindow)
         return
     autosaveLine = _autosaveLine()
     if autosaveLine:

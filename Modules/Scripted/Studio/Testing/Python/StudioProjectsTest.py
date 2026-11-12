@@ -374,6 +374,82 @@ class StudioProjectsTest(unittest.TestCase):
             projects_ui._service = originalService
             service.newProject = originalNew
 
+    def test_03d_every_running_long_job_is_named_when_quitting(self):
+        """Quitting names a running Contrast, Null models, Validation, Run everything or reference build (not only Map
+        network and Normalize), and asks even with nothing open or unsaved (bug
+        quit-question-ignores-running-contrast-nulls-validate-reference-jobs).
+        """
+        import importlib
+        import types
+
+        from StudioLib import firstrun
+
+        jobrunner = importlib.import_module("LesionNetworkMappingUI.jobrunner")
+
+        def fakeJob(name, title, heavy=True, progress=0.15):
+            return types.SimpleNamespace(spec=types.SimpleNamespace(name=name, title=title), heavy=heavy, progress=progress,
+                                         isFinished=lambda: False)
+
+        runner = types.SimpleNamespace(runningJobs=lambda: [])
+        original = jobrunner.instance
+        jobrunner.instance = lambda: runner
+        mainWindow = slicer.util.mainWindow()
+        patched = {name: getattr(firstrun, name) for name in ("studyCloseSummary", "projectCloseSummary", "closeSummary", "_sceneModified")}
+        try:
+            for name, title, expected in (("glm", "GLM", "Contrast is running (15%)"),
+                                          ("nulls", "Null models", "Null models is running (15%)"),
+                                          ("validate", "Validation", "Validation is running (15%)"),
+                                          ("validate-frozen", "Frozen circuit", "Frozen circuit is running (15%)"),
+                                          ("fastindex", "Fast index", "Fast index is running (15%)"),
+                                          ("degree", "Degree map", "Degree map is running (15%)")):
+                runner.runningJobs = lambda name=name, title=title: [fakeJob(name, title)]
+                notice = firstrun.runningJobNotice()
+                self.assertIn(expected, notice)
+                self.assertIn("Quitting stops it and its result will be lost", notice)
+                self.assertEqual(firstrun.runningJobNotice(sceneOnly=True), "", f"{name} is not stopped by closing the scene")
+            for name, title, expected in (("pipeline", "Cohort analysis", "Run everything is running (25%)"),
+                                          ("reference", "Reference maps", "Reference maps is running (25%)")):
+                runner.runningJobs = lambda name=name, title=title: [fakeJob(name, title, progress=0.25)]
+                notice = firstrun.runningJobNotice()
+                self.assertIn(expected, notice)
+                self.assertIn("Quitting stops it; the work done so far is kept", notice)
+            # A short light job (a terms check) is not worth a sentence
+            runner.runningJobs = lambda: [fakeJob("fetch-terms", "Terms", heavy=False)]
+            self.assertEqual(firstrun.runningJobNotice(), "")
+            # Nothing open and nothing unsaved: the Studio question still names the running job (not the plain
+            # official "Are you sure you want to exit?")
+            firstrun.studyCloseSummary = lambda: None
+            firstrun.projectCloseSummary = lambda: None
+            firstrun.closeSummary = lambda: ("", "")
+            firstrun._sceneModified = lambda: False
+            runner.runningJobs = lambda: [fakeJob("glm", "GLM")]
+            firstrun.computeCloseSummary()
+            self.assertEqual(mainWindow.property(firstrun.CLOSE_MODE_PROPERTY), firstrun.CLOSE_MODE_LESION_SAVED)
+            summary = str(mainWindow.property(firstrun.CLOSE_SUMMARY_PROPERTY))
+            self.assertIn("Contrast is running (15%). Quitting stops it and its result will be lost.", summary)
+            # Unsaved data that the classic prompt would offer to save: the question says so ("Save session…" saves it)
+            firstrun._sceneModified = lambda: True
+            firstrun.computeCloseSummary()
+            self.assertIn("Save session", str(mainWindow.property(firstrun.CLOSE_SUMMARY_PROPERTY)))
+            # Saving the project failed (the classic prompt asks): the job is still named
+            firstrun.projectCloseSummary = lambda: ("", "")
+            mainWindow.setProperty(firstrun.CLOSE_MODE_PROPERTY, None)
+            firstrun.computeCloseSummary()
+            self.assertEqual(mainWindow.property(firstrun.CLOSE_MODE_PROPERTY), firstrun.CLOSE_MODE_LESION_SAVED)
+            # No job: the classic prompt runs (no property is set)
+            runner.runningJobs = lambda: []
+            firstrun.projectCloseSummary = lambda: None
+            mainWindow.setProperty(firstrun.CLOSE_MODE_PROPERTY, None)
+            mainWindow.setProperty(firstrun.CLOSE_SUMMARY_PROPERTY, None)
+            firstrun.computeCloseSummary()
+            self.assertFalse(mainWindow.property(firstrun.CLOSE_MODE_PROPERTY))
+        finally:
+            jobrunner.instance = original
+            for name, value in patched.items():
+                setattr(firstrun, name, value)
+            mainWindow.setProperty(firstrun.CLOSE_MODE_PROPERTY, None)
+            mainWindow.setProperty(firstrun.CLOSE_SUMMARY_PROPERTY, None)
+
     def test_03b_user_scan_named_like_a_template_is_user_data(self):
         """A scan the user opened from a file is user data whatever its name (FSL's MNI152_T1_2mm_brain is not a template)."""
         service = self._service()
