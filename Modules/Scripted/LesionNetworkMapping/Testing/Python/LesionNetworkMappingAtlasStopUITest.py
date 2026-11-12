@@ -83,6 +83,12 @@ class LesionNetworkMappingAtlasStopUITest(unittest.TestCase):
         self.assertEqual(len(started), 1, "the other atlases went on after Stop")
         self.assertEqual(manager.message, "The download was stopped.")
         self.assertFalse(manager.busy())
+        self.assertTrue(manager.stopped, "a stop must be told apart from a failure so that only the Clusters card words it")
+        with mock.patch.object(card_clusters.AtlasManager, "isCached", return_value=False), mock.patch.object(fetch, "fetch_set", slow):
+            self.assertTrue(manager.fetch(IDS))
+            self.assertFalse(manager.stopped, "a new download clears the stop")
+            manager.stop()
+            self.assertTrue(wait(lambda: manager.fetching is None, 5))
 
 
 if __name__ == "__main__":

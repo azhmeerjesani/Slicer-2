@@ -1133,7 +1133,8 @@ class NetworksCard:
             widgets.setBannerText(self.atlasBanner, self.atlases.message or _("Downloading…"))
         elif missing:
             names = ", ".join(shortName(atlasId) for atlasId in missing)
-            widgets.setBannerText(self.atlasBanner, self.atlases.message or _("Not on this computer: {names} ({size}). Networks of the other atlases are listed.").format(names=names, size=self.atlases.sizeText(missing)))
+            note = "" if self.atlases.stopped else self.atlases.message  # a stop belongs to the card that started the download
+            widgets.setBannerText(self.atlasBanner, note or _("Not on this computer: {names} ({size}). Networks of the other atlases are listed.").format(names=names, size=self.atlases.sizeText(missing)))
         for button in self.atlasBanner.findChildren(qt.QToolButton):
             isStop = button.text == _("Stop")
             button.setVisible(busy if isStop else True)

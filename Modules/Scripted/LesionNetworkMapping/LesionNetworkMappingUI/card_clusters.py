@@ -856,6 +856,7 @@ class AtlasManager:
         self.allowCrossFamily = False
         self.fetching = None  # {"thread", "timer", "state"} while a download runs
         self.message = ""
+        self.stopped = False  # True from a stop until the next download starts: only the card that shows the atlases' state may say so
         self._status = None
         self._memo = {}
 
@@ -985,6 +986,7 @@ class AtlasManager:
             return False
         from LesionNetworkMappingLib import jobs
 
+        self.stopped = False
         token = jobs.CancelToken(signals=False)
         state = {"text": _("Downloading…"), "errors": [], "done": False, "cancel": token, "stopped": False}
         cache = self.cacheDir()  # resolved here: the thread never reads the application settings
@@ -1022,6 +1024,7 @@ class AtlasManager:
                 timer.stop()
                 self._status = None
                 self.fetching = None
+                self.stopped = bool(state["stopped"])
                 self.message = _("The download was stopped.") if state["stopped"] else self.failureText(state["errors"], len(ids))
             self.notify()
 
@@ -1444,9 +1447,13 @@ class ClustersCard:
         else:
             self.atlasLabel.setText(_("Labels: none (no atlas on this computer)"))
         self.atlasLabel.setToolTip("\n".join(self.atlases.title(atlasId) for atlasId in usable))
-        self.atlasBanner.setVisible((bool(missing) and not usable) or busy)
+        stopped = bool(missing) and not busy and self.atlases.stopped
+        self.atlasBanner.setVisible((bool(missing) and not usable) or stopped or busy)
         if busy:
             widgets.setBannerText(self.atlasBanner, self.atlases.message or _("Downloading…"))
+        elif stopped:
+            names = ", ".join(shortName(atlasId) for atlasId in missing)
+            widgets.setBannerText(self.atlasBanner, _("The download was stopped. Not on this computer: {names} ({size}).").format(names=names, size=self.atlases.sizeText(missing)))
         elif missing and not usable:
             widgets.setBannerText(self.atlasBanner, self.atlases.message or _("The clusters are listed without anatomical labels: no atlas is on this computer ({size}).").format(size=self.atlases.sizeText(missing)))
         for button in self.atlasBanner.findChildren(qt.QToolButton):
