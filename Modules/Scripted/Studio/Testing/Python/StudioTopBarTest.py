@@ -362,6 +362,41 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(topBar.grid.columnStretch(2), 1)
         self.assertEqual(topBar.grid.columnMinimumWidth(0), topBar.grid.columnMinimumWidth(2))
 
+    def test_long_status_chip_keeps_window_narrow(self):
+        """A long status chip (a failed run's reason) is elided: the window still shrinks to 1000 px, the full text stays readable."""
+        studioShell = self._applyStudio()
+        topBar = studioShell.topBar
+        self.mainWindow.resize(1366, 760)
+        self._pump(6)
+        before = topBar.toolBar.minimumSizeHint.width()
+        longText = ("Run failed: The VLSM is blocked: No voxel is lesioned in at least 20 of the 24 lesions, "
+                    "lower the minimum overlap or add lesions")
+        studioShell.setStatusChip(longText, "warn")
+        self._pump(6)
+        self.assertTrue(topBar.statusChip.isVisibleTo(topBar.toolBar))
+        # Both side columns take the chip's minimum width (72 px and the spacing), never its whole text
+        self.assertLessEqual(topBar.toolBar.minimumSizeHint.width() - before, 200,
+                             f"the chip widened the top bar from {before} to {topBar.toolBar.minimumSizeHint.width()} px")
+        self.assertLessEqual(topBar.statusChip.width, 320)
+        self.assertIn("…", str(topBar.statusChip.text))
+        self.assertIn(longText, str(topBar.statusChip.toolTip))
+        self.assertEqual(topBar.statusChipText(), longText)
+        self.assertLessEqual(self.mainWindow.width, 1366)
+        for width in (1000, 1366, 1920):
+            self.mainWindow.resize(width, 760)
+            self._pump(6)
+            self.assertLessEqual(self.mainWindow.minimumSizeHint.width(), 1000, f"at {width} px")
+            self.assertEqual(self.mainWindow.width, width)
+            self._assertCentred(topBar, f"long chip at {width} px")
+            self.assertTrue(str(topBar.statusChip.text).startswith("Run failed"), str(topBar.statusChip.text))
+        # A short text is shown whole, without a tooltip
+        studioShell.setStatusChip("Mapping 34%", "busy")
+        self._pump(4)
+        self.assertEqual(str(topBar.statusChip.text), "Mapping 34%")
+        self.assertEqual(topBar.statusChipText(), "Mapping 34%")
+        studioShell.setStatusChip(None)
+        self.assertIsNone(topBar.statusChipText())
+
     def test_compact_mode(self):
         """setCompact(True): the search pill is a 30 px icon button, the switcher shows icons, the breadcrumb is at most 160 px."""
         studioShell = self._applyStudio()

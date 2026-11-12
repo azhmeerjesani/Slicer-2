@@ -43,6 +43,11 @@ BREADCRUMB_SEPARATOR = " \u203a "
 UNAVAILABLE_OPACITY = 0.55
 #: Horizontal padding and frame of the breadcrumb button (its stylesheet), which the elided text must leave free
 _BREADCRUMB_PADDING = 16
+#: Widest the status chip gets (a longer text, such as the reason of a failed run, is elided at its end and shown
+#: whole in its tooltip), and the narrowest it gets when the window is narrow: the chip never widens the window
+STATUS_CHIP_MAX_WIDTH = 280
+STATUS_CHIP_COMPACT_MAX_WIDTH = 160
+STATUS_CHIP_MIN_WIDTH = 72
 ICON_SIZE = 18
 UNDO_REDO_POLL_INTERVAL_MS = 250
 #: Autosave status (A-01b): icon size, and the window widths below which it shows its icon only (the text stays in
@@ -272,7 +277,10 @@ class TopBar:
         self.statusChip = ui.chip("")
         self.statusChip.setObjectName("StudioStatusChip")
         self.statusChip.hide()
+        self._statusChipText = None
         rightLayout.addWidget(self.statusChip)
+        self._rightResizeFilter = _ResizeFilter(self._elideStatusChip)
+        self.rightContainer.installEventFilter(self._rightResizeFilter)
         # Autosave status (A-01b): "Autosaved · 2 min ago" and its menu, hidden until something was autosaved
         self.saveStatusButton = qt.QToolButton()
         self.saveStatusButton.setObjectName("StudioSaveStatus")
@@ -558,6 +566,7 @@ class TopBar:
             button.setToolButtonStyle(style)
         self.breadcrumbButton.setMaximumWidth(BREADCRUMB_COMPACT_MAX_WIDTH if compact else BREADCRUMB_MAX_WIDTH)
         self._elideBreadcrumb()
+        self._elideStatusChip()
         self.updateSaveStatusCompact()
         self.updateColumnMinimums()
 
@@ -961,14 +970,53 @@ class TopBar:
         self._breadcrumbTimer.start()
 
     def setStatusChip(self, text=None, level="neutral"):
+        """Show ``text`` in the status chip (None hides it). A text longer than the chip's room is elided at its end, and
+        the whole text is in the tooltip and in ``statusChipText()``: the chip never widens the window.
+        """
         if not text:
+            self._statusChipText = None
             self.statusChip.hide()
+            self.statusChip.setToolTip("")
         else:
-            self.statusChip.setText(text)
+            text = str(text)
+            self._statusChipText = text
             ui.setChipLevel(self.statusChip, level)
+            # The chip asks for its whole text when it has room, and for at most its minimum width otherwise, so that
+            # the side columns (both get the larger minimum) stay narrow
+            self.statusChip.setMinimumWidth(0)
+            self.statusChip.setText(text)
+            whole = self.statusChip.sizeHint.width()
+            self.statusChip.setMinimumWidth(min(whole, STATUS_CHIP_MIN_WIDTH))
             self.statusChip.show()
+            self._elideStatusChip()
         self.updateSaveStatusCompact()
         self.updateColumnMinimums()
+
+    def statusChipText(self):
+        """The whole (not elided) text of the status chip, or None when it is hidden."""
+        return self._statusChipText
+
+    def _elideStatusChip(self):
+        """Elide the status chip text (at its end) to the room that the right column leaves, at most STATUS_CHIP_MAX_WIDTH."""
+        text = self._statusChipText
+        chip = self.statusChip
+        if not text:
+            return
+        metrics = qt.QFontMetrics(chip.font)
+        # Padding and frame of the chip (its stylesheet): what its size hint adds to the text
+        padding = max(0, chip.sizeHint.width() - metrics.horizontalAdvance(str(chip.text)))
+        room = STATUS_CHIP_COMPACT_MAX_WIDTH if self._compact else STATUS_CHIP_MAX_WIDTH
+        if self.rightContainer.width > 0 and not chip.isHidden():
+            # What the column has beyond the minimum of its contents is the chip's to take (the search pill gives way)
+            spare = self.rightContainer.width - self.rightContainer.minimumSizeHint.width()
+            room = min(room, chip.minimumWidth + max(0, spare))
+        room = max(room, chip.minimumWidth)
+        elided = metrics.elidedText(text, qt.Qt.ElideRight, max(0, room - padding))
+        if str(chip.text) != elided:
+            chip.setText(elided)
+        toolTip = text if elided != text else ""
+        if str(chip.toolTip) != toolTip:
+            chip.setToolTip(toolTip)
 
     #
     # Autosave status (A-01b)

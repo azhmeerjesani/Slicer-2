@@ -4244,21 +4244,28 @@ def _onTemplateDownloadProgress(bytesReceived, bytesTotal):
 _TEMPLATE_CHIP_PATTERN = re.compile(r"^1 mm template \d+%$")
 
 
+def _statusChipText(topBar, chip):
+    """The whole text of the status chip (it shows a long text elided)."""
+    return str(topBar.statusChipText() if hasattr(topBar, "statusChipText") else chip.text)
+
+
 def _statusChipFree(shell):
     """True when the top bar shows no status chip, or the 1 mm template progress."""
-    chip = getattr(getattr(shell, "topBar", None), "statusChip", None)
+    topBar = getattr(shell, "topBar", None)
+    chip = getattr(topBar, "statusChip", None)
     if chip is None:
         return False
     try:
-        return not chip.isVisible() or _TEMPLATE_CHIP_PATTERN.match(str(chip.text)) is not None
+        return not chip.isVisible() or _TEMPLATE_CHIP_PATTERN.match(_statusChipText(topBar, chip)) is not None
     except Exception:
         return False
 
 
 def _clearTemplateChip(*args):
     shell = _currentShell()
-    chip = getattr(getattr(shell, "topBar", None), "statusChip", None) if shell is not None else None
-    if chip is not None and chip.isVisible() and _TEMPLATE_CHIP_PATTERN.match(str(chip.text)):
+    topBar = getattr(shell, "topBar", None) if shell is not None else None
+    chip = getattr(topBar, "statusChip", None)
+    if chip is not None and chip.isVisible() and _TEMPLATE_CHIP_PATTERN.match(_statusChipText(topBar, chip)):
         shell.setStatusChip(None)
 
 

@@ -990,10 +990,13 @@ class JobRunner:
         """Hide the status chip unless other code has shown its own text since (for example "Done · N=1000")."""
         self._statusShown = False
         shell = self._shell(job)
-        chip = getattr(getattr(shell, "topBar", None), "statusChip", None) if shell is not None else None
+        topBar = getattr(shell, "topBar", None) if shell is not None else None
+        chip = getattr(topBar, "statusChip", None)
         if chip is not None:
             try:
-                if chip.isHidden() or str(chip.text) != str(self._chipText):
+                # The whole text: the chip shows a long text elided
+                shown = topBar.statusChipText() if hasattr(topBar, "statusChipText") else chip.text
+                if chip.isHidden() or str(shown) != str(self._chipText):
                     self._chipText = None  # already hidden, or showing someone else's text
                     return
             except Exception:

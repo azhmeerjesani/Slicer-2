@@ -6980,10 +6980,13 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                 self.releaseShellFooter(shell)
                 if getattr(shell, "_primaryAction", None) == self.onPrimary:
                     shell.setPrimaryAction(None, "")
-                chip = getattr(getattr(shell, "topBar", None), "statusChip", None)
+                topBar = getattr(shell, "topBar", None)
+                chip = getattr(topBar, "statusChip", None)
                 from LesionNetworkMappingUI import jobrunner
 
-                if self._statusChipText and chip is not None and str(chip.text) == self._statusChipText and not jobrunner.instance().ownsStatusChip():
+                # The whole text: the chip shows a long text elided
+                shown = (topBar.statusChipText() if hasattr(topBar, "statusChipText") else chip.text) if chip is not None else None
+                if self._statusChipText and chip is not None and str(shown) == self._statusChipText and not jobrunner.instance().ownsStatusChip():
                     shell.setStatusChip(None)
             except Exception:
                 logging.exception("Lesion network mapping: leaving Map failed")
