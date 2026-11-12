@@ -3415,16 +3415,27 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         to their study, and the random-coordinate control draws each study's number of foci for its null sets.
         """
         known = {_focusKey(focus) for focus in self.coordinateFoci}
+        inList = 0
+        repeated = 0
+        seen = set()
         new = []
         for focus in foci:
-            if _focusKey(focus) not in known:
-                known.add(_focusKey(focus))
+            key = _focusKey(focus)
+            if key in seen:
+                repeated += 1
+            elif key in known:
+                inList += 1
+            else:
                 new.append(focus)
+            seen.add(key)
         self.setCoordinates(self.coordinateFoci + new, path)
-        skipped = len(foci) - len(new)
-        if skipped:
-            self.coordSummaryLabel.setText(self.coordSummaryLabel.text + " · " + (_("1 focus already in the list was skipped") if skipped == 1 else
-                                                                                  _("{n} foci already in the list were skipped").format(n=skipped)))
+        notes = []
+        if inList:
+            notes.append(_("1 focus already in the list was skipped") if inList == 1 else _("{n} foci already in the list were skipped").format(n=inList))
+        if repeated:
+            notes.append(_("1 duplicate focus in the file was skipped") if repeated == 1 else _("{n} duplicate foci in the file were skipped").format(n=repeated))
+        if notes:
+            self.coordSummaryLabel.setText(self.coordSummaryLabel.text + " · " + " · ".join(notes))
         return new
 
     def onAddMarkupsCoordinates(self):
