@@ -1613,7 +1613,9 @@ class PipelineCard:
             n, groups = int(info.get("n") or 0), info.get("groups") or {}
         parts = [_plural(n, "{n} lesion", "{n} lesions")]
         if groups.get("case") or groups.get("control"):
-            parts.append(_("{cases} cases / {controls} controls").format(cases=groups.get("case", 0), controls=groups.get("control", 0)))
+            from LesionNetworkMapping import cohortGroupsText
+
+            parts.append(cohortGroupsText(groups))
         scores = self._scores(study)
         if scores:
             parts.append(_("scores: {names}").format(names=", ".join(scores)))

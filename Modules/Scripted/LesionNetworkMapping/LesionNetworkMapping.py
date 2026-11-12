@@ -1579,6 +1579,16 @@ def cohortExcludedText(excluded):
     return _("Not mapped: {parts}").format(parts=" · ".join(parts)) if parts else ""
 
 
+def cohortGroupsText(groups):
+    """"1 case / 0 controls" from {"case": n, "control": m} (singular for one; "" when there is neither)."""
+    cases, controls = int(groups.get("case", 0) or 0), int(groups.get("control", 0) or 0)
+    if not (cases or controls):
+        return ""
+    caseText = _("{cases} case") if cases == 1 else _("{cases} cases")
+    controlText = _("{controls} control") if controls == 1 else _("{controls} controls")
+    return _("{caseText} / {controlText}").format(caseText=caseText.format(cases=cases), controlText=controlText.format(controls=controls))
+
+
 def _mappingStatusText(job):
     """Status chip text of an engine job: "Mapping 34% · 2 min left"."""
     from LesionNetworkMappingUI import jobrunner
@@ -4097,7 +4107,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         groups = info.get("groups", {}) if info else {}
         groupText = ""
         if groups.get("case") or groups.get("control"):
-            groupText = " · " + _("{cases} cases / {controls} controls").format(cases=groups.get("case", 0), controls=groups.get("control", 0))
+            groupText = " · " + cohortGroupsText(groups)
         self.cohortStudyLabel.setText((_("Study “{name}” · 1 lesion to map") if info and info["n"] == 1 else _("Study “{name}” · {n} lesions to map")).format(name=study.name, n=info["n"] if info else 0) + groupText)
         excluded = (info or {}).get("excluded") or {}
         if excluded or (info or {}).get("error"):

@@ -41,6 +41,11 @@ class CohortExcludedTextTest(unittest.TestCase):
         for code in ("include=0", "qc=fail", "review_status", "norm_qc", "!="):
             self.assertNotIn(code, text)
 
+    def test_group_counts_use_the_singular_for_one(self):
+        self.assertEqual(self.module.cohortGroupsText({"case": 1, "control": 0}), "1 case / 0 controls")
+        self.assertEqual(self.module.cohortGroupsText({"case": 2, "control": 1}), "2 cases / 1 control")
+        self.assertEqual(self.module.cohortGroupsText({}), "")
+
     def test_nothing_excluded(self):
         self.assertEqual(self.module.cohortExcludedText({}), "")
         self.assertEqual(self.module.cohortExcludedText({"missing lesion": []}), "")
