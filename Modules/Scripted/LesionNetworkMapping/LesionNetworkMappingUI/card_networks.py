@@ -801,7 +801,7 @@ class NetworksCard:
         schemeRow.addWidget(self.schemeFrame)
         schemeRow.addStretch(1)
         layout.addLayout(schemeRow)
-        self.atlasBanner = widgets.banner("", [(_("Get atlases"), self.getAtlases)], level="neutral")
+        self.atlasBanner = widgets.banner("", [(_("Get atlases"), self.getAtlases), (_("Stop"), self.atlases.stop)], level="neutral")
         self.atlasBanner.setObjectName("LNMNetworksAtlasBanner")
         self.atlasBanner.hide()
         layout.addWidget(self.atlasBanner)
@@ -1135,7 +1135,9 @@ class NetworksCard:
             names = ", ".join(shortName(atlasId) for atlasId in missing)
             widgets.setBannerText(self.atlasBanner, self.atlases.message or _("Not on this computer: {names} ({size}). Networks of the other atlases are listed.").format(names=names, size=self.atlases.sizeText(missing)))
         for button in self.atlasBanner.findChildren(qt.QToolButton):
-            button.setEnabled(not busy)
+            isStop = button.text == _("Stop")
+            button.setVisible(busy if isStop else True)
+            button.setEnabled(busy if isStop else not busy)
 
     #
     # The table

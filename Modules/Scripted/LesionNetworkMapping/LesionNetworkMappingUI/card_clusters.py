@@ -968,6 +968,14 @@ class AtlasManager:
             return _("Some atlases could not be downloaded. {reason}").format(reason=reasons)
         return _("The atlases could not be downloaded. {reason}").format(reason=reasons)
 
+    def stop(self):
+        """Stop the running download (the partial file is kept; the card shows that it was stopped)."""
+        if self.busy():
+            self.fetching["state"]["cancel"].cancel("stopped")
+            self.fetching["state"]["text"] = _("Stopping…")
+            return True
+        return False
+
     def fetch(self, ids):
         """Download the missing atlases of ``ids`` in a background thread (an explicit user action; one at a time)."""
         if self.busy():
@@ -975,23 +983,34 @@ class AtlasManager:
         ids = [atlasId for atlasId in ids if not self.isCached(atlasId)]
         if not ids:
             return False
-        state = {"text": _("Downloading…"), "errors": [], "done": False}
+        from LesionNetworkMappingLib import jobs
+
+        token = jobs.CancelToken(signals=False)
+        state = {"text": _("Downloading…"), "errors": [], "done": False, "cancel": token, "stopped": False}
         cache = self.cacheDir()  # resolved here: the thread never reads the application settings
 
         def work():
             from LesionNetworkMappingLib import fetch
 
-            for atlasId in ids:
+            for index, atlasId in enumerate(ids):
                 try:
                     resource = fetch.find_resource(atlasId, ("atlases",))
 
                     def progress(done, total, title=resource.title):
                         state["text"] = _("Downloading {title}… {pct}%").format(title=title, pct=int(100 * done / total)) if total else _("Downloading {title}…").format(title=title)
 
-                    fetch.fetch_set(resource, cache=cache, progress=progress)
+                    fetch.fetch_set(resource, cache=cache, progress=progress, cancel=token)
+                except jobs.Cancelled:
+                    state["stopped"] = True
+                    break
                 except Exception as exc:
                     logging.info(f"Lesion network mapping: the atlas {atlasId} could not be downloaded: {exc!r}")
-                    state["errors"].append(fetch.user_message(exc))
+                    message = fetch.user_message(exc)
+                    state["errors"].append(message)
+                    if isinstance(exc, fetch.OfflineError):
+                        # No connection at all: the other atlases would each retry and fail the same way
+                        state["errors"].extend([message] * (len(ids) - index - 1))
+                        break
             state["done"] = True
 
         timer = qt.QTimer()
@@ -1003,7 +1022,7 @@ class AtlasManager:
                 timer.stop()
                 self._status = None
                 self.fetching = None
-                self.message = self.failureText(state["errors"], len(ids))
+                self.message = _("The download was stopped.") if state["stopped"] else self.failureText(state["errors"], len(ids))
             self.notify()
 
         timer.connect("timeout()", poll)
@@ -1101,7 +1120,7 @@ class ClustersCard:
         self.atlasButton.setMenu(self.atlasMenu)
         atlasRow.addWidget(self.atlasButton)
         layout.addLayout(atlasRow)
-        self.atlasBanner = widgets.banner("", [(_("Get atlases"), self.getAtlases)], level="neutral")
+        self.atlasBanner = widgets.banner("", [(_("Get atlases"), self.getAtlases), (_("Stop"), self.atlases.stop)], level="neutral")
         self.atlasBanner.setObjectName("LNMClustersAtlasBanner")
         self.atlasBanner.hide()
         layout.addWidget(self.atlasBanner)
@@ -1431,7 +1450,9 @@ class ClustersCard:
         elif missing and not usable:
             widgets.setBannerText(self.atlasBanner, self.atlases.message or _("The clusters are listed without anatomical labels: no atlas is on this computer ({size}).").format(size=self.atlases.sizeText(missing)))
         for button in self.atlasBanner.findChildren(qt.QToolButton):
-            button.setEnabled(not busy)
+            isStop = button.text == _("Stop")
+            button.setVisible(busy if isStop else True)
+            button.setEnabled(busy if isStop else not busy)
 
     #
     # The table
