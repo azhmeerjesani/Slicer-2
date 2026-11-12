@@ -1298,6 +1298,18 @@ class StudioProjectsTest(unittest.TestCase):
             qt.QCoreApplication.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.app.processEvents()
 
+    def test_13bd_change_chooser_does_not_send_the_user_to_the_settings_they_are_in(self):
+        from StudioLib import projects_ui
+
+        proposal = os.path.join(self.tempDir, "Slicer Studio")
+        for cancellable in (False, True):
+            dialog = projects_ui.FolderChooserDialog(proposal=proposal, cancellable=cancellable)
+            try:
+                body = dialog.findChild("QLabel", "StudioProjectsFolderBody").text
+                self.assertEqual("Settings" in body, not cancellable, body)
+            finally:
+                dialog.deleteLater()
+
     def test_13c_folder_chooser_enter_presses_continue(self):
         """Enter in the folder chooser presses the primary "Continue" and does not open the folder picker, whichever button has
         the initial focus; Cancel (Change folder) is never the default either (BB-1).

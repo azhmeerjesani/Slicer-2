@@ -302,13 +302,19 @@ class FolderChooserDialog(qt.QDialog):
         header.addWidget(ui.iconTile("folder", 40, 20, "StudioProjectsFolderIcon"), 0, qt.Qt.AlignTop)
         headerText = qt.QVBoxLayout()
         headerText.setSpacing(6)
-        title = qt.QLabel(_("Where should Slicer Studio keep your work?"))
+        if self.cancellable:
+            titleText = _("Choose a new Slicer Studio folder")
+            bodyText = _("Everything you open, draw and compute is saved here automatically, so there is no Save to remember.")
+        else:
+            titleText = _("Where should Slicer Studio keep your work?")
+            bodyText = _("Everything you open, draw and compute is saved here automatically, so there is no Save to remember. "
+                         "You can change this later in Settings › Saving.")  # noqa: RUF001
+        title = qt.QLabel(titleText)
         title.setObjectName("StudioProjectsFolderTitle")
         title.setWordWrap(True)
         ui.setText(title, "title")
         headerText.addWidget(title)
-        body = qt.QLabel(_("Everything you open, draw and compute is saved here automatically, so there is no Save to remember. "
-                           "You can change this later in Settings › Saving."))  # noqa: RUF001
+        body = qt.QLabel(bodyText)
         body.setObjectName("StudioProjectsFolderBody")
         body.setWordWrap(True)
         headerText.addWidget(body)
