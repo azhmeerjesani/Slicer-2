@@ -323,6 +323,10 @@ def foci_from_rows(columns, rows, default_space="MNI", default_study="study", wh
             if names["diameter"]:
                 diameter = _number(row.get(names["diameter"]))
                 radius = None if diameter is None else diameter / 2.0
+            if radius is not None and not (math.isfinite(radius) and 0 < radius <= MAX_RADIUS_MM):
+                label = "diameter" if names["diameter"] else "radius"
+                raise ValueError(f"the sphere {label} in the file must give a radius in (0, {MAX_RADIUS_MM:g}] mm, "
+                                 f"got a radius of {radius:g} mm")
             space = normalize_space(row.get(names["space"]) if names["space"] else None, default_space)
             study = (row.get(names["study"]) or "").strip() if names["study"] else ""
             subjects = _number(row.get(names["subjects"])) if names["subjects"] else None

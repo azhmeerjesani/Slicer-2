@@ -1526,7 +1526,7 @@ def _focusKey(focus):
 
 def _ownRadiusText(foci):
     """" · 2 foci use the radius from the file" when foci carry their own sphere radius (it overrides the Sphere row)."""
-    own = sum(1 for focus in foci if getattr(focus, "radius_mm", None))
+    own = sum(1 for focus in foci if getattr(focus, "radius_mm", None) is not None)
     if not own:
         return ""
     return " · " + (_("1 focus uses the radius from the file") if own == 1 else _("{n} foci use the radius from the file").format(n=own))

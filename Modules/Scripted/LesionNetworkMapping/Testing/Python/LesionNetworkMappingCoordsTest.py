@@ -98,6 +98,17 @@ class ParserTest(CoordsTestCase):
         with self.assertRaisesRegex(ValueError, "Unknown coordinate space"):
             coords.read_csv(self.write("bad.csv", "x,y,z,space\n1,2,3,Colin\n"))
 
+    def test_csv_radius_out_of_range_names_file_and_row(self):
+        with self.assertRaisesRegex(ValueError, r"radius_zero_neg\.csv, row 2: .*\(0, 30\] mm.*0 mm"):
+            coords.read_csv(self.write("radius_zero_neg.csv", "x,y,z,radius,study\n-33,-57,11,0,A\n34,-55,12,-3,B\n"))
+        with self.assertRaisesRegex(ValueError, r"neg\.csv, row 3: .*-3 mm"):
+            coords.read_csv(self.write("neg.csv", "x,y,z,radius\n1,2,3,4\n34,-55,12,-3\n"))
+        with self.assertRaisesRegex(ValueError, r"dia\.csv, row 2: "):
+            coords.read_csv(self.write("dia.csv", "x,y,z,diameter\n1,2,3,0\n"))
+        with self.assertRaisesRegex(ValueError, r"big\.csv, row 2: "):
+            coords.read_csv(self.write("big.csv", "x,y,z,radius\n1,2,3,31\n"))
+        self.assertEqual(coords.read_csv(self.write("ok.csv", "x,y,z,radius\n1,2,3,30\n"))[0].radius_mm, 30.0)
+
     def test_csv_error_row_is_the_file_line(self):
         # Blank and comment lines are dropped before parsing and a headerless table has no header line: the message
         # must still name the line the user sees in the file (it said "row 3" for all of these).
