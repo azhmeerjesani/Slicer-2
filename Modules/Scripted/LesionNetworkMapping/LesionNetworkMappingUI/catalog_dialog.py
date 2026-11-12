@@ -155,13 +155,21 @@ def planSummary(entry, subset, keepArchives, destination, unfinished=None):
         parts.append(_("stored {size}").format(size=formatBytes(plan["stored"])))
     if plan["peak"]:
         parts.append(_("peak {size}").format(size=formatBytes(plan["peak"])))
+    elif plan.get("peak_min"):
+        parts.append(_("peak at least {size}").format(size=formatBytes(plan["peak_min"])))
     if free is not None:
         parts.append(_("free here {size}").format(size=formatBytes(free)))
     text = " · ".join(parts)
     if plan["notes"]:
         text += "\n" + " ".join(plan["notes"])
     problem = None
-    if plan["peak"] and free is not None:
+    if not plan["peak"] and plan.get("peak_min") and free is not None:
+        # The bundle size is not known before the conversion, but a destination that cannot hold even its lower bound is refused
+        fraction = (unfinished or {}).get("fraction")
+        need = plan["peak_min"] if fraction is None else round(plan["peak_min"] * (1 - min(max(fraction, 0), 1)))
+        if free < need:
+            problem = _("Not enough free space here: the plan needs at least about {need} and {free} are free.").format(need=formatBytes(need), free=formatBytes(free))
+    elif plan["peak"] and free is not None:
         fraction = (unfinished or {}).get("fraction")
         if fraction is not None:
             remaining = round(plan["peak"] * (1 - min(max(fraction, 0), 1)))

@@ -1156,6 +1156,24 @@ class FetchLeadDbsSubsetTest(unittest.TestCase):
         self.assertFalse(self.server.requests_for(ids[1]))  # the second archive is never needed
         self.assertEqual(self.warnings("subset_more_archives"), [])
 
+    def test_a_destination_that_cannot_hold_the_lower_bound_is_refused_before_anything_is_downloaded(self):
+        """The Lead-DBS bundle size is known only from the mask in dataset_volsurf.mat, so the plan has no peak; the job still
+        refuses a destination with less free space than the lower bound (half of the float32 archives) instead of filling the disk.
+        """
+        entry, ids = self.entry((4, 4))
+        plan = catalog.disk_plan(entry)
+        self.assertIsNone(plan["peak"])
+        self.assertTrue(plan["peak_min"])
+        usage = shutil.disk_usage(self.dest)
+        with mock.patch.object(fetchconnectome.shutil, "disk_usage", return_value=usage._replace(free=plan["peak_min"] - 1)):
+            with self.assertRaises(jobs.JobError) as context:
+                self.fetch(entry, "all")
+        self.assertEqual(context.exception.code, "disk_space")
+        self.assertIn("at least", context.exception.message)
+        self.assertFalse([file_id for file_id in ids if self.server.requests_for(file_id)])
+        with mock.patch.object(fetchconnectome.shutil, "disk_usage", return_value=usage._replace(free=plan["peak_min"])):
+            self.assertExactSubset(self.fetch(entry, "First 2 Subjects"), "First 2 Subjects", 2)  # a subset needs less
+
     def test_archives_that_hold_fewer_subjects_are_followed_by_the_next_ones(self):
         entry, ids = self.entry((1, 1, 3, 3))  # "First 4 Subjects" is estimated in 2 archives, which hold 2 subjects
         self.assertEqual(catalog.disk_plan(entry, "First 4 Subjects")["archives"], ["GSP1000_leadDBS_00.tar", "GSP1000_leadDBS_01.tar"])

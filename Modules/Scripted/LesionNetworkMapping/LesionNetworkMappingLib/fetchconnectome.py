@@ -1061,6 +1061,9 @@ def fetch_connectome(entry, dest, terms_sha, subset=None, streams=2, keep_archiv
     free = shutil.disk_usage(dest).free
     if plan_info["peak"] and not state.exists and free < plan_info["peak"] * DISK_MARGIN:
         raise jobs.JobError(f"Not enough free space in {dest}: the plan needs about {plan_info['peak']:,} B at the peak and {free:,} B are free", code="disk_space")
+    if not plan_info["peak"] and plan_info.get("peak_min") and not state.exists and free < plan_info["peak_min"]:
+        # The bundle size is known only at conversion, but the destination cannot hold even its lower bound
+        raise jobs.JobError(f"Not enough free space in {dest}: the plan needs at least about {plan_info['peak_min']:,} B and {free:,} B are free", code="disk_space")
 
     with lock:
         if lock.reclaimed:

@@ -63,6 +63,9 @@ STORED_SAMPLE_BYTES = 2
 STORED_NORM_BYTES = 4
 #: Bytes per sample of a run kept in memory or staged between two archives (float32)
 STAGED_SAMPLE_BYTES = 4
+#: Bytes per sample of the runs in the archives of a streamed converter (float32: GSP NIfTI runs, Lead-DBS gmtc), so a
+#: bundle whose size the catalog does not state holds at least about STORED_SAMPLE_BYTES / ARCHIVE_SAMPLE_BYTES of its archives
+ARCHIVE_SAMPLE_BYTES = 4
 _DOI_PATTERN = re.compile(r"^10\.\d{4,9}/\S+$")
 _ARCHIVE_SUBSET_PATTERN = re.compile(r"^archives:\s*(.+)$", re.IGNORECASE)
 _SUBJECT_SUBSET_PATTERN = re.compile(r"^subjects:\s*(\d+)$", re.IGNORECASE)
@@ -417,8 +420,11 @@ def disk_plan(entry, subset=None, keep_archives=False):
       the bundle, the small files and the runs staged between two archives. Other entries keep the download
       next to what is converted from it. None for link-out entries (nothing is downloaded by the app) and
       when the bundle size is unknown.
+    - ``peak_min``: a lower bound of the peak when the peak is unknown for a streamed converter (the bundle keeps the
+      runs of the archives as float16, at least half of their float32 bytes); otherwise None. Checked like the peak, so
+      a destination that cannot hold even this is refused before anything is written.
 
-    :return: dict with download, stored, stored_range, peak, staging, archives (names), subjects, exact
+    :return: dict with download, stored, stored_range, peak, peak_min, staging, archives (names), subjects, exact
       (whether the download is exact) and notes.
     """
     selection = resolve_subset(entry, subset)
@@ -458,6 +464,15 @@ def disk_plan(entry, subset=None, keep_archives=False):
                 notes.append("Archives are streamed into the bundle and never stored.")
         elif download is not None:
             peak = download + kept
+    peak_min = None
+    if peak is None and not link_out(entry) and entry.get("converter") in STREAM_CONVERTERS and download is not None:
+        # The bundle size is known only at conversion (Lead-DBS: from the mask in dataset_volsurf.mat), but the runs in the
+        # archives are float32 and the bundle keeps them as float16: it needs at least about half of the archive bytes
+        # of the subjects it keeps (the subset's fraction of all the archives), next to the small files
+        all_archives = sum(f.get("size") or 0 for f in files if f.get("role") == "archive")
+        other_bytes = sum(f.get("size") or 0 for f in others)
+        bundle_min = round(all_archives * fraction * STORED_SAMPLE_BYTES / ARCHIVE_SAMPLE_BYTES)
+        peak_min = bundle_min + other_bytes + (download - other_bytes if keep_archives else 0)
     if not selection["exact"]:
         notes.append("The archives of a subject subset are estimated: subjects are assumed spread evenly over the archives in order.")
         if entry.get("converter") == "leaddbs_vol":
@@ -469,6 +484,7 @@ def disk_plan(entry, subset=None, keep_archives=False):
         "stored": stored,
         "stored_range": stored_range,
         "peak": peak,
+        "peak_min": peak_min,
         "staging": staging,
         "archives": [f["name"] for f in selection["archives"]],
         "subjects": selection["subjects"],

@@ -211,6 +211,25 @@ class LesionNetworkMappingCatalogDialogTest(unittest.TestCase):
                 runner.assert_not_called()
                 self.assertIsNone(controller.checkResumeSubset({**request, "subset": None}))
 
+    def test_an_unknown_bundle_size_still_refuses_a_destination_too_small_for_its_lower_bound(self):
+        """GSP1000 for Lead-DBS: the bundle size is known only at conversion, but 4 GB free cannot hold a 219 GB download's bundle
+        (at least half of its float32 archives): Download is refused like the NIfTI entry, not left enabled to fill the disk.
+        """
+        from LesionNetworkMappingLib import catalog
+        from LesionNetworkMappingUI import catalog_dialog
+
+        entry = catalog.load_catalog().get("gsp1000-kktjqc")
+        plan = catalog.disk_plan(entry, None, False)
+        self.assertIsNone(plan["peak"])
+        with mock.patch.object(catalog_dialog, "freeBytes", return_value=4_300_000_000):
+            text, problem = catalog_dialog.planSummary(entry, "all", False, self.tmp)
+            self.assertIn("peak at least", text)
+            self.assertIn("Not enough free space here", problem or "")
+            self.assertIn("Not enough free space here", catalog_dialog.planSummary(entry, "Full Set", False, self.tmp)[1] or "")
+            self.assertIsNone(catalog_dialog.planSummary(entry, "First Subject", False, self.tmp)[1])  # about 0.1 GB fits
+        with mock.patch.object(catalog_dialog, "freeBytes", return_value=plan["peak_min"] + 1):
+            self.assertIsNone(catalog_dialog.planSummary(entry, "all", False, self.tmp)[1])
+
     def test_resume_is_judged_by_the_space_still_to_be_written(self):
         """A partly written download compares the free space with what is still to be written, not with the whole peak (the part
         written is no longer free): the main button stays 'Resume this download' and enabled, like the banner's Resume button.
