@@ -113,8 +113,11 @@ class LesionNetworkMappingDownloadCacheUITest(unittest.TestCase):
 
         looked = []
         with mock.patch.object(atlases, "peak_regions", lambda points, space=None, cache=None, atlases=None: looked.append(fetch.cache_dir(cache))), \
-                mock.patch.object(widget, "_showPeakRegions", lambda peaks, regions: None):
-            widget._lookupPeakRegions([{"world": (0.0, 0.0, 0.0)}], None)
+                mock.patch.object(widget, "_showPeakRegions", lambda peaks, regions, unknownSpace=False: None):
+            # A map on a standard grid (a map whose space cannot be told is not looked up at all)
+            from LesionNetworkMappingLib import geometry
+
+            widget._lookupPeakRegions([{"world": (0.0, 0.0, 0.0)}], geometry.GRID_BY_ID["NLin6-2mm"].grid)
             self.assertTrue(wait(lambda: getattr(widget, "_peakRegionJob", None) is None))
         self.assertEqual(looked, [self.expected])
 

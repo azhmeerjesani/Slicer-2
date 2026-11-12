@@ -6571,12 +6571,20 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         cache = fetch.app_cache_dir()  # the folder the cards download to (Clusters' Get atlases)
         points = [peak["world"] for peak in peaks]
         space = self._peakSpace(grid)
+        previous = getattr(self, "_peakRegionJob", None)
+        if not space or atlases.space_family(space) in ("unknown", "native"):
+            # The template space of the map cannot be told: like the Clusters card, no atlas names its regions (scanner or
+            # unknown-space coordinates would be named as MNI regions, and atlases of both families mixed)
+            if previous is not None:
+                self._endPeakRegionPoll(previous)
+            self._peakRegionJob = None
+            self._showPeakRegions(peaks, None, unknownSpace=True)
+            return
         executor = getattr(LesionNetworkMappingWidget, "_regionExecutor", None)
         if executor is None:
             executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="LNMPeakRegions")
             LesionNetworkMappingWidget._regionExecutor = executor
         future = executor.submit(atlases.peak_regions, points, space, cache)
-        previous = getattr(self, "_peakRegionJob", None)
         if previous is not None:
             self._endPeakRegionPoll(previous)
         job = {"future": future, "peaks": peaks}
@@ -6616,12 +6624,18 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         except Exception:
             pass
 
-    def _showPeakRegions(self, peaks, regions):
-        """The Peak region column: the region names, or "—" when no atlas is downloaded (the tooltip says how to get one)."""
+    def _showPeakRegions(self, peaks, regions, unknownSpace=False):
+        """The Peak region column: the region names, or "—" when no atlas is downloaded (the tooltip says how to get one)
+        or when the template space of the map cannot be told (``unknownSpace``: the tooltip says so).
+        """
         if peaks is not self._peaks or not hasattr(self, "peaksTable"):
             return
-        self._peakRegionsMissing = regions is None
-        noAtlas = _("No atlas downloaded: Get atlases (the Lesion card of Draw, or the Clusters card) names the peak regions")
+        self._peakRegionsMissing = regions is None and not unknownSpace
+        if unknownSpace:
+            regions = None
+            noAtlas = _("The template space of this map is not recognized, so its peaks are not named by an atlas. Say which template space it is in.")
+        else:
+            noAtlas = _("No atlas downloaded: Get atlases (the Lesion card of Draw, or the Clusters card) names the peak regions")
         for row in range(min(len(peaks), self.peaksTable.rowCount)):
             item = self.peaksTable.item(row, 0)
             if item is None:

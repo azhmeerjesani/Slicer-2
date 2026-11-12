@@ -96,6 +96,48 @@ class LesionNetworkMappingPeakSpaceUITest(unittest.TestCase):
             widget.loadedMap, widget.ctx.resultVolume = saved
             slicer.mrmlScene.RemoveNode(volume)
 
+    def test_unknown_space_names_no_region(self):
+        """A map whose template space cannot be told (no declared space, a grid that is not a standard one: an oblique or
+        3 mm map without a sidecar): the Peak region column says "—" with the reason, as the Clusters card refuses to
+        label it. It handed space None to peak_regions, which then named scanner coordinates with every cached atlas.
+        """
+        import numpy as np
+
+        from LesionNetworkMappingLib import atlases
+
+        widget = slicer.modules.LesionNetworkMappingWidget
+        affine = np.array([[-3.0, 0, 0, 90.0], [0, 3.0, 0, -126.0], [0, 0, 3.0, -72.0], [0, 0, 0, 1.0]])
+        grid = types.SimpleNamespace(shape=(61, 73, 61), affine=affine)
+        lookups, shown = [], []
+        saved = (widget.loadedMap, widget.ctx.resultVolume, widget.runOutputs)
+        try:
+            widget.loadedMap, widget.ctx.resultVolume, widget.runOutputs = None, None, {}
+            self.assertIsNone(widget._peakSpace(grid))
+            with mock.patch.object(atlases, "peak_regions", lambda points, space=None, cache=None, atlases=None: lookups.append(space) or ["L caudate"]), \
+                    mock.patch.object(widget, "_showPeakRegions", lambda peaks, regions, unknownSpace=False: shown.append((regions, unknownSpace))):
+                widget._lookupPeakRegions([{"world": (0.0, 0.0, 0.0)}], grid)
+                self.assertTrue(wait(lambda: getattr(widget, "_peakRegionJob", None) is None))
+        finally:
+            widget.loadedMap, widget.ctx.resultVolume, widget.runOutputs = saved
+        self.assertEqual(lookups, [], "no atlas may name the peaks of a map whose space is unknown")
+        self.assertEqual(shown, [(None, True)])
+
+        # The column itself: "—" with the reason, and no "Get atlases" refresh pending
+        table = widget.peaksTable
+        peaks = [{"world": (0.0, 0.0, 0.0)}]
+        savedPeaks, savedRows = widget._peaks, table.rowCount
+        try:
+            widget._peaks = peaks
+            table.setRowCount(1)
+            table.setItem(0, 0, qt.QTableWidgetItem("…"))
+            widget._showPeakRegions(peaks, None, unknownSpace=True)
+            self.assertEqual(table.item(0, 0).text(), "—")
+            self.assertIn("template space", table.item(0, 0).toolTip())
+            self.assertFalse(widget._peakRegionsMissing)
+        finally:
+            widget._peaks = savedPeaks
+            table.setRowCount(savedRows)
+
 
 if __name__ == "__main__":
     unittest.main()

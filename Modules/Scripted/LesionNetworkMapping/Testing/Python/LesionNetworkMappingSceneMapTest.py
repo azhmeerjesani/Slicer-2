@@ -249,6 +249,8 @@ class LesionNetworkMappingSceneMapTest(unittest.TestCase):
         widget = self.widget
         widget.exit()
         volume = self._sceneMap()
+        # A map in a known template space (a map whose space cannot be told names no region, whatever the atlases)
+        volume.SetAttribute("Studio.Space", "MNI152NLin6Asym")
         widget.loadedMap = None
         widget.runOutputs = {}
         widget._peaks = []
