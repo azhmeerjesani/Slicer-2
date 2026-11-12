@@ -485,6 +485,15 @@ class CatalogDialog(qt.QDialog):
             self.notice.hide()
         current = self.entry["id"] if self.entry else None
         table = self.table
+        # Drop the previous licence chips first: setCellWidget on a refilled table leaves the old widgets
+        # drawn at their old position (they then overlap the titles when the dialog is resized)
+        for row in range(table.rowCount):
+            old = table.cellWidget(row, 1)
+            if old is not None:
+                table.removeCellWidget(row, 1)
+                old.hide()
+                old.deleteLater()
+        table.clearContents()
         table.setRowCount(len(self.entries))
         selectRow = 0
         for row, entry in enumerate(self.entries):

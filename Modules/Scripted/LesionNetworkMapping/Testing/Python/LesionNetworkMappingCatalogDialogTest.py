@@ -309,6 +309,26 @@ class LesionNetworkMappingCatalogDialogTest(unittest.TestCase):
             self.assertGreaterEqual(chip.width, chip.sizeHint.width(), "row %d: chip '%s' is clipped" % (row, chip.text))
             self.assertGreaterEqual(table.columnWidth(1), cell.sizeHint.width())
 
+    def test_refreshing_again_leaves_one_licence_chip_per_row(self):
+        """Opening Get a connectome… a second time refills the table: the first filling's chips must not stay behind (they were drawn over the titles)."""
+        from LesionNetworkMappingUI import catalog_dialog
+
+        dialog = catalog_dialog.CatalogDialog()
+        self.addCleanup(dialog.deleteLater)
+        previous = dialog.controller.catalogPath
+        self.addCleanup(setattr, dialog.controller, "catalogPath", previous)
+        dialog.controller.catalogPath = None
+        dialog.show()
+        dialog.refresh()
+        dialog.refresh()
+        dialog.resize(dialog.width + 200, dialog.height)
+        for _ in range(20):
+            slicer.app.processEvents()
+        table = dialog.table
+        self.assertGreater(table.rowCount, 0)
+        chips = [w for w in table.viewport().findChildren("QLabel") if w.isVisible()]
+        self.assertEqual(len(chips), table.rowCount)
+
     def test_the_progress_line_uses_the_singular_for_one_subject(self):
         dialog = self.makeDialog(None)
         base = {"state": "running", "name": "demo", "fraction": 0.09, "archiveCount": 3, "archiveIndex": 1, "eta": None, "bytes": 7, "total": 70, "error": None, "warnings": []}
