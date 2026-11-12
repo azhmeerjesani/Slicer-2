@@ -64,6 +64,7 @@ import csv
 import gzip
 import json
 import logging
+import math
 import os
 import re
 import struct
@@ -781,6 +782,40 @@ def _niftiHasInvalidSize(path):
     return False
 
 
+def _niftiHasInvalidGeometry(path):
+    """True if a value of the NIfTI header of ``path`` that places the image in space is not finite (NaN or infinite):
+    a voxel size ``pixdim[1..3]`` of the dimensions it has, the quaternion and offset when ``qform_code`` > 0, or a row
+    of the affine (``srow_x/y/z``) when ``sform_code`` > 0. Such an image has no valid position or orientation, and the
+    Segment Editor aborts the app on a segmentation read from it (``std::bad_alloc`` on its NaN extent).
+    """
+    header = _niftiHeader(path, 540)
+    if header is None or len(header) < 348:
+        return False
+    for byteOrder in ("<", ">"):
+        size = struct.unpack(byteOrder + "i", header[0:4])[0]
+        if size == 348:
+            dims = struct.unpack(byteOrder + "8h", header[40:56])
+            pixdim = struct.unpack(byteOrder + "8f", header[76:108])
+            qformCode, sformCode = struct.unpack(byteOrder + "2h", header[252:256])
+            quatern = struct.unpack(byteOrder + "6f", header[256:280])
+            srow = struct.unpack(byteOrder + "12f", header[280:328])
+        elif size == 540 and len(header) >= 540:
+            dims = struct.unpack(byteOrder + "8q", header[16:80])
+            pixdim = struct.unpack(byteOrder + "8d", header[104:168])
+            qformCode, sformCode = struct.unpack(byteOrder + "2i", header[344:352])
+            quatern = struct.unpack(byteOrder + "6d", header[352:400])
+            srow = struct.unpack(byteOrder + "12d", header[400:496])
+        else:
+            continue
+        used = list(pixdim[1:1 + max(1, min(3, dims[0]))])
+        if qformCode > 0:
+            used += quatern
+        if sformCode > 0:
+            used += srow
+        return not all(math.isfinite(value) for value in used)
+    return False
+
+
 def _checkNiftiComplete(path):
     """Raise ``RuntimeError`` (a message for the user) if the data of the NIfTI file ``path`` stops before the end that its
     header promises: the voxels that are missing would be read as 0, and a lesion would lose part of its volume.
@@ -799,6 +834,10 @@ def _checkNiftiComplete(path):
             raise RefusedFileError(
                 _("{name} is damaged: its header gives an invalid image size (a dimension below 1), so it was not "
                   "opened.").format(name=name))
+        if _niftiHasInvalidGeometry(path):
+            raise RefusedFileError(
+                _("{name} is damaged: its header gives an invalid position or orientation (a voxel size or a "
+                  "position value that is not a number), so it was not opened.").format(name=name))
     _checkNrrdMhaComplete(path)
     shortfall = _niftiDataShortfall(path)
     if shortfall is not None:
