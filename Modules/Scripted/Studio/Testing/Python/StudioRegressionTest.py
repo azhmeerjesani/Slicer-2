@@ -8256,3 +8256,51 @@ class StudioRegressionTest(unittest.TestCase):
         for _ in range(4):
             slicer.app.processEvents()
         self.assertFalse(slicer.util.mainWindow().grab().isNull())
+
+    def test_99_new_case_from_this_paper_counts_in_prisma_cases(self):
+        """BB-1: "New case from this paper" raises the record's n_cases in sources/records.tsv, as "Add cases…" does, so the
+        PRISMA case count and the Sources summary include it; Undo puts the count back.
+        """
+        from StudioLib import study_ui
+
+        sources = study_ui._lnm("sources")
+        Study = study_ui._lnm("study").Study
+        folder = os.path.join(self.directory, "paper cases")
+        study = Study.create(folder, name="Paper cases")
+        records = sources.Records.open(study)
+        recordId = records.add([{"title": "Peduncular hallucinosis after thalamic stroke", "authors": "Müller, Anna", "year": "2019",
+                                 "doi": "10.1212/WNL.0000000000001234"}])["added"][0]
+        for _ in range(3):
+            records.advance(recordId)
+        self.assertEqual(records.get(recordId)["stage"], sources.INCLUDED)
+        created = sources.add_cases(study, records, recordId, 2)
+        records.save()
+        study.save()
+        self.assertEqual(sources.prisma_counts(study, sources.Records.open(study))["cases"], 2)
+        undos = []
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: undos.append(kwargs.get("action"))
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        try:
+            session = study_ui.openStudy(folder, None, subject=created[0], showLibrary=False)
+            for _ in range(4):
+                slicer.app.processEvents()
+            newSid = session.newCaseFromPaper(switchToDraw=False)
+            for _ in range(4):
+                slicer.app.processEvents()
+            reopened = Study.open(folder)
+            self.assertIn(newSid, sources.linked_subjects(reopened, recordId))
+            records = sources.Records.open(reopened)
+            self.assertEqual(records.get(recordId)["n_cases"], "3")
+            self.assertEqual(sources.prisma_counts(reopened, records)["cases"], 3)
+            # Undo (the toast's action) removes the case and its count
+            self.assertTrue(undos and undos[-1] is not None)
+            self.assertTrue(undos[-1]())
+            for _ in range(4):
+                slicer.app.processEvents()
+            session.flush()
+            self.assertEqual(sources.Records.open(Study.open(folder)).get(recordId)["n_cases"], "2")
+        finally:
+            study_ui.closeStudy()
+            for _ in range(4):
+                slicer.app.processEvents()

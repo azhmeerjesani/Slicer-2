@@ -2343,6 +2343,7 @@ class StudySession:
         self._inboxRetryTimer.setInterval(INBOX_RETRY_MS)
         self._inboxRetryTimer.connect("timeout()", self._onInboxRetry)
         self._removed = []  # undo records of "Remove from study"
+        self._paperCaseCounts = {}  # "New case from this paper": sid -> (record_id, n_cases before, n_cases set), for Undo
         self.creationReport = None
         self._gridRows = {}
         self._metricsWriter = None
@@ -4472,6 +4473,7 @@ class StudySession:
         last = max((index for index, other in enumerate(rows) if recordOf(other) == paper), default=len(rows) - 1)
         rows.insert(last + 1, moved)
         self.flush()
+        self._syncPaperCaseCount(newSid, values.get("record_id"))
         previous = self._current
         if not self.open(newSid, switchToDraw=switchToDraw):
             return newSid
@@ -4480,6 +4482,41 @@ class StudySession:
                action=lambda: self._undoNewCase(newSid, previous), actionText=_("Undo"), level="consequence")
         _notify(self)
         return newSid
+
+    def _syncPaperCaseCount(self, sid, recordId):
+        """Raise ``n_cases`` of the paper's record in sources/records.tsv to its linked study rows, as "Add cases…" on the
+        Sources card does, so the PRISMA case count and the Sources summary include ``sid``. Nothing is written for a case
+        with no record in records.tsv, a read-only or unavailable study folder, or an unreadable records.tsv.
+        """
+        if _missing(recordId) or self.readOnly or not self.folderAvailable():
+            return
+        try:
+            sources = _lnm("sources")
+            records = sources.Records.open(self.study)
+            before = sources.sync_case_count(self.study, records, str(recordId))
+            if before is None:
+                return
+            records.save()
+            self._paperCaseCounts[sid] = (str(recordId), before, records.get(str(recordId))["n_cases"])
+        except Exception as e:
+            logging.warning(f"Studio: the case count of record {recordId} in sources/records.tsv was not updated: {e}")
+
+    def _restorePaperCaseCount(self, sid):
+        """Undo of :meth:`_syncPaperCaseCount` for ``sid``, while records.tsv still holds the count it set."""
+        recordId, before, after = self._paperCaseCounts.pop(sid, (None, None, None))
+        if recordId is None or self.readOnly or not self.folderAvailable():
+            return
+        try:
+            sources = _lnm("sources")
+            records = sources.Records.open(self.study)
+            row = records.get(recordId)
+            if row["n_cases"] != after:
+                return  # changed since: keep it
+            row["n_cases"] = before
+            sources.sync_case_count(self.study, records, recordId)  # never below the cases still linked
+            records.save()
+        except Exception as e:
+            logging.warning(f"Studio: the case count of record {recordId} in sources/records.tsv was not restored: {e}")
 
     def _undoNewCase(self, sid, previous):
         """Undo "New case from this paper" while the new case is untouched: remove it and go back to the case it came from."""
@@ -4494,6 +4531,7 @@ class StudySession:
         if not self.removeSubjects([sid]):
             return False
         self._removed.pop()  # not offered by "Undo remove"
+        self._restorePaperCaseCount(sid)
         return True
 
     def newCaseFromClipboardFigure(self, sid=None, shell=None):

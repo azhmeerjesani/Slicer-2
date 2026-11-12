@@ -974,10 +974,26 @@ def add_cases(study, records, record_id, n):
             continue
         study.add_subject(sid, values)
         created.append(sid)
-    # Keep the PRISMA case count in step with the study rows
-    digits = re.search(r"\d+", row["n_cases"])
-    row["n_cases"] = str(max(int(digits.group(0)) if digits else 0, len(linked_subjects(study, record_id))))
+    sync_case_count(study, records, record_id)
     return created
+
+
+def sync_case_count(study, records, record_id):
+    """Keep the PRISMA case count in step with the study rows: raise the record's ``n_cases`` to the number of study rows
+    linked to it (a larger count entered for the paper is kept). Used by :func:`add_cases` and by "New case from this paper".
+
+    :return: the record's previous ``n_cases`` text when it changed, else None (also for a record not in ``records``).
+    """
+    try:
+        row = records.get(record_id)
+    except KeyError:
+        return None
+    digits = re.search(r"\d+", row["n_cases"])
+    count = str(max(int(digits.group(0)) if digits else 0, len(linked_subjects(study, record_id))))
+    if count == row["n_cases"]:
+        return None
+    previous, row["n_cases"] = row["n_cases"], count
+    return previous
 
 
 def relink_cases(study, keep, drop):
