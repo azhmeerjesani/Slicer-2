@@ -1386,6 +1386,12 @@ def study_connectomes(root):
     return found
 
 
+def _vlsm_sign_coding(record):
+    from . import vlsm  # noqa: PLC0415 (a vlsm.json written before it recorded "sign_coding")
+
+    return vlsm.sign_coding(record)
+
+
 def neurovault_image(item, connectome=None):
     """NeuroVault metadata of one map (see :func:`neurovault_metadata`).
 
@@ -1402,8 +1408,34 @@ def neurovault_image(item, connectome=None):
     fallback = _connectome_source(item["connectome"] if item.get("connectome") is not None else connectome)
     licence, connectome = item.get("licence"), {}
     df, n_subjects, sign, description = item.get("df"), item.get("number_of_subjects", item.get("n_lesions")), item.get("sign_coding"), item.get("description")
+    # A VLSM result folder (vlsm.json): maps of lesion location, not of connectivity
+    vlsm_record = _read_json_or_none(os.path.join(folder, "vlsm.json")) if not lesion and (not desc or desc.startswith("vlsm")) else None
+    vlsm_record = vlsm_record if isinstance(vlsm_record, dict) else None
     if name.endswith(("_mask.nii.gz", "_mask.nii")):
         map_type = "R"
+    elif vlsm_record is not None:
+        connectome = {}
+        is_p = desc.endswith(P_MAP_SUFFIXES)
+        is_t = desc.endswith("Tstat")
+        map_type = "T" if is_t else "Other"
+        if n_subjects is None:
+            n_subjects = vlsm_record.get("n")
+        if is_t and df is None:
+            df = vlsm_record.get("df")
+        n_text = vlsm_record.get("n") if vlsm_record.get("n") is not None else NOT_RECORDED
+        if desc == "vlsmCoverage":
+            sign = sign or "Counts (0 to n): the number of analysed lesions that cover each voxel; not a signed statistic."
+            description = description or f"Lesion coverage map: number of the n = {n_text} analysed lesions covering each voxel (a lesion count, not a statistic)."
+        else:
+            if sign is None:
+                sign = "Plain p-values (not 1 - p, not -log10 p); 1 outside the tested voxels." if is_p else vlsm_record.get("sign_coding") or _vlsm_sign_coding(vlsm_record)
+            kind = "p-value map" if is_p else "unthresholded statistic" if desc.endswith(("Tstat", "Fstat")) else "unthresholded effect size"
+            contrast = vlsm_record.get("contrast") if isinstance(vlsm_record.get("contrast"), dict) else {}
+            label = contrast.get("label") or NOT_RECORDED
+            if contrast.get("spec") and contrast.get("spec") != label:
+                label += f" ({contrast['spec']})"
+            description = description or (f"Voxel-based lesion-symptom map ({desc}): relation of lesion location (binary lesion masks) to the "
+                                          f"{'score' if vlsm_record.get('test') == 'continuous' else 'group'}, contrast {label}, n = {n_text}; {kind}.")
     elif lesion:
         sidecar = _lesion_sidecar_for(path) or {}
         provenance = _read_json_or_none(os.path.join(folder, "provenance.json")) or {}
@@ -1448,12 +1480,12 @@ def neurovault_image(item, connectome=None):
             else:
                 sign = NOT_RECORDED
         description = description or f"Group lesion network map ({desc}); {'p-value map' if is_p else 'unthresholded statistic'}."
-    space = str(connectome.get("space") or "")
+    space = str(connectome.get("space") or (vlsm_record or {}).get("space") or "")
     image = {
         "name": item.get("name") or re.sub(r"\.nii(\.gz)?$", "", name),
         "file": item.get("file") or name,
         "map_type": item.get("map_type") or map_type,
-        "modality": "fMRI-BOLD",
+        "modality": "Other" if vlsm_record is not None else "fMRI-BOLD",  # VLSM: lesion location, not resting-state BOLD
         "analysis_level": "G",
         "is_thresholded": False,
         "number_of_subjects": n_subjects,
@@ -1471,7 +1503,7 @@ def neurovault_image(item, connectome=None):
 
 def neurovault_metadata(maps, out=None, connectome=None, root=None):
     """NeuroVault metadata of maps (nothing is uploaded): map_type "T" (T maps), "R" (ROI/mask files) or
-    "Other"; modality fMRI-BOLD; analysis_level G; number_of_subjects = the number of lesions (1 for a
+    "Other"; modality fMRI-BOLD (Other for VLSM maps, which map lesion location); analysis_level G; number_of_subjects = the number of lesions (1 for a
     per-lesion map, the design n for a group map); statistic_parameters = df of T maps (connectome N - 1
     for a per-lesion T map, n - p for a group GLM T map); an explicit sign coding; the data use terms and
     the GSP acknowledgement for GSP-DUT-2014 maps.

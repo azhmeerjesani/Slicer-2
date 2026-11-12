@@ -110,6 +110,35 @@ def contrast_desc(design):
     return "vlsm" + label[:1].upper() + label[1:]
 
 
+def sign_coding(record):
+    """What a positive value of a VLSM statistic map means, from a vlsm.json record ("stat", "test", "contrast", "n_per_level").
+
+    The outcome is the binary lesion value of each voxel and the predictors are the group or the score, so a positive
+    T (and its Hedges g or partial r) means lesion at the voxel goes with the contrast's direction: the "negative"
+    score contrast (-1 on the score) flips the sign compared with the two-sided map. F maps have no sign.
+    """
+    record = record if isinstance(record, dict) else {}
+    contrast = record.get("contrast") if isinstance(record.get("contrast"), dict) else {}
+    spec = contrast.get("spec")
+    if record.get("stat") == "F" or spec == "F":
+        return "F statistic and partial eta squared are not signed: larger values mean lesion location differs more between the groups."
+    adjusted = " (after the covariates)" if record.get("covariates") else ""
+    if record.get("test") == "continuous":
+        columns = contrast.get("columns") or []
+        score = str(columns[1]) if len(columns) > 1 and columns[1] else "score"
+        score = score if score.lower().endswith("score") else score + " score"
+        lower = spec == "negative"
+        flip = " The contrast is -1 on the score, so the sign is flipped compared with the two-sided map." if lower else ""
+        return (f"Positive values: lesion at the voxel goes with a {'lower' if lower else 'higher'} {score}{adjusted}; negative values: "
+                f"lesion goes with a {'higher' if lower else 'lower'} score.{flip}")
+    levels = [str(level) for level in (record.get("n_per_level") or {})]
+    if record.get("test") in designlib.GROUP_TESTS and len(levels) >= 2:
+        first, second = (levels[1], levels[0]) if spec == "B>A" else (levels[0], levels[1])
+        return f"Positive values: the voxel is lesioned more often in {first} than in {second}{adjusted}; negative values: the opposite."
+    label = contrast.get("label")
+    return f"Positive values: lesion at the voxel goes with a positive contrast {label} ({spec})." if label and spec else "not recorded"
+
+
 def output_path(out_dir, space, desc, suffix="map"):
     """``<out_dir>/group_space-<sp>_desc-<desc>_<suffix>.nii.gz`` (letters and digits only in ``desc``)."""
     if not re.fullmatch(r"[A-Za-z0-9]+", desc):
@@ -627,6 +656,7 @@ def vlsm(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESION
             "disclaimer": DISCLAIMER,
         })
         record.pop("tfce_fwe", None)
+        record["sign_coding"] = sign_coding(record)
         json_path = os.path.join(out_dir, VLSM_JSON)
         write_record(json_path, record)
         outputs = [*paths.values(), design_json, design_tsv, lesions_tsv, json_path]

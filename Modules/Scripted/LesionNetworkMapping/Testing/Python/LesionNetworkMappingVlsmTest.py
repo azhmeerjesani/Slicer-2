@@ -257,6 +257,52 @@ class VlsmRunTest(unittest.TestCase):
         self.assertIn("smallest attainable p 0.001", legacy)
         self.assertNotIn("min_p", legacy)
 
+    def test_share_export_describes_vlsm_maps(self):
+        """The share-safe export and the NeuroVault metadata describe VLSM maps as lesion-location maps (not network
+        maps), the coverage map as a lesion count, and record the sign coding (the "negative" score contrast flips the
+        sign) and the df; vlsm.json records the sign coding too (bug bash: generic "Group lesion network map" text,
+        SignCoding "not recorded", modality fMRI-BOLD).
+        """
+        from LesionNetworkMappingLib import export, share
+
+        study, _scores = make_study(os.path.join(self.tmp, "share-study"), n=24, seed=5)
+        spec = designlib.DesignSpec(test="continuous", score_column="score", contrast="negative", group_column=None, covariates=["volume_ml"])
+        record = vlsm.vlsm(study.path, spec, grid=self.grid, space=SPACE, min_lesions=6, min_percent=0, n_perm=200, seed=3)
+        self.assertIn("lesion at the voxel goes with a lower score (after the covariates)", record["sign_coding"])
+        self.assertIn("flipped", record["sign_coding"])
+        out = os.path.join(self.tmp, "share-out")
+        share.export_dataset(study.path, out, {"licence": "CC0-1.0", "maps": True})
+        desc = record["contrast"]["desc"]
+
+        def sidecar(suffix):
+            with open(os.path.join(out, "group", f"group_space-{SPACE}_desc-{suffix}_map.json"), encoding="utf-8") as stream:
+                return json.load(stream)
+
+        tstat = sidecar(desc + "Tstat")
+        self.assertTrue(tstat["Description"].startswith("Voxel-based lesion-symptom map"), tstat)
+        self.assertNotIn("network", tstat["Description"])
+        self.assertEqual(tstat["Statistic"], "T")
+        self.assertEqual(tstat["SignCoding"], record["sign_coding"])
+        self.assertEqual(tstat["DegreesOfFreedom"], record["df"])
+        self.assertEqual(tstat["NumberOfSubjects"], record["n"])
+        self.assertIn("lesion goes with a higher score", sidecar(desc + "PartialR")["SignCoding"])
+        coverage = sidecar("vlsmCoverage")
+        self.assertIn("lesion count", coverage["Description"])
+        self.assertNotIn("statistic;", coverage["Description"])
+        self.assertNotEqual(coverage["SignCoding"], export.NOT_RECORDED)
+        folder = os.path.dirname(record["record"])
+        images = {image["name"]: image for image in export.neurovault_metadata([os.path.join(folder, name) for name in sorted(os.listdir(folder)) if name.endswith(".nii.gz")])["images"]}
+        for name, image in images.items():
+            self.assertEqual(image["modality"], "Other", name)
+            self.assertNotIn("lesion network map", image["description"] or "", name)
+            self.assertEqual(image["target_template_image"], "GenericMNI", name)
+        self.assertIn("p-value", images[f"group_space-{SPACE}_desc-{desc}PFwe_map"]["description"])
+        # A vlsm.json written before it recorded the sign coding: derived from its contrast; group contrasts name the levels
+        legacy = {key: value for key, value in record.items() if key != "sign_coding"}
+        self.assertEqual(vlsm.sign_coding(legacy), record["sign_coding"])
+        groups = {"test": "two_group", "stat": "t", "contrast": {"spec": "B>A"}, "n_per_level": {"case": 20, "control": 20}}
+        self.assertIn("lesioned more often in control than in case", vlsm.sign_coding(groups))
+
     def test_group_contrast_and_refusals(self):
         out = os.path.join(self.tmp, "groups")
         record = vlsm.vlsm(self.study.path, designlib.DesignSpec(levels=["case", "control"], contrast="A>B"), grid=self.grid, space=SPACE, n_perm=200, out_dir=out, register=False)
