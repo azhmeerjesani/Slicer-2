@@ -9494,6 +9494,28 @@ sys.exit(web.command_local(args))
         self.assertFalse(any("Errno" in r[1] for r in records), records)
         self.assertEqual(shown, ["warning"], "Save lesion shows a warning box, not a Slicer error box")
 
+    def test_110_save_copy_into_unwritable_folder_logs_a_warning_not_an_error(self):
+        import logging
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        records = []
+
+        class Handler(logging.Handler):
+            def emit(self, record):
+                records.append((record.levelname, record.getMessage()))
+
+        handler = Handler()
+        logging.getLogger().addHandler(handler)
+        try:
+            with mock.patch.object(projects_ui.os, "access", lambda *args: False):  # (root ignores folder permissions)
+                self.assertFalse(projects_ui.writeBundleKeepingState(slicer.mrmlScene, os.path.join(self.tempDir, "ro", "x.mrb")))
+        finally:
+            logging.getLogger().removeHandler(handler)
+        self.assertTrue(records)
+        self.assertEqual([level for level, _ in records if level not in ("WARNING",)], [], records)
+
     def test_109_opening_a_study_asks_when_the_open_project_cannot_be_saved(self):
         """Opening a study while the open project could not be saved (disk full) asked nothing: the project was released
         anyway with its edits only in memory, and Ctrl+N or Ctrl+W in the study then cleared them unasked (BB-1). As for

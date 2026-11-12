@@ -640,7 +640,8 @@ def writeBundleKeepingState(scene, path):
     scene.GetStorableNodesModifiedSinceRead(modified)
     modifiedIds = [modified.GetItemAsObject(i).GetID() for i in range(modified.GetNumberOfItems())]
     success = False
-    if not os.access(folder, os.W_OK):
+    refused = not os.access(folder, os.W_OK)
+    if refused:
         messages.AddMessage(vtk.vtkCommand.ErrorEvent, f"Failed to save scene as {path} (path {folder} is not writeable)")
     else:
         # The scene file name of the bundle is the copy's (the caller restores the project's)
@@ -659,7 +660,8 @@ def writeBundleKeepingState(scene, path):
         text = f"Failed to save scene to file: {path}"
         if messages.GetNumberOfMessages() > 0:
             text += "\n" + messages.GetAllMessagesAsString()
-        logging.error(text)
+        # An unwritable folder is an expected refusal (the caller tells the user): a warning, not an error badge
+        (logging.warning if refused else logging.error)(text)
     return success
 
 
