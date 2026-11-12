@@ -1418,6 +1418,11 @@ def planExport(nodes, folder, extension=".nii.gz", segmentationMode=SEGMENTATION
             continue
         kind = kindOf(node)
         base = limitLength((names or {}).get(node.GetID()) or defaultBaseName(node, kind, bids=bids))
+        # A node named like a file ("brain.nii.gz") must not get the extension twice.
+        for suffix in (".nii.gz", ".nii"):
+            if base.lower().endswith(suffix) and len(base) > len(suffix):
+                base = base[: -len(suffix)]
+                break
         if kind == KIND_SEGMENTATION and segmentationMode == SEGMENTATION_LABELMAP:
             base = f"{base}_dseg"
         options = {}

@@ -980,6 +980,14 @@ class StudioNiftiExportTest(unittest.TestCase):
             "Lesions_label-Cyst2_mask.nii.gz": "Cyst2",
         })
 
+    def test_06dc_node_named_like_a_file_keeps_one_extension(self):
+        """A volume named "brain.nii.gz" is exported as ``brain.nii.gz``, not ``brain.nii.gz.nii.gz``."""
+        for name, extension, expected in (("brain.nii.gz", ".nii.gz", "brain.nii.gz"), ("brain.nii.gz", ".nii", "brain.nii"),
+                                          ("Brain.NII", ".nii.gz", "Brain.nii.gz"), ("brain", ".nii.gz", "brain.nii.gz")):
+            node = self._volume(name, np.zeros((4, 4, 4), np.int16), np.eye(4))
+            jobs = self.export.planExport([node], self.out, extension=extension)
+            self.assertEqual(os.path.basename(jobs[0].path), expected)
+
     def test_06da_accented_letters_are_transliterated_in_names(self):
         """Non-ASCII letters are not deleted from file names: "Ödem rechts" -> ``Odemrechts``; CJK names use the segment number."""
         export = self.export
