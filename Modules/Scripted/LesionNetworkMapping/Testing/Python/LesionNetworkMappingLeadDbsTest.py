@@ -225,6 +225,38 @@ class ImportTest(_TempCase):
             leaddbs.import_leaddbs_maps(relabel, study, connectome_label="Native")
         self.assertEqual(caught.exception.code, "exists")
 
+    def test_second_import_keeps_earlier_participants(self):
+        # A second batch into the same folder adds to the first (bug bash: the first batch was silently deleted)
+        first, second = self.path("batch1"), self.path("batch2")
+        self.make_outputs(first, ["A1", "A2"])
+        self.make_outputs(second, ["B1", "A2"])
+        out = self.path("merged")
+        leaddbs.import_leaddbs_maps(first, out_dir=out)
+        events = []
+        record = leaddbs.import_leaddbs_maps(second, out_dir=out, emit=lambda event, **fields: events.append((event, fields)))
+        rows = cohortmaps.read_maps_tsv(record["maps_tsv"])
+        self.assertEqual([row["participant_id"] for row in rows], ["sub-A1", "sub-A2", "sub-B1"])
+        for row in rows:
+            for key in ("AvgR", "AvgFz", "T"):
+                self.assertTrue(os.path.isfile(row[key]), row[key])
+        self.assertTrue(os.path.isfile(os.path.join(out, "sub-A1_conn-GSP1000v2xFullSet_lnm.json")))
+        self.assertEqual((record["lesions"]["mapped"], record["lesions"]["kept"], record["lesions"]["total"]), (2, 1, 3))
+        self.assertEqual(set(record["participants"]), {"sub-A1", "sub-A2", "sub-B1"})
+        warnings = [fields for event, fields in events if event == "warning"]
+        self.assertEqual([(fields["code"], fields["participants"]) for fields in warnings], [("kept_earlier", ["sub-A1"])])
+        self.assertIn("maps.tsv lists 3 participants", warnings[0]["message"])
+        with open(record["maps_tsv"], encoding="utf-8") as f:
+            self.assertNotIn(self.tmp, f.read())
+        # Maps that do not pool with the new ones (another N) are removed, with a warning
+        third = self.path("batch3")
+        self.make_outputs(third, ["C1"])
+        events.clear()
+        record = leaddbs.import_leaddbs_maps(third, out_dir=out, n=500, emit=lambda event, **fields: events.append((event, fields)))
+        self.assertEqual([row["participant_id"] for row in cohortmaps.read_maps_tsv(record["maps_tsv"])], ["sub-C1"])
+        self.assertEqual([(fields["code"], fields["participants"]) for event, fields in events if event == "warning"],
+                         [("replaced_earlier", ["sub-A1", "sub-A2", "sub-B1"])])
+        self.assertFalse([name for name in os.listdir(out) if name.startswith(("sub-A", "sub-B"))])
+
     def test_import_errors_and_cli(self):
         folder = self.path("mixed")
         self.make_outputs(folder, ["A1", "A2"], label="GSP1000v2xFullSet", fz=False)

@@ -319,7 +319,11 @@ def import_leaddbs_maps(folder, study=None, connectome_label=None, out_dir=None,
       those maps are imported under the given label (the original is kept in the sidecars).
     :param n: connectome subjects of the maps (df = N - 1 of the T maps); default: :func:`infer_n` of the label.
     :param terms: "auto" (GSP-DUT-2014 for a GSP label), a licence label, or "none".
-    :param overwrite: replace a folder that holds maps computed by this library (an earlier import is always replaced).
+    :param overwrite: replace a folder that holds maps computed by this library.
+
+    An earlier Lead-DBS import in the destination is merged: its participants that this import does not have are kept
+    (a warning names them), as long as their maps are still there and pool with the new ones (same label, N and grid);
+    the others are removed, with a warning. A participant of both imports gets the new maps.
     """
     from .cohortmaps import MAPS_COLUMNS, write_maps_tsv
     from .export import DISCLAIMER, SIDECAR_FORMAT, derivatives_dir, file_sha256, now_iso, sidecar_path
@@ -358,9 +362,10 @@ def import_leaddbs_maps(folder, study=None, connectome_label=None, out_dir=None,
         out_dir = derivatives_dir(study_obj.path, label)
     out_dir = os.path.abspath(os.fspath(out_dir))
     record_path = os.path.join(out_dir, "cohortmaps.json")
+    previous = _read_json(record_path)
+    previous_import = bool(previous and previous.get("format") == IMPORT_FORMAT)
     if os.path.isdir(out_dir) and os.listdir(out_dir) and not overwrite:
-        previous = _read_json(record_path)
-        if not (previous and previous.get("format") == IMPORT_FORMAT):
+        if not previous_import:
             raise jobs.JobError(f"{out_dir} already holds maps that were not imported from Lead-DBS: choose another label or allow overwriting", code="exists", exit_code=jobs.EXIT_USAGE)
     os.makedirs(out_dir, exist_ok=True)
     lock = jobs.OutputLock(os.path.join(out_dir, LOCK_NAME))
@@ -390,10 +395,23 @@ def import_leaddbs_maps(folder, study=None, connectome_label=None, out_dir=None,
         terms_value = _terms_for(label, terms)
         compat = imported_compatibility(label)
 
+        # The participants of an earlier import that this one does not have are kept (a second batch adds to the first)
+        stale = {name for name in os.listdir(out_dir) if name.endswith(("_funcmap.nii.gz", "_lnm.json"))}
+        kept, dropped = _earlier_import_rows(out_dir, previous if previous_import else None, set(mapping.values()), label, n, compat, reference_header)
+        if kept:
+            emit("warning", code="kept_earlier", participants=[row["participant_id"] for row in kept],
+                 message=(f"The {len(kept)} map(s) of an earlier import into this folder are kept ({', '.join(row['participant_id'] for row in kept[:5])}"
+                          f"{', …' if len(kept) > 5 else ''}): maps.tsv lists {len(kept) + len(mapping)} participants"))
+        if dropped:
+            emit("warning", code="replaced_earlier", participants=dropped,
+                 message=(f"{len(dropped)} map(s) of an earlier import were removed: they do not pool with these maps (other label, N or grid) or their files are missing"
+                          f" ({', '.join(dropped[:5])}{', …' if len(dropped) > 5 else ''})"))
+        for row in kept:
+            stale.difference_update(row.pop("_files"))
+
         # Copy the maps, write the sidecars
         rows, total, t_paths = [], len(selected), []
         started = time.monotonic()
-        stale = {name for name in os.listdir(out_dir) if name.endswith(("_funcmap.nii.gz", "_lnm.json"))}
         for index, ((lesion, conn), files) in enumerate(sorted(selected.items())):
             if cancel is not None:
                 cancel.raise_if_cancelled(done=index)
@@ -444,6 +462,10 @@ def import_leaddbs_maps(folder, study=None, connectome_label=None, out_dir=None,
             os.remove(os.path.join(out_dir, name))
 
         # Mask, maps.tsv and the record
+        earlier_participants = (previous or {}).get("participants") or {}
+        kept_participants = {row["participant_id"]: earlier_participants.get(row["participant_id"], "") for row in kept}
+        t_paths += [row["T"] for row in kept if row.get("T")]
+        rows += kept
         mask_path = os.path.join(out_dir, "mask.nii.gz")
         mask_sources = t_paths or [path for row in rows for path in (row.get("AvgR"), row.get("AvgFz")) if path]
         mask = _imported_mask(mask_sources, reference_header)
@@ -466,8 +488,8 @@ def import_leaddbs_maps(folder, study=None, connectome_label=None, out_dir=None,
             "maps_tsv": "maps.tsv",
             "mask": "mask.nii.gz",
             "mask_voxels": int(mask.sum()),
-            "lesions": {"requested": len(selected), "mapped": len(rows)},
-            "participants": {mapping[name]: name for name in names},
+            "lesions": {"requested": len(selected), "mapped": len(selected), "kept": len(kept), "total": len(rows)},
+            "participants": {**kept_participants, **{mapping[name]: name for name in names}},
             "unmatched": unmatched,
             "terms": terms_value,
             "note": "Maps computed by Lead-DBS outside this application; their subject list is unknown, so they pool only with imported maps of the same label",
@@ -478,6 +500,48 @@ def import_leaddbs_maps(folder, study=None, connectome_label=None, out_dir=None,
         return {**record, "maps_tsv": maps_tsv, "mask": mask_path, "path": record_path, "out_dir": out_dir}
     finally:
         lock.release()
+
+
+def _earlier_import_rows(out_dir, previous, new_ids, label, n, compat, reference_header):
+    """The maps.tsv rows of an earlier Lead-DBS import in ``out_dir`` to keep beside a new import, and the ids dropped.
+
+    A row is kept when its participant is not in ``new_ids``, its sidecar and map files exist, and it pools with the new
+    maps: the same compatibility key (the label), the same N and the same grid. Each kept row has its map paths absolute
+    (None for a missing map) and ``_files``, the base names of its files in ``out_dir``.
+    """
+    from .cohortmaps import MAPS_COLUMNS, NA, read_maps_tsv
+    from .export import sidecar_path
+    from .nifti import read_nifti_header
+
+    tsv = os.path.join(out_dir, "maps.tsv")
+    if previous is None or not os.path.isfile(tsv):
+        return [], []
+    compat_text = ["" if value is None else str(value) for value in compat]
+    kept, dropped = [], []
+    for row in read_maps_tsv(tsv):
+        pid = row.get("participant_id")
+        if not pid or pid in new_ids:
+            continue
+        row = {column: (None if row.get(column) in (None, "", NA) else row.get(column)) for column in MAPS_COLUMNS}
+        side = sidecar_path(out_dir, pid, label)
+        sidecar = _read_json(side) or {}
+        paths = [row[key] for key in MAP_KEYS if row.get(key)]
+        try:
+            same = (
+                [row.get(column) or "" for column in ("manifest_sha256", "subject_ids_sha256", "statistic", "supersample", "probabilistic", "library_version")] == compat_text
+                and sidecar.get("N") == n
+                and paths
+                and all(os.path.isfile(path) and os.path.dirname(os.path.abspath(path)) == out_dir for path in paths)
+                and all(_same_grid(reference_header, read_nifti_header(path)) for path in paths)
+            )
+        except (OSError, ValueError, KeyError):
+            same = False
+        if not same:
+            dropped.append(pid)
+            continue
+        row["_files"] = {os.path.basename(path) for path in paths} | {os.path.basename(side)}
+        kept.append(row)
+    return kept, dropped
 
 
 def _progress_fields(done, total, started):
