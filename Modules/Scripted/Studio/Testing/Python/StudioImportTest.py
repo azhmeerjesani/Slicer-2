@@ -805,6 +805,58 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertIn("voxel size of 0", message)
         self.assertFalse([r for r in records if "Traceback" in r.getMessage() or r.levelno >= logging.ERROR])
 
+    def test_unknown_datatype_and_degenerate_nrrd_directions_are_refused_in_plain_words(self):
+        """BB-1: a NIfTI with a datatype code that NIfTI does not define, and an NRRD whose space directions are all zero
+        or not numbers, fell through to the ITK reader: a bare 'Slicer error' box, an ERROR traceback and the error badge.
+        They are refused in plain words with WARNING records only; ordinary files still pass the check.
+        """
+        from StudioLib import importer
+
+        def niftiPath(name, datatype):
+            header = bytearray(348)
+            struct.pack_into("<i", header, 0, 348)
+            struct.pack_into("<8h", header, 40, 3, 8, 8, 6, 1, 1, 1, 1)
+            struct.pack_into("<hh", header, 70, datatype, 8)
+            struct.pack_into("<8f", header, 76, 1, 1, 1, 1, 1, 0, 0, 0)
+            struct.pack_into("<f", header, 108, 352)
+            header[344:348] = b"n+1\0"
+            path = os.path.join(self.directory, name)
+            with open(path, "wb") as f:
+                f.write(bytes(header) + bytes(4) + bytes([1]) * (8 * 8 * 6))
+            return path
+
+        def nrrdPath(name, directions):
+            path = os.path.join(self.directory, name)
+            with open(path, "wb") as f:
+                f.write(("NRRD0004\ntype: uchar\ndimension: 3\nspace: left-posterior-superior\nsizes: 4 4 4\n"
+                         "space directions: %s\nkinds: domain domain domain\nendian: little\nencoding: raw\n"
+                         "space origin: (0,0,0)\n\n" % directions).encode() + bytes(64))
+            return path
+
+        unknown = niftiPath("sub-95_T1w.nii", 9999)
+        zeroDirections = nrrdPath("sub-96_T1w.nrrd", "(0,0,0) (0,1,0) (0,0,1)")
+        nanDirections = nrrdPath("sub-97_T1w.nrrd", "(nan,0,0) (0,1,0) (0,0,1)")
+        for path in (niftiPath("sub-98_T1w.nii", 2), nrrdPath("sub-99_T1w.nrrd", "(1,0,0) (0,1,0) (0,0,1)"),
+                     nrrdPath("sub-100_T1w.nrrd", "(1,0,0) none (0,0,1)")):
+            importer._checkNiftiComplete(path)  # no RefusedFileError
+        for path in (unknown, zeroDirections, nanDirections):
+            with self.assertRaises(importer.RefusedFileError):
+                importer._checkNiftiComplete(path)
+        studioShell = self._applyStudio()
+        recorder = logging.Handler()
+        records = []
+        recorder.emit = records.append
+        logging.getLogger().addHandler(recorder)
+        try:
+            result = importer.loadFiles([unknown, zeroDirections, nanDirections], studioShell)
+        finally:
+            logging.getLogger().removeHandler(recorder)
+        self._pump()
+        self.assertEqual(len(result.errors), 3)
+        for _path, message in result.errors:
+            self.assertIn("is damaged", message)
+        self.assertFalse([r for r in records if "Traceback" in r.getMessage() or r.levelno >= logging.ERROR])
+
     def test_uncompressed_nifti_named_nii_gz_opens(self):
         """BB-1: a valid NIfTI saved without compression but named ``.nii.gz`` (a browser or server unpacked a download and
         kept the name) opens as a scan and as a lesion, as in official 3D Slicer, whose reader reads it as plain data. A

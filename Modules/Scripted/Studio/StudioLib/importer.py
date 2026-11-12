@@ -850,6 +850,29 @@ def _niftiHasDegenerateGeometry(path):
     return False
 
 
+#: The ``datatype`` codes that the NIfTI standard defines (a header with another code cannot be read)
+_NIFTI_DATATYPE_CODES = frozenset((1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 768, 1024, 1280, 1536, 1792, 2048, 2304))
+
+
+def _nrrdHasDegenerateDirections(path):
+    """True if the ``space directions`` line of the NRRD file ``path`` has a value that is not a number or a vector of
+    zeros (the image would have no size in space), False if it is fine, absent or cannot be judged.
+    """
+    if _extension(path) not in (".nrrd", ".nhdr", ".seg.nrrd", ".seg.nhdr") or not os.path.isfile(path):
+        return False
+    parsed = _readTextHeader(path, endsAtBlankLine=True)
+    if parsed is None or "space directions" not in parsed[0]:
+        return False
+    for vector in re.findall(r"\(([^)]*)\)", parsed[0]["space directions"]):
+        try:
+            values = [float(v) for v in vector.split(",")]
+        except ValueError:
+            return True
+        if not all(math.isfinite(v) for v in values) or not any(values):
+            return True
+    return False
+
+
 def _checkNiftiComplete(path):
     """Raise ``RuntimeError`` (a message for the user) if the data of the NIfTI file ``path`` stops before the end that its
     header promises: the voxels that are missing would be read as 0, and a lesion would lose part of its volume.
@@ -876,6 +899,11 @@ def _checkNiftiComplete(path):
             raise RefusedFileError(
                 _("{name} is damaged: its header gives a voxel size of 0 (or an affine with no extent), so the image "
                   "has no size in space and it was not opened.").format(name=name))
+        datatype = _niftiDatatype(path)
+        if datatype is not None and datatype not in _NIFTI_DATATYPE_CODES:
+            raise RefusedFileError(
+                _("{name} is damaged: its header gives a voxel type that NIfTI does not define (code {code}), so the "
+                  "voxels cannot be read and it was not opened.").format(name=name, code=datatype))
     _checkNrrdMhaComplete(path)
     shortfall = _niftiDataShortfall(path)
     if shortfall is not None:
@@ -1099,6 +1127,10 @@ def _checkNrrdMhaComplete(path):
     """
     shortfall = _nrrdMhaDataShortfall(path)
     name = os.path.basename(str(path))
+    if _nrrdHasDegenerateDirections(path):
+        raise RefusedFileError(
+            _("{name} is damaged: its header gives a voxel size of 0 or a value that is not a number for the image "
+              "directions, so the image has no size in space and it was not opened.").format(name=name))
     if shortfall is not None:
         raise RefusedFileError(
             _("{name} is damaged: its image data stops after {have:,} of the {need:,} bytes that its header announces "
