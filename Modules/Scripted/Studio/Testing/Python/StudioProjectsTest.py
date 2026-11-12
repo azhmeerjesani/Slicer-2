@@ -7384,6 +7384,123 @@ class StudioProjectsTest(unittest.TestCase):
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
             self.io.backgroundWriter().drain(10.0)
 
+    def test_81f_other_folder_after_failed_root_move_keeps_moved_items_listed(self):
+        """After Change folder > Move failed partway (81d), the user chose a third folder: only what was left in the old
+        folder moved there, the record of the failed move ended, and the projects and studies that had already moved
+        were listed nowhere, while the toast said "Moved to" (BB-1). Now the record follows the setting: Library at the
+        third folder lists them where they are, each start names that folder, and moving to it ends the record.
+        """
+        import errno
+        from unittest import mock
+
+        projects = self.projects
+        settings = qt.QSettings()
+        base = os.path.join(self.tempDir, "partial other")
+        oldRoot = os.path.normpath(os.path.join(base, "A", "Slicer Studio"))
+        partialRoot = os.path.normpath(os.path.join(base, "B", "Slicer Studio"))
+        thirdRoot = os.path.normpath(os.path.join(base, "C", "Slicer Studio"))
+        fourthRoot = os.path.normpath(os.path.join(base, "D", "Slicer Studio"))
+
+        def makeProject(root, name):
+            path = os.path.join(root, projects.PROJECTS_DIR, name)
+            os.makedirs(path)
+            with open(os.path.join(path, name + ".mrml"), "w") as f:
+                f.write("<MRML></MRML>\n")
+
+        def makeStudy(root, name):
+            path = os.path.join(root, projects.STUDIES_DIR, name)
+            os.makedirs(path)
+            with open(os.path.join(path, "study.json"), "w", encoding="utf-8") as f:
+                json.dump({"format": "slicer-studio-study", "version": 1, "name": name, "created": "2026-01-01"}, f)
+
+        makeProject(oldRoot, "Alpha")
+        makeProject(oldRoot, "Beta")
+        makeStudy(oldRoot, "Stroke")
+        os.makedirs(os.path.join(oldRoot, projects.LNM_DIR, "maps"))
+        with open(os.path.join(oldRoot, projects.LNM_DIR, "maps", "big.bin"), "wb") as f:
+            f.write(b"\0" * 64)
+        makeProject(partialRoot, "Theirs")
+        makeStudy(partialRoot, "Their study")
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        settings.setValue(projects.ROOT_KEY, oldRoot)
+        settings.setValue(projects.ROOT_CHOSEN_KEY, True)
+        realRename = os.rename
+        try:
+            def fullDisk(source, destination, *args, **kwargs):
+                if os.sep + projects.LNM_DIR + os.sep in os.fspath(source) + os.sep:
+                    raise OSError(errno.ENOSPC, "No space left on device", os.fspath(destination))
+                return realRename(source, destination, *args, **kwargs)
+
+            with mock.patch.object(projects.os, "rename", side_effect=fullDisk):
+                with self.assertRaises(OSError):
+                    self._service().moveRoot(partialRoot, moveContent=True, run=lambda function: function())
+            self.assertIsNotNone(projects.partialMove())
+            movedProjects = sorted(os.path.join(partialRoot, projects.PROJECTS_DIR, name) for name in ("Alpha", "Beta"))
+            movedStudies = [os.path.join(partialRoot, projects.STUDIES_DIR, "Stroke")]
+            # Another folder in Settings > Change…, and Move (the old folder still has LNM/)
+            self.assertTrue(projects.hasContent(oldRoot))
+            from StudioLib import projects_ui
+
+            class FakeChooser:
+                path = thirdRoot
+                continueButton = mock.Mock()
+                setWindowTitle = mock.Mock()
+                choose = mock.Mock()
+                exec = mock.Mock()
+                exec_ = mock.Mock()
+                deleteLater = mock.Mock()
+
+                def __init__(self, *args, **kwargs):
+                    pass
+
+            toasts = []
+            running = self.autosave._service
+            self.autosave._service = self._service()
+            try:
+                with mock.patch.object(projects_ui, "FolderChooserDialog", FakeChooser), \
+                        mock.patch.object(projects_ui, "_question", lambda *args, **kwargs: 0), \
+                        mock.patch.object(projects_ui, "_runWithProgress", lambda function, *args, **kwargs: function()), \
+                        mock.patch.object(projects_ui, "message", lambda text, level="info", **kwargs: toasts.append((text, level))):
+                    self.assertEqual(projects_ui.changeRootDialog(None), thirdRoot)
+            finally:
+                self.autosave._service = running
+            self.assertEqual(projects.root(), thirdRoot)
+            self.assertEqual(len(toasts), 1, toasts)
+            self.assertIn(projects.shortPath(partialRoot), toasts[0][0], "the toast names the folder that still holds them")
+            self.assertEqual(toasts[0][1], "warning", "not a plain 'Moved to' success")
+            self.assertTrue(os.path.isfile(os.path.join(thirdRoot, projects.LNM_DIR, "maps", "big.bin")), "the rest moved")
+            partial = projects.partialMove()
+            self.assertIsNotNone(partial, "the projects that moved before are not forgotten")
+            self.assertEqual(os.path.normpath(partial[1]), partialRoot)
+            self.assertEqual(sorted(info.path for info in projects.listProjects()), movedProjects)
+            self.assertEqual(projects.listStudies(), movedStudies)
+            told = []
+            result = self._service().finishInterruptedMove(run=lambda function: function(), notify=lambda text, level: told.append((text, level)))
+            self.assertEqual(result, "partial")
+            self.assertIn(projects.shortPath(partialRoot), told[0][0], "each start names the folder that holds them")
+            # Another folder without moving anything (Change… asks nothing when the folder has nothing of its own)
+            projects.setRoot(fourthRoot)
+            self.assertEqual(os.path.normpath(projects.partialMove()[1]), partialRoot)
+            self.assertEqual(sorted(info.path for info in projects.listProjects()), movedProjects)
+            projects.setRoot(thirdRoot)
+            # That folder chosen and moved to: everything is in one folder, listed once, and the record ends
+            self._service().moveRoot(partialRoot, moveContent=True, run=lambda function: function())
+            self.assertEqual(projects.root(), partialRoot)
+            self.assertIsNone(projects.partialMove())
+            self.assertEqual(sorted(info.name for info in projects.listProjects()), ["Alpha", "Beta", "Theirs"])
+            self.assertEqual(sorted(os.path.basename(path) for path in projects.listStudies()), ["Stroke", "Their study"])
+            self.assertTrue(os.path.isfile(os.path.join(partialRoot, projects.LNM_DIR, "maps", "big.bin")))
+            # A folder chosen after the record ended takes nothing along
+            projects.setRoot(fourthRoot)
+            self.assertIsNone(projects.partialMove())
+        finally:
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            projects.clearPendingMove()
+            projects.clearPartialMove()
+            projects.discardMoveJournal()
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
     def test_82_cards_follow_the_clock_while_the_app_stays_open(self):
         """The relative time of a project card and a study card ("just now", "Edited just now") follows the clock: a card kept
         while nothing about its project changed said "just now" for hours until the app was restarted (BB-1).

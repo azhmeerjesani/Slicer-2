@@ -54,7 +54,8 @@ MOVE_PENDING_KEY = "Studio/Projects/MovePending"
 #: A move of the folder's content that failed partway with a reported error (the new disk is full): what moved stays in
 #: the new folder while the setting stays on the old one (JSON ``{"from", "to", "projects", "studies"}``,
 #: ``recordPartialMove``). Library lists the projects and studies that moved there (``listProjects``), and each start
-#: names that folder (``AutosaveService.finishInterruptedMove``), until the folder setting changes (``setRoot``)
+#: names that folder (``AutosaveService.finishInterruptedMove``), until that folder becomes the Slicer Studio folder
+#: (``setRoot``; another folder chosen takes the record along)
 PARTIAL_MOVE_KEY = "Studio/Projects/PartialMove"
 #: Environment: the folder (skips the chooser), and "0" to turn projects off
 ROOT_ENVIRONMENT = "SLICER_STUDIO_PROJECTS_ROOT"
@@ -247,12 +248,18 @@ def setRoot(path, chosen=True):
     """Store the chosen folder (only an explicit choice writes the keys; never under --testing)."""
     settings = qt.QSettings()
     path = os.path.normpath(os.path.abspath(os.path.expanduser(str(path))))
+    partial = partialMove()  # read before the setting changes (it names the old folder)
     settings.setValue(ROOT_KEY, path)
     if chosen:
         settings.setValue(ROOT_CHOSEN_KEY, True)
     # A move that was pending ends here: it finished, or another folder was chosen since
     settings.remove(MOVE_PENDING_KEY)
-    settings.remove(PARTIAL_MOVE_KEY)  # a move done again ends it (or another folder was chosen)
+    settings.remove(PARTIAL_MOVE_KEY)  # a move done again ends it
+    if partial is not None and _partiallyMovedItemsRemain(partial, path):
+        # Another folder was chosen: what the failed move put in its new folder stays there (only the old folder's own
+        # content moves now), so the record follows the setting. Without it those projects and studies would be listed
+        # nowhere, and no start would name the folder that holds them (BB-1)
+        recordPartialMove(path, partial[1], partial[2], partial[3])
     discardMoveJournal()
     # Written now: after a move, the content is already in the new folder, and a crash before Qt writes the settings by
     # itself would start the next time in the old, now empty folder
@@ -294,8 +301,9 @@ def recordPartialMove(oldRoot, newRoot, projectsBefore=(), studiesBefore=()):
 
     ``projectsBefore`` and ``studiesBefore``: the item names that Projects/ and Studies/ of ``newRoot`` had before the move
     (they are that folder's own, not moved ones). Library lists the projects and studies that moved (``listProjects``,
-    ``listStudies``), and each start names the folder that holds them, until the folder setting changes (``setRoot``):
-    without it the old folder, whose Projects/ may have moved, looks like a new install (BB-1).
+    ``listStudies``), and each start names the folder that holds them, until that folder becomes the Slicer Studio folder
+    (``setRoot``; when another folder is chosen, the record names that one as the old folder): without it the old folder,
+    whose Projects/ may have moved, looks like a new install (BB-1).
     """
     settings = qt.QSettings()
     settings.setValue(PARTIAL_MOVE_KEY, json.dumps({"from": os.path.normpath(oldRoot), "to": os.path.normpath(newRoot),
@@ -323,6 +331,19 @@ def partialMove():
         return {str(name) for name in value} if isinstance(value, list) else set()
 
     return oldRoot, newRoot, names("projects"), names("studies")
+
+
+def _partiallyMovedItemsRemain(partial, newRootPath):
+    """True when ``newRootPath`` is not the folder that holds what the failed move ``partial`` (``partialMove``) put there,
+    and that folder still holds some of it (or cannot be found now: a drive that is not connected).
+    """
+    target = partial[1]
+    if os.path.normcase(os.path.realpath(target)) == os.path.normcase(os.path.realpath(newRootPath)):
+        return False  # that folder itself: its Projects/ and Studies/ are the Slicer Studio folder's own now
+    if not os.path.isdir(target):
+        return True
+    return bool((_visibleNames(os.path.join(target, PROJECTS_DIR)) - partial[2])
+                or (_visibleNames(os.path.join(target, STUDIES_DIR)) - partial[3]))
 
 
 def clearPartialMove():

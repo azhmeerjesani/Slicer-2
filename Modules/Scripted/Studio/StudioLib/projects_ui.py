@@ -1100,7 +1100,15 @@ def changeRootDialog(parent=None):
         projects.notifyChanged()
         return None
     projects.notifyChanged()
-    if moved:
+    partial = projects.partialMove()
+    if partial is not None:
+        # What an earlier move that failed partway put in another folder stays there (``projects.setRoot``)
+        text = _("Some of your projects and studies are still in {folder}: Library lists them. To bring them together, "
+                 "choose that folder in Settings › Saving and move.").format(folder=projects.shortPath(partial[1]))  # noqa: RUF001
+        if moved:
+            text = _("Moved to {folder}.").format(folder=projects.shortPath(newRoot)) + " " + text
+        message(text, "warning", toolTip=partial[1], ms=8000)
+    elif moved:
         message(_("Moved to {folder}").format(folder=projects.shortPath(newRoot)), toolTip=newRoot)
     return newRoot
 
