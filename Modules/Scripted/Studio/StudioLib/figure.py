@@ -975,6 +975,13 @@ class FigureSession:
             return
         self._placing = None
         self._pendingTemplate = None
+        pending, tplList = panel.figureLandmarks(), panel.templateLandmarks()
+        if pending is not None and tplList is not None and pending.GetNumberOfControlPoints() > tplList.GetNumberOfControlPoints():
+            # A figure point is waiting for its template point: "Remove last" drops only that, never a complete pair
+            while pending.GetNumberOfControlPoints() > tplList.GetNumberOfControlPoints():
+                pending.RemoveNthControlPoint(pending.GetNumberOfControlPoints() - 1)
+            self.updateFit(panel)
+            return
         for markups in (panel.figureLandmarks(), panel.templateLandmarks()):
             if markups is not None and markups.GetNumberOfControlPoints():
                 markups.RemoveNthControlPoint(markups.GetNumberOfControlPoints() - 1)

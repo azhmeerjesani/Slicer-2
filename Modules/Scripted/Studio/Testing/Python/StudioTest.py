@@ -2655,6 +2655,14 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIsNotNone(panel.fit, panel.fitError)
         self.assertLess(panel.fit.rms_mm, 0.5)
         self.assertIn("(5 pairs)", card.findChild("QLabel", "StudioFigureResidualChip").text)
+        # "Remove last" while a figure point waits for its template point removes only that point, never a complete pair
+        panel.figureLandmarks().AddControlPoint(vtk.vtkVector3d(*panel.localOf((80.0, 60.0))))
+        self.assertEqual(panel.figureLandmarks().GetNumberOfControlPoints(), 6)
+        session.removeLastPair()
+        self.assertEqual(panel.figureLandmarks().GetNumberOfControlPoints(), 5)
+        self.assertEqual(panel.templateLandmarks().GetNumberOfControlPoints(), 5)
+        self.assertEqual(panel.pairCount(), 5)
+        self.assertIsNotNone(panel.fit, panel.fitError)
         # The affine model needs at least 4 pairs
         self.assertTrue(card.findChild("QFrame", "StudioFigureModel").findChildren("QToolButton")[1].enabled)
         # A refused affine fit (collinear landmarks) keeps the similarity fit: the figure does not jump back, and no "4 of 2"
