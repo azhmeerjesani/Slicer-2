@@ -183,6 +183,24 @@ class ParserTest(CoordsTestCase):
                 coords.read_foci(path)
             self.assertIn("NiMARE", str(ctx.exception))
 
+    def test_nimare_json_sample_size_shapes(self):
+        def one(metadata):
+            contrast = {"coords": {"space": "MNI", "x": [1], "y": [2], "z": [3]}}
+            if metadata is not None:
+                contrast["metadata"] = metadata
+            path = os.path.join(self.tmp, "sizes.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"s1": {"contrasts": {"c": contrast}}}, f)
+            return coords.read_foci(path)
+
+        self.assertEqual(one({"sample_sizes": 15})[0].subjects, 15)
+        self.assertEqual(one({"sample_sizes": [12, 3]})[0].subjects, 12)
+        self.assertIsNone(one({"sample_sizes": float("nan")})[0].subjects)
+        self.assertIsNone(one({"sample_sizes": [float("nan")]})[0].subjects)
+        for metadata in (["x"], {"sample_sizes": "15"}, 7):
+            with self.assertRaisesRegex(ValueError, "sizes.json is not a NiMARE dataset"):
+                one(metadata)
+
 
 class TalairachTest(unittest.TestCase):
     def test_published_reference_point(self):

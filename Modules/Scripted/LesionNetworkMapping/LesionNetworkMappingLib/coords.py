@@ -444,8 +444,17 @@ def read_nimare_json(path):
             if not xs:
                 continue
             space = normalize_space(coords.get("space"))
-            sizes = ((contrast.get("metadata") or {}).get("sample_sizes") or [None]) if isinstance(contrast, dict) else [None]
-            n = sizes[0] if sizes and isinstance(sizes[0], (int, float)) else None
+            metadata = contrast.get("metadata") if isinstance(contrast, dict) else None
+            if metadata is not None and not isinstance(metadata, dict):
+                raise ValueError(f"{name} is not a NiMARE dataset (metadata of {study_id}-{contrast_id} must be an object)")
+            sizes = (metadata or {}).get("sample_sizes")
+            if isinstance(sizes, (int, float)) and not isinstance(sizes, bool):
+                sizes = [sizes]
+            elif sizes is not None and not isinstance(sizes, list):
+                raise ValueError(f"{name} is not a NiMARE dataset (sample_sizes of {study_id}-{contrast_id} must be a number or a list)")
+            n = sizes[0] if sizes and isinstance(sizes[0], (int, float)) and not isinstance(sizes[0], bool) else None
+            if n is not None and not math.isfinite(n):
+                n = None
             try:
                 points = [(float(x), float(y), float(z)) for x, y, z in zip(xs, ys, zs, strict=True)]
                 if not all(math.isfinite(v) for point in points for v in point):
