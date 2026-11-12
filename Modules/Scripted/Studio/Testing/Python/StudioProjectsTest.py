@@ -8812,6 +8812,21 @@ class StudioProjectsTest(unittest.TestCase):
             slicer.app.processEvents()
 
 
+    def test_99a_crash_offer_names_the_day_of_an_old_save(self):
+        """The crash card said only "saved at 01:29" for a project saved days ago, while its project card said "3 days ago"
+        (BB-1). A save of another day now carries its date.
+        """
+        from StudioLib import projects_ui
+
+        now = time.mktime((2026, 11, 12, 12, 0, 0, 0, 0, -1))
+        today = time.mktime((2026, 11, 12, 1, 29, 0, 0, 0, -1))
+        old = now - 3 * 86400
+        self.assertEqual(projects_ui._savedTime(today, now), "01:29")
+        self.assertEqual(projects_ui._savedTime(0, now), "")
+        oldText = projects_ui._savedTime(old, now)
+        self.assertTrue(oldText.startswith(projects_ui._clock(old) + " on "), oldText)
+        self.assertGreater(len(oldText), len(projects_ui._clock(old)) + 4)
+
     def test_99_classic_close_asks_nothing_about_a_saved_unedited_project(self):
         """A project that is up to date on disk but whose scene is "modified since read" (what an open changes: views,
         hierarchy numbers) is closed unasked by File > Close Scene and by quitting in Classic (the project save, not the

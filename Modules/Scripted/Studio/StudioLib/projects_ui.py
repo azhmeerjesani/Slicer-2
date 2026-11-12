@@ -107,6 +107,22 @@ def _clock(seconds):
     return time.strftime("%H:%M", time.localtime(seconds)) if seconds else ""
 
 
+def _savedTime(seconds, now=None):
+    """The clock time of a save, with the date when it was not today ("01:29" or "01:29 on 11/09/26")."""
+    if not seconds:
+        return ""
+    clock = _clock(seconds)
+    today = time.localtime(now if now is not None else time.time())
+    then = time.localtime(seconds)
+    if (then.tm_year, then.tm_yday) == (today.tm_year, today.tm_yday):
+        return clock
+    try:
+        date = qt.QLocale().toString(qt.QDateTime.fromSecsSinceEpoch(int(seconds)).date(), qt.QLocale.ShortFormat)
+    except Exception:
+        date = time.strftime("%Y-%m-%d", then)
+    return _("{clock} on {date}").format(clock=clock, date=date)
+
+
 def _relativeTime(seconds):
     try:
         from . import library
@@ -2157,7 +2173,7 @@ class CrashCard:
         for info in self.infos[:3]:
             row = qt.QHBoxLayout()
             saved = projects.parseTime(info.data.get("savedAt")) or info.modified
-            text = qt.QLabel(_("Your project {name} was saved at {time}.").format(name=info.name, time=_clock(saved) or _("an earlier time")))
+            text = qt.QLabel(_("Your project {name} was saved at {time}.").format(name=info.name, time=_savedTime(saved) or _("an earlier time")))
             text.setObjectName("StudioProjectCrashCardText")
             text.setWordWrap(True)
             row.addWidget(text, 1)
@@ -2197,7 +2213,7 @@ def showCrashOfferDialog(infos):
     box.setObjectName("StudioProjectCrashDialog")
     box.setWindowTitle(_("Slicer Studio closed unexpectedly"))
     box.setIcon(qt.QMessageBox.Information)
-    box.setText(_("Slicer Studio closed unexpectedly. Your project {name} was saved at {time}.").format(name=info.name, time=_clock(saved)))
+    box.setText(_("Slicer Studio closed unexpectedly. Your project {name} was saved at {time}.").format(name=info.name, time=_savedTime(saved)))
     openButton = box.addButton(_("Open project"), qt.QMessageBox.AcceptRole)
     box.addButton(_("Close"), qt.QMessageBox.RejectRole)
     box.setWindowModality(qt.Qt.NonModal)
