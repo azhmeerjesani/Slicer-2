@@ -2067,6 +2067,70 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertNotEqual(label.font.capitalization(), qt.QFont.AllUppercase, text)
             self.assertEqual(label.font.letterSpacing(), 0.0, text)
 
+    def test_sources_unreadable_records_tsv_is_never_overwritten(self):
+        """A records.tsv that cannot be read (not UTF-8) stays as it is: Import refuses, the error stays shown, the stage log is kept (BB-1)."""
+        from LesionNetworkMappingLib import sources
+        from LesionNetworkMappingLib.study import Study
+        from StudioLib import libcard_sources, study_ui
+
+        path = os.path.join(self.directory, "Lit")
+        Study.create(path, name="Lit").save()
+        session = study_ui.openStudy(path, None)
+        self.cleanup.append(study_ui.closeStudy)
+        toasts = []
+        original = libcard_sources._toast
+        libcard_sources._toast = lambda *args, **kwargs: toasts.append(args)
+        self.cleanup.append(lambda: setattr(libcard_sources, "_toast", original))
+        card = libcard_sources.SourcesCard(session)
+        self.cleanup.append(card.widget.close)
+        nbib = "\n\n".join(f"PMID- {pmid}\nTI  - Caf\u00e9 study {t}\nAU  - M\u00fcller {t}\nDP  - 2020\nTA  - Brain" for pmid, t in (("111111", "A"), ("222222", "B")))
+        self.assertIsNotNone(card.importRecords(text=nbib, database="PubMed", query="q"))
+        card.table.selectRow(0)
+        card.advanceSelected()
+        recordsPath = os.path.join(path, "sources", "records.tsv")
+        logPath = os.path.join(path, "sources", "stage_log.tsv")
+        self.assertTrue(os.path.isfile(logPath))
+        with open(recordsPath, encoding="utf-8") as f:
+            text = f.read()
+        with open(recordsPath, "wb") as f:
+            f.write(text.encode("cp1252"))  # as a spreadsheet saves it on Windows
+        with open(recordsPath, "rb") as f:
+            damaged = f.read()
+        with open(logPath, "rb") as f:
+            log = f.read()
+
+        fresh = libcard_sources.SourcesCard(session)
+        self.cleanup.append(fresh.widget.close)
+        fresh.widget.show()
+        fresh.refresh()  # no exception: the PRISMA counts use the empty stand-in, not the file again
+        self._pump()
+        self.assertTrue(fresh.errorLabel.isVisible())
+        self.assertIn("cannot be read", fresh.errorLabel.text)
+        self.assertIsNone(fresh.importRecords(text="10.9999/after.damage\n"))
+        self._pump()
+        self.assertTrue(fresh.errorLabel.isVisible())
+        self.assertIn("cannot be read", fresh.errorLabel.text)
+        self.assertIn("Nothing was imported", fresh.errorLabel.text)
+        with open(recordsPath, "rb") as f:
+            self.assertEqual(f.read(), damaged)
+        with open(logPath, "rb") as f:
+            self.assertEqual(f.read(), log)
+        with self.assertRaises(sources.SourcesError):
+            fresh.records.save()  # the library refuses too
+        with open(recordsPath, "rb") as f:
+            self.assertEqual(f.read(), damaged)
+
+        # Once the file is saved as UTF-8 again, the records come back and the error goes
+        with open(recordsPath, "w", encoding="utf-8") as f:
+            f.write(text)
+        fresh.refresh()
+        self._pump()
+        self.assertEqual(len(fresh.records), 2)
+        self.assertIsNone(fresh.records.unreadable)
+        self.assertIsNotNone(fresh.importRecords(text="10.9999/after.fix\n"))
+        self.assertFalse(fresh.errorLabel.isVisible())
+        self.assertEqual(len(fresh.records), 3)
+
     def test_sources_prisma_export_on_read_only_study_is_plain(self):
         """A read-only study disables PRISMA export, and a permission error is said in plain words without a logged traceback (BB-1)."""
         import errno

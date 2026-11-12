@@ -467,8 +467,10 @@ class SourcesCard:
             try:
                 self.records = sources.Records.open(studyObject)
             except sources.SourcesError as e:
+                # An empty stand-in that refuses to save: the unreadable file is never written over
                 self.records = sources.Records(studyObject.path)
-                self._showError(str(e))
+                self.records.unreadable = str(e)
+                self._showError("")
             self._signature = signature
             self._lastChange = None
         return self.records
@@ -495,6 +497,10 @@ class SourcesCard:
         return self._rows[row]
 
     def _showError(self, text):
+        # While records.tsv cannot be read, its message stays visible above any other one
+        unreadable = getattr(self.records, "unreadable", None)
+        if unreadable:
+            text = unreadable if not text or text == unreadable else f"{unreadable}\n{text}"
         self.errorLabel.setText(text)
         self.errorLabel.setVisible(bool(text))
 
@@ -780,6 +786,9 @@ class SourcesCard:
             return None
         report = None
         self._showError("")
+        if records.unreadable:
+            self._showError(_("Nothing was imported: fix sources/records.tsv (save it as UTF-8 text) or move it away first."))
+            return None
         try:
             if path:
                 with open(path, encoding="utf-8-sig", errors="replace") as f:

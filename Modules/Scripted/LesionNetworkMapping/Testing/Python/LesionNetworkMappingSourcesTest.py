@@ -231,6 +231,25 @@ class SourcesTest(unittest.TestCase):
         with open(records.path, encoding="utf-8") as f:
             self.assertEqual(f.readline().rstrip("\n").split("\t"), list(sources.COLUMNS))
 
+    def test_unreadable_stand_in_never_saves(self):
+        """An empty table that stands in for an unreadable records.tsv refuses to save; prisma_counts uses it as given (BB-1)."""
+        records = sources.Records.open(self.study)
+        records.add(sources.parse_nbib(NBIB), origin="database")
+        records.advance("smith2020")
+        records.save()
+        with open(records.path, "rb") as f:
+            before = f.read()
+        stand_in = sources.Records(self.study.path)
+        stand_in.unreadable = "sources/records.tsv cannot be read: not UTF-8"
+        stand_in.add([sources.draft(doi="10.9999/x")])
+        with self.assertRaises(sources.SourcesError):
+            stand_in.save()
+        with open(records.path, "rb") as f:
+            self.assertEqual(f.read(), before)
+        self.assertTrue(os.path.isfile(records.log_path))
+        # An empty table is used as given, not replaced by the file on disk
+        self.assertEqual(sources.prisma_counts(self.study, sources.Records(self.study.path))["screened"], 0)
+
     def test_exact_duplicates_merge(self):
         records = sources.Records.open(self.study)
         records.add([sources.draft(doi="10.1000/A", title="One")])

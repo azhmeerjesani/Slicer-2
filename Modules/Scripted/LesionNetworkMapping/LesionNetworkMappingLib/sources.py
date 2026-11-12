@@ -496,6 +496,9 @@ class Records:
         self.rows = list(rows or [])
         self.extra_columns = list(extra_columns)
         self.log = list(log or [])
+        # Why sources/records.tsv could not be read, when this empty table stands in for it: save() then refuses, so the
+        # user's records and stage log are never written over
+        self.unreadable = None
 
     # Storage
 
@@ -533,6 +536,8 @@ class Records:
 
     def save(self):
         """Write ``sources/records.tsv`` and ``stage_log.tsv`` (atomic)."""
+        if self.unreadable:
+            raise SourcesError("sources/records.tsv cannot be read, so nothing was saved: fix or move the file first")
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         study_module.write_tsv(self.path, [*COLUMNS, *self.extra_columns], self.rows)
         if self.log:
@@ -1022,7 +1027,7 @@ def prisma_counts(study, records=None):
     title and abstract screening; one excluded later, at the full-text stage, with its reason counted in
     ``fulltext_excluded_reasons``. ``cases`` is the sum of ``n_cases`` of the included records.
     """
-    records = records or Records.open(study)
+    records = records if records is not None else Records.open(study)
     searches = search_log(study)
     duplicates = sum(int(entry.get("duplicates") or 0) for entry in searches) + records.merged_count()
     unique = len(records.rows)
