@@ -43,6 +43,8 @@ folder "Slicer Studio tést" (spaces and non-ASCII characters). The tests cover:
 - leaving or quitting a project that was only looked at saves nothing and keeps "Last edited" (an edit made just before
   leaving is saved);
 - SIGTERM (stopping the web build) quits as File > Exit does: an edit made after the last save is in the project.
+- a scene from outside opened while a study is open closes the study and opens as its own project (a copy), never merged
+  with the project open before the study.
 """
 
 import contextlib
@@ -9551,6 +9553,74 @@ sys.exit(web.command_local(args))
             service.openProject(projectPath)
             self.assertEqual(len(asked), 2)
             self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("Project scan"))
+
+    def test_111_outside_scene_opened_in_a_study_opens_as_its_own_project(self):
+        """A scene from outside (made by official 3D Slicer) dropped or opened while a study was open closed the study and was
+        then added on top of the project open before the study (released for it): the next save made "<project> 2" with
+        that project's scan and lesion plus the outside scene's scan, and no project of the scene (BB-1). The scene now
+        opens as its own project (a copy named after it), as without a study; the earlier project is saved and closed.
+        """
+        from StudioLib import importer, shell, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("studies are not part of this build")
+        projects = self.projects
+        # A scene saved by 3D Slicer outside the Slicer Studio folder
+        self._userVolume("OutsideScan", shape=(12, 14, 16), extension=".nrrd")
+        outsideFolder = os.path.join(self.tempDir, "outside")
+        os.makedirs(outsideFolder)
+        scenePath = os.path.join(outsideFolder, "Outside.mrml")
+        self.assertTrue(slicer.util.saveNode(slicer.mrmlScene.GetFirstNodeByName("OutsideScan"), os.path.join(outsideFolder, "OutsideScan.nrrd")))
+        slicer.mrmlScene.SetRootDirectory(outsideFolder)
+        slicer.mrmlScene.SetURL(scenePath)
+        self.assertTrue(slicer.mrmlScene.Commit(scenePath))
+        # A study
+        studyFolder = os.path.join(self.projects.studiesFolder(), "Outside scene")
+        os.makedirs(studyFolder)
+        _subjectVolume, subjectPath = self._userVolume("sub-09_T1w", shape=(12, 14, 16))
+        shutil.copy(subjectPath, os.path.join(studyFolder, "sub-09_T1w.nii.gz"))
+        study_ui.createStudy([os.path.join(studyFolder, "sub-09_T1w.nii.gz")], folder=studyFolder, openIt=False)
+        slicer.mrmlScene.Clear(0)
+
+        service = self._service()
+        running = self.autosave._service
+        self.autosave._service = service  # as the running service of the application
+        self.addCleanup(setattr, self.autosave, "_service", running)
+        self.addCleanup(study_ui.closeStudy)
+        volume, _path = self._userVolume("sub-01_T1w", shape=(12, 14, 16))
+        self._lesion(volume, "sub-01_lesion")
+        earlier = self._projectFor(service)
+        self._save(service)
+        earlierPath = earlier.path
+        studioShell = shell.Shell(force=True)
+        try:
+            studioShell.apply()
+            slicer.app.processEvents()
+            self.assertIsNotNone(study_ui.openStudy(studyFolder, studioShell, showLibrary=False))
+            self.assertIsNone(service.project, "the project is released for the study")
+
+            announced = []
+            service.setProjectAnnouncer(lambda event, project, **info: announced.append((event, project.name if project else None)))
+            result = importer.loadFiles([scenePath], studioShell)
+            self.io.backgroundWriter().drain(30.0)
+            service.poll()
+            self.io.backgroundWriter().drain(30.0)
+            self.assertIsNone(study_ui.session(), "the study is closed")
+            self.assertEqual(result.scenes, [scenePath])
+            self.assertIsNotNone(service.project)
+            self.assertEqual(service.project.name, "Outside", "the scene opens as its own project (a copy), not '<project> 2'")
+            self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("OutsideScan"))
+            self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName("sub-01_T1w"), "the earlier project is not merged into it")
+            self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName("sub-01_lesion"))
+            names = sorted(os.listdir(projects.projectsFolder()))
+            self.assertEqual(names, sorted([os.path.basename(earlierPath), "Outside"]), "no '<project> 2' is made")
+            self.assertEqual(projects.readJson(projects.projectFile(earlierPath))["state"], "closed")
+            self.assertIn(("copy", "Outside"), announced)
+            self.assertNotIn("opened", [event for event, _name in announced], "no 'Continuing …' for the project replaced at once")
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            slicer.app.processEvents()
 
 
 def _sphere(center=(0, 0, 0)):

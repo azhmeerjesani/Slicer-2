@@ -1636,6 +1636,21 @@ class AutosaveService:
             logging.error("Slicer Studio: project handling failed:\n" + traceback.format_exc())
         return self.project
 
+    def continueProjectBeforeScene(self):
+        """A study was closed to open a scene: the project open before the study (released for it, its data shown again)
+        continues now, as the next poll would, so that the scene replaces it as its own project (``opensSceneAsProject()``)
+        instead of being added to its data. Its "Continuing …" message is not shown (the scene replaces it at once). Return
+        the open project, or None.
+        """
+        announcer = getattr(self, "_projectAnnouncer", None)
+        if announcer is not None:
+            self._projectAnnouncer = lambda event, project, **info: None if event == "opened" else announcer(event, project, **info)
+        try:
+            return self.ensureProject()
+        finally:
+            if announcer is not None:
+                self._projectAnnouncer = announcer
+
     def _startProjectForScene(self, scene, fingerprint):
         """The scene holds user data and no project is open: continue the project of its scene file, or create a new one."""
         if self._sceneBusy(scene):

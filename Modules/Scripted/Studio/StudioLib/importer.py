@@ -1842,13 +1842,29 @@ def _studySubjectOfFile(studySession, path):
     return sid
 
 
+def _continueProjectAfterStudy():
+    """A scene load closed the study: the work that was open before it (shown again) continues as its project now, as the
+    next autosave poll would, so that the scene replaces that project as its own project (A-09: a scene from outside becomes
+    a copy). Left released, the scene was added on top of the earlier project's nodes, and the next poll saved both as a
+    new "<project> 2" (BB-1).
+    """
+    try:
+        from . import autosave
+
+        service = autosave.instance()
+        if service is not None and hasattr(service, "continueProjectBeforeScene"):
+            service.continueProjectBeforeScene()
+    except Exception:
+        logging.error(f"Studio: the project open before the study could not be continued:\n{traceback.format_exc()}")
+
+
 def _routeStudyLoad(paths, kinds, shell):
     """With a study open (Studio), route the scenes, scans and lesions of a load before it: Draw edits one lesion, and
     Done → next writes the study's subject.
 
     A file of a subject of the study (its scan or lesion) opens that subject in the study instead of being loaded again. Any
     other one closes the study first (the current subject's edits are written, as when another study or a project
-    opens): left open, Draw would trace the loaded scan under the study's breadcrumb, Done → next would write the hidden
+    opens; a scene then opens as its own project, ``_continueProjectAfterStudy()``): left open, Draw would trace the loaded scan under the study's breadcrumb, Done → next would write the hidden
     subject, and the tracing would be saved nowhere (no project is saved while a study is open). A toast offers to reopen
     the study. Return ``(paths, kinds)`` left to load, or None when nothing is loaded (the current subject's edits could
     not be written: a toast says why, and the study stays open).
@@ -1868,6 +1884,8 @@ def _routeStudyLoad(paths, kinds, shell):
 
     studyPath, studyName, sid = studySession.path, studySession.name, studySession.current()
     study_ui.closeStudy()
+    if "scene" in kinds:
+        _continueProjectAfterStudy()
     outside = traced[sids.index(None)]
     shell.toast(_("Study {study} closed: {file} is not one of its subjects").format(study=studyName, file=os.path.basename(outside)),
                 level="consequence", action=lambda: study_ui.openStudy(studyPath, shell, subject=sid), actionText=_("Reopen study"))
