@@ -1184,7 +1184,9 @@ class CompareCard:
     def _onAdditionDone(self, job):
         if self._cleanedUp:
             return
-        if job.state != "done":
+        if job.state == "cancelled":
+            self._setNotice(_("The download was stopped; nothing was added. The partial file is kept and resumes next time."))
+        elif job.state != "done":
             self._setNotice(_("The reference map was not added: {reason}").format(reason=job.failureReason or job.state))
         else:
             added = [event.get("entry") or {} for event in job.results if event.get("kind") == "refmap"]
