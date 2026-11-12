@@ -476,6 +476,12 @@ class Panel:
                 self.fit = figurefit.fit_figure(pixels, points, self.cut(), convention=self.fitConvention, model=model)
             except ValueError as error:
                 self.fitError = str(error)
+                if model != "similarity":
+                    # Keep the last valid kind of fit so the overlay the user is tracing over does not jump back
+                    try:
+                        self.fit = figurefit.fit_figure(pixels, points, self.cut(), convention=self.fitConvention, model="similarity")
+                    except ValueError:
+                        pass
         return self.fit
 
     def place(self, attach=False):

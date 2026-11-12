@@ -2653,6 +2653,32 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIn("(5 pairs)", card.findChild("QLabel", "StudioFigureResidualChip").text)
         # The affine model needs at least 4 pairs
         self.assertTrue(card.findChild("QFrame", "StudioFigureModel").findChildren("QToolButton")[1].enabled)
+        # A refused affine fit (collinear landmarks) keeps the similarity fit: the figure does not jump back, and no "4 of 2"
+        savedFigure = [list(panel.figureLandmarks().GetNthControlPointPosition(i)) for i in range(5)]
+        savedTemplate = [list(panel.templateLandmarks().GetNthControlPointPositionWorld(i)) for i in range(5)]
+        panel.figureLandmarks().RemoveAllControlPoints()
+        panel.templateLandmarks().RemoveAllControlPoints()
+        for index, (v, y) in enumerate(((30, 70.0), (110, 15.0), (190, -40.0), (270, -95.0))):
+            panel.figureLandmarks().AddControlPoint(vtk.vtkVector3d(*panel.localOf((140, v))))
+            panel.templateLandmarks().AddControlPointWorld(vtk.vtkVector3d(0.0, y, 10.0))
+            panel.templateLandmarks().SetNthControlPointLabel(index, f"C{index + 1}")
+        session.updateFit()
+        similarityRas = np.array(panel.ijkToRas())
+        panel.model = "affine"
+        session.updateFit()
+        self.assertTrue(panel.fitError)
+        self.assertIsNotNone(panel.fit)
+        self.assertEqual(panel.fit.model, "similarity")
+        self.assertTrue(np.allclose(panel.ijkToRas(), similarityRas))
+        self.assertNotIn("of 2 pairs", card.findChild("QLabel", "StudioFigureResidualChip").text)
+        panel.model = "similarity"
+        panel.figureLandmarks().RemoveAllControlPoints()
+        panel.templateLandmarks().RemoveAllControlPoints()
+        for index, (figurePosition, templatePosition) in enumerate(zip(savedFigure, savedTemplate, strict=True)):
+            panel.figureLandmarks().AddControlPoint(vtk.vtkVector3d(*figurePosition))
+            panel.templateLandmarks().AddControlPointWorld(vtk.vtkVector3d(*templatePosition))
+            panel.templateLandmarks().SetNthControlPointLabel(index, f"L{index + 1}")
+        session.updateFit()
         # Trace views: layout 7001, template + figure in Red, the figure alone in Green; restored on close
         layoutBefore = layouts.FOCUS_LAYOUT_ID
         session.enterTrace()
