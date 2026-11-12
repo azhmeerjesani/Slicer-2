@@ -620,6 +620,8 @@ class FigureSession:
         self._observations = []
         self._viewObservations = []
         self._updating = False
+        #: A landmark is being removed together with its partner (pairs match by position in the two lists)
+        self._pairSync = False
         self._placing = None
         self._interactionObservation = None
         self._pendingTemplate = None
@@ -837,6 +839,8 @@ class FigureSession:
                 self._observations.append((panel, node, tag))
             tag = node.AddObserver(node.PointPositionDefinedEvent, lambda caller, event, panel=panel: self._onPointDefined(panel, caller))
             self._observations.append((panel, node, tag))
+            tag = node.AddObserver(node.PointRemovedEvent, self._onLandmarkRemoved)
+            self._observations.append((panel, node, tag))
 
     def _unobservePanel(self, panel):
         kept = []
@@ -847,6 +851,37 @@ class FigureSession:
             else:
                 kept.append((owner, node, tag))
         self._observations = kept
+
+    @contextlib.contextmanager
+    def _syncingPairs(self):
+        previous, self._pairSync = self._pairSync, True
+        try:
+            yield
+        finally:
+            self._pairSync = previous
+
+    @vtk.calldata_type(vtk.VTK_INT)
+    def _onLandmarkRemoved(self, caller, event, index=None):
+        """A landmark removed on its own (the view's "Delete control point") takes its partner in the other list with it.
+
+        Pairs match by position in the two lists, so removing one point alone would pair every later point with the
+        wrong partner. A list emptied on its own (index unknown) empties its partner too.
+        """
+        if self._pairSync or caller is None:
+            return
+        nodeId = caller.GetID()
+        panel = next((panel for panel in self.panels if nodeId in (panel.figureLandmarksId, panel.templateLandmarksId)), None)
+        if panel is None:
+            return
+        other = panel.templateLandmarks() if nodeId == panel.figureLandmarksId else panel.figureLandmarks()
+        if other is None:
+            return
+        with self._syncingPairs():
+            if index is None:
+                if caller.GetNumberOfControlPoints() == 0 and other.GetNumberOfControlPoints():
+                    other.RemoveAllControlPoints()
+            elif 0 <= index < other.GetNumberOfControlPoints():
+                other.RemoveNthControlPoint(index)
 
     def _onLandmarksModified(self, caller=None, event=None):
         if not self._updating:
@@ -896,9 +931,13 @@ class FigureSession:
             return
         if kind == "figure":
             # A figure point left without its template point (Esc) would pair with the next template point
-            templateCount = panel.templateLandmarks().GetNumberOfControlPoints()
-            while markups.GetNumberOfControlPoints() > templateCount:
-                markups.RemoveNthControlPoint(markups.GetNumberOfControlPoints() - 1)
+            templateList = panel.templateLandmarks()
+            with self._syncingPairs():
+                while markups.GetNumberOfControlPoints() > templateList.GetNumberOfControlPoints():
+                    markups.RemoveNthControlPoint(markups.GetNumberOfControlPoints() - 1)
+                # ... and so would a template point whose figure point was removed while it was being placed
+                while templateList.GetNumberOfControlPoints() > markups.GetNumberOfControlPoints():
+                    templateList.RemoveNthControlPoint(templateList.GetNumberOfControlPoints() - 1)
         if self._interactionObservation is None:
             tag = interactionNode.AddObserver(interactionNode.InteractionModeChangedEvent, self._onInteractionModeChanged)
             self._interactionObservation = (interactionNode, tag)
@@ -982,13 +1021,14 @@ class FigureSession:
                 pending.RemoveNthControlPoint(pending.GetNumberOfControlPoints() - 1)
             self.updateFit(panel)
             return
-        for markups in (panel.figureLandmarks(), panel.templateLandmarks()):
-            if markups is not None and markups.GetNumberOfControlPoints():
-                markups.RemoveNthControlPoint(markups.GetNumberOfControlPoints() - 1)
         figureList, templateList = panel.figureLandmarks(), panel.templateLandmarks()
-        # A figure point without its template point goes too
-        while figureList.GetNumberOfControlPoints() > templateList.GetNumberOfControlPoints():
-            figureList.RemoveNthControlPoint(figureList.GetNumberOfControlPoints() - 1)
+        with self._syncingPairs():
+            for markups in (figureList, templateList):
+                if markups is not None and markups.GetNumberOfControlPoints():
+                    markups.RemoveNthControlPoint(markups.GetNumberOfControlPoints() - 1)
+            # A figure point without its template point goes too
+            while figureList.GetNumberOfControlPoints() > templateList.GetNumberOfControlPoints():
+                figureList.RemoveNthControlPoint(figureList.GetNumberOfControlPoints() - 1)
         self.updateFit(panel)
 
     # Plane

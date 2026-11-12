@@ -2812,6 +2812,81 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 problems.append((label.text, "width", label.width))
         self.assertEqual(problems, [])
 
+    def test_33d_figure_landmark_deleted_alone_takes_its_partner(self):
+        """A landmark deleted on its own (the view's "Delete control point") removes its partner in the other list: the
+        later pairs keep their partners and the fit stays good; "Remove last" and a new pair stay paired.
+        """
+        import os
+        import tempfile
+
+        import numpy as np
+        import vtk
+
+        if not _hasFigureTracing():
+            self.skipTest("figure tracing is not in this build")
+        from LesionNetworkMappingLib import figurefit
+        from StudioLib import figure, importer
+
+        studioShell = self._applyStudio()
+        self._startOnTemplate(studioShell)
+        self.addCleanup(lambda: figure.closeFigure(removeNodes=True))
+        directory = tempfile.mkdtemp(prefix="StudioTestFigureDelete", dir=slicer.app.temporaryPath)
+        image = qt.QImage(200, 220, qt.QImage.Format_RGB32)
+        image.fill(qt.QColor(20, 20, 20))
+        path = os.path.join(directory, "case-3_fig1.png")
+        self.assertTrue(image.save(path))
+        importer.handleDrop([path], shell=studioShell)
+        self._pump(10)
+        session = figure.session()
+        panel = session.panel()
+        session.setPlane("axial")
+        session.setCut(z=10.0)
+        session.setConvention("radiological")
+        cut = panel.cut()
+        pixels = np.array([(30, 40), (170, 50), (100, 190), (50, 150), (160, 140), (120, 90)], float)
+        ras = cut.to_ras(((pixels - [100, 110]) @ figurefit.convention_matrix("radiological")[:2, :2].T) * 0.8)
+        figureList, templateList = panel.figureLandmarks(), panel.templateLandmarks()
+
+        def addPair(index):
+            position = figureList.AddControlPoint(vtk.vtkVector3d(*panel.localOf(pixels[index])))
+            figureList.SetNthControlPointLabel(position, f"L{index + 1}")
+            position = templateList.AddControlPointWorld(vtk.vtkVector3d(*ras[index]))
+            templateList.SetNthControlPointLabel(position, f"L{index + 1}")
+
+        def labels(markups):
+            return [markups.GetNthControlPointLabel(index) for index in range(markups.GetNumberOfControlPoints())]
+
+        for index in range(5):
+            addPair(index)
+        session.updateFit()
+        self.assertLess(panel.fit.rms_mm, 0.5)
+        # Figure landmark 2 deleted alone: template landmark 2 goes with it
+        figureList.RemoveNthControlPoint(1)
+        self._wait(400)
+        self.assertEqual(labels(figureList), ["L1", "L3", "L4", "L5"])
+        self.assertEqual(labels(templateList), ["L1", "L3", "L4", "L5"])
+        self.assertEqual(panel.pairs()[0], ["L1", "L3", "L4", "L5"])
+        self.assertIsNotNone(panel.fit, panel.fitError)
+        self.assertLess(panel.fit.rms_mm, 0.5)
+        # Template landmark 3 deleted alone: figure landmark 3 goes with it
+        templateList.RemoveNthControlPoint(2)
+        self._wait(400)
+        self.assertEqual(labels(figureList), ["L1", "L3", "L5"])
+        self.assertEqual(labels(templateList), ["L1", "L3", "L5"])
+        self.assertLess(panel.fit.rms_mm, 0.5)
+        # A new pair after it is paired correctly; "Remove last" removes exactly that pair
+        addPair(5)
+        session.updateFit()
+        self.assertEqual(panel.pairs()[0], ["L1", "L3", "L5", "L6"])
+        self.assertLess(panel.fit.rms_mm, 0.5)
+        session.removeLastPair()
+        self.assertEqual(labels(figureList), ["L1", "L3", "L5"])
+        self.assertEqual(labels(templateList), ["L1", "L3", "L5"])
+        self.assertLess(panel.fit.rms_mm, 0.5)
+        # A list emptied on its own empties its partner
+        figureList.RemoveAllControlPoints()
+        self.assertEqual(templateList.GetNumberOfControlPoints(), 0)
+
     def test_33c_figure_tracing_resumes_after_the_scene_is_opened_again(self):
         """A figure traced in a scene that is saved, closed and opened again (a project reopened from the Library) is
         resumed from its saved nodes: the same figure volume, crop, plane, convention, landmarks and fit, and the trace
