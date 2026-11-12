@@ -981,6 +981,40 @@ class Study:
         except ValueError:
             return path
 
+    def follow_move(self, old_path, moved=None):
+        """Make the table paths that leave the study ("../...") point at their files again after the study folder moved.
+
+        The study was at ``old_path`` and is now at :attr:`path`. A relative path to a file outside the study (one that
+        Add files referenced in place) would otherwise resolve from the new place, which is a different file or none when
+        the new folder is at another depth. Such a path is written again relative to the new place. ``moved`` maps the
+        absolute path a file had before the move to where it is now (files that moved with the study's parent folder);
+        files that stayed where they were are found at their old path. Paths inside the study, "controlset:" paths,
+        absolute paths and paths whose file is missing are kept. Running it again changes nothing. Changes the table
+        in memory (save it with :meth:`save`); return the number of cells changed.
+        """
+        old_path = os.path.normpath(os.path.abspath(os.fspath(old_path)))
+        if os.path.normcase(old_path) == os.path.normcase(os.path.normpath(self.path)):
+            return 0
+        columns = [column for column in self._columns if column in ("scan", "lesion") or self.column_spec(column).type == "path"]
+        changed = 0
+        for row in self._rows:
+            for column in columns:
+                value = row.get(column)
+                if is_missing(value) or value.startswith(CONTROLSET_PREFIX) or os.path.isabs(value):
+                    continue
+                parts = value.split("/")
+                if os.path.normpath(os.path.join(*parts)).split(os.sep)[0] != os.pardir:
+                    continue  # inside the study: it moved with it
+                before = os.path.normpath(os.path.join(old_path, *parts))
+                now = moved(before) if moved is not None else before
+                if not now or not os.path.exists(now):
+                    continue
+                if os.path.normcase(os.path.normpath(self.abspath(value))) == os.path.normcase(os.path.normpath(now)):
+                    continue
+                self.set(row["participant_id"], {column: self.relpath(now)})
+                changed += 1
+        return changed
+
     def lesion_relpath(self, sid, space=None):
         """Table path of a subject's lesion file: lesions/<sid>_space-<space>_desc-lesion_mask.nii.gz."""
         row = self._row(sid)

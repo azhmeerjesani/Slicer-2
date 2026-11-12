@@ -463,7 +463,7 @@ class MoveJournal:
         self.newRoot = os.path.normpath(newRoot)
         self._lock = threading.Lock()
         self._data = {"from": self.oldRoot, "to": self.newRoot, "renamed": {}, "renamedIds": {}, "templatesBefore": None,
-                      "projectsBefore": None, "named": {}, "controlSetsBefore": None}
+                      "projectsBefore": None, "named": {}, "controlSetsBefore": None, "studiesBefore": None}
         if not path:
             return
         if resume:
@@ -489,6 +489,8 @@ class MoveJournal:
                     self._data["projectsBefore"] = [str(name) for name in data["projectsBefore"]]
                 if isinstance(data.get("controlSetsBefore"), dict):
                     self._data["controlSetsBefore"] = data["controlSetsBefore"]
+                if isinstance(data.get("studiesBefore"), list):
+                    self._data["studiesBefore"] = [str(name) for name in data["studiesBefore"]]
                 return
         # A new move: what an earlier one wrote is not this move's
         with contextlib.suppress(OSError):
@@ -578,6 +580,16 @@ class MoveJournal:
     def setControlSetsBefore(self, data):
         with self._lock:
             self._data["controlSetsBefore"] = data
+            self._write()
+
+    def studiesBefore(self):
+        """The study folder names of Studies/ of the old folder before the move (a list), or None when not recorded."""
+        names = self._data["studiesBefore"]
+        return None if names is None else list(names)
+
+    def setStudiesBefore(self, names):
+        with self._lock:
+            self._data["studiesBefore"] = sorted(names)
             self._write()
 
     def completedRenames(self):
@@ -2679,6 +2691,46 @@ def _controlSetsFollowMove(before, oldRoot, newRoot, absoluteRenames):
             logging.warning(f"Slicer Studio: the moved study {folder} could not follow its renamed control sets", exc_info=True)
 
 
+def _studiesFollowMove(names, oldRoot, newRoot, absoluteRenames):
+    """Make the table paths of the studies that moved from ``oldRoot`` (``names``: their folder names in Studies/ before
+    the move) that point outside the study follow the move (``Study.follow_move``).
+
+    Add files references scans and lesions in place, as paths relative to the study ("../../../data/sub-01_mask.nii.gz"):
+    from a new folder at another depth they would name files that do not exist. A file that stayed where it was is
+    referenced from the new place; one that moved with the folder (in Projects/, LNM/...) is followed there.
+    Worker-safe; never raises.
+    """
+    if not names:
+        return
+    try:
+        from LesionNetworkMappingLib.study import Study
+    except ImportError:
+        return
+    renamed = {}
+    for source, destination in absoluteRenames.items():
+        with contextlib.suppress(ValueError):
+            renamed[os.path.normpath(os.path.relpath(source, oldRoot))] = os.path.normpath(os.path.relpath(destination, newRoot))
+
+    def after(path):
+        """Where ``path`` (in ``oldRoot``) is now: ``path`` itself when it is not in ``oldRoot`` or did not move."""
+        if not isInside(path, oldRoot):
+            return path
+        moved = pathAfterMove(path, oldRoot, newRoot, renamed)
+        return moved if not os.path.lexists(path) and os.path.lexists(moved) else path
+
+    for name in names:
+        source = os.path.join(oldRoot, STUDIES_DIR, name)
+        folder = after(source)
+        if folder == source or not os.path.isfile(os.path.join(folder, "study.json")):
+            continue
+        try:
+            study = Study.open(folder)
+            if study.follow_move(source, after):
+                study.save(lock_timeout=5)
+        except Exception:
+            logging.warning(f"Slicer Studio: the moved study {folder} could not follow the move", exc_info=True)
+
+
 def checkMoveTarget(oldRoot, newRoot):
     """Raise OSError (a plain message, nothing created) when the content of ``oldRoot`` cannot be moved to ``newRoot``.
 
@@ -2834,6 +2886,7 @@ def moveContent(oldRoot, newRoot, progress=None, renamed=None, renamedIds=None, 
     templatesChecked = False
     projectsBefore = None
     controlSetsBefore = None
+    studiesBefore = None
     if journal is not None:
         # What the interrupted run of this move renamed before it was killed (already in the journal)
         dict.update(absoluteRenames, journal.completedRenames())
@@ -2842,6 +2895,12 @@ def moveContent(oldRoot, newRoot, progress=None, renamed=None, renamedIds=None, 
         templatesBefore = journal.templatesBefore()
         projectsBefore = journal.projectsBefore()
         controlSetsBefore = journal.controlSetsBefore()
+        studiesBefore = journal.studiesBefore()
+    if studiesBefore is None:
+        # The studies that move (the journal keeps them for the move that finishes an interrupted one)
+        studiesBefore = sorted(_visibleNames(os.path.join(oldRoot, STUDIES_DIR)))
+        if journal is not None:
+            journal.setStudiesBefore(studiesBefore)
     if controlSetsBefore is None:
         # Before anything moves (the journal keeps it for the move that finishes an interrupted one)
         controlSetsBefore = _controlSetsBefore(oldRoot) or {}
@@ -2891,6 +2950,7 @@ def moveContent(oldRoot, newRoot, progress=None, renamed=None, renamedIds=None, 
             _movedNormalizationsFollowRenamedIds(newRoot, renamedIds)
         _studiesFollowRenamedFolders(absoluteRenames, newRoot)  # also after a failed move: what moved is listed there
         _controlSetsFollowMove(controlSetsBefore, oldRoot, newRoot, absoluteRenames)
+        _studiesFollowMove(studiesBefore, oldRoot, newRoot, absoluteRenames)
         if renamed is not None:
             for source, destination in absoluteRenames.items():
                 renamed[os.path.normpath(os.path.relpath(source, oldRoot))] = os.path.normpath(os.path.relpath(destination, newRoot))

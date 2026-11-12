@@ -4315,6 +4315,46 @@ class StudioProjectsTest(unittest.TestCase):
         volume.SetName("Renamed after the copy")
         self.assertTrue(service.projectNeedsSave(), "a real edit after the copy is still saved")
 
+    def test_53c_moved_study_keeps_finding_files_added_from_outside(self):
+        """Add files references scans and lesions in place, as paths relative to the study ("../../../../data/..."). After
+        Change folder > Move to a folder at another depth they named files that do not exist (BB-1): the moved study lost
+        every lesion it had added from outside. They follow the move; files that moved with the folder are followed
+        there, and a second run changes nothing (an interrupted move is finished later).
+        """
+        from LesionNetworkMappingLib.study import Study
+
+        projects = self.projects
+        oldRoot = os.path.join(self.tempDir, "rm-old", "Slicer Studio")
+        newRoot = os.path.join(self.tempDir, "rm-new", "deep", "er", "Slicer Studio")
+        data = os.path.join(self.tempDir, "outside data")
+        os.makedirs(data)
+        outsideScan = os.path.join(data, "sub-01_T1w.nii.gz")
+        outsideLesion = os.path.join(data, "sub-01_desc-lesion_mask.nii.gz")
+        insideLesion = os.path.join(oldRoot, projects.PROJECTS_DIR, "P", "sub-02_desc-lesion_mask.nii.gz")
+        os.makedirs(os.path.dirname(insideLesion))
+        for path in (outsideScan, outsideLesion, insideLesion):
+            with open(path, "wb") as f:
+                f.write(b"x")
+        study = Study.create(os.path.join(oldRoot, projects.STUDIES_DIR, "Outside"), name="Outside")
+        study.add_subject("sub-01", scan=study.relpath(outsideScan), lesion=study.relpath(outsideLesion))
+        study.add_subject("sub-02", lesion=study.relpath(insideLesion))
+        study.add_subject("sub-03", lesion="lesions/sub-03_space-native_desc-lesion_mask.nii.gz")
+        study.save()
+        self.assertTrue(dict(study._row("sub-01"))["lesion"].startswith("../"))
+
+        projects.moveContent(oldRoot, newRoot)
+        newFolder = os.path.join(newRoot, projects.STUDIES_DIR, "Outside")
+        moved = Study.open(newFolder)
+        self.assertEqual(moved.abspath(moved._row("sub-01")["scan"]), os.path.normpath(outsideScan))
+        self.assertEqual(moved.abspath(moved._row("sub-01")["lesion"]), os.path.normpath(outsideLesion))
+        self.assertEqual(moved.abspath(moved._row("sub-02")["lesion"]),
+                         os.path.join(newRoot, projects.PROJECTS_DIR, "P", "sub-02_desc-lesion_mask.nii.gz"), "moved with the folder")
+        self.assertEqual(moved._row("sub-03")["lesion"], "lesions/sub-03_space-native_desc-lesion_mask.nii.gz", "inside the study: unchanged")
+        for sid in ("sub-01", "sub-02"):
+            self.assertFalse(os.path.isabs(moved._row(sid)["lesion"]), "no absolute paths in a shared table")
+            self.assertTrue(os.path.isfile(moved.abspath(moved._row(sid)["lesion"])))
+        self.assertEqual(moved.follow_move(os.path.join(oldRoot, projects.STUDIES_DIR, "Outside")), 0, "a second run changes nothing")
+
     def test_54_scene_saved_inside_a_project_folder_opens_as_a_copy(self):
         """A scene that official 3D Slicer saved into a subfolder of a project (Projects/<name>/Exports/variant/) is not the
         project (BB-1): opening it (Open…/drop with or without a project open, or Load Scene in Classic followed by Studio)
