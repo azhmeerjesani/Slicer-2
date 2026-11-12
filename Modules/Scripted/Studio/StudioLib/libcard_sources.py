@@ -791,8 +791,7 @@ class SourcesCard:
             return None
         try:
             if path:
-                with open(path, encoding="utf-8-sig", errors="replace") as f:
-                    text = f.read()
+                text = sources.read_text(path)
             elif not text.strip():
                 raise sources.SourcesError(_("Choose a file or paste DOIs or PMIDs"))
             report = sources.import_text(studyObject, records, text, path or "", origin=origin, database=database, query=query)

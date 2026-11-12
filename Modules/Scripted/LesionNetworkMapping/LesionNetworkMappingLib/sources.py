@@ -432,14 +432,46 @@ def parse_text(text, name=""):
     return kind, parser(text)
 
 
-def parse_file(path):
-    """Draft records of a file. Return ``(format, records)``. :raises SourcesError: for an unreadable file."""
+def decode_text(data, name=""):
+    """The text of the bytes of a reference file, without replacement characters.
+
+    UTF-8 (with or without a byte order mark) first, then UTF-16 with a byte order mark, then Windows-1252, which is what
+    EndNote, Reference Manager and other Windows programs often write (it also reads Latin-1 text with accents).
+
+    :raises SourcesError: for bytes that none of these decode, with what to do.
+    """
     try:
-        with open(path, encoding="utf-8-sig", errors="replace") as f:
-            text = f.read()
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        pass
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        try:
+            return data.decode("utf-16")
+        except UnicodeDecodeError:
+            pass
+    else:
+        try:
+            return data.decode("cp1252")
+        except UnicodeDecodeError:
+            pass
+    name = os.path.basename(os.fspath(name)) or "The file"
+    raise SourcesError(f"{name} is not saved as UTF-8 or Windows-1252 text. "
+                       "Export or save it again with the encoding UTF-8 and try again.")
+
+
+def read_text(path):
+    """The text of a reference file (see :func:`decode_text`). :raises SourcesError: for an unreadable file."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
     except OSError as e:
         raise SourcesError(f"Cannot read {os.path.basename(os.fspath(path))}: {e.strerror or e}") from e
-    return parse_text(text, os.fspath(path))
+    return decode_text(data, path)
+
+
+def parse_file(path):
+    """Draft records of a file. Return ``(format, records)``. :raises SourcesError: for an unreadable file."""
+    return parse_text(read_text(path), os.fspath(path))
 
 
 #

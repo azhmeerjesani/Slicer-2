@@ -215,6 +215,26 @@ class SourcesTest(unittest.TestCase):
         with self.assertRaises(sources.SourcesError):
             sources.parse_file(os.path.join(self.root, "missing.ris"))
 
+    def test_windows_1252_and_utf16_files_are_decoded_without_replacement_characters(self):
+        # EndNote and other Windows programs export Latin-1 / Windows-1252 text: it is decoded, never turned into U+FFFD
+        ris = "TY  - JOUR\nTI  - Syndrome de Capgras apr\u00e8s un \u201cinfarctus\u201d \u2013 cas\nAU  - Lef\u00e8vre, H\u00e9l\u00e8ne\nPY  - 2017\nER  - \n"
+        for name, data in (("latin1.ris", ris.replace("\u201c", '"').replace("\u201d", '"').replace("\u2013", "-").encode("latin-1")),
+                           ("cp1252.ris", ris.encode("cp1252")), ("utf16.ris", ris.encode("utf-16")), ("utf8.ris", ris.encode("utf-8-sig"))):
+            path = os.path.join(self.root, name)
+            with open(path, "wb") as f:
+                f.write(data)
+            kind, records = sources.parse_file(path)
+            self.assertEqual(kind, "ris", name)
+            self.assertEqual(records[0]["authors"], "Lef\u00e8vre, H\u00e9l\u00e8ne", name)
+            self.assertTrue(records[0]["title"].startswith("Syndrome de Capgras apr\u00e8s"), name)
+            self.assertNotIn("\ufffd", sources.read_text(path), name)
+        self.assertEqual(sources.decode_text("\u201cq\u201d".encode("cp1252")), "\u201cq\u201d")
+        # Bytes that no supported encoding decodes are refused with a message, not imported with replacement characters
+        with self.assertRaises(sources.SourcesError) as raised:
+            sources.decode_text(b"\x81\x8d\x8f", "odd.ris")
+        self.assertIn("odd.ris", str(raised.exception))
+        self.assertIn("UTF-8", str(raised.exception))
+
     # Records and dedupe
 
     def test_add_and_ids(self):
