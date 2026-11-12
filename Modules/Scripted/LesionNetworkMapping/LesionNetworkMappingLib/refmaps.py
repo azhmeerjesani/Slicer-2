@@ -592,6 +592,9 @@ def _fetch_into_registry(resource, root, session=None, progress=None, cancel=Non
 
     try:
         return fetch.fetch(resource, cache=registry_root(root), progress=progress, cancel=cancel, offline=offline, session=session)
+    except fetch.DiskFullError:
+        # The library sentence of every other write error: not the internal content-hash sub-folder the fetch message names.
+        raise RefmapsError(f"{resource.title}: The disk of {registry_root(root)} is full. Free some space or choose another folder.") from None
     except fetch.FetchError as exc:
         message = exc.message
         raise RefmapsError(message if message.startswith(f"{resource.title}:") else f"{resource.title}: {message}") from None

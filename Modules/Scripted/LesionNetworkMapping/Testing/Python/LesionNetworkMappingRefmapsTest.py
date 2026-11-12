@@ -793,8 +793,9 @@ class SourcesTest(RefmapsTestBase):
             with self.assertRaises(refmaps.RefmapsError) as raised:
                 refmaps.add_url(base + "/big.nii.gz", root=self.root, offline=False)
             message = str(raised.exception)
-            self.assertIn("disk is full", message)
-            self.assertIn(os.path.join(self.root, refmaps.FILES_DIR), message)  # where
+            self.assertIn(f"The disk of {self.root} is full. Free some space or choose another folder.", message)  # the library sentence
+            self.assertNotIn(os.path.join(self.root, refmaps.FILES_DIR), message)  # not the internal hashed sub-folder
+            self.assertNotIn("partial", message)
             self.assertNotIn("Errno", message)
             self.assertEqual(partials(), [], "the partial file that filled the disk is not kept")
             self.assertEqual(refmaps.entries(self.root), [])
