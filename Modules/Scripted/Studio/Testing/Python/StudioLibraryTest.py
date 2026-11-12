@@ -2381,6 +2381,26 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 self.assertFalse(form.isOpen())
                 self.assertFalse(row.isHidden(), form.widget.objectName)
 
+    def test_agreement_card_does_not_ask_to_assign_when_subjects_are_assigned(self):
+        """Once subjects are assigned (todo > 0, no pair yet) the Agreement card does not tell the user to assign again."""
+        import types
+
+        from StudioLib import libcard_agreement
+
+        def hint(todo):
+            saved = libcard_agreement._session, libcard_agreement.counts
+            libcard_agreement._session = lambda: types.SimpleNamespace(study=types.SimpleNamespace(path="x"))
+            libcard_agreement.counts = lambda study: {"todo": todo, "pairs": 0, "adjudicate": 0, "consensus": 0}
+            try:
+                card = libcard_agreement.AgreementCard(None)
+                card.refresh()
+                return str(card.metrics.text)
+            finally:
+                libcard_agreement._session, libcard_agreement.counts = saved
+
+        self.assertNotIn("assign", hint(6).lower())
+        self.assertIn("assign second tracings", hint(0))
+
     def test_compute_agreement_on_a_read_only_study_says_so_plainly(self):
         """BB-1: Compute agreement on a read-only study toasted "[Errno 13] Permission denied: '.../derivatives/qc'" and logged
         a traceback: it is refused up front with the plain read-only message, and a study that turns read-only while the

@@ -375,7 +375,10 @@ class AgreementCard:
         if numbers["pairs"] and (not data or computed != numbers["pairs"] or _stale(studyObject, data)):
             text = (text + "\n" if text else "") + _("Not up to date: Compute agreement")
         elif not numbers["pairs"]:
-            text = _("No lesion is traced twice yet: assign second tracings to a share of the subjects")
+            if numbers["todo"]:
+                text = _("Not traced twice yet: do the second tracings")
+            else:
+                text = _("No lesion is traced twice yet: assign second tracings to a share of the subjects")
         if str(self.metrics.text) != text:
             self.metrics.setText(text)
         shell = library._shell()
