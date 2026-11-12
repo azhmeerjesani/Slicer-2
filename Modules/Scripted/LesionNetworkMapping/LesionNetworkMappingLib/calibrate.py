@@ -461,6 +461,7 @@ def _design_info(design, spec=None):
         "tails": design.tails,
         "contrast": spec.contrast,
         "label": glm.contrast_label(design),
+        **tested_columns(design, spec),
         "exchange": design.exchange,
         "permute": design.permute,
         "block_column": design.block_column,
@@ -471,11 +472,28 @@ def _design_info(design, spec=None):
     }
 
 
+def tested_columns(design, spec=None):
+    """{"group_column", "levels", "score_column"}: what a design tests (the group factor and its levels of a group
+    test, the score of a continuous test; None where the test has none). glm.json stores the same fields.
+    """
+    spec = design.spec if spec is None else designlib.as_spec(spec)
+    group = spec.test in designlib.GROUP_TESTS
+    levels = getattr(design, "levels", None)
+    return {
+        "group_column": spec.group_column if group else None,
+        "levels": [str(level) for level in levels] if group and levels is not None else None,
+        "score_column": spec.score_column if spec.test == "continuous" else None,
+    }
+
+
 #: The fields of a record's "design" that identify the configured analysis. The run folder is named by the contrast
 #: label only, so a covariate, transform (log volume), statistic (Aspin-Welch v), permutation or block change reuses
-#: it: these fields tell the designs apart. A record written before "transforms" was stored has None there, so it is
-#: out of date rather than assumed untransformed.
-DESIGN_IDENTITY = ("test", "design_type", "n", "stat", "contrast", "exchange", "permute", "block_column", "covariates", "transforms", "input", "method")
+#: it: these fields tell the designs apart. Every calibration folder is searched, so the tested factor or score and
+#: the levels are compared too (a case vs control calibration is not one of side L vs R with the same n). A record
+#: written before "transforms" or "group_column" was stored has None there, so it is out of date rather than assumed
+#: to match.
+DESIGN_IDENTITY = ("test", "design_type", "n", "stat", "contrast", "group_column", "levels", "score_column", "exchange", "permute", "block_column", "covariates", "transforms",
+                   "input", "method")
 
 
 def design_identity(info):
@@ -861,9 +879,11 @@ def group_design(data, kind="glm"):
             out["method"] = data["method"]
     elif "test" in data:
         out["test"] = data["test"]
-    for key in ("design_type", "n", "covariates", "transforms", "stat"):
+    for key in ("design_type", "n", "covariates", "transforms", "stat", "group_column", "levels", "score_column"):
         if key in data:
             out[key] = data[key]
+    if kind == "slnm" and "score" in data:
+        out["score_column"] = data["score"]
     contrast = data.get("contrast")
     if kind != "slnm" and isinstance(contrast, dict) and "spec" in contrast:
         out["contrast"] = contrast["spec"]

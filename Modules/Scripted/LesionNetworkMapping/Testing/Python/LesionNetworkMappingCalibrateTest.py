@@ -281,6 +281,47 @@ class DesignMatchTest(_CalibrateTestCase):
         old = dict(record, design={key: value for key, value in record["design"].items() if key != "transforms"})
         self.assertFalse(calibrate.matches_design(old, plain))
 
+    def test_evidence_follows_the_tested_factor(self):
+        """A calibration of group case vs control is out of date for another group column with the same n and
+        covariates (side L vs R), in the card's identity, latest_record, glm.json (checklist F8) and the methods
+        (BB-1 calibration-of-other-group-column-counts-as-current).
+        """
+        study = Study.create(self.path("study"), name="study")
+        for index in range(12):
+            group = "case" if index < 8 else "control"
+            study.add_subject(f"sub-{index:03d}", {"group": group, "side": "L" if index % 2 else "R", "volume_ml": f"{float(self.rng.uniform(2, 60)):.3f}"})
+        study.save()
+        case = designlib.build_design(study, designlib.DesignSpec(test="two_group", levels=["case", "control"], covariates=["volume_ml"], inference={"n_perm": 1000}))
+        side = designlib.build_design(study, designlib.DesignSpec(test="two_group", group_column="side", levels=["L", "R"], covariates=["volume_ml"], inference={"n_perm": 1000}))
+        swapped = designlib.build_design(study, designlib.DesignSpec(test="two_group", group_column="side", levels=["R", "L"], covariates=["volume_ml"], inference={"n_perm": 1000}))
+        self.assertEqual((case.n, side.n, case.design_type), (12, 12, side.design_type))
+        run_id = self.register(study, case, "caseVsControl")
+        record = calibrate.read_record(self.path("study", "derivatives", "lnm", "calibration", "caseVsControl", calibrate.CALIBRATION_JSON))
+        self.assertTrue(calibrate.matches_design(record, case))
+        self.assertFalse(calibrate.matches_design(record, side))
+        self.assertFalse(calibrate.matches_design(record, swapped))
+        self.assertNotEqual(calibrate.design_identity(record["design"]), calibrate.design_identity(calibrate._design_info(side, side.spec)))
+        self.assertEqual(calibrate.latest_record(study.path, design=side), (None, None))
+        self.assertEqual(calibrate.checklist_evidence(study.path, design=side)[0], "not_run")
+        self.assertEqual(calibrate.checklist_evidence(study.path, design=case)[2], [run_id])
+
+        def glm_record(design):
+            info = calibrate.tested_columns(design)
+            return {"test": "two_group", "design_type": design.design_type, "n": design.n, "covariates": ["volume_ml"], "transforms": {}, "stat": design.stat,
+                    "contrast": {"spec": design.spec.contrast}, "permutation": {"scheme": design.permute, "exchange": design.exchange, "block_column": design.block_column}, **info}
+
+        self.assertTrue(calibrate.matches_group(record, glm_record(case), "glm"))
+        self.assertFalse(calibrate.matches_group(record, glm_record(side), "glm"))
+        status, value, _evidence = calibrate.group_checklist_evidence(study.path, [("glm", glm_record(side))])
+        self.assertEqual(status, "flagged")
+        self.assertIn("out of date", value)
+        # A record written before the tested factor was stored is out of date rather than assumed to match
+        old = dict(record, design={key: value for key, value in record["design"].items() if key not in ("group_column", "levels", "score_column")})
+        self.assertFalse(calibrate.matches_design(old, case))
+        self.assertFalse(calibrate.matches_group(old, glm_record(case), "glm"))
+        # An sLNM record (slnm.json) stores the tested score as "score"
+        self.assertEqual(calibrate.group_design({"score": "nihss"}, "slnm")["score_column"], "nihss")
+
 
 class SensitivityTest(unittest.TestCase):
     def test_routes(self):
@@ -410,6 +451,8 @@ class CommandLineTest(_CalibrateTestCase):
         with open(os.path.join(glm_out, "glm.json"), encoding="utf-8") as f:
             glm_record = json.load(f)
         self.assertTrue(calibrate.matches_group(record, glm_record, "glm"))  # the same design, read from both records
+        self.assertEqual((glm_record["group_column"], glm_record["levels"], glm_record["score_column"]), ("group", ["case", "control"], None))
+        self.assertFalse(calibrate.matches_group(record, dict(glm_record, group_column="side", levels=["L", "R"]), "glm"))  # another factor, same n
 
         def f8():
             items = checklist.evaluate(study.path)

@@ -1627,6 +1627,10 @@ def _run_cli(args, argv):
             "design_type": design.design_type,
             "contrast": {"label": desc, "spec": spec.contrast, "names": list(design.contrast_names), "matrix": design.C.tolist(), "columns": list(design.columns)},
             "n": design.n,
+            # what the design tests (calibrate.tested_columns: a calibration of another factor or score is not of this analysis)
+            "group_column": spec.group_column if spec.test in designlib.GROUP_TESTS else None,
+            "levels": [str(level) for level in design.levels] if spec.test in designlib.GROUP_TESTS and design.levels is not None else None,
+            "score_column": spec.score_column if spec.test == "continuous" else None,
             "n_per_level": dict(design.n_per_level),
             "n_voxels": n_voxels,
             "excluded": {reason: list(sids) for reason, sids in design.excluded.items()},
