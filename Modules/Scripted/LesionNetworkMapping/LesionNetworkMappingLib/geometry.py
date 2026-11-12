@@ -463,6 +463,17 @@ def space_family(space):
     return "unknown"
 
 
+FAMILY_NAMES = {
+    "fsl6": "MNI152NLin6Asym", "2009": "MNI152NLin2009a/cAsym", "2009b": "MNI152NLin2009bAsym", "spm": "MNI152Lin",
+    "colin": "MNIColin27", "pediatric": "MNIPediatric", "native": "native (subject)", "unknown": "unknown",
+}
+
+
+def family_name(family):
+    """The name of a space family as the app names templates elsewhere ("fsl6" -> "MNI152NLin6Asym")."""
+    return FAMILY_NAMES.get(family, str(family))
+
+
 def same_family(a, b):
     """True when two space labels belong to the same template family (images are comparable without
     a template-family transform). Native (subject) and unknown spaces never share a family.

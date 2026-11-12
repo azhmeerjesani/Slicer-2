@@ -398,6 +398,26 @@ def scan_folder(folder, lesion_rule=None, id_regex=None):
     return {"folder": folder, "lesions": unique, "skipped": skipped, "grids": grids, "all_lesions": all_lesions}
 
 
+def mixed_family_message(counts):
+    """The refusal text for lesions of several template families: counts is {family id: number of files}; "" for one family."""
+    from .geometry import family_name
+
+    counts = {family: n for family, n in counts.items() if family}
+    if len(counts) < 2:
+        return ""
+    parts = ", ".join(f"{n} in {family_name(family)}" for family, n in sorted(counts.items(), key=lambda kv: family_name(kv[0])))
+    return f"The folder holds lesions of different template families ({parts}); register one control set per family"
+
+
+def scan_mixed_families(scan):
+    """The warning for a scan whose lesions are on grids of two template families, or "" (shown before Register)."""
+    counts = {}
+    for grid in scan["grids"].values():
+        if grid.get("family"):
+            counts[grid["family"]] = counts.get(grid["family"], 0) + grid["n"]
+    return mixed_family_message(counts)
+
+
 def questions(scan, answers=None):
     """The unanswered ambiguous grids of a scan: [{"grid_id", "candidates" (a file-name hint first), "n", "family", "resolution", "hint"}]."""
     answers = dict(answers or {})
@@ -566,9 +586,12 @@ def register_folder(folder, name, source=None, licence_note=None, space=None, as
         usable.append((item, item_space))
     if not usable:
         raise ValueError(f"No usable control lesion in {folder}")
-    families = {space_family(item_space) for _item, item_space in usable}
+    family_counts = {}
+    for _item, item_space in usable:
+        family_counts[space_family(item_space)] = family_counts.get(space_family(item_space), 0) + 1
+    families = set(family_counts)
     if len(families) > 1:
-        raise ValueError(f"The lesions are in spaces of different template families ({', '.join(sorted(families))}); register one set per family")
+        raise ValueError(mixed_family_message(family_counts))
     lesions = []
     total = len(usable)
     for done, (item, item_space) in enumerate(usable):

@@ -230,6 +230,13 @@ class RegistryTest(ControlSetsTestBase):
         with self.assertRaises(ValueError) as raised:
             controlsets.register_folder(folder, "Mixed", root=self.root)
         self.assertIn("families", str(raised.exception))
+        message = str(raised.exception)
+        self.assertIn("1 in MNI152NLin6Asym", message)
+        self.assertIn("1 in MNI152NLin2009a/cAsym", message)
+        self.assertNotIn("fsl6", message)
+        # the scan warns before Register, with the same wording
+        warning = controlsets.scan_mixed_families(controlsets.scan_folder(folder))
+        self.assertIn("1 in MNI152NLin6Asym", warning)
 
     def test_unrecognised_names_take_every_image(self):
         folder = self.path("plain")

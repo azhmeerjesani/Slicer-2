@@ -325,6 +325,9 @@ class AddControlSetDialog:
             text += " · " + _("{n} files skipped").format(n=len(self.scan["skipped"]))
         if controlsets.NO_GRID in self.scan["grids"]:
             text += "\n" + _("Lesions that are not on a standard template grid are left out.")
+        mixed = controlsets.scan_mixed_families(self.scan)
+        if mixed:
+            text += "\n" + mixed
         self.questions = controlsets.questions(self.scan)
         if self.questions:
             text += "\n" + _("Several templates share this grid: choose the one the lesions were drawn on.")
