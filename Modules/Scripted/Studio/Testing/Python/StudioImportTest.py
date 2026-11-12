@@ -2757,6 +2757,39 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName(importer.scanLesionSegmentationName(scan)), route)
             self.assertEqual(studioShell.currentWorkspace(), "draw", route)
 
+    def test_lesion_open_as_label_map_is_not_loaded_again(self):
+        """BB-1: a lesion file that Classic's Add Data opened as a label map, opened again in Studio (drop, Open...,
+        Recent), is already open: the label map becomes the lesion ("<name> is already open"), no second copy is loaded.
+        """
+        from StudioLib import importer, shell
+
+        scanPath = self._writeVolume("sub-05_T1w.nii.gz", GRID_SHIFTED)
+        maskPath = self._writeMask("sub-05_lesion.nii.gz", GRID_SHIFTED)
+        for route in ("open", "recent"):
+            if shell._shell is not None:
+                shell._shell.dispose()
+            slicer.mrmlScene.Clear(0)
+            self._pump()
+            # Classic: 3D Slicer's Add Data reads the lesion as a label map
+            scan = slicer.util.loadVolume(scanPath)
+            labelMap = slicer.util.loadLabelVolume(maskPath)
+            studioShell = self._applyStudio()
+            if route == "open":
+                result = importer.loadFiles([maskPath], studioShell)
+            else:
+                result = importer.loadRecentFile({"fileName": maskPath, "fileType": "VolumeFile", "labelmap": True}, None,
+                                                 studioShell)
+            self._pump(6)
+            lesions = slicer.util.getNodesByClass("vtkMRMLSegmentationNode")
+            self.assertEqual([node.GetName() for node in lesions], ["sub-05_lesion"], route)
+            self.assertEqual([node.GetID() for node in result.alreadyOpen], [lesions[0].GetID()], route)
+            self.assertEqual(result.segmentations, [], route)
+            self.assertIsNone(slicer.mrmlScene.GetNodeByID(labelMap.GetID()), route)
+            self.assertEqual(slicer.util.getNodesByClass("vtkMRMLLabelMapVolumeNode"), [], route)
+            self.assertGreater(self._voxels(lesions[0]), 0, route)
+            self.assertEqual(studioShell.toastText(), "sub-05_lesion is already open", route)
+            self.assertTrue(importer._isBoundTo(lesions[0], scan), route)
+
     def test_scan_dropped_after_its_lesion_is_the_lesion_scan(self):
         """BB-1: a lesion opened alone (unbound), then its own scan dropped (same grid, and same BIDS subject or, with
         generic names, same folder): the lesion is bound to the scan and Draw edits it, as when both are dropped together

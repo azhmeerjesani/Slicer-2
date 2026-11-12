@@ -1490,6 +1490,32 @@ def openNodeForFile(path, exclude=None):
     return None
 
 
+def openLabelMapAsLesion(path):
+    """The lesion for a lesion file that is open as a label map, else None.
+
+    3D Slicer's Add Data (Classic) reads a ``*_lesion`` (mask, roi) file as a label map volume. In Studio that file is
+    already open: the label map becomes the lesion that Draw edits (``library.labelMapToLesion()``, as "Continue in
+    Draw" does) instead of a second copy being loaded. The label map is found by the file it reads, or, when the open
+    project took that file over, by the file it was read from (``_projectSourceNodes()``).
+    """
+    if not path:
+        return None
+    target = _normalizedPath(path)
+    labelMaps = []
+    for node in slicer.util.getNodesByClass("vtkMRMLLabelMapVolumeNode"):
+        storageNode = node.GetStorageNode()
+        fileName = storageNode.GetFileName() if storageNode is not None else None
+        if fileName and _normalizedPath(fileName) == target:
+            labelMaps.append(node)
+    labelMaps.extend(node for node in _projectSourceNodes(path) if node.IsA("vtkMRMLLabelMapVolumeNode"))
+    labelMap = next((node for node in labelMaps if not node.GetHideFromEditors()), None)
+    if labelMap is None:
+        return None
+    from . import library
+
+    return library.labelMapToLesion(labelMap)
+
+
 def _shownNodeForFile(node):
     """The node shown to the user for ``node`` read from a file: a scan (not a label map) or a segmentation, the proxy scan
     of a sequence; None for anything else.
@@ -1989,6 +2015,9 @@ def loadFiles(paths, shell=None, pairedLesion=None):
                 if kind != wantedKind:
                     continue
                 openNode = openNodeForFile(path) if shell is not None and kind != "scene" else None
+                if openNode is None and shell is not None and kind == "lesion":
+                    # A lesion file that Classic's Add Data opened as a label map: that label map becomes the lesion
+                    openNode = openLabelMapAsLesion(path)
                 if openNode is not None:
                     # In Studio, a file is not loaded twice: its node becomes current again
                     result.alreadyOpen.append(openNode)
@@ -2452,6 +2481,8 @@ def loadRecentFile(properties, action=None, shell=None):
         # open empty), and the notes of its sidecar are restored (loadLesion, restoreSidecarText)
         return loadFiles([fileName], shell)
     openNode = openNodeForFile(fileName) if shell is not None and not isScene else None
+    if openNode is None and shell is not None and not isScene and os.path.isfile(fileName) and fileKind(fileName) == "lesion":
+        openNode = openLabelMapAsLesion(fileName)
     if openNode is not None:
         result = LoadResult()
         result.alreadyOpen.append(openNode)
