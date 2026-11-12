@@ -335,6 +335,20 @@ def _sceneFileParses(path):
     return True
 
 
+def _bundleIsReadable(path):
+    """False if the .mrb ``path`` exists but is not a zip archive (a text file, a cut-short download): Slicer's loader would
+    answer with raw "No URL specified" errors. True if it is a zip or cannot be checked.
+    """
+    import zipfile
+
+    try:
+        with open(path, "rb"):
+            pass
+        return zipfile.is_zipfile(path)
+    except Exception:
+        return True
+
+
 class AutosaveStatus:
     """State of the autosave, for status displays (A-01b)."""
 
@@ -2396,13 +2410,14 @@ class AutosaveService:
         return True
 
     def refuseDamagedSceneFile(self, path):
-        """True if ``path`` is a scene file (.mrml) that was cut short (an interrupted save, a sync conflict) and projects are
+        """True if ``path`` is a scene file (.mrml) that was cut short, or a bundle (.mrb) that is not a zip archive, (an interrupted save, a sync conflict) and projects are
         on: it is announced ("not-opened") and left as it is. Checked before the scene is replaced, so the open project stays
         open (Load Scene would clear it first and then fail) and the failed load adds no error dialog or traceback on top.
         """
-        if not str(path).lower().endswith(".mrml") or not self._projects().isEnabled() or not self.projectsActive():
+        lower = str(path).lower()
+        if not lower.endswith((".mrml", ".mrb")) or not self._projects().isEnabled() or not self.projectsActive():
             return False
-        if _sceneFileParses(path):
+        if (_bundleIsReadable(path) if lower.endswith(".mrb") else _sceneFileParses(path)):
             return False
         name = self._projects().displayName(os.path.basename(path))
         logging.warning(f"Slicer Studio: the scene file {os.path.basename(path)} is damaged and could not be read; it is left as it is")

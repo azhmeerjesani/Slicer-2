@@ -8407,6 +8407,62 @@ class StudioProjectsTest(unittest.TestCase):
             studioShell.dispose()
             slicer.app.processEvents()
 
+    def test_92b_damaged_outside_bundle_leaves_the_open_project_open_with_one_message(self):
+        """A bundle (.mrb) that is not a zip archive (text, a cut-short download), opened in Library while a project is open (or
+        with none open), is refused before anything is replaced: the open project stays open (it was saved and closed first,
+        and the toast said that nothing was opened), and the user gets the one toast, with no "Slicer error" dialog and no
+        logged traceback on top of it (BB-1).
+        """
+        from unittest import mock
+
+        from StudioLib import importer, projects_ui, shell
+
+        service = self._service()
+        service.setProjectAnnouncer(projects_ui.announce)
+        running = self.autosave._service
+        self.autosave._service = service
+        outside = os.path.join(self.tempDir, "damaged outside")
+        os.makedirs(outside)
+        brokenPath = os.path.join(outside, "Brain scene.mrb")
+        damaged = "not a zip archive, only text"
+        with open(brokenPath, "w", encoding="utf-8") as file:
+            file.write(damaged)
+        studioShell = shell.Shell(force=True)
+        try:
+            studioShell.apply()
+            slicer.app.processEvents()
+            for withProject in (False, True):
+                slicer.mrmlScene.Clear(0)
+                self.io.backgroundWriter().drain(10.0)
+                self.assertIsNone(service.project)
+                if withProject:
+                    self._userVolume("T1", shape=(10, 11, 12), extension=".nrrd")
+                    project = self._projectFor(service)
+                    self._save(service)
+                    self.assertTrue(service.opensSceneAsProject())
+                shown = []
+                errors = []
+                with mock.patch.object(slicer.util, "errorDisplay", lambda text, *a, into=shown, **k: into.append(text)), \
+                        mock.patch.object(importer.logging, "error", lambda text, *a, into=errors, **k: into.append(text)):
+                    result = importer.loadFiles([brokenPath], studioShell)
+                    slicer.app.processEvents()
+                label = "with a project open" if withProject else "with nothing open"
+                self.assertEqual(shown, [], f"{label}: no error dialog on top of the toast")
+                self.assertEqual(errors, [], f"{label}: no error and traceback logged")
+                self.assertEqual(result.errors, [])
+                self.assertEqual(result.scenes, [])
+                self.assertIn("damaged and could not be read", studioShell.toastText(), label)
+                if withProject:
+                    self.assertIsNotNone(service.project, "the open project stays open")
+                    self.assertEqual(service.project.path, project.path)
+                    self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("T1"), "its data is still in the scene")
+                with open(brokenPath, encoding="utf-8") as file:
+                    self.assertEqual(file.read(), damaged, "the damaged file is left as it is")
+        finally:
+            self.autosave._service = running
+            studioShell.dispose()
+            slicer.app.processEvents()
+
     def test_93_same_name_taken_by_another_window_between_choice_and_creation_gets_the_next_name(self):
         """Two windows that create a project of the same name at the same moment: the one that loses the race for the folder
         gets "Name 2" and a project, not "Autosave paused: the Slicer Studio folder cannot be written (File exists)" (BB-1).
