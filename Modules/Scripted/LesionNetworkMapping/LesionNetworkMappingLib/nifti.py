@@ -352,6 +352,31 @@ def image_data_problem(path):
     return None if total >= expected else f"the image data are cut short ({total} of {expected} bytes)"
 
 
+# Largest expansion of a deflate stream (zlib: about 1032 to 1); a .nii.gz cannot decompress to more than this many times
+# its own size, plus a margin for the gzip headers of several members.
+_MAX_DEFLATE_RATIO = 1032
+_GZIP_SLACK = 1 << 16
+
+
+def _check_data_fits_file(path, expected):
+    """Raise ValueError when a header claims more image data than the file can hold.
+
+    A header that overstates the image size (a damaged or hand-made file) would otherwise make numpy try to allocate
+    the claimed size before the short read is noticed, and fail with MemoryError (which callers that exclude unreadable
+    files do not expect) or take all the memory of the machine. Uncompressed files are compared with their size,
+    .nii.gz files with the most that deflate can expand to.
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return  # left to the read
+    limit = size * _MAX_DEFLATE_RATIO + _GZIP_SLACK if _is_gzip(path) else size
+    if expected > limit:
+        if _is_gzip(path):
+            raise ValueError(f"The NIfTI header claims {expected} bytes of image data, more than this {size}-byte compressed file can hold: {path}")
+        raise ValueError(f"Truncated NIfTI image data (the header claims {expected} bytes, the file has {size}): {path}")
+
+
 def read_nifti(path, apply_scaling=True, on_block=None):
     """Read a NIfTI-1 image.
 
@@ -371,6 +396,7 @@ def read_nifti(path, apply_scaling=True, on_block=None):
         offset = int(header["vox_offset"])
         if offset < HEADER_SIZE:
             offset = HEADER_SIZE + 4
+        _check_data_fits_file(path, offset + count * dtype.itemsize)
         f.seek(offset)
         flat = np.empty(count, dtype=dtype)
         view = memoryview(flat.view(np.uint8))

@@ -219,6 +219,26 @@ class SubjectLevelBlockTest(_Fixture):
         self.assertEqual(_check(self.preflight(), "lesion_subvoxel")["subjects"], ["sub-small"])
 
 
+    def test_header_claiming_a_huge_grid_is_unreadable_not_a_failed_check(self):
+        # A header that says 32000^3 voxels on a 50 KB file (BB-1): numpy tried to allocate the claimed terabytes and the
+        # MemoryError aborted the whole check; the lesion is excluded like any unreadable file, the others are checked.
+        self.add_many(3)
+        path = self.write_lesion("sub-lies")
+        with gzip.open(path, "rb") as f:
+            raw = bytearray(f.read())
+        raw[40:48] = np.array([3, 32000, 32000, 32000], "<i2").tobytes()
+        with open(path, "wb") as f:
+            f.write(gzip.compress(bytes(raw)))
+        self.study.add_subject("sub-lies", lesion=self.study.relpath(path), space=SPACE, volume_ml=1)
+        with self.assertRaises(ValueError):
+            nifti.read_nifti(path)
+        report = self.preflight()
+        check = _check(report, "lesion_unreadable")
+        self.assertEqual((check["level"], check["subjects"]), ("block", ["sub-lies"]))
+        self.assertEqual(report["counts"]["included"], 3)
+        self.assertFalse(report["blocked"])
+        self.assertTrue(self.preflight(strict=True)["blocked"])
+
     def test_lesion_outside_the_grid_is_not_called_empty(self):
         # 451-like voxels that lie 480 mm away from the connectome grid: excluded, but named by the real cause
         affine = np.array(self.bundle.affine, dtype=float)

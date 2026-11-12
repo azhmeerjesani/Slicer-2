@@ -294,7 +294,7 @@ def remeasure(study, sids, bundle=None, post=False, outside=False):
             continue
         try:
             values, result = measure_lesion(path, connectome_grid=grid, connectome_mask=mask, multifocal=row.get("multifocal") == "1")
-        except (OSError, EOFError, ValueError, ArithmeticError, IndexError):
+        except (OSError, EOFError, ValueError, ArithmeticError, IndexError, MemoryError):
             continue
         if mask is not None:
             values["outside_brain_pct"] = None if result["outside_pct"] is None else round(result["outside_pct"], 2)
@@ -674,7 +674,7 @@ def run_preflight(
                     except (OSError, ValueError):
                         connectome_mask.append(None)
                 values, result = measure_lesion(path, conn_grid, connectome_mask[0] if connectome_mask else None, header, row.get("multifocal") == "1")
-            except (OSError, EOFError, ValueError, ArithmeticError, IndexError) as exc:
+            except (OSError, EOFError, ValueError, ArithmeticError, IndexError, MemoryError) as exc:  # MemoryError: a lesion too large for this machine
                 subject_block("lesion_unreadable", sid, lambda sids, d: f"{_count(len(sids), 'lesion file')} cannot be read: {_listed(sids)} ({next(iter(d.values()))}).", "lesion file unreadable")
                 collector.items["lesion_unreadable"]["details"][sid] = f"{type(exc).__name__}: {exc}"
                 continue
