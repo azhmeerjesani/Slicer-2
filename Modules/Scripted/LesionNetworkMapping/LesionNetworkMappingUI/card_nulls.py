@@ -391,7 +391,7 @@ class NullsCard:
         if path:
             return os.path.dirname(path)
         widget = _mapWidget()
-        return widget.cohortOutputDir() if widget is not None and hasattr(widget, "cohortOutputDir") else None
+        return widget.cohortOutputDir(ownOnly=True) if widget is not None and hasattr(widget, "cohortOutputDir") else None
 
     def outDir(self, kind=None, mode=None):
         """The run folder of a kind and mode: ``<cohort maps folder>/nulls-<kind>-<mode>``."""

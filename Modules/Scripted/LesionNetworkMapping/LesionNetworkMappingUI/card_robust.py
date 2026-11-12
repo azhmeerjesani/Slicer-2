@@ -560,7 +560,7 @@ class RobustCard:
         if path:
             return os.path.dirname(os.path.dirname(path))
         widget = _mapWidget()
-        cohortDir = widget.cohortOutputDir() if widget is not None and hasattr(widget, "cohortOutputDir") else None
+        cohortDir = widget.cohortOutputDir(ownOnly=True) if widget is not None and hasattr(widget, "cohortOutputDir") else None
         return os.path.dirname(cohortDir) if cohortDir else None
 
     def robustnessRoot(self):

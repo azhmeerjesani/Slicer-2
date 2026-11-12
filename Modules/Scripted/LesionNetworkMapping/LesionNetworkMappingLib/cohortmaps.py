@@ -877,6 +877,42 @@ def read_maps_tsv(path, resolve_paths=True):
     return rows
 
 
+def _same_folder(a, b):
+    try:
+        return os.path.normcase(os.path.realpath(os.fspath(a))) == os.path.normcase(os.path.realpath(os.fspath(b)))
+    except (TypeError, ValueError):
+        return False
+
+
+def record_matches_bundle(record, bundle):
+    """Whether the cohortmaps.json ``record`` (as :func:`read_record` returns it) was computed with ``bundle`` (an open
+    ``ConnectomeBundle``, or its folder).
+
+    The maps are of this connectome when their record names the same connectome.json (its sha256: the same connectome in
+    any folder or on any computer) or the same bundle folder (its optional metadata edited in place). A record that names
+    neither (older files) is taken as the bundle's. The cohort folder ``conn-<label>`` is named after the connectome name
+    only, so two connectomes with the same name (or a full connectome and a subset of it) share it: the maps of one must
+    never be taken as the other's.
+    """
+    info = record.get("bundle") if isinstance(record, dict) else None
+    if not isinstance(info, dict):
+        return True
+    manifest, path = info.get("manifest_sha256"), info.get("path")
+    if not manifest and not path:
+        return True
+    bundle_path = getattr(bundle, "path", bundle)
+    if bundle_path is None:
+        return False
+    if path and _same_folder(path, bundle_path):
+        return True
+    if not manifest:
+        return False
+    try:
+        return manifest == file_sha256(os.path.join(os.fspath(bundle_path), "connectome.json"))
+    except OSError:
+        return False
+
+
 def read_record(path):
     """The cohortmaps.json record at ``path`` with its paths (``RECORD_PATH_FIELDS``) absolute, or None when it
     cannot be read. The file stores them relative to its folder; older files hold absolute paths, kept as they are.

@@ -370,6 +370,30 @@ class NullsTest(unittest.TestCase):
         for desc, values in reference_maps.items():
             np.testing.assert_array_equal(_read_map(os.path.join(resumed, os.path.basename(record["outputs"][desc])), self.bundle), values, err_msg=desc)
 
+    def test_maps_of_another_connectome_of_the_same_name_are_refused(self):
+        """Two connectomes with the same name share the cohort folder conn-<label>: the nulls of one never run on the other's maps (BB-1)."""
+        other_info = connectome.make_synthetic(self.path("other", "Synthetic.lnmc"), shape=SHAPE, n_subjects=5, runs=(30, 30), seed=7)
+        other = connectome.ConnectomeBundle.open(other_info["path"])
+        self.addCleanup(other.close)
+        self.assertEqual(other.name, self.bundle.name)
+        record = cohortmaps.read_record(os.path.join(self.maps_dir, cohortmaps.COHORTMAPS_JSON))
+        self.assertTrue(cohortmaps.record_matches_bundle(record, self.bundle))
+        self.assertFalse(cohortmaps.record_matches_bundle(record, other), "the maps of one connectome are taken as another's of the same name")
+        self.assertFalse(cohortmaps.record_matches_bundle(record, other.path))
+        # The same connectome in another folder (same connectome.json), the same folder (metadata edited in place), older records
+        moved = self.path("moved", "Synthetic.lnmc")
+        shutil.copytree(self.bundle.path, moved)
+        self.assertTrue(cohortmaps.record_matches_bundle(record, moved))
+        edited = {**record, "bundle": {**record["bundle"], "manifest_sha256": "0" * 64}}
+        self.assertTrue(cohortmaps.record_matches_bundle(edited, self.bundle))
+        self.assertFalse(cohortmaps.record_matches_bundle(edited, moved))
+        for legacy in ({}, {"bundle": "Synthetic"}, {"bundle": {"name": "Synthetic"}}):
+            self.assertTrue(cohortmaps.record_matches_bundle(legacy, other), legacy)
+        with self.assertRaises(jobs.JobError) as raised:
+            nulls.run(other, self.path("other-nulls"), maps_tsv=self.maps_tsv, kind="rl_independent", mode="exact", k=10, k_pool=2, rule=TOP10, emit=_quiet, register=False)
+        self.assertEqual(raised.exception.code, "input")
+        self.assertIn("another connectome", str(raised.exception))
+
     def test_stopped_or_failed_rerun_keeps_finished_result(self):
         """A rerun that is stopped or fails before it writes leaves the earlier finished result as it was (BB-1)."""
         import hashlib

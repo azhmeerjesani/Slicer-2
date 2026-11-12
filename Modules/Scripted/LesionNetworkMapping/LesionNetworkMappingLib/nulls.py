@@ -1703,6 +1703,9 @@ def run(
         cohort = load_cohort(maps_tsv, bundle, participants, group_column, emit)
         if cohort.run_id and cohort.run_id not in parents:
             parents.append(cohort.run_id)
+        if not cohortmaps.record_matches_bundle(cohort.record, bundle):
+            raise jobs.JobError(f"The lesion maps (maps.tsv) were computed with another connectome than {bundle.name!r} (another connectome.json): "
+                                "map the lesions with this connectome first", code="input")
         if len(cohort) < 2:
             raise jobs.JobError(f"The nulls need at least 2 lesions; {len(cohort)} can be used", code="no_lesions")
         if not cohort.subject_ids:

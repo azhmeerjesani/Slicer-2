@@ -4164,7 +4164,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.cohortMapsPath = None
         if study is not None and bundle is not None:
             candidate = os.path.join(self.cohortOutputDir(), "maps.tsv")
-            if os.path.isfile(candidate) and os.path.isfile(os.path.join(os.path.dirname(candidate), "cohortmaps.json")):
+            if os.path.isfile(candidate) and os.path.isfile(os.path.join(os.path.dirname(candidate), "cohortmaps.json")) and not self._cohortFolderOfOtherConnectome(os.path.dirname(candidate)):
                 self.cohortMapsPath = candidate
         self._publishCohortMaps()
         return self.cohortMapsPath
@@ -5381,12 +5381,26 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
     # Compute: cohort
     #
 
-    def cohortOutputDir(self):
-        """Where the cohort maps go: ``<study>/derivatives/lnm/conn-<label>[_n-<N>]/cohort`` (N for a Preview)."""
+    def cohortOutputDir(self, ownOnly=False):
+        """Where the cohort maps go: ``<study>/derivatives/lnm/conn-<label>[_n-<N>]/cohort`` (N for a Preview).
+
+        The folder is named after the connectome name only. With ``ownOnly``, None when it holds the lesion maps of another
+        connectome of the same name (``_cohortFolderOfOtherConnectome``): the cards then show none of that connectome's results.
+        """
         if self.cohortStudy is None or self.bundle is None:
             return None
         previewN = self.plannedN() if self._parameterNode is not None and self._parameterNode.subjectsMode == "preview" and self.plannedN() < self.bundle.n_subjects else None
-        return self.logic.cohortOutputDir(self.cohortStudy.path, self.bundle.name, previewN)
+        folder = self.logic.cohortOutputDir(self.cohortStudy.path, self.bundle.name, previewN)
+        return None if ownOnly and self._cohortFolderOfOtherConnectome(folder) else folder
+
+    def _cohortFolderOfOtherConnectome(self, folder):
+        """True when the cohort folder ``folder`` holds lesion maps (cohortmaps.json) computed with another connectome than the
+        chosen one: another connectome.json in another folder, for example a second connectome of the same name.
+        """
+        from LesionNetworkMappingLib import cohortmaps
+
+        record = cohortmaps.read_record(os.path.join(folder, cohortmaps.COHORTMAPS_JSON)) if folder else None
+        return record is not None and self.bundle is not None and not cohortmaps.record_matches_bundle(record, self.bundle)
 
     def computeCohort(self):
         """Map every analysable lesion of the cohort's study with ``cohortmaps`` (batched, cached); return the job or None.
