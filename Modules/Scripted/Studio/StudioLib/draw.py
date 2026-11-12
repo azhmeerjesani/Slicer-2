@@ -1890,6 +1890,11 @@ def _onSceneClosed(caller=None, event=None):
     _savedRecords.clear()
     _metricsCache.clear()
     _mniCache.clear()
+    # The "lesion is in scan space" offer belongs to the closed lesion: its buttons would act on a deleted node
+    if _extension is not None:
+        _extension._nativeOffer = None
+        if _extension._session is not None:
+            _extension._session.refreshPanel()
     # The assisted counts of lesion segments: the next scene reuses their node IDs (a study subject's counts are kept)
     for key in [key for key in _assistCounts if not key.startswith(_STUDY_KEY_PREFIX)]:
         del _assistCounts[key]

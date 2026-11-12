@@ -2021,6 +2021,24 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         saveButton = self.mainWindow.findChild("QPushButton", "StudioSaveLesionButton")
         self.assertFalse(saveButton.isEnabled())
 
+    def test_native_lesion_offer_ends_with_the_scene(self):
+        """Closing the scene clears Draw's "lesion is in scan space" offer: no button acts on the deleted lesion."""
+        from StudioLib import draw, importer
+
+        studioShell = self._applyStudio()
+        path = self._writeMask("sub-04_lesion.nii.gz", GRID_SHIFTED, subdirectory="lesions")
+        importer.loadFiles([path], studioShell)
+        self._pump(8)
+        self.assertIsNotNone(draw.extension()._nativeOffer)
+        slicer.mrmlScene.Clear(0)
+        self._pump(8)
+        self.assertIsNone(draw.extension()._nativeOffer)
+        self.assertFalse(slicer.util.getNodesByClass("vtkMRMLSegmentationNode"))
+        emptyState = self._drawEmptyState()
+        if emptyState is not None and emptyState.isVisible():
+            text = str(emptyState.findChild("QLabel", "StudioDrawEmptyStateText").text)
+            self.assertNotIn("scan space", text)
+
     def test_lesion_only_native(self):
         """A lesion in scan space alone is never shown on the template; its sidecar's scan is offered and opens with it."""
         from StudioLib import importer
