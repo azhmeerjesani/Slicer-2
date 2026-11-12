@@ -152,6 +152,17 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual((records[0]["year"], records[0]["journal"]), ("2017", "Neuroimage"))
         self.assertEqual(records[1]["pmid"], "333333")
 
+    def test_bibtex_unclosed_entry_skipped(self):
+        text = (
+            "@article{a, title={First}, year=2020}\n"
+            "@article{broken, title={Unclosed entry, author={Nobody}, year=2023\n\n"
+            "@article{x3, title={Alexia without agraphia}, author={Rossi, Marco}, year={2016}}\n"
+            "@article{q, title=\"Open quote, year=2001\n@article{z, title={Last}}\n"
+        )
+        records = sources.parse_bibtex(text)
+        self.assertEqual([record["title"] for record in records], ["First", "Alexia without agraphia", "Last"])
+        self.assertEqual(records[1]["year"], "2016")
+
     def test_bibtex_latex_accents_decoded(self):
         text = (
             "@article{a,\n  author = {M{\\\"u}ller, J{\\\"o}rg and Fern{\\'a}ndez, Ana and Sch\\\"on, B and {\\O}stergaard, K"

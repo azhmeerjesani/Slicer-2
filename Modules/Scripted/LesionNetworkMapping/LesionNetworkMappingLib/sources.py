@@ -236,26 +236,31 @@ def parse_ris(text):
     return [draft(**{**record, "authors": "; ".join(record["authors"])}) for record in records if record.get("title") or record.get("doi") or record.get("pmid")]
 
 
-def _bibtex_value(text, index):
-    """(value, next index) of a BibTeX field value starting at ``index`` ({...}, "..." or a bare word)."""
+def _bibtex_value(text, index, limit=None):
+    """(value, next index) of a BibTeX field value starting at ``index`` ({...}, "..." or a bare word); the value is None
+    when a ``{`` or ``"`` is not closed before ``limit`` (the start of the next entry; default the end of ``text``).
+    """
+    limit = len(text) if limit is None else limit
     while index < len(text) and text[index].isspace():
         index += 1
     if index >= len(text):
         return "", index
     if text[index] == "{":
         depth, start = 0, index + 1
-        for position in range(index, len(text)):
+        for position in range(index, limit):
             if text[position] == "{":
                 depth += 1
             elif text[position] == "}":
                 depth -= 1
                 if depth == 0:
                     return text[start:position], position + 1
-        return text[start:], len(text)
+        return None, limit
     if text[index] == '"':
         position = index + 1
-        while position < len(text) and not (text[position] == '"' and text[position - 1] != "\\"):
+        while position < limit and not (text[position] == '"' and text[position - 1] != "\\"):
             position += 1
+        if position >= limit:
+            return None, limit
         return text[index + 1 : position], position + 1
     match = re.compile(r"[^,}\s]*").match(text, index)
     return match.group(0), match.end()
@@ -297,22 +302,30 @@ def _latex_to_unicode(value):
 def parse_bibtex(text):
     """BibTeX entries (``@article{key, title = {...}, author = {A and B}, ...}``)."""
     records = []
+    starts = [found.start() for found in re.finditer(r"^[ \t]*@\w+\s*[{(]", text, re.M)]
     for match in re.finditer(r"@(\w+)\s*[{(]", text):
         if match.group(1).lower() in ("comment", "string", "preamble"):
             continue
+        limit = next((start for start in starts if start > match.start()), len(text))
         index = text.find(",", match.end())
         if index < 0:
             continue
         fields = {}
+        malformed = False
         index += 1
         while index < len(text):
             field = re.compile(r"\s*([A-Za-z][\w-]*)\s*=").match(text, index)
             if not field:
                 break
-            value, index = _bibtex_value(text, field.end())
+            value, index = _bibtex_value(text, field.end(), limit)
+            if value is None:
+                malformed = True  # an unclosed { or " : the entry is cut off, so it is skipped, not kept as a junk record
+                break
             fields[field.group(1).lower()] = re.sub(r"[{}]", "", _latex_to_unicode(value))
             comma = re.compile(r"\s*,").match(text, index)
             index = comma.end() if comma else index
+        if malformed:
+            continue
         authors = "; ".join(part.strip() for part in re.split(r"\s+and\s+", fields.get("author", "")) if part.strip())
         record = draft(title=fields.get("title"), authors=authors, year=fields.get("year") or fields.get("date"),
                        journal=fields.get("journal") or fields.get("journaltitle") or fields.get("booktitle"),
