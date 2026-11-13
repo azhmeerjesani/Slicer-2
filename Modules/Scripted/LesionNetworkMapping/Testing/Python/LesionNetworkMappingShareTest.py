@@ -211,6 +211,44 @@ class ExclusionTest(ShareTestBase):
         self.assertEqual(item["status"], "warn")
         self.assertIn("notes", item["detail"])
 
+    def test_personal_columns_confirmed_as_metadata_stay_off_and_are_flagged(self):
+        # Person names, dates of birth and record numbers that the user confirmed as Metadata (the Columns... dialog keeps
+        # the inferred type), with names that say what they hold or neutral ones
+        names = ["Hans Mueller", "Anna Schmidt", "Peter Weber", "Maria Fischer", "Karl Wagner"]
+        for i, sid in enumerate(row["participant_id"] for row in self.study.subjects):
+            self.study.set(sid, patient_name=names[i], dob=f"195{i}-01-1{i}", mrn=f"MRN48291{i}", who=names[i],
+                           born=f"196{i}-02-0{i + 1}", code=f"X{i}Q", site="A" if i % 2 else "B")
+        self.study.save()
+        self.study = Study.open(self.root)
+        self.assertEqual(self.study.column_spec("dob").type, "date")
+        for name in ("patient_name", "dob", "mrn", "who", "born", "code", "site"):
+            self.study.set_column_role(name, "metadata", type="categorical")
+        self.study.save()
+        self.study = Study.open(self.root)
+        offered = {choice["name"]: choice for choice in share.column_choices(self.study)}
+        self.assertEqual(offered["patient_name"]["sensitive"], "person name")
+        self.assertEqual(offered["dob"]["sensitive"], "date")
+        self.assertEqual(offered["mrn"]["sensitive"], "record number")
+        self.assertEqual(offered["born"]["sensitive"], "date")
+        self.assertEqual(offered["who"]["sensitive"], "one value per participant")
+        self.assertEqual(offered["code"]["sensitive"], "one value per participant")
+        self.assertIsNone(offered["site"]["sensitive"])
+        columns = share.default_columns(self.study)
+        for name in ("patient_name", "dob", "mrn", "who", "born", "code"):
+            self.assertNotIn(name, columns)
+        self.assertIn("site", columns)
+        _result, out = self.export()
+        with open(os.path.join(out, "participants.tsv"), encoding="utf-8") as f:
+            text = f.read()
+        for leaked in ("Hans Mueller", "1950-01-10", "MRN482910", "1960-02-01", "X0Q"):
+            self.assertNotIn(leaked, text)
+        # Ticked by hand, they are exported with a warning that names them
+        checklist = share.checklist(self.study, {"licence": "CC0-1.0", "columns": ["age", "patient_name", "dob", "who"]})
+        item = next(item for item in checklist if item["id"] == "columns")
+        self.assertEqual(item["status"], "warn")
+        for text in ("patient_name (person name)", "dob (date)", "who (one value per participant)"):
+            self.assertIn(text, item["detail"])
+
     def test_own_patient_masks_need_a_decision(self):
         checklist = share.checklist(self.study, {"licence": "CC0-1.0", "lesions": True})
         item = next(item for item in checklist if item["id"] == "own_patient")

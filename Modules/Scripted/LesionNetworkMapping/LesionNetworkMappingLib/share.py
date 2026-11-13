@@ -140,6 +140,16 @@ SENSITIVE_COLUMNS = {
     "modified": "date",
     "lesion_mtime": "date",
 }
+#: Words of column names that hold personal identifiers ("patient_name", "DateOfBirth", "mrn"): offered, off by default
+IDENTIFYING_WORDS = {
+    **dict.fromkeys(("name", "names", "fullname", "firstname", "lastname", "surname", "forename", "forenames", "givenname",
+                     "familyname", "maidenname", "initials"), "person name"),
+    **dict.fromkeys(("dob", "birth", "birthdate", "birthday", "date", "dates"), "date"),
+    **dict.fromkeys(("mrn", "ssn", "nhs", "insurance", "passport"), "record number"),
+    **dict.fromkeys(("address", "street", "postcode", "zip", "zipcode", "phone", "telephone", "email", "mail"), "contact details"),
+}
+#: Fewest participants for which a text column with a different value for each one counts as identifying
+IDENTIFYING_MIN_ROWS = 5
 #: Columns that identify the publication a case comes from: on by default (published information)
 CITATION_COLUMNS = ("record_id", "source_type", "source_dataset", "doi", "pmid", "citation", "figure", "panel", "case_label")
 #: Columns of sources/records.tsv that are exported (citations only)
@@ -231,15 +241,42 @@ def _open(study):
 #
 
 
+def _name_words(name):
+    """Lower-case words of a column name ("patientName" and "patient_name" give ["patient", "name"]; "DateOfBirth" gives
+    ["date", "of", "birth"]), plus the whole name without separators.
+    """
+    words = [word.lower() for word in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", name)]
+    return [*words, "".join(words)]
+
+
 def _sensitivity(study, name):
-    """Why a column is sensitive (tracer name, free text, date, ...), or None."""
+    """Why a column is sensitive (tracer name, free text, date, person name, ...), or None.
+
+    Besides the known columns and the date and text types, a column the application does not know (not registered)
+    is sensitive when its name says it holds a personal identifier (name, date of birth, record number, contact
+    details), when every value is a date (whatever type the user confirmed), or when it holds a different non-numeric
+    value for each participant (an identifier such as a name or a record number, which would undo pseudonymisation).
+    """
     if name in SENSITIVE_COLUMNS:
         return SENSITIVE_COLUMNS[name]
     spec = study.column_spec(name)
     if spec.type == "date":
         return "date"
-    if spec.type == "text" and name not in CITATION_COLUMNS:
+    if name in CITATION_COLUMNS:
+        return None
+    if spec.type == "text":
         return "free text"
+    if schema.registered(name) is not None:
+        return None
+    for word in _name_words(name):
+        if word in IDENTIFYING_WORDS:
+            return IDENTIFYING_WORDS[word]
+    present = [str(row.get(name)).strip() for row in study.subjects if not is_missing(row.get(name))]
+    if present and all(schema.is_iso_date(value) for value in present):
+        return "date"
+    if (spec.type != "numeric" and len(present) >= IDENTIFYING_MIN_ROWS and len(set(present)) == len(present)
+            and not all(schema._number(value) is not None for value in present)):
+        return "one value per participant"
     return None
 
 
@@ -265,7 +302,7 @@ def column_choices(study):
 
 def default_columns(study):
     """The columns exported unless the user chooses others: roles group/score/covariate/block, citation columns and
-    categorical or numeric metadata; never free text, tracer names, dates or paths.
+    categorical or numeric metadata; never free text, tracer names, person names, dates, identifiers or paths.
     """
     return [choice["name"] for choice in column_choices(study) if choice["default"]]
 

@@ -73,12 +73,15 @@ class SchemaTest(unittest.TestCase):
         for name in ("scan_native", "lesion_native", "norm_suggestion", "norm_fingerprint", "volume_native_ml", "lesion_mtime", "lesion_size"):
             self.assertIn(name, schema.OPTIONAL_COLUMNS)
 
-        # Inference: numeric when every value is a finite number, categorical up to 20 levels, text otherwise
+        # Inference: numeric when every value is a finite number, date when every value is an ISO date, categorical up to 20 levels, text otherwise
         self.assertEqual(schema.infer_spec("moca", ["21", "n/a", "3.5", ""]).type, "numeric")
         self.assertEqual(schema.infer_spec("moca", ["21", "inf"]).type, "categorical")
         self.assertEqual(schema.infer_spec("site", ["A", "B", "A"]).levels, {"A": None, "B": None})
         self.assertEqual(schema.infer_spec("comment", [f"text {i}" for i in range(21)]).type, "text")
         self.assertEqual(schema.infer_spec("empty", ["n/a"]).type, "text")
+        # ISO 8601 dates (dates of birth, scan dates) are dates, not categories; an invalid calendar date is not
+        self.assertEqual(schema.infer_spec("dob", ["1950-01-10", "1962-12-31T08:00:00", "n/a"]).type, "date")
+        self.assertEqual(schema.infer_spec("visit", ["1950-02-30", "1951-01-01"]).type, "categorical")
         self.assertEqual(schema.infer_spec("moca", ["1"]).role, schema.UNKNOWN_ROLE)
 
         # Registration of later columns; a conflicting re-registration raises

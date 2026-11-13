@@ -397,17 +397,38 @@ def normalize_with_spec(spec, text):
     return text, None
 
 
+#: An ISO 8601 date, optionally with a time ("1950-01-10", "2024-03-01T12:30:00Z")
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$")
+
+
+def is_iso_date(text):
+    """Whether a value is an ISO 8601 date or date and time (a valid calendar date)."""
+    import datetime
+
+    text = str(text).strip()
+    if not _ISO_DATE.match(text):
+        return False
+    try:
+        datetime.date.fromisoformat(text[:10])
+    except ValueError:
+        return False
+    return True
+
+
 def infer_spec(name, values):
     """Spec of a column that is neither registered nor confirmed, from its values (role "unknown").
 
-    Numeric when every non-missing value is a finite number; categorical when there are at most
-    :data:`MAX_CATEGORIES` distinct values; text otherwise (also when every value is missing).
+    Numeric when every non-missing value is a finite number; date when every one is an ISO 8601 date (or date
+    and time); categorical when there are at most :data:`MAX_CATEGORIES` distinct values; text otherwise (also
+    when every value is missing).
     """
     present = [str(value) for value in values if not is_missing(value)]
     if not present:
         return ColumnSpec(name=name, type="text", role=UNKNOWN_ROLE)
     if all(_number(value) is not None for value in present):
         return ColumnSpec(name=name, type="numeric", role=UNKNOWN_ROLE)
+    if all(is_iso_date(value) for value in present):
+        return ColumnSpec(name=name, type="date", role=UNKNOWN_ROLE)
     distinct = sorted(set(present))
     if len(distinct) <= MAX_CATEGORIES:
         return ColumnSpec(name=name, type="categorical", role=UNKNOWN_ROLE, levels=dict.fromkeys(distinct))
