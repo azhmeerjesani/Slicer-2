@@ -1533,6 +1533,8 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         offsetBefore, heightBefore = sliceNode.GetSliceOffset(), sliceNode.GetFieldOfView()[1]
         self._routeFigure(studioShell, fromLibrary=False)
         self._wait(500)
+        # A scan is on the left (no template was started): the toast must not call it the template
+        self.assertEqual(studioShell.toastText(), "Figure shown on the right; the scan on the left is where you draw")
         self.assertEqual(self.layoutManager.layout, importer.COMPARE_LAYOUT_ID)
         sliceNode = self.layoutManager.sliceWidget("Red").mrmlSliceNode()
         self.assertAlmostEqual(sliceNode.GetSliceOffset(), offsetBefore, places=3)

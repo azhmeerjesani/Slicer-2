@@ -5392,7 +5392,8 @@ def _routeFigure(path, shell, result, figureNode=None):
     try:
         # Tag the figure first: untagged it is itself the background of the views, so no template would be started for it
         figureNode.SetAttribute(space.ROLE_ATTRIBUTE, space.ROLE_FIGURE)
-        if _backgroundVolume() is None:
+        templateOnLeft = _backgroundVolume() is None
+        if templateOnLeft:
             # Something to draw on: the template (an existing template lesion is reused)
             startOnTemplate(shell=shell)
         if figureNode.GetAttribute(space.FIGURE_CONVENTION_ATTRIBUTE) not in space.CONVENTIONS:
@@ -5423,7 +5424,11 @@ def _routeFigure(path, shell, result, figureNode=None):
         return True
     _withdrawNotice("figure-convention", shell)
     _postNotice("figure-convention", _figureConventionNotice(figureNode, shell), shell)
-    shell.toast(_("Figure shown on the right; the template on the left is where you draw"), level="consequence")
+    if templateOnLeft:
+        shell.toast(_("Figure shown on the right; the template on the left is where you draw"), level="consequence")
+    else:
+        # A scan is already open and stays on the left: it is what is drawn on
+        shell.toast(_("Figure shown on the right; the scan on the left is where you draw"), level="consequence")
     return True
 
 
