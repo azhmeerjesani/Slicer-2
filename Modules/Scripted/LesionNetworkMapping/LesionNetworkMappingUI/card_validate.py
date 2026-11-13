@@ -1746,9 +1746,17 @@ class ValidateCard:
         metric = "AUC" if binary else "r"
         circuit, volume = metrics.get(first) or {}, (record.get("volume_metrics") or {}).get(first) or {}
         bootstrap = record.get("bootstrap") or {}
+        independence = frozen.get("independence") or {}
+        sameCohort = independence.get("provenance") == "same_cohort"
+        sha = str(frozen.get("sha256") or "")[:16] + "…"
+        if sameCohort:
+            fitted = _("Not an independent replication: {basis}. The result is circular (same cohort).").format(basis=independence.get("basis") or _("the circuit was made from the scored lesions"))
+            fitted = '<span style="color:{}"><b>{}</b></span>'.format(levelColor("warn"), html.escape(fitted))
+        else:
+            fitted = html.escape(_("Nothing was fitted on this cohort."))
         lines = [
             "<b>" + html.escape(_("Frozen circuit applied to {n} subjects · {outcome}").format(n=outcome.get("n", "?"), outcome=outcome.get("column", ""))) + "</b>",
-            html.escape(_("The circuit file has sha256 {sha}, recorded in validation.json. Nothing was fitted on this cohort.").format(sha=str(frozen.get("sha256") or "")[:16] + "…")),
+            html.escape(_("The circuit file has sha256 {sha}, recorded in validation.json.").format(sha=sha)) + " " + fitted,
             html.escape(_("95% CI: simple bootstrap of the subjects within strata ({boot} resamples). There is no permutation p: no model was fitted here.").format(boot=bootstrap.get("B", "?"))),
         ]
         self.frozenSummary.setText("".join(f"<div>{line}</div>" for line in lines))
@@ -1757,7 +1765,7 @@ class ValidateCard:
             overlap = not (float(circuit["ci"][1]) < float(volume["ci"][0]) or float(volume["ci"][1]) < float(circuit["ci"][0]))
         except (KeyError, TypeError, ValueError, IndexError):
             overlap = None
-        text = _("The frozen circuit gives {metric} {value} (95% CI {low} to {high}) in this cohort; lesion volume alone gives {volumeValue} (95% CI {volumeLow} to {volumeHigh}).").format(
+        text = (_("Same-cohort (circular) result: ") if sameCohort else "") + _("The frozen circuit gives {metric} {value} (95% CI {low} to {high}) in this cohort; lesion volume alone gives {volumeValue} (95% CI {volumeLow} to {volumeHigh}).").format(
             metric=metric, value=_num(circuit.get("value")), low=_num((circuit.get("ci") or [None, None])[0]), high=_num((circuit.get("ci") or [None, None])[1]),
             volumeValue=_num(volume.get("value")), volumeLow=_num((volume.get("ci") or [None, None])[0]), volumeHigh=_num((volume.get("ci") or [None, None])[1]))
         if overlap is not None:

@@ -846,6 +846,43 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(code, jobs.EXIT_USAGE)
         self.assertIn("--circuit is required", events[-1]["message"])
 
+    def test_frozen_circuit_from_the_scored_lesions_is_same_cohort(self):
+        """A circuit made from the scored lesions (its slnm.json names their maps.tsv) is not recorded as an independent replication."""
+        fixture = self._write_fixture(self.tmp, study=True)
+        circuit = np.zeros(self.SHAPE, dtype=np.float32)
+        circuit.reshape(-1)[fixture["indices"]] = fixture["pattern"]
+        run_dir = os.path.join(self.tmp, "slnm_run")
+        os.makedirs(run_dir)
+        path = os.path.join(run_dir, "circuit-slnmScore_desc-R_map.nii.gz")
+        nifti.write_nifti(path, circuit, fixture["affine"])
+        with open(os.path.join(run_dir, "slnm.json"), "w", encoding="utf-8") as f:
+            json.dump({"run_id": "slnm-1", "inputs": {"maps_tsv": os.path.relpath(fixture["maps_tsv"], run_dir)}}, f)
+        out = os.path.join(self.tmp, "frozen_same")
+        base = ["--maps", fixture["maps_tsv"], "--participants", fixture["participants"], "--outcome", "group", "--type", "binary", "--mask", fixture["mask"], "--threads", "1", "--boot", "10"]
+        code, events = self.run_in_process([*base, "--out", out, "--frozen", path, "--frozen-sha256", file_sha256(path)])
+        self.assertEqual(code, 0, events[-1])
+        with open(os.path.join(out, "validation.json"), encoding="utf-8") as f:
+            record = json.load(f)
+        self.assertEqual(record["frozen"]["independence"]["provenance"], "same_cohort")
+        self.assertGreater(record["frozen"]["independence"]["overlap"], 0)
+        self.assertTrue(record["frozen"]["provenance"].startswith("same_cohort"))
+        self.assertNotIn("independent circuit", record["frozen"]["provenance"])
+        self.assertEqual(_absolute_strings(record), [])
+        self.assertTrue([event for event in events if event.get("code") == "same_cohort"])
+        # The same file with no record of its source lesions, declared frozen with its sha256, stays a frozen replication
+        other = os.path.join(self.tmp, "elsewhere")
+        os.makedirs(other)
+        copy = os.path.join(other, "circuit.nii.gz")
+        shutil.copyfile(path, copy)
+        out = os.path.join(self.tmp, "frozen_other")
+        code, events = self.run_in_process([*base, "--out", out, "--frozen", copy, "--frozen-sha256", file_sha256(copy)])
+        self.assertEqual(code, 0, events[-1])
+        with open(os.path.join(out, "validation.json"), encoding="utf-8") as f:
+            record = json.load(f)
+        self.assertEqual(record["frozen"]["independence"]["provenance"], "frozen")
+        self.assertEqual(record["frozen"]["provenance"], "frozen (independent circuit, sha256 verified)")
+        self.assertFalse([event for event in events if event.get("code") == "same_cohort"])
+
 
 if __name__ == "__main__":
     unittest.main()

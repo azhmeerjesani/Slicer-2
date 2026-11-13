@@ -685,6 +685,9 @@ def damage_values(occupancy, circuit, threshold=None, sign="both"):
 def provenance_of(circuit_path, sha256, scored, scored_study=None, frozen_sha256=None):
     """Whether a circuit is independent of the scored lesions.
 
+    The circuit's source lesions come from its circuit.json, else from the run record next to it (:func:`parent_record`:
+    slnm.json, glm.json, ...), so that a result map of a run on the scored lesions is never taken as independent.
+
     :param scored: {"sha256": [...], "participants": [...]} of the scored lesions (:func:`lesions_of_maps`).
     :param scored_study: the study folder of the scored lesions (participant ids count only within one study).
     :param frozen_sha256: the sha256 the circuit was frozen with (declared by the user), or None.
@@ -698,6 +701,10 @@ def provenance_of(circuit_path, sha256, scored, scored_study=None, frozen_sha256
     warnings = []
     source = (record or {}).get("source") or {}
     known = bool(record) and bool(source.get("known"))
+    if record is None:  # no circuit.json: the run record next to the file (slnm.json, glm.json, ...) names the lesions that made it
+        parent = parent_record(circuit_path)
+        lesions = parent.get("lesions") or {}
+        source = {"lesion_sha256": lesions.get("sha256") or [], "participants": lesions.get("participants") or [], "study": parent.get("study")}
     source_sha = set(source.get("lesion_sha256") or ())
     same_study = bool(scored_study and source.get("study") and os.path.normcase(os.path.realpath(source["study"])) == os.path.normcase(os.path.realpath(scored_study)))
     if not same_study and scored_study and source.get("study_key"):  # the study moved, or circuit.json names it by its identity only

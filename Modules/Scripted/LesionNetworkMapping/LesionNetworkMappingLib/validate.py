@@ -1608,16 +1608,19 @@ def apply_frozen(circuit_path, sha256, maps_tsv, participants, outcome, outcome_
 
     The circuit file must have the given sha256 (it is the record of what was frozen). Returns a dict with the
     circuit sha256, the per-subject scores, the metrics of the score (and of lesion volume, for context) with
-    bootstrap CIs, and the excluded subjects.
+    bootstrap CIs, the excluded subjects, and the circuit's independence of the scored lesions
+    (``provenance``: :func:`circuits.provenance_of`; "same_cohort" when the circuit was made from some of them).
 
     :raises ValueError: the sha256 does not match, or the circuit is not on the grid of the maps.
     """
-    from . import nifti
+    from . import circuits, nifti
     from .export import file_sha256
 
     actual = file_sha256(circuit_path)
     if str(sha256).lower() != actual:
         raise ValueError(f"The circuit {os.path.basename(os.fspath(circuit_path))} has sha256 {actual}, not the frozen {sha256}: it is not the frozen circuit")
+    # A circuit made from (some of) the scored lesions is not an independent replication (double dipping)
+    provenance = circuits.provenance_of(circuit_path, actual, circuits.lesions_of_maps(maps_tsv), circuits.find_study_root(maps_tsv), actual)
     loaded = load_data(maps_tsv, participants, outcome, outcome_type, mask=mask, positive=positive, dataset_column=dataset_column, input=input, bundle=bundle, need_occupancy=score == "damage", memmap_path=memmap_path, emit=emit)
     data, info = loaded["data"], loaded["info"]
     circuit_data, circuit_affine, _ = nifti.read_nifti(circuit_path)
@@ -1643,6 +1646,7 @@ def apply_frozen(circuit_path, sha256, maps_tsv, participants, outcome, outcome_
         "metrics": metrics,
         "partial_metrics": frozen_metrics(partial, data.outcome, data.outcome_type, data.datasets, n_boot, seed) if partial is not None else None,
         "volume_metrics": frozen_metrics(data.volume, data.outcome, data.outcome_type, data.datasets, n_boot, seed),
+        "provenance": provenance,
         "data": data,
         "info": info,
     }
@@ -2151,15 +2155,22 @@ def _run_cli(args, argv):
             )
             outputs.append(scores_path)
             record.update(common)
+            independence = applied["provenance"]
+            if independence["provenance"] == "frozen":
+                provenance = "frozen (independent circuit, sha256 verified)"
+            else:
+                provenance = f"same_cohort ({independence['basis']}: not an independent replication)"
+                emit("warning", code="same_cohort", message=f"The frozen circuit is not independent of this cohort: {independence['basis']}. The result is recorded as same-cohort (circular), not as a replication.")
             record.update({
                 "mode": "frozen",
-                "frozen": {"circuit": applied["circuit"], "sha256": applied["sha256"], "score": applied["score"], "top_pct": applied["top_pct"], "provenance": "frozen (independent circuit, sha256 verified)"},
+                "frozen": {"circuit": applied["circuit"], "sha256": applied["sha256"], "score": applied["score"], "top_pct": applied["top_pct"], "provenance": provenance,
+                           "independence": {key: independence[key] for key in ("provenance", "basis", "overlap")}},
                 "metrics": applied["metrics"],
                 "partial_metrics": applied["partial_metrics"],
                 "volume_metrics": applied["volume_metrics"],
                 "bootstrap": {"B": n_boot, "resampling": "subjects within strata (simple bootstrap; the circuit is fixed)", "ci_level": CI_LEVEL},
             })
-            summary = {"mode": "frozen", "n": data.n, "metrics": {name: item["value"] for name, item in applied["metrics"].items()}}
+            summary = {"mode": "frozen", "provenance": independence["provenance"], "n": data.n, "metrics": {name: item["value"] for name, item in applied["metrics"].items()}}
         else:
             stage = {"index": 1}
 
