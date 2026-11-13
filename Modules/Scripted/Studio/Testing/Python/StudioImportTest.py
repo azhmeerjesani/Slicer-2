@@ -3138,7 +3138,7 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIsNone(lesion.GetNodeReference(role))
         self.assertNotEqual(self._editor().segmentationNode().GetID(), lesion.GetID())
 
-    def _writeDicomSeries(self, folderName, slices=6, size=24):
+    def _writeDicomSeries(self, folderName, slices=6, size=24, headerSize=None):
         """A synthetic axial MR series of one series UID written with pydicom; return its folder (None without pydicom)."""
         try:
             import pydicom
@@ -3169,7 +3169,7 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             dataset.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
             dataset.PixelSpacing = [2.0, 2.0]
             dataset.SliceThickness = 3.0
-            dataset.Rows = dataset.Columns = size
+            dataset.Rows = dataset.Columns = headerSize or size  # headerSize: a header that lies about the pixel data
             dataset.SamplesPerPixel = 1
             dataset.PhotometricInterpretation = "MONOCHROME2"
             dataset.BitsAllocated = dataset.BitsStored = 16
@@ -3232,6 +3232,50 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             seriesUID = slicer.dicomDatabase.seriesForFile(os.path.join(folder, "slice00.dcm"))
             self.assertEqual([node.GetID() for node in importer.openNodesForDicomSeries(seriesUID)], [scan.GetID()])
         finally:
+            if slicer.dicomDatabase.isOpen:
+                slicer.dicomDatabase.closeDatabase()
+            if originalSetting:
+                settings.setValue(settingsKey, originalSetting)
+                if originalOpen and os.path.isdir(str(originalSetting)):
+                    DICOMUtils.openDatabase(str(originalSetting))
+            else:
+                settings.remove(settingsKey)
+
+    def test_dicom_series_with_lying_header_is_refused(self):
+        """BB-1: a DICOM series whose header says 512x512 but whose pixel data is 24x24 is refused with a plain message
+        (as a cut-short NIfTI is): no scan, no project, no Recent folder (the reader would zero-fill it silently).
+        """
+        from DICOMLib import DICOMUtils
+        from StudioLib import importer
+
+        folder = self._writeDicomSeries("dicom lying header", headerSize=512)
+        if folder is None:
+            return  # pydicom is not available in this build
+        studioShell = self._applyStudio()
+        settings = qt.QSettings()
+        settingsKey = slicer.dicomDatabaseDirectorySettingsKey
+        originalSetting = settings.value(settingsKey)
+        originalOpen = bool(slicer.dicomDatabase is not None and slicer.dicomDatabase.isOpen)
+        DICOMUtils.openTemporaryDatabase(os.path.join(self.directory, "dicom lying database"))
+        warnings = []
+        originalWarning = slicer.util.warningDisplay
+        slicer.util.warningDisplay = lambda text, *args, **kwargs: warnings.append(text)
+        try:
+            before = len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"))
+            self.assertEqual(importer.handleDrop([folder], shell=studioShell), "dicom")
+            self._pump(8)
+            self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")), before)
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("damaged", warnings[0])
+            self.assertFalse([entry for entry in importer.recentFolders() if "lying" in entry["path"]])
+            # An honest series still opens
+            good = self._writeDicomSeries("dicom honest header")
+            importer.handleDrop([good], shell=studioShell)
+            self._pump(8)
+            self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")), before + 1)
+            self.assertEqual(len(warnings), 1)
+        finally:
+            slicer.util.warningDisplay = originalWarning
             if slicer.dicomDatabase.isOpen:
                 slicer.dicomDatabase.closeDatabase()
             if originalSetting:

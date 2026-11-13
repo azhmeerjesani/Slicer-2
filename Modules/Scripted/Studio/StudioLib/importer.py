@@ -2846,6 +2846,55 @@ def _folderFiles(path, limit=FOLDER_SCAN_MAX_FILES):
     return files
 
 
+def _dicomPixelDataShortfall(filePath):
+    """``(have, need)`` bytes if the pixel data of the DICOM file ``filePath`` is shorter than its header (Rows, Columns,
+    samples, bits, frames) announces, else None (also when it cannot tell: compressed, no pixel data, unreadable).
+
+    The reader fills the missing voxels with 0 without a word, so a series whose header lies would open as a mostly black
+    scan of the size that the header gives.
+    """
+    try:
+        import pydicom
+
+        size = os.path.getsize(filePath)
+        header = pydicom.dcmread(filePath, stop_before_pixels=True, force=True)
+        if "Rows" not in header or "Columns" not in header or "BitsAllocated" not in header:
+            return None
+        syntax = getattr(getattr(header, "file_meta", None), "TransferSyntaxUID", None)
+        if syntax is not None and syntax.is_compressed:
+            return None
+        frames = int(header.get("NumberOfFrames", 1) or 1)
+        need = (int(header.Rows) * int(header.Columns) * int(header.get("SamplesPerPixel", 1) or 1) * frames
+                * int(header.BitsAllocated) + 7) // 8
+        if size >= need + 65536:  # cannot be short: no need to read the pixels
+            return None
+        full = pydicom.dcmread(filePath, force=True)
+        if "PixelData" not in full:
+            return None
+        have = len(full.PixelData)
+        return (have, need) if have < need else None
+    except Exception:
+        logging.debug(f"Studio: {traceback.format_exc()}")
+        return None
+
+
+def _checkDicomSeriesComplete(seriesUID, database):
+    """Raise ``RefusedFileError`` if an instance of the DICOM series ``seriesUID`` has less pixel data than its header says."""
+    try:
+        files = list(database.filesForSeries(seriesUID))
+    except Exception:
+        logging.debug(f"Studio: {traceback.format_exc()}")
+        return
+    for filePath in files:
+        shortfall = _dicomPixelDataShortfall(filePath)
+        if shortfall is not None:
+            raise RefusedFileError(
+                _("This DICOM series is damaged: {name} holds {have:,} bytes of image data, but its header (image size) "
+                  "announces {need:,}. It was not opened, because the missing part would show as black. Export the "
+                  "series again from its source.").format(name=os.path.basename(filePath), have=shortfall[0],
+                                                            need=shortfall[1]))
+
+
 def importDicomFolder(path, shell=None):
     """Import a DICOM folder into the DICOM database; in Studio, a folder of one series opens in Draw.
 
@@ -2894,8 +2943,13 @@ def importDicomFolder(path, shell=None):
             _afterLoad(result, shell)
             return True
         try:
+            _checkDicomSeriesComplete(seriesUIDs[0], database)
             with _ownLoad(), slicer.util.WaitCursor():
                 nodeIds = DICOMUtils.loadSeriesByUID(seriesUIDs)
+        except RefusedFileError as e:
+            logging.warning(f"Studio: {path} was not opened: {e}")  # planned refusal: no traceback
+            slicer.util.warningDisplay(str(e), detailedText=f"{path}\n{e}")
+            return False
         except Exception:
             logging.error(f"Studio: cannot load the DICOM series of {path}:\n{traceback.format_exc()}")
             nodeIds = []
