@@ -3314,6 +3314,42 @@ class StudioRegressionTest(unittest.TestCase):
             finally:
                 dialog.dialog.close()
 
+    def test_20b_control_set_scan_text_singular(self):
+        """The Add control set dialog says "1 file skipped" and "1 lesion is on the ... grid" (not "1 files", "1 lesions are"),
+        and keeps the plural for other counts (BB-1).
+        """
+        from unittest import mock
+
+        from StudioLib import libcard_controls
+
+        if slicer.util.mainWindow() is None:
+            self.skipTest("needs the main window")
+        controlsets = libcard_controls._lnm("controlsets")
+        fakes = {
+            "one": ({"lesions": ["a", "b", "c"], "skipped": ["x.txt"], "grids": {"TF2009-2mm": {"n": 2}, "TF2009-1mm": {"n": 1}}},
+                    ["TF2009-1mm", "TF2009-2mm"], (1, 2)),
+            "many": ({"lesions": ["a", "b"], "skipped": ["x.txt", "y.txt"], "grids": {"TF2009-2mm": {"n": 2}}}, ["TF2009-2mm"], (2,)),
+        }
+        for name, (scan, gridIds, counts) in fakes.items():
+            questions = [{"grid_id": g, "n": n, "candidates": ["A", "B"]} for g, n in zip(gridIds, counts, strict=True)]
+            with mock.patch.object(controlsets, "scan_folder", lambda folder, scan=scan: dict(scan)), \
+                    mock.patch.object(controlsets, "questions", lambda scan, questions=questions: questions), \
+                    mock.patch.object(controlsets, "scan_mixed_families", lambda scan: ""):
+                dialog = libcard_controls.addControlSet(self.directory, modal=False)
+                try:
+                    text = dialog.scanLabel.text
+                    tips = [combo.toolTip for combo in dialog.spaceCombos]
+                finally:
+                    dialog.dialog.close()
+            if name == "one":
+                self.assertIn("1 file skipped", text)
+                self.assertNotIn("1 files", text)
+                self.assertIn("1 lesion is on the TF2009-1mm grid", tips[0])
+                self.assertIn("2 lesions are on the TF2009-2mm grid", tips[1])
+            else:
+                self.assertIn("2 files skipped", text)
+                self.assertIn("2 lesions are on", tips[0])
+
     def test_21_share_dialog_shows_success_after_export(self):
         """After a successful "Export study for sharing" the dialog shows the success ("Exported N files to ...") and Close, and
         its checklist has no failure mark: the folder that was just written is not reported as "It already exists" and Export

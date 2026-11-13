@@ -322,7 +322,8 @@ class AddControlSetDialog:
         if grids:
             text += " · " + _("grids: {grids}").format(grids=grids)
         if self.scan["skipped"]:
-            text += " · " + _("{n} files skipped").format(n=len(self.scan["skipped"]))
+            nSkipped = len(self.scan["skipped"])
+            text += " · " + (_("{n} file skipped") if nSkipped == 1 else _("{n} files skipped")).format(n=nSkipped)
         if controlsets.NO_GRID in self.scan["grids"]:
             text += "\n" + _("Lesions that are not on a standard template grid are left out.")
         mixed = controlsets.scan_mixed_families(self.scan)
@@ -341,8 +342,11 @@ class AddControlSetDialog:
             combo.addItem(_("Choose the template…"))
             for candidate in question["candidates"]:
                 combo.addItem(candidate)
-            combo.setToolTip(_("{n} lesions are on the {grid} grid, which several templates share. Which template were they drawn on?").format(
-                n=question["n"], grid=question["grid_id"]))
+            if question["n"] == 1:
+                tip = _("{n} lesion is on the {grid} grid, which several templates share. Which template was it drawn on?")
+            else:
+                tip = _("{n} lesions are on the {grid} grid, which several templates share. Which template were they drawn on?")
+            combo.setToolTip(tip.format(n=question["n"], grid=question["grid_id"]))
             combo.connect("currentIndexChanged(int)", lambda _index: self._updateButtons())
             self.questionsLayout.addRow(_("Template of {grid}").format(grid=question["grid_id"]), combo)
             self.spaceCombos.append(combo)
