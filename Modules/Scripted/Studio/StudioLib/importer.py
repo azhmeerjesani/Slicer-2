@@ -2705,6 +2705,9 @@ def _loadScene(path, shell):
         if service is not None and service.refuseDamagedSceneFile(path):
             return False  # damaged: announced there; no error dialog or traceback on top of it
     _announceSceneSource(path)
+    if shell is not None and service is not None and hasattr(service, "loadSceneLeavingOutUnread"):
+        # Unreadable data that the project service left out and announced is not an error (no traceback, no error box)
+        return bool(service.loadSceneLeavingOutUnread(path, {}))
     slicer.util.loadScene(path, {})
     return True
 

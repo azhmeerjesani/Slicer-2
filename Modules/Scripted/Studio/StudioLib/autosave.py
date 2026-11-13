@@ -486,6 +486,7 @@ class AutosaveService:
         self._forceProjectOpen = False
         #: the user chose to replace the open project without saving it (its save failed): the next scene close does not save
         self._discardOnClose = False
+        self._sceneUnread = None  # names of the nodes the running scene load left out (loadSceneLeavingOutUnread)
         #: the scene file that the last scene load could not read (damaged): openProject does not open its project
         self._unreadableScene = None
         self._lastProjectPlan = None
@@ -2466,9 +2467,31 @@ class AutosaveService:
             return False  # the open project could not be saved and the user keeps working in it
         self.setPendingSceneSource(path)
         try:
-            slicer.util.loadScene(path, {"clear": True})
+            return self.loadSceneLeavingOutUnread(path, {"clear": True})
         finally:
             self._discardOnClose = False
+
+    def loadSceneLeavingOutUnread(self, path, properties):
+        """``slicer.util.loadScene(path, properties)``; return True if the scene (or a part of it) is open.
+
+        loadScene raises RuntimeError after the scene ended loading when a data file of it could not be read. When the load
+        handler (``_afterSceneImport``) already left those nodes out and announced it (toast: opened without them, or not
+        opened), that is a planned partial or refused load, not an error: a warning in the log, no traceback, and the caller
+        shows no error box that contradicts the toast. Any other failure is raised as before (also in Classic and in a
+        study, where the load handler does nothing).
+        """
+        self._sceneUnread = None
+        try:
+            slicer.util.loadScene(path, properties)
+        except RuntimeError:
+            unread = self._sceneUnread
+            if not unread:
+                raise
+            logging.warning("Slicer Studio: the scene {} was loaded without {} (the data could not be read)".format(
+                os.path.basename(str(path)), ", ".join(unread)))
+            return self.project is not None or self._projects().sceneHasUserData(slicer.mrmlScene)
+        finally:
+            self._sceneUnread = None
         return True
 
     def refuseDamagedSceneFile(self, path):
@@ -2518,6 +2541,7 @@ class AutosaveService:
             # could never be saved and would make quitting ask about it. It is left out before the project's files are
             # recorded, so its file stays where it is (the scene file keeps naming it until the project is saved again).
             unread = self._removeUnreadNodes(scene)
+            self._sceneUnread = unread
             if not self.attachProject(project, inPlace=True):
                 if project.readOnly:
                     self._copyReadOnlyProject(project, unread)
@@ -2538,6 +2562,7 @@ class AutosaveService:
         if not self.projectsActive():
             return
         unread = self._removeUnreadNodes(scene)
+        self._sceneUnread = unread
         if not projects.sceneHasUserData(scene):
             # Nothing could be loaded: no empty project (A-09). A damaged scene file is named (its folder is left as it is)
             if source is not None and not _sceneFileParses(url):

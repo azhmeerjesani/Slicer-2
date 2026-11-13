@@ -50,6 +50,7 @@ folder "Slicer Studio tést" (spaces and non-ASCII characters). The tests cover:
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -4086,6 +4087,53 @@ class StudioProjectsTest(unittest.TestCase):
         timer.connect("timeout()", poll)
         timer.start()
         return timer
+
+    def test_52d_scene_with_unreadable_data_opens_without_it_and_without_a_traceback(self):
+        """BB-1: an outside scene with one unreadable data file opens as a project without that node; the failed read that
+        loadScene raises afterwards is a planned partial load (a warning, no ERROR traceback, openSceneFile is True). A
+        scene whose only data is unreadable is not opened, also without an exception.
+        """
+        service = self._service()
+        announced = []
+        service.setProjectAnnouncer(lambda event, project, **info: announced.append(event))
+        outside = os.path.join(self.tempDir, "outside lying")
+        os.makedirs(outside)
+        good = slicer.util.addVolumeFromArray(np.ones((6, 7, 8), np.int16), name="good scan")
+        bad = slicer.util.addVolumeFromArray(np.ones((6, 7, 8), np.int16), name="bad scan")
+        self.assertTrue(slicer.util.saveNode(good, os.path.join(outside, "good scan.nrrd")))
+        self.assertTrue(slicer.util.saveNode(bad, os.path.join(outside, "bad scan.nrrd")))
+        scenePath = os.path.join(outside, "lying.mrml")
+        self.assertTrue(slicer.util.saveScene(scenePath))
+        slicer.mrmlScene.Clear(0)
+        with open(os.path.join(outside, "bad scan.nrrd"), "wb") as f:
+            f.write(b"not an image")
+        records = []
+        recorder = logging.Handler()
+        recorder.emit = records.append
+        logging.getLogger().addHandler(recorder)
+        try:
+            self.assertTrue(service.openSceneFile(scenePath))
+        finally:
+            logging.getLogger().removeHandler(recorder)
+        self.assertIsNotNone(service.project)
+        names = [node.GetName() for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")]
+        self.assertEqual(names, ["good scan"])
+        self.assertFalse([r for r in records if r.levelno >= logging.ERROR and "Traceback" in r.getMessage()])
+        slicer.mrmlScene.Clear(0)
+        self.io.backgroundWriter().drain(10.0)
+        # Only the unreadable data: nothing opens, announced, no exception
+        slicer.util.saveScene(scenePath)  # an empty scene is not a test of this; write the single-node scene by hand
+        only = slicer.util.addVolumeFromArray(np.ones((6, 7, 8), np.int16), name="bad scan")
+        self.assertTrue(slicer.util.saveNode(only, os.path.join(outside, "bad scan.nrrd")))
+        onlyPath = os.path.join(outside, "only.mrml")
+        self.assertTrue(slicer.util.saveScene(onlyPath))
+        slicer.mrmlScene.Clear(0)
+        with open(os.path.join(outside, "bad scan.nrrd"), "wb") as f:
+            f.write(b"not an image")
+        del announced[:]
+        self.assertFalse(service.openSceneFile(onlyPath))
+        self.assertIn("not-opened", announced)
+        self.assertIsNone(service.project)
 
     def test_52_rename_and_trash_dialogs_have_the_dialog_chrome(self):
         """Rename project and Move to Trash use the Studio dialog chrome (VISUAL 4.7: frameless card, icon tile, one primary
@@ -8552,6 +8600,75 @@ class StudioProjectsTest(unittest.TestCase):
                     self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("T1"), "its data is still in the scene")
                 with open(brokenPath, encoding="utf-8") as file:
                     self.assertEqual(file.read(), damaged, "the damaged file is left as it is")
+        finally:
+            self.autosave._service = running
+            studioShell.dispose()
+            slicer.app.processEvents()
+
+    def test_92a_scene_with_unreadable_data_opened_in_library_gives_no_error_box_or_traceback(self):
+        """An outside scene with one unreadable data file, opened in Library with nothing open or with a project open, opens
+        as a project without that node and says so in the toast: no "Slicer error" dialog that contradicts it and no logged
+        traceback (the failed read that loadScene raises afterwards is a planned partial load). A scene whose only data is
+        unreadable is not opened, with the same single message (BB-1).
+        """
+        from unittest import mock
+
+        from StudioLib import importer, projects_ui, shell
+
+        service = self._service()
+        service.setProjectAnnouncer(projects_ui.announce)
+        running = self.autosave._service
+        self.autosave._service = service
+        outside = os.path.join(self.tempDir, "outside unreadable")
+        os.makedirs(outside)
+        for name in ("good scan", "bad scan"):
+            node = slicer.util.addVolumeFromArray(np.ones((6, 7, 8), np.int16), name=name)
+            self.assertTrue(slicer.util.saveNode(node, os.path.join(outside, name + ".nrrd")))
+        mixPath = os.path.join(outside, "mix lying.mrml")
+        self.assertTrue(slicer.util.saveScene(mixPath))
+        slicer.mrmlScene.RemoveNode(slicer.mrmlScene.GetFirstNodeByName("good scan"))
+        onlyPath = os.path.join(outside, "only lying.mrml")
+        self.assertTrue(slicer.util.saveScene(onlyPath))
+        slicer.mrmlScene.Clear(0)
+        with open(os.path.join(outside, "bad scan.nrrd"), "wb") as file:
+            file.write(b"not an image")
+        studioShell = shell.Shell(force=True)
+        try:
+            studioShell.apply()
+            slicer.app.processEvents()
+            for withProject in (False, True):
+                for scenePath in (mixPath, onlyPath):
+                    slicer.mrmlScene.Clear(0)
+                    self.io.backgroundWriter().drain(10.0)
+                    self.assertIsNone(service.project)
+                    if withProject:
+                        self._userVolume("T1", shape=(10, 11, 12), extension=".nrrd")
+                        self._projectFor(service)
+                        self._save(service)
+                        self.assertTrue(service.opensSceneAsProject())
+                    shown = []
+                    errors = []
+                    with mock.patch.object(slicer.util, "errorDisplay", lambda text, *a, into=shown, **k: into.append(text)), \
+                            mock.patch.object(importer.logging, "error", lambda text, *a, into=errors, **k: into.append(text)):
+                        result = importer.loadFiles([scenePath], studioShell)
+                        slicer.app.processEvents()
+                    label = os.path.basename(scenePath) + (" with a project open" if withProject else " with nothing open")
+                    self.assertEqual(shown, [], f"{label}: no error dialog on top of the toast")
+                    self.assertEqual(errors, [], f"{label}: no error and traceback logged")
+                    self.assertEqual(result.errors, [], label)
+                    names = [node.GetName() for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")]
+                    if scenePath == mixPath:
+                        self.assertEqual(result.scenes, [mixPath], label)
+                        self.assertEqual(names, ["good scan"], label)
+                        self.assertIsNotNone(service.project, label)
+                        self.assertTrue(service.project.name.startswith("mix lying"), label)  # "mix lying 2" the second time
+                        self.assertIn("bad scan", studioShell.toastText(), label)
+                    else:
+                        self.assertEqual(result.scenes, [], label)
+                        self.assertEqual(names, [], label)
+                        self.assertIsNone(service.project, label)
+                        self.assertIn("was not opened", studioShell.toastText(), label)
+                    self.assertIsNone(service._sceneUnread, "the record of one load does not reach the next")
         finally:
             self.autosave._service = running
             studioShell.dispose()
