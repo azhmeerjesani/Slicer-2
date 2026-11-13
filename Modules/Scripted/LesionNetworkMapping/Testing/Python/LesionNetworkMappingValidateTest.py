@@ -599,6 +599,34 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(len(validation), 1)
         self.assertEqual(validation[0]["status"], "done")
 
+    def test_stopped_rerun_keeps_finished_result(self):
+        """A stopped rerun into the folder of a finished validation (the card's <outcome>_<circuit>) leaves that result in place."""
+        fixture = self._write_fixture(self.tmp, study=True)
+        out = os.path.join(os.path.dirname(fixture["maps_dir"]), "validation", "group_glm")
+        argv = ["--maps", fixture["maps_tsv"], "--participants", fixture["participants"], "--outcome", "group", "--type", "binary", "--circuit", "glm", "--mask", fixture["mask"], "--out", out,
+                "--k", "3", "--repeats", "1", "--boot", "4", "--perm", "4", "--threads", "1"]
+        code, events = self.run_in_process(argv + ["--scheme", "kfold"])
+        self.assertEqual(code, 0, events[-1])
+        with open(os.path.join(out, "validation.json"), "rb") as f:
+            finished = f.read()
+        self.assertEqual(json.loads(finished)["status"], "done")
+        cancel = os.path.join(self.tmp, "cancel")
+        open(cancel, "w").close()
+        code, events = self.run_in_process(argv + ["--scheme", "loo", "--cancel-file", cancel])
+        os.remove(cancel)
+        self.assertEqual(code, jobs.EXIT_CANCELLED, events[-1])
+        with open(os.path.join(out, "validation.json"), "rb") as f:
+            self.assertEqual(f.read(), finished)  # not replaced by a cancelled stub
+        self.assertEqual(validate.read_record(os.path.join(out, "validation.json"))["status"], "done")
+        self.assertEqual(sorted(os.listdir(out)), ["folds.tsv", "scores.tsv", "validation.json"])
+        # A stopped first run (no finished record) still leaves its cancelled record
+        fresh = os.path.join(os.path.dirname(out), "group_topk")
+        open(cancel, "w").close()
+        code, events = self.run_in_process([*argv[:argv.index("--out") + 1], fresh, *argv[argv.index("--out") + 2:], "--cancel-file", cancel])
+        os.remove(cancel)
+        self.assertEqual(code, jobs.EXIT_CANCELLED, events[-1])
+        self.assertEqual(validate.read_record(os.path.join(fresh, "validation.json"))["status"], "cancelled")
+
     def test_reference_baselines_with_a_bundle(self):
         mask, affine = self._grid()
         rng = np.random.default_rng(5)

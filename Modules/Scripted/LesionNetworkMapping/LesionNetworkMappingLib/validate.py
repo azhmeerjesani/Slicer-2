@@ -2213,7 +2213,10 @@ def _run_cli(args, argv):
     except jobs.Cancelled as exc:
         if record is not None:
             record.update({"status": "cancelled", "end": now_iso(), "stop_reason": exc.reason, "reruns_done": exc.done})
-            write_record(os.path.join(out_dir, VALIDATION_JSON), record)
+            json_path = os.path.join(out_dir, VALIDATION_JSON)
+            previous = read_record(json_path)
+            if not previous or previous.get("status") != "done":  # never replace a finished result's record with a stub
+                write_record(json_path, record)
         if run_id:
             runs.update(run_root, run_id, status="cancelled", ended=now_iso())
         raise
