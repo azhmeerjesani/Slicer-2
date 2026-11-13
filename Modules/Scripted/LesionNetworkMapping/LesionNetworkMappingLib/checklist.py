@@ -189,13 +189,15 @@ def _d6_thresholds(records):
 def _e7_overlap_null(records):
     nulls = records.done_runs("nulls")
     overlap = records.done_runs("cohort")
+    # The pipeline's overlap stage runs in-process and registers no cohort run: only its pipeline.json records it
+    overlap_stage = records.pipeline_stage_runs("overlap")
     if nulls:
         modes = {str((records.summary(record) or {}).get("mode") or (records.params(record) or {}).get("mode") or "") for record in nulls}
         if "fast" in modes:
             return FLAGGED, "null reference computed in the approximate (fast) mode", [record["id"] for record in nulls]
         return DONE, f"null reference: {len(nulls)} run(s)", [record["id"] for record in nulls]
-    if overlap:
-        return FLAGGED, "overlap maps without a null reference", [record["id"] for record in overlap]
+    if overlap or overlap_stage:
+        return FLAGGED, "overlap maps without a null reference", [record["id"] for record in overlap + overlap_stage]
     return NOT_RUN, "no overlap or null run", []
 
 

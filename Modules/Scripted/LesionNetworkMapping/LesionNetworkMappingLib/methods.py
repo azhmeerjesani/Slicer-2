@@ -427,6 +427,11 @@ class Records:
         kinds = {kind} if isinstance(kind, str) else set(kind)
         return [record for record in self.runs.values() if record.get("kind") in kinds and record.get("status") == "done" and not self.superseded(record)]
 
+    def pipeline_stage_runs(self, stage, statuses=("done", "reused")):
+        """The done pipeline runs whose pipeline.json lists ``stage`` with one of ``statuses`` (for stages that register no child run, such as overlap)."""
+        stages = self._pipeline_stages()
+        return [record for record in self.done_runs("pipeline") if (stages.get(record["id"], {}).get(stage) or (None,))[0] in statuses]
+
     def _pipeline_stages(self):
         """{pipeline run id: {stage name: (status, {child run ids})}} from the pipeline.json in each pipeline run's folder.
 

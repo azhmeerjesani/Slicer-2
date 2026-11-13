@@ -515,6 +515,20 @@ class ChecklistTest(_StudyCase):
         self.assertIn("volume covariate off", items["F8"]["value"])
         self.assertEqual(items["E7"]["status"], checklist.FLAGGED)
 
+    def test_pipeline_overlap_stage_without_null_is_flagged(self):
+        self.make_study([("sub-01", {"group": "case"})])
+        out = self.run_dir("pipeline")
+        export.write_json_atomic(
+            os.path.join(out, "pipeline.json"),
+            {"format": "slicer-lnm-pipeline", "stages": [{"name": "nulls", "status": "skipped"}, {"name": "overlap", "status": "done"}]},
+        )
+        pipeline_id = self.register("pipeline", out)
+        item = checklist.ITEMS_BY_ID["E7"].evaluate(self.root)
+        self.assertEqual((item["status"], item["value"]), (checklist.FLAGGED, "overlap maps without a null reference"))
+        self.assertEqual(item["evidence"], [pipeline_id])
+        export.write_json_atomic(os.path.join(out, "pipeline.json"), {"format": "slicer-lnm-pipeline", "stages": [{"name": "overlap", "status": "skipped"}]})
+        self.assertEqual(checklist.ITEMS_BY_ID["E7"].evaluate(self.root)["status"], checklist.NOT_RUN)
+
     def test_dot_colours(self):
         self.assertEqual(checklist.dot_colour([]), checklist.GREY)
         self.assertEqual(checklist.dot_colour([checklist.NOT_RUN, checklist.NA]), checklist.GREY)
