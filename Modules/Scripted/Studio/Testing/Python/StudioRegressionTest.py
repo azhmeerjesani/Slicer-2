@@ -639,10 +639,14 @@ class StudioRegressionTest(unittest.TestCase):
         study = self._study([("sub-01", {}, False), ("sub-02", {}, False)])
         study_ui.openStudy(study.path, None, showLibrary=False)
         self.addCleanup(study_ui.closeStudy)
+        # showLibrary=False builds no Lesion card, so nothing binds the QC core to the open study: install the hooks here
+        # instead of relying on an earlier test having done it (the test must pass alone or first in a suite).
+        self.assertTrue(lesionqc.installStudyHooks())
         for _ in range(4):
             slicer.app.processEvents()
         session = study_ui.session()
         core = lesionqc.core()
+        self.assertIsNotNone(core.studyPath)
         core.pairs = [("sub-01", "sub-02", 1.0)]
         core._applyDuplicateFlags()
         self.assertIn("duplicate", lesionqc.flagsOf(session.study.subject("sub-02")))
