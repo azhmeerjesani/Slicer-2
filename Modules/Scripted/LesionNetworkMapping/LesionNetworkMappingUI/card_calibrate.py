@@ -218,6 +218,26 @@ def powerChart(effects, width=CHART_SIZE[0], height=CHART_SIZE[1], palette=None)
 _CURRENT = object()
 
 
+def _formGrid():
+    """A two-column form (label, field) on a QGridLayout, which handles the height of word-wrapped rows correctly."""
+    grid = qt.QGridLayout()
+    grid.setHorizontalSpacing(6)
+    grid.setVerticalSpacing(6)
+    grid.setColumnStretch(1, 1)
+    return grid
+
+
+def _addFormRow(grid, text, field):
+    """Add a row to ``grid``: ``text`` in the first column (none for a caption), ``field`` (widget or layout) in the second."""
+    row = grid.rowCount()
+    if text:
+        grid.addWidget(qt.QLabel(text), row, 0, qt.Qt.AlignLeft | qt.Qt.AlignVCenter)
+    if field.isWidgetType():
+        grid.addWidget(field, row, 1)
+    else:
+        grid.addLayout(field, row, 1)
+
+
 class CalibrateCard:
     """Controller of the Calibrate card (``widget`` is a collapsible card)."""
 
@@ -238,17 +258,18 @@ class CalibrateCard:
         layout.setSpacing(6)
         layout.addWidget(label(INTRO, "LNMCalibrateIntro", "secondaryText"))
 
-        form = qt.QFormLayout()
-        form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
+        # A grid, not a QFormLayout: a QFormLayout gave the word-wrapped rows (the captions, the wrapped check box) heights
+        # computed for another width: blank lines in the captions and a band of about 110 px above the Calibrate button.
+        form = _formGrid()
         self.sourceCombo = qt.QComboBox()
         self.sourceCombo.setObjectName("LNMCalibrateSourceCombo")
         for key, title in SOURCES:
             self.sourceCombo.addItem(title, key)
         self.sourceCombo.setToolTip(_("The analysis to calibrate: the current settings of the Cohort card's Contrast or Symptom tab"))
         self.sourceCombo.connect("currentIndexChanged(int)", self.refresh)
-        form.addRow(_("Analysis:"), self.sourceCombo)
+        _addFormRow(form, _("Analysis:"), self.sourceCombo)
         self.designLabel = label("", "LNMCalibrateDesign", "secondaryText")
-        form.addRow("", self.designLabel)
+        _addFormRow(form, "", self.designLabel)
 
         self.kSpin = self._spin("LNMCalibrateKSpin", 20, 1000, DEFAULT_K, _("Null datasets: each is your design run on permuted labels or scores (100 gives a CI of about ±5 points at \u03b1 = 0.05)"))
         self.innerSpin = self._spin("LNMCalibrateInnerSpin", 100, 5000, DEFAULT_INNER, _("Permutations of each null dataset and simulation, identity included"))
@@ -257,7 +278,7 @@ class CalibrateCard:
         nullRow.addWidget(qt.QLabel("\u00d7"))
         nullRow.addWidget(self.innerSpin)
         nullRow.addStretch(1)
-        form.addRow(_("Null datasets:"), nullRow)
+        _addFormRow(form, _("Null datasets:"), nullRow)
 
         self.simsSpin = self._spin("LNMCalibrateSimsSpin", 5, 500, DEFAULT_SIMS, _("Simulations per effect size of the planted network"))
         self.effectsEdit = qt.QLineEdit("0.1, 0.2, 0.3")
@@ -268,7 +289,7 @@ class CalibrateCard:
         plantRow.addWidget(self.simsSpin)
         plantRow.addWidget(qt.QLabel(_("sims at β")))
         plantRow.addWidget(self.effectsEdit, 1)
-        form.addRow(_("Planted:"), plantRow)
+        _addFormRow(form, _("Planted:"), plantRow)
 
         targetRow = qt.QHBoxLayout()
         self.targetCombo = qt.QComboBox()
@@ -278,15 +299,15 @@ class CalibrateCard:
         self.targetCombo.setToolTip(_("The planted truth is a network: the top 5% of one lesion's Fz map (the lesion of median volume), or a mask on the connectome grid"))
         self.targetCombo.connect("activated(int)", self._onTargetChosen)
         targetRow.addWidget(self.targetCombo, 1)
-        form.addRow(_("Target network:"), targetRow)
+        _addFormRow(form, _("Target network:"), targetRow)
         self.targetLabel = label("", "LNMCalibrateTargetText", "secondaryText")
-        form.addRow("", self.targetLabel)
+        _addFormRow(form, "", self.targetLabel)
 
         self.sensitivityCheckBox = qt.QCheckBox(_("Also the sensitivity route (relocated lesions; slower)"))
         self.sensitivityCheckBox.setObjectName("LNMCalibrateSensitivityCheckBox")
         self.sensitivityCheckBox.setToolTip(_("False-positive rate of the classic overlap rule and of its null-referenced version on relocated lesion sets"))
         # A QCheckBox draws its text on one line (367 px): it made the card, and so the Map inspector, wider for good.
-        form.addRow("", widgets.wrapCheckBox(self.sensitivityCheckBox))
+        _addFormRow(form, "", widgets.wrapCheckBox(self.sensitivityCheckBox))
         layout.addLayout(form)
 
         runRow = qt.QHBoxLayout()
