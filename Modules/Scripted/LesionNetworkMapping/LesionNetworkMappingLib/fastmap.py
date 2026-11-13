@@ -1099,7 +1099,7 @@ def load_index(path, bundle=None, verify=True, subject_ids=None):
     if verify:
         for item in files.values():
             if _file_sha256(os.path.join(folder, item["file"])) != item.get("sha256"):
-                raise ValueError(f"{item['file']} does not match the sha256 recorded in {INDEX_JSON}")
+                raise ValueError(f"The fast index is damaged (a file changed after it was built: {item['file']}): rebuild it")
     tiling = Tiling.load(folder)
     p = np.load(os.path.join(folder, files.get("P", {}).get("file", P_NAME)), allow_pickle=False)
     c = np.load(os.path.join(folder, files.get("C", {}).get("file", C_NAME)), allow_pickle=False)
@@ -1686,8 +1686,13 @@ def _build_main(argv):
     except fetch.NotCachedError as exc:
         raise jobs.JobError(str(exc), code="not_cached") from None
     except (OSError, ValueError, KeyError, fetch.FetchError) as exc:
-        raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None
+        raise jobs.JobError(_input_message(exc), code="input") from None
     return jobs.EXIT_OK
+
+
+def _input_message(exc):
+    """The text of an input error for the command line: a ValueError is already a plain sentence, other errors keep their class."""
+    return str(exc) if type(exc) is ValueError else f"{type(exc).__name__}: {exc}"
 
 
 def _parity_main(argv):
@@ -1729,7 +1734,7 @@ def _parity_main(argv):
     except (jobs.Cancelled, jobs.JobError):
         raise
     except (OSError, ValueError, KeyError) as exc:
-        raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None
+        raise jobs.JobError(_input_message(exc), code="input") from None
     cover = coverage(weights, index)
     for lesion, lesion_qc, lesion_cover, (_, exact_path) in zip(report["lesions"], qc, cover, pairs, strict=True):
         lesion.update({"file": lesion_qc["file"], "sha256": lesion_qc["sha256"], "exact_map": os.path.basename(exact_path), "coverage": lesion_cover})
@@ -1789,7 +1794,7 @@ def _apply_main(argv):
     except jobs.JobError:
         raise
     except (OSError, ValueError, KeyError) as exc:
-        raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None
+        raise jobs.JobError(_input_message(exc), code="input") from None
     os.makedirs(args.out, exist_ok=True)
     bundle_name = (index.metadata.get("bundle") or {}).get("name") or "connectome"
     strata = lesion_strata(weights, index)

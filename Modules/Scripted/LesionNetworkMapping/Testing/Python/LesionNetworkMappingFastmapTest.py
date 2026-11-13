@@ -330,6 +330,24 @@ class FastmapTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             fastmap.load_index(copy)
 
+    def test_damaged_index_is_reported_in_plain_words_with_rebuild_advice(self):
+        """A changed index file gives a sentence without an exception class name that says to rebuild, also on the command line."""
+        copy = os.path.join(self.tmp, "index-damaged")
+        shutil.copytree(self.index_dir, copy)
+        path = os.path.join(copy, fastmap.P_NAME)
+        with open(path, "r+b") as f:
+            f.seek(-1, os.SEEK_END)
+            last = f.read(1)
+            f.seek(-1, os.SEEK_END)
+            f.write(bytes([last[0] ^ 0xFF]))
+        with self.assertRaisesRegex(ValueError, "damaged.*rebuild it"):
+            fastmap.load_index(copy)
+        code, events, stderr = self._run("apply", "--index", copy, "--lesion", os.path.join(self.tmp, "none.nii.gz"), "--out", os.path.join(self.tmp, "damaged-out"))
+        self.assertEqual(code, 1, stderr)
+        self.assertEqual(events[-1]["code"], "input")
+        self.assertIn("rebuild it", events[-1]["message"])
+        self.assertNotIn("ValueError", events[-1]["message"])
+
     def test_index_of_a_bundle_converted_again_from_other_data_is_stale(self):
         """Converting other time series with the same subject ids and mask into the same folder (``--overwrite``) must
         change connectome.json (the manifest sha256 that keys the cohort maps cache) and make the fast index stale.

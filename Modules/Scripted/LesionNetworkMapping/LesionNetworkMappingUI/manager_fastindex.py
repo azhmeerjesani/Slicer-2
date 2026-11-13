@@ -1031,9 +1031,9 @@ class FastIndexDialog(qt.QDialog):
         self.parityProgress.update()
         self.parityJob = None
         if not job.succeeded():
+            self._refreshParity()
             self.parityReason.setText(_("Stopped.") if job.state == "cancelled" else _("The parity check failed: {reason}").format(reason=job.failureReason))
             self.parityReason.show()
-            self._refreshParity()
             return
         self.refresh()
 
