@@ -193,6 +193,9 @@ def powerChart(effects, width=CHART_SIZE[0], height=CHART_SIZE[1], palette=None)
     return pixmap
 
 
+_CURRENT = object()
+
+
 class CalibrateCard:
     """Controller of the Calibrate card (``widget`` is a collapsible card)."""
 
@@ -200,6 +203,8 @@ class CalibrateCard:
         self.ctx = ctx
         self.job = None
         self.notice = ""
+        self._noticeFor = None  # the design identity a stop/failure notice belongs to (None: no design)
+        self._runFor = None  # the design identity of the running (or last) job
         self.targetPath = None
         self.result = None  # (folder, record) on show
         self.resultCurrent = True  # False when the shown record was calibrated for another design
@@ -540,9 +545,13 @@ class CalibrateCard:
         self.etaLabel.setText(_("About {time}").format(time=duration(seconds)) if seconds is not None else "")
         self.stateLabel.setText(reason)
         self.stateLabel.setVisible(bool(reason))
-        self.noticeLabel.setText(self.notice)
-        self.noticeLabel.setVisible(bool(self.notice))
         identity = self.designIdentity(spec, design)
+        # The notice and the Stopped progress row of a run belong to the design of that run.
+        other = self._noticeFor is not None and identity != self._noticeFor
+        self.noticeLabel.setText("" if other else self.notice)
+        self.noticeLabel.setVisible(bool(self.notice) and not other)
+        if self._noticeFor is not None and not self.running():
+            self.progress.widget.setVisible(not other)
         if not self.running() and (self.result is None or identity != self._shownFor):
             self.showLatestResult(identity)
         if not self.running() and design is not None:
@@ -588,8 +597,12 @@ class CalibrateCard:
                 self.targetCombo.setCurrentIndex(0)
         self.refresh()
 
-    def _setNotice(self, text):
+    def _setNotice(self, text, identity=_CURRENT):
+        """Show ``text``; it belongs to the design of ``identity`` (default: the design shown now) and is hidden for another."""
+        if identity is _CURRENT:
+            identity = self.designIdentity(*self.currentSpec()[:2])
         self.notice = text or ""
+        self._noticeFor = identity if text else None
         self.noticeLabel.setText(self.notice)
         self.noticeLabel.setVisible(bool(self.notice))
 
@@ -636,6 +649,7 @@ class CalibrateCard:
         spec = jobrunner.JobSpec("LesionNetworkMappingLib.calibrate", args, title=_("Calibrate"), heavy=True, kind="calibration", name="calibration", runRoot=os.path.dirname(out),
                                  onEvent=self._onEvent, onDone=lambda job, out=out: self._onDone(job, out), statusText=_statusText,
                                  nice=JOB_NICE)
+        self._runFor = self.designIdentity(*self.currentSpec()[:2])
         self.job = self.ctx.submit(spec)
         self.progress.setJob(self.job)
         self.progress.widget.show()
@@ -652,9 +666,9 @@ class CalibrateCard:
             return
         _updateProgress(self.progress, force=True)
         if job.state == "failed":
-            self._setNotice(_("The calibration failed: {reason}").format(reason=job.failureReason))
+            self._setNotice(_("The calibration failed: {reason}").format(reason=job.failureReason), self._runFor)
         elif job.state == "cancelled":
-            self._setNotice(_("Stopped. Calibrate again with the same settings to continue from where it stopped."))
+            self._setNotice(_("Stopped. Calibrate again with the same settings to continue from where it stopped."), self._runFor)
         else:
             self.progress.widget.hide()
             self._setNotice("")

@@ -213,5 +213,31 @@ class LesionNetworkMappingCalibrateStaleUITest(unittest.TestCase):
         self.assertEqual(card.kSpin.value, 60)
 
 
+    def test_stop_notice_belongs_to_the_design_of_the_run(self):
+        """The stop notice and the Stopped progress row show only for the design that was stopped (BB-1
+        calibrate-stopped-notice-stays-after-design-switch).
+        """
+        from LesionNetworkMappingUI import card_calibrate
+
+        self.calibrated(self.withVolume, "caseVsControl", 1_000_000)
+        self.tab.design = self.withVolume
+        self.card = card = card_calibrate.CalibrateCard(_Ctx(self.study, _Cohort(self.tab)))
+        self.tab.design = self.without
+        card.refresh()
+        identity = card.designIdentity(*card.currentSpec()[:2])
+        card._setNotice("Stopped. Calibrate again with the same settings to continue.", identity)
+        card.progress.widget.show()
+        card.refresh()
+        self.assertFalse(card.noticeLabel.isHidden())
+        self.tab.design = self.withVolume
+        card.refresh()
+        self.assertTrue(card.noticeLabel.isHidden())
+        self.assertTrue(card.progress.widget.isHidden())
+        self.assertCurrent(card, True)
+        self.tab.design = self.without
+        card.refresh()
+        self.assertFalse(card.noticeLabel.isHidden())
+
+
 if __name__ == "__main__":
     unittest.main()
