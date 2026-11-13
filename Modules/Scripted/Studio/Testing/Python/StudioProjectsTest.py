@@ -10485,6 +10485,72 @@ sys.exit(web.command_local(args))
             self.autosave._service = running
             qt.QSettings().remove(projects.ROOT_KEY)
 
+    def test_117_recover_replace_asks_when_the_open_project_cannot_be_saved(self):
+        """Recover autosaved work > Replace current scene (the dialog and the startup card both call ``recovery.recover``)
+        cleared the scene while the open project could not be saved (disk full): the project was released and its edits
+        were lost, with only the generic Replace/Add question (BB-1). Like Open project, the user is asked first: "Keep
+        working" cancels the recovery and keeps the project and its edits; "Open without saving" recovers.
+        """
+        from unittest import mock
+
+        from StudioLib import projects_ui, recovery
+
+        service = self._service()
+        volume, _path = self._userVolume("ScanR", shape=(12, 14, 16))
+        project = self._projectFor(service)
+        self._save(service)
+        array = slicer.util.arrayFromVolume(volume)
+        array[:] = 321  # the edit that cannot be saved
+        slicer.util.arrayFromVolumeModified(volume)
+        slotDir = os.path.join(self.tempDir, "crashed slot")
+        os.makedirs(slotDir)
+        slot = mock.Mock(path=slotDir, updated="2026-11-13T10:00:00")
+        slot.scenePath.return_value = os.path.join(slotDir, "scene.mrml")
+        asked, loads = [], []
+
+        def answer(index):
+            def question(parent, title, text, buttons, default=0):
+                asked.append((title, text, list(buttons), default))
+                return index
+            return question
+
+        def loadSlot(slot, scenePath, manifest, replace):
+            loads.append(replace)
+            if replace:
+                slicer.mrmlScene.Clear(0)
+            return None  # (the load itself is tested in StudioAutosaveTest)
+
+        with mock.patch.object(service, "saveNow", lambda *args, **kwargs: False), \
+                mock.patch.object(recovery, "_service", lambda: service), mock.patch.object(recovery, "_loadSlot", loadSlot), \
+                mock.patch.object(projects_ui, "_service", lambda: service), mock.patch.object(projects_ui, "_shell", lambda: None):
+            service._projectPausedReason = "less than 1.5 MB free on the disk"
+            with mock.patch.object(projects_ui, "_question", answer(2)):
+                self.assertIsNone(recovery.recover(slot, mode="replace"), "Keep working: nothing is recovered")
+            self.assertEqual(len(asked), 1, "the user is asked before the unsaved edits are dropped")
+            title, text, buttons, default = asked[0]
+            self.assertEqual(title, "Recover autosaved work")
+            self.assertEqual(len(buttons), 3)
+            self.assertIn("less than 1.5 MB free", text)
+            self.assertEqual(default, 2, "keeping the work is the default")
+            self.assertEqual(loads, [], "the scene is not replaced")
+            self.assertIs(service.project, project, "the project that could not be saved stays open")
+            self.assertTrue(slicer.mrmlScene.IsNodePresent(volume))
+            self.assertTrue((slicer.util.arrayFromVolume(volume) == 321).all(), "its edits are kept")
+
+            # Adding the autosaved data keeps the project open: nothing to ask
+            with mock.patch.object(projects_ui, "_question", answer(2)):
+                recovery.recover(slot, mode="add")
+            self.assertEqual(len(asked), 1)
+            self.assertEqual(loads, [False])
+
+            with mock.patch.object(projects_ui, "_question", answer(1)):
+                recovery.recover(slot, mode="replace")
+            self.assertEqual(len(asked), 2)
+            self.assertEqual(loads, [False, True], "Open without saving: the scene is replaced")
+        self.io.backgroundWriter().drain(10.0)
+        self.assertIsNone(service.project)
+        self.assertFalse(service._discardOnClose, "the choice applies to that recovery only")
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 

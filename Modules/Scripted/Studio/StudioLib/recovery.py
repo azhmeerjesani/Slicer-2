@@ -807,6 +807,19 @@ def recoverOtherData(slot, isRestored):
     return report
 
 
+def _confirmReplaceOpenProject():
+    """Replacing the scene closes the open project, which is saved first (``_closeProjectOnSceneClose``). If that save
+    cannot be done (disk full, folder not writable), ask as Open project and Open scene do (``confirmReplaceProject``)
+    instead of losing its edits silently: no autosave slot keeps the scene of an open project. Return False if the user
+    keeps working in the project (the recovery must not go ahead). Without an open project nothing is asked here: the
+    replaced scene keeps a closed-unsaved autosave slot.
+    """
+    service = _service()
+    if service is None or getattr(service, "project", None) is None or not service.enabled():
+        return True
+    return service.confirmReplaceProject(_("Recover autosaved work"))
+
+
 def recover(slot, mode=None, parent=None):
     """Load an autosaved slot and re-link its data to the original files. Return the report, or None if cancelled."""
     scene = slicer.mrmlScene
@@ -814,6 +827,8 @@ def recover(slot, mode=None, parent=None):
         mode = askReplaceOrAdd(parent) if sceneHasDisplayableData(scene) else "replace"
     if mode is None:
         return None
+    if mode == "replace" and not _confirmReplaceOpenProject():
+        return None  # the open project could not be saved and the user keeps working in it
     manifest = io.readJson(os.path.join(slot.path, io.MANIFEST_FILE)) or {}
     report = _loadSlot(slot, slot.scenePath(), manifest, replace=mode == "replace")
     if report is None:
