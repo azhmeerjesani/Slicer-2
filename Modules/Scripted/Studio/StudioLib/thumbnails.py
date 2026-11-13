@@ -746,7 +746,8 @@ def _isBackgroundCandidate(node):
     if node.GetAttribute("LNM.Result") == "1":
         return False
     dimensions = node.GetImageData().GetDimensions()
-    return min(dimensions) > 1
+    # A single-slice (2D) scan is a scan; only a line or a point has nothing to show
+    return min(dimensions) >= 1 and sum(1 for size in dimensions if size > 1) >= 2
 
 
 def _segmentationLayers(segmentationNode):

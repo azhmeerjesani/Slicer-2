@@ -2098,6 +2098,31 @@ class StudioAutosaveTest(unittest.TestCase):
         self.assertIsNotNone(source)
         self.assertEqual(len(source.lesions), 0)
 
+    def test_ze2_singleSliceScanGetsAThumbnail(self):
+        """BB-1: a project whose scan is a single-slice (2D) image got no thumbnail (the background test refused any image with
+        a dimension of 1): it is a scan like any other and is rendered; a line of voxels still is not.
+        """
+        from StudioLib import thumbnails
+
+        slicer.mrmlScene.Clear(0)
+        slice2d = slicer.util.addVolumeFromArray((np.arange(40 * 50).reshape(1, 50, 40) % 500).astype(np.int16), name="sub-06_T1w")
+        source = thumbnails.projectThumbnailSource()
+        self.assertIsNotNone(source, "a single-slice scan is a thumbnail background")
+        folder = tempfile.mkdtemp(prefix="StudioSingleSlice")
+        try:
+            private = os.path.join(folder, ".studio")
+            os.makedirs(private)
+            written = thumbnails.renderProjectViews(source, private)
+            self.assertTrue(written)
+            for path in written:
+                self.assertGreater(os.path.getsize(path), 0)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+        slicer.mrmlScene.RemoveNode(slice2d)
+        line = slicer.util.addVolumeFromArray(np.zeros((1, 1, 30), np.int16), name="line")
+        self.assertIsNone(thumbnails.projectThumbnailSource(), "a line of voxels has nothing to show")
+        slicer.mrmlScene.RemoveNode(line)
+
     def test_zf_openRecoveryFolderBeforeFirstAutosave(self):
         """BB-1: Settings > Saving > Recovery "Open" did nothing while the recovery folder did not exist yet (Studio work goes to
         Projects, so a fresh install has none): it now creates the folder and shows it.
