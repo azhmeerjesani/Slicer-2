@@ -565,5 +565,15 @@ class ReportTest(unittest.TestCase):
         self.assertNotIn("<script", code.lower())
 
 
+class MapsPhraseTest(unittest.TestCase):
+    """Bug report-html-singular-plural-1-lesions-1-maps: one map reads "1 map", not "1 maps"."""
+
+    def test_singular_and_plural(self):
+        self.assertEqual(report._maps_phrase(1), "1 map")
+        self.assertEqual(report._maps_phrase("1", "lesion network "), "1 lesion network map")
+        self.assertEqual(report._maps_phrase(3), "3 maps")
+        self.assertEqual(report._maps_phrase("n/a"), "n/a maps")
+
+
 if __name__ == "__main__":
     unittest.main()

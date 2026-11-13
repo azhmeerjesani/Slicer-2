@@ -117,6 +117,11 @@ def _e(value):
     return html.escape("" if value is None else str(value), quote=True)
 
 
+def _maps_phrase(n, kind=""):
+    """'1 map' / '3 maps' (with an optional adjective phrase such as 'lesion network '); 'n/a' stays plural."""
+    return f"{n} {kind}{'map' if str(n) == '1' else 'maps'}"
+
+
 def _num(value, digits=3):
     if value is None:
         return "n/a"
@@ -736,14 +741,14 @@ class _Report:
         if mean:
             note = "" if threshold is not None else " Shown unthresholded: this rule does not give one |T| for the mean map."
             side = self.group_sidecar("meanT")
-            parts.append(self.montage_html(mean, "diverging", (f"meanT: {MEAN_CAPTION}; n = {side.get('n_maps', 'n/a')} maps ({side.get('population', 'not recorded')}); voxels with |T| below {_num(threshold)} are hidden.{note}" if threshold else f"meanT: {MEAN_CAPTION}.{note}"),
+            parts.append(self.montage_html(mean, "diverging", (f"meanT: {MEAN_CAPTION}; n = {_maps_phrase(side.get('n_maps', 'n/a'))} ({side.get('population', 'not recorded')}); voxels with |T| below {_num(threshold)} are hidden.{note}" if threshold else f"meanT: {MEAN_CAPTION}.{note}"),
                                            threshold=threshold, sign=sign, alt=f"Mean T montage ({tag})"))
         for suffix, label in (("Pos", "positive network, headline"), ("Neg", "negative network, secondary")):
             desc = self.desc_for("percent", suffix.lower(), tag, primary)
             path = self.group_path(desc) if desc else None
             if path:
                 side = self.group_sidecar(desc)
-                caption = f"overlapPct{suffix} ({label}): % of the {side.get('n_maps', 'n/a')} lesion network maps ({side.get('population', 'not recorded')}) above the rule; classic overlap, hub-inflated (read it next to the null models)."
+                caption = f"overlapPct{suffix} ({label}): % of the {_maps_phrase(side.get('n_maps', 'n/a'), 'lesion network ')} ({side.get('population', 'not recorded')}) above the rule; classic overlap, hub-inflated (read it next to the null models)."
                 parts.append(self.montage_html(path, "sequential", caption, vmax=100.0, alt=f"Overlap percent {suffix} montage ({tag})",
                                                bar=self.colorbar("sequential", 0, 100, "% of maps above the rule")))
         pos, neg = self.desc_for("binary", "pos", tag, primary), self.desc_for("binary", "neg", tag, primary)

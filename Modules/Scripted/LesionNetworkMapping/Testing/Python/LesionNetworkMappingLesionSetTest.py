@@ -561,6 +561,11 @@ class LiteratureTest(unittest.TestCase):
         self.assertTrue(lesionset.literature_context({"n": 12, "n_cases": 7}, blind=True)[0]["text"].startswith("This set: 12 lesions."))
         self.assertTrue(lesionset.literature_context({"n": 12, "n_cases": 7})[0]["text"].startswith("This set: 7 lesions."))
 
+    def test_literature_context_singular(self):
+        # Bug report-html-singular-plural-1-lesions-1-maps: one lesion reads "1 lesion", not "1 lesions"
+        text = lesionset.literature_context({"n": 1, "n_cases": 1})[0]["text"]
+        self.assertTrue(text.startswith("This set: 1 lesion. "), text)
+
 
 if __name__ == "__main__":
     unittest.main()

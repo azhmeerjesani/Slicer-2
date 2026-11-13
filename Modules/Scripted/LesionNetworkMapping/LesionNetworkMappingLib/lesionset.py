@@ -1106,7 +1106,7 @@ def literature_context(summary, blind=False):
     out.append(
         {
             "key": "set_size",
-            "text": f"This set: {n} lesions. Sets of \u2265 10 heterogeneous lesions approach the degree map (r > 0.44; 20\u201325 lesions r > 0.62; {CITATION_VDH})",
+            "text": f"This set: {n} {'lesion' if n == 1 else 'lesions'}. Sets of \u2265 10 heterogeneous lesions approach the degree map (r > 0.44; 20\u201325 lesions r > 0.62; {CITATION_VDH})",
             "citation": CITATION_VDH,
         },
     )
