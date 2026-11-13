@@ -330,10 +330,27 @@ def _i13_connectome_robustness(records):
     return (DONE if second and split_half else FLAGGED), ", ".join(parts), evidence
 
 
+def _newest_bundle(records):
+    """Newest exported bundle folder publication/<UTC>[-n]/ that holds a manifest.json (or None)."""
+    parent = records.path("derivatives", "lnm", "publication")
+    try:
+        names = sorted(name for name in os.listdir(parent) if os.path.isfile(os.path.join(parent, name, "manifest.json")))
+    except OSError:
+        return None
+    return os.path.join(parent, names[-1]) if names else None
+
+
 def _j14_sharing(records):
+    # The Report card's bundle export writes publication/<UTC>[-n]/manifest.json; the flat paths are accepted too
+    bundle = _newest_bundle(records)
     manifest_path = records.path(*PUBLICATION_MANIFEST)
+    if bundle and not os.path.isfile(manifest_path):
+        manifest_path = os.path.join(bundle, "manifest.json")
     manifest = methods._read_json(manifest_path)
-    neurovault = [path for path in (records.path(*NEUROVAULT_IMAGES), records.path("derivatives", "lnm", "publication", *NEUROVAULT_IMAGES)) if os.path.isfile(path)]
+    candidates = [records.path(*NEUROVAULT_IMAGES), records.path("derivatives", "lnm", "publication", *NEUROVAULT_IMAGES)]
+    if bundle:
+        candidates.append(os.path.join(bundle, *NEUROVAULT_IMAGES))
+    neurovault = [path for path in candidates if os.path.isfile(path)]
     if manifest is None and not neurovault:
         return NOT_RUN, "no publication manifest or NeuroVault folder", []
     evidence = ([_file_evidence(records, manifest_path)] if manifest is not None else []) + [_file_evidence(records, path) for path in neurovault]

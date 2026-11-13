@@ -601,6 +601,18 @@ class ExportFilesTest(_StudyCase):
             self.assertEqual(json.load(f)["missing"], manifest["missing"])
         self.assertEqual(checklist.ITEMS_BY_ID["J14"].evaluate(self.root)["status"], checklist.FLAGGED)
 
+    def test_j14_counts_exported_bundle_folder(self):
+        # The bundle export writes publication/<UTC>/manifest.json, not publication/manifest.json
+        bundle = os.path.join(self.root, "derivatives", "lnm", "publication", "20261113T090747Z")
+        os.makedirs(os.path.join(bundle, "neurovault"))
+        self.assertEqual(checklist.ITEMS_BY_ID["J14"].evaluate(self.root)["status"], checklist.NOT_RUN)
+        export.write_json_atomic(os.path.join(bundle, "manifest.json"), {"files": [{"path": "a"}], "missing": ["reproduce"]})
+        result = checklist.ITEMS_BY_ID["J14"].evaluate(self.root)
+        self.assertEqual(result["status"], checklist.FLAGGED)
+        self.assertIn("reproduce", result["value"])
+        export.write_json_atomic(os.path.join(bundle, "manifest.json"), {"files": [{"path": "a"}], "missing": []})
+        self.assertEqual(checklist.ITEMS_BY_ID["J14"].evaluate(self.root)["status"], checklist.DONE)
+
     def test_neurovault_df_per_map_type(self):
         folder = os.path.join(self.tmp, "maps")
         self._touch(folder, "sub-01_conn-X_desc-T_funcmap.nii.gz", "sub-01_conn-X_desc-AvgRFz_funcmap.nii.gz", "sub-01_conn-X_desc-AvgR_funcmap.nii.gz")
