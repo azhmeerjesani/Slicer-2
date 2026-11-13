@@ -1145,8 +1145,11 @@ METHODS_FORMATS = ("md", "html", "txt")
 # Desc suffixes of p-value maps (plain p, 1 outside the mask); other group maps are unthresholded statistics
 P_MAP_SUFFIXES = ("PUnc", "PFwe", "PFdr", "TfcePFwe")
 # Files listed by the publication manifest, by kind (``required`` kinds are reported as missing when absent)
-PUBLICATION_KINDS = ("unthresholded_map", "p_map", "design", "palm_export", "reproduce", "checklist", "neurovault", "methods")
+PUBLICATION_KINDS = ("unthresholded_map", "p_map", "design", "palm_export", "reproduce", "checklist", "neurovault", "methods", "seeds")
 _SKIPPED_FOLDERS = ("cache", ".studio")
+# Files of a seed-set run folder (coordinates, atrophy or stimulation seeds: coords.write_seed_set's seeds.json) that
+# describe its seeds; with seeds/<id>_seed.nii.gz they let a reader re-map the run
+_SEED_RUN_FILES = ("seeds.json", "foci.tsv", "lesions.tsv", "maps.tsv")
 _GROUP_MAP = re.compile(r"_desc-([A-Za-z0-9]+)_map\.nii(?:\.gz)?$")
 _LESION_MAP = re.compile(r"_desc-([A-Za-z0-9]+)_funcmap\.nii(?:\.gz)?$")
 
@@ -1276,9 +1279,46 @@ def _publication_kind(name, folder_names):
     return None
 
 
+def seed_run_files(folder, names, root):
+    """[(path, kind)] to publish of a seed-set run ``folder`` (one holding seeds.json, ``names`` its file names), or [].
+
+    A seed-set run started without a study keeps its per-seed maps in its own cache folder (``<run>/cache``), which the
+    publication walk skips; the maps that its maps.tsv lists below ``root`` are therefore listed here (unthresholded
+    maps), with the run's seeds.json, foci.tsv, lesions.tsv, maps.tsv and seed images ("seeds"). The relative paths of
+    maps.tsv and lesions.tsv still resolve in a bundle that keeps the run folder's layout.
+    """
+    if "seeds.json" not in names:
+        return []
+    found = [(os.path.join(folder, name), "seeds") for name in _SEED_RUN_FILES if name in names]
+    seed_folder = os.path.join(folder, "seeds")
+    try:
+        seed_names = sorted(os.listdir(seed_folder))
+    except OSError:
+        seed_names = []
+    found += [(os.path.join(seed_folder, name), "seeds") for name in seed_names if name.endswith("_seed.nii.gz") and os.path.isfile(os.path.join(seed_folder, name))]
+    if "maps.tsv" in names:
+        from .cohortmaps import MAP_KEYS, read_maps_tsv
+
+        top = os.path.realpath(root)
+        try:
+            rows = read_maps_tsv(os.path.join(folder, "maps.tsv"))
+        except (OSError, ValueError):
+            rows = []
+        for row in rows:
+            for key in MAP_KEYS:
+                path = row.get(key)
+                if not path or not os.path.isabs(path) or not _LESION_MAP.search(os.path.basename(path)) or not os.path.isfile(path):
+                    continue
+                real = os.path.realpath(path)
+                if os.path.commonpath([top, real]) == top:  # never a file outside the study (no absolute path in the bundle)
+                    found.append((path, "unthresholded_map"))
+    return found
+
+
 def publication_manifest(root, out=None, hashes=True):
     """List the files to publish under ``root`` (a study or output folder): unthresholded maps and p maps,
-    design files, the PALM export, reproduce scripts, checklist.md, methods and neurovault/images.json.
+    design files, the PALM export, reproduce scripts, checklist.md, methods and neurovault/images.json, and the seeds and
+    maps of seed-set runs (:func:`seed_run_files`, even when those maps are in the run's own cache folder).
 
     Paths are relative to ``root`` with "/" separators (no absolute local paths). Kinds that the runs
     should have produced but are absent are listed in "missing" (design, p maps and the PALM export
@@ -1303,6 +1343,14 @@ def publication_manifest(root, out=None, hashes=True):
                     group_analysis = True
                 kind = "neurovault" if name == "images.json" and os.path.basename(folder) == "neurovault" else _publication_kind(name, names)
                 if kind is None:
+                    continue
+                seen.add(os.path.realpath(path))
+                entry = {"path": os.path.relpath(path, root).replace(os.sep, "/"), "kind": kind, "bytes": os.path.getsize(path)}
+                if hashes:
+                    entry["sha256"] = file_sha256(path)
+                files.append(entry)
+            for path, kind in seed_run_files(folder, names, root):
+                if path == out_abs or os.path.realpath(path) in seen:
                     continue
                 seen.add(os.path.realpath(path))
                 entry = {"path": os.path.relpath(path, root).replace(os.sep, "/"), "kind": kind, "bytes": os.path.getsize(path)}

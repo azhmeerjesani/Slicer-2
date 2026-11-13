@@ -213,6 +213,24 @@ def _fallbackManifest(root, export, warnings):
                     group = True
                 seen.add(real)
                 files.append({"path": rel, "kind": kind, "bytes": size})
+            seedFiles = getattr(export, "seed_run_files", None)
+            try:
+                extra = seedFiles(folder, names, root) if seedFiles else []
+            except (OSError, ValueError) as exc:
+                warnings.append(f"The seed run {os.path.relpath(folder, root).replace(os.sep, '/')} was skipped: {_scrub(exc, root)}")
+                extra = []
+            for path, kind in extra:
+                rel = os.path.relpath(path, root).replace(os.sep, "/")
+                try:
+                    real = os.path.realpath(path)
+                    if real in seen:
+                        continue
+                    size = os.path.getsize(path)
+                except OSError as exc:
+                    warnings.append(f"{rel} was skipped: {_scrub(exc, root)}")
+                    continue
+                seen.add(real)
+                files.append({"path": rel, "kind": kind, "bytes": size})
     required = ["unthresholded_map", "reproduce", "checklist", "neurovault"]
     if group:
         required[1:1] = ["p_map", "design", "palm_export"]
