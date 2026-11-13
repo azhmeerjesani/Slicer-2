@@ -677,6 +677,50 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(result.errors, [])
         self.assertEqual(len(result.volumes), 1)
 
+    def test_recent_file_damaged_since_is_refused_as_damaged(self):
+        """BB-1: a recent file (File > Recent, Library "Opened from elsewhere", Search) that was cut short after it was
+        first opened is refused as damaged with its reason, as with a drop or Open...: no half zero-filled scan is loaded.
+        """
+        from StudioLib import importer
+
+        header = bytearray(348)
+        struct.pack_into("<i", header, 0, 348)
+        struct.pack_into("<8h", header, 40, 3, 8, 8, 6, 1, 1, 1, 1)
+        struct.pack_into("<hh", header, 70, 2, 8)  # uint8
+        struct.pack_into("<8f", header, 76, 1, 1, 1, 1, 1, 0, 0, 0)
+        struct.pack_into("<f", header, 108, 352)
+        header[344:348] = b"n+1\0"
+        complete = bytes(header) + bytes(4) + bytes([1]) * (8 * 8 * 6)
+        studioShell = self._applyStudio()
+        shown = []
+        for name, pack in (("sub-06_T1w.nii", bytes), ("sub-07_T1w.nii.gz", gzip.compress)):
+            path = os.path.join(self.directory, name)
+            with open(path, "wb") as f:
+                f.write(pack(complete))
+            result = importer.loadFiles([path], studioShell)
+            self._pump()
+            self.assertEqual(result.errors, [], name)
+            slicer.mrmlScene.Clear(0)
+            self._pump()
+            with open(path, "wb") as f:
+                f.write(pack(complete[: len(complete) // 2]))  # the image data stops halfway
+            del shown[:]
+            original = slicer.util.errorDisplay, slicer.util.warningDisplay
+            slicer.util.errorDisplay = lambda text, *args, **kwargs: shown.append(("error", text))
+            slicer.util.warningDisplay = lambda text, *args, **kwargs: shown.append(("warning", text))
+            try:
+                result = importer.loadRecentFile({"fileName": path, "fileType": "VolumeFile"}, None, studioShell)
+                self._pump()
+            finally:
+                slicer.util.errorDisplay, slicer.util.warningDisplay = original
+            self.assertEqual(len(result.errors), 1, name)
+            self.assertIn("damaged", result.errors[0][1], name)
+            self.assertEqual([kind for kind, text in shown], ["warning"], name)
+            self.assertIn("damaged", shown[0][1], name)
+            self.assertIn("It was not opened", shown[0][1], name)
+            self.assertEqual(result.nodes(), [], name)
+            self.assertEqual(slicer.util.getNodesByClass("vtkMRMLVolumeNode"), [], name)
+
     def test_nifti_with_invalid_header_size_is_refused_as_damaged(self):
         """BB-1: a NIfTI whose header gives a dimension below 1 (dim = 3, -5, 64, 64) is refused in plain words as damaged,
         logged without a traceback: the reader fails on it with a bare error.

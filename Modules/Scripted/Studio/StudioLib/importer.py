@@ -2584,6 +2584,21 @@ def loadRecentFile(properties, action=None, shell=None):
             _afterLoad(result, shell)
             return result
         _announceSceneSource(fileName)
+    elif fileName and os.path.isfile(fileName):
+        # As with a drop or Open... (loadFiles): a file damaged since it was last opened (cut short by a failed copy, a
+        # bad header) is refused with its reason; the reader would fill the missing voxels with 0 without a word
+        try:
+            _checkNiftiComplete(fileName)
+        except RefusedFileError as e:
+            logging.warning(f"Studio: {fileName} was not opened: {e}")  # planned refusal: no traceback
+            _noteLoadResult(fileName, False)
+            result = LoadResult()
+            result.errors.append((fileName, str(e)))
+            name = os.path.basename(fileName)
+            message = str(e) if str(e).startswith(name) else f"{name}: {e}"
+            slicer.util.warningDisplay(_("Some files could not be loaded:") + "\n\n" + message,
+                                       detailedText=f"{fileName}\n{e}")
+            return result
     if action is not None:
         action.trigger()
     else:
