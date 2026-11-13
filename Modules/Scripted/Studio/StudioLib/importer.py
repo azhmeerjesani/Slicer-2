@@ -2490,12 +2490,35 @@ def _bindToScanGrid(segmentationNode, volumeNode, tolerance=1e-3):
     return True
 
 
+def irregularGeometryVolumes(nodes):
+    """The volumes of ``nodes`` under a non-linear (grid) transform.
+
+    The DICOM scalar volume plugin adds such a "acquisition transform" to a series with a missing slice or an uneven
+    slice spacing: the image is loaded and shown straight, but its slices are not where the file says.
+    """
+    found = []
+    for node in nodes:
+        if not node.IsA("vtkMRMLScalarVolumeNode"):
+            continue
+        parent = node.GetParentTransformNode()
+        if parent is not None and not parent.IsTransformToWorldLinear():
+            found.append(node)
+    return found
+
+
 def _loadToast(result, shell):
     fractional = [node for node in result.segmentations if node.GetAttribute(LESION_FRACTIONAL_ATTRIBUTE)]
     if fractional:
         # A probabilistic mask is not an ordinary 0/1 lesion: say how it is shown (a study offers Binarize at 0.5)
         shell.toast(_("{name} has fractional values (a probabilistic mask): every voxel above 0 is shown as the lesion. "
                       "The file is unchanged.").format(name=fractional[0].GetName()), ms=6000, level="warning")
+        return
+    irregular = irregularGeometryVolumes(result.nodes())
+    if irregular:
+        # The series has a missing slice or an uneven spacing (Slicer corrected the geometry with a grid transform)
+        shell.toast(_("{name}: a slice is missing or the slice spacing is uneven. The image is shown corrected: "
+                      "check measurements and the lesion on it.").format(name=irregular[0].GetName()),
+                    ms=7000, level="warning")
         return
     held = getattr(shell, "consequenceHeld", None)
     if callable(held) and held():

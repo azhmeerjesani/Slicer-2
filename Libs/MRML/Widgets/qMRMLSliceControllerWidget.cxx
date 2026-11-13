@@ -1001,7 +1001,11 @@ void qMRMLSliceControllerWidgetPrivate::updateFlatBarFromMRMLSliceNode()
 
   QString indexText;
   QString indexDescription;
-  if (volumeNode)
+  // A volume under a non-linear transform (the grid transform that the DICOM plugin adds to a series with a missing
+  // slice) has no slice index along a straight normal: the readout has the position only, and the index is not asked
+  // (vtkMRMLTransformNode would log an error each time)
+  vtkMRMLTransformNode* volumeTransformNode = volumeNode ? volumeNode->GetParentTransformNode() : nullptr;
+  if (volumeNode && (!volumeTransformNode || volumeTransformNode->IsTransformToWorldLinear()))
   {
     int sliceIndex = this->SliceLogic->GetSliceIndexFromOffset(offset, volumeNode);
     int sliceCount = sliceCountAlongNormal(volumeNode, sliceNode);

@@ -4270,3 +4270,52 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertIn("MNI152NLin2009cAsym 1mm T1w", str(raised.exception))
         finally:
             SampleData.SampleDataLogic.downloadFileIntoCache = original
+
+    def test_volume_under_grid_transform_has_no_error_flood_and_a_toast(self):
+        """A volume under a non-linear (grid) transform, as a DICOM series with a missing slice is loaded: the flat
+        slice bar logs no "expected linear transforms" error for it, and the load toast says that a slice is missing
+        (the DICOM plugin only logs it).
+        """
+        import numpy as np
+        import vtk
+        import vtk.util.numpy_support as vtkNumpy
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "gap scan")
+        image = vtk.vtkImageData()
+        image.SetDimensions(8, 8, 8)
+        image.AllocateScalars(vtk.VTK_SHORT, 1)
+        image.GetPointData().GetScalars().FillComponent(0, 5)
+        volume.SetAndObserveImageData(image)
+        volume.CreateDefaultDisplayNodes()
+        grid = vtk.vtkImageData()
+        grid.SetDimensions(3, 3, 3)
+        grid.AllocateScalars(vtk.VTK_DOUBLE, 3)
+        vtkNumpy.vtk_to_numpy(grid.GetPointData().GetScalars())[:] = np.random.RandomState(0).uniform(-0.5, 0.5, (27, 3))
+        transform = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLGridTransformNode", "gap scan acquisition transform")
+        transform.GetTransformFromParent().SetDisplacementGridData(grid)
+        volume.SetAndObserveTransformNodeID(transform.GetID())
+        self.assertFalse(transform.IsTransformToWorldLinear())
+        self.assertEqual(importer.irregularGeometryVolumes([volume]), [volume])
+
+        for name in ("Red", "Green", "Yellow"):
+            slicer.app.layoutManager().sliceWidget(name).sliceController().setProperty("flatStyle", True)
+            composite = slicer.app.layoutManager().sliceWidget(name).sliceLogic().GetSliceCompositeNode()
+            composite.SetBackgroundVolumeID(volume.GetID())
+        model = slicer.app.errorLogModel()
+        before = model.rowCount()
+        self._pump(30)
+        self._wait(300)
+        messages = [str(model.index(row, 4).data() or "") for row in range(before, model.rowCount())]
+        self.assertEqual([m for m in messages if "expected linear" in m or "not linear" in m], [])
+
+        result = importer.LoadResult()
+        result.volumes.append(volume)
+        importer._loadToast(result, studioShell)
+        self.assertIn("slice is missing", studioShell.toastText())
+        # A volume without a transform keeps the plain toast
+        volume.SetAndObserveTransformNodeID(None)
+        self.assertEqual(importer.irregularGeometryVolumes([volume]), [])
+        importer._loadToast(result, studioShell)
+        self.assertIn("Loaded gap scan", studioShell.toastText())
