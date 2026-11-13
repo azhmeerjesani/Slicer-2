@@ -486,6 +486,32 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual(sources.Records.open(self.study).get(a)["stage"], "included")
         self.assertEqual(sources.Records.open(self.study).stage_counts()["included"], 1)
 
+    def test_changing_the_exclusion_reason_keeps_the_stage_it_was_excluded_from(self):
+        """X again with a new reason only changes the reason: a screening exclusion stays one in PRISMA, P brings the
+        record back, and U restores the earlier reason (also after a reload).
+        """
+        records = sources.Records.open(self.study)
+        records.add([sources.draft(title="T1", authors="A, B", year="2020"), sources.draft(title="T2", authors="C, D", year="2021")])
+        a, b = records.ids()
+        records.exclude(a, "Not a case report")
+        records.exclude(a, "Animal study")
+        self.assertEqual((records.get(a)["exclusion_reason"], records.excluded_at(records.get(a))), ("Animal study", "identified"))
+        counts = sources.prisma_counts(self.study, records)
+        self.assertEqual((counts["excluded_screening"], counts["fulltext_sought"], counts["fulltext_excluded"]), (1, 0, 0))
+        self.assertEqual(records.undo(a), "excluded")
+        self.assertEqual(records.get(a)["exclusion_reason"], "Not a case report")
+        records.exclude(a, "Animal study")
+        records.advance(b)
+        records.advance(b)
+        records.exclude(b, "Wrong population")
+        records.exclude(b, "No lesion mask")
+        records.save()
+        reopened = sources.Records.open(self.study)
+        self.assertEqual((reopened.excluded_at(reopened.get(a)), reopened.excluded_at(reopened.get(b))), ("identified", "fulltext"))
+        counts = sources.prisma_counts(self.study, reopened)
+        self.assertEqual((counts["excluded_screening"], counts["fulltext_excluded"], counts["fulltext_excluded_reasons"]), (1, 1, {"No lesion mask": 1}))
+        self.assertEqual((reopened.advance(a), reopened.advance(b)), ("identified", "fulltext"))
+
     # Lookup (mocked)
 
     def test_sici_dois_are_kept_whole(self):

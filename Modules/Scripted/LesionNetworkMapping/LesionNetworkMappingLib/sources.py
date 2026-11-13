@@ -910,8 +910,10 @@ class Records:
         return self.set_stage(record_id, EXCLUDED, reason)
 
     def _stage_before_exclusion(self, record_id):
+        # A reason change on an excluded record is logged excluded -> excluded (so undo restores the earlier reason): skip
+        # those lines, the stage it was excluded from is on the line that excluded it
         for entry in reversed(self.log):
-            if entry["record_id"] == record_id and entry["to"] == EXCLUDED:
+            if entry["record_id"] == record_id and entry["to"] == EXCLUDED and entry["from"] != EXCLUDED:
                 return entry["from"]
         return None
 
