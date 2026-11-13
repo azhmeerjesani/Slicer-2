@@ -530,6 +530,8 @@ def _runner_class():
             super().__init__(config, emit, cancel, argv, lock=lock)
             self.level = level
             self.labels = set(config.participant_label) if config.participant_label else None
+            # The output folder holds exactly the application's file set (no runs.jsonl of its own): the run registers in the study
+            self.registry_root_override = config.study
 
         def _stage(self, name):
             if self.level == "participant" and name not in PARTICIPANT_STAGES:

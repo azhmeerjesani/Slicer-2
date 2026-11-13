@@ -1083,6 +1083,23 @@ class Plan:
         }
 
 
+def registry_root(study_path, out):
+    """Folder whose ``derivatives/lnm/runs.jsonl`` registers a pipeline run of ``study_path`` written to ``out``: the study
+    when ``out`` lies inside it, else ``out`` itself.
+
+    A run written outside the study (for example ``OUT=elsewhere sh reproduce_pipeline.sh``, or a BIDS app output folder)
+    must not join the study's registry, whose runs the methods, the checklist and the Report card cite and whose ``dir``
+    values stay relative to the study (no absolute local path in a shared file).
+    """
+    study = os.path.realpath(os.fspath(study_path))
+    folder = os.path.realpath(os.fspath(out))
+    try:
+        inside = os.path.commonpath([study, folder]) == study
+    except ValueError:  # different drives
+        inside = False
+    return study_path if inside else out
+
+
 def default_out(config, bundle_name):
     from .export import derivatives_dir
 
@@ -1614,6 +1631,7 @@ class Runner:
         self.kept = []
         self.children = []
         self.run_id = None
+        self.registry_root_override = None  # a subclass may register its runs elsewhere (slicer-lnm: the study)
         self.started = time.monotonic()
         self.created = _now_iso()
         self.current_outputs = []
@@ -1633,6 +1651,11 @@ class Runner:
 
     def private(self, *parts):
         return os.path.join(self.out, PRIVATE_DIR, *parts)
+
+    @property
+    def run_root(self):
+        """Folder of the run registry of this run: :attr:`registry_root_override` when set, else :func:`registry_root`."""
+        return self.registry_root_override or registry_root(self.study.path, self.out)
 
     def stage_dir(self, name):
         folder = self.path(STAGES_DIR, name)
@@ -1847,7 +1870,7 @@ class Runner:
 
         runs.register_kind("pipeline")
         self.run_id = runs.new_run_id("pipeline")
-        runs.register(self.study.path, "pipeline", self.out, parents=config.parent_run, params=config.to_json(base=self.out, analysis_only=True), seeds={"preview": config.preview_seed, "permutation": config.perm_seed, "null": config.null_seed},
+        runs.register(self.run_root, "pipeline", self.out, parents=config.parent_run, params=config.to_json(base=self.out, analysis_only=True), seeds={"preview": config.preview_seed, "permutation": config.perm_seed, "null": config.null_seed},
                       run_id=self.run_id)
         if isinstance(self.emit, Emitter):
             self.emit.progress["run_id"] = self.run_id
@@ -1972,12 +1995,30 @@ class Runner:
         return fp, {"status": "done", "reused": True, "fingerprint": fp, "result": state.get("result") or {}, "outputs_rel": state.get("outputs") or {}, "child_run_id": state.get("child_run_id"),
                     "warnings": state.get("warnings") or []}
 
+    def _methods_runs(self):
+        """The run records the methods of this run cite: None (the study's registry) when the run registers in the study,
+        else the study's runs and the runs of this output folder's own registry (:attr:`run_root`), read side by side.
+        """
+        from . import runs
+
+        if os.path.realpath(self.run_root) == os.path.realpath(self.study.path):
+            return None
+        try:
+            study_runs = runs.load(self.study.path)
+        except OSError:
+            study_runs = {}
+        try:
+            own = runs.absolute_records(self.run_root, runs.load(self.run_root))
+        except OSError:
+            own = {}
+        return {**study_runs, **own}
+
     def _run_done(self, run_id):
         """Whether the registry records the pipeline run ``run_id`` as finished (status "done")."""
         from . import runs
 
         try:
-            return (runs.load(self.study.path).get(run_id) or {}).get("status") == "done"
+            return (runs.load(self.run_root).get(run_id) or {}).get("status") == "done"
         except (OSError, ValueError):
             return False
 
@@ -2173,7 +2214,7 @@ class Runner:
             args += ["--cancel-file", self.private(STOP_NAME)]
         if resume and not self.config.recompute:
             args += ["--resume"]
-        args += ["--run-root", self.study.path, "--parent-run", self.run_id]
+        args += ["--run-root", self.run_root, "--parent-run", self.run_id]
         return args
 
     # Snapshots
@@ -3360,7 +3401,7 @@ class Runner:
         written = None
         if self.providers["export"].kind == "preferred":
             try:
-                written = export.write_methods(self.study.path, self.out, formats=("md", "html", "txt"))
+                written = export.write_methods(self.study.path, self.out, formats=("md", "html", "txt"), runs=self._methods_runs())
             except jobs.Cancelled:
                 raise
             except Exception as exc:  # the data outputs are complete: keep write_run's methods.md
@@ -3540,7 +3581,7 @@ class Runner:
 
         mapping = {"done": "done", "done_with_failures": "done", "cancelled": "cancelled", "error": "failed", "failed": "failed"}
         try:
-            runs.update(self.study.path, self.run_id, status=mapping.get(status, status), ended=_now_iso(), summary=summary or {"status": status, "failed_stages": self.failed})
+            runs.update(self.run_root, self.run_id, status=mapping.get(status, status), ended=_now_iso(), summary=summary or {"status": status, "failed_stages": self.failed})
         except OSError:
             pass
 

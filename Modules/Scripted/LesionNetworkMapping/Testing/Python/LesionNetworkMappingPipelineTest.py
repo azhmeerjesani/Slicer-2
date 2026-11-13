@@ -836,6 +836,41 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertEqual(code, 3, stderr[-2000:])
         self.assertGreaterEqual(resumed["first"], cursor - 1, "the GLM resumes from its cursor")
 
+    def test_run_outside_the_study_keeps_the_study_registry(self):
+        """A run written outside the study (``OUT=elsewhere sh reproduce_pipeline.sh``) registers in its own folder: the study's
+        runs.jsonl, and so its methods, checklist and Report card, stay as they were, and never get an absolute run folder.
+        """
+        from LesionNetworkMappingLib import methods
+
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-outside"))
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST))
+        self.assertEqual(code, 0, stderr[-2000:])
+        study_run = done_event(events)["run_id"]
+        registry_path = runs.registry_path(fx["study"])
+        with open(registry_path, "rb") as f:
+            before = f.read()
+        methods_before = methods.render(methods.methods_sections(fx["study"]), "md")
+        outside = os.path.join(self.tmp, "f-outside-reproduced")
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST, "--out", outside))
+        self.assertEqual(code, 0, stderr[-2000:])
+        outside_run = done_event(events)["run_id"]
+        with open(registry_path, "rb") as f:
+            after = f.read()
+        added = [json.loads(line) for line in after[len(before):].decode("utf-8").splitlines() if line.strip()]
+        self.assertTrue(after.startswith(before))
+        self.assertEqual([record for record in added if record.get("kind") != "preflight"], [], "only the study's preflight report is added")
+        self.assertFalse([record for record in runs.read_records(fx["study"]) if isinstance(record.get("dir"), str) and os.path.isabs(record["dir"])])
+        self.assertEqual(methods.render(methods.methods_sections(fx["study"]), "md"), methods_before)
+        self.assertIn(f"run {study_run}", methods_before)
+        # The run outside the study has its own registry (relative folders) and its methods cite it
+        own = runs.load(outside)
+        self.assertEqual(own[outside_run]["status"], "done")
+        self.assertEqual(own[outside_run]["dir"], ".")
+        self.assertTrue(runs.children(outside, outside_run))
+        self.assertFalse([record for record in own.values() if os.path.isabs(record.get("dir") or "")])
+        with open(os.path.join(outside, "methods.md"), encoding="utf-8") as f:
+            self.assertIn(f"The analysis ran as one pipeline (run {outside_run}", f.read())
+
     def test_resumed_run_methods_cite_the_run_that_finished(self):
         """A run stopped while the report is made has already written the export; the run that resumes it writes it again, so the
         methods, the sidecars and the report name the run that finished (not the cancelled one), and a finished run's export is reused.

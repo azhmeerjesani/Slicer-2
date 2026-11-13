@@ -191,6 +191,23 @@ def run_dir(root, record):
     return os.path.normpath(folder if os.path.isabs(folder) else os.path.join(os.fspath(root), *folder.split("/")))
 
 
+def absolute_records(root, runs):
+    """Copies of the folded records ``runs`` ({id: record}, from :func:`load`) of the registry of ``root`` with their
+    ``dir`` and spilled ``{"$file": ...}`` fields made absolute, so they can be read next to the records of another root
+    (in memory only: never write them back to a registry).
+    """
+    out = {}
+    for run_id, record in runs.items():
+        record = dict(record)
+        if record.get("dir"):
+            record["dir"] = run_dir(root, record)
+        for key, value in record.items():
+            if isinstance(value, dict) and set(value) == {"$file"} and isinstance(value["$file"], str) and not os.path.isabs(value["$file"]):
+                record[key] = {"$file": os.path.normpath(os.path.join(os.fspath(root), *value["$file"].split("/")))}
+        out[run_id] = record
+    return out
+
+
 def _encode(record):
     return (_dumps(record, separators=(",", ":")) + "\n").encode("utf-8")
 
