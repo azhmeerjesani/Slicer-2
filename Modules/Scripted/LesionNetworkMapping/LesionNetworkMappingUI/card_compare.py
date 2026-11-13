@@ -1,6 +1,6 @@
 """Compare card of the Map module (order 130; L-52, SPEC_LNM_ADDENDUM §3.6, §3.7, §4.4 and §7.1).
 
-Checks whether a network repeats across conditions (van den Heuvel et al. 2026b) with honest statistics:
+Checks whether a network repeats across conditions (van den Heuvel et al. 2026) with honest statistics:
 
 - **Maps to compare** (tick any): this result, the cohort's group maps, per-lesion maps, group maps of other
   connectomes or subsets of the same study (resampled onto this grid), the connectome's μC_r and PC1, maps built here

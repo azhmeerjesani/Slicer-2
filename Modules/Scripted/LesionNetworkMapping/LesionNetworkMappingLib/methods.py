@@ -106,7 +106,7 @@ KIND_LABELS = {
 VLSM_JSON = "vlsm.json"
 #: How VLSM results are described: VLSM tests lesion location, not a network (vlsm.INTERPRETATION)
 VLSM_CLAIM = "Voxel-based lesion-symptom mapping results are described as lesion locations associated with the tested contrast or score; VLSM tests location, not the network."
-NULL_CAPTION = "Null models benchmark significance; they do not by themselves establish disease specificity (van den Heuvel et al. 2026b); see also Zalesky & Cash 2026; Siddiqi et al. 2026."
+NULL_CAPTION = "Null models benchmark significance; they do not by themselves establish disease specificity (van den Heuvel et al. 2026); see also Zalesky & Cash 2026; Siddiqi et al. 2026."
 #: Inflections of "localize" (claim wording); "localization" stays allowed (the title of Boes et al., 2015)
 _LOCALIZE_INFLECTIONS = r"locali[sz](?:e|es|ed|ing)"
 _BANNED_PATTERN = re.compile(r"\b(?:" + "|".join([_LOCALIZE_INFLECTIONS, *(re.escape(phrase) for phrase in BANNED_PHRASES)]) + r")\b", re.IGNORECASE)
@@ -1145,6 +1145,8 @@ def statistics_section(records, used):
             summary = records.summary(record) or {}
             if kind == "robustness":
                 body = robustness_text(summary, records.params(record), records.seeds(record))
+            elif kind == "nulls":
+                body = nulls_text(summary)
             else:
                 body = _generic_text(summary)
             text = f"{KIND_LABELS.get(kind, kind.capitalize())} (run {record['id']}): {body or 'summary ' + NOT_RECORDED}."
@@ -1259,6 +1261,46 @@ def _generic_text(data, keys=None):
             parts.append(f"{key} {value}")
         if len(parts) >= 8:
             break
+    return "; ".join(parts)
+
+
+NULL_KIND_TEXT = {
+    "rl_independent": "relocated-lesion null models (independent relocation)",
+    "rl_cohort_shift": "relocated-lesion null models (one shift for the whole cohort)",
+    "rl_strength": "relocated-lesion null models (strength-matched relocation)",
+    "rl_overlap": "relocated-lesion null models (overlap-preserving relocation)",
+    "empirical_pool": "empirical-pool null models",
+}
+NULL_MODE_TEXT = {"exact_pooled": "exact pooled", "approximate": "approximate (fast parcel mode)"}
+
+
+def nulls_text(summary):
+    """Methods sentence of one null-model run from its registry summary; missing values are "not recorded".
+
+    :param summary: the run's registry summary (kind, mode, k, n_lesions, n_fwe_05, min_attainable_p, classic_rule).
+    :return: the text without the run label and the final full stop ("" for a summary that is not a dict).
+    """
+    if not isinstance(summary, dict) or not summary:
+        return ""
+    kind = summary.get("kind")
+    mode = summary.get("mode")
+    k, lesions, n_fwe = _number(summary.get("k")), _number(summary.get("n_lesions")), summary.get("n_fwe_05")
+    parts = [
+        (
+            f"{NULL_KIND_TEXT.get(kind, _or_nr(kind))}, {NULL_MODE_TEXT.get(mode, _or_nr(mode))}, "
+            f"{k or NOT_RECORDED} null cohorts of the {lesions or NOT_RECORDED} case lesions"
+        ),
+    ]
+    if _number(n_fwe) is None:
+        parts.append(f"voxels reaching PFWE <= 0.05 {NOT_RECORDED}")
+    elif float(n_fwe) == 0:
+        parts.append("no voxel reached PFWE <= 0.05")
+    else:
+        parts.append(f"{_number(n_fwe)} voxel{'' if float(n_fwe) == 1 else 's'} reached PFWE <= 0.05")
+    parts.append(f"smallest attainable p = {_number(summary.get('min_attainable_p')) or NOT_RECORDED}")
+    rule = summary.get("classic_rule")
+    if isinstance(rule, str) and rule:
+        parts.append(f"classic overlap rule: {rule.rstrip('.')}")
     return "; ".join(parts)
 
 

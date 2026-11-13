@@ -1,7 +1,7 @@
 """Reference-map library and comparison matrix (SR-17, DE-20; addendum §3.6, §3.7 and §4.4).
 
 Researchers check whether the network found for one condition repeats across conditions (van den Heuvel et al.
-2026b): if a clinically unrelated condition gives nearly the same map, the map follows the connectome rather than the
+2026): if a clinically unrelated condition gives nearly the same map, the map follows the connectome rather than the
 disease. This module keeps a local library of reference maps the user chose to fetch, puts them on the connectome grid
 and compares any set of maps with honest statistics.
 
@@ -122,7 +122,7 @@ VDH_NOTE = ("The van den Heuvel repository states no licence: the file is downlo
 VDH_DEFAULT_ENTRY = "degree"
 
 CROSS_CONDITION_NOTE = ("A map that also matches clinically unrelated conditions is more likely to reflect the connectome's own structure "
-                        "(hubs, mean connectivity) than a condition-specific network (van den Heuvel et al. 2026b). Partial r given "
+                        "(hubs, mean connectivity) than a condition-specific network (van den Heuvel et al. 2026). Partial r given "
                         "μC_r and PC1 shows the similarity left after these connectome axes.")
 NO_P_EXTERNAL = ("r only: a p-value needs the raw inputs of both maps (per-lesion maps with labels or scores from this study). "
                  "Spatial autocorrelation invalidates parametric p, and spin or BrainSMASH nulls are not used for volumetric maps.")

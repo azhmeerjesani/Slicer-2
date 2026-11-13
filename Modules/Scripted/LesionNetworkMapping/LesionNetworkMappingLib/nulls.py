@@ -146,7 +146,7 @@ KIND_INFO = {
 # Permanent caption of every null output (addendum §3.6, exact text)
 CAPTION = (
     "Null models benchmark significance; they do not by themselves establish disease specificity "
-    "(van den Heuvel et al. 2026b); see also Zalesky & Cash 2026; Siddiqi et al. 2026."
+    "(van den Heuvel et al. 2026); see also Zalesky & Cash 2026; Siddiqi et al. 2026."
 )
 APPROX_LABEL = "approximate (fast parcel mode, approximate z-scale; rank rules only)"
 OUTPUT_DESCS = ("sensNullExcess", "sensNullP", "sensNullQ", "sensNullPFwe", "sensNullBias")
