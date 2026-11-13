@@ -2143,6 +2143,83 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertFalse(fresh.errorLabel.isVisible())
         self.assertEqual(len(fresh.records), 3)
 
+    def test_sources_prisma_export_refuses_unreadable_records_tsv(self):
+        """Search > Export PRISMA flow diagram, with records.tsv unreadable, writes nothing and says why: with the card shown
+        (it exported the empty stand-in over the good export) and without it (a traceback in the error log) (BB-1).
+        """
+        from LesionNetworkMappingLib import sources
+        from LesionNetworkMappingLib.study import Study
+        from StudioLib import libcard_sources, study_ui
+
+        path = os.path.join(self.directory, "LitPrisma")
+        Study.create(path, name="LitPrisma").save()
+        session = study_ui.openStudy(path, None)
+        self.cleanup.append(study_ui.closeStudy)
+        toasts = []
+        original = libcard_sources._toast
+        libcard_sources._toast = lambda *args, **kwargs: toasts.append((args, kwargs))
+        self.cleanup.append(lambda: setattr(libcard_sources, "_toast", original))
+        card = libcard_sources.SourcesCard(session)
+        self.cleanup.append(card.widget.close)
+        self.assertIsNotNone(card.importRecords(text="10.9999/prisma.a\n10.9999/prisma.b\n10.9999/prisma.c\n"))
+        counts, paths = sources.export_prisma(session.study)
+        self.assertEqual(counts["screened"], 3)
+        good = {}
+        for p in paths:
+            with open(p, "rb") as f:
+                good[p] = f.read()
+        recordsPath = os.path.join(path, "sources", "records.tsv")
+        with open(recordsPath, encoding="utf-8") as f:
+            text = f.read()
+        with open(recordsPath, "wb") as f:
+            f.write(text.encode("utf-16"))
+        with open(recordsPath, "rb") as f:
+            damaged = f.read()
+        action = next(a for a in libcard_sources._paletteActions() if a["id"] == "lnm.sources-prisma")
+
+        def assertUnchanged(where):
+            for p, data in good.items():
+                with open(p, "rb") as f:
+                    self.assertEqual(f.read(), data, f"{where}: {os.path.basename(p)} was written over")
+            with open(recordsPath, "rb") as f:
+                self.assertEqual(f.read(), damaged, where)
+
+        # The card is shown (Library): Search refuses the way the card's own button does
+        fresh = libcard_sources._cards[libcard_sources._createCard(session)]
+        self.cleanup.append(fresh.widget.close)
+        fresh.widget.show()
+        fresh.refresh()
+        self._pump()
+        live = libcard_sources.liveCard()  # this card, or the one of the Library inspector
+        self.assertIsNotNone(live)
+        live.refresh()
+        self.assertTrue(live.records.unreadable)
+        self.assertFalse(live.prismaButton.enabled)
+        del toasts[:]
+        self.assertIsNone(action["callback"]())
+        assertUnchanged("card shown")
+        self.assertEqual(len(toasts), 1, toasts)
+        self.assertIn("records.tsv cannot be read", toasts[0][0][0])
+        self.assertNotIn("written to derivatives/prisma", toasts[0][0][0])
+        self.assertIn("Nothing was written", live.errorLabel.text)
+        self.assertIsNone(fresh.exportPrisma())
+        assertUnchanged("card button")
+
+        # No card shown (Draw): a plain reason, never an exception for the Search popup to log
+        for widget in list(libcard_sources._cards):
+            if widget.isVisible():
+                widget.hide()
+                self.cleanup.append(widget.show)
+        self.assertIsNone(libcard_sources.liveCard())
+        del toasts[:]
+        self.assertIsNone(action["callback"]())
+        assertUnchanged("no card")
+        self.assertEqual(len(toasts), 1, toasts)
+        self.assertIn("records.tsv cannot be read", toasts[0][0][0])
+        with self.assertRaises(sources.SourcesError):
+            sources.export_prisma(session.study, fresh.records)  # the library refuses the empty stand-in too
+        assertUnchanged("library")
+
     def test_sources_unreadable_stage_log_is_reported_and_kept(self):
         """A stage_log.tsv that cannot be read is said on the card, P/X/U and Import do not write over it, and once it is
         fixed (records.tsv unchanged) the card reads it again with the full-text exclusion in place (BB-1).

@@ -1302,7 +1302,14 @@ def prisma_paths(study):
 
 
 def export_prisma(study, records=None):
-    """Write ``derivatives/prisma/prisma_counts.json`` and ``prisma_flow.svg`` (atomic). Return ``(counts, [paths])``."""
+    """Write ``derivatives/prisma/prisma_counts.json`` and ``prisma_flow.svg`` (atomic). Return ``(counts, [paths])``.
+
+    :raises SourcesError: when the records cannot be read (``records.tsv`` or ``stage_log.tsv``, or ``records`` is the
+        empty stand-in of an unreadable file): nothing is written, so an earlier export stays as it was.
+    """
+    records = records if records is not None else Records.open(study)
+    if getattr(records, "unreadable", None):
+        raise SourcesError(f"Nothing was written: {records.unreadable}. Fix or move the file first")
     counts = prisma_counts(study, records)
     json_path, svg_path = prisma_paths(study)
     os.makedirs(os.path.dirname(json_path), exist_ok=True)

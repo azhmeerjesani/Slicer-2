@@ -946,6 +946,11 @@ class SourcesCard:
         studyObject = self._study()
         if records is None or studyObject is None:
             return None
+        if records.unreadable:
+            # As Import does: the empty stand-in of an unreadable file never replaces an earlier export
+            self._showError(_("Nothing was written: fix the file named above (save it as UTF-8 text) or move it away first."))
+            _toast(_("The PRISMA flow diagram was not written: {reason}").format(reason=records.unreadable), ms=5000, level="warning")
+            return None
 
         def work():
             _counts, paths = _sources().export_prisma(studyObject, records)
@@ -988,7 +993,12 @@ def _exportPrisma():
         _toast(_("Open a study first"))
         return None
     sources = _sources()
-    _counts, paths = sources.export_prisma(session.study)
+    try:
+        _counts, paths = sources.export_prisma(session.study)
+    except sources.SourcesError as e:
+        # records.tsv or stage_log.tsv cannot be read: say why, as the card does, rather than a traceback
+        _toast(_("The PRISMA flow diagram was not written: {reason}").format(reason=e), ms=5000, level="warning")
+        return None
     _toast(_("PRISMA counts and flow diagram written to derivatives/prisma"), ms=4000)
     return paths
 
