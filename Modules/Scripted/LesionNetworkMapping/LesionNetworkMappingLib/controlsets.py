@@ -26,8 +26,9 @@ Lesions of different template families are refused. Each lesion is then read onc
 **Study links** (``Study.link_control_set``) add one row per control lesion with group = control, source_type =
 control_db, source_dataset = <name>, source_id = <lesion id> and lesion = ``controlset:<name>/<rel>``.
 ``Study.abspath`` resolves such paths through the registry: ``Study.controlset_root``, else the environment variable
-:data:`ENV_ROOT`, else the default data directory. study.json records ``control_sets: [{"name", "sha256"}]``, where
-sha256 is :func:`content_sha256` of the set (its space and lesion hashes), so a changed set is detected.
+:data:`ENV_ROOT`, else the application's data directory (:func:`set_data_directory_resolver`). study.json records
+``control_sets: [{"name", "sha256"}]``, where sha256 is :func:`content_sha256` of the set (its space and lesion hashes), so
+a changed set is detected.
 
 **Maps** go to the set's own cache (:func:`maps_cache_root`): :func:`map_controls` (or the cohortmaps command line with
 :func:`map_job_args`) maps the set once per connectome and subject list, and every study that links the set looks its
@@ -125,14 +126,35 @@ def _documents_directory():
     return os.path.join(home, "Documents")
 
 
+#: Callable giving the application's data directory (``Studio/LNM/DataDirectory`` with its defaults), installed by the
+#: LesionNetworkMapping module (:func:`set_data_directory_resolver`); None outside the application
+_data_directory_resolver = None
+
+
+def set_data_directory_resolver(resolver):
+    """Install the callable that :func:`registry_root` asks for the data directory when neither a root nor :data:`ENV_ROOT`
+    is given, so that the registry does not depend on which card was shown first (None removes it).
+    """
+    global _data_directory_resolver
+    _data_directory_resolver = resolver
+
+
 def registry_root(root=None):
-    """The registry folder: ``root``, else the environment variable :data:`ENV_ROOT`, else <default data directory>/ControlSets."""
+    """The registry folder: ``root``, else the environment variable :data:`ENV_ROOT`, else <data directory>/ControlSets,
+    where the data directory is the application's (:func:`set_data_directory_resolver`), else :func:`default_data_directory`.
+    """
     if root:
         return os.path.abspath(os.fspath(root))
     value = os.environ.get(ENV_ROOT, "").strip()
     if value:
         return os.path.abspath(value)
-    return os.path.join(default_data_directory(), REGISTRY_DIR)
+    data_directory = None
+    if _data_directory_resolver is not None:
+        try:
+            data_directory = str(_data_directory_resolver() or "").strip() or None
+        except Exception:
+            data_directory = None
+    return os.path.join(data_directory or default_data_directory(), REGISTRY_DIR)
 
 
 def root_for_data_directory(data_directory):

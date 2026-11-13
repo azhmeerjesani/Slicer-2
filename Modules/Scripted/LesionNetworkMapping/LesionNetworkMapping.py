@@ -283,6 +283,7 @@ Montreal Neurological Institute, McGill University (see LICENSE-MNI152NLin2009cA
             slicer.app.connect("startupCompleted()", registerPaletteProvider)
         if not installSceneMigration():
             slicer.app.connect("startupCompleted()", installSceneMigration)
+        installControlSetRegistry()
 
 
 #
@@ -508,6 +509,26 @@ def paletteEntries(shell=None):
          "callback": lambda: _openMap(lambda widget: widget.computeCohort()), "enabled": lambda: (_existingWidget() is None or _existingWidget().cohortComputeState()[0]),
          "description": _("Compute the network map of every analysable lesion of the study")},
     ]
+
+
+def controlSetDataDirectory():
+    """``Studio/LNM/DataDirectory`` as the normalization card and Library's Control sets card read it."""
+    from LesionNetworkMappingUI import normalize_controller
+
+    return normalize_controller.dataDirectory()
+
+
+def installControlSetRegistry():
+    """Make the control-set registry (<DataDirectory>/ControlSets) the one Library registers sets in, whatever card was
+    shown first, so that linked control lesions ("controlset:<set>/<rel>") resolve in Map, Cohort and the pipeline.
+    """
+    try:
+        from LesionNetworkMappingLib import controlsets
+    except Exception:
+        logging.debug("LesionNetworkMapping: the control-set library could not be imported", exc_info=True)
+        return False
+    controlsets.set_data_directory_resolver(controlSetDataDirectory)
+    return True
 
 
 def registerPaletteProvider():
