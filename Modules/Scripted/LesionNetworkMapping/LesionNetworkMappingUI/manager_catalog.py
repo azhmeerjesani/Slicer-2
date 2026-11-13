@@ -380,7 +380,7 @@ class FetchController:
 
     def status(self):
         """A dict for the interface: ``state``, ``fraction`` (0..1 or None), ``eta`` (text), ``archive``, ``subjects``, ``name``,
-        ``error``, ``mismatch`` (the failure is a checksum mismatch the user may accept), ``termsChanged`` (the provider's terms text changed: only accepting the live text helps) and ``path`` of a finished bundle.
+        ``error``, ``mismatch`` (the failure is a checksum mismatch the user may accept), ``damaged`` (an archive is damaged upstream: Resume cannot succeed), ``termsChanged`` (the provider's terms text changed: only accepting the live text helps) and ``path`` of a finished bundle.
         """
         job = self.job
         event = (job.lastEvent or {}) if job is not None else {}
@@ -400,6 +400,7 @@ class FetchController:
             "error": self.error,
             "mismatch": bool(self.errorEvent and self.errorEvent.get("code") == "checksum"),
             "termsChanged": bool(self.errorEvent and self.errorEvent.get("code") == "terms_mismatch"),
+            "damaged": bool(self.errorEvent and self.errorEvent.get("code") == "damaged_member"),
             "path": self.resultPath,
             "warnings": [w.get("message") for w in (job.warnings if job is not None else [])],
         }

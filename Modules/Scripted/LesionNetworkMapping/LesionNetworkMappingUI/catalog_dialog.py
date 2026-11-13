@@ -895,7 +895,7 @@ class CatalogDialog(qt.QDialog):
         else:
             self.progress.setProgress(1.0, text=_("Done: the connectome is registered and ready in the Connectome card."))
             self.progress.stopButton.setEnabled(False)
-        self.resumeButton.setVisible(state in ("paused", "failed") and not status["mismatch"] and not status["termsChanged"])
+        self.resumeButton.setVisible(state in ("paused", "failed") and not status["mismatch"] and not status["termsChanged"] and not status["damaged"])
         self.discardButton.setVisible(state in ("paused", "failed"))
         self.acceptMismatchButton.setVisible(state == "failed" and status["mismatch"])
         self.openFolderButton.setVisible(state == "done" and bool(status["path"]))

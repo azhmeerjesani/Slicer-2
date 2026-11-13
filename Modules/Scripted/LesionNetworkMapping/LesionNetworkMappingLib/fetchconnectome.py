@@ -1225,6 +1225,14 @@ def _run_fetch(entry, live, plan, terms_sha, state, work, bundle, dest, session,
             info.update({"status": "partial", "bytes": source.position})
             state.save()
             raise jobs.Cancelled(done=progress.done(source.position), reason="cancelled") from None
+        except connectome.StreamIntegrityError as exc:
+            # The archive's checksum may match the provider's listing: the file is damaged upstream, and reading it again fails the same way
+            info.update({"status": "partial", "bytes": source.position})
+            state.save()
+            raise jobs.JobError(
+                f"{item['name']} is damaged upstream, in the data the provider serves ({exc}). Downloading it again gives the same damage. "
+                "Choose another subset of subjects that avoids it, or report it to the provider.",
+                code="damaged_member", file=item["name"]) from None
         finally:
             source.close()
 

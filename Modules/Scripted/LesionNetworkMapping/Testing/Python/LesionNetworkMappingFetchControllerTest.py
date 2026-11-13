@@ -132,6 +132,12 @@ class LesionNetworkMappingFetchControllerTest(unittest.TestCase):
         status = controller.status()
         self.assertTrue(status["termsChanged"])
         self.assertFalse(status["mismatch"])
+        self.assertFalse(status["damaged"])
+        fake.errorEvent = {"code": "damaged_member", "file": "x.tar"}
+        controller._onDone(fake)
+        status = controller.status()
+        self.assertTrue(status["damaged"])
+        self.assertFalse(status["mismatch"])
 
     def test_the_fetch_job_stops_with_the_application(self):
         args = self.controller.arguments(self.request)

@@ -905,6 +905,24 @@ class FetchIntegrityTest(FetchConnectomeBase):
         self.assertEqual(len(self.warnings("checksum_override")), 1)
         self.assertEqual(connectome.ConnectomeBundle.open(summary["path"]).provenance["source"]["checksumOverride"], True)
 
+    def test_a_damaged_gzip_member_is_reported_as_damaged_upstream_not_as_an_exception(self):
+        # The provider serves an archive whose member has a wrong gzip CRC32 and lists the MD5 of exactly those bytes (damaged
+        # upstream): the job ends with a plain, resume-less error that names the archive, not with an unhandled exception
+        data = bytearray(self.archives[1])
+        with tarfile.open(fileobj=io.BytesIO(bytes(data))) as tar:
+            member = next(m for m in tar.getmembers() if m.isfile() and m.name.endswith(".nii.gz"))
+        data[member.offset_data + member.size - 8] ^= 0xFF  # the first byte of the CRC32 in the gzip trailer
+        self.addCleanup(self.server.files[1001].__setitem__, "data", self.server.files[1001]["data"])  # the server is shared by the tests
+        self.server.files[1001]["data"] = bytes(data)
+        with self.assertRaises(jobs.JobError) as ctx:
+            self.fetch()
+        self.assertEqual(ctx.exception.code, "damaged_member")
+        self.assertEqual(ctx.exception.fields["file"], "GSP1000_v2_01.tar")
+        message = str(ctx.exception)
+        self.assertIn("GSP1000_v2_01.tar", message)
+        self.assertIn("damaged upstream", message)
+        self.assertNotIn("Traceback", message)
+
     def test_a_truncated_archive_stops_and_is_resumable(self):
         # The provider cuts the connection for good after some bytes (a signed URL whose budget never renews)
         original = fetchconnectome.MAX_FAILURES
