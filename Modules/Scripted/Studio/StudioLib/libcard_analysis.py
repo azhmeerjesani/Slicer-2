@@ -10,6 +10,11 @@ visible):
   "Running · Network maps 34%" (a run of this application or of another process), "Stopped", "Failed".
 - [Open in Map] shows Map with Seed = Cohort and the Run everything card; [Open report] opens the last report.
 
+The plan depends on the run's settings and on the study's design files (participants.tsv and study.json, by size and
+modification time, ``studyStamp``): a QC key, a Case section field, a column role or a removed subject that the session
+saves to participants.tsv, or an edit by another program, plans again (the 5 s refresh and the study save listener
+notice it), so the line never stays "up to date" for a design that the last run did not analyse.
+
 A StudySession Done hook (order 900; it returns ``{}`` and only schedules a timer) shows the toast "All N lesions traced ·
 run the cohort analysis in Map" once per session when every included subject is traced. In Classic the Studio module
 panel hosts the same card. The Search entries of the cohort analysis (``card_pipeline.paletteEntries``) are also listed
@@ -148,6 +153,22 @@ def stateLine(analysis, plan=None, liveModel=None):
     return _("Cohort analysis: never run"), "text2"
 
 
+#: The study files that the design of the plan is read from (``studyStamp``)
+DESIGN_FILES = ("participants.tsv", "study.json")
+
+
+def studyStamp(studyPath):
+    """``[[name, size, mtime_ns], …]`` of the study's :data:`DESIGN_FILES` (one ``stat`` each; None for a missing file)."""
+    stamp = []
+    for name in DESIGN_FILES:
+        try:
+            info = os.stat(os.path.join(studyPath, name))
+            stamp.append([name, info.st_size, info.st_mtime_ns])
+        except (OSError, TypeError):
+            stamp.append([name, None, None])
+    return stamp
+
+
 def planConfig(analysis):
     """The analysis settings of a finished run (its pipeline.json, paths made absolute) for the staleness plan, or None."""
     if analysis is None or analysis.get("record") is None:
@@ -175,6 +196,7 @@ class AnalysisCard:
         self.analysis = None
         self.plan = None
         self.planKey = None
+        self.requestedKey = None  # the key of the last plan asked of the worker (not asked again while it is current)
         self.studyPath = None
         self.widget = qt.QWidget()
         self.widget.setObjectName("StudioAnalysisLibraryCard")
@@ -243,13 +265,18 @@ class AnalysisCard:
         self.session = session
         studyPath = session.study.path
         if studyPath != self.studyPath:
-            self.studyPath, self.plan, self.planKey = studyPath, None, None
+            self.studyPath, self.plan, self.planKey, self.requestedKey = studyPath, None, None, None
             self.schedulePlan()
         try:
             self.analysis = latestAnalysis(studyPath)
         except Exception:
             logging.error(f"Studio Library: the cohort analysis state could not be read:\n{traceback.format_exc()}")
             self.analysis = None
+        # The design changed since the last plan (the session saved participants.tsv, another program edited it, a run
+        # ended with other settings): plan again, so that the line does not keep the verdict of the old design
+        key = self._planKey()
+        if key is not None and key != self.planKey and key != self.requestedKey and not self.planTimer.isActive():
+            self.schedulePlan()
         self.show()
 
     def show(self):
@@ -269,9 +296,12 @@ class AnalysisCard:
         if library._isAlive(self.widget) and self.widget.isVisible():
             self.refresh()
 
-    def _planKey(self):
-        config = planConfig(self.analysis)
-        return json.dumps(config, sort_keys=True, default=str) if config is not None else None
+    def _planKey(self, config=None):
+        """What the plan depends on: the run's settings and the stamp of the study's design files."""
+        config = config if config is not None else planConfig(self.analysis)
+        if config is None:
+            return None
+        return json.dumps({"config": config, "study": studyStamp(self.studyPath)}, sort_keys=True, default=str)
 
     def schedulePlan(self):
         self.planTimer.start()
@@ -288,7 +318,8 @@ class AnalysisCard:
         config = planConfig(self.analysis)
         if config is None or (self.analysis.get("status") or {}).get("status") == "running":
             return
-        self.worker.request(json.dumps(config, sort_keys=True, default=str), config)
+        self.requestedKey = self._planKey(config)
+        self.worker.request(self.requestedKey, config)
 
     def _onPlan(self, key, summary, error):
         if error or key != self._planKey():
@@ -398,11 +429,20 @@ def _onSession(session):
         _hookedSessions.add(id(session))
 
 
+def _onSaved(session):
+    """Study save listener: participants.tsv was written, so the cards re-read the state and plan again if it changed."""
+    for card in list(_cards):
+        if library._isAlive(card.widget):
+            card.refresh()
+
+
 def _install():
     studyUi = library._studyUi()
     if studyUi is None:
         return
     studyUi.addListener(_onSession)
+    if hasattr(studyUi, "addSaveListener"):
+        studyUi.addSaveListener(_onSaved)
     _onSession(studyUi.session())
 
 

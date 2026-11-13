@@ -643,6 +643,51 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
         self.assertEqual(level, "success")
         self.assertEqual(libcard_analysis.allTraced(self.widget.cohortStudy)[0], 12)
 
+    def test_a1_library_card_plans_again_after_a_library_design_change(self):
+        """A QC fail or a score edit made in the Library (saved by the study session) is a design change on the
+        Library Analysis card too, without reopening the study (bug bash BB-1).
+        """
+        try:
+            from StudioLib import libcard_analysis, study_ui
+        except ImportError:
+            self.skipTest("the Studio module is not part of this build")
+        session = study_ui.openStudy(self.fx["study"], showLibrary=False)
+        self.assertIsNotNone(session)
+        card = libcard_analysis.AnalysisCard(session)
+        card.timer.stop()  # the test refreshes as the 5 s timer and the save listener do
+
+        def settle():
+            card.refresh()
+            _pump(libcard_analysis.PLAN_DELAY_MS + 100)
+            card.worker.waitForIdle(30)
+            _pump(50)
+            return card.lineText()
+
+        sid = next(row["participant_id"] for row in session.study.subjects if row.get("group") == "case")
+        try:
+            self.assertTrue(settle().startswith("Cohort analysis: up to date"), card.lineText())
+            session.setQc([sid], "fail")  # the X key of the study list
+            session.flush()
+            self.assertEqual(settle(), "Cohort analysis: design changed since the last run")
+            session.setQc([sid], "unreviewed")
+            session.flush()
+            self.assertTrue(settle().startswith("Cohort analysis: up to date"), card.lineText())
+            score = list(card.plan["scores"])  # the confirmed score columns of the plan (aphasia_score)
+            self.assertTrue(score, card.plan)
+            if score:
+                before = session.study.subject(sid).get(score[0])
+                session.setValues([sid], {score[0]: "99"})  # the Case section
+                session.flush()
+                self.assertEqual(settle(), "Cohort analysis: design changed since the last run")
+                session.setValues([sid], {score[0]: before if before is not None else ""})
+                session.flush()
+        finally:
+            card.dispose()
+            card.widget.deleteLater()
+            study_ui.closeStudy()
+            with open(self.participants, "wb") as f:
+                f.write(self.participantsBytes)
+
     def test_b_foreign_compute_block(self):
         """A Compute block of another Map plug-in (e.g. Preflight) refuses Run everything: card button, primary override and Ctrl+Enter."""
         card, widget = self.card, self.widget
