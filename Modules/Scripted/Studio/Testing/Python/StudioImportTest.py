@@ -1345,21 +1345,38 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         cut = os.path.join(self.directory, "fig_cut.png")
         with open(cut, "wb") as stream:
             stream.write(data[: len(data) // 2])
+        import struct
+
+        def tiff(width, height, stripBytes):
+            entries = [(256, 4, width), (257, 4, height), (258, 3, 8), (259, 3, 1), (273, 4, 8), (277, 3, 1), (279, 4, stripBytes)]
+            ifd = struct.pack("<H", len(entries)) + b"".join(struct.pack("<HHII", t, k, 1, v) for t, k, v in entries)
+            return b"II*\x00" + struct.pack("<I", 8 + stripBytes) + b"\x00" * stripBytes + ifd + b"\x00\x00\x00\x00"
+
+        lyingTiff = os.path.join(self.directory, "fig_lying.tif")
+        cutTiff = os.path.join(self.directory, "fig_cut.tif")
+        okTiff = os.path.join(self.directory, "fig_ok.tif")
+        for name, data in ((lyingTiff, tiff(100000, 100000, 5000)), (cutTiff, tiff(50, 50, 2500)[:-30]), (okTiff, tiff(50, 50, 2500))):
+            with open(name, "wb") as stream:
+                stream.write(data)
+        self.assertTrue(importer._tiffIsConsistent(okTiff))
+        self.assertFalse(importer._tiffIsConsistent(lyingTiff))
+        self.assertFalse(importer._tiffIsConsistent(cutTiff))
         model = slicer.app.errorLogModel()
 
         def errorRows():
-            return sum(1 for row in range(model.rowCount()) if "rror" in str(model.index(row, 2).data()))
+            # the badge counts Warning-and-worse rows of these levels: Critical and Fatal count as well as Error
+            return sum(1 for row in range(model.rowCount()) if str(model.index(row, 2).data()).lower() in ("critical", "fatal") or "rror" in str(model.index(row, 2).data()))
 
         shown = []
         original = (slicer.util.errorDisplay, slicer.util.warningDisplay)
         slicer.util.errorDisplay = slicer.util.warningDisplay = lambda text, **kw: shown.append(text)
         try:
             before = errorRows()
-            for path in (textPath, cut):
+            for path in (textPath, cut, lyingTiff, cutTiff):
                 result = importer.handleDrop([path], shell=studioShell)
                 self._pump(5)
                 self.assertEqual(len(result.figures), 0, path)
-            self.assertEqual(len(shown), 2)
+            self.assertEqual(len(shown), 4)
             self.assertEqual(errorRows(), before)
         finally:
             slicer.util.errorDisplay, slicer.util.warningDisplay = original

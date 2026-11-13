@@ -5218,19 +5218,117 @@ def loadFigureVolume(path):
     return scalar
 
 
-def _checkPlainImageReadable(path):
-    """Refuse a damaged .png/.jpg/.bmp before a reader runs on it: the volume readers log ERROR rows (and light the error
-    badge) for a file that is cleanly refused here. Other formats are left to the volume readers.
+def _pngIsComplete(path):
+    """True when the file is a whole PNG: signature, every chunk with a valid CRC, ending with IEND. Reads the file
+    in Python so nothing is logged (QImage.load logs a CRITICAL libpng row for a cut file, which lights the error badge).
     """
-    if os.path.splitext(str(path))[1].lower() not in (".png", ".jpg", ".jpeg", ".bmp"):
-        return
-    extension = os.path.splitext(str(path))[1].lower()
+    import struct
+    import zlib
+
+    size = os.path.getsize(path)
+    with open(path, "rb") as stream:
+        if stream.read(8) != b"\x89PNG\r\n\x1a\n":
+            return False
+        position = 8
+        first = True
+        while position + 12 <= size:
+            header = stream.read(8)
+            if len(header) < 8:
+                return False
+            length, kind = struct.unpack(">I4s", header)
+            if position + 12 + length > size or (first and kind != b"IHDR"):
+                return False
+            first = False
+            crc = zlib.crc32(kind)
+            remaining = length
+            while remaining > 0:
+                block = stream.read(min(remaining, 1 << 20))
+                if not block:
+                    return False
+                crc = zlib.crc32(block, crc)
+                remaining -= len(block)
+            tail = stream.read(4)
+            if len(tail) < 4 or struct.unpack(">I", tail)[0] != (crc & 0xFFFFFFFF):
+                return False
+            position += 12 + length
+            if kind == b"IEND":
+                return True
+    return False
+
+
+def _tiffIsConsistent(path):
+    """False when a classic TIFF is cut or its directory lies (strips/tiles outside the file, or an uncompressed picture
+    far larger than the file). The ITK reader logs CRITICAL/ERROR rows for such a file. Anything not understood
+    (BigTIFF, odd layouts) passes to the reader.
+    """
+    import struct
+
+    size = os.path.getsize(path)
     with open(path, "rb") as stream:
         head = stream.read(8)
-    # A .png must be a PNG (ITK reads by extension); QImage reads the whole file, so a cut file fails too
-    wrongKind = extension == ".png" and head != b"\x89PNG\r\n\x1a\n"
-    image = qt.QImage()
-    if wrongKind or not image.load(str(path)) or image.isNull():
+        if len(head) < 8 or head[:2] not in (b"II", b"MM"):
+            return False
+        end = "<" if head[:2] == b"II" else ">"
+        if struct.unpack(end + "H", head[2:4])[0] != 42:
+            return True
+        offset = struct.unpack(end + "I", head[4:8])[0]
+        if offset < 8 or offset + 2 > size:
+            return False
+        stream.seek(offset)
+        count = struct.unpack(end + "H", stream.read(2))[0]
+        entries = stream.read(12 * count)
+        if len(entries) < 12 * count:
+            return False
+        sizes = {1: 1, 3: 2, 4: 4, 6: 1, 7: 1, 8: 2, 9: 4}
+        codes = {1: "B", 3: "H", 4: "I", 6: "b", 7: "B", 8: "h", 9: "i"}
+        tags = {}
+        for index in range(count):
+            tag, kind, n, raw = struct.unpack(end + "HHI4s", entries[12 * index : 12 * index + 12])
+            width = sizes.get(kind)
+            if width is None or n > 1 << 24 or tag not in (256, 257, 258, 259, 273, 277, 279, 324, 325):
+                continue
+            if width * n <= 4:
+                data = raw[: width * n]
+            else:
+                where = struct.unpack(end + "I", raw)[0]
+                if where + width * n > size:
+                    return False
+                stream.seek(where)
+                data = stream.read(width * n)
+                if len(data) < width * n:
+                    return False
+            tags[tag] = struct.unpack(end + str(n) + codes[kind], data)
+    offsets = tags.get(324 if 324 in tags else 273)
+    counts = tags.get(325 if 325 in tags else 279)
+    if offsets is None or counts is None:
+        return True
+    if len(offsets) != len(counts) or any(o + c > size for o, c in zip(offsets, counts, strict=True)):
+        return False
+    width, height = tags.get(256, (0,))[0], tags.get(257, (0,))[0]
+    if tags.get(259, (1,))[0] == 1 and width and height:
+        samples = tags.get(277, (1,))[0]
+        bits = tags.get(258, (8,))[0]
+        if width * height * samples * bits // 8 > sum(counts) + size:
+            return False
+    return True
+
+
+def _checkPlainImageReadable(path):
+    """Refuse a damaged .png/.jpg/.bmp/.tif before a reader runs on it: the volume readers (and QImage) log ERROR or
+    CRITICAL rows (and light the error badge) for a file that is cleanly refused here. PNG and TIFF are checked in Python
+    without logging; other formats are left to the volume readers.
+    """
+    extension = os.path.splitext(str(path))[1].lower()
+    if extension not in (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"):
+        return
+    if extension == ".png":
+        damaged = not _pngIsComplete(path)
+    elif extension in (".tif", ".tiff"):
+        damaged = not _tiffIsConsistent(path)
+    else:
+        image = qt.QImage()
+        damaged = not image.load(str(path)) or image.isNull()
+    if damaged:
         raise RefusedFileError(_("{name} could not be read as an image (it may be damaged, or another kind of file saved under "
                                  "this name), so it was not opened.").format(name=os.path.basename(str(path))))
 
