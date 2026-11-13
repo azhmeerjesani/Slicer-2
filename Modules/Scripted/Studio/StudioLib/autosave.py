@@ -578,9 +578,9 @@ class AutosaveService:
         if self._closeSummaryConnected:
             mainWindow = slicer.util.mainWindow()
             if mainWindow is not None:
-                mainWindow.disconnect("closeSummaryRequested()", self.flushForClose)
+                mainWindow.disconnect("closeSummaryRequested()", self._onCloseSummaryRequested)
                 if hasattr(mainWindow, "closeSceneSummaryRequested"):
-                    mainWindow.disconnect("closeSceneSummaryRequested()", self.flushForClose)
+                    mainWindow.disconnect("closeSceneSummaryRequested()", self._onCloseSceneSummaryRequested)
                 if hasattr(mainWindow, "loadSceneRequested") and hasattr(mainWindow, "loadSceneFinished"):
                     mainWindow.disconnect("loadSceneRequested()", self._onLoadSceneRequested)
                     mainWindow.disconnect("loadSceneFinished()", self._onLoadSceneFinished)
@@ -2159,9 +2159,9 @@ class AutosaveService:
         mainWindow = slicer.util.mainWindow()
         if self._closeSummaryConnected or mainWindow is None or not hasattr(mainWindow, "closeSummaryRequested"):
             return False
-        mainWindow.connect("closeSummaryRequested()", self.flushForClose)
+        mainWindow.connect("closeSummaryRequested()", self._onCloseSummaryRequested)
         if hasattr(mainWindow, "closeSceneSummaryRequested"):
-            mainWindow.connect("closeSceneSummaryRequested()", self.flushForClose)
+            mainWindow.connect("closeSceneSummaryRequested()", self._onCloseSceneSummaryRequested)
         if hasattr(mainWindow, "loadSceneRequested") and hasattr(mainWindow, "loadSceneFinished"):
             mainWindow.connect("loadSceneRequested()", self._onLoadSceneRequested)
             mainWindow.connect("loadSceneFinished()", self._onLoadSceneFinished)
@@ -2204,6 +2204,49 @@ class AutosaveService:
         if ok:
             self._markProjectSavedForClose()
         return ok
+
+    def _onCloseSummaryRequested(self):
+        """The main window is about to ask whether to save before exit (``closeSummaryRequested()``)."""
+        self._askUnsavedProjectOnClose(self.flushForClose(), "quit")
+
+    def _onCloseSceneSummaryRequested(self):
+        """File > Close Scene is about to ask whether to save the scene (``closeSceneSummaryRequested()``)."""
+        self._askUnsavedProjectOnClose(self.flushForClose(), "close")
+
+    def _askUnsavedProjectOnClose(self, saved, verb):
+        """The open project could not be saved (a full disk, a folder that cannot be written) and the main window is about to
+        close the scene (``verb`` "close") or quit ("quit"). The official "Save before closing scene?" / "Save before exit?"
+        question would offer its Save Data dialog, which writes over the project's own files in place (no temporary file):
+        on a full disk that truncates the lesion saved before. In Classic (and for File > Close Scene in Studio) the user is
+        asked as for Load Scene instead: "Save a copy…" elsewhere, close or quit without saving, or keep working. Studio's
+        own close prompt (``firstrun``) asks the quit question itself.
+        """
+        if saved is not False or self.project is None or self._recovering != 0 or not self.enabled() or self._studyOpen():
+            return
+        mainWindow = slicer.util.mainWindow()
+        if mainWindow is None or mainWindow.property("SlicerStudioCloseMode"):
+            return
+        from StudioLib import firstrun
+
+        if verb == "quit" and slicer.app.property(firstrun.DISCLAIMER_HANDLED_PROPERTY):
+            return
+        try:
+            from StudioLib import projects_ui
+
+            title = _("Quit") if verb == "quit" else _("Close scene")
+            answer = projects_ui.askReplaceUnsavedProject(title, self.project, self._projectPausedReason, verb=verb)
+        except Exception:
+            logging.error("Slicer Studio: asking about the project that could not be saved failed:\n" + traceback.format_exc())
+            answer = "cancel"
+        if answer not in ("save", "discard"):
+            mainWindow.setProperty("SlicerStudioCloseMode", "cancel")
+            return
+        if verb == "quit":
+            mainWindow.setProperty("SlicerStudioCloseMode", "quit")
+            return
+        # A copy holds the edits, or the user chose to drop them: the close does not try (and fail) to save again
+        self._discardOnClose = True
+        mainWindow.setProperty("SlicerStudioCloseMode", "projectSaved")
 
     def _markProjectSavedForClose(self):
         """The project is up to date: the main window asks nothing about "unsaved" scene state (the views and the hierarchy

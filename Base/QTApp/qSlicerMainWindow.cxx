@@ -620,6 +620,15 @@ bool qSlicerMainWindowPrivate::confirmCloseApplication()
   {
     return this->confirmCloseApplicationLesionSaved(closeSummary);
   }
+  // The application asked its own question already (for example about a project that could not be saved)
+  if (closeMode == "cancel")
+  {
+    return false;
+  }
+  if (closeMode == "quit")
+  {
+    return true;
+  }
 
   QString details;
   // "projectSaved": the application saved the project and nothing else is unsaved (the scene's own changes since it
@@ -827,9 +836,15 @@ bool qSlicerMainWindowPrivate::confirmCloseScene()
   // The application may have saved the project already (see qSlicerMainWindow::closeSceneSummaryRequested())
   q->setProperty("SlicerStudioCloseMode", QVariant());
   emit q->closeSceneSummaryRequested();
-  if (q->property("SlicerStudioCloseMode").toString() == "projectSaved")
+  const QString closeMode = q->property("SlicerStudioCloseMode").toString();
+  if (closeMode == "projectSaved")
   {
     return true;
+  }
+  // The application asked its own question already (for example about a project that could not be saved)
+  if (closeMode == "cancel")
+  {
+    return false;
   }
 
   // Allocated on the stack (not with WA_DeleteOnClose) so that clickedButton()

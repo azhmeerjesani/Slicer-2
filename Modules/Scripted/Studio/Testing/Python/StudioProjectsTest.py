@@ -9222,7 +9222,9 @@ class StudioProjectsTest(unittest.TestCase):
         hierarchy numbers) is closed unasked by File > Close Scene and by quitting in Classic (the project save, not the
         official "Save before ...?" prompt, is what protects the data); a project that is not saved still asks.
         """
-        from StudioLib import firstrun
+        from unittest import mock
+
+        from StudioLib import firstrun, projects_ui
 
         mainWindow = slicer.util.mainWindow()
         if not hasattr(mainWindow, "closeSceneSummaryRequested"):
@@ -9244,11 +9246,13 @@ class StudioProjectsTest(unittest.TestCase):
                 mainWindow.setProperty(firstrun.CLOSE_MODE_PROPERTY, "")
                 getattr(mainWindow, signalName)()
                 self.assertEqual(mainWindow.property(firstrun.CLOSE_MODE_PROPERTY), "projectSaved", signalName)
-            # Not up to date: the handler leaves the official prompt on
+            # Not up to date: the Studio question about the unsaved project asks (test_113c), never "projectSaved" unasked
             service.saveNow = lambda *args, **kwargs: False
             mainWindow.setProperty(firstrun.CLOSE_MODE_PROPERTY, "")
-            mainWindow.closeSceneSummaryRequested()
-            self.assertFalse(mainWindow.property(firstrun.CLOSE_MODE_PROPERTY))
+            with mock.patch.object(projects_ui, "_question", lambda *args, **kwargs: 2), \
+                    mock.patch.object(projects_ui, "_service", lambda: service), mock.patch.object(projects_ui, "_shell", lambda: None):
+                mainWindow.closeSceneSummaryRequested()
+            self.assertEqual(mainWindow.property(firstrun.CLOSE_MODE_PROPERTY), "cancel")
         finally:
             slicer.app.setProperty(firstrun.DISCLAIMER_HANDLED_PROPERTY, handled)
             mainWindow.setProperty(firstrun.CLOSE_MODE_PROPERTY, "")
@@ -10221,6 +10225,77 @@ sys.exit(web.command_local(args))
             standIn.setObjectName("")
             standIn.deleteLater()
             real.setObjectName("FileCloseSceneAction")
+
+    def test_113c_classic_close_or_quit_with_an_unsaveable_project_asks_the_studio_question(self):
+        """In Classic, File > Close Scene (Ctrl+W) and quitting while the open project could not be saved (disk full) fell
+        back to the official "Save before closing scene?" / "Save before exit?" question (BB-1): Studio's own close prompt
+        is uninstalled there, and the autosave hook only answered "projectSaved" when the save succeeded. The official
+        "Save scene" / "Save" opened the Save Data dialog on the project folder, which wrote over the project's files in
+        place and truncated the saved lesion. The project stays a project in Classic (A-09): the Studio question asks
+        ("Save a copy…", close or quit without saving, "Keep working") and answers the main window itself.
+        """
+        import shutil as shutilModule
+        from unittest import mock
+
+        from StudioLib import firstrun, projects_ui
+
+        mainWindow = slicer.util.mainWindow()
+        if not hasattr(mainWindow, "closeSceneSummaryRequested"):
+            self.skipTest("the main window has no close scene summary hook")
+        service = self._service()
+        volume, _path = self._userVolume("Full disk classic", shape=(20, 24, 28))
+        segmentation, segmentId, array = self._lesion(volume, name="Lesion")
+        project = self._projectFor(service)
+        self._save(service)
+        lesionPath = os.path.join(project.path, "Segmentations", "Lesion.seg.nrrd")
+        saved = _md5File(lesionPath)
+        array[12:16, 12:16, 12:16] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, volume)
+        realDiskUsage = shutilModule.disk_usage
+        asked = []
+
+        def answer(index):
+            def question(parent, title, text, buttons, default=0):
+                asked.append((title, text, list(buttons), default))
+                return index
+            return question
+
+        def emit(signalName, index):
+            mainWindow.setProperty(firstrun.CLOSE_MODE_PROPERTY, "")
+            with mock.patch.object(projects_ui, "_question", answer(index)):
+                getattr(mainWindow, signalName)()
+            return mainWindow.property(firstrun.CLOSE_MODE_PROPERTY)
+
+        handled = slicer.app.property(firstrun.DISCLAIMER_HANDLED_PROPERTY)
+        slicer.app.setProperty(firstrun.DISCLAIMER_HANDLED_PROPERTY, False)  # Classic: Studio's close prompt is not installed
+        service.connectCloseSummary()
+        try:
+            with mock.patch.object(shutilModule, "disk_usage", lambda path: realDiskUsage(path)._replace(free=1024)), \
+                    mock.patch.object(projects_ui, "_service", lambda: service), mock.patch.object(projects_ui, "_shell", lambda: None):
+                # Ctrl+W, "Keep working" (the default): the main window cancels the close, no official question
+                self.assertEqual(emit("closeSceneSummaryRequested", 2), "cancel")
+                self.assertEqual(len(asked), 1, "the Studio question is asked instead of the official one")
+                title, _text, buttons, default = asked[0]
+                self.assertEqual(title, "Close scene")
+                self.assertEqual(buttons, ["Save a copy…", "Close without saving", "Keep working"])
+                self.assertEqual(default, 2, "keeping the work is the default")
+                self.assertIs(service.project, project, "the project stays open with its edits")
+                # Quit, "Keep working": the quit is cancelled; "Quit without saving": the application quits unasked
+                self.assertEqual(emit("closeSummaryRequested", 2), "cancel")
+                self.assertEqual(asked[-1][0], "Quit")
+                self.assertEqual(asked[-1][2], ["Save a copy…", "Quit without saving", "Keep working"])
+                self.assertEqual(emit("closeSummaryRequested", 1), "quit")
+                self.assertFalse(service._discardOnClose, "a quit answer does not change what a later Close Scene does")
+                # Ctrl+W, "Close without saving": the scene closes without the official question and without writing
+                self.assertEqual(emit("closeSceneSummaryRequested", 1), "projectSaved")
+                self.assertEqual(len(asked), 4)
+                slicer.mrmlScene.Clear(0)
+                self.io.backgroundWriter().drain(10.0)
+                self.assertIsNone(service.project, "the project is closed")
+            self.assertEqual(_md5File(lesionPath), saved, "the lesion saved before is kept as it was")
+        finally:
+            slicer.app.setProperty(firstrun.DISCLAIMER_HANDLED_PROPERTY, handled)
+            mainWindow.setProperty(firstrun.CLOSE_MODE_PROPERTY, "")
 
     def test_113b_a_file_that_could_not_be_written_is_not_announced_or_saved(self):
         """A lesion file that another program changed is kept and Studio writes "<name> (Slicer Studio).seg.nrrd" next to it.

@@ -196,13 +196,15 @@ signals:
   /// emitted). A handler connected with a direct connection may set them:
   /// - "unsavedLesion": the summary is shown with the buttons "Save lesion...", "Don't save" and "Cancel";
   /// - "lesionSaved": the summary is shown with the buttons "Quit", "Save session..." and "Cancel";
+  /// - "quit" or "cancel": the application asked its own question; the application exits, or stays open;
   /// - empty (the default): the usual confirmation.
   /// \sa saveRequested()
   void closeSummaryRequested();
 
   /// Emitted when Close Scene is about to ask whether to save a modified scene, after the main window property
   /// SlicerStudioCloseMode is cleared. A handler connected with a direct connection may set it to "projectSaved":
-  /// the project is up to date on disk and nothing is asked. Same value is honored by closeSummaryRequested().
+  /// the project is up to date on disk and nothing is asked, or to "cancel": the application asked its own question
+  /// and the scene stays open. "projectSaved" is honored by closeSummaryRequested() as well.
   void closeSceneSummaryRequested();
 
   /// Emitted when the user chose "Save lesion..." in the exit confirmation. A handler connected with a direct
