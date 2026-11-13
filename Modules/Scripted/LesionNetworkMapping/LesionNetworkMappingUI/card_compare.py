@@ -188,7 +188,7 @@ class CompareCard:
         self.job = None
         self.notice = ""
         self._raw = None  # (key, matrix, participant ids)
-        self._reference = None  # (bundle path, Reference or None)
+        self._reference = None  # ((bundle path, reference fingerprint), Reference or None)
         self._vectors = {}
         self._cleanedUp = False
         self.widget = widgets.card(_("Compare"), objectName="LNMCompareCard", collapsed=True)
@@ -436,15 +436,20 @@ class CompareCard:
         bundle = self.ctx.bundle
         if bundle is None:
             return None
-        if self._reference is None or self._reference[0] != bundle.path:
-            try:
-                from LesionNetworkMappingLib import reference
+        from LesionNetworkMappingLib import reference
 
+        # Keyed on the files on disk too, so that a build or rebuild (QA card, command line) is picked up.
+        try:
+            key = (bundle.path, reference.reference_fingerprint(bundle))
+        except Exception:
+            key = (bundle.path, None)
+        if self._reference is None or self._reference[0] != key:
+            try:
                 loaded = reference.load_reference(bundle, verify=False)
             except Exception:
                 logging.exception("Lesion network mapping: the reference maps could not be loaded")
                 loaded = None
-            self._reference = (bundle.path, loaded)
+            self._reference = (key, loaded)
         return self._reference[1]
 
     def mapsTsv(self):
@@ -783,7 +788,7 @@ class CompareCard:
         from LesionNetworkMappingLib import refmaps
 
         bundle = self.ctx.bundle
-        cacheKey = (source.key, bundle.path, os.path.getmtime(source.path) if source.path and os.path.isfile(source.path) else None)
+        cacheKey = (source.key, bundle.path, os.path.getmtime(source.path) if source.path and os.path.isfile(source.path) else None, (source.info or {}).get("reference_sha256"))
         if source.group != "instudy" and cacheKey in self._vectors:
             return self._vectors[cacheKey]
         if source.vector is not None:

@@ -1037,6 +1037,26 @@ def _candidates(bundle, path=None):
     return [base, *sorted(glob.glob(os.path.join(base, "subj-*")))]
 
 
+def reference_fingerprint(bundle):
+    """A cheap stamp of what :func:`load_reference` reads first: the reference.json of every reference
+    folder and the bundle's connectome.json (path, size and mtime of each; None for a missing file).
+
+    It changes when reference maps are built, rebuilt or removed, or the connectome is re-converted,
+    so a caller that keeps a loaded :class:`Reference` reloads it when the stamp differs.
+    """
+    bundle_path = os.fspath(getattr(bundle, "path", bundle))
+    stamps = []
+    base = os.path.join(bundle_path, "derived", "reference")
+    folders = [base, *sorted(glob.glob(os.path.join(base, "subj-*")))]  # as _candidates
+    for path in [os.path.join(folder, REFERENCE_JSON) for folder in folders] + [os.path.join(bundle_path, "connectome.json")]:
+        try:
+            info = os.stat(path)
+            stamps.append((path, info.st_size, info.st_mtime_ns))
+        except OSError:
+            stamps.append((path, None, None))
+    return tuple(stamps)
+
+
 def reference_status(bundle, subjects_sha=None, path=None, strict=False, verify=True, check_data=True):
     """Status of every reference folder of a bundle: a list of {path, status, reason, metadata}.
 

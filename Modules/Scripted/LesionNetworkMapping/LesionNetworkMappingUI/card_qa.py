@@ -903,12 +903,17 @@ class QACard:
         bundle = self.ctx.bundle
         if bundle is None:
             return None
-        if self._reference is not None and self._reference[0] == bundle.path:
-            return self._reference[1]
         from LesionNetworkMappingLib import qa as qaLib
+        from LesionNetworkMappingLib import reference
 
+        try:
+            key = (bundle.path, reference.reference_fingerprint(bundle))
+        except Exception:
+            key = (bundle.path, None)
+        if self._reference is not None and self._reference[0] == key:
+            return self._reference[1]
         loaded = qaLib.load_reference(bundle, verify=False)
-        self._reference = (bundle.path, loaded)
+        self._reference = (key, loaded)
         return loaded
 
     def _maskedValues(self, path, bundle):
