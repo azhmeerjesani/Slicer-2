@@ -75,6 +75,9 @@ Run with the main window and testing enabled::
   ``Extensions-<revision>`` folder and their scripted modules are loaded as extensions (folder added to ``sys.path``).
 - ``test_24_lesion_metrics_follow_a_result_that_repoints_the_lesion`` (BB-1): a merged result that repoints the lesion
   (a normalization) recomputes the row's centroid, outside-brain share and lesion size from the new file at once.
+- ``test_102_warp_uses_the_open_subjects_edits`` (BB-1): a warp to MNI152NLin6Asym of the open subject writes its edits first, so
+  the warped lesion has them (it read the old file and the result, merged after Done, dropped them); a lesion edited while
+  the warp runs keeps its row (the warp is not applied, a toast asks to warp it again).
 - ``test_27_sources_undo_reverts_the_change_just_made`` (BB-1): in the Sources card, U right after P or X undoes that change
   (the selection had moved on to the next record, and U reverted that record's earlier decision silently), selects the
   record and says what was undone; a row selected by the user is undone as before.
@@ -8532,3 +8535,124 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertNotEqual(entry.get("SlicerStudio", {}).get("type"), "numeric")
         result = lc.applyChanges(session, {"nihss": {"role": "score"}})
         self.assertEqual(result["applied"], ["nihss"], result)
+
+    def test_102_warp_uses_the_open_subjects_edits(self):
+        """BB-1: a warp to MNI152NLin6Asym started while the open subject had edits that were not written read the old lesion
+        file; its result waited for Done and then repointed the row at a warp without the edits (no flag, no toast). The edits
+        are now written before the warp reads the file; a lesion edited while the warp runs is not repointed (a toast says
+        to warp it again).
+        """
+        import SimpleITK as sitk
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grids = {spec.grid_id: spec for spec in geometry.GRID_REGISTRY}
+        source, reference = grids["TF2009-2mm"], grids["NLin6-2mm"]
+        folder = os.path.join(self.directory, "Warp open subject")
+        os.makedirs(folder)
+        rng = np.random.default_rng(1)
+        paths = []
+        for index in (1, 2):
+            paths.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(paths[-1], rng.normal(300, 8, source.shape).astype(np.int16), source.affine, sform_code=4, qform_code=4)
+        transforms = os.path.join(self.directory, "transforms")
+        os.makedirs(transforms)
+        transformPath = os.path.join(transforms, "tpl-MNI152NLin6Asym_from-MNI152NLin2009cAsym_mode-image_xfm.tfm")
+        sitk.WriteTransform(sitk.TranslationTransform(3), transformPath)
+        referencePath = os.path.join(transforms, "reference.nii.gz")
+        nifti.write_nifti(referencePath, np.zeros(reference.shape, np.int16), reference.affine, sform_code=4, qform_code=4)
+
+        def paint(session, box):
+            segmentation, volume = session.segmentationNode(), session.volumeNode()
+            segmentId = segmentation.GetSegmentation().GetNthSegmentID(0)
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, segmentId, volume)
+            array[box] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, volume)
+            slicer.app.processEvents()
+
+        def voxels(path):
+            return int((np.asarray(nifti.read_nifti(path)[0]) > 0).sum())
+
+        toasts = []
+        originalToast = study_ui._toast
+
+        def spyToast(shell_, text, *args, **kwargs):
+            toasts.append(text)
+            return originalToast(shell_, text, *args, **kwargs)
+
+        def startWarp(sid):
+            del toasts[:]
+            job = study_ui.warpToConnectomeSpace(sid, transformPath=transformPath, referencePath=referencePath, shell=studioShell)
+            self.assertIsNotNone(job)
+            return job
+
+        def waitForWarp():
+            deadline = time.time() + 240
+            while time.time() < deadline and not any("warp" in text.lower() and "sub-01" in text for text in toasts):
+                slicer.app.processEvents()
+                time.sleep(0.05)
+            for _ in range(10):
+                slicer.app.processEvents()
+            self.assertFalse(any("failed" in text for text in toasts), toasts)
+
+        warped = os.path.join(folder, "lesions", "sub-01_space-MNI152NLin6Asym_desc-lesion_mask.nii.gz")
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        study_ui._toast = spyToast
+        try:
+            session = study_ui.createStudy(paths, studioShell, folder=folder)
+            study = session.study
+            for sid in ("sub-01", "sub-02"):
+                if study.subject(sid).get("space") != "MNI152NLin2009cAsym":
+                    study.set(sid, {"space": "MNI152NLin2009cAsym"})
+            session.open("sub-01", switchToDraw=False)
+            paint(session, np.s_[40:46, 50:56, 40:46])
+            session.done()
+            traced = study.subject("sub-01")["lesion"]
+            self.assertEqual(voxels(study.abspath(traced)), 216)
+            policy = study.trace_policy
+            policy["space"] = "MNI152NLin6Asym"
+            study.trace_policy = policy
+            study.save()
+
+            # A lesion edited while the warp runs is not the one warped: the row keeps it, the warp is not applied
+            session.open("sub-01", switchToDraw=False)
+            self.assertFalse(session.isDirty())
+            startWarp("sub-01")
+            paint(session, np.s_[60:62, 60:62, 60:62])
+            self.assertTrue(session.isDirty())
+            waitForWarp()
+            self.assertTrue(any("edited while it was warped" in text for text in toasts), toasts)
+            session.done()
+            session.applyInbox()
+            row = study.subject("sub-01")
+            self.assertEqual((row["lesion"], row["space"]), (traced, "MNI152NLin2009cAsym"))
+            self.assertEqual(voxels(study.abspath(traced)), 216 + 8)
+            self.assertFalse(os.path.exists(warped))
+
+            # Edits not written when the warp starts are written first: the warped lesion has them
+            session.open("sub-01", switchToDraw=False)
+            paint(session, np.s_[20:30, 20:30, 20:30])
+            self.assertTrue(session.isDirty())
+            startWarp("sub-01")
+            self.assertEqual(voxels(study.abspath(traced)), 216 + 8 + 1000)
+            waitForWarp()
+            if session.current() == "sub-01" and session.isDirty():
+                session.done()
+            session.applyInbox()
+            row = study.subject("sub-01")
+            self.assertEqual(session.lastInboxHeld, [])
+            self.assertEqual(row["space"], "MNI152NLin6Asym")
+            self.assertEqual(study.abspath(row["lesion"]), warped)
+            self.assertGreater(voxels(warped), 216 + 1000 - 50)
+        finally:
+            study_ui._toast = originalToast
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)

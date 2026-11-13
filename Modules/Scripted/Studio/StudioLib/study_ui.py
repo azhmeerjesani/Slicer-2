@@ -4595,10 +4595,26 @@ def canWarpToConnectomeSpace(studySession, sid):
     return geometry.space_family(str(row.get("space") or "")) == "2009"
 
 
+def _lesionEditedDuringWarp(studySession, sid, originalLesion, lesionStamp):
+    """True when the lesion that a warp of ``sid`` read (``originalLesion``, file stamp ``lesionStamp``) is not the subject's
+    lesion any more: the row points at another file, the file was written again, or the open subject has edits not written.
+    """
+    studyObject = studySession.study
+    if sid not in studyObject or studyObject.subject(sid).get("lesion") != originalLesion:
+        return True
+    if _fileStamp(studyObject.abspath(originalLesion)) != lesionStamp:
+        return True
+    return _session is studySession and studySession.current() == sid and studySession.isDirty()
+
+
 def warpToConnectomeSpace(sid, transformPath=None, referencePath=None, shell=None):
     """Warp a subject's 2009c lesion to MNI152NLin6Asym with the transforms CLI (two background jobs: the fractional
     ``desc-lesionProb`` and the binarized ``desc-lesion`` at 0.5). The originals are kept; the row is repointed through the
     inbox with ``trace_template`` and the transform's sha256 (in the audit record and the lesion sidecar).
+
+    The jobs read the lesion file: edits of the open subject that are not written yet are written first (the subject stays
+    open). A lesion edited while the jobs run (written, or still unwritten when they finish) was not the one warped: the row is
+    then not repointed, and a toast asks to warp it again.
 
     :return: the first job, or None when cancelled.
     """
@@ -4609,8 +4625,6 @@ def warpToConnectomeSpace(sid, transformPath=None, referencePath=None, shell=Non
     from LesionNetworkMappingUI import jobrunner
 
     studyObject = studySession.study
-    row = studyObject.subject(sid)
-    lesion = studyObject.abspath(row["lesion"])
     target = "MNI152NLin6Asym"
     transformPath = transformPath or slicer.util.settingsValue(WARP_TRANSFORM_KEY, "")
     if not transformPath or not os.path.isfile(transformPath):
@@ -4630,6 +4644,17 @@ def warpToConnectomeSpace(sid, transformPath=None, referencePath=None, shell=Non
         referencePath = sampleFile(NLIN6_2MM_SAMPLE)
         if referencePath is None:
             raise RuntimeError(_("The MNI152NLin6Asym template could not be downloaded"))
+    # The jobs warp the file: the open subject's edits are written to it first, or nothing is warped
+    if studySession.current() == sid and studySession.isDirty() and not studySession.writeCurrent():
+        _toast(shell, _("{sid} was not warped: its edits could not be written").format(sid=sid), ms=6000, level="warning")
+        return None
+    if not canWarpToConnectomeSpace(studySession, sid):
+        _toast(shell, _("{sid} has no MNI152NLin2009cAsym lesion to warp").format(sid=sid))
+        return None
+    row = studyObject.subject(sid)
+    originalLesion = row["lesion"]
+    lesion = studyObject.abspath(originalLesion)
+    lesionStamp = _fileStamp(lesion)
     studyModule = _lnm("study")
     lesionsDir = os.path.join(studyObject.path, studyModule.LESIONS_DIR)
     probability = os.path.join(lesionsDir, f"{sid}_space-{target}_desc-lesionProb_mask.nii.gz")
@@ -4642,6 +4667,15 @@ def warpToConnectomeSpace(sid, transformPath=None, referencePath=None, shell=Non
     def finish(job):
         if not job.succeeded():
             _toast(shell, _("Warping {sid} failed: {reason}").format(sid=sid, reason=job.failureReason or job.state), ms=6000, level="warning")
+            return
+        if _lesionEditedDuringWarp(studySession, sid, originalLesion, lesionStamp):
+            # The warp is of a lesion that is no longer the subject's: its result would drop the edits from the analysis
+            for path in (probability, binary):
+                with contextlib.suppress(OSError):
+                    os.remove(path)
+            logging.info(f"Studio: the warp of {sid} was not applied: its lesion was edited while it ran")
+            _toast(shell, _("The lesion of {sid} was edited while it was warped: the warp was not applied. Warp it again.").format(sid=sid),
+                   ms=8000, level="warning")
             return
         provenance = (job.doneEvent or {}).get("provenance") or {}
         audit = {"event": "warp", "sid": sid, "from": sourceSpace, "to": target, "transform": os.path.basename(str(transformPath)),
