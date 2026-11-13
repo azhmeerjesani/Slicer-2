@@ -843,6 +843,8 @@ class FastIndexDialog(qt.QDialog):
     def _existingIndex(self, ids):
         from LesionNetworkMappingLib import nulls
 
+        if self.bundle is None:
+            return None
         try:
             folder = nulls.find_fast_index(self.bundle, ids)
         except (OSError, ValueError):

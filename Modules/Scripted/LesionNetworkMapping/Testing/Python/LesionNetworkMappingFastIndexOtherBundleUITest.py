@@ -125,6 +125,19 @@ class LesionNetworkMappingFastIndexOtherBundleUITest(unittest.TestCase):
             with open(self.recordPath, "w", encoding="utf-8") as f:
                 f.write(original)
 
+    def test_4_unreachable_connectome_opens_with_a_sentence(self):
+        """A connectome whose drive was unplugged: the dialog opens (no raw AttributeError) and says it cannot be opened."""
+        from LesionNetworkMappingUI import manager_fastindex
+
+        for path in (os.path.join(self.tmp, "unplugged.lnmc"), None):
+            ctx = types.SimpleNamespace(cohortMaps=self.mapsTsv, bundle=self.bundles["Synthetic"])
+            dialog = manager_fastindex.FastIndexDialog(ctx, path)
+            self.addCleanup(dialog.deleteLater)
+            self.addCleanup(dialog.close)
+            self.assertIsNone(dialog.bundle)
+            self.assertFalse(dialog.buildButton.enabled)
+            self.assertIsNone(dialog._existingIndex(["sub-001"]))
+
 
 if __name__ == "__main__":
     unittest.main()
