@@ -2105,12 +2105,14 @@ def loadFiles(paths, shell=None, pairedLesion=None):
 
     loadedPaths = []
     refused = []
+    topBar = getattr(shell, "topBar", None) if shell is not None else None
     with slicer.util.WaitCursor():
         # Scenes first (they may replace nodes), then scans (a 4D image is a sequence), then lesions (shown over the scans)
         for wantedKind in ("scene", "volume", "sequence", "lesion"):
             for path, kind in zip(paths, kinds, strict=True):
                 if kind != wantedKind:
                     continue
+                logMark = topBar.logRowMark() if hasattr(topBar, "logRowMark") else None
                 openNode = openNodeForFile(path) if shell is not None and kind != "scene" else None
                 if openNode is None and shell is not None and kind == "lesion":
                     # A lesion file that Classic's Add Data opened as a label map: that label map becomes the lesion
@@ -2154,6 +2156,8 @@ def loadFiles(paths, shell=None, pairedLesion=None):
                         # a file too large for the memory: planned refusal, plain words (no reader text, no traceback)
                         refused.append(path)
                         _noteLoadResult(path, False)
+                        if logMark is not None:
+                            topBar.ignoreErrorRowsSince(logMark)  # the reader's raw Error rows: already explained
                         logging.warning(f"Studio: {path} was not opened: too large for the memory ({str(e)[:200]!r})")
                         result.errors.append((path, _tooLargeMessage(path)))
                         continue

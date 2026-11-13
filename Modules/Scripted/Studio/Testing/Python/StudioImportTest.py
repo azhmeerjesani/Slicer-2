@@ -622,6 +622,51 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             slicer.util.errorDisplay, slicer.util.warningDisplay = original
 
+    def test_too_large_refusal_does_not_light_the_error_badge(self):
+        """BB-1: the reader logs Error rows ("returned failure for request") when a file is too large for the memory; the
+        refusal is explained in the box, so those rows are not counted by the error badge (other errors still are).
+        """
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        topBar = studioShell.topBar
+        path = os.path.join(self.directory, "huge_T1w.nii")
+        with open(path, "wb") as f:
+            f.write(b"x")
+        shown = []
+        original = (slicer.util.errorDisplay, slicer.util.warningDisplay, slicer.util.loadVolume, importer._checkNiftiComplete,
+                    importer._checkScanVoxelType)
+
+        def failingLoad(*args, **kwargs):
+            logging.warning("reader started")
+            logging.error("Algorithm vtkITKArchetypeImageSeriesScalarReader (0x1) returned failure for request: vtkInformation")
+            raise MemoryError("Unable to allocate 2147483648 elements of size 1 bytes.")
+
+        slicer.util.errorDisplay = lambda text, **kw: shown.append(("error", text))
+        slicer.util.warningDisplay = lambda text, **kw: shown.append(("warning", text))
+        slicer.util.loadVolume = failingLoad
+        importer._checkNiftiComplete = lambda *a, **k: None
+        importer._checkScanVoxelType = lambda *a, **k: None
+        try:
+            self._pump(10)
+            topBar._scanErrors()
+            before = topBar.errorCount()
+            result = importer.loadFiles([path], studioShell)
+            self._pump(10)
+            topBar._scanErrors()
+            self.assertEqual(len(result.errors), 1)
+            self.assertEqual([kind for kind, _text in shown], ["warning"])
+            self.assertEqual(topBar.errorCount(), before)
+            logging.warning("separator")
+            logging.error("a real error afterwards")
+            self._pump(10)
+            topBar._scanErrors()
+            self.assertEqual(topBar.errorCount(), before + 1)
+            topBar._onErrorLogViewed()
+        finally:
+            (slicer.util.errorDisplay, slicer.util.warningDisplay, slicer.util.loadVolume, importer._checkNiftiComplete,
+             importer._checkScanVoxelType) = original
+
     def test_truncated_nifti_is_refused_as_damaged(self):
         """BB-1: a NIfTI file whose data stops before the end that its header announces (gzip or plain) is a load error in
         plain words, for a scan and for a lesion: the reader zero-fills the missing voxels and reports success.

@@ -1372,6 +1372,7 @@ class TopBar:
         self._seenErrorRows = 0
         self._dicomFirstRunRow = None
         self._dicomFirstRunSqlErrors = 0
+        self._plannedRefusalRows = set()
         self._errorCountTimer = qt.QTimer(self.toolBar)
         self._errorCountTimer.setSingleShot(True)
         self._errorCountTimer.setInterval(100)
@@ -1394,7 +1395,9 @@ class TopBar:
         scanned = self._scannedRows
         for row in range(self._scannedRows, rowCount):
             isError = model.index(row, _LEVEL_COLUMN).data() in _ERROR_LEVEL_NAMES
-            if isError and self._isBlankMessage(row):
+            if row in self._plannedRefusalRows:
+                pass  # the reader text of a refusal that was explained in plain words
+            elif isError and self._isBlankMessage(row):
                 if row == rowCount - 1:
                     # The log groups consecutive entries of a level in the last row: a later line can still join this one
                     break
@@ -1403,6 +1406,22 @@ class TopBar:
             scanned = row + 1
         self._scannedRows = scanned
         self._updateErrorBadge()
+
+    def logRowMark(self):
+        """The number of log rows now (after counting the pending ones), to pass to ``ignoreErrorRowsSince``."""
+        self._scanErrors()
+        return self.errorLogModel.rowCount()
+
+    def ignoreErrorRowsSince(self, mark):
+        """Do not count the Error rows logged since ``mark`` (``logRowMark``): the raw reader text of a planned refusal
+        (for example "too large for the memory") that the user was already told about in plain words.
+        """
+        slicer.app.processEvents()
+        model = self.errorLogModel
+        for row in range(mark, model.rowCount()):
+            self._plannedRefusalRows.add(row)
+        self._scannedRows = min(self._scannedRows, mark)
+        self._rescanErrors(keepIgnored=True)
 
     def _isBlankMessage(self, row):
         """True for a log row without text. CTK's stderr reader logs a stray newline as an empty Critical "FD" entry
@@ -1428,8 +1447,10 @@ class TopBar:
             return True
         return False
 
-    def _rescanErrors(self, *args):
+    def _rescanErrors(self, *args, keepIgnored=False):
         # The log was cleared or filtered
+        if not keepIgnored:
+            self._plannedRefusalRows = set()
         self._scannedRows = 0
         self._errorRows = 0
         self._dicomFirstRunRow = None
