@@ -594,6 +594,11 @@ def followMovedPaths(movedPath):
     known = LesionNetworkMappingLogic._knownConnectomes
     for identifier, path in list(known.items()):
         known[identifier] = movedPath(path)
+    # A download paused (or failed) in this session resumes from the request it holds: its folder follows too
+    catalog = sys.modules.get("LesionNetworkMappingUI.manager_catalog")
+    fetch = getattr(catalog, "_controller", None) if catalog is not None else None
+    if fetch is not None and isinstance(fetch.request, dict) and isinstance(fetch.request.get("dest"), str) and not fetch.isRunning():
+        fetch.request["dest"] = movedPath(fetch.request["dest"])
     widget = getattr(slicer.modules, "LesionNetworkMappingWidget", None)
     if widget is not None and hasattr(widget, "followMovedPaths"):
         widget.followMovedPaths(movedPath)

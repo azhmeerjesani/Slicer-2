@@ -817,10 +817,14 @@ class StudioProjectsTest(unittest.TestCase):
         inside the moved items follow the folder; paths outside the moved items stay as they are.
         """
         import LesionNetworkMapping as lnm
+        from LesionNetworkMappingUI import manager_catalog
 
         projects = self.projects
         service = self._service()
         keys = self.autosave.MOVED_PATH_KEYS + self.autosave.MOVED_JSON_PATH_KEYS
+        self.assertIn(manager_catalog.ACTIVE_FETCH_SETTING, keys)
+        fetch = manager_catalog.controller()
+        fetchSaved = (fetch.request, fetch.state)
         settings = qt.QSettings()
         saved = {key: settings.value(key) for key in keys}
         known = dict(lnm.LesionNetworkMappingLogic._knownConnectomes)
@@ -845,6 +849,10 @@ class StudioProjectsTest(unittest.TestCase):
             settings.setValue("Studio/LNM/NullsControlSet", json.dumps({"kind": "pool_maps", "path": controlTsv}))
             settings.setValue("Studio/LNM/LastExportFolder", os.path.join(self.root, "LNM", "Exports"))
             settings.setValue("Studio/NiftiExport/LastFolder", outside)
+            # A connectome download paused in LNM/Connectomes (saved request and the request held in this session)
+            fetchRequest = {"entry": "gsp1000-ilxiks", "dest": os.path.join(self.root, "LNM", "Connectomes"), "subset": None, "termsSha": "x"}
+            settings.setValue(manager_catalog.ACTIVE_FETCH_SETTING, json.dumps(fetchRequest))
+            fetch.request, fetch.state = dict(fetchRequest), "paused"
             newRoot = os.path.join(self.tempDir, "moved", "Slicer Studio")
             moved = service.moveRoot(newRoot, moveContent=True)
             self.assertIn("LNM", moved)
@@ -862,6 +870,9 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertEqual(lnm.LesionNetworkMappingLogic().resolveConnectome(identifier), newBundle)
             self.assertEqual(str(settings.value(lnm.COHORT_STUDY_SETTING)), os.path.join(os.path.normpath(newRoot), "Studies", "Study A"))
             self.assertEqual(str(settings.value("Studio/LNM/FetchDestination")), os.path.join(os.path.normpath(newRoot), "LNM", "Connectomes"))
+            newFetchDest = os.path.join(os.path.normpath(newRoot), "LNM", "Connectomes")
+            self.assertEqual(json.loads(str(settings.value(manager_catalog.ACTIVE_FETCH_SETTING))), dict(fetchRequest, dest=newFetchDest))
+            self.assertEqual(fetch.request, dict(fetchRequest, dest=newFetchDest))
             # Settings > Change… > Move without the autosave service (it moves the folder itself): the paths follow too
             from unittest import mock
 
@@ -891,6 +902,7 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertEqual(lnm.LesionNetworkMappingLogic.registeredConnectomes(), [thirdBundle, outside, notMoved])
             self.assertEqual(lnm.LesionNetworkMappingLogic().resolveConnectome(identifier), thirdBundle)
         finally:
+            fetch.request, fetch.state = fetchSaved
             lnm.LesionNetworkMappingLogic._knownConnectomes.clear()
             lnm.LesionNetworkMappingLogic._knownConnectomes.update(known)
             for key, value in saved.items():

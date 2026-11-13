@@ -3182,8 +3182,12 @@ MOVED_PATH_KEYS = (
     "Studio/LNM/LastExportFolder",
     "Studio/NiftiExport/LastFolder",
 )
-#: Fork-only settings that hold a JSON object whose "path" is such a path (the Nulls card's control set)
-MOVED_JSON_PATH_KEYS = ("Studio/LNM/NullsControlSet",)
+#: Fork-only settings that hold a JSON object with such a path: the Nulls card's control set ("path") and the request of
+#: an unfinished connectome download ("dest", ``manager_catalog.ACTIVE_FETCH_SETTING``: a paused download is still offered
+#: for Resume at its new place)
+MOVED_JSON_PATH_KEYS = ("Studio/LNM/NullsControlSet", "Studio/LNM/ActiveFetch")
+#: The field of a ``MOVED_JSON_PATH_KEYS`` object that holds the path, when it is not "path"
+MOVED_JSON_PATH_FIELDS = {"Studio/LNM/ActiveFetch": "dest"}
 
 
 def _updateMovedPathSettings(oldRoot, newRoot, moved, renamed=None, movedTo=None):
@@ -3224,10 +3228,11 @@ def _updateMovedPathSettings(oldRoot, newRoot, moved, renamed=None, movedTo=None
         try:
             raw = settings.value(key)
             data = json.loads(str(raw)) if raw else None
-            if isinstance(data, dict) and isinstance(data.get("path"), str) and data["path"]:
-                newPath = movedPath(data["path"])
-                if newPath != data["path"]:
-                    data["path"] = newPath
+            field = MOVED_JSON_PATH_FIELDS.get(key, "path")
+            if isinstance(data, dict) and isinstance(data.get(field), str) and data[field]:
+                newPath = movedPath(data[field])
+                if newPath != data[field]:
+                    data[field] = newPath
                     settings.setValue(key, json.dumps(data))
         except (TypeError, ValueError):
             continue
