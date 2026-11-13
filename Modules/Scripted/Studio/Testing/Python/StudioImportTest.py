@@ -2921,6 +2921,39 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._pump()
         self.assertIsNone(studioShell.inspectorNotice())
 
+    def test_template_offer_keeps_its_height_after_a_classic_round_trip(self):
+        """The 1 mm offer is not left as a tall empty box in its capped notice slot after Classic and back."""
+        from StudioLib import importer
+
+        if importer.cachedTemplatePath(importer.TEMPLATE_SAMPLE_1MM) is not None:
+            self.skipTest("the 1 mm template is cached")
+        qt.QSettings().remove(importer.TEMPLATE_1MM_OFFER_KEY)
+        studioShell = self._applyStudio()
+        volume, segmentation = importer.startOnTemplate(shell=studioShell)
+        self._pump(6)
+        segmentId = segmentation.GetSegmentation().GetNthSegmentID(0)
+        array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, segmentId, volume)
+        array[40:42, 50:52, 45:47] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, volume)
+        self._wait(600)
+        offer = importer.templateOfferWidget()
+        self.assertIsNotNone(offer)
+        before = offer.height
+        studioShell.classic(persist=False)
+        self._pump(6)
+        studioShell.studio()
+        self._pump(6)
+        studioShell.switchTo("draw")
+        self._wait(600)
+        offer = importer.templateOfferWidget()
+        self.assertIsNotNone(offer)
+        slot = self.mainWindow.findChild("QWidget", "StudioInspectorNotice")
+        self.assertTrue(offer.isVisible())
+        self.assertLessEqual(offer.height, slot.height, "the offer is %d px tall in a %d px slot" % (offer.height, slot.height))
+        self.assertEqual(offer.height, before)
+        importer._closeTemplateBanner()
+        self._pump()
+
     def test_reopen_keeps_lesion(self):
         """Re-opening a scan with a traced lesion (Recent, Open…) keeps the same segmentation and adds no node."""
         from StudioLib import importer

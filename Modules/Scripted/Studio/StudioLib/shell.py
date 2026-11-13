@@ -409,6 +409,10 @@ class _NoticeSlotHeightFilter(qt.QObject):
         needed = layout.heightForWidth(slot.width)
         if needed > 0 and slot.maximumHeight != needed:
             slot.setMaximumHeight(needed)
+        # The cap resizes the slot. While the slot is being shown (its pending Resize event is what brought us
+        # here, Classic and back) Qt sends no Resize event for that, and the layout would keep the notice as
+        # tall as the uncapped slot: an empty box cut off by the slot. No-op when the layout is up to date
+        layout.setGeometry(slot.contentsRect())
 
     def eventFilter(self, obj, event):
         if event.type() in (qt.QEvent.Resize, qt.QEvent.LayoutRequest, qt.QEvent.Show):
