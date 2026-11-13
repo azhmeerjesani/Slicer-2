@@ -4594,6 +4594,19 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertEqual(proposal(["participant_id", "diagnosis"], rows), ("diagnosis", {"yes": "case", "no": "control"}))
         rows = [{"participant_id": "sub-01", "cohort": "patient"}, {"participant_id": "sub-02", "cohort": "HC"}]
         self.assertEqual(proposal(["participant_id", "cohort"], rows), ("cohort", {"patient": "case", "HC": "control"}))
+        # A group column with one value Studio does not know ("MCI", "unknown", "TIA") is still the groups: the user
+        # chooses for that value (it was skipped, and every group was left empty without a word)
+        for column, values, expected in (("diagnosis", ("patient", "HC", "MCI"), {"patient": "case", "HC": "control", "MCI": None}),
+                                         ("diagnosis", ("patient", "HC", "unknown"), {"patient": "case", "HC": "control", "unknown": None}),
+                                         ("cohort", ("stroke", "control", "TIA"), {"stroke": "case", "control": "control", "TIA": None})):
+            rows = [{"participant_id": f"sub-0{index}", column: value} for index, value in enumerate(values)]
+            self.assertEqual(proposal(["participant_id", column], rows), (column, expected))
+        # ... but not a column named like a group without both a case and a control value, nor any other column
+        rows = [{"participant_id": "sub-01", "type": "T1w"}, {"participant_id": "sub-02", "type": "patient"}]
+        self.assertIsNone(proposal(["participant_id", "type"], rows))
+        rows = [{"participant_id": "sub-01", "site": "patient"}, {"participant_id": "sub-02", "site": "HC"},
+                {"participant_id": "sub-03", "site": "MCI"}]
+        self.assertIsNone(proposal(["participant_id", "site"], rows))
 
         studioShell = shell.Shell(force=True)
         studioShell.apply()
@@ -4679,6 +4692,15 @@ class StudioRegressionTest(unittest.TestCase):
             answers.append((True, {"HC": "Exclude"}))
             self.assertIsNotNone(newStudy(folder))
             self.assertEqual(groups(folder)[1], [("sub-01", "case", "1"), ("sub-02", "n/a", "0"), ("sub-03", "case", "1")])
+            study_ui.closeStudy()
+
+            # A diagnosis column with a value besides patient / HC: the step is still shown, that value on "—" for the user
+            folder = makeFolder("DiagnosisMCI", "diagnosis", ("patient", "HC", "patient", "MCI"))
+            answers.append((True, {"MCI": "Exclude"}))
+            self.assertIsNotNone(newStudy(folder))
+            self.assertEqual(shown[-1][1], {"patient": "Case", "HC": "Control", "MCI": "—"})
+            self.assertEqual(groups(folder)[1], [("sub-01", "case", "1"), ("sub-02", "control", "1"), ("sub-03", "case", "1"),
+                                                 ("sub-04", "n/a", "0")])
             study_ui.closeStudy()
 
             # The participants table's "Create study" shows the same step

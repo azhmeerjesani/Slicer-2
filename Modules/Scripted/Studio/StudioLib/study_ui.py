@@ -480,8 +480,9 @@ def groupMappingProposal(columns, rows):
 
     :return: ``(column, {value: "case" | "control" | "exclude" | None})`` for the first column of
       ``GROUP_COLUMN_CANDIDATES`` (or any column) whose values are all recognized words, ``(column, mapping)`` with None
-      targets for a "group" column with unknown values (the user chooses), or None when there is nothing to map (no
-      group column, or a "group" column that already holds case / control / n/a only).
+      targets for a "group" column with unknown values, or for another column named like a group (``diagnosis``, ...)
+      with a case value, a control value and other values ("MCI", "unknown": the user chooses), or None when there is
+      nothing to map (no group column, or a "group" column that already holds case / control / n/a only).
     """
     lowered = {str(column).lower(): column for column in columns if column != "participant_id"}
 
@@ -508,6 +509,17 @@ def groupMappingProposal(columns, rows):
         if all(target in ("case", "control", "exclude") for target in targets.values()) and {"case", "control"} & set(targets.values()):
             if column.lower() not in GROUP_COLUMN_CANDIDATES and all(value.lower() in FLAG_WORDS for value in columnValues):
                 continue  # a 0/1, yes/no or true/false column that is not named like a group ("include", a symptom flag)
+            return column, targets
+    # A column named like a group whose values include one Studio does not know ("MCI", "unknown", "TIA") besides a
+    # case and a control value: still the groups, with the unknown values left to the user (None)
+    for column in ordered:
+        if column.lower() not in GROUP_COLUMN_CANDIDATES:
+            continue
+        columnValues = values(column)
+        if not 2 <= len(columnValues) <= 6:
+            continue
+        targets = {value: groupTarget(value) for value in columnValues}
+        if {"case", "control"} <= set(targets.values()):
             return column, targets
     return None
 
