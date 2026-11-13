@@ -224,6 +224,21 @@ def failingText(gate):
     return ", ".join(parts)
 
 
+def gateNotes(gate, shown=()):
+    """The gate messages worth adding to the gate text: not the per-stratum and per-size-bin failures (the "Failed:" line says
+    them with readable names) and the missing-reference-maps sentence written with the app's controls instead of a command.
+    """
+    notes = []
+    for message in gate.get("messages") or []:
+        if message.startswith("Fast mode is not allowed for "):
+            continue
+        if message.startswith("No reference maps"):
+            message = _("No reference maps: the partial r (mu_r and PC1 partialled out) cannot be computed, so no stratum passes. Build them in the Connectome card (Manage… → Build reference maps).")
+        if message not in " ".join(shown):
+            notes.append(message)
+    return notes[:3]
+
+
 def fastModeState(bundle, mapsTsv):
     """The :class:`FastModeState` of a connectome (an open ``ConnectomeBundle``) and a cohort's lesion maps (maps.tsv path).
 
@@ -1083,7 +1098,7 @@ class FastIndexDialog(qt.QDialog):
             lines.append(_("Passed: {names}. {allowed} of {total} checked lesions are allowed in fast mode.").format(names=strataText(gate["allowed_strata"]), allowed=allowed, total=total))
         if failing:
             lines.append(_("Failed: {failing}. Lesions in these groups are left out of fast-mode statistics.").format(failing=failing))
-        lines += [message for message in gate.get("messages") or [] if message not in " ".join(lines)][:3]
+        lines += gateNotes(gate, lines)
         if stale:
             lines.append(_("This report is out of date (another index or newer lesion maps): run the parity check again."))
         self.gateLabel.setText("\n".join(lines))

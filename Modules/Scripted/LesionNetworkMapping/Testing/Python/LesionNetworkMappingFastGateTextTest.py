@@ -54,3 +54,18 @@ class FastGateTextTest(unittest.TestCase):
         self.assertNotEqual(title, "tian-s2-2mm")
         self.assertEqual(manager_fastindex.atlasTitle("tian-s2-2mm"), title)
         self.assertEqual(manager_fastindex.atlasTitle("no-such-atlas"), "no-such-atlas")
+
+    def test_gate_notes_have_no_raw_ids_or_python_command(self):
+        # Bug fastindex-gate-text-raw-stratum-ids-and-python-command: the gate text repeated the failures with raw ids and named a command.
+        from LesionNetworkMappingLib import fastmap
+        from LesionNetworkMappingUI import manager_fastindex
+
+        lesions = [{"name": f"l{i}", "stratum": s, "size_bin": None, "partial_r": 0.1, "top10_dice": 0.1} for s in ("brainstem", "white-matter-supervoxel") for i in range(6)]
+        gate = fastmap.gate({"lesions": lesions, "size_axis": False, "reference": None}, min_lesions=2)
+        self.assertTrue(any("not allowed for brainstem" in m for m in gate["messages"]))
+        notes = " ".join(manager_fastindex.gateNotes(gate))
+        self.assertNotIn("brainstem", notes)
+        self.assertNotIn("white-matter-supervoxel", notes)
+        self.assertNotIn("not allowed for", notes)
+        self.assertNotIn("python", notes)
+        self.assertIn("Manage… → Build reference maps", notes)
