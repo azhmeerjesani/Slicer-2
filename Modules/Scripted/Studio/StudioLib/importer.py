@@ -924,6 +924,12 @@ def _checkNiftiComplete(path):
                 _("{name} is damaged: its header gives a voxel type that NIfTI does not define (code {code}), so the "
                   "voxels cannot be read and it was not opened.").format(name=name, code=datatype))
     _checkNrrdMhaComplete(path)
+    if isNiftiFile(path):
+        # Refuse an image whose header already shows that it cannot fit in memory before any data is read: counting the
+        # data of a highly compressed file would otherwise decompress all of it on the GUI thread first.
+        need, have = _niftiImageBytes(path), _availableMemoryBytes()
+        if need is not None and have is not None and need * 2 > have:
+            raise RefusedFileError(_tooLargeMessage(path))
     shortfall = _niftiDataShortfall(path)
     if shortfall is not None:
         raise RefusedFileError(

@@ -1187,6 +1187,36 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             importer._availableMemoryBytes = original
         self.assertFalse(importer._isNiftiTooLargeForMemory(path, RuntimeError("something else")))
 
+    def test_too_large_compressed_nifti_is_refused_before_decompression(self):
+        """BB-1: a highly compressed .nii.gz whose header announces more voxels than the memory left is refused at once,
+        before ``_niftiDataShortfall`` decompresses its data on the GUI thread.
+        """
+        import gzip
+
+        from StudioLib import importer
+
+        header = bytearray(348)
+        struct.pack_into("<i", header, 0, 348)
+        struct.pack_into("<8h", header, 40, 3, 2048, 1024, 1024, 1, 1, 1, 1)
+        struct.pack_into("<hh", header, 70, 2, 8)
+        struct.pack_into("<f", header, 108, 352)
+        struct.pack_into("<8f", header, 76, 1, 1, 1, 1, 0, 0, 0, 0)
+        header[344:348] = b"n+1\0"
+        path = os.path.join(self.directory, "bomb_T1w.nii.gz")
+        with gzip.open(path, "wb", 1) as f:
+            f.write(bytes(header) + bytes(4) + bytes(1024 * 1024))  # truncated data, but the memory check comes first
+        originalMemory, originalShortfall = importer._availableMemoryBytes, importer._niftiDataShortfall
+        calls = []
+        try:
+            importer._availableMemoryBytes = lambda: 3 * 1024**3
+            importer._niftiDataShortfall = calls.append
+            with self.assertRaises(importer.RefusedFileError) as context:
+                importer._checkNiftiComplete(path)
+            self.assertIn("too large", str(context.exception))
+            self.assertEqual(calls, [])
+        finally:
+            importer._availableMemoryBytes, importer._niftiDataShortfall = originalMemory, originalShortfall
+
     def test_int64_nifti_scan_is_refused(self):
         """BB-1: a NIfTI scan with 64-bit integer voxels (datatype 1024 or 1280, what nibabel writes for a numpy integer
         array) is refused in plain words before it is read: read as VTK_LONG, its first slice render ended the
