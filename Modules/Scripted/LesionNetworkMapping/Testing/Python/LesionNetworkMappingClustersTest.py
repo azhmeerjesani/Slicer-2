@@ -359,6 +359,38 @@ class LabelTest(unittest.TestCase):
         table = clusters.cluster_table(volume, grid(), None, 2.0, labeler=lambda mask, grid_: [("toy", "a", 40.0, "Cont"), ("toy", "b", 30.0, "Default"), ("toy", "c", 30.0, "Default")])
         self.assertEqual(table[0]["network"], "Default")
 
+    def test_no_network_from_a_small_share(self):
+        """A network that holds less of the cluster than its atlas leaves outside every network is not named (BB-1).
+
+        A brainstem cluster that a Buckner-like atlas touches with 1 of 10 voxels was exported as "Limbic".
+        """
+        space = "MNI152NLin6Asym"
+        family = space_family(space)
+        volume = np.zeros(SHAPE)
+        volume[2:12, 10, 10] = 5.0  # one 10-voxel bar cluster
+        cerebellum = np.zeros(SHAPE, dtype=np.int32)
+        cerebellum[11, 10, 10] = 5  # Network5 = Limbic: 10 % of the cluster
+        subcortex = np.zeros(SHAPE, dtype=np.int32)
+        subcortex[2:12, 10, 10] = 8  # Brainstem: 100 %, no networks
+        empty = np.zeros(SHAPE, dtype=np.int32)
+        empty[0, 0, 0] = 1  # a Schaefer-like atlas that covers none of the cluster
+        order = [
+            atlases.Atlas("schaefer", empty, AFFINE, {1: "7Networks_LH_Default_1"}, family=family, space=space, networks="schaefer"),
+            atlases.Atlas("buckner", cerebellum, AFFINE, {5: "Network5"}, family=family, space=space, networks="yeo7"),
+            atlases.Atlas("ho-sub", subcortex, AFFINE, {8: "Brainstem"}, family=family, space=space),
+        ]
+        table = clusters.cluster_table(volume, grid(), None, 2.0, labeler=clusters.atlas_labeler(order, space=space))
+        self.assertIsNone(table[0]["network"])
+        self.assertIn(("ho-sub", "Brainstem", 100.0), [(atlas, label, round(pct, 6)) for atlas, label, pct in table[0]["labels"]])
+        # a plain labeler: 30 % SomMot with the rest outside every network -> none; half in a network -> named
+        table = clusters.cluster_table(volume, grid(), None, 2.0, labeler=lambda mask, grid_: [("toy", "a", 30.0, "SomMot"), ("toy", "white matter", 70.0, None)])
+        self.assertIsNone(table[0]["network"])
+        table = clusters.cluster_table(volume, grid(), None, 2.0, labeler=lambda mask, grid_: [("toy", "a", 50.0, "SomMot"), ("toy", "white matter", 50.0, None)])
+        self.assertEqual(table[0]["network"], "SomMot")
+        # a split cortical cluster keeps its plurality network: 40 % Default, 35 % Cont, 25 % outside
+        table = clusters.cluster_table(volume, grid(), None, 2.0, labeler=lambda mask, grid_: [("toy", "a", 40.0, "Default"), ("toy", "b", 35.0, "Cont")])
+        self.assertEqual(table[0]["network"], "Default")
+
 
 class HomologueTest(unittest.TestCase):
     def test_pairs(self):

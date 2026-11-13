@@ -161,6 +161,9 @@ def _label_rows(labels, table):
     ``labels.networks`` ({atlas: {network: pct}}, as :func:`atlas_labeler` does), else over the rows it returned.
     Atlases are not added together (two cortical atlases would count the same voxels twice); the largest share of
     any atlas wins, ties going to the earlier atlas and then to the name, so the order of the atlases only breaks ties.
+    The part of the mask an atlas leaves outside all its networks (unlabelled voxels, white matter) competes as one
+    more share of that atlas: a network is named only when it holds at least as much of the mask as that part, so a
+    brainstem cluster that a cerebellar network atlas touches with 1.6 % of its voxels has no network (BB-1).
     """
     rows, shares = [], {}
     for notice in getattr(labels, "notices", None) or []:
@@ -178,7 +181,10 @@ def _label_rows(labels, table):
     if given:
         shares = {atlas: dict(byNetwork) for atlas, byNetwork in given.items() if byNetwork}
     order = {atlas: index for index, atlas in enumerate(dict.fromkeys([*(row[0] for row in rows), *shares]))}
-    candidates = [(-pct, order[atlas], name) for atlas, byNetwork in shares.items() for name, pct in byNetwork.items() if pct > 0]
+    candidates = []
+    for atlas, byNetwork in shares.items():
+        outside = max(0.0, 100.0 - sum(byNetwork.values()))  # the share of the mask in none of this atlas's networks
+        candidates += [(-pct, order[atlas], name) for name, pct in byNetwork.items() if pct > 0 and pct >= outside]
     return rows, (min(candidates)[2] if candidates else None)
 
 
