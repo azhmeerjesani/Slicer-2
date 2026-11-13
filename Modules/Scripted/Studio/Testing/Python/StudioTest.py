@@ -2811,6 +2811,22 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             elif label.width < label.fontMetrics().horizontalAdvance(label.text):
                 problems.append((label.text, "width", label.width))
         self.assertEqual(problems, [])
+        # While a pair is being placed ("placing “<landmark>”…") nothing is cut either
+        session.addLandmarkPair()
+        self._pump(6)
+        self._wait(500)
+        pairLabel = card.findChild("QLabel", "StudioFigurePairLabel")
+        self.assertIn("placing", pairLabel.text)
+        problems = []
+        for label in card.findChildren("QLabel"):
+            if not label.isVisible() or not label.text.strip():
+                continue
+            if label.wordWrap:
+                if label.height < label.heightForWidth(label.width):
+                    problems.append((label.text, "height", label.height, label.heightForWidth(label.width)))
+            elif label.width < label.fontMetrics().horizontalAdvance(label.text):
+                problems.append((label.text, "width", label.width))
+        self.assertEqual(problems, [])
 
     def test_33d_figure_landmark_deleted_alone_takes_its_partner(self):
         """A landmark deleted on its own (the view's "Delete control point") removes its partner in the other list: the

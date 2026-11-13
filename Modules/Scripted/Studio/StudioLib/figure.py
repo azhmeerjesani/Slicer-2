@@ -2307,11 +2307,13 @@ class FigureCard:
         self.removePairButton.connect("clicked()", lambda: session().removeLastPair() if session() is not None else None)
         landmarkRow.addWidget(self.removePairButton)
         landmarkRow.addStretch(1)
+        steps.addRow(_("4 Landmarks"), landmarkRow)
+        # Own wrapped row: "placing “<landmark>”…" is long and was cut mid-word beside the buttons
         self.pairLabel = qt.QLabel()
         self.pairLabel.setObjectName("StudioFigurePairLabel")
+        self.pairLabel.setWordWrap(True)
         self.pairLabel.setProperty("slicerRole", "secondaryText")
-        landmarkRow.addWidget(self.pairLabel)
-        steps.addRow(_("4 Landmarks"), landmarkRow)
+        steps.addRow(self._wrapped(self.pairLabel))
 
         self.modelFrame, self.modelGroup = ui.segmented([_("Similarity"), _("Affine")])
         self.modelFrame.setObjectName("StudioFigureModel")
