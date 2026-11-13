@@ -2832,6 +2832,7 @@ def setOptionsStudioLook(editor, studio, hideDiameter=False):
         style = checkBox.style()
         style.unpolish(checkBox)
         style.polish(checkBox)
+        ui.refreshCheckBoxHint(checkBox)
         checkBox.updateGeometry()
         checkBox.update()
     for label in optionsGroupBox.findChildren("QLabel"):

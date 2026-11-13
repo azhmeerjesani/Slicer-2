@@ -615,7 +615,20 @@ def setRole(widget, role):
     style = widget.style()
     style.unpolish(widget)
     style.polish(widget)
+    refreshCheckBoxHint(widget)
     widget.update()
+
+
+def refreshCheckBoxHint(widget):
+    """Drop the cached size hint of a check box after its slicerRole changed.
+
+    A QCheckBox caches its sizeHint() until a StyleChange event (a change of the role alone sends none), so a check box
+    that became a switch after its first layout kept the hint of a plain check box and its label was cut beside the
+    track. Other widgets are left alone.
+    """
+    if widget is not None and widget.inherits("QCheckBox"):
+        widget.updateGeometry()
+        slicer.app.sendEvent(widget, qt.QEvent(qt.QEvent.StyleChange))
 
 
 #

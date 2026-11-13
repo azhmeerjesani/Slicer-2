@@ -2571,6 +2571,35 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertEqual([label.text for label in frame.findChildren("QLabel") if label.wordWrap and label.text.startswith("Actual")], [], effectName)
         editor.setActiveEffectByName("")
 
+    def test_32e_switch_labels_fit_beside_their_switch(self):
+        """A switch check box (Fill between slices: "Selected segment only") reserves the room its label needs: the content
+        rectangle of the label is as wide as the text, so it is not cut mid-word.
+        """
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        widget = slicer.modules.SegmentEditorWidget
+        widget.setMoreToolsShown(True)
+        self._pump()
+        for effectName in ("Fill between slices", "Margin", "Smoothing", "Islands", "Mask volume"):
+            editor.setActiveEffectByName(effectName)
+            self._wait(400)
+            frame = editor.activeEffect().optionsFrame()
+            checked = 0
+            for box in frame.findChildren("QCheckBox"):
+                if not box.isVisible() or not box.text:
+                    continue
+                fm = qt.QFontMetrics(box.font)
+                textWidth = fm.horizontalAdvance(box.text) if hasattr(fm, "horizontalAdvance") else fm.width(box.text)
+                option = qt.QStyleOptionButton()
+                option.initFrom(box)
+                option.text = box.text
+                content = box.style().subElementRect(qt.QStyle.SE_CheckBoxContents, option, box)
+                self.assertGreaterEqual(content.width(), textWidth, (effectName, box.text))
+                checked += 1
+            if effectName == "Fill between slices":
+                self.assertGreater(checked, 0)
+        editor.setActiveEffectByName("")
+
     def test_33b_figure_row_web_build_has_no_paste_hint(self):
         """The "Trace from a figure" row advertises Ctrl+V and drop only where they work: not in the web build."""
         if not _hasFigureTracing():

@@ -1054,6 +1054,7 @@ class SettingsDialogLook:
                 box.setProperty("slicerRole", "switch")
                 box.style().unpolish(box)
                 box.style().polish(box)
+                ui.refreshCheckBoxHint(box)
         # A form row puts a control that is lower than the row at the top of it; the label rows are 44 px high
         saved["centred"] = {}
         for name in self.APPEARANCE_CENTRED:
@@ -1101,6 +1102,7 @@ class SettingsDialogLook:
                 box.setProperty("slicerRole", "")
                 box.style().unpolish(box)
                 box.style().polish(box)
+                ui.refreshCheckBoxHint(box)
         if saved["header"] is not None and ui._isAlive(saved["header"]):
             form.removeRow(saved["header"])
         form.setContentsMargins(*saved["margins"])

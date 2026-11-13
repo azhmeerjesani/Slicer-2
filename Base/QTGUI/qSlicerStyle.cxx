@@ -3029,6 +3029,14 @@ QSize qSlicerStyle::sizeFromContents(ContentsType type, const QStyleOption* opti
         size.setHeight(qMax(size.height(), 26));
       }
       break;
+    case QStyle::CT_CheckBox:
+      if (isSwitch(widget))
+      {
+        // Room for what SE_CheckBoxContents reserves: the track and SwitchSpacing (not the spacing of the base style)
+        size.setWidth(contentsSize.width() + SwitchWidth + SwitchSpacing);
+        size.setHeight(qMax(size.height(), SwitchHeight));
+      }
+      break;
     case QStyle::CT_ToolButton:
       if (hasInlineMenuIndicator(qstyleoption_cast<const QStyleOptionToolButton*>(option), widget))
       {
