@@ -121,6 +121,22 @@ class LesionNetworkMappingJobRunnerChipTest(unittest.TestCase):
         self.assertEqual(self.chips[-1], (f"Run failed: {message[:59]}…", "warn"))
         self.assertTrue(any("failed" in text and "finished with failures" not in text for text in logs), logs)
 
+    def test_killed_worker_reads_plain_sentence(self):
+        from LesionNetworkMappingUI import jobrunner
+
+        with open(os.path.join(self.tmp, "killed_job.py"), "w", encoding="utf-8") as f:
+            f.write("import os, signal\nos.kill(os.getpid(), signal.SIGKILL)\n")
+        runner = jobrunner.instance()
+        job = runner.submit(jobrunner.JobSpec("killed_job", [], title="Fetch", heavy=False, kind="probe", runRoot=self.tmp, env={"PYTHONPATH": self.tmp}, name="killed_job"))
+        self.assertTrue(job.waitForFinished(60), job.state)
+        runner.clearStatus()
+        self.assertEqual(job.state, "failed")
+        reason = job.failureReason
+        self.assertIn("stopped unexpectedly", reason)
+        self.assertNotIn("Report the problem", reason)
+        self.assertNotIn("exit abnormally", reason)
+        self.assertNotIn(sys.prefix, reason)
+
 
 if __name__ == "__main__":
     unittest.main()

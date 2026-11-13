@@ -681,8 +681,15 @@ class Job:
         if self.exitCode == _jobs.EXIT_LOCKED:
             return "the output folder is locked by another job"
         for line in reversed(self.logTail):
-            if line.strip():
-                return line.strip()
+            text = line.strip()
+            if not text:
+                continue
+            if "exit abnormally" in text:
+                # The launcher's own line for a worker that was killed (out of memory, a system monitor): it holds a
+                # local path and "Report the problem", so say what happened in plain words instead
+                return ("the process stopped unexpectedly (it was probably killed by the system, for example when memory ran out). "
+                        "What was done so far is kept; Resume continues")
+            return text
         return f"exit code {self.exitCode}"
 
     def isPartial(self):
