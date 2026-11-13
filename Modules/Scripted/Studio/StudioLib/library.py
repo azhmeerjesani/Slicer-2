@@ -5594,6 +5594,14 @@ def _captionFolder(folder):
     return " \u203a ".join(parts)
 
 
+def _rootUnwritable():
+    """True once autosave found that the Slicer Studio folder cannot be written."""
+    from . import autosave
+
+    service = autosave.instance()
+    return service is not None and service.rootUnwritable()
+
+
 class LibraryCanvas(qt.QObject):
     """The Library page shown over the views (SPEC 3.1, VISUAL 4.2): a full-width page (at most ``PAGE_MAX_WIDTH`` px of
     content) with the "Projects" header and its buttons, the Continue card of what is open, the projects of the Slicer
@@ -6029,6 +6037,10 @@ class LibraryCanvas(qt.QObject):
                 # The chosen folder is on a drive that is not connected: not "saved automatically" there (A-09)
                 text = _("Not found, connect its drive: {folder}").format(folder=folder)
                 toolTip = projects.rootMissingText() + "\n" + projects.root()
+            elif enabled and _rootUnwritable():
+                # The folder could not be written when a project was last made in it: nothing is saved there (autosave paused)
+                text = _("Autosave paused: {folder} cannot be written").format(folder=folder)
+                toolTip = projects.root()
             else:
                 text = _("Saved automatically in {folder}").format(folder=folder) if enabled else ""
                 toolTip = projects.root() if enabled else ""

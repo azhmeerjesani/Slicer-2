@@ -1918,6 +1918,43 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertNotIn("CaptionFirst", canvas._captionText)
         self.assertIn(second, str(canvas.captionLabel.toolTip))
 
+    def test_caption_does_not_say_saved_when_the_folder_cannot_be_written(self):
+        """Once autosave knows the Slicer Studio folder cannot be written, the caption says autosave is paused, not saved."""
+        from StudioLib import autosave, projects
+
+        saved = os.environ.get("SLICER_STUDIO_PROJECTS_ROOT")
+
+        def restore():
+            if saved is None:
+                os.environ.pop("SLICER_STUDIO_PROJECTS_ROOT", None)
+            else:
+                os.environ["SLICER_STUDIO_PROJECTS_ROOT"] = saved
+            autosave._service = savedService
+            projects.notifyChanged()
+
+        savedService = autosave._service
+        self.cleanup.append(restore)
+        root = os.path.join(self.directory, "CaptionUnwritable", "Slicer Studio")
+        os.makedirs(root, exist_ok=True)
+        os.environ["SLICER_STUDIO_PROJECTS_ROOT"] = root
+        studioShell = self._applyStudio()
+        canvas = self._library(studioShell)
+        self.assertTrue(canvas._captionText.startswith("Saved automatically in "), canvas._captionText)
+
+        class Unwritable:
+            """What autosave answers once creating a project in the folder failed (autosave is off in tests)."""
+
+            def rootUnwritable(self):
+                return True
+
+        autosave._service = Unwritable()
+        projects.notifyChanged()
+        self._wait(900)
+        self._pump(4)
+        self.assertNotIn("Saved automatically", canvas._captionText)
+        self.assertTrue(canvas._captionText.startswith("Autosave paused: "), canvas._captionText)
+        self.assertTrue(canvas._captionText.endswith("cannot be written"), canvas._captionText)
+
     def test_footer_line(self):
         """One 32 px text2 line at the bottom of the canvas, with link-style actions; it survives a new canvas."""
         from StudioLib import library
