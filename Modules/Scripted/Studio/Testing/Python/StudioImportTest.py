@@ -4037,6 +4037,20 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             importer.openAddDataDialog = original
 
+    def test_one_row_participants_table_uses_singular(self):
+        """A one-row participants table reads "1 row" on the folder card and "1 participant" in the toast (BB-1)."""
+        from StudioLib import library, study_ui
+
+        studioShell = self._applyStudio()
+        path = os.path.join(self.directory, "participants.tsv")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("participant_id\tage\nsub-01\t30\n")
+        self.assertEqual(library.participantsLine(path), "participants.tsv · 1 row · age")
+        toasts = []
+        studioShell.toast = lambda text, *args, **kwargs: toasts.append(text)
+        study_ui.openParticipantsTable(path, studioShell)
+        self.assertTrue(any("participants.tsv: 1 participant (age)" in t and "1 participants" not in t for t in toasts), toasts)
+
     def test_semicolon_csv_participants_table_is_recognized(self):
         """A participants.csv that Excel saved in a decimal-comma locale ("CSV (semicolon separated)") is a participants
         table like the comma CSV: it never opens Add Data, its columns are named, and its decimal commas read as numbers

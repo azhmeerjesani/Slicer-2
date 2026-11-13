@@ -3157,7 +3157,8 @@ def _openParticipantsTable(path, shell):
     columns, rowCount = readTableHeader(path) or ([], 0)
     shown = [column for column in columns if column != "participant_id"][:4]
     columnText = ", ".join(shown) + ("…" if len(columns) - 1 > len(shown) else "")
-    shell.toast(_("{name}: {n} participants ({columns}). Studies are not available in this build.").format(
+    shell.toast((_("{name}: {n} participant ({columns}). Studies are not available in this build.") if rowCount == 1
+                 else _("{name}: {n} participants ({columns}). Studies are not available in this build.")).format(
         name=os.path.basename(path), n=rowCount, columns=columnText or "participant_id"), 6000)
 
 

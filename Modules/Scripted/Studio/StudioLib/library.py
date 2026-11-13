@@ -2215,7 +2215,7 @@ def participantsLine(path):
     columns, rowCount = header
     shown = [column for column in columns if column != "participant_id"][:4]
     more = "…" if len([c for c in columns if c != "participant_id"]) > len(shown) else ""
-    text = _("{name} · {count} rows").format(name=os.path.basename(path), count=rowCount)
+    text = (_("{name} · 1 row") if rowCount == 1 else _("{name} · {count} rows")).format(name=os.path.basename(path), count=rowCount)
     return text + (" · " + ", ".join(shown) + more if shown else "")
 
 

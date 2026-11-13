@@ -1605,7 +1605,7 @@ def openParticipantsTable(path, shell=None):
     shell = _currentShell(shell)
     columns, rows = readTable(path)
     shown = [column for column in columns if column != "participant_id"][:4]
-    summary = _("{name}: {n} participants ({columns})").format(name=os.path.basename(path), n=len(rows), columns=", ".join(shown) or "participant_id")
+    summary = (_("{name}: {n} participant ({columns})") if len(rows) == 1 else _("{name}: {n} participants ({columns})")).format(name=os.path.basename(path), n=len(rows), columns=", ".join(shown) or "participant_id")
     if _session is not None:
         result = _session.importTable(path)
         text = summary + " · " + _("{added} added, {updated} updated in {study}").format(
