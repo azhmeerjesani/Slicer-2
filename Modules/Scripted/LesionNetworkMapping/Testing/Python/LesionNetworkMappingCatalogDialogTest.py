@@ -156,6 +156,41 @@ class LesionNetworkMappingCatalogDialogTest(unittest.TestCase):
         dialog.onControllerChanged()
         self.assertTrue(dialog.resumeButton.isVisibleTo(dialog))
 
+    def test_changed_terms_after_accepting_drop_the_old_text_and_reload(self):
+        """The provider changes its terms after they were accepted: the failed row asks to read the new text below (not to open the
+        dialog that is open), the old text is dropped with its tick, the live text is loaded and Download stays disabled until accepted.
+        """
+        from LesionNetworkMappingLib import catalog
+
+        entry = catalog.load_catalog().get("gsp1000-ilxiks")
+        dialog = self.makeDialog(None)
+        dialog.entry = entry
+        dialog.fillFetchBox(entry)
+        dialog.terms[entry["id"]] = {"text": "old", "display": "old", "sha": "a" * 64}
+        dialog.setTermsView(dialog.terms[entry["id"]])
+        controller = dialog.controller
+        saved = (controller.state, controller.request, controller.errorEvent, controller.job, controller.error)
+        self.addCleanup(lambda: [setattr(controller, n, v) for n, v in zip(("state", "request", "errorEvent", "job", "error"), saved, strict=True)])
+        controller.job = None
+        controller.state = "failed"
+        controller.errorEvent = {"code": "terms_mismatch"}
+        controller.error = "x"
+        with mock.patch.object(dialog, "loadTerms") as load:
+            dialog.onControllerChanged()
+            dialog.onControllerChanged()
+            self.assertEqual(load.call_count, 1)  # once per failure
+        self.assertNotIn(entry["id"], dialog.terms)
+        self.assertFalse(dialog.acceptCheck.checked)
+        self.assertFalse(dialog.downloadButton.enabled)
+        self.assertEqual(dialog.progress.bar.maximum, 1000)  # no frozen busy segment
+        fake = mock.Mock(errorEvent={"code": "terms_mismatch"}, failureReason="r")
+        fake.succeeded.return_value = False
+        fake.state = "failed"
+        controller.state = "running"
+        controller._onDone(fake)
+        self.assertIn("Read the new text below", controller.error)
+        self.assertNotIn("Open Get a connectome", controller.error)
+
     def test_resume_is_not_offered_for_a_subset_that_leaves_out_converted_archives(self):
         """Paused with All archives when the first archive is done and the second partly converted: choosing 'The first archive'
         does not offer 'Resume this download' (it failed with "missing connectome.json"); a plain hint says why. The same

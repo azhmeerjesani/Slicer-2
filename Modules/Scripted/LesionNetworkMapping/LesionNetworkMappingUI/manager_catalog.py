@@ -349,7 +349,7 @@ class FetchController:
             self.errorEvent = job.errorEvent or {}
             code = self.errorEvent.get("code")
             if code == "terms_mismatch":
-                self.error = _("The provider's terms text is not the text you accepted (it has changed). Open Get a connectome…, read the live text and accept it to continue. Nothing more was downloaded.")
+                self.error = _("The provider's terms text is not the text you accepted (it has changed). Read the new text below and accept it to continue. Nothing more was downloaded.")
             elif code == "checksum":
                 # The job's own text names its command-line flag; the interface offers the same choice as a button
                 self.error = _("{name}: the checksum does not match the one the provider lists, also after reading it twice. "

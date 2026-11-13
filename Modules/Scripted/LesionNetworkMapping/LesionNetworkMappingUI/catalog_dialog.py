@@ -240,6 +240,7 @@ class CatalogDialog(qt.QDialog):
             self.controller.catalogPath = catalogPath
         self.entries = []
         self.entry = None
+        self.termsChangeHandled = None  # the failed job's error event whose changed terms were already dropped and reloaded
         self.terms = {}  # entry id -> {"text", "display", "sha"} of the terms loaded in this session
         self.termsJob = None
         self.checkJobs = []
@@ -661,6 +662,18 @@ class CatalogDialog(qt.QDialog):
                 self.termsView.setPlainText(failure)
         self.updateState()
 
+    def onTermsChanged(self):
+        """The provider changed its terms after they were accepted: the text shown is stale. Drop it (the box unticks, Download is
+        disabled) and load the live text once, so that the new text can be read and accepted.
+        """
+        event = self.controller.errorEvent
+        if self.entry is None or self.termsChangeHandled is event:
+            return
+        self.termsChangeHandled = event
+        self.terms.pop(self.entry["id"], None)
+        self.setTermsView(None)
+        self.loadTerms()
+
     def setTermsView(self, terms):
         if terms is None:
             self.termsView.setPlainText(_("Click Load terms to read the provider's current terms."))
@@ -855,6 +868,10 @@ class CatalogDialog(qt.QDialog):
         widgets.setChipLevel(self.progressChip, level, chipText)
         self.progress.setJob(job if state == "running" else None)
         fraction = status["fraction"]
+        if fraction is None and state != "running":
+            fraction = 0.0  # a stopped job shows an empty bar, never a frozen busy segment
+        if state == "failed" and status["termsChanged"]:
+            self.onTermsChanged()
         if state == "running":
             archive = ""
             if status.get("archiveCount"):
