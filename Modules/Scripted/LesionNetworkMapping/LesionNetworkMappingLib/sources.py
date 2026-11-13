@@ -168,6 +168,21 @@ def draft(**fields):
 #
 
 
+class Parsed(list):
+    """The draft records a parser found (a list); ``skipped`` counts the entries it could not read (an unclosed BibTeX
+    entry, a CSV row or RIS record without title, DOI or PMID), so that the caller can tell the user.
+    """
+
+    skipped = 0
+
+
+def _parsed(records, total):
+    """``records`` as :class:`Parsed`, with ``skipped`` the entries of ``total`` that gave no record."""
+    out = Parsed(records)
+    out.skipped = max(0, total - len(records))
+    return out
+
+
 def _tagged(text, pattern):
     """[(tag, value)] of a tagged format (nbib: ``TI  - ``; RIS: ``TI  - ``); continuation lines are joined."""
     items = []
@@ -236,7 +251,8 @@ def parse_ris(text):
             current["pmid"] = value
         elif tag in ("N1", "M3") and "PMID" in value.upper() and not current.get("pmid"):
             current["pmid"] = value
-    return [draft(**{**record, "authors": "; ".join(record["authors"])}) for record in records if record.get("title") or record.get("doi") or record.get("pmid")]
+    kept = [draft(**{**record, "authors": "; ".join(record["authors"])}) for record in records if record.get("title") or record.get("doi") or record.get("pmid")]
+    return _parsed(kept, len(records))
 
 
 def _bibtex_value(text, index, limit=None):
@@ -304,12 +320,13 @@ def _latex_to_unicode(value):
 
 def parse_bibtex(text):
     """BibTeX entries (``@article{key, title = {...}, author = {A and B}, ...}``)."""
-    records = []
+    records, total = [], 0
     starts = [found.start() for found in re.finditer(r"^[ \t]*@\w+\s*[{(]", text, re.M)]
     for match in re.finditer(r"@(\w+)\s*[{(]", text):
         if match.group(1).lower() in ("comment", "string", "preamble"):
             continue
         limit = next((start for start in starts if start > match.start()), len(text))
+        total += 1
         index = text.find(",", match.end())
         if index < 0:
             continue
@@ -335,7 +352,7 @@ def parse_bibtex(text):
                        doi=fields.get("doi") or fields.get("url"), pmid=fields.get("pmid") or fields.get("pubmed"))
         if record["title"] or record["doi"] or record["pmid"]:
             records.append(record)
-    return records
+    return _parsed(records, total)
 
 
 _CSV_NAMES = {
@@ -375,7 +392,7 @@ def parse_csv(text):
     reader = csv.reader(io.StringIO(text), dialect)
     rows = [row for row in reader if any(cell.strip() for cell in row)]
     if not rows:
-        return []
+        return Parsed()
     header = [cell.strip().lower() for cell in rows[0]]
     columns = {key: next((header.index(name) for name in names if name in header), None) for key, names in _CSV_NAMES.items()}
     if columns["doi"] is None and columns["pmid"] is None and columns["title"] is None:
@@ -386,7 +403,7 @@ def parse_csv(text):
         record = draft(**fields)
         if record["title"] or record["doi"] or record["pmid"]:
             records.append(record)
-    return records
+    return _parsed(records, len(rows) - 1)
 
 
 def parse_identifiers(text):
@@ -1172,6 +1189,7 @@ def import_text(study, records, text, name="", origin="database", database=None,
         raise SourcesError("No record found in this file")
     report = records.add(drafts, origin=origin, n_cases=n_cases)
     report["format"], report["parsed"] = kind, len(drafts)
+    report["skipped"] = getattr(drafts, "skipped", 0)  # entries of the file that could not be read (not in the search log)
     add_search(study, database or ("Pasted identifiers" if kind == "identifiers" else os.path.basename(name) or kind.upper()), query,
                records=len(drafts), duplicates=len(report["merged"]), origin=origin)
     return report

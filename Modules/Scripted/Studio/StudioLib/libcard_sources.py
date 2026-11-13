@@ -833,6 +833,9 @@ class SourcesCard:
         if report["merged"]:
             merged = len(report["merged"])
             message += " · " + (_("{n} duplicate merged") if merged == 1 else _("{n} duplicates merged")).format(n=merged)
+        skipped = report.get("skipped", 0)
+        if skipped:
+            message += " · " + (_("{n} entry could not be read") if skipped == 1 else _("{n} entries could not be read")).format(n=skipped)
         _toast(message)
         return report
 

@@ -2158,6 +2158,26 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertNotEqual(label.font.capitalization(), qt.QFont.AllUppercase, text)
             self.assertEqual(label.font.letterSpacing(), 0.0, text)
 
+    def test_sources_import_toast_counts_unreadable_entries(self):
+        """An entry that cannot be read (unclosed BibTeX entry) is counted in the import toast, not dropped silently (BB-1)."""
+        from LesionNetworkMappingLib.study import Study
+        from StudioLib import libcard_sources, study_ui
+
+        path = os.path.join(self.directory, "LitSkip")
+        Study.create(path, name="Lit").save()
+        session = study_ui.openStudy(path, None)
+        self.cleanup.append(study_ui.closeStudy)
+        toasts = []
+        original = libcard_sources._toast
+        libcard_sources._toast = lambda *args, **kwargs: toasts.append(args[0])
+        self.cleanup.append(lambda: setattr(libcard_sources, "_toast", original))
+        card = libcard_sources.SourcesCard(session)
+        self.cleanup.append(card.widget.close)
+        bib = "@article{a, title={One}}\n@article{b, title={Unclosed, year=2023\n\n@article{c, title={Four}}\n"
+        report = card.importRecords(text=bib, database="Scholar", query="q")
+        self.assertEqual(report["skipped"], 1)
+        self.assertEqual(toasts, ["2 added \u00b7 1 entry could not be read"])
+
     def test_sources_unreadable_records_tsv_is_never_overwritten(self):
         """A records.tsv that cannot be read (not UTF-8, or comma-separated) stays as it is: Import refuses, the error stays shown, the stage log is kept (BB-1)."""
         from LesionNetworkMappingLib import sources

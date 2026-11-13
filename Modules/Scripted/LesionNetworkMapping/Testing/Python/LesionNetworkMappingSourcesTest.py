@@ -163,6 +163,16 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual([record["title"] for record in records], ["First", "Alexia without agraphia", "Last"])
         self.assertEqual(records[1]["year"], "2016")
 
+    def test_unreadable_entries_are_counted(self):
+        bib = "@article{a, title={One}}\n@article{b, title={Unclosed, year=2023\n\n@article{c, title={Four}}\n"
+        csv_text = "Authors,Title,DOI\nA,One,10.1/a\nOnly Author,,\nB,Three,10.1/c\n"
+        ris = "TY  - JOUR\nTI  - One\nER  - \nTY  - JOUR\nAU  - Only, Author\nER  - \n"
+        self.assertEqual([sources.parse_bibtex(bib).skipped, sources.parse_csv(csv_text).skipped, sources.parse_ris(ris).skipped], [1, 1, 1])
+        self.assertEqual(sources.parse_bibtex("@article{a, title={One}}\n").skipped, 0)
+        records = sources.Records.open(self.study)
+        report = sources.import_text(self.study, records, bib, "a.bib")
+        self.assertEqual((report["parsed"], report["skipped"]), (2, 1))
+
     def test_bibtex_latex_accents_decoded(self):
         text = (
             "@article{a,\n  author = {M{\\\"u}ller, J{\\\"o}rg and Fern{\\'a}ndez, Ana and Sch\\\"on, B and {\\O}stergaard, K"
