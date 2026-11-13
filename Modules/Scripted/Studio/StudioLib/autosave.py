@@ -2836,9 +2836,18 @@ class AutosaveService:
                 # What the new folder and the old one hold before the move: when it fails partway, what moved is told apart
                 # from the new folder's own projects and studies (``recordPartialMove``)
                 projectsBefore = journal.projectsBefore() if resuming else None
+                studiesBefore = None
+                partial = projects.partialMove() if not resuming else None
+                if projectsBefore is None and partial is not None and _canonicalPath(partial[1]) == _canonicalPath(newRoot):
+                    # This move finishes one that failed partway into the same folder: the projects and studies that the
+                    # failed attempt moved are not the new folder's own. Its record knows those, so the moved projects'
+                    # scenes follow the templates that move now under another id, as in a move that never stopped
+                    projectsBefore, studiesBefore = set(partial[2]), set(partial[3])
+                    journal.setProjectsBefore(projectsBefore)
                 if projectsBefore is None:
                     projectsBefore = projects._visibleNames(os.path.join(newRoot, projects.PROJECTS_DIR))
-                studiesBefore = projects._visibleNames(os.path.join(newRoot, projects.STUDIES_DIR))
+                if studiesBefore is None:
+                    studiesBefore = projects._visibleNames(os.path.join(newRoot, projects.STUDIES_DIR))
                 contentBefore = projects.contentNames(oldRoot)
                 function = lambda: projects.moveContent(oldRoot, newRoot, renamed=renamed, renamedIds=renamedIds, journal=journal)  # noqa: E731
                 moved = run(function) if run is not None else function()

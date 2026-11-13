@@ -10626,6 +10626,89 @@ sys.exit(web.command_local(args))
         self.assertIsNone(service.project)
         self.assertFalse(service._discardOnClose, "the choice applies to that recovery only")
 
+    def test_118_failed_root_move_done_again_moved_projects_follow_the_renamed_template_id(self):
+        """Change folder > Move into a folder that has a project and a template with the same names as A's fails when
+        Templates/ moves (the new disk is full; Templates/ always moves last), and the user frees space and moves again
+        (BB-1). The move done again renamed A's template ("My template 2", a new id) but rewrote only the scenes of the
+        projects it moved itself: the project that the failed attempt had moved kept naming B's template, which kept the
+        id (another image), so its scan and exported provenance named the wrong template. Now the record of the failed
+        move tells B's own projects from A's, and every moved scene follows the new id, as after a move that never stopped.
+        """
+        import errno
+        from unittest import mock
+
+        from StudioLib import templates
+
+        projects = self.projects
+        builtin = templates.builtinTemplates()[0]
+        settings = qt.QSettings()
+        previous = settings.value(templates.DEFAULT_KEY)
+        oldRoot = os.path.normpath(os.path.join(self.tempDir, "full disk ids", "A", "Slicer Studio"))
+        newRoot = os.path.normpath(os.path.join(self.tempDir, "full disk ids", "B", "Slicer Studio"))
+        theirs = templates.addTemplate(builtin.imagePath, name="My template", rootPath=newRoot)
+        mine = templates.addTemplate(builtin.maskPath, name="My template", rootPath=oldRoot)
+        self.assertEqual(mine.id, theirs.id, "the two templates have the same id")
+
+        def makeProject(root, name):
+            folder = os.path.join(root, projects.PROJECTS_DIR, name)
+            os.makedirs(folder)
+            with open(os.path.join(folder, name + ".mrml"), "w", encoding="utf-8") as f:
+                f.write('<MRML version="Slicer4.4.0">\n <Volume id="vtkMRMLScalarVolumeNode1" name="Scan" '
+                        f'attributes="Studio.TemplateId:{mine.id}"></Volume>\n</MRML>\n')
+            return os.path.join(folder, name + ".mrml")
+
+        theirScene = makeProject(newRoot, "Theirs")
+        makeProject(oldRoot, "Mine")
+        makeProject(oldRoot, "Theirs")  # moves as "Theirs 2"
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        settings.setValue(projects.ROOT_KEY, oldRoot)
+        settings.setValue(projects.ROOT_CHOSEN_KEY, True)
+        realRename = os.rename
+        failing = os.path.join(projects.TEMPLATES_DIR, "My template")
+
+        def fullDisk(source, destination, *args, **kwargs):
+            if os.path.normpath(os.fspath(source)).endswith(os.sep + failing):
+                raise OSError(errno.ENOSPC, "No space left on device", os.fspath(destination))
+            return realRename(source, destination, *args, **kwargs)
+
+        def sceneIds(path):
+            with open(path, encoding="utf-8") as f:
+                return re.findall(r"Studio\.TemplateId:([^;\"]*)", f.read())
+
+        try:
+            with mock.patch.object(projects.os, "rename", side_effect=fullDisk):
+                with self.assertRaises(OSError):
+                    self._service().moveRoot(newRoot, moveContent=True, run=lambda function: function())
+            self.assertEqual(projects.root(), oldRoot, "the setting is unchanged")
+            self.assertEqual(sorted(os.listdir(os.path.join(newRoot, projects.PROJECTS_DIR))), ["Mine", "Theirs", "Theirs 2"])
+            self.assertTrue(os.path.isdir(os.path.join(oldRoot, projects.TEMPLATES_DIR, "My template")), "A's template did not move")
+            # The user frees space and moves again
+            self._service().moveRoot(newRoot, moveContent=True, run=lambda function: function())
+            self.assertEqual(projects.root(), newRoot)
+            listed = {template.id: template for template in templates.userTemplates(newRoot)}
+            self.assertEqual(len(listed), 2, "two templates, two ids")
+            self.assertEqual(listed[theirs.id].imageSha256, theirs.imageSha256, "B's template keeps its id")
+            newId = next(template.id for template in listed.values() if template.id != theirs.id)
+            self.assertEqual(listed[newId].imageSha256, mine.imageSha256)
+            for name in ("Mine", "Theirs 2"):
+                folder = os.path.join(newRoot, projects.PROJECTS_DIR, name)
+                scenes = [entry for entry in os.listdir(folder) if entry.endswith(".mrml")]
+                self.assertEqual(len(scenes), 1, scenes)
+                self.assertEqual(sceneIds(os.path.join(folder, scenes[0])), [newId], f"the moved project {name} names A's template")
+            self.assertEqual(sceneIds(theirScene), [theirs.id], "B's own project keeps B's template")
+        finally:
+            if previous is None:
+                settings.remove(templates.DEFAULT_KEY)
+            else:
+                settings.setValue(templates.DEFAULT_KEY, previous)
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            projects.clearPendingMove()
+            projects.clearPartialMove()
+            projects.discardMoveJournal()
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 
