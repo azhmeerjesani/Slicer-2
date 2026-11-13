@@ -708,8 +708,8 @@ class VlsmTab(CohortTab):
         items = []
         for item in clusters:
             x, y, z = item.get("peak_xyz") or (0.0, 0.0, 0.0)
-            items.append((_("Cluster {id} · {sign} · {n} voxels ({ml:.1f} mL) · peak {stat} {value:.2f} at {where}").format(
-                id=item.get("id"), sign=SIGN_TEXT.get(item.get("sign"), ""), n=item.get("voxels"), ml=float(item.get("volume_ml") or 0.0), stat=statName,
+            items.append((_("Cluster {id} · {sign} · {size} · peak {stat} {value:.2f} at {where}").format(
+                id=item.get("id"), sign=SIGN_TEXT.get(item.get("sign"), ""), size=_clusterSizeText(item.get("voxels"), item.get("volume_ml")), stat=statName,
                 value=float(item.get("peak_stat") or 0.0), where=_whereText(x, y, z)), str(item.get("id"))))
         for sign in ("pos", "neg"):
             if sum(1 for item in clusters if item.get("sign") == sign) > 1:
@@ -887,6 +887,15 @@ def _removeUnfinished(folder):
             shutil.rmtree(folder)
     except OSError:
         logging.exception("Lesion network mapping: the unfinished circuit folder could not be removed")
+
+
+def _clusterSizeText(nVoxels, volumeMl):
+    """A cluster's size for the seed combo: "1 voxel (0.008 mL)", "12 voxels (0.1 mL)"; volumes under 0.1 mL keep 3 decimals (never "0.0 mL")."""
+    ml = float(volumeMl or 0.0)
+    mlText = f"{ml:.1f}" if (ml >= 0.095 or ml <= 0.0) else f"{ml:.3f}"
+    if nVoxels == 1:
+        return _("1 voxel ({ml} mL)").format(ml=mlText)
+    return _("{n} voxels ({ml} mL)").format(n=nVoxels, ml=mlText)
 
 
 def _fweSummaryText(nVoxels, nClusters, minP):

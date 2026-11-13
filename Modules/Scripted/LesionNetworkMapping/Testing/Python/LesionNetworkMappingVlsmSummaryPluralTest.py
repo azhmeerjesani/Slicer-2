@@ -31,3 +31,8 @@ class VlsmSummaryPluralTest(unittest.TestCase):
         self.assertIn("5 voxels in 2 clusters", self.vlsm._fweSummaryText(5, 2, "0.01"))
         self.assertIn("1 voxel in 1 cluster", self.vlsm._fweSummaryText(1, 1, "0.01"))
         self.assertIn("0 voxels in 0 clusters", self.vlsm._fweSummaryText(0, 0, "n/a"))
+
+    def test_cluster_size_text(self):
+        self.assertEqual(self.vlsm._clusterSizeText(1, 0.008), "1 voxel (0.008 mL)")
+        self.assertEqual(self.vlsm._clusterSizeText(250, 2.0), "250 voxels (2.0 mL)")
+        self.assertEqual(self.vlsm._clusterSizeText(3, 0.024), "3 voxels (0.024 mL)")
