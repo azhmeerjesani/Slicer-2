@@ -7123,6 +7123,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         self.ctx.setCurrentRun(None)
         if self.parent.isEntered:
             self.initializeParameterNode()
+            # The new scene's parameter node names the connectome in use (the one still chosen in the combo), so that
+            # the scene saved next records the connectome its maps are computed with
+            self.refreshConnectomes(select=self._connectomePath or None)
         self.refreshResult()  # the Result card of the new scene: no title of the closed scene's map or run ("Mapping: …")
         self.updateComputeState()
 
@@ -7131,6 +7134,12 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         # and reach the cards now, as they would when the module is entered next.
         if self.parent.isEntered:
             self.initializeParameterNode()
+            # The scene's connectome (its identifier, SPEC 9.7 rule 10) is opened, as enter() does: maps are computed with
+            # the connectome the parameter node names, not with the one chosen before the scene was opened
+            self.refreshConnectomes()
+            if self._adoptSceneResult():
+                self._displayWindow(self._parameterNode.resultVolume, False)
+                self.refreshResult(reloadMaps=False, peaks=True)
 
     @vtk.calldata_type(vtk.VTK_OBJECT)
     def onNodeAdded(self, caller, event, node):
