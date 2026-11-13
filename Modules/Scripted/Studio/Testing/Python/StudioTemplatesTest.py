@@ -2370,3 +2370,34 @@ class StudioTemplatesTest(unittest.TestCase):
         finally:
             dialog.deleteLater()
             shutil.rmtree(folder, ignore_errors=True)
+
+    def test_47_cut_short_image_is_refused(self):
+        """BB-1: a template image whose data stops before the end its header announces was accepted (the readers
+        zero-fill the rest, so it opened half black).
+        """
+        import shutil
+
+        from LesionNetworkMappingLib import nifti
+
+        templates = self.templates
+        folder = os.path.join(self.tempDir, "bb46")
+        os.makedirs(folder, exist_ok=True)
+        try:
+            whole = os.path.join(folder, "whole_1.5mm.nii")
+            data, affine, _header = nifti.read_nifti(self.image15)
+            nifti.write_nifti(whole, data, affine)
+            self.assertTrue(templates.identify(whole).ok)
+            cut = os.path.join(folder, "cut_1.5mm.nii")
+            with open(whole, "rb") as f:
+                body = f.read()
+            with open(cut, "wb") as f:
+                f.write(body[:len(body) // 2])
+            detection = templates.identify(cut)
+            self.assertFalse(detection.ok)
+            self.assertEqual(detection.status, "refused")
+            self.assertIn("is damaged", detection.message)
+            self.assertIn("stops after", detection.message)
+            with self.assertRaises(templates.TemplateError):
+                self._add(cut, name="Cut")
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)

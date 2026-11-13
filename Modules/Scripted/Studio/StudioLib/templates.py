@@ -519,6 +519,20 @@ def identify(path):
         detection.status = "error"
         detection.message = _("This file cannot be read as an image: {error}").format(error=error)
         return detection
+    try:
+        from . import importer
+
+        shortfall = importer._niftiDataShortfall(path) or importer._nrrdMhaDataShortfall(path)
+    except Exception:
+        shortfall = None
+    if shortfall:
+        # The readers zero-fill the missing voxels: a template cut short would open half black without a word
+        detection.status = "refused"
+        detection.message = _(
+            "{name} is damaged: its image data stops after {have:,} of the {need:,} bytes that its header announces "
+            "(the file was probably cut short by a failed copy or download). Copy it again from its source.").format(
+            name=os.path.basename(str(path)), have=shortfall[0], need=shortfall[1])
+        return detection
     shape, affine = tuple(header["shape"]), np.asarray(header["affine"], dtype=float)
     detection.shape, detection.frames, detection.affine, detection.codes, detection.format = shape, header["frames"], affine, header["codes"], header["format"]
     detection.spacing = voxelSpacing(affine)
