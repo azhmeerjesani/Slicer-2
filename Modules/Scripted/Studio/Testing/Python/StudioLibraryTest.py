@@ -201,6 +201,24 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._pump(4)
         return panel
 
+    def test_study_card_review_count_agrees_with_one_subject(self):
+        """The Studies card meta line says '1 needs review' for one subject and 'N need review' otherwise."""
+        from StudioLib import projects_ui
+
+        section = projects_ui.StudiesSection()
+        try:
+            texts = {}
+            for count in (1, 2):
+                summary = {"name": "S", "subjects": 5, "traced": 1, "review": count, "modified": 0}
+                card = section._card(tempfile.gettempdir(), summary)
+                meta = card.findChild("QLabel", "studioStudyMeta")
+                texts[count] = meta.text
+                card.deleteLater()
+            self.assertEqual(texts[1], "1 needs review")
+            self.assertEqual(texts[2], "2 need review")
+        finally:
+            section.widget.deleteLater()
+
     #
     # Current work
     #

@@ -2136,7 +2136,7 @@ class StudiesSection(qt.QObject):
         when = _relativeTime(summary["modified"]) if summary["modified"] else ""
         parts = [_("Edited {when}").format(when=when) if when else ""]
         if summary["review"]:
-            parts.append(_("{count} need review").format(count=summary["review"]))
+            parts.append(_("1 needs review") if summary["review"] == 1 else _("{count} need review").format(count=summary["review"]))
         elif subjects and traced >= subjects:
             parts.append(_("All traced"))
         meta = ui.label(" · ".join(part for part in parts if part), "caption", "text3", "studioStudyMeta")
