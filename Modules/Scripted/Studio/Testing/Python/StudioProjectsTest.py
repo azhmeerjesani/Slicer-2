@@ -7916,6 +7916,24 @@ class StudioProjectsTest(unittest.TestCase):
             slicer.app.processEvents()
 
     def test_85_continue_card_follows_the_moved_project(self):
+        self._continueCardFollowsTheMovedProject()
+
+    def test_85b_continue_card_folder_line_writes_the_home_folder_as_tilde(self):
+        """The card's folder line is written like every displayed path ("~" for the home folder), so the test must not depend
+        on where the temporary folder is (it is inside HOME when TMPDIR is, the bug-bash setup): run it with HOME above it.
+        """
+        saved = os.environ.get("HOME")
+        os.environ["HOME"] = self.tempDir
+        try:
+            self.assertTrue(self.projects.shortPath(os.path.join(self.tempDir, "x")).startswith("~"))
+            self._continueCardFollowsTheMovedProject()
+        finally:
+            if saved is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = saved
+
+    def _continueCardFollowsTheMovedProject(self):
         """After Change folder > Move the Continue card (Library) named the scan's folder in the old location until the next
         scene event, and after a move that failed partway (the open project was followed into the new folder while the setting
         stayed on the old one) it said "Open now · Not in a project yet" (BB-1). The card shows where the scan is now, and
@@ -7955,14 +7973,14 @@ class StudioProjectsTest(unittest.TestCase):
             canvas.refresh()
             title, meta, folders = card(canvas)
             self.assertEqual(title, project.name)
-            self.assertEqual(folders, [os.path.join(project.path, "Images")])
+            self.assertEqual(folders, [projects.shortPath(os.path.join(project.path, "Images"))])
             # A move that succeeds: the folder line names the scan's new folder at once, not after the next scene event
             newRoot = os.path.normpath(os.path.join(self.tempDir, "card move", "A", "Slicer Studio"))
             service.moveRoot(newRoot, moveContent=True)
             movedPath = os.path.join(newRoot, projects.PROJECTS_DIR, project.name)
             self.assertEqual(os.path.dirname(volume.GetStorageNode().GetFileName()), os.path.join(movedPath, "Images"))
-            title, meta, folders = waitFor(canvas, lambda state: state[2] == [os.path.join(movedPath, "Images")])
-            self.assertEqual(folders, [os.path.join(movedPath, "Images")], "the card names the scan's new folder")
+            title, meta, folders = waitFor(canvas, lambda state: state[2] == [projects.shortPath(os.path.join(movedPath, "Images"))])
+            self.assertEqual(folders, [projects.shortPath(os.path.join(movedPath, "Images"))], "the card names the scan's new folder")
             self.assertEqual(title, project.name)
             # A move that fails partway: the project moved, the setting stays on the old folder
             realMove = projects.moveContent
@@ -7978,8 +7996,8 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertEqual(projects.root(), newRoot, "the setting is unchanged")
             movedPath = os.path.join(failedRoot, projects.PROJECTS_DIR, project.name)
             self.assertEqual(os.path.normpath(service.project.path), movedPath)
-            title, meta, folders = waitFor(canvas, lambda state: state[2] == [os.path.join(movedPath, "Images")])
-            self.assertEqual(folders, [os.path.join(movedPath, "Images")])
+            title, meta, folders = waitFor(canvas, lambda state: state[2] == [projects.shortPath(os.path.join(movedPath, "Images"))])
+            self.assertEqual(folders, [projects.shortPath(os.path.join(movedPath, "Images"))])
             self.assertEqual(title, project.name)
             self.assertIn("Projects \u203a " + project.name, meta)
             self.assertNotIn("Not in a project yet", meta)
