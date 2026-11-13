@@ -2159,7 +2159,7 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertEqual(label.font.letterSpacing(), 0.0, text)
 
     def test_sources_unreadable_records_tsv_is_never_overwritten(self):
-        """A records.tsv that cannot be read (not UTF-8) stays as it is: Import refuses, the error stays shown, the stage log is kept (BB-1)."""
+        """A records.tsv that cannot be read (not UTF-8, or comma-separated) stays as it is: Import refuses, the error stays shown, the stage log is kept (BB-1)."""
         from LesionNetworkMappingLib import sources
         from LesionNetworkMappingLib.study import Study
         from StudioLib import libcard_sources, study_ui
@@ -2183,33 +2183,36 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertTrue(os.path.isfile(logPath))
         with open(recordsPath, encoding="utf-8") as f:
             text = f.read()
-        with open(recordsPath, "wb") as f:
-            f.write(text.encode("cp1252"))  # as a spreadsheet saves it on Windows
-        with open(recordsPath, "rb") as f:
-            damaged = f.read()
-        with open(logPath, "rb") as f:
-            log = f.read()
+        commas = "\n".join(",".join(f'"{cell}"' if "," in cell else cell for cell in line.split("\t")) for line in text.split("\n"))
+        # As a spreadsheet saves it on Windows (not UTF-8), or re-saved as comma-separated (no record_id column)
+        for damage in (text.encode("cp1252"), commas.encode("utf-8")):
+            with open(recordsPath, "wb") as f:
+                f.write(damage)
+            with open(recordsPath, "rb") as f:
+                damaged = f.read()
+            with open(logPath, "rb") as f:
+                log = f.read()
 
-        fresh = libcard_sources.SourcesCard(session)
-        self.cleanup.append(fresh.widget.close)
-        fresh.widget.show()
-        fresh.refresh()  # no exception: the PRISMA counts use the empty stand-in, not the file again
-        self._pump()
-        self.assertTrue(fresh.errorLabel.isVisible())
-        self.assertIn("cannot be read", fresh.errorLabel.text)
-        self.assertIsNone(fresh.importRecords(text="10.9999/after.damage\n"))
-        self._pump()
-        self.assertTrue(fresh.errorLabel.isVisible())
-        self.assertIn("cannot be read", fresh.errorLabel.text)
-        self.assertIn("Nothing was imported", fresh.errorLabel.text)
-        with open(recordsPath, "rb") as f:
-            self.assertEqual(f.read(), damaged)
-        with open(logPath, "rb") as f:
-            self.assertEqual(f.read(), log)
-        with self.assertRaises(sources.SourcesError):
-            fresh.records.save()  # the library refuses too
-        with open(recordsPath, "rb") as f:
-            self.assertEqual(f.read(), damaged)
+            fresh = libcard_sources.SourcesCard(session)
+            self.cleanup.append(fresh.widget.close)
+            fresh.widget.show()
+            fresh.refresh()  # no exception: the PRISMA counts use the empty stand-in, not the file again
+            self._pump()
+            self.assertTrue(fresh.errorLabel.isVisible())
+            self.assertIn("cannot be read", fresh.errorLabel.text)
+            self.assertIsNone(fresh.importRecords(text="10.9999/after.damage\n"))
+            self._pump()
+            self.assertTrue(fresh.errorLabel.isVisible())
+            self.assertIn("cannot be read", fresh.errorLabel.text)
+            self.assertIn("Nothing was imported", fresh.errorLabel.text)
+            with open(recordsPath, "rb") as f:
+                self.assertEqual(f.read(), damaged)
+            with open(logPath, "rb") as f:
+                self.assertEqual(f.read(), log)
+            with self.assertRaises(sources.SourcesError):
+                fresh.records.save()  # the library refuses too
+            with open(recordsPath, "rb") as f:
+                self.assertEqual(f.read(), damaged)
 
         # Once the file is saved as UTF-8 again, the records come back and the error goes
         with open(recordsPath, "w", encoding="utf-8") as f:

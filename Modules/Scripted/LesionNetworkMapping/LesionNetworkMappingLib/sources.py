@@ -609,12 +609,28 @@ class Records:
                 columns, rows = study_module.read_tsv(records.path)
             except (OSError, ValueError) as e:
                 raise SourcesError(f"sources/records.tsv cannot be read: {e}") from e
+            if "record_id" not in columns and (columns or rows):
+                # For example re-saved by a spreadsheet as comma-separated: every row would be dropped, and the next
+                # save would write the few new records over all of them
+                separated = next((name for sep, name in ((",", "comma"), (";", "semicolon")) if sep in "".join(columns)), None)
+                how = f" (it looks {separated}-separated)" if separated else ""
+                raise SourcesError(f"sources/records.tsv cannot be read: it has no record_id column{how}. "
+                                   "Save it again as tab-separated text")
             records.extra_columns = [column for column in columns if column not in COLUMNS]
-            for row in rows:
+            for line, row in enumerate(rows, start=2):
                 full = {column: ("" if row.get(column, NA) == NA else row.get(column, "")) for column in (*COLUMNS, *records.extra_columns)}
-                if full["record_id"]:
-                    full["stage"] = full["stage"] if full["stage"] in STAGES else IDENTIFIED
-                    records.rows.append(full)
+                if not full["record_id"]:
+                    if any(full.values()):  # a record the next save would drop
+                        raise SourcesError(f"sources/records.tsv cannot be read: row {line} has no record_id")
+                    continue
+                # Stages typed by hand ("Included") are matched without regard to case; a stage the app does not know
+                # is reported, not turned into "identified" (and saved so)
+                stage = full["stage"].strip().lower()
+                if stage and stage not in STAGES:
+                    raise SourcesError(f"sources/records.tsv cannot be read: record {full['record_id']} has the unknown stage "
+                                       f"{full['stage']!r} (expected one of {', '.join(STAGES)})")
+                full["stage"] = stage or IDENTIFIED
+                records.rows.append(full)
         if os.path.isfile(records.kept_path):
             try:
                 _columns, rows = study_module.read_tsv(records.kept_path)

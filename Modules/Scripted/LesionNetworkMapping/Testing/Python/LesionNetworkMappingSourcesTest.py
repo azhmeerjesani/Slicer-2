@@ -348,6 +348,58 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual((counts["excluded_screening"], counts["fulltext_excluded"]), (0, 1))
         self.assertEqual(counts["fulltext_excluded_reasons"], {"No usable lesion imaging": 1})
 
+    def test_records_without_record_id_column_or_unknown_stage_are_reported_not_dropped(self):
+        """A records.tsv re-saved as comma-separated, with a row without a record_id or with an unknown stage raises
+        SourcesError instead of reading as empty or "identified", so the next Import cannot write over it (BB-1).
+        A stage typed with capitals ("Included") is read as that stage.
+        """
+        import csv
+
+        records = sources.Records.open(self.study)
+        records.add([sources.draft(doi=f"10.9999/{n}") for n in "abc"])
+        first, second, _third = records.ids()
+        records.advance(first)
+        records.save()
+        columns, rows = sources.study_module.read_tsv(records.path)
+
+        def write(delimiter, edit=None):
+            table = [dict(row) for row in rows]
+            if edit:
+                edit(table)
+            with open(records.path, "w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f, delimiter=delimiter, lineterminator="\n")
+                writer.writerow(columns)
+                writer.writerows([[row[column] for column in columns] for row in table])
+            with open(records.path, "rb") as f:
+                return f.read()
+
+        def set_cell(index, column, value):
+            return lambda table: table[index].__setitem__(column, value)
+
+        for delimiter, edit, expected in (
+            (",", None, "comma-separated"),
+            (";", None, "semicolon-separated"),
+            ("\t", set_cell(1, "record_id", "n/a"), "row 3 has no record_id"),
+            ("\t", set_cell(1, "stage", "Included!"), "unknown stage"),
+        ):
+            damaged = write(delimiter, edit)
+            with self.assertRaises(sources.SourcesError) as raised:
+                sources.Records.open(self.study)
+            self.assertIn("records.tsv", str(raised.exception))
+            self.assertIn(expected, str(raised.exception))
+            with self.assertRaises(sources.SourcesError):
+                sources.prisma_counts(self.study)
+            with open(records.path, "rb") as f:
+                self.assertEqual(f.read(), damaged)
+        # A stage typed by hand with capitals or spaces is the known stage (and an empty one is "identified")
+        write("\t", lambda table: (table[0].__setitem__("stage", " Screened"), table[1].__setitem__("stage", "INCLUDED"),
+                                    table[2].__setitem__("stage", "n/a")))
+        again = sources.Records.open(self.study)
+        self.assertEqual([again.get(record_id)["stage"] for record_id in again.ids()],
+                         [sources.SCREENED, sources.INCLUDED, sources.IDENTIFIED])
+        self.assertEqual(sources.prisma_counts(self.study, again)["included"], 1)
+        self.assertEqual(second, again.ids()[1])
+
     def test_prisma_figure_says_1_case_in_the_singular(self):
         records = sources.Records.open(self.study)
         sources.import_text(self.study, records, "10.9999/one\n")
