@@ -952,7 +952,7 @@ def family_warning(entry, bundle_space):
     from .geometry import space_family
 
     mine, theirs = entry.get("family") or "unknown", space_family(bundle_space) if bundle_space else "unknown"
-    if mine == "unknown" or theirs == "unknown" or mine == theirs:
+    if mine in ("unknown", "native") or theirs in ("unknown", "native") or mine == theirs:
         return ""
     return f"{entry.get('title')}: template family {mine} differs from the connectome's ({theirs}); resampled without a template-family transform (offsets of a few mm)."
 

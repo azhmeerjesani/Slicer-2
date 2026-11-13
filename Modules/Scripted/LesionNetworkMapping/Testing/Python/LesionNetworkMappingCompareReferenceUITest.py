@@ -19,6 +19,8 @@ import tempfile
 import time
 import unittest
 
+import numpy as np
+
 try:
     import slicer
 except ImportError as exc:
@@ -66,6 +68,31 @@ class LesionNetworkMappingCompareReferenceUITest(unittest.TestCase):
 
     def _connectomeSources(self):
         return {source.key: source for source in self.compare.discoverSources() if source.group == "connectome"}
+
+    def test_0_reference_sources_carry_template_family(self):
+        """The Compare card passes the registry's family to refmaps.family_warning (it was dropped: no note ever)."""
+        from LesionNetworkMappingLib import nifti, refmaps
+        from LesionNetworkMappingUI import card_compare
+
+        bundle = self.bundle
+        self.ctx.setBundle(bundle)
+        _pump(50)
+        root = card_compare.registryRoot()
+        path = os.path.join(self.tmp, "nlin6_map.nii.gz")
+        data = np.zeros(bundle.shape, dtype=np.float32)
+        data[2:5, 2:5, 2:5] = 1.0
+        nifti.write_nifti(path, data, bundle.affine)
+        entry = refmaps.add_file(path, root=root, title="family test map", space="MNI152NLin6Asym")
+        try:
+            source = next(s for s in self.compare.discoverSources() if s.key == f"reference:{entry['id']}")
+            self.assertEqual(source.info.get("family"), "fsl6")
+            self.assertEqual(source.info.get("space"), "MNI152NLin6Asym")
+            # The declared space of the connectome decides, also on a grid that is not a standard template grid.
+            bundle.metadata = dict(getattr(bundle, "metadata", None) or {}, space="MNI152NLin2009cAsym")
+            self.assertEqual(self.compare._bundleSpace(), "MNI152NLin2009cAsym")
+            self.assertIn("template family fsl6 differs", refmaps.family_warning(source.info, self.compare._bundleSpace()))
+        finally:
+            refmaps.remove_entry(entry["id"], root=root)
 
     def test_1_build_and_rebuild_are_picked_up(self):
         import numpy as np

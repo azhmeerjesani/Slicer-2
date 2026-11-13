@@ -397,6 +397,16 @@ class NoteTest(RefmapsTestBase):
         rows = refmaps.top_similar(current, candidates[4:], condition="depression")
         self.assertIn("clinically unrelated", rows[0]["note"])
 
+    def test_family_warning(self):
+        entry = {"title": "map_nlin6", "family": "fsl6", "space": "MNI152NLin6Asym"}
+        self.assertIn("template family fsl6 differs", refmaps.family_warning(entry, "MNI152NLin2009cAsym"))
+        self.assertIn("without a template-family transform", refmaps.family_warning(entry, "MNI152NLin2009cAsym"))
+        self.assertEqual(refmaps.family_warning({"title": "m", "family": "2009"}, "MNI152NLin2009cAsym"), "")
+        self.assertEqual(refmaps.family_warning({"title": "m"}, "MNI152NLin2009cAsym"), "")
+        # a native (non-template) grid is no family: no misleading "(native)" note
+        self.assertEqual(refmaps.family_warning(entry, "native"), "")
+        self.assertEqual(refmaps.family_warning({"title": "m", "family": "native"}, "MNI152NLin2009cAsym"), "")
+
     def test_connectome_reference_note(self):
         v = self.bundle.n_voxels
         current = self.rng.standard_normal(v)

@@ -542,7 +542,8 @@ class CompareCard:
                                      info=
                                      {"kind": entry.get("kind") or "reference", "id": entry.get("id"), "title": entry.get("title"), "source": entry.get("source"),
                                       "licence": licence, "licence_note": entry.get("licence_note"), "citation": entry.get("citation"),
-                                      "condition": condition, "sha256": entry.get("sha256"), "redistribute": bool(entry.get("redistribute"))}, tooltip=tip))
+                                      "condition": condition, "sha256": entry.get("sha256"), "redistribute": bool(entry.get("redistribute")),
+                                      "space": entry.get("space"), "family": entry.get("family")}, tooltip=tip))
         if self.lesionCheck.checked and mapsTsv:
             from LesionNetworkMappingLib import cohortmaps
 
@@ -872,6 +873,9 @@ class CompareCard:
         try:
             from LesionNetworkMappingLib import geometry
 
+            declared = (getattr(bundle, "metadata", None) or {}).get("space")
+            if declared and geometry.space_family(declared) not in ("native", "unknown"):
+                return str(declared)  # the connectome's declared space (as connectomeSpaceName), also on a non-standard grid
             return geometry.detect_space(bundle.shape, bundle.affine)
         except Exception:
             return None
