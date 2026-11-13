@@ -1596,9 +1596,15 @@ def createProject(name=None, rootPath=None):
         except FileExistsError:
             if attempt == CREATE_NAME_ATTEMPTS - 1:
                 raise
-    os.makedirs(privateFolder(path), exist_ok=True)
-    project = Project(path)
-    project.writeJson(state="open")
+    try:
+        os.makedirs(privateFolder(path), exist_ok=True)
+        project = Project(path)
+        project.writeJson(state="open")
+    except BaseException:
+        # A full disk (or any other failure) must not leave an empty or half-made folder: Library would list it as an
+        # "Empty" card and every retry would add another one. The folder was created just above, so it holds nothing
+        shutil.rmtree(path, ignore_errors=True)
+        raise
     return project
 
 

@@ -10745,6 +10745,29 @@ sys.exit(web.command_local(args))
             projects.discardMoveJournal()
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
 
+    def test_119_failed_project_creation_on_a_full_disk_leaves_no_folder(self):
+        # createProject takes the folder first, then writes .studio/project.json: when that fails (disk full), the
+        # folder must be removed, or Library lists an "Empty" card and each retry adds another folder
+        projects = self.projects
+        folder = projects.projectsFolder(self.root)
+        before = sorted(os.listdir(folder)) if os.path.isdir(folder) else []
+        original = projects.Project.writeJson
+
+        def fullDisk(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        projects.Project.writeJson = fullDisk
+        try:
+            for _attempt in range(2):
+                with self.assertRaises(OSError):
+                    projects.createProject("other", rootPath=self.root)
+        finally:
+            projects.Project.writeJson = original
+        after = sorted(os.listdir(folder)) if os.path.isdir(folder) else []
+        self.assertEqual(after, before, "no empty folder is left behind")
+        self.assertNotIn("other", [info.name for info in projects.listProjects(self.root)])
+        self.assertEqual(os.path.basename(projects.createProject("other", rootPath=self.root).path), "other")
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk
