@@ -498,15 +498,30 @@ def _surname(author):
     if "," in author:
         return author.split(",")[0].strip()
     words = author.split()
-    if len(words) > 1 and re.fullmatch(r"[A-Z]{1,3}", words[-1]):
+    if len(words) > 1 and re.fullmatch(r"[A-Z]{1,3}|[A-Z]\.(?:[\s-]*[A-Z]\.)*", words[-1]):
         return " ".join(words[:-1])
     return words[-1] if words else ""
 
 
+_SCOPUS_AUTHOR = re.compile(r"[^,;]+\s[A-Z]\.(?:[\s-]*[A-Z]\.)*")
+
+
+def _split_authors(text):
+    """Authors of "A; B", "A and B" or the Scopus form "Chen W., Patel R." (surname, initials with periods)."""
+    text = _clean(text)
+    if not text:
+        return []
+    if ";" not in text and "," in text:
+        pieces = [part.strip() for part in text.split(",")]
+        if all(_SCOPUS_AUTHOR.fullmatch(part) for part in pieces):
+            return pieces
+    return [part.strip() for part in re.split(r";|\s+and\s+", text) if part.strip()]
+
+
 def _record_id_base(record):
     """Letters and digits of the first author's surname and the year ("smith2020"); "rec" without an author."""
-    authors = _clean(record.get("authors"))
-    first = re.split(r"[;]|\s+and\s+", authors)[0] if authors else ""
+    authors = _split_authors(record.get("authors"))
+    first = authors[0] if authors else ""
     surname = _surname(first)
     surname = re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFKD", surname).encode("ascii", "ignore").decode().lower())
     return (surname or "rec") + _year(record.get("year"))
@@ -515,6 +530,8 @@ def _record_id_base(record):
 def _citation(row):
     """"Smith et al. 2020, Brain" from a record row."""
     authors = [part.strip() for part in re.split(r";", _clean(row.get("authors"))) if part.strip()]
+    if len(authors) == 1:
+        authors = _split_authors(authors[0])
     if authors:
         who = _surname(authors[0]) + (" et al." if len(authors) > 1 else "")
     else:

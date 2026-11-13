@@ -188,6 +188,26 @@ class SourcesTest(unittest.TestCase):
         with self.assertRaises(sources.SourcesError):
             sources.parse_csv("foo,bar\n1,2\n")
 
+    def test_scopus_initials_authors_give_surname_ids_and_citations(self):
+        text = (
+            "Authors,Title,Year,Source title,DOI\n"
+            '"Lefevre B.",T1,2020,Rev Neurol,10.1/a\n'
+            '"Chen W., Patel R.",T2,2022,Brain,10.1/b\n'
+            '"Smith J.A., Doe K.",T3,2021,X,10.1/c\n'
+            '"Smith, John",T4,2019,Y,10.1/d\n'
+        )
+        _kind, records = sources.parse_text(text, "scopus.csv")
+        got = [(sources._record_id_base(dict(r)), sources._citation(dict(r))) for r in records]
+        self.assertEqual(
+            got,
+            [
+                ("lefevre2020", "Lefevre 2020, Rev Neurol"),
+                ("chen2022", "Chen et al. 2022, Brain"),
+                ("smith2021", "Smith et al. 2021, X"),
+                ("smith2019", "Smith 2019, Y"),
+            ],
+        )
+
     def test_identifiers(self):
         text = "https://doi.org/10.1000/ABC.1.\n12345678\nPMID: 987\n10.5555/x.y, not a doi\n\n10.1000/abc.1\n"
         records = sources.parse_identifiers(text)
