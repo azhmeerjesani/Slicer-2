@@ -36,6 +36,9 @@ from . import library, ui
 CARD_ORDER = 45
 #: Rows of the table before it scrolls
 TABLE_ROWS = 6
+#: The record id is only a key (the tooltip has the details); the title is what P/X screening judges
+RECORD_COLUMN_WIDTH = 60
+TITLE_MIN_WIDTH = 120
 STAGE_LABELS = (("identified", "Identified"), ("screened", "Screened"), ("fulltext", "Full text"), ("included", "Included"), ("excluded", "Excluded"))
 STAGE_LEVELS = {"identified": "text2", "screened": "text", "fulltext": "text", "included": "success", "excluded": "danger"}
 COMMON_REASONS = ("Not a case report", "No usable lesion imaging", "Lesion cannot be localised", "Not the studied symptom", "Duplicate patient report", "No full text")
@@ -267,7 +270,7 @@ class SourcesCard:
         header.setSectionResizeMode(1, qt.QHeaderView.Stretch)
         header.setSectionResizeMode(2, qt.QHeaderView.ResizeToContents)
         header.setMinimumSectionSize(40)
-        self.table.setColumnWidth(0, 104)
+        self.table.setColumnWidth(0, RECORD_COLUMN_WIDTH)
         # The title is what is being judged: it keeps room, and nothing scrolls sideways
         self.table.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
         self.table.setFocusPolicy(qt.Qt.StrongFocus)

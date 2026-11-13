@@ -2292,6 +2292,25 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         card.caseCount.setValue(1)
         self.assertEqual(card.caseCount.suffix, " case")
 
+    def test_sources_title_column_keeps_room(self):
+        """In the 278 px Library panel the Title column stays readable next to a long record id and the widest stage (BB-1)."""
+        from StudioLib import libcard_sources
+
+        card = libcard_sources.SourcesCard(None)
+        table = card.table
+        table.setRowCount(1)
+        for column, text in enumerate(("pmid-12345678-long-id", "Akinetopsia after a bilateral occipital infarct", "Identified")):
+            table.setItem(0, column, qt.QTableWidgetItem(text))
+        card.widget.setFixedWidth(278)  # the width of the Library panel
+        card.widget.show()
+        slicer.app.processEvents()
+        try:
+            widths = [table.columnWidth(i) for i in range(3)]
+            self.assertGreaterEqual(widths[1], libcard_sources.TITLE_MIN_WIDTH, widths)
+            self.assertGreater(widths[1], widths[0], widths)
+        finally:
+            card.widget.hide()
+
     def test_sources_prisma_export_on_read_only_study_is_plain(self):
         """A read-only study disables PRISMA export, and a permission error is said in plain words without a logged traceback (BB-1)."""
         import errno
