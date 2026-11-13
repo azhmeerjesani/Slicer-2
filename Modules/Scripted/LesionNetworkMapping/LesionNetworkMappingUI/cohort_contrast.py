@@ -785,6 +785,9 @@ class CohortTab:
             self.result, self.outputs = None, []
             self.results.hide()
             self.onScopeChanged()
+            card = self.card()
+            if card is not None and hasattr(card, "hideGroupMapOfOtherScope"):
+                card.hideGroupMapOfOtherScope()  # the map of the previous scope leaves the views (as its result left the tab)
         self.rebuildDesign()
         self.showDesignState()
         self.showState()
@@ -1034,7 +1037,7 @@ class CohortTab:
         if not 0 <= index < len(self.outputs):
             return None
         desc, text, path = self.outputs[index]
-        volume = showGroupFile(self.ctx, path, desc, f"{self.TITLE}: {text}")
+        volume = showGroupFile(self.ctx, path, desc, f"{self.TITLE}: {text}", scopeOf=self.connectomeDir)
         if volume is not None:
             self.mapsTable.selectRow(index)
         return volume
@@ -1088,9 +1091,10 @@ def groupVolume(ctx):
     return None
 
 
-def showGroupFile(ctx, path, desc, name):
+def showGroupFile(ctx, path, desc, name, scopeOf=None):
     """Show a group map file in the group map volume with its own colour table copy (``display.applyGroupMapDisplay``),
-    over the template; return the volume, or None.
+    over the template; return the volume, or None. ``scopeOf()`` gives the folder of the results the map belongs to (the
+    tab's ``connectomeDir``): when it changes (another study or connectome), the map leaves the slice views.
     """
     from LesionNetworkMappingLib import display
 
@@ -1112,6 +1116,8 @@ def showGroupFile(ctx, path, desc, name):
     card = ctx.card("cohort")
     if card is not None and hasattr(card, "groupVolumeId"):
         card.groupVolumeId = volume.GetID()
+        if hasattr(card, "setGroupScope"):
+            card.setGroupScope(scopeOf)
     display.applyGroupMapDisplay(volume, desc)
     node = ctx.parameterNode
     opacity = getattr(node, "opacity", 0.8) if node is not None else 0.8

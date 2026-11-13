@@ -194,6 +194,65 @@ class LesionNetworkMappingVlsmUITest(unittest.TestCase):
         _pump(50)
         self.assertNotIn("259 voxels", str(tab.summaryLabel.text))
 
+    def test_other_study_takes_the_previous_map_out_of_the_views(self):
+        # BB-1: after a VLSM of study 1, "Other study…" hid the tab's result but left study 1's VLSM map in every slice
+        # view, where it could be read as study 2's result. The map of the previous scope now leaves the views.
+        import json
+
+        import numpy as np
+        from LesionNetworkMappingLib import nifti
+        from LesionNetworkMappingUI import card_pipeline, cohort_contrast
+
+        tab, widget = self.vlsm, self.widget
+        card = widget.ctx.card("cohort")
+        study2 = os.path.join(self.tmp, "study two")
+        shutil.copytree(self.fx["study"], study2)
+        with open(os.path.join(study2, "study.json"), encoding="utf-8") as f:
+            record = json.load(f)
+        record["name"] = "study two"
+        with open(os.path.join(study2, "study.json"), "w", encoding="utf-8") as f:
+            json.dump(record, f)
+        path = os.path.join(self.tmp, "vlsm_desc-tstat_map.nii.gz")
+        data = np.zeros(self.fx["fine_shape"], dtype=np.float32)
+        data[2:6, 2:6, 2:6] = 4.0
+        nifti.write_nifti(path, data, self.fx["fine_affine"])
+
+        def foregrounds():
+            return {node.GetForegroundVolumeID() for node in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode")}
+
+        tab.refresh()
+        _pump(50)
+        storedOutputs = tab.outputs
+        try:
+            tab.outputs = [("vlsmTestTstat", "Statistic (T)", path)]
+            volume = tab.showMap(0)
+            _pump(100)
+            self.assertIsNotNone(volume)
+            volumeId = volume.GetID()
+            self.assertIn(volumeId, foregrounds(), "the VLSM map is not shown")
+            # The same study again (a refresh, another control) keeps the map in the views
+            tab.refresh()
+            card.refresh()
+            _pump(50)
+            self.assertIn(volumeId, foregrounds(), "a refresh of the same study took the map out of the views")
+            widget.openCohortStudy(study2)
+            _pump(300)
+            tab.refresh()
+            _pump(100)
+            self.assertIsNone(tab.result)
+            self.assertNotIn(volumeId, foregrounds(), "study 1's VLSM map is still shown with study 2 open")
+        finally:
+            tab.outputs = storedOutputs
+            widget.openCohortStudy(self.fx["study"])
+            card_pipeline.setCohortSeed(widget)
+            for node in list(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")):
+                if node.GetAttribute(cohort_contrast.GROUP_VOLUME_ATTRIBUTE) == "1":
+                    slicer.mrmlScene.RemoveNode(node)
+            card.groupVolumeId = None
+            tab.refresh()
+            _pump(100)
+            shutil.rmtree(study2, ignore_errors=True)
+
 
 class LesionNetworkMappingSingleLevelUITest(unittest.TestCase):
     """A cases-only study has one group level: the Contrast and VLSM tabs do not offer "case vs case"."""

@@ -452,6 +452,8 @@ class CohortCard:
     def __init__(self, ctx):
         self.ctx = ctx
         self.groupVolumeId = None
+        self.groupScope = None  # scope (results folder) of the map shown in the group map volume when it was shown, or None
+        self._groupScopeOf = None  # the function that gives that scope now (of the card or of the tab that showed the map)
         self.widget = widgets.card(_("Cohort"), objectName="LNMCohortCard")
         layout = qt.QVBoxLayout(self.widget)
         self.statusLabel = qt.QLabel("")
@@ -533,6 +535,46 @@ class CohortCard:
         path = self.currentMapsTsv()
         return os.path.dirname(path) if path else None
 
+    def connectomeScope(self):
+        """``<study>/derivatives/lnm/conn-<label>[_n-N]`` of the open study and connectome (the folder of the cohort maps and
+        of the group maps and analyses made from them), or None.
+        """
+        folder = self.folder()
+        if folder:
+            return os.path.dirname(folder)
+        widget = _mapWidget()
+        cohortDir = widget.cohortOutputDir(ownOnly=True) if widget is not None and hasattr(widget, "cohortOutputDir") else None
+        return os.path.dirname(cohortDir) if cohortDir else None
+
+    def setGroupScope(self, scopeOf=None):
+        """The group map volume now shows a map of the open study (and connectome): ``scopeOf()`` (default
+        ``connectomeScope``) gives the folder of the results it belongs to (a tab's ``connectomeDir``).
+        """
+        self._groupScopeOf = scopeOf or self.connectomeScope
+        try:
+            self.groupScope = self._groupScopeOf()
+        except Exception:
+            logging.exception("Lesion network mapping: the scope of the group map could not be read")
+            self.groupScope, self._groupScopeOf = None, None
+
+    def hideGroupMapOfOtherScope(self):
+        """Another study or connectome is open: take the group map of the previous one out of the slice views (its tab
+        no longer shows that result either), so that it is not read as a result of the one open now; return whether it was.
+        """
+        if self.groupScope is None or self._groupScopeOf is None:
+            return False
+        try:
+            scope = self._groupScopeOf()
+        except Exception:
+            logging.exception("Lesion network mapping: the scope of the group map could not be read")
+            return False
+        if scope == self.groupScope:
+            return False
+        from LesionNetworkMappingLib import display
+
+        self.groupScope, self._groupScopeOf = None, None
+        return display.hideForeground(self.groupVolume())
+
     def groupRecord(self):
         """cohort.json of the group maps next to the current maps.tsv, or None."""
         folder = self.folder()
@@ -562,6 +604,7 @@ class CohortCard:
         self.mapButton.setVisible(not mapsTsv)
         self.mapButton.setEnabled(widget is not None and widget.cohortComputeState()[0] and not running)
         self.browseButton.setEnabled(bool(mapsTsv))
+        self.hideGroupMapOfOtherScope()
         self.overlap.refresh()
 
     #
@@ -629,6 +672,7 @@ class CohortCard:
                       "Studio.Space": widget.logic.connectomeSpaceName(bundle)}
         volume = widget.logic.loadMap(path, name, self.groupVolume(), saveWithScene=True, attributes=attributes)
         self.groupVolumeId = volume.GetID()
+        self.setGroupScope()
         display.applyGroupMapDisplay(volume, desc)
         try:
             from StudioLib import mappage
