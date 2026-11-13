@@ -1112,6 +1112,8 @@ def changeRootDialog(parent=None):
         try:
             # A project or study open in another Slicer Studio would move away from under it (and drop out of its Library)
             projects.checkNotOpenElsewhere(oldRoot)
+            # A running job that writes into the folder (a connectome download into LNM/Connectomes) would fail and re-create it
+            projects.checkNoJobsUsing(oldRoot)
         except OSError as error:
             _notice(parent, _("Change the Slicer Studio folder"), str(error))
             return None

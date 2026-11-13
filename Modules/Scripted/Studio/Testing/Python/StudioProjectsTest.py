@@ -10270,6 +10270,92 @@ sys.exit(web.command_local(args))
         self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName("Lesion"))
 
 
+    def test_116_root_move_is_refused_while_a_job_writes_into_the_folder(self):
+        """Change folder > Move while a connectome download runs into <Slicer Studio folder>/LNM/Connectomes (BB-1) is
+        refused before anything is moved, with a message that names the job, as it is for an open study. The folder used to
+        move from under the download: the job failed with a raw FileNotFoundError on its .tmp file, and its state.json and
+        runs.jsonl re-created the old folder. A job whose files are all elsewhere does not stop the move.
+        """
+        from unittest import mock
+
+        from LesionNetworkMappingUI import jobrunner
+
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        service = self._service()
+        projects.ensureRoot(self.root)
+        oldRoot = projects.root()
+        projects.createProject("Patient", rootPath=oldRoot)
+        destination = os.path.join(oldRoot, projects.LNM_DIR, "Connectomes")
+        os.makedirs(destination, exist_ok=True)
+        newRoot = os.path.join(self.tempDir, "moved", "Slicer Studio")
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        qt.QSettings().setValue(projects.ROOT_KEY, self.root)
+        running = self.autosave._service
+        self.autosave._service = service
+        runner = jobrunner.instance()
+
+        def fetchJob(dest):
+            # The job the connectome catalog starts (``manager_catalog.FetchController.start``), never launched here
+            spec = jobrunner.JobSpec("LesionNetworkMappingLib.fetchconnectome", ["--entry", "fake", "--dest", dest, "--terms-sha", "0"],
+                                     title="Fetching fake", heavy=False, kind="fetch", name="fetch", runRoot=jobrunner.defaultRunRoot())
+            job = jobrunner.Job(runner, spec, "test-fetch")
+            job.state = jobrunner.RUNNING
+            return job
+
+        job = fetchJob(destination)
+        elsewhere = fetchJob(os.path.join(self.tempDir, "external drive"))
+        runner._running.extend([job, elsewhere])
+        try:
+            def unchanged():
+                self.assertFalse(os.path.exists(newRoot), "nothing is made in the new folder")
+                self.assertTrue(os.path.isdir(destination), "the download folder stays")
+                self.assertEqual(projects.root(), os.path.normpath(self.root), "the setting is unchanged")
+
+            self.assertEqual(projects.jobsUsingFolder(oldRoot), ["Fetching fake"])
+            with self.assertRaises(projects.JobsRunningError) as context:
+                service.moveRoot(newRoot, moveContent=True)
+            self.assertIn("Fetching fake is running", str(context.exception))
+            unchanged()
+            # The Change… dialog says it before asking anything
+            shown = []
+
+            class FakeChooser:
+                path = newRoot
+                continueButton = mock.Mock()
+                setWindowTitle = mock.Mock()
+                choose = mock.Mock()
+                exec = mock.Mock()
+                exec_ = mock.Mock()
+                deleteLater = mock.Mock()
+
+                def __init__(self, *args, **kwargs):
+                    pass
+
+            def fail(*args, **kwargs):
+                raise AssertionError("the question is not asked")
+
+            with mock.patch.object(projects_ui, "FolderChooserDialog", FakeChooser), \
+                    mock.patch.object(projects_ui, "_question", fail), \
+                    mock.patch.object(projects_ui, "_notice", lambda parent, title, text: shown.append(text)):
+                self.assertIsNone(projects_ui.changeRootDialog(None))
+            self.assertEqual(len(shown), 1, shown)
+            self.assertIn("Fetching fake is running and uses files in the Slicer Studio folder", shown[0])
+            unchanged()
+            # Once the download has finished, the folder moves (the job writing elsewhere does not matter)
+            job.state = jobrunner.DONE
+            self.assertEqual(projects.jobsUsingFolder(oldRoot), [])
+            moved = service.moveRoot(newRoot, moveContent=True)
+            self.assertIn("Projects", moved)
+            self.assertEqual(projects.root(), os.path.normpath(newRoot))
+        finally:
+            for item in (job, elsewhere):
+                if item in runner._running:
+                    runner._running.remove(item)
+            self.autosave._service = running
+            qt.QSettings().remove(projects.ROOT_KEY)
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 

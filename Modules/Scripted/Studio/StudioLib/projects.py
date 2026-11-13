@@ -2844,6 +2844,53 @@ def checkNotOpenElsewhere(rootPath):
             names=", ".join(studies)))
 
 
+class JobsRunningError(OpenElsewhereError):
+    """The folder cannot be moved: a running job (a connectome download, Map, Normalize...) uses files in it. Raised before
+    anything is moved, like ``OpenElsewhereError``.
+    """
+
+
+def jobsUsingFolder(rootPath):
+    """The titles of the running or waiting jobs of this application (``LesionNetworkMappingUI.jobrunner``) that use files in
+    ``rootPath``: an argument (for example the ``--dest`` of a connectome download into LNM/Connectomes) or their run folder
+    lies in it. Such a job keeps writing to the old absolute paths: a move would break it and re-create the old folder.
+    """
+    module = sys.modules.get("LesionNetworkMappingUI.jobrunner")
+    if module is None:
+        return []
+    try:
+        runner = module.instance()
+        jobs = list(runner.queuedJobs()) + list(runner.runningJobs())
+    except Exception:
+        logging.exception("Slicer Studio: the running jobs could not be listed")
+        return []
+    titles = []
+    for job in jobs:
+        try:
+            if job.isFinished():
+                continue
+            spec = job.spec
+            paths = [arg for arg in [*spec.args, spec.runRoot] if isinstance(arg, str) and os.path.isabs(arg)]
+            if any(isInside(path, rootPath) for path in paths):
+                titles.append(str(spec.title))
+        except Exception:
+            continue
+    return titles
+
+
+def checkNoJobsUsing(rootPath):
+    """Raise JobsRunningError (a plain message that names them) when a running job of this application uses files in the
+    folder (``jobsUsingFolder``): moving the folder would move them away from under it.
+    """
+    titles = jobsUsingFolder(rootPath)
+    if len(titles) == 1:
+        raise JobsRunningError(_("{name} is running and uses files in the Slicer Studio folder. Wait until it finishes, or stop it, "
+                                 "then change the folder.").format(name=titles[0]))
+    if titles:
+        raise JobsRunningError(_("{names} are running and use files in the Slicer Studio folder. Wait until they finish, or stop them, "
+                                 "then change the folder.").format(names=", ".join(titles)))
+
+
 def _movedTemplateIdsUnique(templatesFolder, before, renamedIds, journal=None):
     """After Templates/ was merged into ``templatesFolder`` (whose item names were ``before``): the moved templates whose id
     or name a template there already had get their own (``templates.makeMovedIdsUnique``), each new id written into

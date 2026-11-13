@@ -2718,6 +2718,8 @@ class AutosaveService:
             projects.checkMoveTarget(oldRoot, newRoot)  # before the open project is saved and unlocked
             # A project or study that another Slicer Studio has open would move away from under it (it would go on saving there)
             projects.checkNotOpenElsewhere(oldRoot)
+            # A running job (a connectome download into LNM/Connectomes...) would go on writing to the old paths
+            projects.checkNoJobsUsing(oldRoot)
             # Marks this move as running until the setting points at the new folder: another Slicer Studio that starts
             # meanwhile must not take its MovePending record for an interrupted move (``finishInterruptedMove``), nor
             # offer the projects it moves (unlocked while they move) as crashed, nor move the folder at the same time
