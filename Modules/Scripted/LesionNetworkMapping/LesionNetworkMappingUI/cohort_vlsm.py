@@ -321,6 +321,58 @@ class VlsmTab(CohortTab):
         tested = self.score() if self.testKind() == "score" else self.groupColumn()
         return [name for name in self.covariates.checked() if name != tested]
 
+    def restoreDesign(self, folder):
+        """Set the controls to the design.json of ``folder``, the result shown again after a restart.
+
+        Without it the controls fall back to their defaults and Run VLSM would run another analysis than the one on
+        screen. Unreadable or unfit files change nothing.
+        """
+        from LesionNetworkMappingLib import design as designlib
+
+        try:
+            spec = designlib.DesignSpec.load(folder)
+        except Exception:
+            logging.debug("Lesion network mapping: the design of the shown VLSM result could not be read", exc_info=True)
+            return
+        if spec.test == "continuous":
+            scores = [self.scoreCombo.itemData(i) for i in range(self.scoreCombo.count)]
+            if spec.score_column not in scores:
+                return
+            self.testGroup.button(TESTS.index("score")).setChecked(True)
+            self.scoreCombo.setCurrentIndex(scores.index(spec.score_column))
+            if spec.contrast in SCORE_CONTRASTS:
+                self.directionGroup.button(SCORE_CONTRASTS.index(spec.contrast)).setChecked(True)
+        elif spec.test in ("two_group", "anova"):
+            groups = [self.groupCombo.itemText(i) for i in range(self.groupCombo.count)]
+            if spec.group_column not in groups:
+                return
+            self.testGroup.button(TESTS.index("groups")).setChecked(True)
+            if spec.group_column != self.groupColumn():
+                self.groupCombo.setCurrentIndex(groups.index(spec.group_column))
+            if spec.levels and len(spec.levels) >= 2:
+                for combo, level in ((self.levelACombo, spec.levels[0]), (self.levelBCombo, spec.levels[1])):
+                    index = combo.findText(level)
+                    if index >= 0:
+                        combo.setCurrentIndex(index)
+            if spec.contrast in CONTRASTS:
+                self.contrastGroup.button(CONTRASTS.index(spec.contrast)).setChecked(True)
+        else:
+            return
+        for name, button in self.covariates.buttons.items():
+            button.setChecked(name in spec.covariates)
+        self.logVolumeCheckBox.setChecked(spec.transforms.get(designlib.VOLUME_COLUMN) == "log")
+        self.volumeReasonEdit.setText(spec.volume_off_reason or "")
+        index = self.permuteCombo.findData(spec.permute)
+        if index >= 0:
+            self.permuteCombo.setCurrentIndex(index)
+        index = self.blockCombo.findData(spec.block_column or "")
+        if index >= 0:
+            self.blockCombo.setCurrentIndex(index)
+        self.fdrCheckBox.setChecked(bool(spec.inference.get("fdr")))
+        if spec.inference.get("n_perm"):
+            self.permSpinBox.setValue(int(spec.inference["n_perm"]))
+        self.onSettingsChanged()
+
     def spec(self):
         """The ``design.DesignSpec`` of the current settings (n_perm at least the design minimum; ``nPerm()`` is run)."""
         from LesionNetworkMappingLib import design as designlib
@@ -659,11 +711,13 @@ class VlsmTab(CohortTab):
                 (record.get("contrast") or {}).get("spec"), "{score}").format(score=scoreName)
         else:
             contrast = contrastText((record.get("contrast") or {}).get("spec", ""), list(record.get("n_per_level") or {}))
+        others = [str(name) for name in (record.get("covariates") or []) if name != "volume_ml"]
+        otherCovariates = (" · " + _("covariates: {names}").format(names=", ".join(others))) if others else ""
         lines = [
             "<b>" + html.escape(_("VLSM · {contrast} · n = {n}").format(contrast=contrast, n=record.get("n", "?"))) + (f" ({perLevel})" if perLevel else "") + "</b>",
             html.escape(_("{v} voxels tested: lesioned in ≥ {k} lesions ({rule}) · lesion volume {volume}").format(
                 v=f"{overlap.get('n_voxels_tested', record.get('n_voxels', 0)):,}", k=overlap.get("min_count", "?"), rule=overlap.get("rule", ""),
-                volume=_("covariate") if record.get("volume_covariate") else _("off"))),
+                volume=_("covariate") if record.get("volume_covariate") else _("off")) + otherCovariates),
             html.escape(_("{n} permutations{kind} · smallest attainable p {p:.2g} · {scheme}").format(
                 n=f"{nPerm:,}" if isinstance(nPerm, int) else nPerm, kind=_(" (exhaustive)") if permutation.get("exhaustive") else (_(" (preview)") if permutation.get("preview") else ""),
                 p=float(record.get("min_attainable_p") or record.get("min_p") or 1.0), scheme=permutation.get("reason") or permutation.get("scheme") or "")),
