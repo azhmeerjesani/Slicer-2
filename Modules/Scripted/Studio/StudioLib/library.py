@@ -2014,7 +2014,8 @@ class CurrentWorkCard(qt.QObject):
             elif isInternalPath(path):
                 text, toolTip = _("Sample data"), path
             else:
-                text = toolTip = os.path.dirname(path)
+                toolTip = os.path.dirname(path)
+                text = _shortFolder(toolTip)
             setElidedText(folderLabel, text, toolTip)
 
     def _updateTexts(self, queue=True):

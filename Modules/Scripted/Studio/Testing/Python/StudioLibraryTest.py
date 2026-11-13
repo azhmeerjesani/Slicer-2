@@ -691,6 +691,30 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertNotIn("Saved ·", text)
         self.assertNotIn("Unsaved", text)
 
+    def test_continue_card_scan_folder_writes_home_as_tilde(self):
+        """The folder line of a scan row on the Continue card uses ``projects.shortPath`` (home written "~"), like the Recent rows;
+        the tooltip keeps the full path.
+        """
+        import types
+        from unittest import mock
+
+        from StudioLib import library
+
+        studioShell = self._applyStudio()
+        volumeNode, _segmentation = self._template(studioShell)
+        home = os.path.expanduser("~")
+        path = os.path.join(home, "data-short-folder-test", "sub-05_T1w.nii.gz")
+        label = qt.QLabel()
+        card = types.SimpleNamespace(_scanRows=[(volumeNode.GetID(), label)])
+        with mock.patch.object(library, "nodeFile", return_value=path), \
+                mock.patch.object(library, "isTemplateNode", return_value=False), \
+                mock.patch.object(library, "isInternalPath", return_value=False):
+            library.CurrentWorkCard._updateScanFolders(card)
+        shown = str(label.property("fullText"))
+        self.assertTrue(shown.startswith("~"), shown)
+        self.assertNotIn(home, shown)
+        self.assertIn(os.path.dirname(path), label.toolTip)
+
     def test_lesion_row_narrow_keeps_name_readable(self):
         """In a narrow Continue card (220 px for the row, as at 1366 x 768) the name keeps room for its start and end
         ("sub-PC…lesion", not "s…n"), and the metrics and the state chip stay readable (second line below the name).
