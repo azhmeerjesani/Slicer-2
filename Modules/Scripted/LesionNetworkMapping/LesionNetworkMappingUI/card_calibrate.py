@@ -126,6 +126,28 @@ def designText(covariates, transforms=None, stat=None):
     return text
 
 
+def designDifferences(design, identity):
+    """The tested factor of a calibrated design (``design``, a record's design) that differs from the current design's
+    ``identity``, as text ("test: continuous (this design: two group) · score column: aphasia_score (this design: none)"), or
+    "" when the test, columns and levels agree. Covariates and permutation are named by the caller, so a calibration of
+    another analysis with the same covariates still says why it is out of date.
+    """
+    design, identity = design or {}, identity or {}
+    labels = (("test", _("test")), ("group_column", _("group column")), ("score_column", _("score column")), ("levels", _("levels")), ("design_type", _("design type")), ("contrast", _("contrast")))
+
+    def show(value):
+        if isinstance(value, (list, tuple)):
+            value = ", ".join(str(item) for item in value)
+        return str(value).replace("_", " ") if value not in (None, "") else _("none")
+
+    parts = []
+    for key, name in labels:
+        if design.get(key) != identity.get(key):
+            parts.append(_("{label}: {was} (this design: {now})").format(label=name, was=show(design.get(key)) if key not in ("group_column", "score_column") else (design.get(key) or _("none")),
+                                                                         now=show(identity.get(key)) if key not in ("group_column", "score_column") else (identity.get(key) or _("none"))))
+    return " · ".join(parts)
+
+
 def powerChart(effects, width=CHART_SIZE[0], height=CHART_SIZE[1], palette=None):
     """A ``qt.QPixmap`` of the power curve: power (0-1) against β, with the 95% CI of each point and a dotted 0.8 line."""
     palette = palette or slicer.app.palette()
@@ -761,8 +783,10 @@ class CalibrateCard:
         self._fillTable(effects)
         if not self.resultCurrent:
             covariates = designText(design.get("covariates"), design.get("transforms"), design.get("stat"))
+            differs = designDifferences(design, identity)
             self.evidenceLabel.setText(_("Out of date: this calibration was run for another design (covariates: {covariates} · permute: {permute}). "
-                                         "It does not count for the checklist; calibrate this analysis again.").format(covariates=covariates, permute=design.get("permute") or "—"))
+                                         "It does not count for the checklist; calibrate this analysis again.").format(covariates=covariates, permute=design.get("permute") or "—")
+                                       + (" " + _("It differs in {differences}.").format(differences=differs) if differs else ""))
         else:
             status, value, _evidence = calibrate.checklist_evidence(self.ctx.study.path, design=identity) if self.ctx.study is not None else ("not_run", "", [])
             self.evidenceLabel.setText(_("Checklist (item 8, design and correction): {value}").format(value=value) if status != "not_run" else "")

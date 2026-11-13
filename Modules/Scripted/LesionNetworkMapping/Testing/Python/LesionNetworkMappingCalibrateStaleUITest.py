@@ -187,6 +187,21 @@ class LesionNetworkMappingCalibrateStaleUITest(unittest.TestCase):
         card.refresh()
         self.assertCurrent(card, True)
 
+    def test_other_test_is_named_in_the_out_of_date_text(self):
+        """A calibration of another test (a continuous score, not the two-group test) with the same covariates names the
+        difference (BB-1 calibrate-other-analysis-result-out-of-date-text-names-identical-design).
+        """
+        from LesionNetworkMappingLib import design as designlib
+        from LesionNetworkMappingUI import card_calibrate
+
+        self.calibrated(self.withVolume, "caseVsControl", 1_000_000)
+        other = dict(self.calibrate._design_info(self.withVolume), test="continuous", score_column="aphasia_score", group_column=None, levels=None)
+        text = card_calibrate.designDifferences(other, self.calibrate.design_identity(self.calibrate._design_info(self.withVolume)))
+        self.assertIn("test: continuous (this design: two group)", text)
+        self.assertIn("score column: aphasia_score (this design: none)", text)
+        self.assertEqual(card_calibrate.designDifferences(self.calibrate._design_info(self.withVolume), self.calibrate.design_identity(self.withVolume)), "")
+        self.assertIsNotNone(designlib)
+
 
     def test_settings_of_a_stopped_run_are_restored_after_reopen(self):
         """After a reopen the spin boxes show the settings of the stopped run, and a notice says that it continues (BB-1
