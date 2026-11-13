@@ -747,6 +747,25 @@ def _niftiDataShortfall(path):
     return (have, need) if have < need else None
 
 
+def _niftiGzipChecksumFails(path):
+    """True if the gzip stream of the ``.nii.gz`` file ``path`` is damaged inside (a flipped bit: the CRC or the length
+    in the gzip trailer does not match, or the deflate data is invalid). The data check above stops once it has counted
+    the voxels, so it never reaches the trailer, and the ITK reader does not check the CRC: such a file opened silently
+    with changed voxels. A stream that is merely cut off (EOFError) is the shortfall check's business, not this one's.
+    """
+    if not isNiftiFile(path) or not os.path.isfile(path) or not _isGzipFile(path):
+        return False
+    try:
+        with gzip.open(path, "rb") as f:
+            while f.read1(1 << 22):
+                pass
+    except EOFError:
+        return False
+    except (OSError, zlib.error):
+        return True
+    return False
+
+
 class RefusedFileError(RuntimeError):
     """A file that Studio refuses on purpose, with a message for the user: it is announced, and logged without a traceback."""
 
@@ -911,6 +930,11 @@ def _checkNiftiComplete(path):
             _("{name} is damaged: its image data stops after {have:,} of the {need:,} bytes that its header announces "
               "(the file was probably cut short by a failed copy or download). It was not opened; copy it again from "
               "its source.").format(name=os.path.basename(str(path)), have=shortfall[0], need=shortfall[1]))
+    if _niftiGzipChecksumFails(path):
+        raise RefusedFileError(
+            _("{name} is damaged: its compressed data does not pass the check of the gzip format (a bit was changed, "
+              "probably by a faulty copy or download), so the voxels would be wrong. It was not opened; copy it again "
+              "from its source.").format(name=os.path.basename(str(path))))
 
 
 #: Bytes per voxel of the NRRD ``type`` names and of the MetaImage ``ElementType`` names that the check below understands

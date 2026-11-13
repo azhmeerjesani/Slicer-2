@@ -901,6 +901,42 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertIn("is damaged", message)
         self.assertFalse([r for r in records if "Traceback" in r.getMessage() or r.levelno >= logging.ERROR])
 
+    def test_gzipChecksumFailureIsRefused(self):
+        """BB-1: a ``.nii.gz`` with a flipped bit that still decodes to full length (gzip CRC mismatch) is refused as damaged
+        instead of opening silently with changed voxels; an intact one is not.
+        """
+        import random
+        from StudioLib import importer
+
+        header = bytearray(348)
+        struct.pack_into("<i", header, 0, 348)
+        struct.pack_into("<8h", header, 40, 3, 16, 16, 16, 1, 1, 1, 1)
+        struct.pack_into("<hh", header, 70, 2, 8)  # uint8
+        struct.pack_into("<8f", header, 76, 1, 1, 1, 1, 1, 0, 0, 0)
+        struct.pack_into("<f", header, 108, 352)
+        header[344:348] = b"n+1\0"
+        rng = random.Random(5)
+        complete = bytes(header) + bytes(4) + bytes(rng.randrange(0, 3) for _ in range(16 ** 3))
+        good = gzip.compress(complete)
+        # A bit changed in the stored CRC (or inside the data, where the stream still decodes to full length): the data
+        # decodes completely, only the gzip trailer check can tell
+        bad = bytearray(good)
+        bad[-8] ^= 0x04
+        bad = bytes(bad)
+        with self.assertRaises(gzip.BadGzipFile):
+            gzip.decompress(bad)
+        paths = {}
+        for name, content in (("ok_T1w.nii.gz", good), ("flipped_T1w.nii.gz", bad)):
+            paths[name] = os.path.join(self.directory, name)
+            with open(paths[name], "wb") as f:
+                f.write(content)
+        self.assertIsNone(importer._niftiDataShortfall(paths["flipped_T1w.nii.gz"]))
+        importer._checkNiftiComplete(paths["ok_T1w.nii.gz"])  # no RefusedFileError
+        with self.assertRaises(importer.RefusedFileError) as context:
+            importer._checkNiftiComplete(paths["flipped_T1w.nii.gz"])
+        self.assertIn("is damaged", str(context.exception))
+        self.assertIn("copy it again", str(context.exception))
+
     def test_uncompressed_nifti_named_nii_gz_opens(self):
         """BB-1: a valid NIfTI saved without compression but named ``.nii.gz`` (a browser or server unpacked a download and
         kept the name) opens as a scan and as a lesion, as in official 3D Slicer, whose reader reads it as plain data. A
