@@ -88,6 +88,17 @@ class CohortCardFocusUITest(unittest.TestCase):
         self.assertFalse(self.widget.ctx.focusCard("no-such-card"))
         self.assertEqual(self.widget.seedMode(), "lesion")
 
+    def test_7_a_pending_focus_retry_on_a_destroyed_card_is_silent(self):
+        # The 0/150/500 ms retries of focusCard outlive the card at quit (bug focus-card-retry-timers-traceback-after-quit)
+        widget = self.widget
+        card = qt.QWidget()
+        widget._cardWidgets["destroyed-card-test"] = (None, card)
+        try:
+            card.delete()
+            widget._focusCardLater("destroyed-card-test")
+        finally:
+            widget._cardWidgets.pop("destroyed-card-test", None)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2742,21 +2742,25 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         if entry is None:
             return
         widget = entry[1]
-        scrollArea = None
-        parent = widget.parentWidget()
-        while parent is not None:
-            if hasattr(parent, "ensureWidgetVisible"):
-                scrollArea = parent
-                break
-            parent = parent.parentWidget()
-        if not widget.isVisible() or (scrollArea is not None and not scrollArea.isVisible()):
-            if attempt < 20:  # still not shown: try again shortly, then give up
-                qt.QTimer.singleShot(50, lambda: self._focusCardLater(cardId, attempt + 1))
+        try:
+            scrollArea = None
+            parent = widget.parentWidget()
+            while parent is not None:
+                if hasattr(parent, "ensureWidgetVisible"):
+                    scrollArea = parent
+                    break
+                parent = parent.parentWidget()
+            if not widget.isVisible() or (scrollArea is not None and not scrollArea.isVisible()):
+                if attempt < 20:  # still not shown: try again shortly, then give up
+                    qt.QTimer.singleShot(50, lambda: self._focusCardLater(cardId, attempt + 1))
+                return
+            if scrollArea is not None:
+                slicer.app.processEvents()  # let the layout of the just expanded card settle
+                scrollArea.ensureWidgetVisible(widget)
+            widget.setFocus()
+        except (ValueError, RuntimeError):
+            # The timers outlive the card: at quit (or when the module is rebuilt) the card is already destroyed
             return
-        if scrollArea is not None:
-            slicer.app.processEvents()  # let the layout of the just expanded card settle
-            scrollArea.ensureWidgetVisible(widget)
-        widget.setFocus()
 
     def _revealCard(self, cardId):
         """Scroll a card into view in its scroll area (no focus change, no expansion)."""
