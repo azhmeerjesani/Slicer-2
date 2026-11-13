@@ -627,6 +627,64 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(code, jobs.EXIT_CANCELLED, events[-1])
         self.assertEqual(validate.read_record(os.path.join(fresh, "validation.json"))["status"], "cancelled")
 
+    def test_methods_cite_only_the_run_in_the_folder_in_words(self):
+        """Methods of validation runs (BB-1 methods-validation-paragraph-key-dump-cites-destroyed-runs): a paragraph from
+        validation.json (outcome, in-fold circuit, scheme, baselines, CI with B, Δ with CI, p_perm with K and its floor),
+        not the registry summary keys; a run whose folder now holds a later run's results is not cited; a frozen
+        replication gives the circuit sha256.
+        """
+        from LesionNetworkMappingLib import methods
+
+        fixture = self._write_fixture(self.tmp, study=True)
+        study = os.path.dirname(os.path.dirname(os.path.dirname(fixture["maps_dir"])))
+        root = os.path.join(os.path.dirname(fixture["maps_dir"]), "validation")
+        base = ["--maps", fixture["maps_tsv"], "--participants", fixture["participants"], "--outcome", "group", "--type", "binary", "--circuit", "glm", "--mask", fixture["mask"],
+                "--out", os.path.join(root, "group_glm"), "--scheme", "kfold", "--k", "3", "--repeats", "1", "--boot", "4", "--perm", "4", "--threads", "1"]
+        ids = []
+        for seed in ("1", "2"):  # the second run overwrites the first one's validation.json
+            code, events = self.run_in_process([*base, "--seed", seed])
+            self.assertEqual(code, 0, events[-1])
+            ids.append(next(event["run_id"] for event in events if event["event"] == "start"))
+        circuit = np.zeros(self.SHAPE, dtype=np.float32)
+        circuit.reshape(-1)[fixture["indices"]] = fixture["pattern"]
+        path = os.path.join(self.tmp, "circuit.nii.gz")
+        nifti.write_nifti(path, circuit, fixture["affine"])
+        sha = file_sha256(path)
+        code, events = self.run_in_process([*base[: base.index("--out")], "--out", os.path.join(root, "group_frozen"), "--frozen", path, "--frozen-sha256", sha, "--boot", "10", "--threads", "1"])
+        self.assertEqual(code, 0, events[-1])
+        frozen_id = next(event["run_id"] for event in events if event["event"] == "start")
+
+        def paragraphs():
+            text = methods.render([methods.find_section(methods.methods_sections(study), "statistics")], fmt="txt")
+            return [line for line in text.splitlines() if line.startswith(methods.KIND_LABELS["validation"])]
+
+        found = paragraphs()
+        self.assertEqual(len(found), 2, found)
+        self.assertFalse([line for line in found if ids[0] in line], "the overwritten run is cited")
+        cv = next(line for line in found if ids[1] in line)
+        frozen = next(line for line in found if frozen_id in line)
+        for line in found:
+            for key in ("delta_vs_volume", "mode cv", "mode frozen", "primary auc", "p_perm 0."):
+                self.assertNotIn(key, line)
+            self.assertEqual(methods.lint_wording(line), [])
+        self.assertIn("outcome group (binary; positive class case", cv)
+        self.assertIn(validate.CIRCUIT_LABELS["glm"], cv)
+        self.assertIn("stratified 3-fold × 1 repeat", cv)  # noqa: RUF001 (a multiplication sign)
+        self.assertIn("Baselines: lesion volume", cv)
+        self.assertIn("B = 4 resamples", cv)
+        self.assertRegex(cv, r"Primary metric AUC: circuit model [\d.]+ \(95% CI [\d.-]+ to [\d.]+\)")
+        self.assertRegex(cv, r"ΔAUC -?[\d.]+ \(95% CI ")
+        self.assertRegex(cv, r"p_perm (≤ 0\.2 \(the smallest attainable p with K = 4 permutations\)|= [\d.]+ \(K = 4 permutations; smallest attainable p 0\.2\))")
+        self.assertIn(f"sha256 {sha}", frozen)
+        self.assertRegex(frozen, r"AUC [\d.]+ \(95% CI [\d.]+ to [\d.]+\)")
+        self.assertIn("B = 10 resamples", frozen)
+        # Without its validation.json (deleted by hand) a run is described from the registry in words, its p at the floor as such
+        os.remove(os.path.join(root, "group_glm", "validation.json"))
+        cv = next(line for line in paragraphs() if ids[1] in line)
+        self.assertIn("validation.json not recorded", cv)
+        self.assertNotIn("delta_vs_volume", cv)
+        self.assertRegex(cv, r"p_perm (≤ 0\.2 \(the smallest|= [\d.]+ \(K = 4 permutations)")
+
     def test_reference_baselines_with_a_bundle(self):
         mask, affine = self._grid()
         rng = np.random.default_rng(5)

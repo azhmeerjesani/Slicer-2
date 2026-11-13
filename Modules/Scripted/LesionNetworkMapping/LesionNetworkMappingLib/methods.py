@@ -104,6 +104,8 @@ KIND_LABELS = {
     "circuits": "Circuits",
 }
 VLSM_JSON = "vlsm.json"
+#: The record of a validation run (validate.VALIDATION_JSON; validate imports numpy, so it is imported only when needed)
+VALIDATION_JSON = "validation.json"
 #: How VLSM results are described: VLSM tests lesion location, not a network (vlsm.INTERPRETATION)
 VLSM_CLAIM = "Voxel-based lesion-symptom mapping results are described as lesion locations associated with the tested contrast or score; VLSM tests location, not the network."
 NULL_CAPTION = "Null models benchmark significance; they do not by themselves establish disease specificity (van den Heuvel et al. 2026); see also Zalesky & Cash 2026; Siddiqi et al. 2026."
@@ -1128,6 +1130,10 @@ def statistics_section(records, used):
         for record in records.done_runs(kind):
             if kind == "robustness" and records.overwritten(record):
                 continue  # a later Robust run wrote its results to the same folder: only that run is cited
+            if kind == "validation":
+                validation = records.run_json(record, VALIDATION_JSON)
+                if isinstance(validation, dict) and validation.get("run_id") not in (None, record["id"]):
+                    continue  # a later validation run wrote its results to the same folder: only that run is cited
             if kind == "vlsm" and record["id"] not in vlsm_records:
                 other = records.run_json(record, VLSM_JSON)
                 if isinstance(other, dict) and other.get("run_id") not in (None, record["id"]):
@@ -1143,6 +1149,13 @@ def statistics_section(records, used):
                 continue
             network_found = True
             summary = records.summary(record) or {}
+            if kind == "validation":
+                # Its own paragraph from validation.json (outcome, circuit, scheme, baselines, CIs, K), never the summary keys
+                if isinstance(validation, dict) and validation.get("status") == "done":
+                    section.paragraph(validation_paragraph(validation, record["id"]))
+                else:
+                    section.paragraph(validation_summary_text(summary, records.params(record), record["id"]))
+                continue
             if kind == "robustness":
                 body = robustness_text(summary, records.params(record), records.seeds(record))
             elif kind == "nulls":
@@ -1243,6 +1256,186 @@ def vlsm_summary_text(summary, run_id=None):
         parts.append(f"smallest observed FWE p {_number(summary['fwe_min_p']) or NOT_RECORDED}")
     parts.append(f"smallest attainable p {_number(attainable) or NOT_RECORDED}")
     return f"{KIND_LABELS['vlsm']} (run {run_id or NOT_RECORDED}; vlsm.json {NOT_RECORDED}): {'; '.join(parts)}."
+
+
+VALIDATION_SCHEME_TEXT = {"lodo": "leave-one-dataset-out", "kfold": "stratified k-fold", "loo": "leave-one-out"}
+VALIDATION_SCORE_TEXT = {
+    "similarity": "spatial similarity (Fisher z of the spatial r between each lesion's network map and the circuit)",
+    "damage": "circuit damage (the lesion's occupancy weighted by the circuit)",
+    "roi": "ROI connectivity (each lesion's network map averaged over the signed circuit ROI)",
+}
+VALIDATION_METRIC_NAMES = {"auc": "AUC", "or_per_sd": "OR per SD", "r": "r", "r2": "out-of-sample R²"}
+VALIDATION_BASELINE_LABELS = {"volume": "lesion volume", "mu_r": "degree (μC_r)", "pc1": "PC1", "location": "lesion location"}
+
+
+def _ci_text(ci):
+    """'95% CI a to b' of a [low, high] interval ("no CI" when it is missing or not finite)."""
+    if isinstance(ci, (list, tuple)) and len(ci) == 2 and _number(ci[0]) is not None and _number(ci[1]) is not None:
+        return f"95% CI {_number(ci[0])} to {_number(ci[1])}"
+    return f"CI {NOT_RECORDED}"
+
+
+def _metric_name(metric):
+    return VALIDATION_METRIC_NAMES.get(metric, _or_nr(metric))
+
+
+def _p_perm_text(p, k):
+    """'p_perm = 0.12 (K = 999 ...)', or 'p_perm ≤ 0.05 (the smallest attainable p with K = 19 ...)' at the floor 1/(K+1)."""
+    k = _as_float(k)
+    if not k:
+        return "no permutation test (K = 0)"
+    floor = 1.0 / (k + 1.0)
+    value = _as_float(p)
+    if value is None:
+        return f"p_perm {NOT_RECORDED} (K = {_number(k)} permutations)"
+    if value <= floor * (1 + 1e-9):
+        return f"p_perm ≤ {_number(floor)} (the smallest attainable p with K = {_number(k)} permutations)"
+    return f"p_perm = {_number(value)} (K = {_number(k)} permutations; smallest attainable p {_number(floor)})"
+
+
+def _validation_outcome_text(outcome):
+    outcome = outcome if isinstance(outcome, dict) else {}
+    text = f"outcome {_or_nr(outcome.get('column'))} ({_or_nr(outcome.get('type'))}"
+    if outcome.get("type") == "binary":
+        text += f"; positive class {_or_nr(outcome.get('positive'))}: {_or_nr(outcome.get('n_positive'))} positive, {_or_nr(outcome.get('n_negative'))} negative"
+    text += f"), n = {_or_nr(outcome.get('n'))}"
+    excluded = outcome.get("excluded")
+    if isinstance(excluded, dict) and excluded:
+        text += f" ({sum(len(members) if isinstance(members, (list, tuple)) else 1 for members in excluded.values())} excluded: {', '.join(str(reason) for reason in excluded)})"
+    datasets = outcome.get("datasets")
+    if isinstance(datasets, list) and datasets:
+        text += f", {len(datasets)} dataset{'s' if len(datasets) != 1 else ''} ({outcome.get('dataset_column') or 'dataset'} column)"
+    return text
+
+
+def _validation_scheme_text(scheme):
+    scheme = scheme if isinstance(scheme, dict) else {}
+    used = scheme.get("used")
+    if used == "kfold":
+        text = f"stratified {_or_nr(scheme.get('k'))}-fold × {_or_nr(scheme.get('repeats'))} repeat{'s' if scheme.get('repeats') != 1 else ''} (strata: dataset × class for a binary outcome, dataset for a score)"  # noqa: RUF001 (a multiplication sign)
+    elif used == "lodo":
+        folds = scheme.get("n_folds") or []
+        text = f"leave-one-dataset-out ({_or_nr(folds[0] if folds else None)} datasets)"
+    else:
+        text = VALIDATION_SCHEME_TEXT.get(used, _or_nr(used))
+    reason = scheme.get("reason")
+    if scheme.get("requested") and scheme.get("requested") != used:
+        text += f"; {scheme['requested']} was requested ({reason or NOT_RECORDED})"
+    elif reason and not str(reason).endswith("as requested"):
+        text += f" ({reason})"
+    return text
+
+
+def _validation_circuit_text(circuit):
+    circuit = circuit if isinstance(circuit, dict) else {}
+    text = f"{_or_nr(circuit.get('label'))}, built inside each training fold only"
+    if circuit.get("thresholding"):
+        text += f" (thresholding: {circuit['thresholding']}"
+        text += "; no permutation thresholds inside the folds)" if circuit.get("permutation_thresholds_in_folds") is False else ")"
+    text += f"; lesion score: {VALIDATION_SCORE_TEXT.get(circuit.get('score'), _or_nr(circuit.get('score')))}"
+    if circuit.get("partial"):
+        text += f", also with {', '.join('μC_r' if key == 'mu_r' else str(key).upper() for key in circuit['partial'])} partialled out (circuit partial row)"
+    return text
+
+
+def _validation_baseline_label(name):
+    name = str(name)
+    return VALIDATION_BASELINE_LABELS.get(name) or (f"reference map {name[4:]}" if name.startswith("ref:") else name)
+
+
+def validation_paragraph(data, run_id=None):
+    """Methods text of a validation.json record (addendum §3.8): cross-validation (outcome, in-fold circuit, scheme,
+    baselines, primary metric with its whole-CV bootstrap CI and B, incremental Δ with CI, p_perm with K and its floor)
+    or a frozen replication (circuit sha256, provenance, metric with its CI).
+    """
+    label = f"{KIND_LABELS['validation']} (run {run_id or data.get('run_id') or NOT_RECORDED})"
+    outcome_text = _validation_outcome_text(data.get("outcome"))
+    covariates = [str(item) for item in data.get("covariates") or []]
+    covariate_text = ", ".join("total lesion volume" if item == "volume_ml" else item for item in covariates) or NOT_RECORDED
+    bootstrap = data.get("bootstrap") or {}
+    if data.get("mode") == "frozen":
+        frozen = data.get("frozen") or {}
+        metrics = data.get("metrics") or {}
+        top_pct = _number(frozen.get("top_pct"))
+        text = (
+            f"{label}: frozen circuit (sha256 {_or_nr(frozen.get('sha256'))}; {_or_nr(frozen.get('provenance'))}) applied without refitting; "
+            f"lesion score: {VALIDATION_SCORE_TEXT.get(frozen.get('score'), _or_nr(frozen.get('score')))}{f' of its top {top_pct}% ROI' if top_pct else ''}; {outcome_text}. "
+        )
+        parts = [f"{_metric_name(name)} {_number((item or {}).get('value')) or NOT_RECORDED} ({_ci_text((item or {}).get('ci'))})" for name, item in metrics.items() if isinstance(item, dict)]
+        text += f"Performance of the frozen score: {'; '.join(parts) or NOT_RECORDED}"
+        volume = data.get("volume_metrics") or {}
+        volume_parts = [f"{_metric_name(name)} {_number((item or {}).get('value')) or NOT_RECORDED} ({_ci_text((item or {}).get('ci'))})" for name, item in volume.items() if isinstance(item, dict)]
+        if volume_parts:
+            text += f"; lesion volume alone, for context: {'; '.join(volume_parts)}"
+        text += f". CIs: simple bootstrap percentile intervals (subjects resampled within strata; the circuit is fixed), B = {_or_nr(bootstrap.get('B'))} resamples."
+        return text
+    primary = data.get("primary_metric")
+    metric = _metric_name(primary)
+    predictors = {item.get("name"): item for item in data.get("predictors") or [] if isinstance(item, dict)}
+    computed, missing = [], []
+    for name, item in predictors.items():
+        if item.get("role") != "baseline":
+            continue
+        if item.get("status") == "computed":
+            computed.append(_validation_baseline_label(name))
+        else:
+            missing.append(f"{_validation_baseline_label(name)} not computed ({item.get('reason') or NOT_RECORDED})")
+    text = (
+        f"{label}: cross-validation of the {outcome_text}. In-fold circuit: {_validation_circuit_text(data.get('circuit'))}. "
+        f"Scheme: {_validation_scheme_text(data.get('scheme'))}. Covariates of every model: {covariate_text}. "
+        f"Baselines: {', '.join(computed) or 'none computed'}{'; ' + '; '.join(missing) if missing else ''}. "
+    )
+    if data.get("model"):
+        text += f"{str(data['model']).rstrip('.')}. "
+    circuit_metric = ((predictors.get("circuit") or {}).get("metrics") or {}).get(primary) or {}
+    text += (
+        f"Primary metric {metric}: circuit model {_number(circuit_metric.get('value')) or NOT_RECORDED} ({_ci_text(circuit_metric.get('ci'))}); "
+        f"CIs from the whole-CV bootstrap (subjects resampled within strata; folds, circuits and models rerun; bias-corrected percentile intervals), B = {_or_nr(bootstrap.get('B'))} resamples."
+    )
+    incremental = data.get("incremental") or {}
+    permutation = data.get("permutation") or {}
+    text += (
+        f" Incremental value ({incremental.get('model') or 'volume + circuit vs volume'}): Δ{metric} {_number(incremental.get('delta')) or NOT_RECORDED} ({_ci_text(incremental.get('ci'))}); "
+        f"{_p_perm_text(incremental.get('p_perm'), permutation.get('K'))}, {permutation.get('tails') or 'one-sided'}, {permutation.get('scheme') or 'outcome permuted within datasets'}."
+    )
+    comparisons = [
+        f"{_validation_baseline_label(entry.get('baseline'))} Δ{metric} {_number(entry.get('delta'))} ({_ci_text(entry.get('ci'))})"
+        for entry in data.get("comparisons") or []
+        if isinstance(entry, dict) and entry.get("baseline") != "volume" and _number(entry.get("delta")) is not None
+    ]
+    if comparisons:
+        text += f" Circuit compared with each baseline: {'; '.join(comparisons)}."
+    warnings = [str(item).rstrip(".") for item in data.get("warnings") or [] if item]
+    if warnings:
+        text += f" Notes: {'; '.join(warnings)}."
+    return text
+
+
+def validation_summary_text(summary, params=None, run_id=None):
+    """Methods text of a validation run whose validation.json is gone: the registry summary and parameters, named in
+    words (a p_perm at 1/(K+1) is the smallest attainable p, stated as such).
+    """
+    summary = summary if isinstance(summary, dict) else {}
+    params = params if isinstance(params, dict) else {}
+    label = f"{KIND_LABELS['validation']} (run {run_id or NOT_RECORDED}; {VALIDATION_JSON} {NOT_RECORDED})"
+    outcome = f"outcome {_or_nr(params.get('outcome'))} ({_or_nr(params.get('type'))}), n = {_or_nr(summary.get('n'))}"
+    if summary.get("mode") == "frozen" or params.get("mode") == "frozen":
+        metrics = summary.get("metrics") if isinstance(summary.get("metrics"), dict) else {}
+        parts = [f"{_metric_name(name)} {_number(value) or NOT_RECORDED}" for name, value in metrics.items()]
+        return (
+            f"{label}: frozen circuit (sha256 {_or_nr(params.get('frozen_sha256'))}; provenance {_or_nr(summary.get('provenance'))}) applied without refitting; {outcome}; "
+            f"{'; '.join(parts) or 'metrics ' + NOT_RECORDED}; B = {_or_nr(params.get('n_boot'))} bootstrap resamples."
+        )
+    metric = _metric_name(summary.get("primary"))
+    scheme = VALIDATION_SCHEME_TEXT.get(summary.get("scheme"), _or_nr(summary.get("scheme")))
+    if summary.get("scheme") == "kfold":
+        scheme = f"stratified {_or_nr(params.get('k'))}-fold × {_or_nr(params.get('repeats'))} repeats"  # noqa: RUF001 (a multiplication sign)
+    circuit = params.get("circuit")
+    return (
+        f"{label}: cross-validation of the {outcome}; in-fold circuit {_or_nr(circuit)}{' (unthresholded)' if circuit in ('glm', 'slnm') else ''}; scheme {scheme}; "
+        f"primary metric {metric}: circuit model {_number(summary.get('circuit')) or NOT_RECORDED}; Δ{metric} vs lesion volume {_number(summary.get('delta_vs_volume')) or NOT_RECORDED} ({_ci_text(summary.get('delta_ci'))}); "
+        f"whole-CV bootstrap B = {_or_nr(params.get('n_boot'))}; {_p_perm_text(summary.get('p_perm'), params.get('n_perm'))}."
+    )
 
 
 def _generic_text(data, keys=None):
