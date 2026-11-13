@@ -467,7 +467,8 @@ class FolderChooserDialog(qt.QDialog):
         folder = qt.QFileDialog.getExistingDirectory(self, _("Choose the Slicer Studio folder"), start)
         if folder:
             # A new, empty folder or an existing Slicer Studio folder (also one with only studies, templates or LNM/ files
-            # and no Projects/ yet: ``projects.isStudioFolder``) is used as is; inside another folder, a "Slicer Studio"
+            # and no Projects/ yet; a user's own "Projects" folder does not make one: ``projects.isStudioFolder``) is used
+            # as is; inside another folder, a "Slicer Studio"
             # folder is proposed so that the user's own files stay apart. A folder that holds only what an interrupted move
             # into it left (hidden partial copies) is the folder of that move: the retry goes there again
             folder = os.path.normpath(folder)

@@ -725,15 +725,24 @@ def isStudioFolder(path):
     """True if ``path`` is a Slicer Studio folder already: named "Slicer Studio", or holding what Studio writes there.
 
     Subfolders are made only when something is written into them, so a Studio folder may have no Projects/ yet: its
-    "About this folder.txt" (written when the folder is chosen), a study (Studies/<name>/study.json), a template
-    (Templates/<name>/template.json) or Studio's LNM/ folders count too. The folder chooser uses such a folder as is.
+    "About this folder.txt" (written when the folder is chosen), a project (Projects/<name>/.studio/project.json), a
+    study (Studies/<name>/study.json), a template (Templates/<name>/template.json) or Studio's LNM/ folders count. The
+    folder chooser uses such a folder as is. A Projects/ folder by itself does not count: a user's own folder (Documents,
+    a lab folder) often has one, and taking it for the Studio folder listed the user's folders there as projects and
+    moved the user's files with the next Change folder > Move (BB-1).
     """
     if not path:
         return False
     path = os.path.normpath(path)
     if os.path.basename(path) == ROOT_FOLDER_NAME:
         return True
-    if os.path.isdir(os.path.join(path, PROJECTS_DIR)) or os.path.isfile(os.path.join(path, ABOUT_FILE)):
+    if os.path.isfile(os.path.join(path, ABOUT_FILE)):
+        return True
+    try:
+        projectNames = os.listdir(os.path.join(path, PROJECTS_DIR))
+    except OSError:
+        projectNames = []
+    if any(os.path.isfile(projectFile(os.path.join(path, PROJECTS_DIR, name))) for name in projectNames):
         return True
     if listStudies(path):
         return True

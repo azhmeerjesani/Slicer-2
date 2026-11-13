@@ -8192,6 +8192,9 @@ class StudioProjectsTest(unittest.TestCase):
         LNM/ folders: subfolders are made only when something is written there) nested a "Slicer Studio" folder inside it,
         and its studies dropped out of the Library (BB-1). Such a folder is used as is, in the first-start chooser and in
         Change… of Settings, Saving; a folder of the user's own files still gets a "Slicer Studio" folder inside it.
+        A user's folder with its own "Projects" subfolder (Documents, a lab folder) was taken for a Studio folder (BB-1):
+        the user's folders there were listed as projects and the next Change folder > Move took the user's files along.
+        Only a Projects/ folder that holds a Studio project (.studio/project.json) counts.
         """
         from StudioLib import projects_ui
 
@@ -8216,12 +8219,16 @@ class StudioProjectsTest(unittest.TestCase):
             folderWith("Lab studies only", "Studies/Aphasia cohort/study.json"),
             folderWith("Lab templates only", "Templates/my-mni/template.json"),
             folderWith("Lab LNM only", "LNM/normalization/sub-01/"),
-            folderWith("Lab projects", "Projects/"),
+            folderWith("Lab projects", "Projects/gamma T1/.studio/project.json"),
         ]
         userFolders = [
             folderWith("My documents", "notes.txt"),
             folderWith("My research", "LNM/scripts.py", "Studies/paper.docx", "Templates/letter.dotx"),
+            folderWith("My lab", "budget.xlsx", "Projects/grant.docx", "Projects/My thesis/chapter1.docx"),
+            folderWith("My empty projects", "Projects/"),
         ]
+        for folder in userFolders:
+            self.assertFalse(projects.isStudioFolder(folder), f"a user's folder: {os.path.basename(folder)}")
         realGetExistingDirectory = qt.QFileDialog.getExistingDirectory
         picked = []
         qt.QFileDialog.getExistingDirectory = staticmethod(lambda *args, **kwargs: picked[-1])
