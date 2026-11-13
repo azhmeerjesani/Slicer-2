@@ -776,6 +776,12 @@ class Records:
         self._fill(row, other)
         if _blank(row["n_cases"]) and not _blank(other["n_cases"]):
             row["n_cases"] = other["n_cases"]
+        elif not _blank(other["n_cases"]):
+            # Both copies are the same paper: the larger case count wins (relink_cases with ``records`` then raises it to
+            # the cases linked to either copy)
+            mine, theirs = re.search(r"\d+", row["n_cases"]), re.search(r"\d+", other["n_cases"])
+            if theirs and (not mine or int(theirs.group(0)) > int(mine.group(0))):
+                row["n_cases"] = other["n_cases"]
         if other["notes"] and other["notes"] not in row["notes"]:
             row["notes"] = (row["notes"] + " " + other["notes"]).strip()
         rank = {stage: index for index, stage in enumerate(ADVANCE)}
@@ -1030,7 +1036,8 @@ def add_cases(study, records, record_id, n):
 
 def sync_case_count(study, records, record_id):
     """Keep the PRISMA case count in step with the study rows: raise the record's ``n_cases`` to the number of study rows
-    linked to it (a larger count entered for the paper is kept). Used by :func:`add_cases` and by "New case from this paper".
+    linked to it (a larger count entered for the paper is kept). Used by :func:`add_cases`, by
+    :func:`relink_cases` after a merge and by "New case from this paper".
 
     :return: the record's previous ``n_cases`` text when it changed, else None (also for a record not in ``records``).
     """
@@ -1046,11 +1053,17 @@ def sync_case_count(study, records, record_id):
     return previous
 
 
-def relink_cases(study, keep, drop):
-    """Point the cases of record ``drop`` at record ``keep`` (after :meth:`Records.merge`). Return the participant ids."""
+def relink_cases(study, keep, drop, records=None):
+    """Point the cases of record ``drop`` at record ``keep`` (after :meth:`Records.merge`). Return the participant ids.
+
+    With ``records``, the ``n_cases`` of ``keep`` is then raised to the cases now linked to it (:func:`sync_case_count`),
+    so the cases of both copies stay counted in PRISMA. The caller saves the study and the records.
+    """
     moved = linked_subjects(study, drop)
     for sid in moved:
         study.set(sid, record_id=keep)
+    if records is not None:
+        sync_case_count(study, records, keep)
     return moved
 
 

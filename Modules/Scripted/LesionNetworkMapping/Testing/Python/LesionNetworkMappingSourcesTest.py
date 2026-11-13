@@ -766,6 +766,35 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual(len(sources.linked_subjects(self.study, a)), 2)
         self.assertEqual(sources.linked_subjects(self.study, b), [])
 
+    def test_merge_keeps_cases_of_both_records_in_prisma(self):
+        """Merging two included duplicates that both have cases keeps every case counted (n_cases and PRISMA cases)."""
+        title = "Pure alexia after occipital stroke"
+        for kept_cases, dropped_cases in ((2, 1), (1, 3)):
+            with self.subTest(kept=kept_cases, dropped=dropped_cases):
+                study = Study.create(os.path.join(self.root, f"both-{kept_cases}-{dropped_cases}"), name="Lit")
+                records = sources.Records.open(study)
+                records.add([sources.draft(title=title, year="2017"), sources.draft(title=title + ".", year="2017")])
+                keep, drop = records.ids()
+                for record_id, n in ((keep, kept_cases), (drop, dropped_cases)):
+                    for _step in range(3):
+                        records.advance(record_id)
+                    sources.add_cases(study, records, record_id, n)
+                before = sources.prisma_counts(study, records)
+                records.merge(keep, drop)
+                sources.relink_cases(study, keep, drop, records)
+                linked = len(sources.linked_subjects(study, keep))
+                self.assertEqual(linked, kept_cases + dropped_cases)
+                self.assertEqual(records.get(keep)["n_cases"], str(linked))
+                after = sources.prisma_counts(study, records)
+                self.assertEqual((after["included"], after["cases"]), (before["included"] - 1, before["cases"]))
+        # a larger count entered for the dropped copy (no linked cases) is kept
+        records = sources.Records(os.path.join(self.root, "entered"))
+        records.add([sources.draft(title=title, year="2017"), sources.draft(title=title + ".", year="2017")])
+        keep, drop = records.ids()
+        records.get(keep)["n_cases"], records.get(drop)["n_cases"] = "1", "4"
+        records.merge(keep, drop)
+        self.assertEqual(records.get(keep)["n_cases"], "4")
+
     def test_merge_keeps_inclusion_of_dropped_duplicate(self):
         """Merging an excluded record with its included duplicate keeps the inclusion: PRISMA included and cases stay."""
         title = "Pure alexia after occipital stroke"

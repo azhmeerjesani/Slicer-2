@@ -753,7 +753,7 @@ class SourcesCard:
         def work():
             studyObject = self._study()
             self.records.merge(keep, drop)
-            _sources().relink_cases(studyObject, keep, drop)
+            _sources().relink_cases(studyObject, keep, drop, self.records)
             self._save()
             self.refresh(select=keep)
             _toast(_("Merged {drop} into {keep}").format(drop=drop, keep=keep))
