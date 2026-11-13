@@ -3827,7 +3827,16 @@ class StudySession:
             lesionPath = None
         with importer._ownLoad():
             if scanPath:
-                volumeNode = slicer.util.loadVolume(scanPath, {"singleFile": True, "show": False})
+                volumeClasses = ("vtkMRMLVolumeNode", "vtkMRMLStorageNode")
+                existingNodes = set().union(*(importer._sceneNodeIds(className) for className in volumeClasses))
+                try:
+                    volumeNode = slicer.util.loadVolume(scanPath, {"singleFile": True, "show": False})
+                except Exception as e:
+                    if importer._isAllocationFailure(e) or importer._isNiftiTooLargeForMemory(scanPath, e):
+                        # too large for the memory: a plain refusal (no reader text, paths or traceback), nothing left behind
+                        importer._removeNodesNotIn(existingNodes, volumeClasses)
+                        raise importer.RefusedFileError(importer._tooLargeMessage(scanPath)) from e
+                    raise
                 # The file's name, without the "_2" that the scene adds for a name it used before (an earlier subject switch)
                 volumeNode.SetName(importer._baseName(scanPath))
                 volumeNode.SetAttribute(SUBJECT_ATTRIBUTE, sid)

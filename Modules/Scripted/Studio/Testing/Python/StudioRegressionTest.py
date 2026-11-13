@@ -1078,6 +1078,59 @@ class StudioRegressionTest(unittest.TestCase):
             self.assertNotIn(raw, toasts[0])
         self.assertEqual([r for r in capture.records if r.levelno >= logging.ERROR], [], "no error badge, no traceback")
 
+    def test_4c_open_subject_with_scan_too_large_for_memory(self):
+        """BB-1: a subject whose scan cannot be allocated is refused with the plain "too large" toast, no traceback or
+        error row, and no node left behind.
+        """
+        from LesionNetworkMappingLib.study import Study
+        from StudioLib import study_ui
+
+        folder = os.path.join(self.directory, "Too large scan")
+        study = Study.create(folder, name="Too large scan")
+        node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "StudioTestScan")
+        slicer.util.updateVolumeFromArray(node, np.ones((8, 8, 8), np.int16))
+        scan = os.path.join(self.directory, "sub-01_T1w.nii.gz")
+        self.assertTrue(slicer.util.saveNode(node, scan))
+        slicer.mrmlScene.RemoveNode(node)
+        study.add_subject("sub-01", scan=study.relpath(scan), status="untraced")
+        study.save()
+
+        toasts = []
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: toasts.append(str(text))
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+
+        def failingLoadVolume(filename, properties=None, returnNode=False):
+            slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "half")
+            raise RuntimeError(f"Failed to load node from file: {filename} - Error: itk::MemoryAllocationError "
+                               "File: itkImportImageContainer.hxx Line: 179")
+
+        class Capture(logging.Handler):
+            def __init__(self):
+                super().__init__()
+                self.records = []
+
+            def emit(self, record):
+                self.records.append(record)
+
+        capture = Capture()
+        logging.getLogger().addHandler(capture)
+        original = slicer.util.loadVolume
+        try:
+            session = study_ui.openStudy(folder, None, subject=None, showLibrary=False)
+            before = slicer.mrmlScene.GetNumberOfNodesByClass("vtkMRMLVolumeNode")
+            slicer.util.loadVolume = failingLoadVolume
+            self.assertFalse(session.open("sub-01", switchToDraw=False))
+        finally:
+            slicer.util.loadVolume = original
+            logging.getLogger().removeHandler(capture)
+        self.assertEqual(len(toasts), 1, toasts)
+        self.assertIn("too large for this computer's memory", toasts[0])
+        for raw in ("MemoryAllocationError", "itkImportImageContainer", "Failed to load node", folder):
+            self.assertNotIn(raw, toasts[0])
+        self.assertEqual([r for r in capture.records if r.levelno >= logging.ERROR], [], "no error badge, no traceback")
+        self.assertEqual(slicer.mrmlScene.GetNumberOfNodesByClass("vtkMRMLVolumeNode"), before)
+
     def test_4_two_windows_same_study(self):
         import glob
         import socket
