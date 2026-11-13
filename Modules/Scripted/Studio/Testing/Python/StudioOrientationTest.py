@@ -19,6 +19,8 @@ always restore the Classic interface. They cover:
   Enter opening the best match, and the classic finder restored in Classic.
 """
 
+import os
+
 import numpy as np
 import qt
 import vtk
@@ -909,3 +911,33 @@ class StudioOrientationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertFalse(filterModel.showModules)
         finally:
             dialog.setModuleTitleFilterText("")
+
+    def test_reformat_orientation_scene_reload_logs_no_error(self):
+        """A scene whose slice nodes are aligned to an oblique scan stores orientation="Reformat"; reading it logs no error."""
+        import tempfile
+
+        sliceNode = slicer.app.layoutManager().sliceWidget("Red").mrmlSliceNode()
+        matrix = vtk.vtkMatrix4x4()
+        angle = np.deg2rad(15.0)
+        matrix.SetElement(0, 0, float(np.cos(angle)))
+        matrix.SetElement(0, 1, float(-np.sin(angle)))
+        matrix.SetElement(1, 0, float(np.sin(angle)))
+        matrix.SetElement(1, 1, float(np.cos(angle)))
+        sliceNode.GetSliceToRAS().DeepCopy(matrix)
+        sliceNode.UpdateMatrices()
+        self.assertEqual(sliceNode.GetOrientation(), "Reformat")
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "oblique.mrml")
+            self.assertTrue(slicer.util.saveScene(path))
+            with open(path, encoding="utf-8") as handle:
+                self.assertIn('orientation="Reformat"', handle.read())
+            slicer.mrmlScene.Clear(0)
+            model = slicer.app.errorLogModel()
+            before = model.logEntryCount()
+            slicer.util.loadScene(path)
+            slicer.app.processEvents()
+            messages = [model.logEntryDescription(i) for i in range(before, model.logEntryCount())]
+        bad = [m for m in messages if "invalid orientation preset name" in m]
+        self.assertEqual(bad, [])
+        loaded = slicer.mrmlScene.GetNodeByID("vtkMRMLSliceNodeRed")
+        self.assertEqual(loaded.GetOrientation(), "Reformat")
