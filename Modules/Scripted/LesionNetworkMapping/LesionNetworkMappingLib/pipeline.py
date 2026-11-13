@@ -1461,6 +1461,10 @@ def plan(config, hash_lesions=True, providers=None):
     # the nulls job keeps only the cases when the study has any (nulls.load_cohort)
     n_cases_mapped = sum(1 for row in rows if row["status"] in ("compute", "reuse", "normalize") and row["group"] == "case")
     nulls_mode, nulls_reason = _nulls_decision(config, providers, bundle, subject_ids, n_cases_mapped or n_mapped, threads, budget)
+    # --nulls auto in fast mode: what runs when the parity gate refuses fast mode for the cohort (decision D-A23)
+    nulls_fallback = None
+    if config.nulls == "auto" and isinstance(nulls_mode, tuple) and nulls_mode[0] == "fast":
+        nulls_fallback = _nulls_exact_decision(config, bundle, subject_ids, n_cases_mapped or n_mapped, threads, budget)
     estimates["nulls"] = nulls_mode[1] if isinstance(nulls_mode, tuple) else 0.0
     nulls_mode = nulls_mode[0] if isinstance(nulls_mode, tuple) else nulls_mode
     for name, label in STAGES:
@@ -1490,6 +1494,7 @@ def plan(config, hash_lesions=True, providers=None):
     result = Plan(config, out, study, bundle, providers, subject_ids, subjects_sha, manifest_sha, rows, stages, blocks, warnings, infos, overrides, total, null_k, specificity, specificity_reason,
                   score_columns, report, budget)
     result.nulls_mode = nulls_mode  # "exact" | "fast" | "skip" | "unavailable"
+    result.nulls_fallback = nulls_fallback  # with --nulls auto in fast mode: (("exact", estimate_s) or "skip", reason) when the parity gate refuses fast mode
     result.design_sha256 = design_fingerprint(study, [row for row in rows if row["status"] in ANALYSED_STATUSES], score_columns, config.covariates)
     result.elapsed = time.perf_counter() - started
     return result
@@ -1519,14 +1524,41 @@ def _nulls_decision(config, providers, bundle, subject_ids, n_lesions, threads, 
     top_pct = thresholds.normalize_rule(config.rule)["kind"] == "top_pct"
     if config.nulls in ("auto", "fast"):
         index = nulls.find_fast_index(bundle, subject_ids) if top_pct else None
-        if index is not None:
+        # auto takes fast mode only when its parity gate can pass: without reference maps (built only on request,
+        # D-A20) no stratum passes, and the exact pooled null within the budget is used instead
+        if index is not None and (config.nulls == "fast" or _references_for_parity(config, bundle, subject_ids)):
             return ("fast", nulls.estimate(n_lesions, bundle, mode="fast", subjects=list(subject_ids), threads=threads, rule=config.rule)), None
         if config.nulls == "fast":
             return "skip", "fast null models need the fast index of this connectome and a top-x% rule"
+    return _nulls_exact_decision(config, bundle, subject_ids, n_lesions, threads, budget)
+
+
+def _nulls_exact_decision(config, bundle, subject_ids, n_lesions, threads, budget):
+    """(("exact", estimate_s), None), or ("skip", reason) when --nulls auto and the exact pooled null exceeds the budget."""
+    from . import nulls
+
     seconds = nulls.estimate(n_lesions, bundle, mode="exact", subjects=list(subject_ids), threads=threads, budget_bytes=budget, rule=config.rule)
     if config.nulls == "auto" and seconds > config.nulls_budget_min * 60:
         return "skip", NULLS_TOO_LONG.format(_duration_text(seconds))
     return ("exact", seconds), None
+
+
+def _references_for_parity(config, bundle, subject_ids):
+    """Whether the nulls stage will find reference maps for the parity gate of fast mode: valid ones in the bundle now
+    (of these subjects, else any), or the run builds them (--build-references).
+    """
+    if config.build_references and config.reference != "off":
+        return True
+    from .connectome import subjects_sha256
+    from .reference import reference_status
+
+    for sha in (subjects_sha256(list(subject_ids)), None):
+        try:
+            if any(entry["status"] == "ok" for entry in reference_status(bundle, sha, verify=False, check_data=False)):
+                return True
+        except (OSError, ValueError, KeyError):
+            return False
+    return False
 
 
 def _lesion_fingerprint(sha256, manifest_sha, subjects_sha, null_k, null_seed, provider):
@@ -2642,6 +2674,21 @@ class Runner:
             args += ["--budget-gb", f"{float(self.config.memory_budget_gb):g}"]
         args += self._common_child_args()
         child = self._child("nulls", "nulls", args, folder)
+        fallback = getattr(self.plan, "nulls_fallback", None)
+        if child.status == "error" and mode == "fast" and fallback is not None and (child.terminal or {}).get("code") == "parity_gate":
+            # --nulls auto: the parity gate refuses fast mode for this cohort; run the exact pooled null instead (D-A23)
+            exact, reason = fallback
+            if not isinstance(exact, tuple):
+                self.warn(f"The parity gate refuses fast mode for this cohort. {reason}", code="nulls_fallback")
+                return self._skip("nulls", reason)
+            self.warn("The parity gate refuses fast mode for this cohort: the null models use the exact pooled null.", code="nulls_fallback")
+            mode, self.plan.nulls_mode = "exact", "exact"
+            params = {**params, "mode": mode}
+            fp, reused = self._cached("nulls", params, ("maps",))
+            if reused:
+                return reused
+            args[args.index("--mode") + 1] = mode
+            child = self._child("nulls", "nulls", args, folder)
         if child.status != "done":
             return {"status": "failed" if child.status == "error" else "blocked", "reason": child.message, "fingerprint": fp}
         from . import nulls

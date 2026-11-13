@@ -1289,6 +1289,33 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertEqual(stages["nulls"]["status"], "skip", stages["nulls"])
         self.assertIn("at least 2 lesions", stages["nulls"]["reason"])
 
+    def test_auto_nulls_with_fast_index_fall_back_to_exact_when_the_parity_gate_refuses(self):
+        """--nulls auto with a top-x% rule and a fast index (D-A23): without reference maps the parity gate cannot pass,
+        so the plan takes the exact pooled null; when the gate refuses fast mode at run time, the stage runs the exact
+        null instead of failing.
+        """
+        from LesionNetworkMappingLib import fastmap
+
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-auto-fast"), n_cases=14, n_controls=4, extra_rows=False)
+        bundle = connectome.ConnectomeBundle.open(fx["bundle"])
+        try:
+            fastmap.build_index(bundle, fastmap.build_tiling(bundle, []), emit=lambda *a, **k: None, register=False)
+        finally:
+            bundle.close()
+        config = pipeline.PipelineConfig(study=fx["study"], bundle=fx["bundle"], accept_terms=True, nulls="auto", rule={"kind": "top_pct", "value": 10}, perm=1000,
+                                          report=False, out=fx["out"])
+        self.assertEqual(pipeline.plan(config).nulls_mode, "exact", "no reference maps: the parity gate cannot pass")
+        # the plan expects the gate to pass (as with reference maps); the gate refuses at run time
+        events = []
+        with mock.patch.object(pipeline, "_references_for_parity", return_value=True):
+            self.assertEqual(pipeline.plan(config).nulls_mode, "fast")
+            code = pipeline.run(config, emit=pipeline.Emitter("json", sink=lambda event, record: events.append(record)))
+        self.assertEqual(code, 0, str(done_event(events)))
+        self.assertEqual(done_event(events)["failed_stages"], [], str(done_event(events)))
+        self.assertEqual(stage_status(events)["nulls"], "done")
+        self.assertTrue([event for event in events if event["event"] == "warning" and event.get("code") == "nulls_fallback"])
+        self.assertEqual(read_json(os.path.join(fx["out"], pipeline.PIPELINE_JSON))["cohort"]["nulls"]["mode"], "exact_pooled")
+
     def test_child_failure_message_has_no_dangling_separator(self):
         import inspect
 
