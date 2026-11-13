@@ -1347,6 +1347,27 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
             shown.append([text for text in record["warnings"] if "excluded" in text or "lesion metrics" in text])
         self.assertEqual(shown[0], shown[1])
 
+    def test_reused_stage_warnings_persist_after_a_rerun(self):
+        """A warning that a stage raised when it computed (the GLM's small-group design check) is raised again when the stage
+        is reused: after a threshold-rule change and after an identical rerun, once each.
+        """
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-stage-warnings"))
+        small = "Fewer than 10 subjects"
+        rule = ["--rule", json.dumps({"kind": "fz_abs", "value": 0.1})]
+        for attempt, extra in enumerate(([], rule, rule)):
+            code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST, *extra), env=self.env())
+            self.assertEqual(code, 0, stderr[-2000:])
+            if attempt:
+                self.assertEqual(stage_status(events)["specificity"], "reused", f"run {attempt + 1} reuses the GLM")
+            found = [event for event in events if event["event"] == "warning" and small in str(event.get("message"))]
+            self.assertEqual(len(found), 1, f"run {attempt + 1}: {found}")
+            record = read_json(os.path.join(fx["out"], pipeline.PIPELINE_JSON))
+            self.assertEqual(len([text for text in record["warnings"] if small in text]), 1, f"run {attempt + 1}: {record['warnings']}")
+            report = os.path.join(fx["out"], "report.html")
+            if os.path.isfile(report):
+                with open(report, encoding="utf-8") as f:
+                    self.assertIn(small, f.read(), f"run {attempt + 1}: report.html")
+
     # Code rules
 
     def test_code_rules(self):

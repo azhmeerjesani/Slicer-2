@@ -1575,6 +1575,7 @@ class Runner:
         self.design_rows = []  # [{participant_id, group}] of the analysed subjects (design_fingerprint)
         self.stage_records = {}
         self.warnings = []
+        self.stage_warnings = None  # the warnings raised while a stage computes (saved in its state, raised again when it is reused)
         self.overrides = []
         self.failed = []
         self.current = "prepare"
@@ -1624,6 +1625,12 @@ class Runner:
 
     def warn(self, message, code="warning", **fields):
         self.warnings.append({"code": code, "message": message, **{key: value for key, value in fields.items() if key in ("participant_id", "stage")}})
+        if self.stage_warnings is not None:
+            try:
+                extra = json.loads(jobs.to_json({key: value for key, value in fields.items() if key != "stage"}))
+            except (TypeError, ValueError):
+                extra = {}
+            self.stage_warnings.append({**extra, "code": code, "message": self._portable(message)})
         self.emit("warning", stage=self.current, code=code, message=message, **fields)
 
     def _warn_preflight(self):
@@ -1641,6 +1648,22 @@ class Runner:
                 subjects = list(check["subjects"])
                 fields = {"participant_id": subjects[0]} if len(subjects) == 1 else {}
                 self.warn(check["message"], code=check["id"], participants=subjects, **fields)
+
+    def _warn_reused(self, saved):
+        """Raise again the warnings that a reused stage raised when it computed (a GLM design check, a refused rule...): they
+        still describe the reused results, so ``pipeline.json``, the report and the card keep them. A warning that this run
+        already raised (same code and message) is not repeated.
+        """
+        raised = {(item.get("code"), self._portable(item.get("message"))) for item in self.warnings}
+        for item in saved or ():
+            if not isinstance(item, dict) or not item.get("message"):
+                continue
+            key = (item.get("code") or "warning", str(item["message"]))
+            if key in raised:
+                continue
+            raised.add(key)
+            fields = {name: value for name, value in item.items() if name not in ("code", "message", "stage")}
+            self.warn(key[1], code=key[0], **fields)
 
     def info(self, message, code="info", **fields):
         self.emit("info", stage=self.current, code=code, message=message, **fields)
@@ -1858,7 +1881,13 @@ class Runner:
             return
         self.current_outputs = []
         self.stage_event(name, "running")  # the current stage of progress.json (a GUI re-attaches to it)
-        outcome = method(planned)
+        self.stage_warnings = []
+        try:
+            outcome = method(planned)
+        finally:
+            self.stage_warnings = None
+        if outcome.get("reused"):
+            self._warn_reused(outcome.get("warnings"))
         status = outcome.get("status", "done")
         record.update({
             "status": status,
@@ -1908,7 +1937,8 @@ class Runner:
             except OSError:
                 pass
             return fp, None
-        return fp, {"status": "done", "reused": True, "fingerprint": fp, "result": state.get("result") or {}, "outputs_rel": state.get("outputs") or {}, "child_run_id": state.get("child_run_id")}
+        return fp, {"status": "done", "reused": True, "fingerprint": fp, "result": state.get("result") or {}, "outputs_rel": state.get("outputs") or {}, "child_run_id": state.get("child_run_id"),
+                    "warnings": state.get("warnings") or []}
 
     def _run_done(self, run_id):
         """Whether the registry records the pipeline run ``run_id`` as finished (status "done")."""
@@ -1926,7 +1956,8 @@ class Runner:
                 sizes[self.rel(path)] = os.path.getsize(path)
         provider = self.providers[name]
         state = {"fingerprint": fp, "provider": provider.module, "provider_sha256": provider.sha256, "status": "done", "pipeline_run": self.run_id, "outputs": sizes, "inputs": self.inputs.get(name), "start": start, "end": _now_iso(), "result": result,
-                 "child_run_id": child_run_id, "events_tail": [self._portable(jobs.to_json(event)) for event in (events or [])[-10:]]}
+                 "child_run_id": child_run_id, "events_tail": [self._portable(jobs.to_json(event)) for event in (events or [])[-10:]],
+                 "warnings": list(self.stage_warnings or [])}
         jobs.write_json_atomic(self._state_path(name), state)
         return {"status": "done", "fingerprint": fp, "result": result, "outputs_rel": sizes, "child_run_id": child_run_id}
 
