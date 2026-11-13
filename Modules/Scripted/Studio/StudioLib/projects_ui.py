@@ -255,7 +255,8 @@ class RenameDialog(_ChromeDialog):
         self.edit = qt.QLineEdit(name)
         self.edit.setObjectName("StudioProjectsRenameEdit")
         self.edit.setMinimumHeight(36)
-        self.edit.selectAll()
+        # Select everything but leave the cursor at the start (selecting backwards), so a long name shows its beginning.
+        self.edit.setSelection(len(name), -len(name))
         column.addWidget(self.edit)
         _ChromeDialog.__init__(self, parent, "StudioProjectsRenameDialog", "pencil", _("Rename project"), None,
                                [_("Rename"), _("Cancel")], 0, content)

@@ -4181,6 +4181,18 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertEqual(projects_ui._question(None, "Title", "Text", ["Move", "Keep", "Cancel"]), 0)
         timer.stop()
 
+    def test_52a_rename_dialog_shows_the_beginning_of_a_long_name(self):
+        """The name is selected but the field shows its beginning (cursor at the start), not the tail."""
+        from StudioLib import projects_ui
+
+        name = "A very long project name that is certainly wider than the rename field " * 2
+        dialog = projects_ui.RenameDialog(name)
+        try:
+            self.assertEqual(str(dialog.edit.selectedText), name)
+            self.assertEqual(dialog.edit.cursorPosition, 0)
+        finally:
+            dialog.delete()
+
     def test_52b_trash_of_the_open_project_is_refused_before_asking_in_the_dialog_chrome(self):
         """Move to Trash on the open project said "Move the project X to the Trash?" and, after the user confirmed, refused in a
         legacy "Slicer error" box (BB-1): it is refused up front, with no question, in the Studio dialog chrome (one OK button);
