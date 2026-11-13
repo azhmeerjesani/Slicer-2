@@ -759,6 +759,18 @@ class StaleReferenceTest(unittest.TestCase):
         writer.finalize()
         reference.build(self.path, n_seeds=20, k=2, power_iters=1, register=False, emit=lambda *args, **kwargs: None)
 
+    def test_manager_space_column_uses_the_grid_space_without_declared_metadata(self):
+        from LesionNetworkMappingLib import engine, manager
+
+        out = os.path.join(self.tmp, "nlin6.lnmc")
+        affine = np.array([[-2, 0, 0, 90], [0, 2, 0, -126], [0, 0, 2, -72], [0, 0, 0, 1.0]])
+        connectome.make_synthetic(out, shape=(91, 109, 91), n_subjects=1, runs=(5,), affine=affine, name="Grid")
+        bundle = connectome.ConnectomeBundle(out)
+        self.assertIsNone(bundle.metadata.get("space"))
+        self.assertEqual(engine.connectome_space(bundle), "MNI152NLin6Asym")
+        self.assertEqual(manager.bundle_summary(out)["space"], "MNI152NLin6Asym")
+        self.assertIsNone(manager.bundle_summary(self.path)["space"])  # unknown grid, nothing declared
+
     def test_manager_row_says_out_of_date(self):
         from LesionNetworkMappingLib import manager
 

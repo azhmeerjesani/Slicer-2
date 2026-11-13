@@ -116,7 +116,7 @@ def bundle_summary(path):
         "size_bytes": int(bundle.data_size_bytes),
         "size": _format_bytes(bundle.data_size_bytes),
         "voxel_mm": spacing[0] if max(spacing) - min(spacing) < 1e-3 else spacing,
-        "space": metadata.get("space"),
+        "space": _bundle_space(bundle, metadata),
         "gsr": gsr if gsr in (True, False) else None,
         "kind": provenance.get("kind") or "timeseries",
         "licence": provenance.get("licence"),
@@ -128,6 +128,16 @@ def bundle_summary(path):
     })
     row["reference_status"], row["reference_reason"] = _reference_status(bundle, reference_dir)
     return row
+
+
+def _bundle_space(bundle, metadata):
+    """Template space Map uses for the bundle: detected from its grid, else the declared metadata space, else None."""
+    from . import engine
+
+    try:
+        return engine.connectome_space(bundle)
+    except Exception:
+        return metadata.get("space")
 
 
 def _reference_status(bundle, reference_dir):
