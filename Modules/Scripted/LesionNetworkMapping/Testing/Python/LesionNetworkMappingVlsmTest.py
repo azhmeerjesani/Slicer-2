@@ -250,6 +250,10 @@ class VlsmRunTest(unittest.TestCase):
         self.assertIn(f"BH-FDR reaches q ≤ 0.05 only when at least {fdr['floor_voxels']} voxels reach the smallest attainable p (FDR floor); "
                       f"{fdr['voxels_at_floor']} voxels reached it.", text)
         self.assertNotIn("FDR floor", methods.vlsm_paragraph({**record, "fdr": {**fdr, "enabled": False}}))
+        # Bug bash: a lesion off the template grid is not a listwise (missing value) exclusion
+        off_grid = methods.vlsm_paragraph({**record, "n_excluded": 1, "excluded": {"outside the template2mm grid": ["sub-27"]}})
+        self.assertIn("1 not analysed: outside the template2mm grid 1)", off_grid)
+        self.assertNotIn("listwise", off_grid)
         self.assertNotIn("network associated with", text)
         self.assertIn("VLSM tests location, not the network", text)
         self.assertEqual(methods.lint_wording(text), [])

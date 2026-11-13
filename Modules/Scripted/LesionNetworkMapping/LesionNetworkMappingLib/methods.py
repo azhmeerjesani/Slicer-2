@@ -1199,6 +1199,14 @@ def _overlap_rule_text(overlap):
     return f"{rule} of the lesions (here {_or_nr(count)} lesions)"
 
 
+def _vlsm_excluded_text(data):
+    """'2 not analysed: outside the template2mm grid 1, missing score 1': VLSM also drops lesions that could not be loaded, which is not listwise deletion."""
+    total = _or_nr(data.get("n_excluded", 0))
+    excluded = data.get("excluded") or {}
+    reasons = ", ".join(f"{reason} {len(sids)}" for reason, sids in excluded.items() if sids)
+    return f"{total} not analysed: {reasons}" if reasons else f"{total} not analysed"
+
+
 def vlsm_paragraph(data, run_id=None):
     """Methods text of a vlsm.json record (voxel-based lesion-symptom mapping, L-50): binary lesion masks, the design
     and contrast, the covariates, the minimum-overlap rule and the voxels it left, the permutation method, the
@@ -1218,7 +1226,7 @@ def vlsm_paragraph(data, run_id=None):
     text = (
         f"{KIND_LABELS['vlsm']} (run {run_id or data.get('run_id') or NOT_RECORDED}): binary lesion masks"
         f"{f' (occupancy ≥ {binarize})' if binarize else ''} as the voxelwise outcome; design {_or_nr(data.get('design_type'))} (test {_or_nr(data.get('test'))}), "
-        f"contrast {contrast_text}, n = {_or_nr(data.get('n'))} ({_or_nr(data.get('n_excluded', 0))} excluded listwise); covariates: {_covariate_text(data)}. "
+        f"contrast {contrast_text}, n = {_or_nr(data.get('n'))} ({_vlsm_excluded_text(data)}); covariates: {_covariate_text(data)}. "
         f"Minimum overlap: only voxels lesioned in at least {_overlap_rule_text(overlap)} were tested, {_or_nr(tested)} voxels"
     )
     if all_lesioned:
