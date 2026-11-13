@@ -1458,7 +1458,9 @@ def plan(config, hash_lesions=True, providers=None):
         "report": REPORT_S + REPORT_LESION_S * n_mapped,
         "finish": 0.2,
     }
-    nulls_mode, nulls_reason = _nulls_decision(config, providers, bundle, subject_ids, n_mapped, threads, budget)
+    # the nulls job keeps only the cases when the study has any (nulls.load_cohort)
+    n_cases_mapped = sum(1 for row in rows if row["status"] in ("compute", "reuse", "normalize") and row["group"] == "case")
+    nulls_mode, nulls_reason = _nulls_decision(config, providers, bundle, subject_ids, n_cases_mapped or n_mapped, threads, budget)
     estimates["nulls"] = nulls_mode[1] if isinstance(nulls_mode, tuple) else 0.0
     nulls_mode = nulls_mode[0] if isinstance(nulls_mode, tuple) else nulls_mode
     for name, label in STAGES:
@@ -2094,7 +2096,9 @@ class Runner:
         message = (terminal or {}).get("message") or f"exit code {rc}"
         tail = _read_log_tail(log_path)
         if tail and code not in ("blocked", "design", "design_blocked"):
-            message += " | " + " / ".join(self._portable(line) for line in tail[-20:] if not line.startswith("#"))[-2000:]
+            detail = " / ".join(self._portable(line) for line in tail[-20:] if not line.startswith("#"))[-2000:]
+            if detail:
+                message += " | " + detail
         status = "blocked" if code in ("blocked", "design", "design_blocked") else "error"
         return ChildResult(rc, status, terminal, list(events), run_id, message)
 

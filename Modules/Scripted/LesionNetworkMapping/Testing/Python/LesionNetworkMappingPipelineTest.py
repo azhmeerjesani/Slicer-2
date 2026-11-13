@@ -1281,6 +1281,20 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertFalse(os.path.exists(result.out), "plan writes nothing")
         self.assertEqual(sha256(os.path.join(study.path, "participants.tsv")), before)
 
+    def test_nulls_plan_counts_cases_only(self):
+        """One case plus controls: the nulls use the cases only, so the plan skips the stage instead of failing it later."""
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-one-case"), n_cases=1, n_controls=1, extra_rows=False)
+        config = pipeline.PipelineConfig(study=fx["study"], bundle=fx["bundle"], accept_terms=True, nulls="exact")
+        stages = {stage["name"]: stage for stage in pipeline.plan(config).stages}
+        self.assertEqual(stages["nulls"]["status"], "skip", stages["nulls"])
+        self.assertIn("at least 2 lesions", stages["nulls"]["reason"])
+
+    def test_child_failure_message_has_no_dangling_separator(self):
+        import inspect
+
+        source = inspect.getsource(pipeline)
+        self.assertNotIn('message += " | " + " / ".join', source)
+
     def test_slnm_skip_reason_names_the_real_cause(self):
         base = dict(study=self.fx["study"], bundle=self.fx["bundle"], accept_terms=True, nulls="off")
         auto = {stage["name"]: stage for stage in pipeline.plan(pipeline.PipelineConfig(**base)).stages}
