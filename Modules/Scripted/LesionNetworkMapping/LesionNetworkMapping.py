@@ -849,8 +849,15 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
 
     @staticmethod
     def termsAccepted(bundle):
-        """Whether "I accept these data use terms" was ticked for this bundle (per manifest sha256)."""
-        value = qt.QSettings().value(LesionNetworkMappingLogic.termsSettingKey(bundle))
+        """Whether "I accept these data use terms" was ticked for this bundle (per manifest sha256).
+
+        False when the bundle's connectome.json cannot be read (its folder was moved or its drive unplugged).
+        """
+        try:
+            key = LesionNetworkMappingLogic.termsSettingKey(bundle)
+        except OSError:
+            return False
+        value = qt.QSettings().value(key)
         return str(value).lower() in ("true", "1")
 
     @staticmethod

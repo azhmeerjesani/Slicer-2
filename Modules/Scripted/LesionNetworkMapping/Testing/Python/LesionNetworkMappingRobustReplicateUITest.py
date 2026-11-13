@@ -165,6 +165,45 @@ class RobustReplicateUITest(unittest.TestCase):
         self.assertNotEqual(folder, legacy, "GSP 1000 uses the earlier result of GSP-1000")
         self.assertIsNone(shown)
 
+    def test_moved_connectome_shows_as_unavailable(self):
+        """A registered connectome whose folder was moved (or whose drive was unplugged) after the card listed it.
+
+        The card cached the opened bundle for good, so every refresh passed the stale bundle to termsAccepted, which read
+        the missing connectome.json and raised FileNotFoundError: the refresh stopped at "Replicate on" (bug
+        robust-card-traceback-when-other-registered-connectome-moved). The connectome now drops out of the list.
+        """
+        import sys
+        import traceback
+
+        path, text = self.bundles["full"]
+        widget = slicer.modules.LesionNetworkMappingWidget
+        errors = []
+        hook = sys.excepthook
+        sys.excepthook = lambda *args: errors.append("".join(traceback.format_exception(*args)))
+        study = mock.patch.object(self.ctx, "study", SimpleNamespace(path=os.path.join(self.tmp, "study")))
+        maps = mock.patch.object(self.robust, "currentMapsTsv", return_value=self.maps)
+        registered = mock.patch.object(widget.logic, "registeredConnectomes", return_value=[path])
+        from LesionNetworkMappingLib.connectome import ConnectomeBundle
+
+        current = mock.patch.object(self.ctx, "bundle", ConnectomeBundle.open(self.bundles["dash"][0]))
+        try:
+            with study, maps, registered, current:
+                self.robust.refresh()
+                combo = self.robust.replicateCombo
+                self.assertIn(text, [combo.itemText(i) for i in range(combo.count)])
+                shutil.move(path, path + ".moved")
+                self.robust.refresh()  # raised FileNotFoundError
+                self.robust.scheduleRefresh()
+                _pump(800)
+                self.assertNotIn(text, [combo.itemText(i) for i in range(combo.count)], "a moved connectome is still offered")
+                self.assertIsNone(self.robust.bundleInfo(path))
+                shutil.move(path + ".moved", path)  # the drive is plugged in again
+                self.robust.refresh()
+                self.assertIn(text, [combo.itemText(i) for i in range(combo.count)], "a connectome that is back is not offered again")
+        finally:
+            sys.excepthook = hook
+        self.assertEqual(errors, [])
+
 
 if __name__ == "__main__":
     unittest.main()

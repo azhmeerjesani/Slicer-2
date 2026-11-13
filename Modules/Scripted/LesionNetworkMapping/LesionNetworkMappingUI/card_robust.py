@@ -285,7 +285,7 @@ class RobustCard:
         self._coordinates = None  # coordinates file of the sphere variants
         self._coordinatesError = None  # why the file that was chosen is not usable (it is not kept)
         self._engineRun = None  # engine run chosen by the user for the connectome split-half
-        self._bundleInfo = {}  # path -> (name, n, bundle) or None
+        self._bundleInfo = {}  # path -> (connectome.json stamp, (name, n, bundle) or None)
         self._timer = qt.QTimer()
         self._timer.setSingleShot(True)
         self._timer.setInterval(DESIGN_DELAY_MS)
@@ -688,17 +688,31 @@ class RobustCard:
         return info[0] if info else os.path.basename(str(path))
 
     def bundleInfo(self, path):
-        """(name, n subjects, bundle) of a registered connectome, or None when it cannot be opened (cached)."""
-        if path not in self._bundleInfo:
+        """(name, n subjects, bundle) of a registered connectome, or None when it cannot be opened.
+
+        The result is cached with the stamp (modification time, size) of the connectome's connectome.json: a connectome
+        whose folder was moved, deleted or is on a drive that was unplugged is opened again and shows as unavailable
+        (None) instead of a stale bundle whose files are gone, and a rewritten manifest is read again.
+        """
+        try:
+            info = os.stat(os.path.join(str(path), "connectome.json"))
+            stamp = (info.st_mtime_ns, info.st_size)
+        except (OSError, TypeError, ValueError):
+            stamp = None
+        cached = self._bundleInfo.get(path)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        result = None
+        if stamp is not None:
             try:
                 from LesionNetworkMappingLib.connectome import ConnectomeBundle
 
                 bundle = ConnectomeBundle.open(path)
-                self._bundleInfo[path] = (bundle.name, bundle.n_subjects, bundle)
+                result = (bundle.name, bundle.n_subjects, bundle)
             except Exception:
                 logging.debug("Lesion network mapping: a registered connectome could not be opened for the Robust card", exc_info=True)
-                self._bundleInfo[path] = None
-        return self._bundleInfo[path]
+        self._bundleInfo[path] = (stamp, result)
+        return result
 
     def otherConnectomes(self):
         """[(display text, path)] of the registered connectomes other than the one in use."""
