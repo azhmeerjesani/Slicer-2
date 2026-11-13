@@ -415,7 +415,8 @@ def disk_plan(entry, subset=None, keep_archives=False):
 
     - ``download``: the selected archives plus every other file of the entry (metadata, participants, docs);
     - ``stored``: the converted bundle (float16), the high end of ``stored_range`` ([low, high], scaled by the
-      subset's fraction of the subjects); None when the catalog cannot estimate it;
+      subset's fraction of the subjects; for a subject subset of a converter that keeps every subject of the archives
+      read, the fraction of those archives); None when the catalog cannot estimate it;
     - ``peak``: the most space in use at once. Streamed converters keep no archive (unless ``keep_archives``):
       the bundle, the small files and the runs staged between two archives. Other entries keep the download
       next to what is converted from it. None for link-out entries (nothing is downloaded by the app) and
@@ -438,13 +439,23 @@ def disk_plan(entry, subset=None, keep_archives=False):
         sizes_known = _is_count(entry.get("size"))
         download = entry["size"] if sizes_known else None
     fraction = selection["fraction"]
+    kept_subjects = selection["subjects"]
+    if not selection["exact"] and entry.get("converter") != "leaddbs_vol" and selection["archives"]:
+        # Only Lead-DBS keeps just the subset's subjects; other converters keep every subject of the archives read, so the
+        # bundle is planned as the archive subset (the archives' share of the archive bytes, as for "archives:...")
+        all_files = archives(entry)
+        archive_bytes = sum(f.get("size") or 0 for f in all_files)
+        chosen_bytes = sum(f.get("size") or 0 for f in selection["archives"])
+        fraction = max(fraction, chosen_bytes / archive_bytes if archive_bytes else len(selection["archives"]) / len(all_files))
+        total_subjects = disk.get("subjects") or (entry.get("population") or {}).get("n")
+        kept_subjects = max(kept_subjects or 0, round(total_subjects * fraction)) if total_subjects else kept_subjects
     notes = []
     stored_range = None
     if disk.get("stored_bytes"):
         stored_range = [round(disk["stored_bytes"][0] * fraction), round(disk["stored_bytes"][1] * fraction)]
-    elif disk.get("voxels") and disk.get("timepoints_per_run") and disk.get("runs_per_subject") and selection["subjects"]:
+    elif disk.get("voxels") and disk.get("timepoints_per_run") and disk.get("runs_per_subject") and kept_subjects:
         per_run = disk["voxels"] * (disk["timepoints_per_run"] * STORED_SAMPLE_BYTES + STORED_NORM_BYTES)
-        stored_range = [per_run * runs * selection["subjects"] for runs in disk["runs_per_subject"]]
+        stored_range = [per_run * runs * kept_subjects for runs in disk["runs_per_subject"]]
     if stored_range is None and entry.get("status") != "link_out":
         notes.append("The bundle size is not known before the conversion.")
     staging = 0

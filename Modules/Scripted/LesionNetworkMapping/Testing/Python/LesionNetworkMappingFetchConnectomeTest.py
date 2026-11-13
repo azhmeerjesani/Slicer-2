@@ -411,6 +411,23 @@ class FetchRunTest(FetchConnectomeBase):
         self.assertEqual(len(differs), 1)
         self.assertIn("hold 4", differs[0]["message"])
 
+    def test_a_subject_subset_is_planned_as_the_archives_it_reads(self):
+        # every subject of the archives read is kept, so subjects:1 (archive 00) needs the space of archives:00, not 1/5
+        entry = copy.deepcopy(self.entry)
+        entry["disk"]["stored_bytes"] = [5_000_000, 50_000_000]
+        for subset, archive_subset in (("subjects:1", "archives:00"), ("subjects:3", "archives:00-01")):
+            plan, as_archives = catalog.disk_plan(entry, subset), catalog.disk_plan(entry, archive_subset)
+            self.assertEqual(plan["archives"], as_archives["archives"])
+            self.assertEqual(plan["stored"], as_archives["stored"], subset)
+            self.assertEqual(plan["peak"], as_archives["peak"], subset)
+        # the job's own free-space check refuses a destination that holds the 1/5 share of the bundle but not archive 00
+        free = catalog.disk_plan(entry, "subjects:1")["peak"]
+        self.assertGreater(free, round(50_000_000 / 5 * fetchconnectome.DISK_MARGIN))
+        with mock.patch.object(fetchconnectome.shutil, "disk_usage", return_value=shutil._ntuple_diskusage(10**12, 10**12 - free, free)):
+            with self.assertRaises(jobs.JobError) as ctx:
+                self.fetch(entry, subset="subjects:1")
+        self.assertEqual(ctx.exception.code, "disk_space")
+
     def test_keep_archives_stores_each_archive(self):
         summary = self.fetch(keep_archives=True)
         for index, data in enumerate(self.archives):

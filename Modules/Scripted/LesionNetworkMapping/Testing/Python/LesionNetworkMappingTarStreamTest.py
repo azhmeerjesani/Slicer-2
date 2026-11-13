@@ -505,7 +505,10 @@ class ConnectomeCatalogTest(unittest.TestCase):
 
         hundred = catalog.disk_plan(ilxiks, 100)
         self.assertEqual(hundred["archives"], ["GSP1000_v2_00.tar", "GSP1000_v2_01.tar"])  # ceil(100 / 1000 * 20)
-        self.assertEqual(hundred["stored_range"], [12_600_000_000, 14_000_000_000])
+        # the converter keeps every subject of the archives read, so the bundle is planned as archives:00-01, not 100/1000
+        self.assertEqual(hundred["stored_range"], two["stored_range"])
+        self.assertEqual(hundred["peak"], two["peak"])
+        self.assertEqual(hundred["subjects"], 100)
         self.assertFalse(hundred["exact"])
         self.assertEqual(catalog.disk_plan(ilxiks, "subjects:100")["download"], hundred["download"])
         kktjqc = self.catalog.get("gsp1000-kktjqc")
