@@ -640,36 +640,48 @@ class RobustCard:
         The tag (8 hex digits of the connectome's identifier, its name and data fingerprint as ``connectomeIdentifier``) gives
         each connectome its own folder: two with the same name (a full connectome and a subset of it), or with names that
         differ only in punctuation ("GSP-1000", "GSP 1000"), no longer share, show or overwrite one result. The same
-        connectome in another folder or on another computer keeps its folder.
+        connectome in another folder or on another computer keeps its folder. Two connectomes with the same name, grid
+        and subjects but different data (the time series fingerprint of connectome.json) have their own folders too.
         """
-        from LesionNetworkMappingLib.export import data_sha256
+        from LesionNetworkMappingLib.export import identity_sha256
 
+        return self._replicateFolderName(path, identity_sha256)
+
+    def _replicateFolderName(self, path, fingerprint):
         info = self.bundleInfo(path)
         if info is None:
             return None
-        identifier = f"{info[0]}#{data_sha256(info[2].metadata)[:16]}"
+        identifier = f"{info[0]}#{fingerprint(info[2].metadata)[:16]}"
         return f"replicate_{_safeName(info[0])}_{hashlib.sha256(identifier.encode('utf-8')).hexdigest()[:8]}"
 
     def legacyReplicateFolder(self, root, path):
-        """The ``replicate_<name>`` folder of an earlier version (no tag) when its result is of this very connectome, else None.
+        """The replicate folder of an earlier version when its result is of this very connectome, else None.
 
-        Such a folder was shared by every connectome of that name: its result is shown only for the connectome it names
-        (the same connectome.json), not for another one of the same name.
+        Earlier versions used ``replicate_<name>`` (no tag) and then a tag without the time series fingerprint. Such a
+        folder could be shared by several connectomes: its result is shown only for the connectome it names (the same
+        connectome.json), not for another one of the same name.
         """
-        from LesionNetworkMappingLib.export import file_sha256
+        from LesionNetworkMappingLib.export import data_sha256, file_sha256
 
         info = self.bundleInfo(path)
         if info is None:
             return None
-        folder = os.path.join(root, f"replicate_{_safeName(info[0])}")
-        record = _readJson(os.path.join(folder, RESULT_FILES["replicate"]))
-        used = record.get("connectome_b") if isinstance(record, dict) else None
-        used = used.get("manifest_sha256") if isinstance(used, dict) else None
         manifest = os.path.join(info[2].path, "connectome.json")
         try:
-            return folder if used and used == file_sha256(manifest) else None
+            manifestSha = file_sha256(manifest)
         except OSError:
             return None
+        names = [self._replicateFolderName(path, data_sha256), f"replicate_{_safeName(info[0])}"]
+        for name in names:
+            if not name or name == self.replicateFolderName(path):
+                continue
+            folder = os.path.join(root, name)
+            record = _readJson(os.path.join(folder, RESULT_FILES["replicate"]))
+            used = record.get("connectome_b") if isinstance(record, dict) else None
+            used = used.get("manifest_sha256") if isinstance(used, dict) else None
+            if used and used == manifestSha:
+                return folder
+        return None
 
     def bundleName(self, path):
         info = self.bundleInfo(path)

@@ -127,6 +127,32 @@ class RobustReplicateUITest(unittest.TestCase):
         finally:
             self.robust._bundleInfo.pop(copy, None)
 
+    def test_same_subjects_different_data_have_their_own_results(self):
+        """Two connectomes of one name, grid and subjects but different time series (with and without GSR) do not share."""
+        from LesionNetworkMappingLib import connectome
+        from LesionNetworkMappingLib.export import data_sha256, file_sha256
+
+        path = os.path.join(self.tmp, "connectomes", "gsr.lnmc")
+        connectome.make_synthetic(path, shape=(8, 10, 8), n_subjects=4, runs=(6, 6), seed=9, name="Second")
+        self.bundles["gsr"] = (path, "Second · N=4 (GSR)")
+        full, _shown = self.select("full")
+        self.writeResult(full, "Second", 4)
+        gsr, shown = self.select("gsr")
+        self.assertNotEqual(gsr, full, "two connectomes with different data share one replicate folder")
+        self.assertIsNone(shown, "the never-replicated GSR connectome shows the result of the other one")
+
+        # A folder under the tag of an earlier version (no time series fingerprint) is still shown for its connectome
+        shutil.rmtree(full)
+        earlier = os.path.join(os.path.dirname(full), self.robust._replicateFolderName(self.bundles["full"][0], data_sha256))
+        self.assertNotEqual(earlier, full)
+        self.writeResult(earlier, "Second", 4, manifest=file_sha256(os.path.join(self.bundles["full"][0], "connectome.json")))
+        folder, shown = self.select("full")
+        self.assertEqual(folder, earlier, "the earlier result of this connectome is no longer shown")
+        self.assertIn("against Second (N=4)", shown or "")
+        folder, shown = self.select("gsr")
+        self.assertNotEqual(folder, earlier, "the GSR connectome uses the earlier result of the other one")
+        self.assertIsNone(shown)
+
     def test_folder_of_an_earlier_version_is_shown_only_for_its_connectome(self):
         from LesionNetworkMappingLib.export import file_sha256
 

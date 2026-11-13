@@ -233,6 +233,25 @@ def data_sha256(metadata):
     return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+def identity_sha256(metadata):
+    """Hex sha256 that tells connectomes apart by their data, from connectome.json alone (no data file is read).
+
+    It is :func:`data_sha256` (grid, subjects, format) when connectome.json does not record the time series
+    fingerprint ``subjectsNormsSha256`` (bundles written before that key, downloaded bundles), so their
+    identity is unchanged. When it does, the time series fingerprint (``connectome.norms_fingerprint``) is
+    included as well: two bundles with the same grid and subjects but different data (for example converted
+    with and without global signal regression) then differ. The same bundle in another folder or on another
+    computer keeps its value.
+    """
+    from .connectome import norms_fingerprint
+
+    data = data_sha256(metadata)
+    norms = norms_fingerprint(metadata)
+    if norms is None:
+        return data
+    return hashlib.sha256(f"{data}\n{norms}".encode()).hexdigest()
+
+
 def bundle_info(bundle):
     """JSON-compatible description of a connectome bundle (also accepts an existing info dict).
 

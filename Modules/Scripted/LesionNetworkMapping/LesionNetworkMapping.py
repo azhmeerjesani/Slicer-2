@@ -727,9 +727,20 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
     def connectomeIdentifier(bundle):
         """Portable identifier of a connectome bundle, saved in scenes instead of its local path (SPEC 9.7 rule 10).
 
-        ``"<name>#<fingerprint>"``: the bundle name and the first 16 hex digits of ``export.data_sha256`` (grid,
-        subjects and format of connectome.json; no data file is read), so the same bundle in another folder or on
-        another computer has the same identifier.
+        ``"<name>#<fingerprint>"``: the bundle name and the first 16 hex digits of ``export.identity_sha256`` (grid,
+        subjects and format of connectome.json, and the time series fingerprint it records; no data file is read),
+        so the same bundle in another folder or on another computer has the same identifier, and two bundles of the
+        same name, grid and subjects but different data do not.
+        """
+        from LesionNetworkMappingLib.export import identity_sha256
+
+        return f"{bundle.name}#{identity_sha256(bundle.metadata)[:16]}"
+
+    @staticmethod
+    def earlierConnectomeIdentifier(bundle):
+        """The identifier earlier versions gave this bundle (``export.data_sha256`` only: no time series fingerprint).
+
+        Scenes saved by those versions hold it; ``resolveConnectome`` still finds the bundle by it.
         """
         from LesionNetworkMappingLib.export import data_sha256
 
@@ -758,6 +769,7 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
         nameOnly = "#" not in identifier  # a legacy scene whose bundle was missing: its folder name (legacyConnectomeName)
         known = LesionNetworkMappingLogic._knownConnectomes.get(identifier)
         candidates = ([known] if known else []) + [path for path in self.registeredConnectomes() if path != known]
+        earlier = []  # bundles that match the identifier of an earlier version (scenes saved before the time series fingerprint)
         for path in candidates:
             try:
                 bundle = self.openBundle(path)
@@ -768,7 +780,11 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
                     return bundle.path
             elif bundle.name == name and self.connectomeIdentifier(bundle) == identifier:
                 return bundle.path
-        return ""
+            elif bundle.name == name and self.earlierConnectomeIdentifier(bundle) == identifier:
+                earlier.append(bundle.path)
+        if len(earlier) > 1:
+            logging.warning(f"Lesion network mapping: {len(earlier)} registered connectomes match {identifier!r} of an earlier version; using {earlier[0]}")
+        return earlier[0] if earlier else ""
 
     def openBundle(self, path):
         """The open ``ConnectomeBundle`` of ``path`` (cached while connectome.json is unchanged)."""
