@@ -188,5 +188,30 @@ class LesionNetworkMappingCalibrateStaleUITest(unittest.TestCase):
         self.assertCurrent(card, True)
 
 
+    def test_settings_of_a_stopped_run_are_restored_after_reopen(self):
+        """After a reopen the spin boxes show the settings of the stopped run, and a notice says that it continues (BB-1
+        calibrate-settings-not-restored-after-reopen-resume-restarts-silently).
+        """
+        import json
+
+        from LesionNetworkMappingUI import card_calibrate
+
+        out = os.path.join(self.conn, "calibration", "caseVsControl")
+        os.makedirs(out)
+        params = {"k": 40, "inner_perm": 100, "sims": 5, "effects": [0.3]}
+        with open(os.path.join(out, self.calibrate.RESUME_NAME), "w", encoding="utf-8") as f:
+            json.dump({"done": ["fwer:0"], "data": {"params": params, "fwer": [], "planted": {}}}, f)
+        self.tab.design = self.withVolume
+        self.card = card = card_calibrate.CalibrateCard(_Ctx(self.study, _Cohort(self.tab)))
+        self.assertEqual((card.kSpin.value, card.innerSpin.value, card.simsSpin.value), (40, 100, 5))
+        self.assertEqual(card.effects(), [0.3])
+        self.assertIn("stopped calibration", card.noticeLabel.text)
+        self.assertFalse(card.noticeLabel.isHidden())
+        # Restored once: the user's later change stays
+        card.kSpin.setValue(60)
+        card.refresh()
+        self.assertEqual(card.kSpin.value, 60)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -71,6 +71,12 @@ def _updateProgress(progressRow, force=False):
     updateProgressQuietly(progressRow, force)
 
 
+def calibrate_resume_name():
+    from LesionNetworkMappingLib import calibrate
+
+    return calibrate.RESUME_NAME
+
+
 def _readJson(path):
     from LesionNetworkMappingLib import calibrate
 
@@ -199,6 +205,7 @@ class CalibrateCard:
         self.resultCurrent = True  # False when the shown record was calibrated for another design
         self._shownFor = None  # the design identity the shown result was chosen for
         self._cleanedUp = False
+        self._restoredFolders = set()  # run folders whose settings were restored into the card once
         self.widget = widgets.card(_("Calibrate"), objectName="LNMCalibrateCard", collapsed=True)
         layout = qt.QVBoxLayout(self.widget)
         layout.setSpacing(6)
@@ -538,6 +545,39 @@ class CalibrateCard:
         identity = self.designIdentity(spec, design)
         if not self.running() and (self.result is None or identity != self._shownFor):
             self.showLatestResult(identity)
+        if not self.running() and design is not None:
+            self._restoreSettings(self.folder(design))
+
+    def _restoreSettings(self, folder):
+        """After a reopen, show the settings of the stopped run of ``folder`` (so Calibrate continues it), else those of its calibration.
+
+        Done once per folder: the card forgets its settings when the app closes, and the defaults would silently discard
+        the saved progress of a stopped run (``--resume`` continues only with identical settings).
+        """
+        if not folder or folder in self._restoredFolders:
+            return
+        self._restoredFolders.add(folder)
+        record = _readJson(os.path.join(folder, "calibration.json")) or {}
+        resume = _readJson(os.path.join(folder, calibrate_resume_name())) or {}
+        data = resume.get("data") if isinstance(resume.get("data"), dict) else {}
+        params = data.get("params")
+        stopped = isinstance(params, dict) and bool(resume.get("done") or data.get("fwer") or data.get("planted"))
+        if stopped:
+            k, inner, sims, effects = params.get("k"), params.get("inner_perm"), params.get("sims"), params.get("effects")
+        else:
+            fwer, planted = record.get("fwer") or {}, record.get("planted") or {}
+            k, inner, sims = fwer.get("k"), fwer.get("inner_perm") or planted.get("inner_perm"), planted.get("n_sims")
+            effects = [item.get("beta") for item in planted.get("effects") or [] if isinstance(item, dict) and item.get("beta") is not None]
+        for spin, value in ((self.kSpin, k), (self.innerSpin, inner), (self.simsSpin, sims)):
+            if isinstance(value, int) and not isinstance(value, bool):
+                spin.setValue(value)
+        if isinstance(effects, list) and effects and all(isinstance(item, (int, float)) for item in effects):
+            self.effectsEdit.blockSignals(True)
+            self.effectsEdit.setText(", ".join(f"{value:g}" for value in effects))
+            self.effectsEdit.blockSignals(False)
+        if stopped and not self.notice:
+            self._setNotice(_("A stopped calibration of this analysis is saved ({k} null datasets \u00d7 {perm} permutations). The settings above are its settings: "
+                              "Calibrate this analysis continues it, and changing them starts again from zero.").format(k=params.get("k"), perm=params.get("inner_perm")))
 
     def _onTargetChosen(self, index=None):
         if self.targetCombo.currentData == "mask":
