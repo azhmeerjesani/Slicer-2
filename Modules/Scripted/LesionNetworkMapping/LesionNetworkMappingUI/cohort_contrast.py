@@ -1009,6 +1009,10 @@ class CohortTab:
                     best = (stamp or (0,), folder)
         if best is not None:
             self.loadResult(best[1])
+            self.restoreDesign(best[1])
+
+    def restoreDesign(self, folder):
+        """Put the controls back to the design of the result shown from ``folder`` (none by default; see ContrastTab)."""
 
     def setOutputs(self, outputs):
         """[(desc, label, path)] of the maps table."""
@@ -1417,6 +1421,51 @@ class ContrastTab(CohortTab):
             self.fdrCheckBox.setChecked(bool(values["fdr"]))
         if values.get("statistic") in INPUTS:
             self.inputGroup.button(INPUTS.index(values["statistic"])).setChecked(True)
+        self.onSettingsChanged()
+
+    def restoreDesign(self, folder):
+        """Set the controls to the design.json of ``folder``, the result shown again after a restart.
+
+        Without it the controls fall back to their defaults and differ from the design of the result on screen (the
+        Calibrate card then compares its calibration with the wrong design). Unreadable or unfit files change nothing.
+        """
+        from LesionNetworkMappingLib import design as designlib
+
+        try:
+            spec = designlib.DesignSpec.load(folder)
+        except Exception:
+            logging.debug("Lesion network mapping: the design of the shown result could not be read", exc_info=True)
+            return
+        groups = [self.groupCombo.itemText(i) for i in range(self.groupCombo.count)]
+        if spec.test not in ("two_group", "anova") or spec.group_column not in groups:
+            return
+        if spec.group_column != self.groupColumn():
+            self.groupCombo.setCurrentIndex(groups.index(spec.group_column))
+        if spec.levels and len(spec.levels) >= 2:
+            for combo, level in ((self.levelACombo, spec.levels[0]), (self.levelBCombo, spec.levels[1])):
+                index = combo.findText(level)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+        if spec.contrast in CONTRASTS:
+            self.contrastGroup.button(CONTRASTS.index(spec.contrast)).setChecked(True)
+        for name, button in self.covariates.buttons.items():
+            button.setChecked(name in spec.covariates)
+        self.logVolumeCheckBox.setChecked(spec.transforms.get(designlib.VOLUME_COLUMN) == "log")
+        self.volumeReasonEdit.setText(spec.volume_off_reason or "")
+        index = self.permuteCombo.findData(spec.permute)
+        if index >= 0:
+            self.permuteCombo.setCurrentIndex(index)
+        index = self.blockCombo.findData(spec.block_column or "")
+        if index >= 0:
+            self.blockCombo.setCurrentIndex(index)
+        if spec.input in INPUTS:
+            self.inputGroup.button(INPUTS.index(spec.input)).setChecked(True)
+        self.fdrCheckBox.setChecked(bool(spec.inference.get("fdr")))
+        self.tfceCheckBox.setChecked(bool(spec.inference.get("tfce")))
+        if spec.inference.get("n_perm"):
+            self.permSpinBox.setValue(int(spec.inference["n_perm"]))
+        self.varianceCheckBox.setChecked(bool(spec.variance_groups))
+        self.restrictCheckBox.setChecked(bool(spec.restrict_to_mixed_blocks))
         self.onSettingsChanged()
 
     def spec(self):
