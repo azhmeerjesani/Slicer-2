@@ -1096,16 +1096,32 @@ def _showElided(label):
             shown = _elidedPath(label.fontMetrics(), text, width)
         else:
             shown = label.fontMetrics().elidedText(text, qt.Qt.ElideRight, width)
+    if label.property("studioElideHug"):
+        # The label is as wide as its whole text at most (a chip stays a pill around its text). Its padding is the
+        # difference between its size hint and its text; 2 px of slack keeps a rounding difference from eliding
+        label.ensurePolished()
+        metrics = label.fontMetrics()
+        padding = max(0, int(label.sizeHint.width()) - metrics.horizontalAdvance(str(label.text)))
+        fullWidth = metrics.horizontalAdvance(text) + padding + 2
+        if int(label.maximumWidth) != fullWidth:
+            label.setMaximumWidth(fullWidth)
+            # Lay out now, so that a longer text is elided to the width the label gets, not to the one it had
+            parent = label.parentWidget()
+            if parent is not None and parent.layout() is not None:
+                parent.layout().activate()
+        if width > 8:
+            shown = metrics.elidedText(text, qt.Qt.ElideRight, int(label.width) - padding)
     if str(label.text) != shown:
         label.setText(shown)
     fullToolTip = str(label.property("studioFullToolTip") or "")
     label.setToolTip(fullToolTip or (text if shown != text else ""))
 
 
-def elideLabel(label, mode="right"):
+def elideLabel(label, mode="right", hug=False):
     """Make ``label`` a one-line label whose text is elided ("…") to its width; set its text with ``setElidedText()``.
     The whole text is the tooltip while it is elided. The label never widens its container (Ignored width).
     ``mode`` "path" is for folder paths: the middle is elided and the last two folders stay visible.
+    ``hug`` keeps the label no wider than its whole text (for a chip, whose background would otherwise fill the row).
     """
     global _elideFilter
     if _elideFilter is None:
@@ -1115,6 +1131,7 @@ def elideLabel(label, mode="right"):
     label.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
     label.setProperty("studioElided", True)
     label.setProperty("studioElideMode", mode)
+    label.setProperty("studioElideHug", bool(hug))
     label.installEventFilter(_elideFilter)
     return label
 

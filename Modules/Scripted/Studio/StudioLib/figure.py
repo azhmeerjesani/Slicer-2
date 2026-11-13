@@ -2322,7 +2322,10 @@ class FigureCard:
         steps.addRow(_("5 Fit"), self.modelFrame)
         self.residualChip = ui.chip("")
         self.residualChip.setObjectName("StudioFigureResidualChip")
-        self.residualChip.setSizePolicy(qt.QSizePolicy.Maximum, qt.QSizePolicy.Fixed)
+        # The chip never wraps: with its own width hint (wider than a narrow card at larger fonts) it made the form
+        # layout give the wrapped labels below less height than their lines need, and their last lines were cut.
+        # It is elided to the card's width instead (the whole text is in its tooltip) and stays a pill around its text
+        ui.elideLabel(self.residualChip, hug=True)
         steps.addRow(self.residualChip)
         self.residualNote = qt.QLabel(_("The residual measures landmark consistency, not lesion accuracy"))
         self.residualNote.setObjectName("StudioFigureResidualNote")
@@ -2492,8 +2495,7 @@ class FigureCard:
             text, level = _("No fit: see the warning below"), figurefit.residual_level(None)
         else:
             text, level = _("No fit yet: {n} of 2 pairs").format(n=pairs), figurefit.residual_level(None)
-        self.residualChip.setText(text)
-        self.residualChip.setToolTip(level.text)
+        ui.setElidedText(self.residualChip, text, toolTip=f"{text}\n{level.text}")
         ui.setChipLevel(self.residualChip, {"green": "ok", "amber": "warn", "red": "danger"}.get(level.level, "neutral"))
         warnings = []
         if panel.fitError:

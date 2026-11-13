@@ -2888,6 +2888,72 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 problems.append((label.text, "width", label.width))
         self.assertEqual(problems, [])
 
+    def test_33b2_figure_card_warnings_are_not_cut_at_125_percent_font(self):
+        """At 125% font (17 px) the Figure card's word-wrapped fit warning keeps the height of all its lines (the
+        'mirrored figure' line below the 'need a reflection' line was cut off).
+        """
+        import tempfile
+
+        import vtk
+
+        if not _hasFigureTracing():
+            self.skipTest("figure tracing is not in this build")
+        from StudioLib import figure, importer
+
+        studioShell = self._applyStudio()
+        oldFont = qt.QFont(qt.QApplication.font())
+        bigFont = qt.QFont(oldFont)
+        bigFont.setPixelSize(17)
+        slicer.app.setFont(bigFont)
+
+        def restoreFont():
+            slicer.app.setFont(oldFont)
+            self._wait(300)
+
+        self.addCleanup(restoreFont)
+        self._startOnTemplate(studioShell)
+        self.addCleanup(lambda: figure.closeFigure(removeNodes=True))
+        directory = tempfile.mkdtemp(prefix="StudioTestFigureFont", dir=slicer.app.temporaryPath)
+        image = qt.QImage(220, 260, qt.QImage.Format_RGB32)
+        image.fill(qt.QColor(20, 20, 20))
+        path = f"{directory}/case-9_fig1.png"
+        self.assertTrue(image.save(path))
+        importer.handleDrop([path], shell=studioShell)
+        self._pump(10)
+        session = figure.session()
+        panel = session.panel()
+        session.setPlane("axial")
+        session.setCut(z=10.0)
+        for pixel in ((30, 40), (190, 40), (110, 230), (60, 150), (170, 180)):
+            panel.figureLandmarks().AddControlPoint(vtk.vtkVector3d(*panel.localOf(pixel)))
+            panel.templateLandmarks().AddControlPoint(vtk.vtkVector3d(-88 + 0.8 * pixel[0], 104 - 0.8 * pixel[1], 10.0))
+        session.updateFit()
+        session.enterTrace()
+        self._pump(6)
+        card = self.mainWindow.findChild("QFrame", "StudioFigureCard")
+        self.assertTrue(card.isVisible())
+        dock = next(widget for widget in self.mainWindow.findChildren("QDockWidget") if widget.isVisible() and widget.isAncestorOf(card))
+        self.mainWindow.resizeDocks([dock], [340], qt.Qt.Horizontal)
+        self._wait(800)
+        warning = card.findChild("QLabel", "StudioFigureFitWarning")
+        self.assertTrue(warning.isVisible())
+        self.assertGreaterEqual(warning.height, warning.heightForWidth(warning.width), warning.text)
+        problems = [
+            (label.text, label.height, label.heightForWidth(label.width))
+            for label in card.findChildren("QLabel")
+            if label.isVisible() and label.text.strip() and label.wordWrap and label.height < label.heightForWidth(label.width)
+        ]
+        self.assertEqual(problems, [])
+        # The residual chip never widens the card: a text wider than the card ends in "…" (the whole text is in the
+        # tooltip) and is not cut at the card's edge
+        chip = card.findChild("QLabel", "StudioFigureResidualChip")
+        full = "(5 pairs)"
+        self.assertIn(full, chip.toolTip)
+        self.assertTrue(full in chip.text or chip.text.endswith("…"), chip.text)
+        self.assertGreaterEqual(chip.width, chip.fontMetrics().horizontalAdvance(chip.text))
+        steps = chip.parent()
+        self.assertLessEqual(chip.x + chip.width, steps.width)
+
     def test_33d_figure_landmark_deleted_alone_takes_its_partner(self):
         """A landmark deleted on its own (the view's "Delete control point") removes its partner in the other list: the
         later pairs keep their partners and the fit stays good; "Remove last" and a new pair stay paired.
