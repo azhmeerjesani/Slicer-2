@@ -8413,3 +8413,24 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertNotEqual(entry.get("SlicerStudio", {}).get("type"), "numeric")
         result = lc.applyChanges(session, {"nihss": {"role": "score", "type": "numeric"}})
         self.assertEqual(result["applied"], ["nihss"], result)
+
+    def test_101_columns_score_role_refuses_non_numeric_values(self):
+        """BB-1: choosing only the Score role made a column with values such as "1,5" numeric without the refusal that the numeric type
+        gets. The role is refused with the same message and nothing is written; a column of numbers still takes the Score role.
+        """
+        from StudioLib import libcard_columns as lc
+        from StudioLib import study_ui
+
+        values = ["1", "1,5", "n/a", "3"]
+        study = self._study([(f"sub-0{index}", {"zeta_score": values[index - 1], "nihss": str(index)}, False) for index in range(1, 5)])
+        session = study_ui.openStudy(study.path, None, showLibrary=False)
+        self.addCleanup(study_ui.closeStudy)
+        slicer.app.processEvents()
+        result = lc.applyChanges(session, {"zeta_score": {"role": "score"}})
+        self.assertEqual(result["applied"], [], result)
+        self.assertIn("not all numbers", result["errors"].get("zeta_score", ""))
+        with open(os.path.join(study.path, "participants.json"), encoding="utf-8") as f:
+            entry = json.load(f).get("zeta_score", {})
+        self.assertNotEqual(entry.get("SlicerStudio", {}).get("type"), "numeric")
+        result = lc.applyChanges(session, {"nihss": {"role": "score"}})
+        self.assertEqual(result["applied"], ["nihss"], result)

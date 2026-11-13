@@ -1203,17 +1203,18 @@ class Study:
         spec = self.column_spec(name)
         changes = {"role": role}
         if type is not None:
-            if type == "numeric":
-                words = sorted({str(row.get(name)) for row in self._rows
-                                if not schema.is_missing(row.get(name)) and schema._number(str(row.get(name))) is None})
-                if words:
-                    raise ValueError(f"The values of {name} are not all numbers (for example {', '.join(words[:3])}), "
-                                     "so it cannot be numeric; keep it categorical or text")
             changes["type"] = type
         elif role in ("group", "block") and spec.type not in ("categorical", "ordinal"):
             changes["type"] = "categorical"
         elif role == "score" and spec.type not in ("numeric", "ordinal"):
             changes["type"] = "numeric"
+        if changes.get("type") == "numeric":
+            # Applies to an explicit type and to the numeric type that the score role implies
+            words = sorted({str(row.get(name)) for row in self._rows
+                            if not schema.is_missing(row.get(name)) and schema._number(str(row.get(name))) is None})
+            if words:
+                raise ValueError(f"The values of {name} are not all numbers (for example {', '.join(words[:3])}), "
+                                 "so it cannot be numeric; keep it categorical or text")
         given = {"levels": levels, "units": units, "description": description}
         changes.update({key: value for key, value in given.items() if value is not None})
         spec = spec.replace(**changes)

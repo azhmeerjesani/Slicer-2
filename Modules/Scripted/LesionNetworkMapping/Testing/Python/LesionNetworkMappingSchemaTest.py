@@ -171,7 +171,12 @@ class SchemaTest(unittest.TestCase):
         for index, sid in enumerate(again.subject_ids):
             again.set(sid, zeta="1,5" if index % 2 else "2", remark="ok" if index % 2 else "dup")
         self.assertEqual(again.column_spec("zeta").type, "categorical")
-        again.set_column_role("zeta", "score", type="numeric")
+        for kwargs in ({"type": "numeric"}, {}):  # the Score role implies numeric, so it is refused as well
+            with self.assertRaises(ValueError):
+                again.set_column_role("zeta", "score", **kwargs)
+        for sid in again.subject_ids:
+            again.set(sid, zeta="1.5")
+        again.set_column_role("zeta", "score")
         again.set_column_role("remark", "metadata", type="text")
         self.assertNotIn("Levels", again.dictionary["zeta"])
         self.assertNotIn("Levels", again.dictionary["remark"])
@@ -269,7 +274,9 @@ class SchemaTest(unittest.TestCase):
         }
         for sid, cells in values.items():
             created.set(sid, cells)
-        created.set_column_role("moca", "score")
+        created.set("sub-07", moca=None)
+        created.set_column_role("moca", "score")  # the Score role refuses a column that holds words
+        created.set("sub-07", moca="n.a.")
         self.assertTrue(created.review_required)  # a case report
         rows, excluded = created.analysis_rows(["moca", "volume_ml"])
         self.assertEqual([row["participant_id"] for row in rows], ["sub-00", "sub-05", "sub-06"])
