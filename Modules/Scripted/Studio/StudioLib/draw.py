@@ -636,6 +636,9 @@ class _DrawSession(VTKObservationMixin):
         self._redoKeyFree = None
         #: Effect deselected by a Place or window/level mode, armed again when the mode ends
         self._suspendedEffect = None
+        #: Effect this session armed that the next evaluation has not seen yet (a Place mode that starts before it
+        #: deselects it, and must suspend it)
+        self._armedEffect = None
         #: The next entry (or the next lesion) arms Brush: an explicit intent ("Continue in Draw", New lesion)
         self._armRequested = False
         self._snapshot = None
@@ -913,6 +916,7 @@ class _DrawSession(VTKObservationMixin):
         snapshot = _Snapshot(editor)
         previous = self._snapshot
         self._snapshot = snapshot
+        self._armedEffect = None
         segmentationNode = editor.segmentationNode()
         if previous is not None:
             if snapshot.effect is not None and snapshot.effect != previous.effect:
@@ -972,9 +976,18 @@ class _DrawSession(VTKObservationMixin):
             self.pendingEffect = None
             return
         self.pendingEffect = None
+        interactionNode = slicer.app.applicationLogic().GetInteractionNode() if slicer.app.applicationLogic() is not None else None
+        if interactionNode is not None and interactionNode.GetCurrentInteractionMode() != slicer.vtkMRMLInteractionNode.ViewTransform:
+            # A Place or window/level mode started before the tool was armed (the template point of a figure pair
+            # right after its figure point): arming would end that mode (the click would draw), so the tool is
+            # suspended and armed when the mode ends (U14)
+            if self._suspendedEffect is None:
+                self._suspendedEffect = effectName
+            return
         if effectName in ("Paint", "Erase"):
             self._applyBrushDefault(editor)
         editor.setActiveEffectByName(effectName)
+        self._armedEffect = effectName
 
     def _onEffectChanged(self, editor, effectName):
         """A tool was chosen (or deselected): Smooth safety. The brush size is not set here: Brush and Erase share it (a
@@ -1003,8 +1016,13 @@ class _DrawSession(VTKObservationMixin):
             if self._suspendedEffect is None:
                 editor = segmentEditor()
                 name = _effectName(editor) if editor is not None else None
-                if name is None and self._snapshot is not None:
-                    name = self._snapshot.effect
+                if name is None:
+                    # The editor deselected the tool before this observer ran: the tool it had, or the one about to
+                    # be armed when the mode ended and started again (a figure pair: figure point, then template
+                    # point)
+                    name = self._armedEffect or self.pendingEffect
+                    if name is None and self._snapshot is not None:
+                        name = self._snapshot.effect
                 if name is not None:
                     self._suspendedEffect = name
                     self.refreshPanel()
@@ -1104,6 +1122,7 @@ class _DrawSession(VTKObservationMixin):
         self.state.segmentId = None
         self.state.sourceVolumeNodeId = None
         self._suspendedEffect = None
+        self._armedEffect = None
         self._lastActiveEffect = None
         self.pendingEffect = DEFAULT_EFFECT if self._armRequested else None
         editor = segmentEditor()

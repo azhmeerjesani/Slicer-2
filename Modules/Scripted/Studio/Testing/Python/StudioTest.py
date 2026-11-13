@@ -1734,6 +1734,37 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIsNone(draw.suspendedEffect(studioShell))
         self.assertEqual(draw.drawState(studioShell).effect, "Erase")
 
+    def test_24a_draw_place_started_again_before_the_tool_is_armed(self):
+        """A Place mode that starts again before the suspended tool is armed (a figure pair: the template point right
+        after the figure point) keeps it suspended: arming it would end that Place mode, and the click would paint.
+        """
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        editor.setActiveEffectByName("Paint")
+        self._pump()
+        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+        for armedInBetween in (False, True):
+            interactionNode.SetCurrentInteractionMode(slicer.vtkMRMLInteractionNode.Place)
+            self._pump()
+            self.assertEqual(draw.suspendedEffect(studioShell), "Paint")
+            # The first point is placed (the mode ends), and the second Place mode starts before (or right after) the
+            # tool is armed again
+            interactionNode.SwitchToViewTransformMode()
+            if armedInBetween:
+                self._pump(1)
+            interactionNode.SetCurrentInteractionMode(slicer.vtkMRMLInteractionNode.Place)
+            self._pump(6)
+            self.assertEqual(interactionNode.GetCurrentInteractionMode(), slicer.vtkMRMLInteractionNode.Place, armedInBetween)
+            self.assertIsNone(self._effect(editor), armedInBetween)
+            self.assertEqual(draw.suspendedEffect(studioShell), "Paint", armedInBetween)
+            # The second point is placed: the tool resumes
+            interactionNode.SwitchToViewTransformMode()
+            self._pump(6)
+            self.assertEqual(self._effect(editor), "Paint", armedInBetween)
+            self.assertIsNone(draw.suspendedEffect(studioShell))
+
     def test_25_draw_double_click_guard(self):
         """A double-click with Paint active does not maximize the view; without a tool it still does (U12)."""
         import vtk
