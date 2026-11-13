@@ -606,7 +606,11 @@ class SourcesCard:
             offers = self._offersAll
         # "Keep both" is remembered per study: record ids (first author and year) repeat between studies
         path = self._study().path if self._study() is not None else None
-        self._offers = [offer for offer in offers if (path,) + tuple(offer[:2]) not in self._dismissed]
+        self._offers = [
+            offer
+            for offer in offers
+            if (path,) + tuple(offer[:2]) not in self._dismissed and not (records is not None and records.is_kept(offer[0], offer[1]))
+        ]
         self.offerRow.setVisible(bool(self._offers))
         if self._offers:
             keep, drop, ratio = self._offers[0]
@@ -763,7 +767,13 @@ class SourcesCard:
     def keepOffer(self):
         if self._offers:
             studyObject = self._study()
-            self._dismissed.add((studyObject.path if studyObject is not None else None,) + tuple(self._offers[0][:2]))
+            pair = tuple(self._offers[0][:2])
+            self._dismissed.add((studyObject.path if studyObject is not None else None,) + pair)
+            if self.records is not None and not self.records.unreadable:
+                try:
+                    self.records.keep_both(*pair)  # stays in the study: the offer does not return after a restart
+                except OSError:
+                    pass  # read-only study: remembered for this session only
             self._refreshOffers()
 
     # Import

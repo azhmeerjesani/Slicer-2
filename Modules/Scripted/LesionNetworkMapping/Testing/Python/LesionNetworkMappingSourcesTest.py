@@ -559,6 +559,20 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual([offer[:2] for offer in records.merge_offers()], [(first, second)])
         self.assertTrue(records.same_identifier(first, second))
 
+    def test_keep_both_is_stored_in_the_study(self):
+        """BB-1: a "Keep both" decision is read back when the study is opened again, in either order, with no local path."""
+        records = sources.Records.open(self.study)
+        records.add([sources.draft(title="Same title here", year="2001", authors="Smith J"), sources.draft(title="Same title here.", year="2001", authors="Smith J")])
+        records.save()
+        first, second = records.ids()
+        self.assertFalse(records.is_kept(first, second))
+        records.keep_both(first, second)
+        again = sources.Records.open(self.study)
+        self.assertTrue(again.is_kept(first, second))
+        self.assertTrue(again.is_kept(second, first))
+        with open(again.kept_path, encoding="utf-8") as f:
+            self.assertNotIn(os.sep + "tmp", f.read())
+
     def test_no_network_without_a_call(self):
         original = sources._http_json
         sources._http_json = lambda *a, **k: self.fail("network used")

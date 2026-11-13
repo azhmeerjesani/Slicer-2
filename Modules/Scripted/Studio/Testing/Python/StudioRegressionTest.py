@@ -7228,6 +7228,11 @@ class StudioRegressionTest(unittest.TestCase):
             self.assertIsNotNone(study_ui.openStudy(pathA, showLibrary=False))
             card.refresh()
             self.assertEqual(card._offers, [])
+
+            # BB-1: the decision is stored in the study, so a new session (empty in-memory set) is not asked again
+            card._dismissed.clear()
+            card.refresh()
+            self.assertEqual(card._offers, [], "Keep both survives a restart")
         finally:
             if card is not None:
                 card.widget.hide()

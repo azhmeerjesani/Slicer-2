@@ -47,6 +47,9 @@ NA = "n/a"
 SOURCES_DIR = "sources"
 RECORDS_TSV = (SOURCES_DIR, "records.tsv")
 STAGE_LOG_TSV = (SOURCES_DIR, "stage_log.tsv")
+#: Pairs of records the user chose to "Keep both" for (a screening decision, so it stays in the study)
+KEPT_PAIRS_TSV = (SOURCES_DIR, "kept_pairs.tsv")
+KEPT_COLUMNS = ("record_id", "other_record_id")
 PRISMA_DIR = ("derivatives", "prisma")
 PRISMA_COUNTS_JSON = "prisma_counts.json"
 PRISMA_FLOW_SVG = "prisma_flow.svg"
@@ -558,6 +561,8 @@ class Records:
         self.rows = list(rows or [])
         self.extra_columns = list(extra_columns)
         self.log = list(log or [])
+        #: {frozenset({record_id, other_record_id})}: pairs the user kept as two records (:meth:`keep_both`)
+        self.kept_pairs = set()
         # Why sources/records.tsv or stage_log.tsv could not be read, when this empty table stands in for them: save()
         # then refuses, so the user's records and stage log are never written over
         self.unreadable = None
@@ -571,6 +576,25 @@ class Records:
     @property
     def log_path(self):
         return os.path.join(self.study_path, *STAGE_LOG_TSV)
+
+    @property
+    def kept_path(self):
+        return os.path.join(self.study_path, *KEPT_PAIRS_TSV)
+
+    def is_kept(self, record_id, other_record_id):
+        """True when the user chose "Keep both" for this pair of records (in either order)."""
+        return frozenset((record_id, other_record_id)) in self.kept_pairs
+
+    def keep_both(self, record_id, other_record_id):
+        """Remember that the user keeps both records of a merge offer (written at once to ``sources/kept_pairs.tsv``)."""
+        self.kept_pairs.add(frozenset((record_id, other_record_id)))
+        self._save_kept_pairs()
+
+    def _save_kept_pairs(self):
+        rows = [{"record_id": min(pair), "other_record_id": max(pair)} for pair in self.kept_pairs if len(pair) == 2]
+        rows.sort(key=lambda row: (row["record_id"], row["other_record_id"]))
+        os.makedirs(os.path.dirname(self.kept_path), exist_ok=True)
+        study_module.write_tsv(self.kept_path, KEPT_COLUMNS, rows)
 
     @classmethod
     def open(cls, study_or_path):
@@ -591,6 +615,12 @@ class Records:
                 if full["record_id"]:
                     full["stage"] = full["stage"] if full["stage"] in STAGES else IDENTIFIED
                     records.rows.append(full)
+        if os.path.isfile(records.kept_path):
+            try:
+                _columns, rows = study_module.read_tsv(records.kept_path)
+                records.kept_pairs = {frozenset((row.get("record_id", ""), row.get("other_record_id", ""))) for row in rows}
+            except (OSError, ValueError):
+                records.kept_pairs = set()  # only a convenience: the offers return
         if os.path.isfile(records.log_path):
             try:
                 _columns, rows = study_module.read_tsv(records.log_path)
