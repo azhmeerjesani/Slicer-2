@@ -141,17 +141,45 @@ class ResampleTest(RefmapsTestBase):
         np.testing.assert_allclose(values, coarse.reshape(-1)[self.bundle.mask_indices], rtol=1e-5)
 
     def test_partial_coverage_is_nan(self):
-        data = np.zeros(SHAPE)
+        data = np.full(SHAPE, np.nan)
         data[: SHAPE[0] // 2] = 1.0 + self.rng.random((SHAPE[0] // 2, *SHAPE[1:]))
         values = refmaps.map_on_grid(self.writeMap("half.nii.gz", data), self.bundle)
-        # Same grid: zeros are kept as values, not as "outside"
-        self.assertFalse(np.isnan(values).any())
-        shifted = self.bundle.affine.copy()
-        shifted[:3, 3] += 0.5  # off-grid: resampled, zero voxels count as not covered
-        values = refmaps.map_on_grid(self.writeMap("half_shift.nii.gz", data, shifted), self.bundle)
         i = np.unravel_index(self.bundle.mask_indices, SHAPE)[0]
+        # Same grid: NaN voxels are not covered
+        self.assertTrue(np.isnan(values[i >= SHAPE[0] // 2]).all())
+        self.assertTrue(np.isfinite(values[i < SHAPE[0] // 2]).all())
+        shifted = self.bundle.affine.copy()
+        shifted[:3, 3] += 0.5  # off-grid: resampled, NaN voxels count as not covered
+        values = refmaps.map_on_grid(self.writeMap("half_shift.nii.gz", data, shifted), self.bundle)
         self.assertTrue(np.isnan(values[i >= SHAPE[0] // 2 + 1]).all())
         self.assertTrue(np.isfinite(values[i < SHAPE[0] // 2 - 1]).all())
+        # A smaller field of view: the voxels outside it are not covered either
+        values = refmaps.map_on_grid(self.writeMap("half_fov.nii.gz", data[: SHAPE[0] // 2], shifted), self.bundle)
+        self.assertTrue(np.isnan(values[i >= SHAPE[0] // 2 + 1]).all())
+        self.assertTrue(np.isfinite(values[i < SHAPE[0] // 2 - 1]).all())
+
+    def test_zeros_are_values_on_any_grid(self):
+        """A binary ROI or a thresholded map keeps its zero voxels as values whatever grid its file is on."""
+        roi = np.zeros(SHAPE)
+        roi[3:8, 4:10, 3:7] = 1.0
+        field = _smooth_field(self.rng, SHAPE, 1.5)
+        field = field / field.std() * 3.0
+        thresholded = np.where(np.abs(field) > 1.0, field, 0.0)
+        fine_affine = np.diag([1.0, 1.0, 1.0, 1.0])
+        fine_affine[:3, 3] = self.bundle.affine[:3, 3] - 0.5
+        padded_affine = self.bundle.affine.copy()
+        padded_affine[:3, 3] -= 6.0
+        for name, data in (("roi", roi), ("thr", thresholded)):
+            on_grid = refmaps.map_on_grid(self.writeMap(f"{name}.nii.gz", data), self.bundle)
+            self.assertTrue(np.isfinite(on_grid).all(), name)
+            fine = np.repeat(np.repeat(np.repeat(data, 2, 0), 2, 1), 2, 2)
+            padded = np.pad(data, 3)  # same voxels, a larger field of view (as a 91x109x91 MNI file)
+            for label, path in (("1 mm", self.writeMap(f"{name}_1mm.nii.gz", fine, fine_affine)), ("padded", self.writeMap(f"{name}_pad.nii.gz", padded, padded_affine))):
+                values = refmaps.map_on_grid(path, self.bundle)
+                np.testing.assert_allclose(values, on_grid, atol=1e-5, err_msg=f"{name} {label}")
+            # Through the library (and its cache): the 1 mm ROI file is compared like its 2 mm copy
+            entry = refmaps.add_file(self.writeMap(f"{name}_lib.nii.gz", fine, fine_affine), root=self.root)
+            np.testing.assert_allclose(refmaps.resample_to(entry, self.bundle, root=self.root), on_grid, atol=1e-5, err_msg=name)
 
 
 class CompareTest(RefmapsTestBase):

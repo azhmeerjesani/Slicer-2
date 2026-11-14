@@ -102,6 +102,7 @@ TOP_K = 10
 #: Covariates of the partial r (addendum §3.7)
 PARTIAL_COVARIATES = ("mu_r", "pc1")
 MIN_COVERAGE = 0.5
+RESAMPLE_RULE = "z1"  # in the resampled cache names: "z1" = zeros are values off the bundle grid too (older caches dropped them)
 DEFAULT_PERMUTATIONS = 1000
 #: Voxels of the permutation test: a fixed seeded sample (the observed and every null r use the same voxels)
 PERMUTATION_MAX_VOXELS = 50_000
@@ -894,8 +895,10 @@ def _cache_dir(entry, root):
 
 def map_on_grid(path, bundle, min_coverage=MIN_COVERAGE):
     """A NIfTI map on the bundle voxels ((V,) float64): its values when it is on the bundle grid, else resampled with
-    ``geometry.resample_to_grid`` in fraction mode over its finite non-zero voxels (as ``reference.external_on_grid``),
-    NaN where less than ``min_coverage`` of a voxel is covered. ``bundle`` needs ``grid``, ``mask_indices`` and ``n_voxels``.
+    ``geometry.resample_to_grid`` in fraction mode over its finite voxels, NaN where less than ``min_coverage`` of a voxel
+    is covered (by the file's field of view, minus its NaN voxels). Zero is a value on both paths, so a binary ROI or a
+    thresholded map gives the same vector whatever grid its file is on. ``bundle`` needs ``grid``, ``mask_indices`` and
+    ``n_voxels``.
     """
     from .geometry import resample_to_grid, to_masked_vector
     from .nifti import read_nifti
@@ -911,7 +914,7 @@ def map_on_grid(path, bundle, min_coverage=MIN_COVERAGE):
     if tuple(data.shape) == tuple(grid.shape) and np.allclose(affine, grid.affine, atol=1e-4, rtol=0):
         out = data.reshape(-1)[indices]
         return np.where(np.isfinite(out), out, np.nan)
-    inside = np.isfinite(data) & (data != 0)
+    inside = np.isfinite(data)  # zeros are values (as on the bundle grid above); only NaN and the field of view's outside are not
     total = to_masked_vector(resample_to_grid(np.where(inside, data, 0.0), affine, grid, mode="fraction"), indices).astype(np.float64)
     coverage = to_masked_vector(resample_to_grid(inside.astype(np.float64), affine, grid, mode="fraction"), indices).astype(np.float64)
     out = np.full(indices.size, np.nan)
@@ -927,7 +930,7 @@ def resample_to(entry, bundle, root=None, min_coverage=MIN_COVERAGE, cache=True)
     path = entry_path(entry, root)
     if not os.path.isfile(path):
         raise RefmapsError(f"The file of {entry.get('title') or entry.get('id')} is missing; add it again")
-    cache_file = os.path.join(_cache_dir(entry, root), f"{_grid_key(bundle, min_coverage)}-{str(entry.get('sha256') or '')[:12]}.npy")
+    cache_file = os.path.join(_cache_dir(entry, root), f"{_grid_key(bundle, min_coverage)}-{str(entry.get('sha256') or '')[:12]}-{RESAMPLE_RULE}.npy")
     if cache and os.path.isfile(cache_file):
         try:
             values = np.load(cache_file, allow_pickle=False)
