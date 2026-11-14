@@ -1113,11 +1113,65 @@ def _niftiImageBytes(path):
     return None
 
 
+def _cgroupMemoryHeadroomBytes(procCgroup="/proc/self/cgroup", root="/sys/fs/cgroup"):
+    """The memory that the control groups of this process still allow (a container's ``--memory``, a Slurm job, a
+    systemd ``MemoryMax``), None if no limit is set or it is not known. The limit can be set on this group or on any
+    group above it, so every group up to the root is asked and the smallest room is kept. The room of a group is its
+    limit minus its use, not counting the file cache that the kernel can free (``inactive_file``).
+    """
+    try:
+        with open(procCgroup) as f:
+            lines = [line.rstrip("\n").split(":", 2) for line in f]
+    except OSError:
+        return None
+    groups = []  # (directory of the hierarchy, path of this process in it, limit file, usage file, cache field)
+    for fields in lines:
+        if len(fields) != 3:
+            continue
+        hierarchy, controllers, path = fields
+        if hierarchy == "0" and controllers == "":
+            for mount in (root, os.path.join(root, "unified")):
+                groups.append((mount, path, "memory.max", "memory.current", "inactive_file"))
+        elif "memory" in controllers.split(","):
+            groups.append((os.path.join(root, "memory"), path, "memory.limit_in_bytes", "memory.usage_in_bytes",
+                           "total_inactive_file"))
+    rooms = []
+    for mount, path, limitName, usageName, cacheField in groups:
+        path = "/" + path.strip("/")
+        while True:
+            directory = os.path.join(mount, path.lstrip("/"))
+            try:
+                with open(os.path.join(directory, limitName)) as f:
+                    limit = f.read().strip()
+                if limit != "max" and int(limit) < 2**60:  # cgroup v1 writes a huge number when there is no limit
+                    with open(os.path.join(directory, usageName)) as f:
+                        usage = int(f.read().strip())
+                    cache = 0
+                    try:
+                        with open(os.path.join(directory, "memory.stat")) as f:
+                            for line in f:
+                                name, _sep, value = line.partition(" ")
+                                if name == cacheField:
+                                    cache = int(value)
+                    except (OSError, ValueError):
+                        pass
+                    rooms.append(max(int(limit) - max(usage - cache, 0), 0))
+            except (OSError, ValueError):
+                pass
+            if path == "/":
+                break
+            path = os.path.dirname(path)
+    return min(rooms) if rooms else None
+
+
 def _availableMemoryBytes():
-    """The memory that this process can still use (free RAM and swap, and the address-space limit if one is set), None if
-    not known (only Linux is asked).
+    """The memory that this process can still use (free RAM and swap, the room that its control groups still allow, and
+    the address-space limit if one is set), None if not known (only Linux is asked).
     """
     limits = []
+    cgroupRoom = _cgroupMemoryHeadroomBytes()
+    if cgroupRoom is not None:
+        limits.append(cgroupRoom)
     try:
         with open("/proc/meminfo") as f:
             fields = {line.split(":")[0]: int(line.split(":")[1].split()[0]) * 1024 for line in f if ":" in line}

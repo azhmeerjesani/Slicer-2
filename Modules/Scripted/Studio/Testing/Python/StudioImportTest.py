@@ -1217,6 +1217,64 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             importer._availableMemoryBytes, importer._niftiDataShortfall = originalMemory, originalShortfall
 
+    def test_memory_guard_sees_cgroup_limit(self):
+        """BB-1: the memory guard counts the room that a control group (a container's --memory, a Slurm job, a systemd
+        MemoryMax) still allows, also when the limit is set on a group above this one, so a scan that does not fit is
+        refused instead of the kernel killing the app.
+        """
+        from StudioLib import importer
+
+        root = os.path.join(self.directory, "cgroupfs")
+
+        def write(relative, text):
+            path = os.path.join(root, relative)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(text)
+
+        # cgroup v2: no limit on this group, 3 GiB on its parent, of which 1 GiB is used (256 MiB of it freeable cache)
+        write("job/step/memory.max", "max\n")
+        write("job/step/memory.current", "100\n")
+        write("job/memory.max", "%d\n" % (3 * 1024**3))
+        write("job/memory.current", "%d\n" % 1024**3)
+        write("job/memory.stat", "anon 1\ninactive_file %d\nactive_file 5\n" % (256 * 1024**2))
+        write("proc-v2", "0::/job/step\n")
+        self.assertEqual(importer._cgroupMemoryHeadroomBytes(os.path.join(root, "proc-v2"), root),
+                         3 * 1024**3 - (1024**3 - 256 * 1024**2))
+        # cgroup v1: the huge number means no limit; a limit on an ancestor counts
+        write("memory/a/b/memory.limit_in_bytes", "9223372036854771712\n")
+        write("memory/a/b/memory.usage_in_bytes", "5\n")
+        write("memory/a/memory.limit_in_bytes", "%d\n" % (2 * 1024**3))
+        write("memory/a/memory.usage_in_bytes", "%d\n" % (512 * 1024**2))
+        write("proc-v1", "9:pids:/x\n4:memory:/a/b\n0::/\n")
+        self.assertEqual(importer._cgroupMemoryHeadroomBytes(os.path.join(root, "proc-v1"), root), 1536 * 1024**2)
+        # no limit anywhere, or nothing readable: not known
+        write("proc-none", "4:memory:/a/b/c\n")
+        os.remove(os.path.join(root, "memory/a/memory.limit_in_bytes"))
+        self.assertIsNone(importer._cgroupMemoryHeadroomBytes(os.path.join(root, "proc-none"), root))
+        self.assertIsNone(importer._cgroupMemoryHeadroomBytes(os.path.join(root, "missing"), root))
+
+        # the guard uses it: a 2 GB scan under a 3 GiB group with 1 GiB used is refused as too large
+        header = bytearray(348)
+        struct.pack_into("<i", header, 0, 348)
+        struct.pack_into("<8h", header, 40, 3, 800, 800, 800, 1, 1, 1, 1)
+        struct.pack_into("<hh", header, 70, 16, 32)
+        struct.pack_into("<f", header, 108, 352)
+        struct.pack_into("<8f", header, 76, 1, 1, 1, 1, 0, 0, 0, 0)
+        header[344:348] = b"n+1\0"
+        path = os.path.join(self.directory, "mid2g_T1w.nii.gz")
+        with gzip.open(path, "wb", 1) as f:
+            f.write(bytes(header) + bytes(4) + bytes(1024))
+        original = importer._cgroupMemoryHeadroomBytes
+        try:
+            importer._cgroupMemoryHeadroomBytes = lambda: 2 * 1024**3
+            self.assertLessEqual(importer._availableMemoryBytes(), 2 * 1024**3)
+            with self.assertRaises(importer.RefusedFileError) as context:
+                importer._checkNiftiComplete(path)
+            self.assertIn("too large", str(context.exception))
+        finally:
+            importer._cgroupMemoryHeadroomBytes = original
+
     def test_nifti2_scan_is_refused_with_reason(self):
         """BB-1: a NIfTI-2 scan is refused with the reason (convert to NIfTI-1 or NRRD), as a planned refusal: no
         traceback is logged and no node is created.
