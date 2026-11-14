@@ -367,7 +367,19 @@ class DesignPreview:
         self.frame.setObjectName(objectName)
         self.frame.setFrameShape(qt.QFrame.StyledPanel)
         self.frame.setFixedWidth(400)
-        layout = qt.QVBoxLayout(self.frame)
+        # The content sits in a scroll area: showAt sizes the popup to the whole content, and it scrolls only when the
+        # content is taller than the screen (a 1366x768 screen, a larger font). QWidget.adjustSize would cap the
+        # popup at about two thirds of the screen height and squeeze the heat map and the facts table instead.
+        outer = qt.QVBoxLayout(self.frame)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.scroll = qt.QScrollArea()
+        self.scroll.setObjectName(f"{objectName}Scroll")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(qt.QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        self.content = qt.QWidget()
+        self.content.setObjectName(f"{objectName}Content")
+        layout = qt.QVBoxLayout(self.content)
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(6)
         self.title = label(_("Design preview"), f"{objectName}Title")
@@ -394,6 +406,10 @@ class DesignPreview:
         layout.addWidget(self.noteLabel)
         for widget in (self.title, self.typeLabel, self.columnsLabel, self.factsLabel, self.checksLabel, self.limitationsLabel, self.noteLabel):
             widget.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Preferred)  # a fixed-width popup: heights follow the wrapped text
+        self.scroll.setWidget(self.content)
+        self.scroll.viewport().setAutoFillBackground(False)  # the popup's own background shows through
+        self.content.setAutoFillBackground(False)
+        outer.addWidget(self.scroll)
 
     def setDesign(self, design, note="", error=None, title=None):
         """Show a ``design.Design`` (or the error that kept it from being built)."""
@@ -443,15 +459,33 @@ class DesignPreview:
         rows.append((_("Permutation"), html.escape(design.permute_reason)))
         return "<table cellspacing=2>" + "".join(f"<tr><td><b>{html.escape(name)}</b>&nbsp;</td><td>{value}</td></tr>" for name, value in rows) + "</table>"
 
+    def contentHeight(self):
+        """The height that shows the whole content at the popup's fixed width (labels wrap, so height follows width)."""
+        layout = self.content.layout()
+        layout.activate()
+        border = self.frame.frameWidth
+        height = self.content.heightForWidth(self.frame.width - 2 * border)
+        if height < 0:
+            height = self.content.sizeHint.height()
+        return height + 2 * border
+
     def showAt(self, anchor):
-        self.frame.adjustSize()
         point = anchor.mapToGlobal(qt.QPoint(0, anchor.height))
         screen = qt.QGuiApplication.screenAt(point) if hasattr(qt.QGuiApplication, "screenAt") else None
+        if screen is None:  # the anchor is scrolled out of view: keep the popup on the primary (first) screen
+            screens = qt.QGuiApplication.screens()  # QGuiApplication.primaryScreen is not a live screen in PythonQt
+            screen = screens[0] if screens else None
+        height = self.contentHeight()
         if screen is not None:
             area = screen.availableGeometry  # a property in PythonQt
             area = area() if callable(area) else area
-            x = min(max(point.x(), area.left()), area.right() - self.frame.width)
-            y = point.y() if point.y() + self.frame.height <= area.bottom() else max(area.top(), point.y() - anchor.height - self.frame.height)
+            height = min(height, area.height())  # taller than the screen: the content scrolls
+        # resize, not adjustSize: adjustSize bounds a window to a share of the screen and would crop the content
+        self.frame.resize(self.frame.width, height)
+        if screen is not None:
+            x = min(max(point.x(), area.left()), area.right() + 1 - self.frame.width)
+            y = point.y() if point.y() + height <= area.bottom() + 1 else point.y() - anchor.height - height
+            y = max(area.top(), min(y, area.bottom() + 1 - height))
             point = qt.QPoint(x, y)
         self.frame.move(point)
         self.frame.show()
