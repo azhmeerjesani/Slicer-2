@@ -2684,7 +2684,8 @@ class StudySession:
         current subject and the trace queue with its position (L-45).
 
         Another live session of the study (a second window) is noticed here; closing never marks it closed: its heartbeat
-        is left (or put back) for ``pipeline init`` and the next session.
+        is left (or put back) for ``pipeline init`` and the next session, with ``left`` (host and pid of the window that
+        closed), from which the other window knows that it is alone again.
         """
         if not self._checkFolder(sayOnce=not closed):
             return
@@ -2692,13 +2693,28 @@ class StudySession:
             if not self._studyWritable():
                 return  # nothing can be written (said once when the study opened)
             self._clearReadOnly()  # write access was given back: the heartbeat (and two-window detection) resumes
-        other = _liveOtherSession(self._readSessionRecord())
+        record = self._readSessionRecord()
+        other = _liveOtherSession(record)
+        if self._otherSession is not None and isinstance(record, dict):
+            own = record.get("pid") == os.getpid() and record.get("host") == socket.gethostname()
+            left = record.get("left") if own else None
+            if own:
+                # This window's own record: the other window forgets itself there ("left") when it closes the study
+                gone = isinstance(left, dict) and (left.get("host"), left.get("pid")) == (
+                    self._otherSession.get("host"), self._otherSession.get("pid"))
+            else:
+                gone = other is None  # the other window's record is no longer live (it closed the study, or it is gone)
+            if gone:
+                self._otherSession = None  # so closing this window does not put the old heartbeat of that window back
         if closed:
+            if other is None:
+                other = _liveOtherSession(self._otherSession)
             if other is not None:
-                return
-            if _liveOtherSession(self._otherSession) is not None:
+                # The study stays open in the other window: its heartbeat is left (or put back), with a note that this
+                # window left, so that the other window does not put this window's heartbeat back when it closes
                 try:
-                    _lnm("schema").write_text_atomic(self._sessionFile(), json.dumps(self._otherSession) + "\n")
+                    kept = dict(other, left={"host": socket.gethostname(), "pid": os.getpid()})
+                    _lnm("schema").write_text_atomic(self._sessionFile(), json.dumps(kept) + "\n")
                 except PermissionError:
                     self._markReadOnly()
                 except OSError:

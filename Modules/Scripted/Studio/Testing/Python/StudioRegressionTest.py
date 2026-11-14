@@ -1267,6 +1267,66 @@ class StudioRegressionTest(unittest.TestCase):
         with open(sessionFile, encoding="utf-8") as f:
             self.assertEqual(json.load(f)["heartbeat_epoch"], 0)
 
+    def test_4b_second_window_close_does_not_restore_a_closed_window_heartbeat(self):
+        import socket
+        import time
+
+        from LesionNetworkMappingLib.study import Study
+
+        from StudioLib import study_ui
+
+        folder = os.path.join(self.directory, "Closed first")
+        Study.create(folder, name="Closed first").save()
+        sessionFile = os.path.join(folder, ".studio", "session.json")
+        os.makedirs(os.path.dirname(sessionFile), exist_ok=True)
+        base = {"format": "slicer-studio-session", "pid": os.getppid(), "host": socket.gethostname(), "app": "Slicer Studio"}
+        with open(sessionFile, "w", encoding="utf-8") as f:
+            json.dump({**base, "heartbeat_epoch": time.time(), "subject": None}, f)
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: None
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        own = {"host": socket.gethostname(), "pid": os.getpid()}
+
+        def record():
+            with open(sessionFile, encoding="utf-8") as f:
+                return json.load(f)
+
+        # This window closes the study while the other window has it open: the other window's heartbeat is put back, with
+        # a note that this window left
+        try:
+            session = study_ui.openStudy(folder, None, showLibrary=False)
+            for _ in range(4):
+                slicer.app.processEvents()
+            self.assertIsNotNone(session._otherSession)
+            self.assertEqual(record()["pid"], os.getpid())
+        finally:
+            study_ui.closeStudy()
+        self.assertEqual(record()["pid"], os.getppid())
+        self.assertGreater(record()["heartbeat_epoch"], 0)
+        self.assertEqual(record()["left"], own)
+        # The other window closes the study first and keeps running: as this window's heartbeat is in the file, it leaves
+        # that record with its note. Closing this window then writes its own closed record (not the other window's old
+        # heartbeat), with the queue
+        try:
+            session = study_ui.openStudy(folder, None, showLibrary=False)
+            for _ in range(4):
+                slicer.app.processEvents()
+            self.assertIsNotNone(session._otherSession)
+            mine = record()
+            self.assertEqual(mine["pid"], os.getpid())
+            self.assertNotIn("left", mine)
+            with open(sessionFile, "w", encoding="utf-8") as f:
+                json.dump({**mine, "left": {"host": base["host"], "pid": base["pid"]}}, f)
+            session.setQueue(study_ui.QUEUE_FLAGGED)
+        finally:
+            study_ui.closeStudy()
+        closed = record()
+        self.assertEqual(closed["pid"], os.getpid())
+        self.assertEqual(closed["heartbeat_epoch"], 0)
+        self.assertIn("closed", closed)
+        self.assertNotIn("left", closed)
+        self.assertEqual(closed["queue"]["key"], study_ui.QUEUE_FLAGGED)
+
     def test_5_study_notes_kept(self):
         from LesionNetworkMappingLib.study import Study
 
