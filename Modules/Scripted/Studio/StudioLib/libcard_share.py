@@ -584,8 +584,19 @@ class ShareDialog:
 
     def export(self):
         self._timer.stop()
+        if self.worker.isBusy():
+            return False
+        # The worker reads the study from disk: the open subject's edits in Draw are written first (as Done, Alt+arrows and
+        # the warp do), or nothing is exported (a stale or missing lesion would be shared while the export says it worked)
+        session = self.session
+        if session.study is self.study and hasattr(session, "writeCurrent") and session.current() is not None and session.isDirty():
+            sid = session.current()
+            if not session.writeCurrent():
+                self.preview()
+                self.progressLabel.setText(_("Not exported: the edits of {sid} could not be written").format(sid=sid))
+                return False
         self.preview()
-        if self.blocking() or self.worker.isBusy():
+        if self.blocking():
             return False
         if hasattr(self.session, "flush"):
             self.session.flush()  # the worker reads the saved study

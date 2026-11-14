@@ -3473,6 +3473,94 @@ class StudioRegressionTest(unittest.TestCase):
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
 
+    def test_21c_share_export_writes_the_open_subjects_edits_first(self):
+        """Export study for sharing writes the open subject's edits in Draw (Done not pressed) before the worker reads the
+        study: a lesion edited since its last write is exported as shown in Draw, and a lesion traced but never written is
+        exported too (the old file, or no mask at all, was shared while the dialog said the export worked) (BB-1).
+        """
+        import glob
+
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import libcard_share, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Share unsaved study")
+        os.makedirs(folder)
+        paths = []
+        rng = np.random.default_rng(3)
+        for index in range(1, 3):
+            paths.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(paths[-1], (rng.random(grid.shape) * 100).astype(np.int16), grid.affine)
+        lesion = np.zeros(grid.shape, np.uint8)
+        lesion[40:44, 50:54, 30:34] = 1  # 64 voxels
+        paths.append(os.path.join(folder, "sub-01_desc-lesion_mask.nii.gz"))
+        nifti.write_nifti(paths[-1], lesion, grid.affine)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        dialog = None
+        try:
+            session = study_ui.createStudy(paths, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+
+            def paint(region):
+                segmentationNode, volumeNode = session.segmentationNode(), session.volumeNode()
+                segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+                array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode)
+                array[region] = 1
+                slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, volumeNode)
+                for _ in range(4):
+                    slicer.app.processEvents()
+
+            def export(output):
+                dialog = libcard_share.ShareDialog(session)
+                dialog.dialog.show()
+                dialog.outputEdit.setText(output)
+                dialog.lesionsCheck.setChecked(True)
+                dialog.ownCombo.setCurrentIndex(1)
+                dialog.licenceCombo.setCurrentIndex(0)
+                dialog.preview()
+                self.assertTrue(dialog.exportButton.enabled, dialog.checklistLabel.text)
+                dialog.exportButton.click()
+                deadline = time.time() + 90
+                while time.time() < deadline and dialog.result is None and dialog.error is None:
+                    slicer.app.processEvents()
+                    qt.QThread.msleep(30)
+                slicer.app.processEvents()
+                self.assertIsNone(dialog.error, dialog.progressLabel.text)
+                self.assertIsNotNone(dialog.result)
+                dialog.dialog.close()
+                return sorted(int((np.asarray(nifti.read_nifti(path)[0]) > 0).sum())
+                              for path in glob.glob(os.path.join(output, "sub-*", "anat", "*_mask.nii.gz")))
+
+            # sub-01 (64 voxels on disk) is edited in Draw to 72 voxels; Done is not pressed
+            self.assertTrue(session.open("sub-01", switchToDraw=False))
+            for _ in range(4):
+                slicer.app.processEvents()
+            paint((slice(10, 12), slice(10, 12), slice(10, 12)))
+            self.assertTrue(session.isDirty())
+            self.assertEqual(export(os.path.join(self.directory, "share-edited")), [72])
+            self.assertFalse(session.isDirty(), "the edits were written")
+            self.assertEqual(session.current(), "sub-01", "the subject stays open")
+            # sub-02 is traced in Draw and never written: its mask is exported too
+            self.assertTrue(session.open("sub-02", switchToDraw=False))
+            for _ in range(4):
+                slicer.app.processEvents()
+            paint((slice(20, 22), slice(20, 22), slice(20, 22)))
+            self.assertTrue(session.isDirty())
+            self.assertEqual(export(os.path.join(self.directory, "share-new")), [8, 72])
+        finally:
+            if dialog is not None:
+                dialog.dialog.close()
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
     def test_22_study_card_save_line_follows_the_save(self):
         """The STUDY card says "Saving…" while the 400 ms save of participants.tsv is pending and "All changes saved" once it has
         run (the card was not refreshed when the save finished and kept "Saving…" for good) (BB-1).
