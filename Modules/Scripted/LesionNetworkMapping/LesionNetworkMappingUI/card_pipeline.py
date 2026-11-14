@@ -98,11 +98,15 @@ DEFAULT_OPTIONS = {
     "specificity": "auto",
     "volume_off_reason": None,
     "perm": 5000,
+    "perm_seed": 0,
+    "alpha": 0.05,
+    "fdr": True,
     "tfce": False,
     "contrast": "two_sided",
     "scores": "auto",
     "null_relocations": "auto",
     "nulls": "auto",
+    "null_seed": 0,
     "build_references": False,
     "native": "normalize",
     "atlas": "none",
@@ -111,8 +115,9 @@ DEFAULT_OPTIONS = {
 }
 #: Options of the dialog that are also accepted from the stored JSON (tests); others are ignored
 EXTRA_OPTION_KEYS = ("memory_budget_gb",)
-#: Options without a control in the dialog that it keeps as they are: the GLM contrast is set by a recipe (recipes.pipeline_options)
-KEPT_OPTION_KEYS = ("contrast",)
+#: Options without a control in the dialog that it keeps as they are: the GLM contrast, the permutation and null seeds,
+#: alpha and the FDR maps are set by a recipe or a locked plan (recipes.pipeline_options)
+KEPT_OPTION_KEYS = ("contrast", "perm_seed", "null_seed", "alpha", "fdr")
 PREVIEW_N = 100
 #: Extra rules offered by the dialog: (key, label, rule)
 EXTRA_RULES = (
@@ -424,7 +429,8 @@ def configDict(studyPath, bundlePath, options, rule=None, software=None, acceptT
     """The ``pipeline.PipelineConfig`` fields of a run (also what the staleness plan uses)."""
     config = {"study": studyPath, "bundle": bundlePath, "rule": rule, "extra_rules": list(options.get("extra_rules") or []),
               "sensitivity": float(options.get("sensitivity", 90.0)), "specificity": options.get("specificity") or "auto",
-              "perm": int(options.get("perm") or 5000), "tfce": bool(options.get("tfce")), "contrast": options.get("contrast") or "two_sided", "scores": options.get("scores", "auto"),
+              "perm": int(options.get("perm") or 5000), "perm_seed": int(options.get("perm_seed") or 0), "alpha": float(options.get("alpha") or 0.05),
+              "fdr": options.get("fdr", True) is not False, "null_seed": int(options.get("null_seed") or 0), "tfce": bool(options.get("tfce")), "contrast": options.get("contrast") or "two_sided", "scores": options.get("scores", "auto"),
               "null_relocations": options.get("null_relocations", "auto"), "nulls": options.get("nulls") or "auto",
               "build_references": bool(options.get("build_references")), "native": options.get("native") or "normalize",
               "recompute": bool(recompute), "accept_terms": bool(acceptTerms), "nice": NICE,
@@ -472,6 +478,13 @@ def commandArguments(config):
     if config.get("preview_n"):
         args += ["--preview", str(config["preview_n"]), "--preview-seed", str(config.get("preview_seed", 0))]
     args += ["--sensitivity", f"{float(config.get('sensitivity', 90.0)):g}", "--specificity", config.get("specificity", "auto"), "--perm", str(config.get("perm", 5000))]
+    # The seeds, alpha and the FDR maps of a recipe or a locked plan (the pipeline's defaults are not repeated)
+    if int(config.get("perm_seed") or 0):
+        args += ["--perm-seed", str(int(config["perm_seed"]))]
+    if float(config.get("alpha") or 0.05) != 0.05:
+        args += ["--alpha", f"{float(config['alpha']):g}"]
+    if config.get("fdr", True) is False:
+        args.append("--no-fdr")
     if config.get("tfce"):
         args.append("--tfce")
     if (config.get("contrast") or "two_sided") != "two_sided":
@@ -481,6 +494,8 @@ def commandArguments(config):
     scores = config.get("scores", "auto")
     args += ["--scores", ",".join(scores) if isinstance(scores, (list, tuple)) else str(scores or "auto")]
     args += ["--null-relocations", str(config.get("null_relocations", "auto")), "--nulls", config.get("nulls", "auto"), "--native", config.get("native", "normalize")]
+    if int(config.get("null_seed") or 0):
+        args += ["--null-seed", str(int(config["null_seed"]))]
     if config.get("include_unreviewed"):
         args.append("--include-unreviewed")
     if config.get("build_references"):
@@ -594,7 +609,7 @@ def designChanged(plan, record):
 #: Analysis settings of the Run everything configuration (:func:`configDict`) that change the group results without changing
 #: the analysed subjects or the design (those are :func:`designChanged`): a finished run whose pipeline.json "config" has
 #: other values is not up to date ("Settings changed since the last run").
-RESULT_SETTING_KEYS = ("rule", "extra_rules", "sensitivity", "specificity", "perm", "tfce", "contrast", "null_relocations", "nulls")
+RESULT_SETTING_KEYS = ("rule", "extra_rules", "sensitivity", "specificity", "perm", "perm_seed", "alpha", "fdr", "tfce", "contrast", "null_relocations", "nulls", "null_seed")
 
 
 def _sameSetting(a, b):

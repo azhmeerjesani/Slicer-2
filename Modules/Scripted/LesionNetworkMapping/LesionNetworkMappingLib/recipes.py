@@ -1157,6 +1157,10 @@ def pipeline_options(params, steps, options=None):
     out["extra_rules"] = list(params["extra_rules"])
     out["preview_n"] = params["preview_n"]
     out["preview_seed"] = params["seeds"]["preview"]
+    out["perm_seed"] = params["seeds"]["permutation"]
+    out["null_seed"] = params["seeds"]["nulls"]
+    out["alpha"] = params["alpha"]
+    out["fdr"] = params["fdr"]
     out["null_relocations"] = params["nulls"]["relocations"]
     out["native"] = params["native"]
     mode = params["nulls"]["mode"]
@@ -1194,6 +1198,16 @@ def parameters_from_map(base, rule=None, options=None):
             params["design"]["contrast"] = str(contrast)
         if options.get("preview_seed") is not None:
             params["seeds"]["preview"] = int(options["preview_seed"])
+        # What Run everything runs with (card_pipeline.configDict): a seed, alpha or FDR choice that differs from the
+        # locked plan is a deviation, as for the other settings
+        if options.get("perm_seed") is not None:
+            params["seeds"]["permutation"] = int(options["perm_seed"])
+        if options.get("null_seed") is not None:
+            params["seeds"]["nulls"] = int(options["null_seed"])
+        if options.get("alpha") is not None:
+            params["alpha"] = float(options["alpha"])
+        if isinstance(options.get("fdr"), bool):
+            params["fdr"] = options["fdr"]
         if options.get("null_relocations") is not None:
             params["nulls"]["relocations"] = options["null_relocations"]
         if options.get("native") in NATIVE_MODES:

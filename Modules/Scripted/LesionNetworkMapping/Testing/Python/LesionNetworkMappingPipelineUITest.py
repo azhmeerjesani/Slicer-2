@@ -931,5 +931,41 @@ class LesionNetworkMappingPipelineModelPercentTest(unittest.TestCase):
         self.assertEqual(model.percent(), 100.0)
 
 
+class LesionNetworkMappingPipelinePlanSeedsTest(unittest.TestCase):
+    """Run everything runs with the locked plan's permutation seed, null seed, alpha and FDR choice (BB-1)."""
+
+    def test_locked_plan_seeds_and_alpha_reach_the_run(self):
+        from LesionNetworkMappingLib import pipeline, recipes
+        from LesionNetworkMappingUI import card_pipeline as cp
+
+        recipe = recipes.find_recipe("classic_ferguson2019_adapted", recipes.load_recipes())
+        plan = recipes.apply(recipe)
+        plan["seeds"].update({"permutation": 7, "nulls": 11})
+        plan["alpha"] = 0.01
+        plan["fdr"] = False
+        plan = recipes.normalize_parameters(plan)
+        # The recipe header stores these options for Run everything (card_recipe._setMapSettings)
+        options = recipes.pipeline_options(plan, recipe.steps, dict(cp.DEFAULT_OPTIONS))
+        config = cp.configDict("/study", "/bundle.lnmc", options, rule=plan["rule"])
+        self.assertEqual((config["perm_seed"], config["null_seed"], config["alpha"], config["fdr"]), (7, 11, 0.01, False))
+        run = pipeline.config_from_args(pipeline._parser().parse_args(cp.commandArguments(config)))
+        self.assertEqual((run.perm_seed, run.null_seed, run.alpha, run.fdr), (7, 11, 0.01, False))
+        # The same as the recipe's own converter (the headless app)
+        converted = recipes.to_pipeline_config(recipe, params=plan, module_available=lambda name: True)["config"]
+        self.assertEqual((converted["perm_seed"], converted["null_seed"], converted["alpha"], converted["fdr"]), (run.perm_seed, run.null_seed, run.alpha, run.fdr))
+        # The Map holds what the plan says: no deviation; a different seed or alpha in the options is one
+        self.assertEqual(recipes.compare_parameters(plan, recipes.parameters_from_map(plan, rule=plan["rule"], options=options)), [])
+        changed = recipes.parameters_from_map(plan, rule=plan["rule"], options=dict(options, perm_seed=0, alpha=0.05))
+        self.assertEqual(sorted(item["field"] for item in recipes.compare_parameters(plan, changed)), ["alpha", "seeds.permutation"])
+        # A run of the plan whose pipeline.json has seed 0 is not up to date
+        self.assertEqual(cp.settingsChanged(config, {"config": dict(config, perm_seed=0)}), ["perm_seed"])
+        # The defaults (no recipe) add no argument: the command line of a Classic run is unchanged
+        defaults = cp.commandArguments(cp.configDict("/study", "/bundle.lnmc", dict(cp.DEFAULT_OPTIONS)))
+        for flag in ("--perm-seed", "--null-seed", "--alpha", "--no-fdr"):
+            self.assertNotIn(flag, defaults)
+        # The options dialog keeps them (it has no control for them)
+        self.assertTrue({"perm_seed", "null_seed", "alpha", "fdr"} <= set(cp.KEPT_OPTION_KEYS))
+
+
 if __name__ == "__main__":
     unittest.main()
