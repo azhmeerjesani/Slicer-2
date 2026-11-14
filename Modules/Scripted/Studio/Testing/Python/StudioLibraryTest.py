@@ -1076,6 +1076,26 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         card.close()
         self._pump(4)
 
+    def test_folder_card_plan_text_names_participants_rewrite(self):
+        """The card does not promise "your files are not changed" when Create study adds columns to the folder's participants.tsv."""
+        from StudioLib import importer, library
+
+        studioShell = self._applyStudio()
+        folder = self._writeTinyFiles(3, "plantext")
+        with open(os.path.join(folder, "participants.tsv"), "w", encoding="utf-8") as f:
+            f.write("participant_id\tage\nsub-01\t50\nsub-02\t60\n")
+        importer.loadFolder(folder, studioShell)
+        self._pump(6)
+        card = library.canvas().folderCard()
+        self.assertIsNotNone(card)
+        if card.studyProblem or not card.studyAvailable:
+            return
+        self.assertNotIn("files are not changed", card.planLabel.text)
+        self.assertIn("participants.tsv", card.planLabel.text)
+        self.assertIn(".studio", card.planLabel.text)
+        card.close()
+        self._pump(4)
+
     def test_folder_card_excel_tables(self):
         """A participants.tsv saved by Excel: Windows-1252 and UTF-16 say "save as UTF-8" (no raw codec error, no garbled
         card line, no ERROR log); trailing empty columns are ignored like extra empty fields in a row.

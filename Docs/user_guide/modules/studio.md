@@ -378,7 +378,7 @@ browser, edited in a spreadsheet and backed up by copying it.
   relative to the study folder. `.studio` is application state and `derivatives/lnm/*/provenance.json` and
   `reproduce.sh` keep full local paths on purpose, because they reproduce one run on one computer.
 - **Creating a study.** **Create study** on the folder card writes `study.json`, `participants.tsv` and a `lesions/` folder
-  into the folder you opened; your own files are not changed or moved. Scans and lesions are paired by the ID found in
+  into the folder you opened; your scans and lesions are not changed or moved (a participants.tsv that is already there gets columns added; the original is kept in `.studio`). Scans and lesions are paired by the ID found in
   the file names (`sub-01`, `patient01_T1.nii.gz`), else in the subject folders inside the folder you opened
   (`patient01/T1.nii.gz` and `patient01/lesion.nii.gz`), and by the lesion words listed in `study.json`. Folders above the
   one you opened give an ID only when the folder you opened is itself a modality or session folder (`sub-01/anat`); files

@@ -5431,8 +5431,13 @@ class FolderCard:
     def _addStudyPlan(self, layout, folder, table):
         """Where the study goes and, for a participants table whose groups are not case / control, how they map (L-01)."""
         studyUi = _studyUi()
-        self.planLabel = self._textLabel(_("Create study writes study.json and lesions/ in this folder; your files are not changed."),
-                                         "StudioFolderCardStudyPlan")
+        if table and os.path.abspath(table) == os.path.abspath(os.path.join(folder, "participants.tsv")):
+            # The folder's own table is adopted in place (study_ui.adoptFolder): columns are added, the original is kept
+            planText = _("Create study writes study.json and lesions/ in this folder and adds columns to your participants.tsv "
+                         "(your columns are kept; a copy of the original is kept in .studio). Your scans are not changed.")
+        else:
+            planText = _("Create study writes study.json and lesions/ in this folder; your files are not changed.")
+        self.planLabel = self._textLabel(planText, "StudioFolderCardStudyPlan")
         layout.addWidget(self.planLabel)
         if not table:
             return
