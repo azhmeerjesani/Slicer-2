@@ -46,6 +46,19 @@ DISCLAIMER = (
     "Siddiqi et al., 2026, bioRxiv, doi:10.64898/2026.02.24.707529; "
     "Zalesky & Cash, 2026, Nat Neurosci, doi:10.1038/s41593-026-02259-3)."
 )
+# Lines for the generated POSIX shell scripts (reproduce.sh, reproduce_pipeline.sh): under the C or POSIX locale (cron,
+# ssh, containers) the PythonSlicer launcher drops every non-ASCII character of its arguments, so a study folder with an
+# accented letter would be passed on without it. Same rule as jobs.utf8_locale_env: LC_ALL replaces a non-UTF-8 LC_ALL,
+# otherwise LC_CTYPE is set; macOS and other systems are left alone (no C.UTF-8 locale there).
+UTF8_LOCALE_SHELL_LINES = (
+    "# The PythonSlicer launcher drops non-ASCII characters from its arguments (a study folder with accents) under the C or POSIX locale.",
+    'if [ "$(uname -s 2>/dev/null)" = Linux ]; then',
+    '  case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in',
+    "    *[Uu][Tt][Ff]-8* | *[Uu][Tt][Ff]8*) ;;",
+    '    *) if [ -n "${LC_ALL:-}" ]; then LC_ALL=C.UTF-8; export LC_ALL; else LC_CTYPE=C.UTF-8; export LC_CTYPE; fi ;;',
+    "  esac",
+    "fi",
+)
 CITATIONS = {
     "boes2015": "Boes AD, Prasad S, Liu H, et al. Network localization of neurological symptoms from focal brain lesions. Brain. 2015;138(10):3061-3075. doi:10.1093/brain/awv228",
     "fox2018": "Fox MD. Mapping symptoms to brain networks with the human connectome. N Engl J Med. 2018;379(23):2237-2245. doi:10.1056/NEJMra1706158",
@@ -1091,6 +1104,7 @@ def reproduce_script(run_meta, info, lesions, preview_n=None, earlier=()):
         "# setting $PYTHONSLICER forces PythonSlicer (a Python interpreter with numpy works too).",
         "# Both run the same engine; compare its library version with provenance.json when the maps differ.",
         "set -e",
+        *UTF8_LOCALE_SHELL_LINES,
         f"DEFAULT_SLICER_LNM={shlex.quote(default_slicer_lnm or '')}",
         f"DEFAULT_PYTHONSLICER={shlex.quote(default_pythonslicer or '')}",
         'OUT="${OUT:-reproduced}"',

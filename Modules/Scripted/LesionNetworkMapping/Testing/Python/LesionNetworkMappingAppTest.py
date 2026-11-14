@@ -1150,6 +1150,36 @@ class ReproduceEntryPointTest(unittest.TestCase):
         self.reproduce("named slicer-lnm", PATH=self.bin_python, SLICER_LNM=os.path.join(self.bin_lnm, "slicer-lnm"))
         self.assertEqual(list(self.logged()), ["slicer-lnm"])
 
+    def test_posix_locale_gets_utf8_before_pythonslicer(self):
+        """Under the C or POSIX locale the PythonSlicer launcher drops non-ASCII characters from its arguments (BB-1: a study folder
+        'Étude' reached the engine as 'tude'): both generated scripts export a UTF-8 character locale before the call.
+        """
+        import types
+
+        if sys.platform != "linux":
+            self.skipTest("the UTF-8 locale is exported on Linux only")
+        folder = os.path.join(self.tmp, "Étude locale")
+        os.makedirs(folder, exist_ok=True)
+        stub = os.path.join(folder, "PythonSlicer")
+        with open(stub, "w", encoding="utf-8") as f:
+            f.write('#!/bin/sh\necho "CT=${LC_CTYPE:-} ALL=${LC_ALL:-}" > "$(dirname "$0")/seen.txt"\n')
+        os.chmod(stub, 0o755)
+        pipeline_script = os.path.join(folder, pipeline.REPRODUCE_PIPELINE)
+        with mock.patch.object(pipeline, "_slicer_lnm_executable", return_value=""):
+            pipeline.Runner._write_reproduce_pipeline(types.SimpleNamespace(path=lambda name: os.path.join(folder, name), current_outputs=[]))
+        self.assertTrue(os.path.exists(pipeline_script))
+        cases = (({}, "CT=C.UTF-8 ALL="), ({"LANG": "C"}, "CT=C.UTF-8 ALL="), ({"LANG": "en_US.UTF-8"}, "CT= ALL="), ({"LC_ALL": "C"}, "CT= ALL=C.UTF-8"), ({"LC_ALL": "C", "LC_CTYPE": "de_DE.utf8"}, "CT=de_DE.utf8 ALL=C.UTF-8"))
+        for script in (pipeline_script, self.script):
+            for extra, expected in cases:
+                with self.subTest(script=os.path.basename(script), env=extra):
+                    seen = os.path.join(folder, "seen.txt")
+                    if os.path.exists(seen):
+                        os.remove(seen)
+                    environment = {"PATH": "/usr/bin:/bin", "PYTHONSLICER": stub, "ACCEPT_TERMS": "1", "OUT": os.path.join(folder, "out"), **extra}
+                    subprocess.run([shutil.which("sh"), script], env=environment, capture_output=True, text=True, timeout=60, check=False)
+                    with open(seen, encoding="utf-8") as f:
+                        self.assertEqual(f.read().strip(), expected)
+
     def test_writer_commands_without_path(self):
         """Neither command on PATH (a venv that is not activated, a Studio export): the commands that wrote the script run."""
         system_path = os.pathsep.join(path for path in ("/usr/bin", "/bin") if os.path.isdir(path))

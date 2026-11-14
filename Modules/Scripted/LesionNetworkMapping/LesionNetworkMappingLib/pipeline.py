@@ -3452,7 +3452,7 @@ class Runner:
         return out
 
     def _write_reproduce_pipeline(self):
-        from .export import DISCLAIMER
+        from .export import DISCLAIMER, UTF8_LOCALE_SHELL_LINES
 
         pythonslicer = shutil.which("PythonSlicer") or "PythonSlicer"
         slicer_lnm = _slicer_lnm_executable()
@@ -3469,6 +3469,7 @@ class Runner:
             '#   set PYTHONPATH=<LesionNetworkMapping module folder> && "C:\\path\\to\\PythonSlicer.exe" -m LesionNetworkMappingLib.pipeline run --config pipeline.json --out reproduced --recompute --accept-terms',
             f"# {DISCLAIMER}",
             "set -e",
+            *UTF8_LOCALE_SHELL_LINES,
             'HERE="$(cd "$(dirname "$0")" && pwd)"',
             f"DEFAULT_PYTHONSLICER={shlex.quote(pythonslicer)}",
             f"DEFAULT_SLICER_LNM={shlex.quote(slicer_lnm)}",
