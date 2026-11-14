@@ -961,10 +961,11 @@ class CircuitsCard:
             widgets.setChipLevel(self.provenanceChip, "ok", _("Frozen · {sha}…").format(sha=provenance["sha256"][:8]))
             self.circularBanner.hide()
         else:
-            widgets.setChipLevel(self.provenanceChip, "warn", _("Same cohort"))
             from LesionNetworkMappingLib import circuits
 
-            widgets.setBannerText(self.circularBanner, circuits.CIRCULARITY_MESSAGE)
+            known = bool(provenance.get("overlap"))
+            widgets.setChipLevel(self.provenanceChip, "warn", _("Same cohort") if known else _("Independence not established"))
+            widgets.setBannerText(self.circularBanner, circuits.circularity_message(provenance.get("overlap")))
             self.circularBanner.show()
         self.provenanceChip.setToolTip(provenance["basis"])
         rows = []

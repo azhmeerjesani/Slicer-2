@@ -103,6 +103,12 @@ CIRCULARITY_MESSAGE = (
     "lesions is circular (double dipping). Use Validate (in-fold circuits), or a circuit frozen from an independent "
     "cohort (declared with its sha256)."
 )
+CIRCULARITY_UNKNOWN_MESSAGE = (
+    "These damage scores come from a circuit whose independence from these lesions is not established (no circuit "
+    "record with its source lesions): testing them against an outcome of these lesions could be circular (double "
+    "dipping). Use Validate (in-fold circuits), or declare the circuit frozen with its sha256 if an independent cohort "
+    "fixed it."
+)
 NOT_ESTABLISHED = "independence not established (no circuit record with its source lesions, and not declared frozen)"
 NA = "n/a"
 MAX_STUDY_LEVELS = 8  # folders walked up from a maps.tsv to find its study (study.json)
@@ -682,6 +688,11 @@ def damage_values(occupancy, circuit, threshold=None, sign="both"):
     return out
 
 
+def circularity_message(overlap):
+    """The refusal text that matches the basis: the circuit is known to share lesions (``overlap`` > 0) or its independence is unknown (None)."""
+    return CIRCULARITY_MESSAGE if overlap else CIRCULARITY_UNKNOWN_MESSAGE
+
+
 def provenance_of(circuit_path, sha256, scored, scored_study=None, frozen_sha256=None):
     """Whether a circuit is independent of the scored lesions.
 
@@ -822,7 +833,7 @@ def damage_scores(maps_tsv, circuit, threshold=None, sign="both", out_dir=None, 
         "provenance_basis": provenance["basis"],
         "overlap": provenance["overlap"],
         "declared_frozen": provenance["declared_frozen"],
-        "association": "allowed (frozen circuit)" if provenance["provenance"] == "frozen" else "refused: " + CIRCULARITY_MESSAGE,
+        "association": "allowed (frozen circuit)" if provenance["provenance"] == "frozen" else "refused: " + circularity_message(provenance["overlap"]),
         "maps_tsv": _portable(maps_tsv, out_dir, root),
         "threshold": threshold,
         "sign": sign,
@@ -897,9 +908,10 @@ def check_association(damage):
         if damage is None:
             raise ValueError("The damage scores cannot be read")
     provenance = damage.get("provenance")
+    overlap = provenance.get("overlap") if isinstance(provenance, dict) else damage.get("overlap")
     provenance = provenance.get("provenance") if isinstance(provenance, dict) else provenance
     if provenance != "frozen":
-        raise CircularityError(CIRCULARITY_MESSAGE)
+        raise CircularityError(circularity_message(overlap))
     return True
 
 

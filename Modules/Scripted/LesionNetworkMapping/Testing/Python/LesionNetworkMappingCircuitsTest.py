@@ -255,6 +255,17 @@ class ProvenanceGuardTest(unittest.TestCase):
         result = circuits.damage_scores(f.maps_tsv, f.circuit_path, mask=f.mask_path, emit=_quiet)
         self.assertEqual(result["provenance"]["provenance"], "same_cohort")
         self.assertEqual(result["provenance"]["basis"], circuits.NOT_ESTABLISHED)
+        # The refusal says "not established", never that the circuit was made from the same lesions
+        with self.assertRaises(circuits.CircularityError) as caught:
+            circuits.check_association(result)
+        self.assertIn("not established", str(caught.exception))
+        self.assertNotIn("made from the same lesions", str(caught.exception))
+        out = os.path.join(self.tmp, "damageU")
+        circuits.damage_scores(f.maps_tsv, f.circuit_path, mask=f.mask_path, out_dir=out, emit=_quiet)
+        with open(os.path.join(out, circuits.DAMAGE_JSON), encoding="utf-8") as handle:
+            association = json.load(handle)["association"]
+        self.assertIn("not established", association)
+        self.assertNotIn("made from the same lesions", association)
 
     def test_same_study_participants_count_as_overlap(self):
         """A re-traced lesion has another sha256, but the same participant of the same study is the same cohort."""
