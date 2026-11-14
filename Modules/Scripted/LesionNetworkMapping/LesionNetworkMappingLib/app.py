@@ -532,6 +532,8 @@ def _runner_class():
             self.labels = set(config.participant_label) if config.participant_label else None
             # The output folder holds exactly the application's file set (no runs.jsonl of its own): the run registers in the study
             self.registry_root_override = config.study
+            # the output folder lies beside the study: its run folders are registered relative to it, so the study holds no local path
+            self.portable_registry = True
 
         def _stage(self, name):
             if self.level == "participant" and name not in PARTICIPANT_STAGES:

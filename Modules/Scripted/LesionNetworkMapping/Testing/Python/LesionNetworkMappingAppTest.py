@@ -41,7 +41,7 @@ for folder in (MODULE_DIR, TEST_DIR):
 import numpy as np
 
 import lnm_pipeline_fixture as fixture
-from LesionNetworkMappingLib import app, cohortmaps, connectome, export, nifti, pipeline
+from LesionNetworkMappingLib import app, cohortmaps, connectome, export, nifti, pipeline, runs
 from LesionNetworkMappingLib.study import Study, read_tsv
 
 TOLERANCE = 1e-5
@@ -670,6 +670,17 @@ class AppLevelsTest(unittest.TestCase):
         result = subprocess.run([sys.executable, script, self.output], capture_output=True, text=True, check=False)
         failing = [line for line in result.stdout.splitlines() if line.startswith("FAIL") and "reproduce_pipeline.sh" not in line]
         self.assertEqual(failing, [], result.stdout[-3000:])
+
+    def test_study_run_registry_holds_no_absolute_run_folders(self):
+        self.assertDone(self.participant)
+        study_root = os.path.join(self.output, "sourcedata", "slicer-lnm-study")
+        records = runs.read_records(study_root)
+        self.assertTrue([record for record in records if record.get("dir")])
+        self.assertEqual([record["dir"] for record in records if isinstance(record.get("dir"), str) and os.path.isabs(record["dir"])], [])
+        with open(os.path.join(study_root, "derivatives", "lnm", "runs.jsonl"), encoding="utf-8") as f:
+            self.assertNotIn(self.tmp, f.read())
+        folders = {os.path.realpath(runs.run_dir(study_root, record)) for record in records if record.get("dir")}
+        self.assertIn(os.path.realpath(self.out), folders)
 
     def test_figures(self):
         self.assertDone(self.group)

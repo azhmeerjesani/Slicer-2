@@ -128,7 +128,7 @@ apptainer run --containall -B "$PWD/bids:/bids:ro" -B "$PWD/out:/out" -B /data/G
   them once in Connectome ▸ Manage… of the application, or on a writable copy with `--build-references`.
 
 Paths inside the outputs are relative, so the output folder can be moved together with the input it
-refers to; `provenance.json` and the reproduce scripts keep the paths of the run on purpose.
+refers to (this includes the run registry of the study, which lists the run folders as paths relative to it); `provenance.json` and the reproduce scripts keep the paths of the run on purpose.
 
 ## Reproducing a run
 

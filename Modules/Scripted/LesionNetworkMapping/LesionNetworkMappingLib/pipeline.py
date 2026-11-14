@@ -1870,6 +1870,8 @@ class Runner:
 
         runs.register_kind("pipeline")
         self.run_id = runs.new_run_id("pipeline")
+        if getattr(self, "portable_registry", False):
+            runs.set_portable(self.run_root)
         runs.register(self.run_root, "pipeline", self.out, parents=config.parent_run, params=config.to_json(base=self.out, analysis_only=True), seeds={"preview": config.preview_seed, "permutation": config.perm_seed, "null": config.null_seed},
                       run_id=self.run_id)
         if isinstance(self.emit, Emitter):
