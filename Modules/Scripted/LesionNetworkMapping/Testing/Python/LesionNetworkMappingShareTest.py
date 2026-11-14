@@ -304,6 +304,19 @@ class ExclusionTest(ShareTestBase):
         with self.assertRaises(share.ShareError):
             share.export_dataset(self.study, os.path.join(self.tmp, "busy"), {"licence": "CC0-1.0"})
 
+    def test_output_through_a_symbolic_link_into_the_study_is_refused(self):
+        link = os.path.join(self.tmp, "link-to-study")
+        try:
+            os.symlink(self.root, link)
+        except (OSError, NotImplementedError, AttributeError):
+            self.skipTest("symbolic links are not available")
+        with self.assertRaises(share.ShareError):
+            share.check_outside_study(self.study, os.path.join(link, "via-link"))
+        with self.assertRaises(share.ShareError):
+            share.export_dataset(self.study, os.path.join(link, "via-link"), {"licence": "CC0-1.0"})
+        self.assertFalse(os.path.exists(os.path.join(self.root, "via-link")))
+        share.check_outside_study(self.study, os.path.join(self.tmp, "elsewhere"))  # no error
+
     def test_zip_export(self):
         out = os.path.join(self.tmp, "share.zip")
         result = share.export_dataset(self.study, out, {"licence": "CC0-1.0", "lesions": True, "own_patient": "share", "zip": True})

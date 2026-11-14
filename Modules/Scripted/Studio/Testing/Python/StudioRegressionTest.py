@@ -3421,6 +3421,58 @@ class StudioRegressionTest(unittest.TestCase):
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
 
+    def test_21b_share_dialog_refuses_an_output_inside_the_study_before_export(self):
+        """An output inside the study folder, or reached through a symbolic link to it, shows an "Output chosen" blocker and keeps
+        Export disabled (it was refused only after Export, and not at all through a link) (BB-1).
+        """
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import libcard_share, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Inside share study")
+        os.makedirs(folder)
+        paths = []
+        for index in range(1, 3):
+            paths.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(paths[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        dialog = None
+        try:
+            session = study_ui.createStudy(paths, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            dialog = libcard_share.ShareDialog(session)
+            dialog.dialog.show()
+            dialog.outputEdit.setText(os.path.join(session.study.path, "my share"))
+            dialog.preview()
+            self.assertFalse(dialog.exportButton.enabled, dialog.checklistLabel.text)
+            self.assertIn("outside the study folder", dialog.checklistLabel.text)
+            link = os.path.join(self.directory, "link-to-study")
+            try:
+                os.symlink(session.study.path, link)
+            except (OSError, NotImplementedError, AttributeError):
+                link = None
+            if link:
+                dialog.outputEdit.setText(os.path.join(link, "via-link"))
+                dialog.preview()
+                self.assertFalse(dialog.exportButton.enabled, dialog.checklistLabel.text)
+                self.assertIn("outside the study folder", dialog.checklistLabel.text)
+            dialog.outputEdit.setText(os.path.join(self.directory, "elsewhere-share"))
+            dialog.preview()
+            self.assertTrue(dialog.exportButton.enabled, dialog.checklistLabel.text)
+        finally:
+            if dialog is not None:
+                dialog.dialog.close()
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.mrmlScene.Clear(0)
+
     def test_22_study_card_save_line_follows_the_save(self):
         """The STUDY card says "Saving…" while the 400 ms save of participants.tsv is pending and "All changes saved" once it has
         run (the card was not refreshed when the save finished and kept "Saving…" for good) (BB-1).

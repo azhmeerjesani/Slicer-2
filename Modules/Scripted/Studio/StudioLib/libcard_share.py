@@ -522,6 +522,11 @@ class ShareDialog:
             pass  # the output this dialog just wrote: the success line says so; the exists-blocker would read as a failure
         elif os.path.exists(output) and (not os.path.isdir(output) or os.listdir(output)):
             items.append({"id": "output", "label": _("Output chosen"), "status": "blocker", "detail": _("It already exists; choose a new name or an empty folder.")})
+        if output and output != self._exportedTo and not any(item["id"] == "output" for item in items):
+            try:
+                share.check_outside_study(self.study, output)
+            except share.ShareError as e:
+                items.append({"id": "output", "label": _("Output chosen"), "status": "blocker", "detail": str(e)})
         if output and not any(item["id"] == "output" for item in items):
             folder = self.unwritableFolder(output)
             if folder:

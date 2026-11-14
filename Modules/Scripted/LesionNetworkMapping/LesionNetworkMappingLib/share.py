@@ -1208,14 +1208,22 @@ def verify_export(root, private_names=(), template_files=()):
 #
 
 
-def _check_output(study, out, zip_output):
-    out = os.path.abspath(os.fspath(out))
-    study_root = os.path.abspath(study.path)
+def check_outside_study(study, out):
+    """Raise ShareError when ``out`` is the study folder, inside it or contains it. Paths are compared after resolving symbolic
+    links (a link to the study, or /tmp on macOS, must not hide the study), also for outputs that do not exist yet.
+    """
+    out = os.path.realpath(os.fspath(out))
+    study_root = os.path.realpath(study.path)
     if out == study_root or out.startswith(study_root + os.sep):
         # Not inside the study either: a later export or map search could pick up the copy (.studio is never a place for it)
         raise ShareError("Choose an output outside the study folder.")
     if study_root.startswith(out + os.sep):
         raise ShareError("The output cannot be a folder that contains the study.")
+
+
+def _check_output(study, out, zip_output):
+    out = os.path.abspath(os.fspath(out))
+    check_outside_study(study, out)
     if zip_output:
         if not out.lower().endswith(".zip"):
             raise ShareError("A zip export needs a file name ending in .zip.")
