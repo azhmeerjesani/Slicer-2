@@ -321,6 +321,9 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
             manager.statusLabel.setText("")
             self.assertIsNone(manager.buildReference())
             self.assertIn("read-only", manager.statusLabel.text)
+            # Bug readonly-bundle-reference-maps-is-stored-grammar: the plural noun must not get "is stored"
+            self.assertNotIn("maps is", manager.statusLabel.text)
+            self.assertIn("reference maps cannot be stored in it", manager.statusLabel.text)
             self.assertIsNone(manager.job)
             _pump(200)
             self.assertEqual(asked, [])

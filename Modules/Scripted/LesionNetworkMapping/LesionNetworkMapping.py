@@ -2350,7 +2350,7 @@ class ConnectomeManagerDialog(qt.QDialog):
         """A plain sentence when the connectome folder cannot be written (a lab share), else "" (before any question or job)."""
         if os.access(path, os.W_OK | os.X_OK):
             return ""
-        return _("The connectome folder is read-only: {what} is stored in it.").format(what=what)
+        return _("The connectome folder is read-only, so {what} cannot be stored in it.").format(what=what)
 
     def buildHubness(self):
         """The degree ("hubness") map of the selected connectome (``qa degree``)."""
