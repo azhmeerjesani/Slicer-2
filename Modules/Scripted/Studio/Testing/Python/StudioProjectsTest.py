@@ -1085,6 +1085,21 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertEqual(dialog.result(), qt.QDialog.Accepted)
         finally:
             dialog.deleteLater()
+        # A long path is elided in the middle (the folder that will be used stays visible), the tooltip is the whole path
+        longPath = os.path.join(self.tempDir, "Research data of the stroke lesion network mapping group 2026",
+                                "Patients collected at the second site", "Imaging and tracing working copies for the replication analysis",
+                                "Slicer Studio")
+        dialog = projects_ui.FolderChooserDialog(proposal=longPath)
+        try:
+            dialog.resize(560, 400)
+            dialog.show()
+            slicer.app.processEvents()
+            shown = dialog.pathLabel.text
+            self.assertIn("\u2026", shown, "the long path is elided with an ellipsis")
+            self.assertTrue(shown.endswith("Slicer Studio"), shown)
+            self.assertEqual(_plainToolTip(dialog.pathLabel), longPath)
+        finally:
+            dialog.deleteLater()
         # Web build: a folder outside /data is warned about in the chooser (lost when the container is removed); /data is not
         projects = self.projects
         webValue = os.environ.get("SLICER_STUDIO_WEB")

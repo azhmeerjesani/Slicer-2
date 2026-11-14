@@ -337,6 +337,7 @@ class FolderChooserDialog(qt.QDialog):
         self.pathLabel.setObjectName("StudioProjectsFolderPath")
         self.pathLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
         self.pathLabel.setMinimumWidth(320)
+        ui.elideLabel(self.pathLabel, "path")
         self.pathLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
         fieldLayout.addWidget(self.pathLabel, 1)
         pathRow.addWidget(pathField, 1)
@@ -437,8 +438,8 @@ class FolderChooserDialog(qt.QDialog):
 
     def _update(self):
         # The home folder is written "~" (the full path is the tooltip)
-        self.pathLabel.setText(projects.shortPath(self.path))
-        self.pathLabel.setToolTip(self.path)
+        # A long path is elided in the middle so that the end (the folder that will be used) stays visible
+        ui.setElidedText(self.pathLabel, projects.shortPath(self.path), self.path)
         service = projects.syncedService(self.path)
         # Web build: a folder outside /data is lost when the container is removed (same warning as the connectome destination)
         notices = [projects.webFolderNotice(self.path)]
