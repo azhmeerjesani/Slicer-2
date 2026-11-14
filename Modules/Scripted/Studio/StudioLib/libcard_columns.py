@@ -446,7 +446,13 @@ class ColumnsDialog:
                 self.table.setItem(row, column, item)
             self.original[name] = {"role": spec.role, "type": spec.type, "units": units, "levels": levels, "description": description, "standard": info["standard"]}
         self.table.resizeColumnToContents(COL_NAME)
-        for column, width in ((COL_TYPE, 110), (COL_ROLE, 150), (COL_UNITS, 70), (COL_LEVELS, 200)):
+        # the Type column follows the font: the widest type combo needs its full sizeHint (110 px is the 100% minimum)
+        typeWidth = 110
+        for row in range(self.table.rowCount):
+            combo = self.table.cellWidget(row, COL_TYPE)
+            if combo is not None:
+                typeWidth = max(typeWidth, combo.sizeHint.width() + 8)
+        for column, width in ((COL_TYPE, typeWidth), (COL_ROLE, 150), (COL_UNITS, 70), (COL_LEVELS, 200)):
             self.table.setColumnWidth(column, width)
         self.table.setColumnWidth(COL_NAME, max(140, self.table.columnWidth(COL_NAME) + 12))
         self._applyFilter()

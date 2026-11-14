@@ -6173,6 +6173,31 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertEqual(list(widget.selectedSegmentIDs()), ["Segment_2"], "only the IDs that exist in the new node are kept")
         self.assertEqual(signals, [])
 
+    def test_54b_columns_dialog_type_column_follows_the_font(self):
+        """Columns...: the Type column was fixed at 110 px, so at a 125% font the 'categorical' combo read 'categori...' (BB-1)."""
+        from StudioLib import libcard_columns as lc
+        from StudioLib import study_ui
+
+        original = qt.QFont(qt.QApplication.font())
+        self.addCleanup(qt.QApplication.setFont, original)
+        big = qt.QFont(original)
+        big.setPixelSize(18)
+        qt.QApplication.setFont(big)
+        slicer.app.processEvents()
+        study = self._study([("sub-01", {"my_score": "3"}, False), ("sub-02", {"my_score": "5"}, False)])
+        session = study_ui.openStudy(study.path, None, showLibrary=False)
+        self.addCleanup(study_ui.closeStudy)
+        dialog = lc.ColumnsDialog(session)
+        self.addCleanup(dialog.widget.deleteLater)
+        dialog.show()
+        dialog.onlyUnset.setChecked(False)
+        for _ in range(5):
+            slicer.app.processEvents()
+        combos = [dialog.table.cellWidget(row, lc.COL_TYPE) for row in range(dialog.table.rowCount)]
+        self.assertTrue(combos)
+        for combo in combos:
+            self.assertGreaterEqual(combo.width, combo.sizeHint.width(), f"the type combo of {combo.objectName} shows its full text")
+
     def test_54_return_in_the_columns_dialog_never_cancels_the_edits(self):
         """Columns...: Return that a focused child leaves unhandled (a closed role combo, the table, the "Only columns without
         a role" check box) clicked Cancel, the dialog's default button, so every edit was dropped without a word (BB-1). The
