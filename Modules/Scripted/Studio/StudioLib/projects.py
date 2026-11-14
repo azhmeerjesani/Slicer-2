@@ -1619,6 +1619,16 @@ def createProject(name=None, rootPath=None):
     return project
 
 
+def removeCreatedProject(path):
+    """Remove the folder that ``createProject`` just made, if it still holds nothing but its ``.studio`` folder."""
+    try:
+        if set(os.listdir(path)) - {PRIVATE_DIR}:
+            return
+    except OSError:
+        return
+    shutil.rmtree(path, ignore_errors=True)
+
+
 def pruneRemoved(projectPath, keepDays=REMOVED_KEEP_DAYS):
     """Delete the files of removed nodes older than ``keepDays`` (.studio/removed/<time>/). Worker-safe."""
     folder = os.path.join(projectPath, PRIVATE_DIR, REMOVED_DIR)

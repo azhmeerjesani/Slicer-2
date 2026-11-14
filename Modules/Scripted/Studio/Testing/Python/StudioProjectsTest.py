@@ -110,6 +110,12 @@ def _privacyModule():
 # The original, kept before any test replaces the Python name (the official dialogs call the C++ function)
 _REAL_OPEN_URL = qt.QDesktopServices.openUrl
 
+def _clockNow(service):
+    from StudioLib import autosave
+
+    return autosave._clock()
+
+
 class StudioProjectsTest(unittest.TestCase):
     """The Slicer Studio folder, projects and their continuous saving. Needs the main window."""
 
@@ -8812,6 +8818,37 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(folder)), ["Race", "Race 2", "Race 3"])
         # The projects of the other window were left as they were
         self.assertEqual(os.listdir(os.path.join(folder, "Race")), [projects.PRIVATE_DIR])
+
+    def test_93b_full_disk_copy_project_leaves_no_empty_folder(self):
+        """A project is created but its lock cannot be written (a full disk, BB-1): the new folder is removed again (no
+        empty "<name> 2" card in Library), the root failure is announced, and the retry comes soon, not after 600 s.
+        """
+        from unittest import mock
+
+        projects = self.projects
+        service = self._service()
+        folder = projects.projectsFolder(self.root)
+        os.makedirs(folder, exist_ok=True)
+        before = sorted(os.listdir(folder))
+        announced = []
+        service.setProjectAnnouncer(lambda event, project, **info: announced.append(event))
+
+        def cannotLock(project):
+            project.readOnly = True
+            project.lastError = "No space left on device"
+            return False
+
+        with mock.patch.object(projects.Project, "lock", cannotLock):
+            self.assertIsNone(service.createProject("Full copy", announce=None))
+        self.assertEqual(sorted(os.listdir(folder)), before, "no folder is left behind")
+        self.assertIn("root-failed", announced)
+        self.assertEqual(service._status.state, "paused")
+        self.assertLess(service._pausedUntil - _clockNow(service), 60.0, "creation is tried again soon")
+        # Space is back: the project is created
+        service._pausedUntil = 0.0
+        project = service.createProject("Full copy", announce=None)
+        self.assertIsNotNone(project)
+        self.assertEqual(os.path.basename(project.path), "Full copy")
 
     def test_94_library_inspector_project_card_follows_the_folder_after_a_root_move(self):
         """Change folder > Move: the project card of the Library inspector shows the open project's new folder (BB-1).

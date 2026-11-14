@@ -1127,8 +1127,8 @@ class AutosaveService:
             return True
         return free >= _requiredFreeBytes(estimatedBytes, project)
 
-    def _pause(self, message):
-        self._pausedUntil = _clock() + ERROR_RETRY_S
+    def _pause(self, message, retrySeconds=ERROR_RETRY_S):
+        self._pausedUntil = _clock() + retrySeconds
         self._setState("paused", message)
         logging.warning(message)
 
@@ -1795,6 +1795,14 @@ class AutosaveService:
             self._rootFailedAnnounced.clear()  # a later failure is news again
             projects.notifyChanged()
         if not self.attachProject(project):
+            # The new folder could not be taken (typically the lock file cannot be written on a full disk): it was made
+            # just above and holds only project.json, so it goes away (Library would list an "Empty" card, and every retry
+            # would add another). The creation is tried again soon, not after the long pause of a failed save.
+            projects.removeCreatedProject(project.path)
+            reason = plainOSError(project.lastError) if getattr(project, "lastError", None) else _("it cannot be written")
+            self._pause(_("Autosave paused: the Slicer Studio folder cannot be written ({reason}). Press Ctrl+S to save "
+                          "once there is room.").format(reason=reason), retrySeconds=30.0)
+            self._announceRootFailedOnce(reason)
             return None
         if announce:
             self._announce(announce, project)
