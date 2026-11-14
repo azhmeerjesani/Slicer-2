@@ -618,12 +618,18 @@ class TfceTest(unittest.TestCase):
         self.assertAlmostEqual(grid.max_enhanced(vector), float(np.abs(tfce.tfce(full, mask)).max()))
         # The ETA scales with the box and the permutations; two-sided is twice one-sided
         reference = tfce.tfce_eta((91, 109, 91), 1, two_sided=False)
-        self.assertAlmostEqual(reference, 0.95, places=6)
-        self.assertAlmostEqual(tfce.tfce_eta((91, 109, 91), 1000), 1900.0, places=3)
-        self.assertAlmostEqual(tfce.tfce_eta(None, 1000, box_voxels=91 * 109 * 91), 1900.0, places=3)
+        self.assertAlmostEqual(reference, 1.3 + tfce.SECONDS_PER_MAP_OVERHEAD, places=6)
+        # Regression (tfce-eta-underestimates-on-mni-box): measured 2.3-2.8 s per two-sided map on the MNI box
+        # (about 2.6 s, addendum 3.4), 16 ms per one-sided map on a 20 x 24 x 20 box; the old 1.6 s / 11 ms were too low
+        self.assertGreaterEqual(tfce.tfce_eta((91, 109, 91), 1), 2.5)
+        self.assertLessEqual(tfce.tfce_eta((91, 109, 91), 1), 2.8)
+        self.assertGreaterEqual(tfce.tfce_eta((20, 24, 20), 1, two_sided=False), 0.015)
+        self.assertAlmostEqual(tfce.tfce_eta((91, 109, 91), 1000), 2 * 1000 * reference, places=3)
+        self.assertAlmostEqual(tfce.tfce_eta(None, 1000, box_voxels=91 * 109 * 91), 2 * 1000 * reference, places=3)
+        self.assertAlmostEqual(tfce.tfce_eta((91, 109, 91), 10, seconds_per_voxel=1e-6), 2 * 10 * 1e-6 * 91 * 109 * 91)
         with self.assertRaises(TypeError):
             tfce.tfce_eta(228483, 1000)  # an in-mask count is not a box
-        self.assertAlmostEqual(tfce.tfce_eta(grid, 10, two_sided=False), 10 * 12 * 16 * 8 * tfce.SECONDS_PER_BOX_VOXEL)
+        self.assertAlmostEqual(tfce.tfce_eta(grid, 10, two_sided=False), 10 * (12 * 16 * 8 * tfce.SECONDS_PER_BOX_VOXEL + tfce.SECONDS_PER_MAP_OVERHEAD))
         self.assertAlmostEqual(tfce.tfce_eta(mask, 10, two_sided=False), tfce.tfce_eta(grid, 10, two_sided=False))
         with self.assertRaises(ValueError):
             tfce.structure(8)
