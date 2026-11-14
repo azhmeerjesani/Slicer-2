@@ -2183,3 +2183,26 @@ class StudioAutosaveTest(unittest.TestCase):
             else:
                 os.environ["SLICER_STUDIO_AUTOSAVE_DIR"] = realEnv
             shutil.rmtree(base, ignore_errors=True)
+
+    def test_zh_thumbnailRenderedWhenTheQuitFlushSavesTheLesion(self):
+        """BB-1: a lesion drawn after the first autosave and saved by the quit flush never reached the project thumbnail (the
+        quit save skipped it): the quit save renders it at once.
+        """
+        from StudioLib import autosave, thumbnails
+
+        slicer.mrmlScene.Clear(0)
+        volume = self._userVolume()
+        slicer.util.setSliceViewerLayers(background=volume)
+        folder = tempfile.mkdtemp(prefix="StudioQuitThumb")
+        try:
+            os.makedirs(os.path.join(folder, ".studio"))
+            service = autosave.AutosaveService.__new__(autosave.AutosaveService)
+            service.project = type("P", (), {"path": folder})()
+            service._projectThumbnailKey = None
+            service._projects = type("L", (), {"notifyChanged": lambda self: None})
+            plan = type("Plan", (), {"reason": "quit"})()
+            service._queueProjectThumbnail(plan)
+            path = os.path.join(folder, ".studio", thumbnails.PROJECT_VIEW_FILES[0][1])
+            self.assertTrue(os.path.isfile(path), "the quit save renders the thumbnail")
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)

@@ -2118,11 +2118,14 @@ class AutosaveService:
     def _queueProjectThumbnail(self, plan):
         """Render the thumbnails of the project in the background writer after a save that changed what they show (V-02):
         the axial, coronal and sagittal slices through the lesion, from the image arrays (not a view grab, so no
-        main-thread render and it works with Library shown). Skipped when nothing visible changed, and when quitting.
+        main-thread render and it works with Library shown). Skipped when nothing visible changed. When quitting, the
+        background writer may not run again, so the views are rendered at once (they come from arrays in a few
+        milliseconds) and the Library card shows what the quit flush saved.
         """
         project = self.project
-        if project is None or getattr(plan, "reason", "") == "quit":
+        if project is None:
             return
+        quitting = getattr(plan, "reason", "") == "quit"
         try:
             from StudioLib import thumbnails
 
@@ -2137,6 +2140,16 @@ class AutosaveService:
             self._projectThumbnailKey = key
         except Exception:
             logging.debug("Slicer Studio: project thumbnail source failed:\n" + traceback.format_exc())
+            return
+
+        if quitting:
+            try:
+                thumbnails.renderProjectViews(source, privateFolder)
+            except Exception:
+                self._projectThumbnailKey = None
+                logging.debug("Slicer Studio: project thumbnail at quit failed:\n" + traceback.format_exc())
+            finally:
+                source.release()
             return
 
         def done(paths, source=source):
