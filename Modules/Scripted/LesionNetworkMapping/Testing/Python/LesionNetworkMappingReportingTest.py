@@ -557,6 +557,17 @@ class ChecklistTest(_StudyCase):
             f.write("This network localizes the symptom.\n")
         self.assertEqual(checklist.ITEMS_BY_ID["K15"].evaluate(self.root)["status"], checklist.DONE)
 
+    def test_wording_item_ignores_publication_bundle_copies(self):
+        # Copies of the methods inside exported bundles are not the study's own methods or report
+        self.make_study([("sub-01", {})])
+        bundle = os.path.join(self.root, "derivatives", "lnm", "publication", "20260101T000000Z")
+        os.makedirs(bundle)
+        for name in ("methods.md", "methods.html", "methods.txt"):
+            with open(os.path.join(bundle, name), "w", encoding="utf-8") as f:
+                f.write("Neutral text.\n")
+        item = checklist.ITEMS_BY_ID["K15"].evaluate(self.root)
+        self.assertEqual(item["status"], checklist.NOT_RUN, item["value"])
+
 
 class ExportFilesTest(_StudyCase):
     def test_supplementary_table_order(self):

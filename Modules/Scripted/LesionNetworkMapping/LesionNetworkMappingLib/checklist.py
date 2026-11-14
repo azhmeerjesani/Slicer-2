@@ -366,9 +366,14 @@ def _j14_sharing(records):
 
 def _k15_wording(records):
     found, violations = [], []
+    bundles = os.path.normpath(records.path("derivatives", "lnm", "publication"))
     for folder, folders, names in os.walk(records.path("derivatives")):
-        # Pruned by folder name below derivatives/ (never by the study's own absolute path)
-        folders[:] = sorted(name for name in folders if name != "cache" and not name.startswith("."))
+        # Pruned by folder name below derivatives/ (never by the study's own absolute path); the exported
+        # bundles under derivatives/lnm/publication/ hold copies of the methods, not the study's own
+        folders[:] = sorted(
+            name for name in folders
+            if name != "cache" and not name.startswith(".") and os.path.normpath(os.path.join(folder, name)) != bundles
+        )
         for name in sorted(names):
             if name in WORDING_FILES:
                 path = os.path.join(folder, name)
