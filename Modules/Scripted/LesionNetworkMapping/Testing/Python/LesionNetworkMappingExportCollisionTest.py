@@ -372,6 +372,7 @@ class LesionNetworkMappingExportUnwritableFolderTest(_Helpers, unittest.TestCase
             self.assertLess(record.levelno, logging.ERROR)
 
 
+@unittest.skipUnless(_HAS_APP, "needs the Slicer application")
 class LesionNetworkMappingReportReadOnlyStudyTest(_Helpers, unittest.TestCase):
     """The publication bundle of a read-only study explains itself in plain words, with no errno and no logged traceback (BB-1)."""
 
