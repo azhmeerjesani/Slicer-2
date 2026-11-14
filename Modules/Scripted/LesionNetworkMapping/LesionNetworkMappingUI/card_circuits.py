@@ -809,6 +809,26 @@ class CircuitsCard:
         self._refreshGm()
         self._refreshTargetsState()
 
+    @staticmethod
+    def _bareMapText(path):
+        """The circuit line of a map without circuit.json: its source when the run record beside it (slnm.json, glm.json, ...) names the lesions."""
+        from LesionNetworkMappingLib import circuits
+
+        try:
+            parent = circuits.parent_record(path)
+        except Exception:
+            parent = {}
+        lesions = parent.get("lesions") or {}
+        count = len(lesions.get("sha256") or []) or len(lesions.get("participants") or [])
+        if count:
+            kind = parent.get("kind") or os.path.splitext(parent.get("record") or "")[0]
+            parts = [_("A circuit map from a file"), _("from the {kind} run beside it").format(kind=kind)]
+            if parent.get("run_id"):
+                parts.append(_("run {id}").format(id=parent["run_id"]))
+            parts.append(_("made from {n} lesion(s)").format(n=count))
+            return " · ".join(parts)
+        return _("A circuit map from a file: its provenance is not recorded (declare it frozen with its sha256 if an independent study fixed it).")
+
     def _showCircuitInfo(self):
         record = self.currentCircuitRecord()
         path = self.currentCircuitPath()
@@ -817,7 +837,7 @@ class CircuitsCard:
             self.circuitLabel.setText("")
             return
         if record is None:
-            self.circuitLabel.setText(_("A circuit map from a file: its provenance is not recorded (declare it frozen with its sha256 if an independent study fixed it)."))
+            self.circuitLabel.setText(self._bareMapText(path))
             return
         parent = record.get("parent") or {}
         seed = record.get("seed") or {}
