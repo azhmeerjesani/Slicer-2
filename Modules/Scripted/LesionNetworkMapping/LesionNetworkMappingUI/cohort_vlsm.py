@@ -640,6 +640,15 @@ class VlsmTab(CohortTab):
 
         return [os.path.join(root, name) for name in sorted(os.listdir(root)) if os.path.isfile(os.path.join(root, name, vlsm.VLSM_JSON))]
 
+    def mapSpace(self):
+        """VLSM maps are on the template grid of the study's lesions, not on the connectome's: the space vlsm.json
+        records, or None (the grid is then recognised from the file).
+        """
+        from LesionNetworkMappingLib import geometry
+
+        space = (self.result[1] or {}).get("space") if self.result else None
+        return str(space) if space and geometry.space_family(space) not in ("native", "unknown") else None
+
     def readResult(self, folder):
         from LesionNetworkMappingLib import vlsm
 

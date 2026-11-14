@@ -184,6 +184,7 @@ from . import widgets
 ORDER_CONTRAST = 20
 #: Node attribute of the Cohort card's group map volume (card_cohort.GROUP_VOLUME_ATTRIBUTE)
 GROUP_VOLUME_ATTRIBUTE = "LNM.GroupMapVolume"
+CONNECTOME_SPACE = object()  # showGroupFile's space: the cohort's connectome's template space
 #: Delay of the design rebuild after a control changed (several changes give one rebuild)
 DESIGN_DELAY_MS = 150
 #: Delay between loading the template and showing it under a map (two short GUI passes instead of one long one)
@@ -1037,10 +1038,17 @@ class CohortTab:
         if not 0 <= index < len(self.outputs):
             return None
         desc, text, path = self.outputs[index]
-        volume = showGroupFile(self.ctx, path, desc, f"{self.TITLE}: {text}", scopeOf=self.connectomeDir)
+        volume = showGroupFile(self.ctx, path, desc, f"{self.TITLE}: {text}", scopeOf=self.connectomeDir, space=self.mapSpace())
         if volume is not None:
             self.mapsTable.selectRow(index)
         return volume
+
+    def mapSpace(self):
+        """Template space of this tab's maps (``Studio.Space`` of the shown map): the cohort's connectome's by default
+        (``CONNECTOME_SPACE``); a tab whose maps are not on the connectome's grid returns their own space, or None (the
+        grid is then recognised from the file).
+        """
+        return CONNECTOME_SPACE
 
     def showFolder(self):
         folder = self.result[0] if self.result else None
@@ -1091,20 +1099,24 @@ def groupVolume(ctx):
     return None
 
 
-def showGroupFile(ctx, path, desc, name, scopeOf=None):
+def showGroupFile(ctx, path, desc, name, scopeOf=None, space=CONNECTOME_SPACE):
     """Show a group map file in the group map volume with its own colour table copy (``display.applyGroupMapDisplay``),
     over the template; return the volume, or None. ``scopeOf()`` gives the folder of the results the map belongs to (the
     tab's ``connectomeDir``): when it changes (another study or connectome), the map leaves the slice views.
+    ``space`` is the map's template space (``Studio.Space``): ``CONNECTOME_SPACE`` (default) for the cohort's connectome's, None
+    for none (the attribute is removed and the grid is recognised from the file).
     """
     from LesionNetworkMappingLib import display
 
     widget = _mapWidget()
     if widget is None or not path or not os.path.isfile(path):
         return None
-    # The cohort's connectome grid and template space (declared in connectome.json, also on a grid that is not standard)
-    bundle = ctx.bundle if ctx.bundle is not None else getattr(widget, "bundle", None)
+    if space is CONNECTOME_SPACE:
+        # The cohort's connectome grid and template space (declared in connectome.json, also on a grid that is not standard)
+        bundle = ctx.bundle if ctx.bundle is not None else getattr(widget, "bundle", None)
+        space = widget.logic.connectomeSpaceName(bundle)
     attributes = {GROUP_VOLUME_ATTRIBUTE: "1", "Studio.Role": "statmap", display.GROUP_MAP_ATTRIBUTE: desc,
-                  "Studio.Space": widget.logic.connectomeSpaceName(bundle)}
+                  "Studio.Space": space}
     try:
         volume = widget.logic.loadMap(path, name, groupVolume(ctx), saveWithScene=True, attributes=attributes)
     except Exception as exc:

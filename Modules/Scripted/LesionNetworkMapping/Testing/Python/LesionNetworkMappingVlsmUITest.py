@@ -253,6 +253,51 @@ class LesionNetworkMappingVlsmUITest(unittest.TestCase):
             _pump(100)
             shutil.rmtree(study2, ignore_errors=True)
 
+    def test_map_space_is_the_study_grid_not_the_connectome(self):
+        # BB-1: a VLSM map got Studio.Space from the selected connectome (connectome.json "space"), although VLSM runs on
+        # the study's lesions on the study's template grid; its NIfTI export then declared the connectome's space. The
+        # map now carries the space vlsm.json records (or none, so that the grid is recognised from the file).
+        from unittest import mock
+
+        import numpy as np
+        from LesionNetworkMappingLib import nifti
+        from LesionNetworkMappingUI import cohort_contrast
+
+        tab, widget = self.vlsm, self.widget
+        card = widget.ctx.card("cohort")
+        contrast = card.tab("contrast")
+        path = os.path.join(self.tmp, "vlsm_space_tstat_map.nii.gz")
+        data = np.zeros(self.fx["fine_shape"], dtype=np.float32)
+        data[2:6, 2:6, 2:6] = 4.0
+        nifti.write_nifti(path, data, self.fx["fine_affine"])
+        tab.refresh()
+        _pump(50)
+        stored = (tab.outputs, tab.result, contrast.outputs, contrast.result)
+        try:
+            with mock.patch.object(widget.logic, "connectomeSpaceName", return_value="MNI152NLin6Asym"):
+                tab.outputs = [("vlsmTestTstat", "Statistic (T)", path)]
+                tab.result = (self.tmp, {"status": "done", "space": "MNI152NLin2009cAsym"})
+                volume = tab.showMap(0)
+                self.assertIsNotNone(volume)
+                self.assertEqual(volume.GetAttribute("Studio.Space"), "MNI152NLin2009cAsym")
+                # A space that is no template space leaves none on the reused volume
+                tab.result = (self.tmp, {"status": "done", "space": "native"})
+                volume = tab.showMap(0)
+                self.assertIsNone(volume.GetAttribute("Studio.Space"))
+                # The Contrast tab's maps are on the connectome's grid: they keep its space
+                contrast.outputs = [("contrastTestTstat", "Statistic (T)", path)]
+                contrast.result = (self.tmp, {"status": "done"})
+                volume = contrast.showMap(0)
+                self.assertEqual(volume.GetAttribute("Studio.Space"), "MNI152NLin6Asym")
+        finally:
+            tab.outputs, tab.result, contrast.outputs, contrast.result = stored
+            for node in list(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")):
+                if node.GetAttribute(cohort_contrast.GROUP_VOLUME_ATTRIBUTE) == "1":
+                    slicer.mrmlScene.RemoveNode(node)
+            card.groupVolumeId = None
+            tab.refresh()
+            _pump(100)
+
 
 class LesionNetworkMappingSingleLevelUITest(unittest.TestCase):
     """A cases-only study has one group level: the Contrast and VLSM tabs do not offer "case vs case"."""
