@@ -148,6 +148,12 @@ class LesionNetworkMappingOverlapRestoreUITest(unittest.TestCase):
         self.tab._onDone(_DoneJob())
         self._assertSettings(95.0, "pos")
 
+    def test_4_spare_height_goes_below_the_rows(self):
+        """The tab pages share the tallest tab's height; the Overlap layout must end in a stretch (bug cohort-overlap-tab-blank-gaps)."""
+        layout = self.tab.widget.layout()
+        last = layout.itemAt(layout.count() - 1)
+        self.assertIsNotNone(last.spacerItem(), "the Overlap tab layout has no closing stretch: spare height is spread between its rows")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -212,6 +212,8 @@ class OverlapTab:
         folderRow.addWidget(self.showFolderButton)
         folderRow.addStretch(1)
         layout.addLayout(folderRow)
+        # the tab pages take the height of the tallest tab: spare height goes below the rows, not between them
+        layout.addStretch(1)
 
     @staticmethod
     def _label(text, objectName, role=None):
