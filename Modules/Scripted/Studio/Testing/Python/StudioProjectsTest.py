@@ -9241,6 +9241,49 @@ class StudioProjectsTest(unittest.TestCase):
         finally:
             self.autosave._service = running
 
+    def test_97b_rescue_copy_avoids_full_disk_and_leaves_no_partial_file(self):
+        """BB-1: "Save a copy..." offered because the project cannot be saved proposed the same full disk, and a failed copy
+        left a 0-byte .mrb behind with a generic "see the error log" text. The rescue copy starts outside a disk without room;
+        a failed copy removes the file it started and says the disk is full.
+        """
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        full = os.path.join(self.tempDir, "full-disk")
+        roomy = os.path.join(self.tempDir, "roomy")
+        os.makedirs(full)
+        os.makedirs(roomy)
+        usage = type("U", (), {})
+        realUsage = shutil.disk_usage
+
+        def diskUsage(path):
+            result = usage()
+            result.total = 10**9
+            result.free = 1000 if os.path.normpath(str(path)).startswith(full) else 10**9
+            result.used = result.total - result.free
+            return result
+
+        with mock.patch.object(shutil, "disk_usage", diskUsage), \
+                mock.patch.object(projects_ui, "saveCopyStartFolder", lambda: full), \
+                mock.patch.object(qt.QDir, "homePath", staticmethod(lambda: roomy)):
+            self.assertEqual(projects_ui.rescueCopyStartFolder(), roomy)
+        with mock.patch.object(shutil, "disk_usage", realUsage), mock.patch.object(projects_ui, "saveCopyStartFolder", lambda: roomy):
+            self.assertEqual(projects_ui.rescueCopyStartFolder(), roomy)
+
+        def failingWriter(scene, path):
+            open(path, "wb").close()  # what the archive writer leaves on a full disk
+            return False
+
+        copyPath = os.path.join(full, "scene.mrb")
+        toasts = []
+        with mock.patch.object(shutil, "disk_usage", diskUsage), \
+                mock.patch.object(projects_ui, "message", lambda text, **kwargs: toasts.append(str(text))), \
+                mock.patch.object(projects_ui, "writeBundleKeepingState", failingWriter):
+            self.assertIsNone(projects_ui.saveCopyAs(copyPath))
+        self.assertFalse(os.path.exists(copyPath), "no 0-byte bundle is left behind")
+        self.assertIn("full", toasts[-1])
+
     def test_98_locked_project_warning_is_seen_when_opened_early_or_with_a_load_toast(self):
         """BB-1: a project that another Slicer Studio has open, opened in this window. (1) From the command line the scene is
         loaded before the service installs its user interface (no announcer yet): the "open in another Slicer Studio"

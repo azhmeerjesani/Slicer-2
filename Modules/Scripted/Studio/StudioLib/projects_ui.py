@@ -708,15 +708,54 @@ def writeBundleKeepingState(scene, path):
     return success
 
 
-def saveCopyAs(path=None):
-    """Save a copy as… (Export): the whole scene as one .mrb file anywhere. The project stays where it is."""
+RESCUE_MIN_FREE_BYTES = 50 * 1024 * 1024
+
+
+def _folderLacksRoom(folder):
+    """True if ``folder`` cannot be written or its disk has (almost) no free space."""
+    import shutil
+
+    try:
+        return not os.access(folder, os.W_OK) or shutil.disk_usage(folder).free < RESCUE_MIN_FREE_BYTES
+    except OSError:
+        return True
+
+
+def rescueCopyStartFolder():
+    """Start folder of the rescue copy offered when the project could not be saved: the usual folder of "Save a copy as…",
+    unless that folder cannot be written or its disk is full (the very reason the save failed): then the last save folder
+    or the home folder, whichever has room (never the disk that just refused the save, if another one has room).
+    """
+    folder = saveCopyStartFolder()
+    if not _folderLacksRoom(folder):
+        return folder
+    lastFolder = str(slicer.util.settingsValue("Studio/LastSaveFolder", "") or "")
+    for candidate in (lastFolder, qt.QDir.homePath()):
+        if candidate and os.path.isdir(candidate) and not _folderLacksRoom(candidate):
+            return candidate
+    return folder
+
+
+def _freeBytes(folder):
+    import shutil
+
+    try:
+        return shutil.disk_usage(folder).free
+    except OSError:
+        return None
+
+
+def saveCopyAs(path=None, startFolder=None):
+    """Save a copy as… (Export): the whole scene as one .mrb file anywhere. The project stays where it is.
+    ``startFolder`` is where the dialog starts (default: Exports/ of the project, see ``saveCopyStartFolder``).
+    """
     service = _service()
     mainWindow = slicer.util.mainWindow()
     project = service.currentProject() if service is not None else None
     if path is None:
         exports = os.path.join(project.path, projects.EXPORTS) if project is not None else None
         exportsExisted = exports is None or os.path.isdir(exports)
-        start = os.path.join(saveCopyStartFolder(), (project.name if project is not None else "Scene") + ".mrb")
+        start = os.path.join(startFolder or saveCopyStartFolder(), (project.name if project is not None else "Scene") + ".mrb")
         path = qt.QFileDialog.getSaveFileName(mainWindow, _("Save a copy as"), start, _("Slicer data bundle") + " (*.mrb)")
         if not exportsExisted and (not path or os.path.realpath(os.path.dirname(os.path.abspath(path))) != os.path.realpath(exports)):
             try:
@@ -730,6 +769,7 @@ def saveCopyAs(path=None):
     if project is not None:
         service.saveNow("copy", progress=True)
     wasClean = project is not None and service.isProjectClean()
+    existedBefore = os.path.exists(path)
     scene = slicer.mrmlScene
     url, rootDirectory = scene.GetURL(), scene.GetRootDirectory()
     written = False
@@ -747,11 +787,19 @@ def saveCopyAs(path=None):
         message(_("Saved a copy as {name}").format(name=os.path.basename(path)), action=lambda: projects.showInFileManager(os.path.dirname(path)),
                 actionText=_("Show"), toolTip=path)
         return path
+    if not written and not existedBefore:
+        try:
+            os.remove(path)  # a partial bundle (0 bytes on a full disk) is a damaged file: never leave it behind
+        except OSError:
+            pass
     folder = os.path.dirname(os.path.abspath(path))
+    free = _freeBytes(folder) if os.path.isdir(folder) else None
     if os.path.isdir(folder) and not os.access(folder, os.W_OK):
         text = _("The copy could not be saved: the folder {folder} cannot be written").format(folder=folder)
     elif os.path.isfile(path) and not os.access(path, os.W_OK):
         text = _("The copy could not be saved: {name} is read-only").format(name=os.path.basename(path))
+    elif free is not None and free < RESCUE_MIN_FREE_BYTES:
+        text = _("The copy could not be saved: the disk of {folder} is full. Choose a folder on another disk.").format(folder=folder)
     else:
         text = _("The copy could not be saved (see the error log)")
     message(text, level="warning", toolTip=path)
@@ -829,7 +877,7 @@ def askReplaceUnsavedProject(title, project, reason="", verb="open", notice=""):
             return "discard"
         if answer != 0:
             return "cancel"
-        if saveCopyAs():
+        if saveCopyAs(startFolder=rescueCopyStartFolder()):
             return "save"
         # The copy was not saved (cancelled or failed): ask again, the edits are still only in memory
 
