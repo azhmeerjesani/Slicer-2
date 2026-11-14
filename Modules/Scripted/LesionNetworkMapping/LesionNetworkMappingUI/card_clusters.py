@@ -1047,16 +1047,71 @@ def sharedAtlases(ctx):
     return manager
 
 
+def fetchQuestionText(manager, ids):
+    """The text of the "Get atlases" confirmation: the count (singular for one atlas), the size and the licence lines."""
+    count = len(ids)
+    one = _("Download {count} atlas file ({size}) from the open sources of the catalog (TemplateFlow, the Tian atlas site)?")
+    many = _("Download {count} atlas files ({size}) from the open sources of the catalog (TemplateFlow, the Tian atlas site)?")
+    text = (one if count == 1 else many).format(count=count, size=manager.sizeText(ids))
+    return text + "\n\n" + "\n".join(manager.describe(ids))
+
+
+def fetchQuestionDialog(text, parent=None):
+    """The "Get atlases" confirmation: a QDialog in the Studio dialog chrome (VISUAL 4.7) when Slicer Studio is part of
+    this build, else a plain QMessageBox (Classic). ``exec`` returns a truthy accepted value for "download".
+    """
+    parent = parent or slicer.util.mainWindow()
+    try:
+        from StudioLib import ui
+    except ImportError:
+        ui = None
+    if ui is None:
+        box = qt.QMessageBox(qt.QMessageBox.Question, _("Get atlases"), text, qt.QMessageBox.Ok | qt.QMessageBox.Cancel, parent)
+        box.setObjectName("LNMGetAtlasesDialog")
+        return box
+    dialog = qt.QDialog(parent)
+    dialog.setObjectName("LNMGetAtlasesDialog")
+    dialog.setWindowTitle(_("Get atlases"))
+    dialog.setMinimumWidth(460)
+    layout = qt.QVBoxLayout(dialog)
+    layout.setContentsMargins(24, 24, 24, 22)
+    layout.setSpacing(14)
+    header, _title, _body = ui.dialogHeader("download", _("Get atlases"), text, "LNMGetAtlases")
+    layout.addLayout(header)
+    buttons = qt.QHBoxLayout()
+    buttons.setSpacing(10)
+    buttons.addStretch(1)
+    cancel = qt.QPushButton(_("Cancel"))
+    cancel.setObjectName("LNMGetAtlasesCancelButton")
+    cancel.setMinimumHeight(36)
+    ui.setRole(cancel, "secondary")
+    cancel.connect("clicked()", dialog.reject)
+    buttons.addWidget(cancel)
+    download = qt.QPushButton(_("Download"))
+    download.setObjectName("LNMGetAtlasesDownloadButton")
+    download.setDefault(True)
+    download.setMinimumHeight(36)
+    download.setMinimumWidth(96)
+    ui.setRole(download, "primary")
+    download.connect("clicked()", dialog.accept)
+    buttons.addWidget(download)
+    layout.addLayout(buttons)
+    ui.dialogChrome(dialog)
+    return dialog
+
+
 def confirmFetch(manager, ids, parent=None):
     """Ask the user to confirm the download of atlases (their licences and size are named); return whether they agreed."""
     ids = manager.missing(ids)
     if not ids:
         return False
-    text = _("Download {count} atlas files ({size}) from the open sources of the catalog (TemplateFlow, the Tian atlas site)?").format(count=len(ids), size=manager.sizeText(ids))
-    text += "\n\n" + "\n".join(manager.describe(ids))
-    box = qt.QMessageBox(qt.QMessageBox.Question, _("Get atlases"), text, qt.QMessageBox.Ok | qt.QMessageBox.Cancel, parent or slicer.util.mainWindow())
-    run = getattr(box, "exec_", None) or box.exec  # Qt 5 PythonQt: exec_, Qt 6: exec
-    return run() == qt.QMessageBox.Ok
+    dialog = fetchQuestionDialog(fetchQuestionText(manager, ids), parent)
+    run = getattr(dialog, "exec_", None) or dialog.exec  # Qt 5 PythonQt: exec_, Qt 6: exec
+    try:
+        # QDialog returns Accepted (1); the Classic QMessageBox returns the Ok button
+        return run() in (qt.QDialog.Accepted, qt.QMessageBox.Ok)
+    finally:
+        dialog.deleteLater()
 
 
 #
