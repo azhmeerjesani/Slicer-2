@@ -786,6 +786,17 @@ class StaleReferenceTest(unittest.TestCase):
         shutil.rmtree(os.path.join(self.path, "derived", "reference"))
         self.assertEqual(manager.bundle_summary(self.path)["reference_status"], "missing")
 
+    def test_manager_row_flags_deleted_reference_map(self):
+        from LesionNetworkMappingLib import manager
+
+        folder = os.path.join(self.path, "derived", "reference")
+        self.assertEqual(manager.bundle_summary(self.path)["reference_status"], "ok")
+        os.remove(os.path.join(folder, "pcs.npy"))
+        self.assertIsNone(reference.load_reference(self.path))
+        row = manager.bundle_summary(self.path)
+        self.assertEqual(row["reference_status"], "corrupt")
+        self.assertIn("pcs.npy", row["reference_reason"])
+
     def test_quick_status_skips_the_time_series_only(self):
         self.assertEqual(reference.reference_status(self.path, verify=False, check_data=False)[0]["status"], "ok")
         _edit_preprocessing(self.path)

@@ -1114,6 +1114,12 @@ def reference_status(bundle, subjects_sha=None, path=None, strict=False, verify=
                 if not os.path.isfile(file_path) or _file_sha256(file_path) != item.get("sha256"):
                     entry.update(status="corrupt", reason=f"{item['file']} is missing or does not match its sha256")
                     break
+        else:
+            # a quick listing does not hash the maps, but a deleted map is cheap to see (load_reference rejects it)
+            for item in metadata["maps"].values():
+                if not os.path.isfile(os.path.join(folder, item["file"])):
+                    entry.update(status="corrupt", reason=f"{item['file']} is missing")
+                    break
     return statuses
 
 
