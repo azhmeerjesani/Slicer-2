@@ -739,6 +739,17 @@ class PalmExportTest(_StudyTestCase):
     def palm_tokens(self, out):
         return self.command(out, "run_palm.sh", "palm")
 
+    def test_export_json_has_no_absolute_paths(self):
+        design = designlib.build_design(self.crossed_study(), DesignSpec(inference={"n_perm": 2000, "tfce": True, "seed": 3}))
+        _, _, out = self.export(design, "palm-nopath")
+        with open(os.path.join(out, "palm_export.json"), encoding="utf-8") as f:
+            manifest = json.load(f)
+        self.assertEqual(manifest["mask_file"], "mask.nii.gz")
+        self.assertIn("mask.nii.gz", manifest["files"])
+        for key, value in manifest.items():
+            if isinstance(value, str):
+                self.assertFalse(os.path.isabs(value) or os.path.dirname(self.mask_path) in value, (key, value))
+
     def test_two_sided_crossed_export(self):
         design = designlib.build_design(self.crossed_study(), DesignSpec(inference={"n_perm": 2000, "tfce": True, "seed": 3}))
         paths, maps, out = self.export(design, "palm-crossed")
