@@ -254,6 +254,19 @@ class StopSignalHandler:
             logging.error("Slicer Studio: stopping after SIGTERM failed:\n" + traceback.format_exc())
 
 
+# Holders (any hashable key) that keep the next poll from saving a scan that was just loaded: Studio's watcher of loads
+# in the DICOM module holds it until it has checked the scan (a damaged series is removed again, not saved as a project)
+_loadHolds = set()
+
+
+def holdNewLoad(key, held=True):
+    """Hold (``held``) or release project creation and autosave for ``key`` while a load is still being checked."""
+    if held:
+        _loadHolds.add(key)
+    else:
+        _loadHolds.discard(key)
+
+
 @contextlib.contextmanager
 def suspended(reason=""):
     """Context manager: no autosave generation starts inside it (no-op without a service)."""
@@ -761,7 +774,7 @@ class AutosaveService:
         if dirty != self.dirty:
             self.dirty = dirty
             self._updateStatus()
-        if not dirty or now < self._pausedUntil or self._suspendCount > 0:
+        if not dirty or now < self._pausedUntil or self._suspendCount > 0 or _loadHolds:
             return
         if not self._hasStorableData(scene):
             return
@@ -1661,7 +1674,7 @@ class AutosaveService:
             if self._studyOpen():
                 self.releaseProjectForStudy()
             return
-        if fingerprint == self._lastProjectCheck or self._recovering or not self.projectsActive():
+        if fingerprint == self._lastProjectCheck or self._recovering or _loadHolds or not self.projectsActive():
             return
         self._startProjectForScene(scene, fingerprint)
 

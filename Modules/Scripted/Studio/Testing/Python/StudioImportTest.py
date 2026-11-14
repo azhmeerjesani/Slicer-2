@@ -3321,7 +3321,7 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         (as a cut-short NIfTI is): no scan, no project, no Recent folder (the reader would zero-fill it silently).
         """
         from DICOMLib import DICOMUtils
-        from StudioLib import importer
+        from StudioLib import autosave, importer, projects
 
         folder = self._writeDicomSeries("dicom lying header", headerSize=512)
         if folder is None:
@@ -3343,12 +3343,30 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertEqual(len(warnings), 1)
             self.assertIn("damaged", warnings[0])
             self.assertFalse([entry for entry in importer.recentFolders() if "lying" in entry["path"]])
+            # The refusal leaves the series in the DICOM browser: loading it there (what its Load button does) is refused
+            # in the same words, so the zero-filled scan is not opened in Draw or saved as a project
+            slicer.util.selectModule("DICOM")  # where the refusal leaves the user (already shown outside this test runner)
+            self._pump(4)
+            self.assertEqual(studioShell.currentModuleName(), "DICOM")
+            seriesUID = slicer.dicomDatabase.seriesForFile(os.path.join(folder, "slice00.dcm"))
+            self.assertTrue(seriesUID)
+            projectBefore = projects.currentProject()
+            DICOMUtils.loadSeriesByUID([seriesUID])
+            # Until the watcher has checked the scan, the autosave poll does not create a project from it
+            self.assertTrue(autosave._loadHolds)
+            self._wait(importer.TRANSIENT_LOAD_WINDOW_MS + 1500)  # the watcher of loads in the DICOM module, then a poll
+            self.assertFalse(autosave._loadHolds)
+            self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")), before)
+            self.assertEqual(len(warnings), 2)
+            self.assertIn("damaged", warnings[1])
+            self.assertNotEqual(studioShell.currentWorkspace(), "draw")
+            self.assertIs(projects.currentProject(), projectBefore)
             # An honest series still opens
             good = self._writeDicomSeries("dicom honest header")
             importer.handleDrop([good], shell=studioShell)
             self._pump(8)
             self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")), before + 1)
-            self.assertEqual(len(warnings), 1)
+            self.assertEqual(len(warnings), 2)
         finally:
             slicer.util.warningDisplay = originalWarning
             if slicer.dicomDatabase.isOpen:

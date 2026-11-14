@@ -2908,6 +2908,31 @@ def _checkDicomSeriesComplete(seriesUID, database):
     except Exception:
         logging.debug(f"Studio: {traceback.format_exc()}")
         return
+    _checkDicomFilesComplete(files)
+
+
+def _checkDicomVolumeComplete(node, database=None):
+    """Raise ``RefusedFileError`` if a DICOM file that the volume ``node`` was loaded from (its ``DICOM.instanceUIDs``
+    attribute) has less pixel data than its header says: a series loaded from the DICOM browser gets the check of a drop.
+    """
+    uids = (node.GetAttribute("DICOM.instanceUIDs") or "").split() if node is not None else []
+    database = database if database is not None else getattr(slicer, "dicomDatabase", None)
+    if not uids or database is None or not database.isOpen:
+        return
+    files = []
+    for uid in uids:
+        try:
+            filePath = database.fileForInstance(uid)
+        except Exception:
+            logging.debug(f"Studio: {traceback.format_exc()}")
+            continue
+        if filePath:
+            files.append(filePath)
+    _checkDicomFilesComplete(files)
+
+
+def _checkDicomFilesComplete(files):
+    """Raise ``RefusedFileError`` if one of the DICOM ``files`` has less pixel data than its header says."""
     for filePath in files:
         shortfall = _dicomPixelDataShortfall(filePath)
         if shortfall is not None:
@@ -5815,6 +5840,16 @@ def _sameLoadedScan(node):
     return None
 
 
+def _removeVolumeAndHelpers(node):
+    """Remove the volume ``node`` with its display and storage nodes."""
+    related = [node.GetNthDisplayNode(i) for i in range(node.GetNumberOfDisplayNodes())]
+    related.append(node.GetStorageNode())
+    slicer.mrmlScene.RemoveNode(node)
+    for other in related:
+        if other is not None and slicer.mrmlScene.IsNodePresent(other):
+            slicer.mrmlScene.RemoveNode(other)
+
+
 class _TransientLoadWatcher(VTKObservationMixin):
     """A scan added while the Sample Data or DICOM module is shown opens in Draw (with a "Lesion" segment), as if it was
     opened from Library. Scene imports and multi-volume loads (more than one volume within 500 ms) are left alone.
@@ -5849,14 +5884,38 @@ class _TransientLoadWatcher(VTKObservationMixin):
         if module not in TRANSIENT_LOADER_MODULES and not (module == _DRAW_MODULE and _addDataDialogs):
             return
         self.added.append(node.GetID())
+        self._holdAutosave(True)  # no project is created from the scan before _onTimeout() has checked it
         self.timer.start()
+
+    def _holdAutosave(self, held):
+        try:
+            from . import autosave
+
+            autosave.holdNewLoad(self, held)
+        except Exception:
+            logging.debug(f"Studio: {traceback.format_exc()}")
 
     def _onTimeout(self):
         added, self.added = self.added, []
         try:
+            self._checkAdded(added)
+        finally:
+            self._holdAutosave(False)
+
+    def _checkAdded(self, added):
+        try:
             nodes = [slicer.mrmlScene.GetNodeByID(nodeId) for nodeId in added]
             nodes = [node for node in nodes if node is not None and _referenceKind(node) is None]
             if len(nodes) != 1 or not self.shell.isActive() or self.shell.currentModuleName() not in (*TRANSIENT_LOADER_MODULES, _DRAW_MODULE):
+                return
+            try:
+                _checkDicomVolumeComplete(nodes[0])
+            except RefusedFileError as e:
+                # A damaged series loaded from the DICOM browser (or imported with its Import button): refused as on a
+                # drop, so the zero-filled scan is neither opened in Draw nor saved as a project
+                logging.warning(f"Studio: {nodes[0].GetName()} was not opened: {e}")  # planned refusal: no traceback
+                _removeVolumeAndHelpers(nodes[0])
+                slicer.util.warningDisplay(str(e))
                 return
             if _isTemplate(nodes[0]):
                 # The MNI template of the Sample Data module: "Start on MNI template" on it (its "Lesions" is reused)
@@ -5871,12 +5930,7 @@ class _TransientLoadWatcher(VTKObservationMixin):
             if openNode is not None and _isScan(openNode):
                 # The same sample loaded a second time: the Sample Data module read its cache file again. The new copy
                 # goes, and the scan that is already open becomes current again ("<name> is already open")
-                related = [nodes[0].GetNthDisplayNode(i) for i in range(nodes[0].GetNumberOfDisplayNodes())]
-                related.append(storageNode)
-                slicer.mrmlScene.RemoveNode(nodes[0])
-                for other in related:
-                    if other is not None and slicer.mrmlScene.IsNodePresent(other):
-                        slicer.mrmlScene.RemoveNode(other)
+                _removeVolumeAndHelpers(nodes[0])
                 result.alreadyOpen.append(openNode)
             else:
                 result.volumes.append(nodes[0])
@@ -5886,6 +5940,7 @@ class _TransientLoadWatcher(VTKObservationMixin):
 
     def dispose(self):
         self.timer.stop()
+        self._holdAutosave(False)
         self.removeObservers()
 
 
