@@ -353,6 +353,35 @@ def check_input_files(args, *options):
             raise JobError(f"The file of --{option.replace('_', '-')} does not exist: {path}", code="usage", exit_code=EXIT_USAGE)
 
 
+def input_message(exc, args=None):
+    """The text of an input error for a command line: a plain sentence, never the Python class or a raw errno text.
+
+    A ``ValueError`` is already a plain sentence. A missing, unreadable or wrong-type file or folder (``OSError`` with a
+    file name) names that path and, when ``args`` (the parsed arguments) holds a path option that is the file or the
+    folder that contains it, the option. Other errors keep their class.
+    """
+    if type(exc) is ValueError:
+        return str(exc)
+    if not isinstance(exc, OSError) or not isinstance(exc.filename, (str, bytes, os.PathLike)):
+        return f"{type(exc).__name__}: {exc}"
+    path = os.fsdecode(exc.filename)
+    where = ""
+    for name, value in sorted(vars(args).items()) if args is not None else ():
+        for item in value if isinstance(value, (list, tuple)) else (value,):
+            for one in item if isinstance(item, (list, tuple)) else (item,):
+                if isinstance(one, str) and one and (os.path.abspath(path) + os.sep).startswith(os.path.abspath(one).rstrip(os.sep) + os.sep):
+                    where = f" (--{name.replace('_', '-')})"
+    if isinstance(exc, FileNotFoundError):
+        return f"The file or folder {path} does not exist{where}"
+    if isinstance(exc, PermissionError):
+        return f"The file or folder {path} cannot be read: permission denied{where}"
+    if isinstance(exc, IsADirectoryError):
+        return f"{path} is a folder, not a file{where}"
+    if isinstance(exc, NotADirectoryError):
+        return f"{path} is not a folder{where}"
+    return f"{path} cannot be read: {exc.strerror or exc}{where}"
+
+
 def positive_int(text):
     """argparse type: an integer of at least 1."""
     try:

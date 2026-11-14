@@ -1294,7 +1294,7 @@ def _build_main(argv):
     except (jobs.Cancelled, jobs.JobError):
         raise
     except (OSError, ValueError, KeyError) as exc:
-        raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None
+        raise jobs.JobError(jobs.input_message(exc, args), code="input") from None
     return jobs.EXIT_OK
 
 
@@ -1310,7 +1310,7 @@ def _estimate_main(argv):
         jobs.emit("start", job="reference-estimate", argv=argv, threads=args.threads)
         info = estimate(bundle, args.subjects, args.subject_list, args.seeds, args.pcs, args.power_iters, args.oversample, args.ev1, args.chunk, int(args.memory_gb * 1024**3))
     except (OSError, ValueError, KeyError) as exc:
-        raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None
+        raise jobs.JobError(jobs.input_message(exc, args), code="input") from None
     jobs.emit("result", kind="estimate", **info)
     jobs.emit("done", outputs=[], elapsed=round(jobs.elapsed(), 3), run_id=None, seconds=info["seconds"])
     return jobs.EXIT_OK
@@ -1333,7 +1333,7 @@ def _compare_main(argv):
             raise jobs.JobError(jobs.command_text("No valid reference maps for this connectome and subject list: build them with 'python -m LesionNetworkMappingLib.reference build'"), code="no_reference")
         external = external_on_grid(args.external, bundle, args.min_coverage)
     except (OSError, ValueError, KeyError) as exc:
-        raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None
+        raise jobs.JobError(jobs.input_message(exc, args), code="input") from None
     from .qa import degree_similarity
 
     n_covered = int(np.count_nonzero(np.isfinite(external)))

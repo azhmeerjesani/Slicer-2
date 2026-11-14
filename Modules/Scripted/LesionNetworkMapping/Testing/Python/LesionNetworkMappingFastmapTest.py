@@ -12,6 +12,7 @@ Run without Slicer's GUI:
     PythonSlicer -m unittest Testing/Python/LesionNetworkMappingFastmapTest.py -v
 """
 
+import argparse
 import json
 import os
 import shutil
@@ -746,6 +747,30 @@ class FastmapTest(unittest.TestCase):
         process = subprocess.run([sys.executable, "-m", "LesionNetworkMappingLib.fastmap", *args], capture_output=True, text=True, env=_env(), cwd=MODULE_DIR, timeout=600, check=False)
         events = [json.loads(line) for line in process.stdout.splitlines() if line.startswith("{")]
         return process.returncode, events, process.stderr
+
+    def test_command_line_missing_input_is_plain_sentence(self):
+        """A missing tiling folder, index folder, lesion or external map is a sentence naming the path and the option, never FileNotFoundError / [Errno 2]."""
+        root = os.path.join(self.tmp, "cli-missing")
+        os.makedirs(root, exist_ok=True)
+        calls = (
+            (("build", "--bundle", self.bundle.path, "--tiling", os.path.join(root, "missing-tiling"), "--out", os.path.join(root, "i")), "--tiling"),
+            (("apply", "--index", os.path.join(root, "noindex"), "--lesion", os.path.join(root, "l.nii.gz"), "--out", os.path.join(root, "o")), "--index"),
+            (("apply", "--index", self.index_dir, "--lesion", os.path.join(root, "missing.nii.gz"), "--out", os.path.join(root, "o")), "--lesion"),
+        )
+        for argv, option in calls:
+            code, events, _ = self._run(*argv)
+            self.assertEqual(code, 1, argv)
+            self.assertEqual(events[-1]["code"], "input")
+            message = events[-1]["message"]
+            for raw in ("FileNotFoundError", "Errno", "No such file"):
+                self.assertNotIn(raw, message)
+            self.assertIn("does not exist", message)
+            self.assertIn(option, message)
+        # The shared wording, also used by the reference command line (compare --external)
+        args = argparse.Namespace(external=os.path.join(root, "missing.nii.gz"))
+        message = jobs.input_message(FileNotFoundError(2, "No such file or directory", args.external), args)
+        self.assertEqual(message, f"The file or folder {args.external} does not exist (--external)")
+        self.assertEqual(jobs.input_message(ValueError("plain")), "plain")
 
     def test_command_line(self):
         root = os.path.join(self.tmp, "cli")

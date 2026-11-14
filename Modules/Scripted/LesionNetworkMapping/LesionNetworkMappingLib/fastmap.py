@@ -1703,13 +1703,13 @@ def _build_main(argv):
     except fetch.NotCachedError as exc:
         raise jobs.JobError(str(exc), code="not_cached") from None
     except (OSError, ValueError, KeyError, fetch.FetchError) as exc:
-        raise jobs.JobError(_input_message(exc), code="input") from None
+        raise jobs.JobError(_input_message(exc, args), code="input") from None
     return jobs.EXIT_OK
 
 
-def _input_message(exc):
-    """The text of an input error for the command line: a ValueError is already a plain sentence, other errors keep their class."""
-    return str(exc) if type(exc) is ValueError else f"{type(exc).__name__}: {exc}"
+def _input_message(exc, args=None):
+    """The text of an input error for the command line: a plain sentence for a ValueError and for a missing or unreadable file, other errors keep their class."""
+    return jobs.input_message(exc, args)
 
 
 def _parity_main(argv):
@@ -1751,7 +1751,7 @@ def _parity_main(argv):
     except (jobs.Cancelled, jobs.JobError):
         raise
     except (OSError, ValueError, KeyError) as exc:
-        raise jobs.JobError(_input_message(exc), code="input") from None
+        raise jobs.JobError(_input_message(exc, args), code="input") from None
     cover = coverage(weights, index)
     for lesion, lesion_qc, lesion_cover, (_, exact_path) in zip(report["lesions"], qc, cover, pairs, strict=True):
         lesion.update({"file": lesion_qc["file"], "sha256": lesion_qc["sha256"], "exact_map": os.path.basename(exact_path), "coverage": lesion_cover})
@@ -1811,7 +1811,7 @@ def _apply_main(argv):
     except jobs.JobError:
         raise
     except (OSError, ValueError, KeyError) as exc:
-        raise jobs.JobError(_input_message(exc), code="input") from None
+        raise jobs.JobError(_input_message(exc, args), code="input") from None
     os.makedirs(args.out, exist_ok=True)
     bundle_name = (index.metadata.get("bundle") or {}).get("name") or "connectome"
     strata = lesion_strata(weights, index)
