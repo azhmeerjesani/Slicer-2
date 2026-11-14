@@ -11066,6 +11066,88 @@ sys.exit(web.command_local(args))
             projects.discardMoveJournal()
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
 
+    def test_122_scene_load_with_clear_asks_when_the_open_project_cannot_be_saved(self):
+        """Classic Add Data (or a drop) with "Clear existing scene", or a script's loadScene with clear, while the open
+        project could not be saved (disk full, read-only folder) asked nothing: the scene reader cleared the scene, the
+        project was released and its edits were lost (BB-1). Every scene load with clear through the IO manager now
+        announces itself (clearSceneRequested) and the user is asked as for Load Scene: "Keep working" loads nothing and
+        keeps the project open with its edits; "Open without saving" lets that load go on without trying to save again.
+        """
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        ioManager = slicer.app.coreIOManager()
+        service = self._service()
+        self.assertTrue(service.connectCloseSummary())  # disconnected by dispose() in tearDown
+        outsideScene = slicer.vtkMRMLScene()
+        outsidePath = os.path.join(self.userDir, "outside.mrml")
+        outsideScene.SetURL(outsidePath)
+        outsideScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "OutsidePoints")
+        self.assertTrue(outsideScene.Commit())
+        volume, _path = self._userVolume("Scan", shape=(12, 14, 16), extension=".nrrd")
+        project = self._projectFor(service)
+        self._save(service)
+        array = slicer.util.arrayFromVolume(volume)
+        array[:] = 321  # the edit that cannot be saved
+        slicer.util.arrayFromVolumeModified(volume)
+
+        asked = []
+        saves = []
+
+        def answer(index):
+            def question(parent, title, text, buttons, default=0):
+                asked.append((title, text, list(buttons), default))
+                return index
+            return question
+
+        def failedSave(*args, **kwargs):
+            saves.append(args[0] if args else kwargs.get("reason"))
+            return False
+
+        sceneFile = {"fileName": outsidePath, "clear": True}
+        with mock.patch.object(service, "saveNow", failedSave), mock.patch.object(projects_ui, "_shell", lambda: None):
+            service._projectPausedReason = "less than 1.2 MB free on the disk"
+            with mock.patch.object(projects_ui, "_question", answer(2)):
+                # Keep working (a script's loadScene; Add Data and a drop load their list of files the same way): nothing
+                # is loaded
+                self.assertFalse(ioManager.loadNodes("SceneFile", sceneFile))
+                self.assertEqual(ioManager.property("SlicerStudioClearSceneAnswer"), "cancel")
+                with self.assertRaises(RuntimeError):
+                    slicer.util.loadScene(outsidePath, {"clear": True})
+            self.assertEqual(len(asked), 2, "the user is asked before the scene with unsaved edits is replaced")
+            title, text, buttons, default = asked[0]
+            self.assertEqual(title, "Open scene")
+            self.assertEqual(len(buttons), 3)
+            self.assertIn("less than 1.2 MB free", text)
+            self.assertEqual(default, 2, "keeping the work is the default")
+            self.assertIs(service.project, project, "the project that could not be saved stays open")
+            self.assertIsNotNone(slicer.mrmlScene.GetNodeByID(volume.GetID()))
+            self.assertTrue((slicer.util.arrayFromVolume(volume) == 321).all(), "its edits are kept")
+            self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName("OutsidePoints"), "nothing is loaded")
+            self.assertFalse(service._discardOnClose)
+
+            # A scene added without clear replaces nothing: nothing is asked
+            with mock.patch.object(projects_ui, "_question", answer(2)):
+                self.assertTrue(ioManager.loadNodes("SceneFile", {"fileName": outsidePath, "clear": False}))
+            self.assertEqual(len(asked), 2)
+            self.assertFalse(ioManager.property("SlicerStudioClearSceneAnswer"), "the answer is cleared by the next load")
+            self.assertIs(service.project, project)
+            slicer.mrmlScene.RemoveNode(slicer.mrmlScene.GetFirstNodeByName("OutsidePoints"))
+
+            # Open without saving: the load goes on and the close does not try (and fail) to save again
+            del saves[:]
+            with mock.patch.object(projects_ui, "_question", answer(1)):
+                self.assertTrue(ioManager.loadNodes("SceneFile", sceneFile))
+            self.assertEqual(len(asked), 3)
+            self.assertEqual(saves, ["open"], "only the save before asking; the close does not save again")
+            self.assertIsNotNone(slicer.mrmlScene.GetFirstNodeByName("OutsidePoints"), "the scene is loaded")
+            self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName("Scan"), "the scene is replaced")
+            self.assertIsNot(service.project, project, "the project is released")
+            self.assertFalse(service._discardOnClose, "the choice applies to that load only")
+            self.assertEqual(self.projects.readJson(self.projects.projectFile(project.path))["state"], "closed")
+
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 

@@ -313,6 +313,16 @@ signals:
   /// \sa saveNodes()
   void fileSaved(const qSlicerIO::IOProperties& savedFileParameters);
 
+  /// Emitted by loadNodes() before a scene file is loaded with "clear" (the scene is replaced, for example by
+  /// Add Data with "Clear existing scene"), after the IO manager property SlicerStudioClearSceneAnswer is cleared.
+  /// A handler connected with a direct connection may set it to "cancel": nothing is loaded and loadNodes() returns
+  /// false (for example, the open project could not be saved and the user keeps working in it); the answer stays
+  /// set until the next loadNodes() call. clearSceneFinished() is emitted afterwards in every case.
+  void clearSceneRequested();
+
+  /// Emitted after the load that clearSceneRequested() announced is done, cancelled or failed.
+  void clearSceneFinished();
+
 public:
   /// Returns the list of registered readers
   Q_INVOKABLE QList<qSlicerFileReader*> readers() const;
@@ -342,6 +352,9 @@ protected:
   /// Used when the Qt-based reader or writer does not provide an options widget.
   /// Returns nullptr in the core IO manager, as widgets are only available in the GUI application.
   virtual qSlicerIOOptions* createGenericOptions(vtkMRMLFileIOHandler* ioHandler) const;
+
+  /// Emit clearSceneRequested() and return false if a handler answered "cancel" (the scene must not be replaced).
+  bool confirmClearScene();
 
 protected:
   QScopedPointer<qSlicerCoreIOManagerPrivate> d_ptr;

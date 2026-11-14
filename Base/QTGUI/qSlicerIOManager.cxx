@@ -543,6 +543,12 @@ void qSlicerIOManager::showLoadNodesResultDialog(bool overallSuccess, vtkMRMLMes
     return;
   }
   qSlicerApplication* app = qSlicerApplication::application();
+  if (!overallSuccess && userMessages->GetNumberOfMessages() == 0 && app && app->coreIOManager()
+      && app->coreIOManager()->property("SlicerStudioClearSceneAnswer").toString() == "cancel")
+  {
+    // The scene was not replaced because the user chose to keep it (see qSlicerCoreIOManager::clearSceneRequested())
+    return;
+  }
   QWidget* mainWindow = app ? app->mainWindow() : nullptr;
   ctkMessageBox* messageBox = new ctkMessageBox(mainWindow);
   QString text;

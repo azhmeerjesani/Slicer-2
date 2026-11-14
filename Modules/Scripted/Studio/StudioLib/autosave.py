@@ -597,6 +597,10 @@ class AutosaveService:
                 if hasattr(mainWindow, "loadSceneRequested") and hasattr(mainWindow, "loadSceneFinished"):
                     mainWindow.disconnect("loadSceneRequested()", self._onLoadSceneRequested)
                     mainWindow.disconnect("loadSceneFinished()", self._onLoadSceneFinished)
+            ioManager = slicer.app.coreIOManager()
+            if hasattr(ioManager, "clearSceneRequested") and hasattr(ioManager, "clearSceneFinished"):
+                ioManager.disconnect("clearSceneRequested()", self._onClearSceneRequested)
+                ioManager.disconnect("clearSceneFinished()", self._onLoadSceneFinished)
             self._closeSummaryConnected = False
         self._removeObservers()
         self._removePlanObservers()
@@ -2199,6 +2203,10 @@ class AutosaveService:
         if hasattr(mainWindow, "loadSceneRequested") and hasattr(mainWindow, "loadSceneFinished"):
             mainWindow.connect("loadSceneRequested()", self._onLoadSceneRequested)
             mainWindow.connect("loadSceneFinished()", self._onLoadSceneFinished)
+        ioManager = slicer.app.coreIOManager()
+        if hasattr(ioManager, "clearSceneRequested") and hasattr(ioManager, "clearSceneFinished"):
+            ioManager.connect("clearSceneRequested()", self._onClearSceneRequested)
+            ioManager.connect("clearSceneFinished()", self._onLoadSceneFinished)
         self._closeSummaryConnected = True
         return True
 
@@ -2218,6 +2226,23 @@ class AutosaveService:
             keep = False
         if keep:
             mainWindow.setProperty("SlicerStudioLoadSceneAnswer", "cancel")
+
+    def _onClearSceneRequested(self):
+        """A scene file is about to be loaded with "clear" through the IO manager (Classic Add Data or a drop with "Clear
+        existing scene", a script's ``loadScene(..., {"clear": True})``): the open project is saved first, and if that fails
+        the user is asked as for Load Scene (``confirmReplaceProject``); "Keep working" loads nothing. A load that was already
+        confirmed (File > Load Scene, Open project, Open scene) saved the project, so nothing is asked again; after "Open
+        without saving" or "Save a copy…" the close does not save (``_discardOnClose``), and nothing is asked either.
+        """
+        if self.project is None or self._recovering != 0 or not self.enabled() or self._discardOnClose:
+            return
+        try:
+            keep = not self.confirmReplaceProject(_("Open scene"))
+        except Exception:
+            logging.error("Slicer Studio: saving the project before loading a scene failed:\n" + traceback.format_exc())
+            keep = False
+        if keep:
+            slicer.app.coreIOManager().setProperty("SlicerStudioClearSceneAnswer", "cancel")
 
     def _onLoadSceneFinished(self):
         # "Open without saving" / "Save a copy…" apply to that load only (its file dialog may have been cancelled)
