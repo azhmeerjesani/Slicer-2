@@ -110,6 +110,28 @@ def _privacyModule():
 # The original, kept before any test replaces the Python name (the official dialogs call the C++ function)
 _REAL_OPEN_URL = qt.QDesktopServices.openUrl
 
+def _qtWith(className, **replacements):
+    """A stand-in for the ``qt`` module in which the class ``className`` has ``replacements`` (static functions), to be set
+    with ``mock.patch.object(<module>, "qt", ...)`` on the module under test.
+
+    Never patch a PythonQt class itself (``mock.patch.object`` on ``qt.QDir``, to replace ``homePath``): when the patch is undone the
+    original slot is written back into the class and the next call of that function crashes Slicer (a segmentation fault
+    in a later, unrelated test).
+    """
+    class _Stub:
+        def __init__(self, target, **attributes):
+            self.__dict__["_target"] = target
+            self.__dict__.update(attributes)
+
+        def __getattr__(self, name):
+            return getattr(self._target, name)
+
+        def __call__(self, *args, **kwargs):
+            return self._target(*args, **kwargs)
+
+    return _Stub(qt, **{className: _Stub(getattr(qt, className), **replacements)})
+
+
 def _clockNow(service):
     from StudioLib import autosave
 
@@ -1105,6 +1127,7 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertTrue(shown.endswith("Slicer Studio"), shown)
             self.assertEqual(_plainToolTip(dialog.pathLabel), longPath)
         finally:
+            dialog.hide()
             dialog.deleteLater()
         # Web build: a folder outside /data is warned about in the chooser (lost when the container is removed); /data is not
         projects = self.projects
@@ -1122,6 +1145,7 @@ class StudioProjectsTest(unittest.TestCase):
                 dialog.setPath("/data/Slicer Studio")
                 self.assertTrue(dialog.syncedNotice.isHidden())
             finally:
+                dialog.hide()
                 dialog.deleteLater()
             os.environ.pop("SLICER_STUDIO_WEB")
             if not os.path.exists("/.dockerenv"):
@@ -1156,6 +1180,16 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertIn("Projects/sub-012 T1w", toolTip)
         items = {item["id"] for item in projects_ui.paletteItems()}
         self.assertTrue({"projects.new", "projects.open", "projects.rename", "projects.showFolder", "projects.changeFolder"} <= items)
+
+    def test_13_ui_leaves_no_chooser_window_open(self):
+        """test_13_ui must not leave a visible folder chooser behind: it stayed the active modal window and stopped later
+        tests (test_13a) from giving keyboard focus to their widgets.
+        """
+        self.test_13_ui()
+        slicer.app.processEvents()
+        leaked = [w.objectName for w in slicer.app.topLevelWidgets() if w.isVisible() and w.objectName == "StudioProjectsFolderDialog"]
+        self.assertEqual(leaked, [])
+        self.assertIsNone(qt.QApplication.activeModalWidget())
 
     def test_13a_keyboard_focus_ring_shows_on_the_open_projects_card(self):
         """The card of the open project (studioCurrent) keeps its accent border, and a keyboard focus on it must still show
@@ -3858,7 +3892,7 @@ class StudioProjectsTest(unittest.TestCase):
             timer.connect("timeout()", tick)
             timer.start()
             try:
-                with mock.patch.object(qt.QFileDialog, "getExistingDirectory", return_value=pick):
+                with mock.patch.object(projects_ui, "qt", _qtWith("QFileDialog", getExistingDirectory=lambda *args: pick)):
                     result = projects_ui.changeRootDialog(None)
             finally:
                 timer.stop()
@@ -9266,7 +9300,7 @@ class StudioProjectsTest(unittest.TestCase):
 
         with mock.patch.object(shutil, "disk_usage", diskUsage), \
                 mock.patch.object(projects_ui, "saveCopyStartFolder", lambda: full), \
-                mock.patch.object(qt.QDir, "homePath", staticmethod(lambda: roomy)):
+                mock.patch.object(projects_ui, "qt", _qtWith("QDir", homePath=lambda: roomy)):
             self.assertEqual(projects_ui.rescueCopyStartFolder(), roomy)
         with mock.patch.object(shutil, "disk_usage", realUsage), mock.patch.object(projects_ui, "saveCopyStartFolder", lambda: roomy):
             self.assertEqual(projects_ui.rescueCopyStartFolder(), roomy)
@@ -9283,6 +9317,29 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertIsNone(projects_ui.saveCopyAs(copyPath))
         self.assertFalse(os.path.exists(copyPath), "no 0-byte bundle is left behind")
         self.assertIn("full", toasts[-1])
+
+    def test_97c_tests_do_not_patch_qt_classes(self):
+        """BB-1: test_97b replaced ``qt.QDir.homePath`` with ``mock.patch.object``. Undoing such a patch writes the PythonQt
+        slot back into the class, and the next ``qt.QDir.homePath()`` (test_98, through ``Shell.apply``) crashed Slicer,
+        so a full run of this file never finished. Tests replace ``qt`` in the module under test instead (``_qtWith``).
+        """
+        with open(__file__.replace(".pyc", ".py"), encoding="utf-8") as f:
+            source = f.read()
+        found = re.findall(r"patch\.object\(\s*qt\.\w+", source)
+        self.assertEqual(found, [], "patch the module's qt with _qtWith instead")
+        # The stand-in replaces only what is named, and only in the module it is given to
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        home = qt.QDir.homePath()
+        with mock.patch.object(projects_ui, "qt", _qtWith("QDir", homePath=lambda: "/stand-in")):
+            self.assertEqual(projects_ui.qt.QDir.homePath(), "/stand-in")
+            self.assertEqual(projects_ui.qt.QDir.tempPath(), qt.QDir.tempPath())
+            self.assertIs(projects_ui.qt.QTimer, qt.QTimer)
+            self.assertEqual(qt.QDir.homePath(), home)
+        self.assertIs(projects_ui.qt, qt)
+        self.assertEqual(qt.QDir.homePath(), home)
 
     def test_98_locked_project_warning_is_seen_when_opened_early_or_with_a_load_toast(self):
         """BB-1: a project that another Slicer Studio has open, opened in this window. (1) From the command line the scene is
