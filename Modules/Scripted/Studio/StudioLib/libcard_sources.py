@@ -550,7 +550,8 @@ class SourcesCard:
                         item = qt.QTableWidgetItem()
                         self.table.setItem(index, column, item)
                     item.setText(text)
-                    tip = row["title"] if column == 1 else " · ".join(part for part in details if part) if column == 0 else ""
+                    # The Record column is narrow (ids are elided), so its tooltip leads with the full id.
+                    tip = row["title"] if column == 1 else " · ".join(part for part in [row["record_id"]] + details if part) if column == 0 else ""
                     if column == 2 and row["stage"] == "excluded" and row["exclusion_reason"]:
                         tip = _("Excluded: {reason}").format(reason=row["exclusion_reason"])
                     item.setToolTip(tip)

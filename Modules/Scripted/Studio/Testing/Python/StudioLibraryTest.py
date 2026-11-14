@@ -2178,6 +2178,26 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(report["skipped"], 1)
         self.assertEqual(toasts, ["2 added \u00b7 1 entry could not be read"])
 
+    def test_sources_record_cell_tooltip_names_the_full_id(self):
+        """The Record column elides ids; its tooltip must carry the full id so similar records can be told apart (BB-1)."""
+        from LesionNetworkMappingLib.study import Study
+        from StudioLib import libcard_sources, study_ui
+
+        path = os.path.join(self.directory, "LitTip")
+        Study.create(path, name="Lit").save()
+        session = study_ui.openStudy(path, None)
+        self.cleanup.append(study_ui.closeStudy)
+        original = libcard_sources._toast
+        libcard_sources._toast = lambda *args, **kwargs: None
+        self.cleanup.append(lambda: setattr(libcard_sources, "_toast", original))
+        card = libcard_sources.SourcesCard(session)
+        self.cleanup.append(card.widget.close)
+        card.importRecords(text="@article{a, title={One}, year=2020, author={Lefevre, A}}\n", database="Scholar", query="q")
+        card.refresh()
+        self.assertGreater(len(card._rows), 0)
+        for index, recordId in enumerate(card._rows):
+            self.assertIn(recordId, card.table.item(index, 0).toolTip())
+
     def test_sources_unreadable_records_tsv_is_never_overwritten(self):
         """A records.tsv that cannot be read (not UTF-8, or comma-separated) stays as it is: Import refuses, the error stays shown, the stage log is kept (BB-1)."""
         from LesionNetworkMappingLib import sources
