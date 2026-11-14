@@ -720,13 +720,19 @@ class VlsmTab(CohortTab):
                 (record.get("contrast") or {}).get("spec"), "{score}").format(score=scoreName)
         else:
             contrast = contrastText((record.get("contrast") or {}).get("spec", ""), list(record.get("n_per_level") or {}))
-        others = [str(name) for name in (record.get("covariates") or []) if name != "volume_ml"]
+        transforms = record.get("transforms") or {}
+
+        def transformed(name):  # the covariate as the model used it: log(volume_ml), z(age) (BB-1: transforms were not shown)
+            return f"{transforms[name]}({name})" if transforms.get(name) else str(name)
+
+        others = [transformed(name) for name in (record.get("covariates") or []) if name != "volume_ml"]
         otherCovariates = (" · " + _("covariates: {names}").format(names=", ".join(others))) if others else ""
         lines = [
             "<b>" + html.escape(_("VLSM · {contrast} · n = {n}").format(contrast=contrast, n=record.get("n", "?"))) + (f" ({perLevel})" if perLevel else "") + "</b>",
             html.escape(_("{v} voxels tested: lesioned in ≥ {k} lesions ({rule}) · lesion volume {volume}").format(
                 v=f"{overlap.get('n_voxels_tested', record.get('n_voxels', 0)):,}", k=overlap.get("min_count", "?"), rule=overlap.get("rule", ""),
-                volume=_("covariate") if record.get("volume_covariate") else _("off")) + otherCovariates),
+                volume=(_("covariate ({name})").format(name=transformed("volume_ml")) if transforms.get("volume_ml") else _("covariate"))
+                if record.get("volume_covariate") else _("off")) + otherCovariates),
             html.escape(_("{n} permutations{kind} · smallest attainable p {p:.2g} · {scheme}").format(
                 n=f"{nPerm:,}" if isinstance(nPerm, int) else nPerm, kind=_(" (exhaustive)") if permutation.get("exhaustive") else (_(" (preview)") if permutation.get("preview") else ""),
                 p=float(record.get("min_attainable_p") or record.get("min_p") or 1.0), scheme=permutation.get("reason") or permutation.get("scheme") or "")),

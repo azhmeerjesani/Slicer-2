@@ -175,6 +175,24 @@ class LesionNetworkMappingVlsmUITest(unittest.TestCase):
         _pump(50)
         self.assertNotIn("not analysed", str(tab.summaryLabel.text))
 
+    def test_result_names_the_covariate_transforms(self):
+        # A run with log(volume) and a z-scored covariate: the summary names the model actually fitted (BB-1: it said
+        # "lesion volume covariate" and "age" with no transform)
+        tab = self.vlsm
+        record = {"test": "continuous", "n": 28, "contrast": {"spec": "negative", "columns": ["intercept", "score"]},
+                  "volume_covariate": True, "covariates": ["volume_ml", "age"], "transforms": {"volume_ml": "log", "age": "z"}}
+        tab.showResult(self.tmp, record)
+        _pump(50)
+        text = str(tab.summaryLabel.text)
+        self.assertIn("lesion volume covariate (log(volume_ml))", text)
+        self.assertIn("covariates: z(age)", text)
+        record["transforms"] = {}
+        tab.showResult(self.tmp, record)
+        _pump(50)
+        text = str(tab.summaryLabel.text)
+        self.assertNotIn("log(", text)
+        self.assertIn("covariates: age", text)
+
     def test_result_states_the_fdr_floor(self):
         # "FDR q ≤ 0.05: 0 voxels" next to FWE-significant voxels: the summary states the FDR floor, as the Contrast tab
         # does (BB-1: vlsm.json's fdr note was not shown)

@@ -1181,9 +1181,20 @@ def statistics_section(records, used):
     return section
 
 
+def _transformed_name(name, transforms):
+    """'log(volume_ml)' when the design transformed the covariate (vlsm.json / calibration.json "transforms"), else the name."""
+    transform = (transforms or {}).get(name)
+    return f"{transform}({name})" if transform else str(name)
+
+
 def _covariate_text(data):
+    """The covariates of a vlsm.json record, with the transforms of the model actually fitted (log volume, z-scores)."""
     covariates = data.get("covariates")
-    text = ", ".join(f"{covariate} (total lesion volume)" if covariate == "volume_ml" else str(covariate) for covariate in covariates) if covariates else "none"
+    transforms = data.get("transforms") or {}
+    text = ", ".join(
+        f"{_transformed_name(covariate, transforms)} (total lesion volume)" if covariate == "volume_ml" else _transformed_name(covariate, transforms)
+        for covariate in covariates
+    ) if covariates else "none"
     if data.get("volume_off_reason"):
         text += f" (lesion volume off: {data['volume_off_reason']})"
     return text
@@ -1762,7 +1773,7 @@ def _calibration_design_text(design):
     permutation scheme.
     """
     transforms = design.get("transforms") or {}
-    covariates = [f"{transforms[name]}({name})" if transforms.get(name) else str(name) for name in design.get("covariates") or []]
+    covariates = [_transformed_name(name, transforms) for name in design.get("covariates") or []]
     covariate_text = ", ".join(covariates) if covariates else "none" if design.get("covariates") is not None else NOT_RECORDED
     return (
         f"{_or_nr(design.get('label'))}, test {_or_nr(design.get('test'))}, n = {_or_nr(design.get('n'))}, covariates: {covariate_text}, "

@@ -266,6 +266,22 @@ class VlsmRunTest(unittest.TestCase):
         self.assertIn("smallest attainable p 0.001", legacy)
         self.assertNotIn("min_p", legacy)
 
+    def test_methods_name_the_covariate_transforms(self):
+        """The covariates clause names the model actually fitted: log(volume_ml), z(age) (BB-1: a run with log volume was
+        described as plain lesion volume, so copied methods text reported another model).
+        """
+        from LesionNetworkMappingLib import methods
+
+        record = {"design_type": "continuous", "test": "continuous", "n": 28, "covariates": ["volume_ml", "age"],
+                  "transforms": {"volume_ml": "log", "age": "z"}, "contrast": {"label": "scoreNeg", "spec": "negative"}}
+        text = methods.vlsm_paragraph(record, "vlsm-1")
+        self.assertIn("covariates: log(volume_ml) (total lesion volume), z(age).", text)
+        plain = methods.vlsm_paragraph({**record, "transforms": {}}, "vlsm-1")
+        self.assertIn("covariates: volume_ml (total lesion volume), age.", plain)
+        self.assertNotIn("log(", plain)
+        legacy = {key: value for key, value in record.items() if key != "transforms"}  # vlsm.json written before transforms
+        self.assertIn("covariates: volume_ml (total lesion volume), age.", methods.vlsm_paragraph(legacy, "vlsm-1"))
+
     def test_methods_cite_only_the_run_whose_outputs_are_in_the_folder(self):
         """Two VLSM runs into the same folder: the methods cite only the later one (bug bash: the overwritten run was
         cited too, as a fallback paragraph "vlsm.json not recorded").
