@@ -715,6 +715,54 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
         self.assertTrue(inView(target), f"Tab focused {target.className()} {target.objectName} out of view (scroll {bar.value})")
         self.assertEqual(bar.value, 0)
 
+    def test_opening_notes_scrolls_the_fields_into_view(self):
+        """Opening Notes (the row, or Search > Notes) in an inspector that is scrolled down scrolls the notes and source
+        fields into view, and the focused field is never off screen (SPEC 2.11).
+        """
+        import numpy as np
+
+        from StudioLib import draw, importer
+
+        volume = slicer.util.addVolumeFromArray(np.arange(8 * 9 * 10, dtype=np.uint8).reshape(8, 9, 10), name="Scan")
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        importer.startOnTemplate(shell=studioShell, volumeNode=volume)
+        self._pump(10)
+        ext = draw.extension()
+        card = ext.card
+        self.assertIsNotNone(card)
+        scrollArea = self.mainWindow.findChild("QDockWidget", "PanelDockWidget").findChild("QScrollArea", "ScrollArea")
+        bar = scrollArea.verticalScrollBar()
+        more = self.mainWindow.findChild("QWidget", "SegmentEditorMoreToolsButton")
+        if more is not None:
+            more.click()
+        viewport = scrollArea.viewport()
+
+        def inView(widget):
+            rect = qt.QRect(widget.mapTo(viewport, qt.QPoint(0, 0)), widget.size)
+            return viewport.rect.contains(rect)
+
+        for height in (520, 440, 380, 320):
+            self.mainWindow.resize(1366, height)
+            self._pump(8)
+            card.setNotesVisible(False)
+            self._pump(8)
+            if bar.maximum > 0 and bar.maximum < 300:
+                break
+        if bar.maximum <= 0:
+            self.skipTest("the Draw inspector does not scroll in this window")
+        for name, opener in (("row", ext.notesRow.click), ("focusNotes", lambda: draw.focusNotes(studioShell)),
+                             ("focusSource", lambda: draw.focusNotes(studioShell, "source"))):
+            card.setNotesVisible(False)
+            self._pump(8)
+            bar.setValue(bar.maximum)
+            self._pump(4)
+            opener()
+            self._pump(8)
+            self.assertFalse(card.notesFrame.isHidden(), name)
+            self.assertTrue(inView(card.sourceReferenceEdit if name == "focusSource" else card.notesEdit),
+                            f"{name}: the field is out of view (scroll {bar.value} of {bar.maximum})")
+
     def _tabStops(self, root):
         """The widgets under ``root`` that Tab stops on now, in the order of the keyboard focus chain (starting at the
         stop that is highest on the screen, then left).

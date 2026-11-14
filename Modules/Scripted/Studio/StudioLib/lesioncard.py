@@ -975,11 +975,38 @@ class LesionCard:
         self.notesFrame.setVisible(visible)
         if callable(self.notesVisibilityChanged):
             self.notesVisibilityChanged(visible)
+        if visible:
+            self._scrollIntoView(self.notesFrame)
+
+    def _scrollIntoView(self, target):
+        """Scroll the inspector so ``target`` shows once the layout has settled (a newly shown frame has no size yet).
+
+        setFocus() and showing a frame do not scroll a QScrollArea, so Notes opened at the bottom of a tall inspector would
+        stay below the fold (SPEC 2.11: the focus ring is visible).
+        """
+        scrollArea = None
+        parent = self.widget.parent()
+        while parent is not None:
+            if parent.inherits("QScrollArea"):
+                scrollArea = parent
+                break
+            parent = parent.parent()
+        if scrollArea is None:
+            return
+
+        def scroll():
+            if ui._isAlive(scrollArea) and ui._isAlive(target) and scrollArea.widget() is not None \
+                    and scrollArea.isAncestorOf(target) and target.isVisible():
+                scrollArea.ensureWidgetVisible(target)
+
+        qt.QTimer.singleShot(0, scroll)
 
     def focusNotes(self, field="notes"):
         """Open the Notes and focus the notes field ("notes") or the source field ("source")."""
         self.setNotesVisible(True)
-        (self.sourceReferenceEdit if field == "source" else self.notesEdit).setFocus(qt.Qt.OtherFocusReason)
+        edit = self.sourceReferenceEdit if field == "source" else self.notesEdit
+        edit.setFocus(qt.Qt.OtherFocusReason)
+        self._scrollIntoView(edit)
 
     def startRename(self):
         """Focus the name field with the name selected (the ⋯ "Rename lesion" item)."""
