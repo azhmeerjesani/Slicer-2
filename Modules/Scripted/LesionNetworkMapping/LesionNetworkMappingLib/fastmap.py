@@ -1388,6 +1388,18 @@ def parity(exact_fz, approx, reference, strata, sizes_ml=None, names=None, top_p
     return report
 
 
+def format_below(value, constant):
+    """Format ``value`` (known to be below ``constant``) with two decimals, or with more when two decimals would round it
+    up to the constant ("0.796" rather than "0.80" for a gate of 0.80), so a failing value never reads as equal.
+    """
+    value = float(value)
+    for digits in range(2, 8):
+        text = f"{value:.{digits}f}"
+        if float(text) < constant:
+            return text
+    return f"{value:.8f}"
+
+
 def _group_verdict(members, constants, min_group):
     n = len(members)
     partial = _median([m["partial_r"] for m in members])
@@ -1398,9 +1410,9 @@ def _group_verdict(members, constants, min_group):
     elif partial is None:
         verdict["reason"] = "the partial r is not available (no reference maps)"
     elif partial < constants["partial_r"]:
-        verdict["reason"] = f"median partial r {partial:.2f} < {constants['partial_r']:.2f}"
+        verdict["reason"] = f"median partial r {format_below(partial, constants['partial_r'])} < {constants['partial_r']:.2f}"
     elif dice is None or dice < constants["top10_dice"]:
-        verdict["reason"] = f"median top-10% Dice {'n/a' if dice is None else f'{dice:.2f}'} < {constants['top10_dice']:.2f}"
+        verdict["reason"] = f"median top-10% Dice {'n/a' if dice is None else format_below(dice, constants['top10_dice'])} < {constants['top10_dice']:.2f}"
     else:
         verdict["passed"] = True
         verdict["reason"] = "passed"

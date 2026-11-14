@@ -98,6 +98,18 @@ def _number(value, digits=2):
     return "—" if math.isnan(value) else f"{value:.{digits}f}"
 
 
+def _gateNumber(value, constant):
+    """A median for the parity table: below the gate's constant it never rounds up to the constant (0.796, not 0.80)."""
+    try:
+        if constant is not None and float(value) < float(constant):
+            from LesionNetworkMappingLib import fastmap
+
+            return fastmap.format_below(value, float(constant))
+    except (TypeError, ValueError):
+        pass
+    return _number(value)
+
+
 def _duration(seconds):
     """"< 1 min", "12 min", "1 h 20 min"."""
     if seconds is None or not math.isfinite(seconds):
@@ -1076,7 +1088,8 @@ class FastIndexDialog(qt.QDialog):
                     rows.append((STRATUM_TEXT.get(name, name) if group == "strata" else _("size {size}").format(size=SIZE_BIN_TEXT.get(name, name)), verdict))
         table.setRowCount(len(rows))
         for index, (name, verdict) in enumerate(rows):
-            cells = (name, str(verdict.get("n")), _number(verdict.get("median_partial_r")), _number(verdict.get("median_top10_dice")), _("Pass") if verdict.get("passed") else _("Fail"))
+            cells = (name, str(verdict.get("n")), _gateNumber(verdict.get("median_partial_r"), (gate.get("constants") or {}).get("partial_r")),
+                     _gateNumber(verdict.get("median_top10_dice"), (gate.get("constants") or {}).get("top10_dice")), _("Pass") if verdict.get("passed") else _("Fail"))
             for column, text in enumerate(cells):
                 item = qt.QTableWidgetItem(text)
                 item.setToolTip(str(verdict.get("reason") or ""))

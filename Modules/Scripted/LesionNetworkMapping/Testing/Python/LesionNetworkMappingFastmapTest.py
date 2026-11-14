@@ -583,6 +583,11 @@ class FastmapTest(unittest.TestCase):
         self.assertTrue(result["strata"]["cortical"]["passed"])
         self.assertEqual(result["strata"]["brainstem"]["reason"], "median partial r 0.50 < 0.80")
         self.assertIn("at least 3", result["strata"]["subcortical"]["reason"])
+        # Bug fast-gate-reason-rounds-to-equal: a failing median is never shown rounded up to the constant
+        near = fastmap.gate({"lesions": [lesion(f"n{i}", "cortical", 0.7962, 0.7) for i in range(5)], "reference": {}})
+        self.assertEqual(near["strata"]["cortical"]["reason"], "median partial r 0.796 < 0.80")
+        self.assertEqual(fastmap.format_below(0.5996, 0.60), "0.5996")
+        self.assertEqual(fastmap.format_below(0.50, 0.80), "0.50")
         excluded = {item["name"]: item["message"] for item in result["excluded"]}
         self.assertEqual(sorted(excluded), ["b0", "b1", "b2", "b3", "s0", "s1", "w0"])
         self.assertIn("brainstem stratum failed the parity gate", excluded["b0"])
