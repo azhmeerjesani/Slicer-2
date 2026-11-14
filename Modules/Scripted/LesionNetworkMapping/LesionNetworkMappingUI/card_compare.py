@@ -789,6 +789,25 @@ class CompareCard:
     # Compare
     #
 
+    def _fileStamp(self, source):
+        """Cache stamp of a source's file: its mtime and size, or None when it has no file or the file is gone.
+
+        Reference-library sources have no ``path``; their copied file in the library is stamped instead, so that
+        a deleted or replaced library file is noticed (and reported as missing) rather than served from the cache.
+        """
+        from LesionNetworkMappingLib import refmaps
+
+        path = source.path
+        if not path and source.group == "reference" and source.vector is None:
+            try:
+                path = refmaps.entry_path(refmaps.get_entry((source.info or {}).get("id"), registryRoot()), registryRoot())
+            except refmaps.RefmapsError:
+                return None
+        if path and os.path.isfile(path):
+            stat = os.stat(path)
+            return (stat.st_mtime, stat.st_size)
+        return None
+
     def vector(self, source):
         """A source's map on the connectome voxels ((V,) float64; NaN where not covered)."""
         import numpy as np
@@ -796,7 +815,7 @@ class CompareCard:
         from LesionNetworkMappingLib import refmaps
 
         bundle = self.ctx.bundle
-        cacheKey = (source.key, bundle.path, os.path.getmtime(source.path) if source.path and os.path.isfile(source.path) else None, (source.info or {}).get("reference_sha256"))
+        cacheKey = (source.key, bundle.path, self._fileStamp(source), (source.info or {}).get("reference_sha256"))
         if source.group != "instudy" and cacheKey in self._vectors:
             return self._vectors[cacheKey]
         if source.vector is not None:

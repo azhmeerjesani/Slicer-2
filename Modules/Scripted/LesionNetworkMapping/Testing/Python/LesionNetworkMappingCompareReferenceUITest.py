@@ -133,6 +133,31 @@ class LesionNetworkMappingCompareReferenceUITest(unittest.TestCase):
         np.testing.assert_array_equal(self.compare.vector(sources["connectome:hub"]), np.asarray(second.maps["hub"], dtype=np.float64),
                                       err_msg="the Compare card's cached Hubness vector is the one of the old build")
 
+    def test_2_deleted_library_file_is_not_served_from_the_cache(self):
+        """A reference map whose library file was deleted is reported missing, not compared from the cached vector."""
+        from LesionNetworkMappingLib import nifti, refmaps
+        from LesionNetworkMappingUI import card_compare
+
+        bundle = self.bundle
+        self.ctx.setBundle(bundle)
+        _pump(50)
+        root = card_compare.registryRoot()
+        path = os.path.join(self.tmp, "deleted_later.nii.gz")
+        data = np.zeros(bundle.shape, dtype=np.float32)
+        data[1:4, 1:4, 1:4] = 1.0
+        nifti.write_nifti(path, data, bundle.affine)
+        entry = refmaps.add_file(path, root=root, title="deleted later map")
+        try:
+            source = next(s for s in self.compare.discoverSources() if s.key == f"reference:{entry['id']}")
+            self.assertIsNotNone(self.compare.vector(source))
+            self.assertIsNotNone(self.compare.vector(source))  # cached
+            os.remove(refmaps.entry_path(entry, root))
+            with self.assertRaises(refmaps.RefmapsError) as raised:
+                self.compare.vector(source)
+            self.assertIn("is missing", str(raised.exception))
+        finally:
+            refmaps.remove_entry(entry["id"], root=root)
+
 
 if __name__ == "__main__":
     unittest.main()
