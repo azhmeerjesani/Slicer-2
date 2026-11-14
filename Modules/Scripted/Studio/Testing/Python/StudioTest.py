@@ -3029,6 +3029,95 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         figureList.RemoveAllControlPoints()
         self.assertEqual(templateList.GetNumberOfControlPoints(), 0)
 
+    def test_33d2_figure_sagittal_panel_side_is_its_own(self):
+        """A paper with an axial panel (the patient's right on the image left) and a sagittal panel with anterior on the
+        image right: the sagittal panel asks where anterior is, for itself alone, so both panels fit and answering one
+        never mirrors the other (BB-1 figure-fit-side-confirmed-per-paper).
+        """
+        import os
+        import tempfile
+
+        import numpy as np
+        import vtk
+
+        if not _hasFigureTracing():
+            self.skipTest("figure tracing is not in this build")
+        from LesionNetworkMappingLib import figurefit
+        from StudioLib import figure, importer
+
+        studioShell = self._applyStudio()
+        self._startOnTemplate(studioShell)
+        self.addCleanup(lambda: figure.closeFigure(removeNodes=True))
+        directory = tempfile.mkdtemp(prefix="StudioTestFigureSagittal", dir=slicer.app.temporaryPath)
+        paths = []
+        for name in ("paper_fig2a.png", "paper_fig2b.png"):
+            image = qt.QImage(200, 220, qt.QImage.Format_RGB32)
+            image.fill(qt.QColor(20, 20, 20))
+            paths.append(os.path.join(directory, name))
+            self.assertTrue(image.save(paths[-1]))
+        pixels = np.array([(30, 40), (170, 50), (100, 190), (50, 150), (160, 140)], float)
+
+        def placePairs(panel, convention):
+            ras = panel.cut().to_ras(((pixels - [100, 110]) @ figurefit.convention_matrix(convention)[:2, :2].T) * 0.8)
+            for index in range(len(pixels)):
+                panel.figureLandmarks().AddControlPoint(vtk.vtkVector3d(*panel.localOf(pixels[index])))
+                panel.templateLandmarks().AddControlPointWorld(vtk.vtkVector3d(*ras[index]))
+            figure.session().updateFit(panel)
+
+        # Panel 1: axial, the patient's right on the image left; the paper's side is answered "Left"
+        importer.handleDrop([paths[0]], shell=studioShell)
+        self._pump(10)
+        session = figure.session()
+        axial = session.panel()
+        session.setPlane("axial")
+        session.setCut(z=10.0)
+        card = figure.card()
+        card.conventionGroup.button(0).click()
+        self._pump(2)
+        placePairs(axial, "radiological")
+        self.assertLess(axial.fit.rms_mm, 0.5)
+        self.assertEqual(card.conventionText.text, "Patient's right is on the … of the figure")
+        # Panel 2: sagittal, anterior on the image right (nilearn/SPM style); it starts from the paper's answer
+        session.enterTrace()
+        self._pump(6)
+        importer.handleDrop([paths[1]], shell=studioShell)
+        self._pump(10)
+        self.assertEqual(len(session.panels), 2)
+        sagittal = session.panel()
+        self.assertIsNot(sagittal, axial)
+        session.setPlane("sagittal")
+        session.setCut(z=20.0)
+        placePairs(sagittal, "neurological")
+        self._pump(2)
+        self.assertEqual(card.conventionText.text, "Anterior is on the … of the figure")
+        self.assertEqual(card.conventionState.text, "Taken from the paper's side: check where anterior is")
+        self.assertTrue(sagittal.fit.mirror_suspected)
+        self.assertIn("check which side anterior is on", card.fitWarning.text)
+        # "Right" on the sagittal panel: anterior on the right, for that panel only
+        card.conventionGroup.button(1).click()
+        self._pump(2)
+        self.assertEqual(sagittal.convention, "neurological")
+        self.assertLess(sagittal.fit.rms_mm, 0.5)
+        self.assertFalse(sagittal.fit.mirror_suspected)
+        self.assertEqual(card.conventionState.text, "Confirmed for this panel")
+        self.assertEqual(axial.convention, "radiological")
+        self.assertLess(axial.fit.rms_mm, 0.5)
+        self.assertFalse(axial.fit.mirror_suspected)
+        # The paper's side answered again (on the axial panel) leaves the sagittal panel's own answer alone
+        session.setConvention("radiological", panel=axial)
+        self.assertEqual(sagittal.convention, "neurological")
+        self.assertLess(sagittal.fit.rms_mm, 0.5)
+        self.assertEqual(session.confirmedConvention(), "radiological")
+        self.assertEqual(session.columns()["fig_convention"], "radiological")
+        session.selectPanel(0)
+        self._pump(2)
+        self.assertEqual(card.conventionState.text, "Confirmed for this paper")
+        # A sagittal panel made axial takes the paper's left-right side again (its anterior answer is not one)
+        session.selectPanel(1)
+        session.setPlane("axial")
+        self.assertEqual(sagittal.convention, "radiological")
+        self.assertFalse(sagittal.sideAnswered)
+
     def test_33e_figure_landmark_list_deleted_from_the_view_menu_is_replaced(self):
         """A landmark list deleted from the view menu ("Delete Point List") is replaced by an empty one: the fit is
         reset (the card no longer shows the old pairs) and "Add pair" still starts a placement.

@@ -57,6 +57,8 @@ it with landmarks. Only a crop of the figure is kept, and no lesion is extracted
 3. **Convention.** "Patient's right is on the Left | Right of this figure". Radiological (patient's right on the left of the
    picture) is assumed until you confirm it, once per source record, and an unconfirmed convention blocks **Done**.
    Studio shows R/L letters and a side tag on the figure views so that a left-right flip is never silent.
+   A sagittal figure does not show the patient's right, so a sagittal panel asks "Anterior is on the Left | Right of the
+   figure" for that panel alone (it starts from the paper's answer): answering it never changes the other panels.
 4. **Landmarks.** Place pairs of points on the figure and on the template (names are suggested). A similarity fit is the
    default; an affine fit needs at least 4 pairs.
 5. **Fit.** A residual chip reads "RMS 1.6 mm · LOO 2.3 mm (5 pairs)" in green, amber or red. It measures the consistency

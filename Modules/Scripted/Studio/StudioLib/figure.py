@@ -18,6 +18,9 @@ faster, auditable and free of silent left-right flips, with standard MRML nodes 
      left) is assumed until it is confirmed, once per source record (``record_id``): the answer is
      ``Studio.FigureConvention`` (U-07's attribute and semantics; "unknown" until confirmed). The figure views show
      the side tag and R/L letters (``orientation.py``).
+     A sagittal figure does not show the patient's right: a sagittal panel asks "Anterior is on the [Left | Right] of the
+     figure" for itself alone (``Panel.ownSide``; "radiological" is anterior on the left, as in ``figurefit``). It
+     starts from the paper's answer, and answering it never changes another panel.
   4. *Landmarks*: two markups point lists, ``FigureLandmarks`` (on the figure, Green view) and ``TemplateLandmarks``
      (on the template, Red view), placed in pairs with suggested names (``figurefit.suggested_landmarks``).
   5. *Fit*: ``figurefit`` similarity by default; affine only with at least 4 pairs. The residual chip reads
@@ -355,6 +358,9 @@ class Panel:
         self.model = "similarity"
         self.fit = None
         self.fitError = None
+        #: A sagittal panel's own side answer ("Anterior is on the … of the figure") was given: the paper's left-right
+        #: answer no longer changes it (a sagittal figure does not show the patient's right)
+        self.sideAnswered = False
         self.label = ""
         self.panelLabel = ""
         self.sourceName = ""
@@ -412,6 +418,11 @@ class Panel:
     @property
     def confirmed(self):
         return self.convention in ("radiological", "neurological")
+
+    @property
+    def ownSide(self):
+        """True for a sagittal panel: its side is where anterior is, asked per panel, not the paper's left-right side."""
+        return self.plane == "sagittal"
 
     @property
     def fitConvention(self):
@@ -763,9 +774,12 @@ class FigureSession:
     # Convention
 
     def confirmedConvention(self):
-        """The convention confirmed for this source record (saved fit files) or, without a study, in this session."""
+        """The convention confirmed for this source record (saved fit files) or, without a study, in this session.
+
+        Sagittal panels do not count: their side (where anterior is) is their own (``Panel.ownSide``).
+        """
         for panel in self.panels:
-            if panel.confirmed:
+            if panel.confirmed and not panel.ownSide:
                 return panel.convention
         folder = self.sourcesFolder()
         if folder and os.path.isdir(folder):
@@ -777,6 +791,8 @@ class FigureSession:
                         record = json.load(f)
                 except (OSError, ValueError):
                     continue
+                if record.get("plane") == "sagittal":
+                    continue
                 if record.get("convention_confirmed") and record.get("convention") in ("radiological", "neurological"):
                     return record["convention"]
         return None
@@ -784,10 +800,21 @@ class FigureSession:
     def setConvention(self, convention, panel=None):
         """Confirm the convention ("radiological": the patient's right is on the left of the figure): every panel of
         this record takes it (it is confirmed once per paper), and the fits are recomputed.
+
+        A sagittal figure does not show the patient's right: for a sagittal ``panel`` (the current one by default) the
+        answer is where anterior is ("radiological": on the left of the figure), for that panel only. The paper's answer
+        also sets the sagittal panels that have no answer of their own yet, as their default.
         """
         if convention not in ("radiological", "neurological", "unknown"):
             raise ValueError(f"Unknown figure convention: {convention}")
-        targets = self.panels if convention != "unknown" else [panel or self.panel()]
+        answering = panel or self.panel()
+        if convention == "unknown":
+            targets = [answering]
+        elif answering is not None and answering.ownSide:
+            answering.sideAnswered = True
+            targets = [answering]
+        else:
+            targets = [target for target in self.panels if not (target.ownSide and target.sideAnswered)]
         for target in targets:
             if target is not None and target.figure() is not None:
                 target.figure().SetAttribute(space.FIGURE_CONVENTION_ATTRIBUTE, convention)
@@ -797,7 +824,7 @@ class FigureSession:
         importer = _importer()
         if importer.noticeWidget("figure-convention") is not None and convention != "unknown":
             controller = importer.figureController()
-            if controller is not None and any(controller.figureId == target.figureId for target in self.panels):
+            if controller is not None and any(target is not None and controller.figureId == target.figureId for target in targets):
                 importer.answerFigureConvention(convention, controller.figureId)
         for target in self.panels:
             target.refit()
@@ -1118,7 +1145,16 @@ class FigureSession:
         panel = self.panel()
         if panel is None or plane not in PLANE_TITLES or plane == panel.plane:
             return
+        # A sagittal panel's anterior side is its own: leaving sagittal, the panel takes the paper's left-right side again
+        # (an anterior answer never becomes the paper's left-right answer: without one, the side is asked again)
+        leaving = panel.ownSide and plane != "sagittal"
+        paper = self.confirmedConvention() if leaving else None
+        answered = panel.sideAnswered
         panel.plane = plane
+        if not panel.ownSide:
+            panel.sideAnswered = False
+            if leaving and panel.figure() is not None and (paper is not None or answered):
+                panel.figure().SetAttribute(space.FIGURE_CONVENTION_ATTRIBUTE, paper or "unknown")
         panel.z = self._initialZ(plane, self.templateNode())
         panel.pitch = panel.roll = 0.0
         self._planeChanged(panel)
@@ -1686,7 +1722,8 @@ class FigureSession:
         panelLabels = [panel.panelLabel for panel in self.panels if panel.panelLabel]
         if panelLabels:
             values["panel"] = ";".join(panelLabels)
-        conventions = {panel.convention for panel in self.panels}
+        # The paper's left-right side (a sagittal panel's side is where anterior is)
+        conventions = {panel.convention for panel in self.panels if not panel.ownSide} or {panel.convention for panel in self.panels}
         values["fig_convention"] = conventions.pop() if len(conventions) == 1 else "unknown"
         values["planes"] = ";".join(dict.fromkeys(panel.plane for panel in self.panels))
         residuals = [panel.fit.rms_mm for panel in self.panels if panel.fit is not None]
@@ -1753,6 +1790,7 @@ class FigureSession:
         panel = self.addPanel(figureNode, select=False)
         panel.cropPath = pngPath
         panel.plane = state.get("plane", "axial")
+        panel.sideAnswered = panel.ownSide and panel.confirmed
         cut = state.get("cut_plane") or state
         panel.z = float(cut.get("z_mm", 0.0))
         panel.pitch = float(cut.get("pitch_deg", 0.0))
@@ -1836,6 +1874,7 @@ class FigureSession:
                              (TEMPLATE_LANDMARKS_REFERENCE, panel.templateLandmarksId)):
             figureNode.SetNodeReferenceID(role, nodeId)
         panel.plane = state.get("plane") if state.get("plane") in PLANE_TITLES else "axial"
+        panel.sideAnswered = panel.ownSide and panel.confirmed
         panel.z = float(state.get("z_mm", 0.0))
         panel.pitch = float(state.get("pitch_deg", 0.0))
         panel.roll = float(state.get("roll_deg", 0.0))
@@ -2469,11 +2508,26 @@ class FigureCard:
         convention = panel.convention
         for index, value in enumerate(("radiological", "neurological")):
             self.conventionGroup.button(index).setChecked(convention == value or (convention == "unknown" and value == "radiological"))
-        if panel.confirmed:
-            self.conventionState.setText(_("Confirmed for this paper"))
-        else:
+        # A sagittal figure does not show the patient's right: its side is where anterior is, asked for each panel
+        sideTexts = (_("Anterior is on the … of the figure"), _("Anterior (the face) is on the left of the figure"),
+                     _("Anterior (the face) is on the right of the figure")) if panel.ownSide else (
+                     _("Patient's right is on the … of the figure"),
+                     _("Radiological: the patient's right is on the left of the figure (most clinical figures)"),
+                     _("Neurological: the patient's right is on the right of the figure"))
+        if self.conventionText.text != sideTexts[0]:
+            self.conventionText.setText(sideTexts[0])
+        for index in range(2):
+            self.conventionGroup.buttons()[index].setToolTip(sideTexts[index + 1])
+        if not panel.confirmed:
             self.conventionState.setText(_("Required: confirm the side") if current.requiredConvention
-                                         else _("Not confirmed (radiological assumed)"))
+                                         else (_("Not confirmed (anterior on the left assumed)") if panel.ownSide
+                                               else _("Not confirmed (radiological assumed)")))
+        elif not panel.ownSide:
+            self.conventionState.setText(_("Confirmed for this paper"))
+        elif panel.sideAnswered:
+            self.conventionState.setText(_("Confirmed for this panel"))
+        else:
+            self.conventionState.setText(_("Taken from the paper's side: check where anterior is"))
         required = "true" if (current.requiredConvention or not panel.confirmed) else "false"
         if self.conventionState.property("required") != required:
             self.conventionState.setProperty("required", required)
@@ -2503,7 +2557,8 @@ class FigureCard:
         if distinct < pairs:
             warnings.append(_("{n} landmark pair(s) repeat another pair's figure point and add nothing to the fit").format(n=pairs - distinct))
         if panel.fit is not None and panel.fit.mirror_suspected:
-            warnings.append(_("The mirrored figure fits much better: check the side"))
+            warnings.append(_("The mirrored figure fits much better: check which side anterior is on") if panel.ownSide
+                            else _("The mirrored figure fits much better: check the side"))
         if panel.fit is not None and len(panel.fit.out_of_plane_mm) and float(np.max(panel.fit.out_of_plane_mm)) > OFF_PLANE_WARNING_MM:
             warnings.append(_("Some template landmarks are off the cut plane ({mm:.1f} mm): place them again").format(mm=float(np.max(panel.fit.out_of_plane_mm))))
         self.fitWarning.setText("\n".join(warnings))
@@ -2733,6 +2788,8 @@ def doneHook(sid, labelmapArray, ijkToRas, ctx):
         _ensureCard()
         if _card is not None:
             _card.conventionFrame.setFocus(qt.Qt.OtherFocusReason)
+        if all(panel.ownSide for panel in current.unconfirmedPanels()):
+            raise study_ui.Blocking(_("Confirm on which side of the figure anterior is (Figure card), then Done again"))
         raise study_ui.Blocking(_("Confirm on which side of the figure the patient's right is (Figure card), then Done again"))
     ctx["figure_plane_normals"] = current.planeNormals()
     ctx["figure_plane_normal"] = ctx["figure_plane_normals"][0]
