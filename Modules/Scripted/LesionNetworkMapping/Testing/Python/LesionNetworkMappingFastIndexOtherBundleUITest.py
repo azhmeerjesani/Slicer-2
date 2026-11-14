@@ -138,6 +138,22 @@ class LesionNetworkMappingFastIndexOtherBundleUITest(unittest.TestCase):
             self.assertFalse(dialog.buildButton.enabled)
             self.assertIsNone(dialog._existingIndex(["sub-001"]))
 
+    def test_5_parity_report_without_index_is_not_a_green_pass(self):
+        """A passing parity report whose index no longer exists (deleted, damaged) is "Out of date", not "Gate passed" (BB-1)."""
+        from LesionNetworkMappingUI import manager_fastindex
+
+        path = manager_fastindex.parityPath(self.mapsTsv)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        gate = {"enough_lesions": True, "allowed_strata": ["cortical"], "excluded": [], "strata": {}, "size_bins": {}, "constants": {}, "min_lesions": 10}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"lesions": [{"id": str(i)} for i in range(12)], "gate": gate}, f)
+        self.addCleanup(shutil.rmtree, self.parityFolder, True)
+        dialog = self._dialog("Synthetic")
+        self.assertTrue(manager_fastindex.fastModeState(self.bundles["Synthetic"], self.mapsTsv).needsIndex)
+        self.assertIn("No index", dialog.indexLabel.text)
+        self.assertNotIn("passed", dialog.gateChip.text.lower(), "the dialog shows a passing gate for an index that does not exist")
+        self.assertEqual(dialog.gateChip.text, "Out of date")
+
 
 if __name__ == "__main__":
     unittest.main()

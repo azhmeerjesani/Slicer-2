@@ -1016,7 +1016,7 @@ class FastIndexDialog(qt.QDialog):
             report = _readJson(parityPath(mapsTsv))
             if report is not None:
                 state = fastModeState(self.bundle, mapsTsv)
-                self.showParity(report, stale=state.needsParity)
+                self.showParity(report, stale=state.needsParity or state.needsIndex)
                 return
         if mapsTsv is None:
             self.showParity(None)
