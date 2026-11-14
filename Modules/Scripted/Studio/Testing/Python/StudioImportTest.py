@@ -4192,6 +4192,34 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             importer.openAddDataDialog = original
 
+    def test_scan_added_by_add_data_dialog_in_draw_gets_its_lesion(self):
+        """A scan that the Add Data dialog loads while Draw is shown is opened for drawing: a lesion on it and the Segment
+        Editor on the scan, not "Open a scan" over a shown scan with every tool disabled (BB-1). Outside the dialog, a scan
+        that other code adds in Draw is left alone.
+        """
+        import numpy as np
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self._pump()
+        self.assertEqual(studioShell.currentModuleName(), "SegmentEditor")
+        other = slicer.util.addVolumeFromArray(np.zeros((6, 7, 8), np.float32), name="PlainScan")
+        self._wait(700)
+        self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")), 0)
+        slicer.mrmlScene.RemoveNode(other)
+        importer._addDataDialogs += 1  # as in openAddDataDialog() while the dialog is open
+        try:
+            scan = slicer.util.addVolumeFromArray(np.zeros((6, 7, 8), np.float32), name="DialogScan")
+        finally:
+            importer._addDataDialogs -= 1
+        self._wait(700)
+        lesions = slicer.util.getNodesByClass("vtkMRMLSegmentationNode")
+        self.assertEqual(len(lesions), 1)
+        editor = slicer.modules.segmenteditor.widgetRepresentation().self().editor
+        self.assertEqual(editor.sourceVolumeNode(), scan)
+        self.assertEqual(editor.segmentationNode(), lesions[0])
+
     def test_one_row_participants_table_uses_singular(self):
         """A one-row participants table reads "1 row" on the folder card and "1 participant" in the toast (BB-1)."""
         from StudioLib import library, study_ui

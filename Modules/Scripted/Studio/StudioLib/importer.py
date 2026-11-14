@@ -1930,15 +1930,28 @@ def _noticeButton(frame, text):
 #
 
 
+_addDataDialogs = 0
+
+#: The module of Draw (the Segment Editor): a scan that the Add Data dialog loads there is opened for drawing
+_DRAW_MODULE = "SegmentEditor"
+
+
 def openAddDataDialog(paths):
     """Open the classic Add Data dialog with ``paths`` (files or folders) already listed."""
+    global _addDataDialogs
     paths = [str(path) for path in paths]
     ioManager = slicer.app.ioManager()
-    if not paths:
-        return ioManager.openAddDataDialog()
-    if len(paths) == 1:
-        return ioManager.openAddDataDialog(paths[0])
-    return ioManager.openDialog("NoFile", slicer.qSlicerFileDialog.Read, {"fileNames": paths})
+    # While the dialog is open, a scan that it loads is also opened for drawing when Draw is shown (the transient module
+    # watcher): otherwise Draw kept saying "Open a scan" over a scan, with no lesion and every tool disabled
+    _addDataDialogs += 1
+    try:
+        if not paths:
+            return ioManager.openAddDataDialog()
+        if len(paths) == 1:
+            return ioManager.openAddDataDialog(paths[0])
+        return ioManager.openDialog("NoFile", slicer.qSlicerFileDialog.Read, {"fileNames": paths})
+    finally:
+        _addDataDialogs -= 1
 
 
 #: Kinds of file whose load Draw edits a lesion of (a scene, a scan, a 4D image, a lesion)
@@ -5830,7 +5843,10 @@ class _TransientLoadWatcher(VTKObservationMixin):
         scene = slicer.mrmlScene
         if scene.IsImporting() or scene.IsClosing() or scene.IsRestoring() or node.GetHideFromEditors():
             return
-        if not self.shell.isActive() or self.shell.currentModuleName() not in TRANSIENT_LOADER_MODULES:
+        if not self.shell.isActive():
+            return
+        module = self.shell.currentModuleName()
+        if module not in TRANSIENT_LOADER_MODULES and not (module == _DRAW_MODULE and _addDataDialogs):
             return
         self.added.append(node.GetID())
         self.timer.start()
@@ -5840,7 +5856,7 @@ class _TransientLoadWatcher(VTKObservationMixin):
         try:
             nodes = [slicer.mrmlScene.GetNodeByID(nodeId) for nodeId in added]
             nodes = [node for node in nodes if node is not None and _referenceKind(node) is None]
-            if len(nodes) != 1 or not self.shell.isActive() or self.shell.currentModuleName() not in TRANSIENT_LOADER_MODULES:
+            if len(nodes) != 1 or not self.shell.isActive() or self.shell.currentModuleName() not in (*TRANSIENT_LOADER_MODULES, _DRAW_MODULE):
                 return
             if _isTemplate(nodes[0]):
                 # The MNI template of the Sample Data module: "Start on MNI template" on it (its "Lesions" is reused)
