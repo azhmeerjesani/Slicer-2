@@ -31,7 +31,8 @@ sha256, primary rule, alpha, n_perm, seeds) and the plan's own sha256 (of its ca
 ``sha256`` field). After the lock, every parameter change is appended with its reason to
 ``analysis_plan_deviations.jsonl`` (:func:`record_deviation`), which the methods text reports (methods.py,
 "Deviations from the analysis plan"). :func:`plan_status` says whether the plan is open, locked or modified
-after the lock (its sha256 no longer matches). Paths in the plan are relative to the study (SPEC 9.7).
+after the lock (its sha256 no longer matches); such an edit is a deviation too (:func:`plan_modification`): it needs
+a reason before Run everything and the methods text reports it. Paths in the plan are relative to the study (SPEC 9.7).
 The analyses of the Map Cohort card (the Contrast GLM and the Symptom sLNM) hold their own permutations,
 covariates and inference options: :func:`analysis_pending` compares them with the locked plan apart from the
 threshold rule and Run everything's options, and their deviations are recorded as "<analysis>.<field>" (for
@@ -982,6 +983,32 @@ def plan_status(study):
     return {"state": state, "locked_at": plan.get("locked_at"), "sha256": stored, "sha8": stored[:8], "recipe": plan.get("recipe"), "deviations": len(deviations), "path": path, "chip": chip}
 
 
+#: Field of the deviation record that discloses a hand edit of ``analysis_plan.json`` after the lock
+PLAN_FILE_FIELD = "plan_file"
+
+
+def plan_modification(study):
+    """The edit of the locked plan file after the lock, or None (no plan, or the file still matches its sha256).
+
+    The plan's settings as the file holds them now are what :func:`effective_parameters` gives (the locked values are
+    no longer known), so the edit is a deviation: :func:`pending_deviations` asks for its reason (Run everything waits)
+    and the methods text reports it, with its reason once recorded (``field`` :data:`PLAN_FILE_FIELD`).
+
+    :return: {"field", "old" (sha256 stored at the lock), "new" (sha256 of the file now), "description",
+      "recorded" (a deviation with this ``new`` sha256 is in the log)}.
+    """
+    plan = read_plan(study)
+    if plan is None:
+        return None
+    stored = str(plan.get("sha256") or "")
+    actual = plan_sha256(plan)
+    if stored and stored == actual:
+        return None
+    recorded = any(item.get("field") == PLAN_FILE_FIELD and item.get("new") == actual for item in read_deviations(study))
+    description = f"analysis_plan.json edited after the lock (sha256 {stored[:8] or 'missing'} at the lock, {actual[:8]} now): the edited plan's settings are used"
+    return {"field": PLAN_FILE_FIELD, "old": stored or None, "new": actual, "description": description, "recorded": recorded}
+
+
 #: Deviations already warned about as skipped ({(log path, time, field, new)}): the Recipe card asks for the
 #: effective parameters on every poll, and one invalid record must not log a warning each time
 _SKIP_WARNED = set()
@@ -1070,7 +1097,10 @@ def pending_deviations(study, current, steps=None):
     recorded = effective_parameters(study)
     if recorded is None:
         return []
-    out = [{**change, "description": describe_change(change["field"], change["old"], change["new"])} for change in compare_parameters(recorded, current)]
+    edited = plan_modification(study)
+    # A plan file edited after the lock is adopted only with a recorded reason (the methods text reports the edit)
+    out = [{key: edited[key] for key in ("field", "old", "new", "description")}] if edited and not edited["recorded"] else []
+    out += [{**change, "description": describe_change(change["field"], change["old"], change["new"])} for change in compare_parameters(recorded, current)]
     planned = ordered_steps(effective_steps(study))
     if steps is not None and ordered_steps(steps) != planned:
         steps = ordered_steps(steps)
@@ -1358,6 +1388,9 @@ def to_pipeline_config(recipe, study=None, params=None, module_available=None):
     record = {**recipe.record(), "label": custom_label(recipe, params), "steps": [{"id": step["id"], "status": step["status"]} for step in checked]}
     if plan is not None:
         record["plan_sha256"] = plan.get("sha256")
+        edited = plan_modification(study)
+        if edited and not edited["recorded"]:
+            logging.warning(f"The locked analysis plan was edited after the lock and the edit has no recorded reason: {edited['description']}")
     from . import jobs
 
     outside = [{"id": step, "label": STEPS[step][0], "where": jobs.command_text(MANUAL_STEP_PLACES.get(step, "Map"))} for step in steps if STEPS[step][2] is None]

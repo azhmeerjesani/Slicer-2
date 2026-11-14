@@ -328,6 +328,52 @@ class PlanLockTest(_TempCase):
             json.dump(data, f)
         self.assertEqual(recipes.plan_status(study)["state"], "modified")
 
+    def test_plan_edited_after_lock_is_a_deviation(self):
+        """A plan file edited after the lock is not adopted silently: it waits for a reason (Run everything is held) and
+        the methods text reports the edit (bug recipes-plan-lock-roi-gui:plan-edited-after-lock-used-silently-methods-say-no-deviations).
+        """
+        study = self.make_study()
+        plan = self.lock(study)
+        self.assertIsNone(recipes.plan_modification(study))
+        text = methods.find_section(methods.methods_sections(study.path), "deviations").text()
+        self.assertIn("No deviations from the locked analysis plan were recorded.", text)
+        path = recipes.plan_path(study)
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        data["parameters"]["alpha"] = data["hypotheses"]["alpha"] = 0.2
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        self.assertEqual(recipes.plan_status(study)["state"], "modified")
+        edited = recipes.plan_modification(study)
+        self.assertEqual((edited["field"], edited["old"], edited["recorded"]), (recipes.PLAN_FILE_FIELD, plan["sha256"], False))
+        self.assertEqual(edited["new"], recipes.plan_sha256(data))
+        # The methods text says the plan was modified after the lock, not "no deviations"
+        text = methods.find_section(methods.methods_sections(study.path), "deviations").text()
+        self.assertNotIn("No deviations from the locked analysis plan were recorded.", text)
+        self.assertIn("was modified after it was locked", text)
+        self.assertIn(plan["sha256"][:8], text)
+        # The edit is a pending deviation (it holds Run everything until its reason is given), even when Map follows it
+        current = recipes.effective_parameters(study)
+        self.assertEqual(current["alpha"], 0.2)
+        pending = recipes.pending_deviations(study, current)
+        self.assertEqual([item["field"] for item in pending], [recipes.PLAN_FILE_FIELD])
+        self.assertIn("edited after the lock", pending[0]["description"])
+        # Recording its reason (as the Recipe card does) settles it, and the methods text lists it with the reason
+        recipes.record_deviation(study, pending[0]["field"], pending[0]["old"], pending[0]["new"], "alpha corrected to the grant", description=pending[0]["description"])
+        self.assertEqual(recipes.pending_deviations(study, current), [])
+        self.assertTrue(recipes.plan_modification(study)["recorded"])
+        self.assertEqual(recipes.effective_parameters(study)["alpha"], 0.2)
+        text = methods.find_section(methods.methods_sections(study.path), "deviations").text()
+        self.assertIn("edited after the lock", text)
+        self.assertIn("reason: alpha corrected to the grant", text)
+        self.assertNotIn("was modified after it was locked", text)
+        # A further edit needs its own reason
+        data["parameters"]["n_perm"] = 6000
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        self.assertEqual([item["field"] for item in recipes.pending_deviations(study, recipes.effective_parameters(study))], [recipes.PLAN_FILE_FIELD])
+        self.assertIn("was modified after it was locked", methods.find_section(methods.methods_sections(study.path), "deviations").text())
+
     def test_hypotheses_validation(self):
         study = self.make_study()
         recipe = self.builtin("siddiqi2021_slnm")

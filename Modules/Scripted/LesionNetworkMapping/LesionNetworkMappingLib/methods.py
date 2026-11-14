@@ -725,6 +725,15 @@ class Records:
         """(analysis plan exists, deviation records or None when the log is absent)."""
         return os.path.isfile(self.path(*PLAN_JSON)), _read_jsonl(self.path(*DEVIATIONS_JSONL))
 
+    def plan_modification(self):
+        """The edit of the locked analysis plan after the lock (``recipes.plan_modification``), or None."""
+        from . import recipes
+
+        try:
+            return recipes.plan_modification(self.root)
+        except (OSError, ValueError, TypeError):
+            return None
+
 
 def _open_study(root):
     from .study import Study
@@ -1864,6 +1873,12 @@ def qa_section(records):
 def deviations_section(records):
     section = _section("deviations")
     plan, deviations = records.deviations()
+    edited = records.plan_modification() if plan else None
+    if edited and not edited["recorded"]:
+        # The plan file no longer matches the sha256 of its lock: the settings reported as the plan are the edited ones
+        edit = (f"The analysis plan file ({'/'.join(PLAN_JSON)}) was modified after it was locked: its content no longer matches the sha256 "
+                f"recorded at the lock ({str(edited['old'] or '')[:8] or NOT_RECORDED}; {edited['new'][:8]} now), and the analysis used the edited plan's settings")
+        deviations = [*(deviations or []), {"description": edit, "reason": NOT_RECORDED}]
     if deviations:
         items = []
         for item in deviations:
