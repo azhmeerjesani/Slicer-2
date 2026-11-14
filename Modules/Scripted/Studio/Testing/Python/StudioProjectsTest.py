@@ -10768,6 +10768,54 @@ sys.exit(web.command_local(args))
         self.assertNotIn("other", [info.name for info in projects.listProjects(self.root)])
         self.assertEqual(os.path.basename(projects.createProject("other", rootPath=self.root).path), "other")
 
+    def test_120_cancel_in_the_move_question_leaves_the_chosen_folder_as_it_was(self):
+        """Change… > Use this folder > Cancel in "Move your projects…": nothing is created in the chosen folder (BB-1: the
+        check made 'Slicer Studio/About this folder.txt' before the question and Cancel left it).
+        """
+        from unittest import mock
+
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        oldRoot = os.path.normpath(self.root)
+        qt.QSettings().setValue(projects.ROOT_KEY, oldRoot)
+        projects.createProject("keep", rootPath=oldRoot)
+        self.assertTrue(projects.hasContent(oldRoot))
+        desktop = os.path.join(self.tempDir, "desktop120")
+        os.makedirs(desktop)
+        open(os.path.join(desktop, "todo.txt"), "w").close()
+        chosen = os.path.join(desktop, "Slicer Studio")
+
+        class FakeChooser:
+            path = chosen
+            continueButton = mock.Mock()
+            setWindowTitle = mock.Mock()
+            choose = mock.Mock()
+            exec = mock.Mock()
+            exec_ = mock.Mock()
+            deleteLater = mock.Mock()
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+        try:
+            for folderExisted in (False, True):
+                if folderExisted:
+                    os.makedirs(chosen)
+                with mock.patch.object(projects_ui, "FolderChooserDialog", FakeChooser), \
+                        mock.patch.object(projects_ui, "_question", lambda *args, **kwargs: 2):
+                    self.assertIsNone(projects_ui.changeRootDialog(None))
+                self.assertEqual(projects.root(), oldRoot)
+                self.assertEqual(sorted(os.listdir(desktop)), ["Slicer Studio", "todo.txt"] if folderExisted else ["todo.txt"])
+                if folderExisted:
+                    self.assertEqual(os.listdir(chosen), [])
+                    os.rmdir(chosen)
+        finally:
+            qt.QSettings().remove(projects.ROOT_KEY)
+            qt.QSettings().remove(projects.ROOT_CHOSEN_KEY)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

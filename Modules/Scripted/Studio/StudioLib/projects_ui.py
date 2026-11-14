@@ -516,6 +516,23 @@ def _makeUsableRoot(path):
     return path
 
 
+def _rootTraces(path):
+    """(the folder existed, its About file existed) before ``_makeUsableRoot`` made them."""
+    return os.path.isdir(path), os.path.exists(os.path.join(path, projects.ABOUT_FILE))
+
+
+def _undoRootTraces(path, before):
+    """Remove what ``_makeUsableRoot`` made in ``path`` (the About file, the empty folder) when the user backs out."""
+    existed, hadAbout = before
+    try:
+        if not hadAbout:
+            os.remove(os.path.join(path, projects.ABOUT_FILE))
+        if not existed:
+            os.rmdir(path)
+    except OSError:
+        pass
+
+
 def _cannotUseMessage(path, error):
     """"The folder … cannot be used: <reason>. Choose another folder." for an OSError of ``_makeUsableRoot``."""
     reason = (getattr(error, "strerror", None) or str(error)).strip()
@@ -1121,12 +1138,16 @@ def changeRootDialog(parent=None):
             return None
         # The new folder is made and checked before the question and before anything moves or the setting changes, as the
         # first-start chooser does: a folder that cannot be written (a read-only drive) is refused right away
+        existed = _rootTraces(newRoot)
         if not _usableOrNotice(parent, newRoot):
+            _undoRootTraces(newRoot, existed)
             return None
         answer = _question(parent, _("Change the Slicer Studio folder"),
                            _("Move your projects, studies and templates to the new folder?\n\n{old}\n→ {new}").format(old=oldRoot, new=newRoot),
                            [_("Move"), _("Keep them where they are"), _("Cancel")])
         if answer in (-1, 2):
+            # Cancel leaves everything as it was: the folder and its About file made just for the question go again
+            _undoRootTraces(newRoot, existed)
             return None
         move = answer == 0
     elif not _usableOrNotice(parent, newRoot):
