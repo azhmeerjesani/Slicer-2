@@ -200,6 +200,14 @@ class AppHelpersTest(unittest.TestCase):
             design.DesignSpec(test="two_group", block_column="dataset", permute="within").save(path)
             with self.assertRaisesRegex(ValueError, "block_column"):
                 app.design_options(path)
+            # Levels select the subjects of continuous and one-sample tests: the pipeline cannot honour that,
+            # so the design is refused instead of running the sLNM on every subject
+            for test, extra in (("continuous", {"score_column": "aphasia_score"}), ("one_sample", {})):
+                design.DesignSpec(test=test, group_column="group", levels=["case"], **extra).save(path)
+                with self.assertRaisesRegex(ValueError, r"levels \['case'\].*slicer-lnm glm --design"):
+                    app.design_options(path)
+            design.DesignSpec(test="one_sample").save(path)
+            self.assertEqual(app.design_options(path)["specificity"], "off")
 
     def test_design_without_volume_names_a_slicer_lnm_remedy(self):
         """A design that leaves out volume_ml must not send slicer-lnm users to 'pipeline run --no-volume-covariate'."""

@@ -396,8 +396,9 @@ def _json_value(text, what):
 def design_options(path):
     """PipelineConfig fields of a design.json (format slicer-lnm-design) that the pipeline's GLM and sLNM stages can honour.
 
-    :raises ValueError: for a design the pipeline cannot run (another group column or levels, an ANOVA,
-      transforms, blocks, permutation scheme or variance groups); run ``slicer-lnm glm --design`` for those.
+    :raises ValueError: for a design the pipeline cannot run (another group column or levels, levels that
+      select the subjects of a continuous or one-sample test, an ANOVA, transforms, blocks, permutation
+      scheme or variance groups); run ``slicer-lnm glm --design`` for those.
     """
     from . import design
 
@@ -417,6 +418,9 @@ def design_options(path):
             unsupported.append(f"contrast {spec.contrast}")
     if spec.test == "continuous" and spec.contrast != "two_sided":
         unsupported.append(f"contrast {spec.contrast}")
+    if spec.test in ("continuous", "one_sample") and spec.levels is not None:
+        # The levels select the subjects of these tests; the pipeline's sLNM and maps use every mapped lesion
+        unsupported.append(f"levels {spec.levels} of {spec.group_column} (a subject selection)")
     for key, default in (("transforms", {}), ("block_column", None), ("permute", "auto"), ("variance_groups", False), ("restrict_to_mixed_blocks", False)):
         value = getattr(spec, key)
         if value and value != default:

@@ -93,7 +93,8 @@ Common options: `--participant-label 01 02` (either level; the selection is stor
 `reproduce_pipeline.sh` analyses the same subjects), `--rule '{"kind": "fwe_bonferroni", "alpha": 0.05}'`
 (or a JSON file), `--recipe NAME` (an analysis recipe; options given on the command line win; pipeline.json and the methods
 name it, and the recipe's steps outside the pipeline, such as validation, are listed as info events),
-`--design design.json` (a design of Map ▸ Contrast: two-group case/control or continuous score),
+`--design design.json` (a design of Map ▸ Contrast: two-group case/control or continuous score; a design
+that selects subjects by levels, an ANOVA, transforms or blocks is refused: run `slicer-lnm glm --design` on the maps),
 `--null-relocations K`, `--perm N`, `--preview N`, `--figures glass,montage,gallery` (extra figures of the
 mean T map), `--events json` (JSON lines for scripts), `--no-report`. `--subject-list` is not available in
 this build: the pipeline maps every connectome subject, or `--preview N` random ones. Exit codes: 0 done,
