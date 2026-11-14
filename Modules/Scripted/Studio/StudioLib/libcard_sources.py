@@ -271,6 +271,9 @@ class SourcesCard:
         header.setSectionResizeMode(2, qt.QHeaderView.ResizeToContents)
         header.setMinimumSectionSize(40)
         self.table.setColumnWidth(0, RECORD_COLUMN_WIDTH)
+        # The width follows the application font: a fixed 60 px cut the "Record" header at a 125% font
+        library._installEventFilter(self.table, self._recordColumnFilter())
+        self._fitRecordColumn()
         # The title is what is being judged: it keeps room, and nothing scrolls sideways
         self.table.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
         self.table.setFocusPolicy(qt.Qt.StrongFocus)
@@ -355,6 +358,27 @@ class SourcesCard:
 
         self._escape = _Escape(self.filter)
         return self._escape
+
+    def _recordColumnFilter(self):
+        card = self
+
+        class _Fit(qt.QObject):
+            def eventFilter(self, watched, event):
+                if event.type() in (qt.QEvent.FontChange, qt.QEvent.StyleChange, qt.QEvent.Show, qt.QEvent.PolishRequest):
+                    card._fitRecordColumn()
+                return False
+
+        self._recordFit = _Fit(self.table)
+        return self._recordFit
+
+    def _fitRecordColumn(self):
+        """Make the Record column wide enough for its header text plus the header padding (6 px each side)."""
+        metrics = self.table.horizontalHeader().fontMetrics()
+        text = _("Record")
+        needed = (metrics.horizontalAdvance(text) if hasattr(metrics, "horizontalAdvance") else metrics.width(text)) + 12 + 2
+        width = max(RECORD_COLUMN_WIDTH, needed)
+        if self.table.columnWidth(0) < width:
+            self.table.setColumnWidth(0, width)
 
     def _addShortcut(self, key, callback, name, description):
         shortcut = qt.QShortcut(qt.QKeySequence(key), self.table)

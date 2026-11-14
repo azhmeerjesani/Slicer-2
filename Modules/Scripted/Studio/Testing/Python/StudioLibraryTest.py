@@ -2485,6 +2485,31 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             card.widget.hide()
 
+    def test_sources_record_header_fits_at_a_large_font(self):
+        """The Record column follows the application font: the header text and its 12 px padding fit at a 125% font (BB-1)."""
+        from StudioLib import libcard_sources
+
+        original = qt.QFont(qt.QApplication.font())
+        card = None
+        try:
+            font = qt.QFont(original)
+            font.setPixelSize(18)  # 125% of the 14 px base
+            qt.QApplication.setFont(font)
+            slicer.app.processEvents()
+            card = libcard_sources.SourcesCard(None)
+            card.widget.resize(520, 500)
+            card.widget.show()
+            for _ in range(5):
+                slicer.app.processEvents()
+            header = card.table.horizontalHeader()
+            metrics = qt.QFontMetrics(header.font)
+            textWidth = metrics.horizontalAdvance("Record") if hasattr(metrics, "horizontalAdvance") else metrics.width("Record")
+            self.assertGreaterEqual(header.sectionSize(0), textWidth + 12, (header.sectionSize(0), textWidth))
+        finally:
+            if card is not None:
+                card.widget.close()
+            qt.QApplication.setFont(original)
+
     def test_sources_prisma_export_on_read_only_study_is_plain(self):
         """A read-only study disables PRISMA export, and a permission error is said in plain words without a logged traceback (BB-1)."""
         import errno
