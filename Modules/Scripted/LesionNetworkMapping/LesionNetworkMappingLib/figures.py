@@ -132,7 +132,7 @@ FONT_FAMILY_SVG = "Inter, Helvetica, Arial, sans-serif"
 TRANSPARENT_NOTE = "below the threshold, opacity = (|value| / threshold)²; suprathreshold voxels outlined (transparent thresholding, Taylor et al. 2023)"
 SLAB_POINTS = 2_000_000  # display-grid points resliced per map_coordinates call (bounds memory)
 
-_ASCII = {"≥": ">=", "≤": "<=", "\u2212": "-", "\u2013": "-", "—": "-", "±": "+/-", "·": "|", "\u00d7": "x", "µ": "u", "⇒": "=>", "\u03b1": "alpha", "…": "...", "²": "^2", "°": " deg", "\u2019": "'"}
+_ASCII = {"≥": ">=", "≤": "<=", "\u2212": "-", "\u2013": "-", "—": "-", "±": "+/-", "·": "|", "\u00d7": "x", "µ": "u", "\u03bc": "u", "⇒": "=>", "\u03b1": "alpha", "…": "...", "²": "^2", "°": " deg", "\u2019": "'"}
 
 
 # Inputs

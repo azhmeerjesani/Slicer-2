@@ -434,6 +434,11 @@ class FiguresTest(unittest.TestCase):
             self.assertEqual(events[-1]["code"], "input", n)
             self.assertFalse(os.path.exists(os.path.join(out, "figures")), n)
 
+    def test_greek_mu_in_a_raster_label_is_not_drawn_as_a_question_mark(self):
+        text = figures.Fonts(None).text("\u03bcC (degree) AUC 0.76")
+        self.assertNotIn("?", text)
+        self.assertTrue(text.startswith("uC"))
+
     def test_multiline_title_and_case_label_are_drawn_on_one_line(self):
         # Pillow refuses an anchor with multi-line text: a line break in --title or a case label failed the figure
         map_path = os.path.join(self.tmp, "multiline-map.nii.gz")
