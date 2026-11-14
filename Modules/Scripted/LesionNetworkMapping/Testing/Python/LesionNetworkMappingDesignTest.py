@@ -149,6 +149,18 @@ class DesignSpecTest(_StudyTestCase):
             DesignSpec.from_dict({"format": "slicer-lnm-design", "version": "1.0"})
 
 
+    def test_one_level_message_is_plain_language(self):
+        rows = [(f"sub-{i}", {"onelevel": "lit", "volume_ml": 10.0 + i}) for i in range(4)]
+        study = self.make_study(rows, roles={"onelevel": "group"})
+        for test, contrast in (("two_group", "two_sided"), ("anova", "F")):
+            with self.subTest(test=test), self.assertRaises(designlib.DesignError) as ctx:
+                designlib.build_design(study, DesignSpec(test=test, group_column="onelevel", contrast=contrast))
+            text = str(ctx.exception)
+            self.assertIn("a group comparison needs at least 2", text)
+            for code in ("two_group", "anova", "a anova"):
+                self.assertNotIn(code, text)
+
+
 class CodingTest(_StudyTestCase):
     def coding_study(self):
         rows = []

@@ -664,7 +664,7 @@ def build_design(study, spec=None, run_metas=None, maps=None):
         exclude(f"{spec.group_column} not in levels ({', '.join(levels)})", [value in levels for value in values])
         if spec.levels is None and len(levels) < 2:
             excluded_text = f" (excluded: {exclusions()})" if excluded else ""
-            raise DesignError(f"{spec.group_column} has {len(levels)} level(s) among the included subjects ({', '.join(levels) or 'none'}){excluded_text}; a {spec.test} test needs at least 2")
+            raise DesignError(f"{spec.group_column} has {len(levels)} level(s) among the included subjects ({', '.join(levels) or 'none'}){excluded_text}; a group comparison needs at least 2")
         if spec.test == "two_group" and len(levels) != 2:
             raise DesignError(f"A two-group test needs exactly 2 levels of {spec.group_column}; found {', '.join(levels)}. Choose the levels, or an ANOVA")
     elif selector is not None:
