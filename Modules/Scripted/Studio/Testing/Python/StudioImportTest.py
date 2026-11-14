@@ -3316,6 +3316,68 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             else:
                 settings.remove(settingsKey)
 
+    def test_dicom_files_without_their_folder_open_in_draw(self):
+        """BB-1: the DICOM files of a series dropped or opened (Open...) without their folder take the folder's route: with
+        no DICOM database yet (fresh profile), the default one is created and the series opens in Draw. They went to the
+        Add Data dialog, whose DICOM reader found no database: nothing was imported, and SQL errors lit the error badge.
+        """
+        import DICOM
+        from DICOMLib import DICOMUtils
+        from StudioLib import importer
+
+        folder = self._writeDicomSeries("dicom files only")
+        if folder is None:
+            return  # pydicom is not available in this build
+        files = sorted(os.path.join(folder, name) for name in os.listdir(folder))
+        self.assertTrue(all(importer.isDicomFile(path) for path in files))
+        studioShell = self._applyStudio()
+        settings = qt.QSettings()
+        settingsKey = slicer.dicomDatabaseDirectorySettingsKey
+        originalSetting = settings.value(settingsKey)
+        originalOpen = bool(slicer.dicomDatabase is not None and slicer.dicomDatabase.isOpen)
+        originalCreate = DICOM.DICOMFileDialog.createDefaultDatabase
+        originalAddData = importer.openAddDataDialog
+        created, addData = [], []
+
+        def createDefaultDatabase():
+            # The default database of a fresh profile, in the test folder (not the user's Documents folder)
+            created.append(True)
+            DICOMUtils.openTemporaryDatabase(os.path.join(self.directory, f"default dicom database {len(created)}"))
+            return True
+
+        DICOM.DICOMFileDialog.createDefaultDatabase = staticmethod(createDefaultDatabase)
+        importer.openAddDataDialog = lambda paths: addData.append(list(paths))
+        try:
+            for route in ("open", "drop"):
+                if slicer.dicomDatabase is not None and slicer.dicomDatabase.isOpen:
+                    slicer.dicomDatabase.closeDatabase()  # a fresh profile: no DICOM database yet
+                slicer.mrmlScene.Clear(0)
+                studioShell.switchTo("library")
+                self._pump()
+                if route == "open":
+                    importer.loadFiles(files, studioShell)  # Open... with the files of the series
+                else:
+                    importer.handleDrop(files, shell=studioShell)
+                self._pump(8)
+                self.assertEqual(addData, [], route)
+                self.assertEqual(len(created), 1 if route == "open" else 2, route)
+                self.assertTrue(slicer.dicomDatabase.isOpen, route)
+                scan = self._editor().sourceVolumeNode()
+                self.assertIsNotNone(scan, route)
+                self.assertTrue(scan.GetAttribute("DICOM.instanceUIDs"), route)
+                self.assertEqual(studioShell.currentWorkspace(), "draw", route)
+        finally:
+            DICOM.DICOMFileDialog.createDefaultDatabase = originalCreate
+            importer.openAddDataDialog = originalAddData
+            if slicer.dicomDatabase.isOpen:
+                slicer.dicomDatabase.closeDatabase()
+            if originalSetting:
+                settings.setValue(settingsKey, originalSetting)
+                if originalOpen and os.path.isdir(str(originalSetting)):
+                    DICOMUtils.openDatabase(str(originalSetting))
+            else:
+                settings.remove(settingsKey)
+
     def test_dicom_series_with_lying_header_is_refused(self):
         """BB-1: a DICOM series whose header says 512x512 but whose pixel data is 24x24 is refused with a plain message
         (as a cut-short NIfTI is): no scan, no project, no Recent folder (the reader would zero-fill it silently).

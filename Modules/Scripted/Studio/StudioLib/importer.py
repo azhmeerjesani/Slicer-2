@@ -25,7 +25,8 @@ official behavior (the file is loaded again).
 Anything else (other file types, several folders, Shift+drop) opens the classic Add Data dialog with the
 dropped paths. In Studio, a load that mixes files of other types with scans or lesions sends only those files to the
 dialog: the scans and lesions load directly, and a scan that the dialog loads (a ``.mgz``) is a scan of the load.
-A DICOM folder goes to the DICOM module; a folder with several NIfTI files is offered as
+A DICOM folder goes to the DICOM module (in Studio, so do the DICOM files of a series dropped or opened without their
+folder, ``importDicomFiles()``); a folder with several NIfTI files is offered as
 a card in the Library, whose primary action is "Create study" (W3-07, ``StudioLib.study_ui``); a study folder
 (with a ``study.json``) opens the study. While a study is open, "Start on MNI template" adds a case to the study on
 its template, and ``loadedSet()`` is None (the study replaces the loaded set). In Studio, loading a scan switches to Draw, on the lesion loaded with it or on a new
@@ -2081,6 +2082,12 @@ def loadFiles(paths, shell=None, pairedLesion=None):
             paths, kinds = [path for path, _kind in kept], [kind for _path, kind in kept]
             if not paths:
                 return result
+        if all(kind == "other" for kind in kinds) and all(isDicomFile(path) for path in paths):
+            # The files of a DICOM series (selected instead of their folder) take the route of their dropped folder: the
+            # default database is created if there is none, and one series opens in Draw. The Add Data dialog's DICOM
+            # reader found no database on a fresh profile: nothing was imported, and SQL errors lit the error badge
+            importDicomFiles(paths, shell)
+            return result
         # A scan of another format (a FreeSurfer .mgz) that is already open is not loaded again by the Add Data dialog: its
         # node becomes current again, as for a NIfTI or NRRD scan
         reopened = {}
@@ -2952,9 +2959,24 @@ def importDicomFolder(path, shell=None):
     several series is shown in the DICOM browser (a series loaded there opens in Draw too). Without the DICOM module,
     the Add Data dialog opens with the folder.
     """
+    return _importDicom(path, None, shell)
+
+
+def importDicomFiles(paths, shell=None):
+    """Import DICOM files (the files of a series, dropped or chosen in Open... instead of their folder) as
+    ``importDicomFolder()`` imports a folder: the default database is created if there is none, and in Studio one series
+    opens in Draw. Without it, the Add Data dialog's DICOM reader found no database on a fresh profile: nothing was
+    imported and dozens of SQL errors lit the error badge (BB-1).
+    """
+    return _importDicom(None, [os.path.abspath(str(path)) for path in paths], shell)
+
+
+def _importDicom(path, files, shell):
+    """Import the DICOM folder ``path``, or the DICOM ``files`` when ``path`` is None (``importDicomFolder()``)."""
     shell = _currentShell(shell)
+    source = path if path is not None else os.path.dirname(files[0])
     if not hasattr(slicer.modules, "dicom"):
-        openAddDataDialog([path])
+        openAddDataDialog([path] if path is not None else files)
         return False
     from DICOMLib import DICOMUtils
 
@@ -2974,15 +2996,15 @@ def importDicomFolder(path, shell=None):
         slicer.util.warningDisplay(_("The DICOM database is not set up. Choose a database folder in the DICOM module, then import the folder again."))
         return False
     with slicer.util.WaitCursor():
-        if not DICOMUtils.importDicom(path):
+        if not (DICOMUtils.importDicom(path) if path is not None else _importDicomFileList(files, database)):
             slicer.util.selectModule("DICOM")
             return False
         seriesUIDs = []
         if shell is not None:
             try:
-                seriesUIDs = sorted(DICOMUtils.seriesUIDsForFiles(_folderFiles(path)))
+                seriesUIDs = sorted(DICOMUtils.seriesUIDsForFiles(_folderFiles(path) if path is not None else files))
             except Exception:
-                logging.error(f"Studio: cannot list the DICOM series of {path}:\n{traceback.format_exc()}")
+                logging.error(f"Studio: cannot list the DICOM series of {source}:\n{traceback.format_exc()}")
     if shell is not None and len(seriesUIDs) == 1:
         openNodes = openNodesForDicomSeries(seriesUIDs[0], database)
         if openNodes:
@@ -2995,11 +3017,11 @@ def importDicomFolder(path, shell=None):
             with _ownLoad(), slicer.util.WaitCursor():
                 nodeIds = DICOMUtils.loadSeriesByUID(seriesUIDs)
         except RefusedFileError as e:
-            logging.warning(f"Studio: {path} was not opened: {e}")  # planned refusal: no traceback
-            slicer.util.warningDisplay(str(e), detailedText=f"{path}\n{e}")
+            logging.warning(f"Studio: {source} was not opened: {e}")  # planned refusal: no traceback
+            slicer.util.warningDisplay(str(e), detailedText=f"{source}\n{e}")
             return False
         except Exception:
-            logging.error(f"Studio: cannot load the DICOM series of {path}:\n{traceback.format_exc()}")
+            logging.error(f"Studio: cannot load the DICOM series of {source}:\n{traceback.format_exc()}")
             nodeIds = []
         result = LoadResult()
         for nodeId in nodeIds or []:
@@ -3011,6 +3033,20 @@ def importDicomFolder(path, shell=None):
             return True
     # Several series (or none loadable): the DICOM browser lists them
     slicer.util.selectModule("DICOM")
+    return True
+
+
+def _importDicomFileList(files, database):
+    """Index the DICOM ``files`` into ``database`` (``DICOMUtils.importDicom()`` takes a folder); return True if done."""
+    try:
+        import ctk
+
+        indexer = ctk.ctkDICOMIndexer()
+        indexer.addListOfFiles(database, files)
+        indexer.waitForImportFinished()
+    except Exception:
+        logging.error(f"Studio: cannot import the DICOM files of {os.path.dirname(files[0])}:\n{traceback.format_exc()}")
+        return False
     return True
 
 
