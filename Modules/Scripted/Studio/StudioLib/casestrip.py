@@ -953,8 +953,8 @@ def _ensureCard():
         return False
     try:
         extension = draw.extension()
-        if extension._header is None:
-            return False
+        if extension._header is None or not _isAlive(extension._cardsBefore):
+            return False  # no panel yet, or its widgets are destroyed (the application is quitting)
         if _strip is None or not _isAlive(_strip.widget):
             _strip = CaseStrip()
         if extension._cards.get(CARD_KEY, (None,))[0] is not _strip.widget:

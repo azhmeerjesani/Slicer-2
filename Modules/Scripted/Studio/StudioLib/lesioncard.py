@@ -1115,6 +1115,10 @@ class LesionCard:
         Only edits the user made since the last commit are written: a field that only shows the lesion's own value is
         left alone.
         """
+        try:
+            self.sourceReferenceEdit.objectName
+        except Exception:
+            return  # the card's widgets are already destroyed (the application is quitting): nothing is being typed
         if self._notesTimer.isActive():
             self._commitNotes()
         if self.sourceReferenceEdit.isModified():

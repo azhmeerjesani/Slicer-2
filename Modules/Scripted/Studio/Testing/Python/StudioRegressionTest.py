@@ -8569,6 +8569,32 @@ class StudioRegressionTest(unittest.TestCase):
         finally:
             shell.instance = original
 
+    def test_99_card_commit_and_case_strip_add_are_silent_once_widgets_are_destroyed(self):
+        from types import SimpleNamespace
+
+        from StudioLib import casestrip, lesioncard
+
+        card = lesioncard.LesionCard(lesioncard._NullController())
+        card.widget.setParent(None)
+        card.widget.deleteLater()
+        for _ in range(4):
+            slicer.app.processEvents()
+        qt.QApplication.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+        card.commitEdits()  # no ValueError on the destroyed QLineEdit
+
+        dead = qt.QVBoxLayout()
+        dead.deleteLater()
+        qt.QApplication.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+        self.assertFalse(casestrip._isAlive(dead))
+        extension = SimpleNamespace(_header=object(), _cardsBefore=dead, _cards={})
+        draw = SimpleNamespace(extension=lambda: extension)
+        originalShell, originalDraw = casestrip._installedShell, casestrip._draw
+        casestrip._installedShell, casestrip._draw = object(), lambda: draw
+        try:
+            self.assertFalse(casestrip._ensureCard())
+        finally:
+            casestrip._installedShell, casestrip._draw = originalShell, originalDraw
+
     def test_97_sliders_with_a_range_over_two_billion_steps_paint(self):
         intMin, intMax = -(2**31), 2**31 - 1
         widgets = []
