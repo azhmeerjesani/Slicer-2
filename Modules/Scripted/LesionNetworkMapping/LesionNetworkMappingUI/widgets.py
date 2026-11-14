@@ -325,6 +325,27 @@ def _font(widget, pixelSize, bold=False):
 #
 
 
+class _CardCreatedFilter(qt.QObject):
+    """Make a ``card()`` apply its collapsed state to the children that were shown before the card was created.
+
+    ``ctk.ctkCollapsibleButton`` hides the children of a collapsed card only once it has been created through its own
+    ``setVisible()``. A card that is created because its parent is shown (the usual case) never gets that call, so a child
+    that was shown while the card was still hidden stays visible in the collapsed card (a chip cut by the card's edge, an
+    empty strip under the title). On the first Show event the card calls ``setVisible(True)`` itself, which makes ctk
+    apply the collapsed state to all its children.
+    """
+
+    def eventFilter(self, obj, event):
+        if event.type() == qt.QEvent.Show:
+            try:
+                obj.removeEventFilter(self)
+                if obj.collapsed:
+                    obj.setVisible(True)
+            except Exception:
+                pass
+        return False
+
+
 def card(title, objectName=None, collapsed=False):
     """Return a collapsible inspector card: a ``ctk.ctkCollapsibleButton`` with ``slicerRole`` "card".
 
@@ -346,6 +367,8 @@ def card(title, objectName=None, collapsed=False):
     # The button measures its title row when its style changes: measure it again for the card role
     qt.QApplication.sendEvent(button, qt.QEvent(qt.QEvent.StyleChange))
     button.collapsed = bool(collapsed)
+    createdFilter = _CardCreatedFilter(button)
+    button.installEventFilter(createdFilter)
     return button
 
 
