@@ -4674,7 +4674,9 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
                 identifier = self.logic.rememberConnectome(self.bundle)
             except Exception as exc:
                 self.bundle = None
-                self.bundleError = str(exc)
+                from LesionNetworkMappingLib.manager import open_error_text
+
+                self.bundleError = open_error_text(path, exc)
         node = self._parameterNode
         if node is not None:
             # The scene keeps the identifier, never the local path (SPEC 9.7 rule 10)

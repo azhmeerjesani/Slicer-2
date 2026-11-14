@@ -936,6 +936,27 @@ class BundleTest(_TempDirTestCase):
         self.assertEqual(bundle.subject_ids, ["sub-01", "sub-02", "sub-03"])
         self.assertEqual((bundle.name, bundle.citation, bundle.data_use_terms), ("Partial", "Cite me", "Research use only."))
 
+    def test_a_moved_bundle_says_it_is_gone_not_a_python_exception(self):
+        """Bug BB-1 moved-bundle-message-raw-filenotfounderror: a registered folder that was moved showed
+        "FileNotFoundError: Not a connectome bundle (missing connectome.json)" in the manager row and the card banner.
+        """
+        from LesionNetworkMappingLib import manager
+
+        gone = self.path("old", "Syn.lnmc")
+        row = manager.bundle_summary(gone)
+        for text in (row["error"], manager.provenance_line(row)):
+            self.assertNotIn("FileNotFoundError", text)
+            self.assertNotIn("missing connectome.json", text)
+            self.assertIn("no longer at", text)
+            self.assertIn(gone, text)
+            self.assertIn("Add bundle", text)
+            self.assertIn("Remove", text)
+        # A folder that is there but is not a bundle keeps its own explanation
+        os.makedirs(self.path("empty.lnmc"))
+        other = manager.bundle_summary(self.path("empty.lnmc"))["error"]
+        self.assertIn("missing connectome.json", other)
+        self.assertNotIn("FileNotFoundError", other)
+
     def test_converting_again_without_resume_keeps_a_stopped_conversion(self):
         """Bug BB-1 convert-without-resume-silently-deletes-stopped-conversion: converting again into a stopped conversion
         without resume (the Convert dialog's default) deleted the subjects it had written and started from zero, without asking.

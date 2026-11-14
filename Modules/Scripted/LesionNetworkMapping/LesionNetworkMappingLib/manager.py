@@ -81,6 +81,17 @@ def format_bytes(count):
 _format_bytes = format_bytes
 
 
+def open_error_text(path, exc):
+    """A plain sentence for a bundle that cannot be opened (no Python exception class): a folder that is no longer there
+    says so and names the two ways out; any other problem keeps the exception's own text.
+    """
+    path = os.path.abspath(os.fspath(path))
+    if not os.path.isdir(path):
+        return (f"the connectome folder is no longer at {path} (it was moved or deleted, or its drive is not connected). "
+                "Use Manage… > Add bundle… to add it at its new place, or Remove it from the list.")
+    return str(exc) or type(exc).__name__
+
+
 def bundle_summary(path):
     """One row of the connectome manager for the bundle at ``path`` (a dict; ``error`` is set when it cannot be opened).
 
@@ -95,7 +106,7 @@ def bundle_summary(path):
     try:
         bundle = ConnectomeBundle.open(path)
     except Exception as exc:
-        row["error"] = f"{type(exc).__name__}: {exc}"
+        row["error"] = open_error_text(path, exc)
         return row
     metadata = getattr(bundle, "metadata", {}) or {}
     try:
