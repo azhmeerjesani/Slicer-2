@@ -398,6 +398,14 @@ def setStep(cardButton, number, state="", summary=""):
 #
 
 
+def _fitChipWidth(chipLabel):
+    """A chip never shrinks below its text: the label's own minimum size ignores the stylesheet padding, so a
+    crowded row would otherwise squeeze it and clip both ends of the text.
+    """
+    chipLabel.setMinimumWidth(0)
+    chipLabel.setMinimumWidth(chipLabel.sizeHint.width())
+
+
 def setChipLevel(chipLabel, level, text=None):
     """Change the level (and optionally the text) of a chip made by ``chip()``."""
     if level not in CHIP_LEVELS:
@@ -407,6 +415,7 @@ def setChipLevel(chipLabel, level, text=None):
     ui = _studioUi()
     if ui is not None:
         ui.setChipLevel(chipLabel, level)
+        _fitChipWidth(chipLabel)
         return
     chipLabel.setProperty("chipLevel", level)
     if _styleSupportsRoles():
@@ -415,6 +424,7 @@ def setChipLevel(chipLabel, level, text=None):
         background, foreground = _paletteChipColors(level)
         chipLabel.setStyleSheet(f"QLabel {{ border: none; border-radius: 10px; padding: 0px 8px; background-color: {background}; color: {foreground}; }}")
     _repolish(chipLabel)
+    _fitChipWidth(chipLabel)
 
 
 def chip(text, level="neutral"):
