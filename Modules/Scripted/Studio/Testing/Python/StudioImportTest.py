@@ -2727,6 +2727,42 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             studioProjects.root = root
         self.assertEqual(calls, [])
 
+    def test_folder_of_other_scans_lists_its_files_in_add_data(self):
+        """A folder with one scan, or with scans that are not NIfTI (here in a subfolder), lists its files in the Add Data
+        dialog, as 3D Slicer lists a dropped folder; the dialog had no row (a folder given as its file) and OK loaded nothing.
+        """
+        from StudioLib import importer
+
+        grid = ((8, 8, 8), 1.0, (1, 1, 1), (0.0, 0.0, 0.0))
+        oneFolder = os.path.dirname(self._writeVolume("sub-02_T1w.nii", grid, subdirectory="one"))
+        otherFolder = os.path.join(self.directory, "nrrd")
+        self._writeVolume("sub-04_T1w.nrrd", grid, subdirectory=os.path.join("nrrd", "anat"))
+        self._writeVolume("sub-05_T1w.nrrd", grid, subdirectory="nrrd")
+        rows = []
+
+        def inspect():
+            for widget in slicer.app.topLevelWidgets():
+                if widget.isWidgetType() and widget.isVisible() and widget.findChildren("QTableWidget") \
+                        and "data" in (widget.windowTitle or "").lower():
+                    rows.append(sum(table.rowCount for table in widget.findChildren("QTableWidget")))
+                    widget.reject()
+                    return
+
+        timer = qt.QTimer()
+        timer.setInterval(100)
+        timer.connect("timeout()", inspect)
+        timer.start()
+        try:
+            for folder, expected in ((oneFolder, 1), (otherFolder, 2)):
+                del rows[:]
+                self.assertEqual(importer.loadFolder(folder), "addData", folder)
+                self.assertEqual(rows, [expected], folder)
+            del rows[:]
+            importer.openAddDataDialog([oneFolder, otherFolder])
+            self.assertEqual(rows, [3])
+        finally:
+            timer.stop()
+
     def test_file_open_event_opens_the_file(self):
         """macOS gives Finder's Open With, a double click and a Dock drop as QFileOpenEvent: the file opens like Open... does."""
         import Studio

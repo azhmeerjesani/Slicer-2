@@ -1997,10 +1997,27 @@ _addDataDialogs = 0
 _DRAW_MODULE = "SegmentEditor"
 
 
+def _addDataFiles(paths):
+    """``paths`` with each folder replaced by the files in it and its subfolders (sorted, hidden entries left out), as 3D
+    Slicer's Add Data dialog lists a dropped folder. The dialog's own ``fileName``/``fileNames`` take files only: a folder
+    given there added no row, so a folder with one scan (or only NRRD/MGZ scans) opened an empty dialog (BB-1).
+    """
+    files = []
+    for path in paths:
+        if not os.path.isdir(path):
+            files.append(path)
+            continue
+        for folder, subfolders, names in os.walk(path):
+            subfolders[:] = sorted(name for name in subfolders if not name.startswith("."))
+            files.extend(os.path.join(folder, name) for name in sorted(names)
+                         if not name.startswith(".") and os.path.isfile(os.path.join(folder, name)))
+    return files
+
+
 def openAddDataDialog(paths):
     """Open the classic Add Data dialog with ``paths`` (files or folders) already listed."""
     global _addDataDialogs
-    paths = [str(path) for path in paths]
+    paths = _addDataFiles([str(path) for path in paths])
     ioManager = slicer.app.ioManager()
     # While the dialog is open, a scan that it loads is also opened for drawing when Draw is shown (the transient module
     # watcher): otherwise Draw kept saying "Open a scan" over a scan, with no lesion and every tool disabled
