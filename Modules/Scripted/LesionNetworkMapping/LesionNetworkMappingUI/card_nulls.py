@@ -850,7 +850,10 @@ class NullsCard:
         # A run that does not finish leaves the earlier finished result of its folder in place (nulls.run removes it only when it writes)
         kept = job.state in ("failed", "cancelled") and bool(folder) and os.path.isfile(os.path.join(folder, nulls.NULLS_JSON))
         if job.state == "failed":
-            self.notice = _("The null models failed: {reason}").format(reason=job.failureReason)
+            reason = str(job.failureReason or "").rstrip()
+            if kept and reason and not reason.endswith((".", "!", "?")):
+                reason += "."  # the next sentence must not run on
+            self.notice = _("The null models failed: {reason}").format(reason=reason)
             if kept:
                 self.notice += " " + _("The earlier result is kept.")
         elif job.state == "cancelled":

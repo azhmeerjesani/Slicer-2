@@ -1095,7 +1095,7 @@ def load_index(path, bundle=None, verify=True, subject_ids=None):
         except ValueError:  # includes JSONDecodeError and UnicodeDecodeError
             metadata = None
     if not isinstance(metadata, dict):
-        raise ValueError(f"The fast index is damaged ({INDEX_JSON} cannot be read): rebuild it")
+        raise ValueError(f"The fast index is damaged ({INDEX_JSON} cannot be read): rebuild it.")
     if metadata.get("format") != FORMAT_NAME:
         raise ValueError(f"{json_path} is not a fast index ({FORMAT_NAME})")
     if int(metadata.get("version", 0)) > FORMAT_VERSION:
@@ -1104,7 +1104,7 @@ def load_index(path, bundle=None, verify=True, subject_ids=None):
     if verify:
         for item in files.values():
             if _file_sha256(os.path.join(folder, item["file"])) != item.get("sha256"):
-                raise ValueError(f"The fast index is damaged (a file changed after it was built: {item['file']}): rebuild it")
+                raise ValueError(f"The fast index is damaged (a file changed after it was built: {item['file']}): rebuild it.")
     tiling = Tiling.load(folder)
     p = np.load(os.path.join(folder, files.get("P", {}).get("file", P_NAME)), allow_pickle=False)
     c = np.load(os.path.join(folder, files.get("C", {}).get("file", C_NAME)), allow_pickle=False)

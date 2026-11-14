@@ -343,6 +343,9 @@ class FastmapTest(unittest.TestCase):
             f.write(bytes([last[0] ^ 0xFF]))
         with self.assertRaisesRegex(ValueError, "damaged.*rebuild it"):
             fastmap.load_index(copy)
+        with self.assertRaises(ValueError) as caught:  # a sentence of its own: callers append further sentences to it
+            fastmap.load_index(copy)
+        self.assertTrue(str(caught.exception).endswith("rebuild it."), str(caught.exception))
         code, events, stderr = self._run("apply", "--index", copy, "--lesion", os.path.join(self.tmp, "none.nii.gz"), "--out", os.path.join(self.tmp, "damaged-out"))
         self.assertEqual(code, 1, stderr)
         self.assertEqual(events[-1]["code"], "input")

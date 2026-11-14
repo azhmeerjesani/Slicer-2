@@ -1749,7 +1749,10 @@ def run(
             try:
                 fast_index = fastmap.load_index(index_path, bundle)
             except (OSError, ValueError) as exc:
-                raise jobs.JobError(f"The fast index cannot be used: {exc}", code="no_index") from None
+                reason = str(exc)
+                if not reason.startswith("The fast index"):  # the load_index sentences already name the index
+                    reason = f"The fast index cannot be used: {reason}"
+                raise jobs.JobError(reason if reason.endswith((".", "!", "?")) else reason + ".", code="no_index") from None
             if (fast_index.metadata.get("subjects") or {}).get("sha256") != cohort.subject_ids_sha256:
                 emit("warning", code="index_subjects", message="The fast index was built from other connectome subjects than the observed maps; the parity gate compares them.")
             parity_report, parity_source = _parity_for_fast(bundle, fast_index, cohort, parity, reference, emit)
