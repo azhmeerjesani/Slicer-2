@@ -348,6 +348,22 @@ class FastmapTest(unittest.TestCase):
         self.assertIn("rebuild it", events[-1]["message"])
         self.assertNotIn("ValueError", events[-1]["message"])
 
+    def test_damaged_index_json_is_reported_with_rebuild_advice(self):
+        """An index.json that is not JSON, or not an object, names index.json and says to rebuild, also on the command line."""
+        for n, text in enumerate(["{garbage", "", "[]", "null"]):
+            copy = os.path.join(self.tmp, f"index-badjson-{n}")
+            shutil.copytree(self.index_dir, copy)
+            with open(os.path.join(copy, fastmap.INDEX_JSON), "w", encoding="utf-8") as f:
+                f.write(text)
+            with self.assertRaisesRegex(ValueError, r"index\.json.*rebuild it"):
+                fastmap.load_index(copy)
+            code, events, stderr = self._run("apply", "--index", copy, "--lesion", os.path.join(self.tmp, "none.nii.gz"), "--out", os.path.join(self.tmp, f"badjson-out-{n}"))
+            self.assertEqual(code, 1, stderr)
+            self.assertEqual(events[-1]["code"], "input")
+            self.assertIn("rebuild it", events[-1]["message"])
+            self.assertNotIn("JSONDecodeError", events[-1]["message"])
+            self.assertNotIn("AttributeError", events[-1]["message"])
+
     def test_index_of_a_bundle_converted_again_from_other_data_is_stale(self):
         """Converting other time series with the same subject ids and mask into the same folder (``--overwrite``) must
         change connectome.json (the manifest sha256 that keys the cohort maps cache) and make the fast index stale.

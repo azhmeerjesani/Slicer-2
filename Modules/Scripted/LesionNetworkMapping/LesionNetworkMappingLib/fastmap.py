@@ -1090,7 +1090,12 @@ def load_index(path, bundle=None, verify=True, subject_ids=None):
     folder = os.path.dirname(path) if os.path.basename(os.fspath(path)) == INDEX_JSON else os.fspath(path)
     json_path = os.path.join(folder, INDEX_JSON)
     with open(json_path, encoding="utf-8") as f:
-        metadata = json.load(f)
+        try:
+            metadata = json.load(f)
+        except ValueError:  # includes JSONDecodeError and UnicodeDecodeError
+            metadata = None
+    if not isinstance(metadata, dict):
+        raise ValueError(f"The fast index is damaged ({INDEX_JSON} cannot be read): rebuild it")
     if metadata.get("format") != FORMAT_NAME:
         raise ValueError(f"{json_path} is not a fast index ({FORMAT_NAME})")
     if int(metadata.get("version", 0)) > FORMAT_VERSION:
