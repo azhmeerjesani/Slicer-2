@@ -222,6 +222,34 @@ class LesionNetworkMappingPlanUITest(unittest.TestCase):
         self.assertEqual(self.contrast.nPerm(), 1000, "the Contrast tab does not follow the plan's recorded deviation")
         self.assertEqual(len(self.recipes.read_deviations(self.study)), recorded, "opening the study recorded something")
 
+    def test_8_recorded_plan_change_is_followed_by_the_analyses(self):
+        """Recording Run everything's permutations after the lock: the Contrast and Symptom tabs that held the plan's
+        value follow the new one, and nothing else asks for a reason or is recorded (bug
+        recipes-plan-lock-roi-gui:locked-plan-deviation-cascades-phantom-contrast-symptom-deviations).
+        """
+        self.assertEqual(self.contrast.nPerm(), 1000)  # its own recorded deviation (test 3)
+        self.assertEqual(self.symptom.nPerm(), 5000)
+        self.assertEqual(self.header.pending, [], self._pendingText())
+        options = self.cp.loadOptions()
+        options["perm"] = 2000
+        self.cp.saveOptions(options)
+        self.ctx.card("pipeline").onRunSettingsChanged()
+        self.header.refresh()
+        _pump(50)
+        self.assertEqual([change["field"] for change in self.header.pending], ["n_perm"], self._pendingText())
+        recorded = len(self.recipes.read_deviations(self.study))
+        self.assertEqual(len(self.header.recordPending("Compute budget")), 1)
+        self._refresh(self.contrast)
+        self._refresh(self.symptom)
+        self.assertEqual(self.header.pending, [], self._pendingText())
+        self.assertTrue(self.header.prompt.isHidden(), "the reason row asks for changes nobody made")
+        self.assertEqual(self.symptom.nPerm(), 2000)
+        self.assertEqual(self.contrast.nPerm(), 2000, "the latest change of the field wins (analysis_parameters)")
+        self.assertNotIn("analysis plan", self.contrast.runState()[1])
+        self.assertNotIn("analysis plan", self.symptom.runState()[1])
+        deviations = self.recipes.read_deviations(self.study)
+        self.assertEqual([(item["field"], item["old"], item["new"]) for item in deviations[recorded:]], [("n_perm", 5000, 2000)])
+
 
 if __name__ == "__main__":
     unittest.main()

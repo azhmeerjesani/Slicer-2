@@ -371,6 +371,29 @@ class PlanLockTest(_TempCase):
         recipes.record_deviation(study, "n_perm", 1000, 10, "hand edit")
         self.assertEqual(recipes.effective_parameters(study)["n_perm"], 1000)
 
+    def test_cohort_analysis_follows_a_recorded_plan_change(self):
+        """After a change of the plan is recorded, an analysis that still held the plan's value follows it; one the user
+        changed keeps its value (bug recipes-plan-lock-roi-gui:locked-plan-deviation-cascades-phantom-contrast-symptom-deviations).
+        """
+        before = {"n_perm": 5000, "design.covariates": ["volume_ml"], "design.tfce": False, "fdr": True, "statistic": "Fz"}
+        after = dict(before, **{"n_perm": 2000, "design.covariates": []})
+        self.assertEqual(recipes.analysis_follow(before, after, dict(before)), {"n_perm": 2000, "design.covariates": []})
+        self.assertEqual(recipes.analysis_follow(before, after, {"n_perm": 3000, "design.covariates": ["volume_ml"]}), {"design.covariates": []})
+        self.assertEqual(recipes.analysis_follow(before, before, dict(before)), {})
+        self.assertEqual(recipes.analysis_follow(None, after, dict(before)), {})
+        self.assertEqual(recipes.analysis_follow(before, after, {"n_perm": 5000}), {"n_perm": 2000})  # only the fields it holds
+        # With a study: Run everything's permutations recorded after the lock; the analyses at the plan's 5000 follow
+        study = self.make_study()
+        self.lock(study)
+        old = recipes.analysis_parameters(study, "symptom")
+        current = {"n_perm": 5000, "design.covariates": ["volume_ml"]}
+        recipes.record_deviation(study, "n_perm", 5000, 2000, "compute budget")
+        new = recipes.analysis_parameters(study, "symptom")
+        follow = recipes.analysis_follow(old, new, current)
+        self.assertEqual(follow, {"n_perm": 2000})
+        self.assertEqual(recipes.analysis_pending(study, "symptom", dict(current, **follow)), [])
+        self.assertEqual(len(recipes.analysis_pending(study, "symptom", current)), 1, "without following, a change nobody made")
+
     def test_cohort_analysis_deviations(self):
         """The Cohort card's Contrast and Symptom analyses are compared with the plan apart from Run everything."""
         study = self.make_study()

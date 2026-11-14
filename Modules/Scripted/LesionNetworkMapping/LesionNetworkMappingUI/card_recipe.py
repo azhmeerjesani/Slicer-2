@@ -732,6 +732,12 @@ class RecipeHeader:
         path = self.studyPath()
         if not reason or not path or not self.pending:
             return []
+        followed = {}  # what each Cohort analysis followed before, and its settings: it follows a recorded plan change
+        for tab in self.analysisTabs():
+            try:
+                followed[tab] = (recipes.analysis_parameters(path, tab.PLAN_SCOPE), tab.planValues())
+            except Exception:
+                logging.exception("Lesion network mapping: a Cohort analysis could not be compared with the locked plan")
         records = []
         for change in list(self.pending):
             try:
@@ -739,6 +745,14 @@ class RecipeHeader:
             except (recipes.RecipeError, OSError) as exc:
                 logging.error(f"Lesion network mapping: the deviation could not be recorded: {exc}")
         self.reasonEdit.clear()
+        for tab, (before, current) in followed.items():
+            try:
+                values = recipes.analysis_follow(before, recipes.analysis_parameters(path, tab.PLAN_SCOPE), current)
+                if values:
+                    tab.applyPlanValues(values)
+                    tab.refresh()
+            except Exception:
+                logging.exception("Lesion network mapping: a Cohort analysis could not follow the locked plan")
         self.refresh()
         for tab in self.analysisTabs():
             tab.showState()  # Run of a Cohort analysis waited for this reason

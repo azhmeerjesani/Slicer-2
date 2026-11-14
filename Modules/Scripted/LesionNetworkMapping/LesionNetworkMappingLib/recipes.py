@@ -1043,6 +1043,36 @@ def _analysis_value(field, value):
     return str(value)
 
 
+def _analysis_same(field, a, b):
+    """Whether the values ``a`` and ``b`` of an analysis ``field`` are the same setting."""
+    if field == "design.covariates":
+        return sorted(a or []) == sorted(b or [])  # the order of the covariates does not change the inference
+    return _same(a, b)
+
+
+def analysis_follow(before, after, current):
+    """{field: value} an analysis should be set to after deviations were recorded: the fields whose followed value
+    changed from ``before`` to ``after`` (:func:`analysis_parameters` before and after recording) and whose ``current``
+    setting was still ``before`` (the analysis followed the plan; a setting the user changed is kept).
+
+    Without it a recorded change of the plan (for example Run everything's permutations) left the analyses that
+    follow it at the old value, which then showed as a change of theirs nobody made.
+    """
+    if not before or not after:
+        return {}
+    out = {}
+    for field in ANALYSIS_FIELDS:
+        if field not in current or _analysis_same(field, before.get(field), after.get(field)):
+            continue
+        try:
+            value = _analysis_value(field, current[field])
+        except (TypeError, ValueError):
+            continue
+        if _analysis_same(field, before.get(field), value):
+            out[field] = copy.deepcopy(after.get(field))
+    return out
+
+
 def analysis_parameters(study, scope):
     """{field: value} of :data:`ANALYSIS_FIELDS` that the Cohort-card analysis ``scope`` follows under the locked
     plan: the plan's parameters with the deviations of the plan (as :func:`effective_parameters`) and the analysis's
@@ -1095,11 +1125,7 @@ def analysis_pending(study, scope, current):
         if field not in current:
             continue
         new, old = _analysis_value(field, current[field]), planned.get(field)
-        if field == "design.covariates":
-            same = sorted(old or []) == sorted(new)  # the order of the covariates does not change the inference
-        else:
-            same = _same(old, new)
-        if not same:
+        if not _analysis_same(field, old, new):
             out.append({"field": f"{scope}.{field}", "old": old, "new": new, "description": f"{ANALYSIS_SCOPES[scope]}: {describe_change(field, old, new)}", "scope": scope})
     return out
 
