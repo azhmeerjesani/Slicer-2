@@ -818,11 +818,12 @@ def splitExtension(fileName):
     return base, extension
 
 
-def uniqueName(folder, name, reserved=(), isFile=True, free=()):
+def uniqueName(folder, name, reserved=(), isFile=True, free=(), keepSuffix=""):
     """``name``, else "name 2", "name 3"... (before the extension of a file), so that nothing in ``folder`` is replaced.
 
     ``reserved``: names already planned (compared case-insensitively, as on macOS and Windows). ``free``: existing names
-    that the caller is about to replace or remove. Worker-safe.
+    that the caller is about to replace or remove. ``keepSuffix`` (folders): an ending of ``name`` that stays at the end
+    when a long name is shortened to make room for the number (" copy": "<long name> copy 2"). Worker-safe.
     """
     reservedLower = {str(item).lower() for item in reserved}
     try:
@@ -834,9 +835,26 @@ def uniqueName(folder, name, reserved=(), isFile=True, free=()):
     candidate = name
     index = 2
     while candidate.lower() in taken:
-        candidate = f"{base} {index}{extension}"
+        suffix = f" {index}{extension}"
+        shortBase = base
+        if not isFile:
+            # A folder name stays within the name limits: the base gives way to the number, not the other way round
+            keep = keepSuffix if keepSuffix and base.endswith(keepSuffix) else ""
+            shortBase = _fitBase(base[: len(base) - len(keep)], suffix + keep) + keep
+        candidate = f"{shortBase}{suffix}"
         index += 1
     return candidate
+
+
+def _fitBase(base, suffix):
+    """``base`` shortened (only if needed) so that ``base + suffix`` has at most MAX_NAME_LENGTH characters and
+    MAX_NAME_BYTES UTF-8 bytes. A base that is already longer than the limits (an old name) is shortened too.
+    """
+    while base and (
+        len(base) + len(suffix) > MAX_NAME_LENGTH or len((base + suffix).encode("utf-8", "replace")) > MAX_NAME_BYTES
+    ):
+        base = base[:-1]
+    return base.rstrip(". ") or base
 
 
 def displayName(text):
@@ -1938,12 +1956,21 @@ _pendingCopies = set()
 _pendingCopiesLock = threading.Lock()
 
 
+def copyName(name):
+    """"<name> copy" for a Duplicate; a long name is shortened so that the result keeps its " copy" and the name limits."""
+    template = _("{name} copy")
+    base = sanitizeName(name)
+    suffix = template.format(name="")
+    shortBase = _fitBase(base, suffix) if template.endswith(suffix) else base
+    return sanitizeName(template.format(name=shortBase.rstrip()))
+
+
 def _reserveCopyName(parent, name):
     """A name for a new folder in ``parent`` that neither exists nor is reserved by a Duplicate in progress; reserve it."""
     key = os.path.normcase(os.path.abspath(parent))
     with _pendingCopiesLock:
         reserved = [entry for folder, entry in _pendingCopies if folder == key]
-        newName = uniqueName(parent, name, reserved=reserved, isFile=False)
+        newName = uniqueName(parent, name, reserved=reserved, isFile=False, keepSuffix=_("{name} copy").format(name=""))
         _pendingCopies.add((key, newName))
     return newName
 
@@ -2157,7 +2184,7 @@ def duplicateFolder(path, onDone=None, onError=None):
 
     name = os.path.basename(os.path.normpath(path))
     parent = os.path.dirname(os.path.normpath(path))
-    newName = _reserveCopyName(parent, sanitizeName(_("{name} copy").format(name=name)))
+    newName = _reserveCopyName(parent, copyName(name))
     newPath = os.path.join(parent, newName)
     scene = sceneFile(path)
     # Translated here: ``copy`` runs in the background writer

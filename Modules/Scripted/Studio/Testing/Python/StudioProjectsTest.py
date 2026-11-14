@@ -4887,6 +4887,27 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertFalse(os.path.exists(leftover))
         self.assertFalse([name for name in entries() if projects.COPY_MARKER in name])
 
+    def test_57a_duplicate_of_a_maximum_length_name_is_still_a_copy(self):
+        """A name of 80 characters (the limit) was duplicated as "<name> 2" (82 characters, over the limit): sanitizeName cut
+        " copy" off and uniqueName numbered the original's name. The copy keeps " copy" and the limits (BB-1).
+        """
+        projects = self.projects
+        for name in ("N" * 80, "N" * 76, "患" * 70, "Patient A"):
+            copy = projects.copyName(name)
+            self.assertTrue(copy.endswith(" copy"), copy)
+            self.assertLessEqual(len(copy), projects.MAX_NAME_LENGTH)
+            self.assertLessEqual(len(copy.encode("utf-8")), projects.MAX_NAME_BYTES)
+        self.assertEqual(projects.copyName("Patient A"), "Patient A copy")
+        with tempfile.TemporaryDirectory() as parent:
+            first = projects._reserveCopyName(parent, projects.copyName("N" * 80))
+            os.makedirs(os.path.join(parent, first))
+            second = projects._reserveCopyName(parent, projects.copyName("N" * 80))
+            self.assertEqual(first, "N" * 75 + " copy")
+            self.assertEqual(second, "N" * 73 + " copy 2")
+            self.assertLessEqual(len(second), projects.MAX_NAME_LENGTH)
+            projects._releaseCopyName(parent, first)
+            projects._releaseCopyName(parent, second)
+
     def test_57b_startup_deletes_the_partial_copy_of_an_interrupted_duplicate(self):
         """A Duplicate that was killed midway (a crash, kill -9, a power loss) left "<name> copy.studio-copy" of up to
         hundreds of MB in Projects/: hidden from the Library, never deleted, moved along with every later move of the
