@@ -1629,9 +1629,9 @@ class AutosaveService:
         self._projects().notifyChanged()  # the Library caption says that nothing is saved
 
     def rootUnwritable(self):
-        """True if the Slicer Studio folder could not be written when a project was last created in it."""
+        """True if the Slicer Studio folder could not be written when a project was last created in it, or cannot be now."""
         key = os.path.normcase(os.path.abspath(self._projects().root()))
-        return key in self._rootFailedAnnounced
+        return key in self._rootFailedAnnounced or self._projects().isRootReadOnly()
 
     def _studioActive(self):
         if self.studioActiveOverride is not None:

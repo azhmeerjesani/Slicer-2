@@ -5599,8 +5599,12 @@ def _rootUnwritable():
     """True once autosave found that the Slicer Studio folder cannot be written."""
     from . import autosave
 
+    from . import projects
+
     service = autosave.instance()
-    return service is not None and service.rootUnwritable()
+    if service is not None and service.rootUnwritable():
+        return True
+    return projects.isRootReadOnly()  # also before any write was tried (an empty session on a read-only drive)
 
 
 class LibraryCanvas(qt.QObject):

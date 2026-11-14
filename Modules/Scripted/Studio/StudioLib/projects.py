@@ -226,6 +226,17 @@ def isRootMissing(rootPath=None):
     return not os.path.isdir(current)
 
 
+def isRootReadOnly():
+    """True if the Slicer Studio folder exists but the operating system does not let us write to it now (a read-only
+    drive or share, or no permission): autosave cannot save there, whether or not a write was tried yet.
+    """
+    current = root()
+    try:
+        return os.path.isdir(current) and not os.access(current, os.W_OK | os.X_OK)
+    except Exception:
+        return False
+
+
 def rootMissingText(rootPath=None):
     """What to tell the user when ``isRootMissing()``: where the folder was, and what to do."""
     return _("The Slicer Studio folder {folder} cannot be found. Connect the drive that holds it, or choose another folder "

@@ -1997,6 +1997,38 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertTrue(canvas._captionText.startswith("Autosave paused: "), canvas._captionText)
         self.assertTrue(canvas._captionText.endswith("cannot be written"), canvas._captionText)
 
+    def test_caption_readonly_folder_before_any_write(self):
+        """A Studio folder that the system will not let us write to is not "saved automatically" even before a write
+        failed (an empty session on a read-only drive or share).
+        """
+        from StudioLib import autosave, projects
+
+        saved = os.environ.get("SLICER_STUDIO_PROJECTS_ROOT")
+        savedFunction = projects.isRootReadOnly
+        savedService = autosave._service
+
+        def restore():
+            projects.isRootReadOnly = savedFunction
+            autosave._service = savedService
+            if saved is None:
+                os.environ.pop("SLICER_STUDIO_PROJECTS_ROOT", None)
+            else:
+                os.environ["SLICER_STUDIO_PROJECTS_ROOT"] = saved
+            projects.notifyChanged()
+
+        self.cleanup.append(restore)
+        root = os.path.join(self.directory, "CaptionReadOnly", "Slicer Studio")
+        os.makedirs(root, exist_ok=True)
+        os.environ["SLICER_STUDIO_PROJECTS_ROOT"] = root
+        autosave._service = None  # no write was tried
+        projects.isRootReadOnly = lambda: True  # (as root, chmod does not stop writes: the check itself is tested below)
+        studioShell = self._applyStudio()
+        canvas = self._library(studioShell)
+        self.assertTrue(canvas._captionText.startswith("Autosave paused: "), canvas._captionText)
+        self.assertTrue(canvas._captionText.endswith("cannot be written"), canvas._captionText)
+        projects.isRootReadOnly = savedFunction
+        self.assertFalse(projects.isRootReadOnly())  # a writable folder
+
     def test_footer_line(self):
         """One 32 px text2 line at the bottom of the canvas, with link-style actions; it survives a new canvas."""
         from StudioLib import library
