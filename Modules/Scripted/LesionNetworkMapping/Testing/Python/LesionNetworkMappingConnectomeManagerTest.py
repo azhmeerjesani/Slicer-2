@@ -748,6 +748,31 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
         finally:
             widget.acceptTermsCheckBox.setChecked(False)
 
+    def test_name_column_stays_readable_when_the_first_connectome_is_registered(self):
+        import qt
+
+        from LesionNetworkMapping import CONNECTOMES_SETTING
+
+        saved = qt.QSettings().value(CONNECTOMES_SETTING)
+        qt.QSettings().setValue(CONNECTOMES_SETTING, [])
+        try:
+            self.widget.refreshConnectomes()
+            manager = self.widget.openManager()
+            manager.show()
+            _pump(100)
+            self.assertEqual(manager.table.rowCount, 0)
+            self.logic.registerConnectome(self.later[0])
+            manager.refresh(select=self.later[0])
+            _pump(100)
+            table = manager.table
+            text = table.item(0, 0).text()
+            metrics = table.fontMetrics()
+            need = metrics.horizontalAdvance(text) if hasattr(metrics, "horizontalAdvance") else metrics.width(text)
+            self.assertGreaterEqual(table.columnWidth(0), need, (text, [table.columnWidth(c) for c in range(table.columnCount)], manager.width))
+        finally:
+            qt.QSettings().setValue(CONNECTOMES_SETTING, saved if saved is not None else [])
+            self.widget.refreshConnectomes(select=self.paths[0])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2035,10 +2035,12 @@ class ConnectomeManagerDialog(qt.QDialog):
         self.job = None
         self.rows = []
         self.convertDialog = None
+        self._sized = False  # set once __init__ has sized the dialog; refresh() then only widens it
         self.setObjectName("LNMConnectomeManager")
         self.setWindowTitle(_("Connectomes"))
         self.setMinimumSize(720, 420)
         layout = qt.QVBoxLayout(self)
+        self._mainLayout = layout
         intro = qt.QLabel(_("Connectome bundles registered on this computer. Connectomes are never bundled or downloaded automatically; "
                             "register a bundle you have, or convert data you have into one."))
         intro.setWordWrap(True)
@@ -2107,10 +2109,20 @@ class ConnectomeManagerDialog(qt.QDialog):
         self.refresh()
         # A top-level window takes no height for width from its layout: size it for the wrapped button rows before it
         # is first shown (as wide as the layout wants, as high as it needs at that width)
+        self._fitSize()
+        self._sized = True
+
+    def _fitSize(self, widenOnly=False):
+        """Size the dialog for the layout and the table's columns; with ``widenOnly`` it only grows the width (a window the user resized stays)."""
+        layout = self._mainLayout
         width = max(self.minimumWidth, layout.totalSizeHint().width(), self._tableWidthHint(layout))
         area = self._availableWidth()
         if area:
             width = max(self.minimumWidth, min(width, area))
+        if widenOnly:
+            if width > self.width:
+                self.resize(width, self.height)
+            return
         self.resize(width, max(self.minimumHeight, layout.totalHeightForWidth(width)))
 
     NAME_COLUMN_WIDTH = (160, 360)  # least and most width (px) that the dialog asks for the Name column
@@ -2195,6 +2207,9 @@ class ConnectomeManagerDialog(qt.QDialog):
         if selectRow >= 0:
             table.selectRow(selectRow)
         self.onSelectionChanged()
+        if self._sized:
+            # The first bundle (or a longer name) changes the columns' widths: without room the Name column shrank to "G…"
+            self._fitSize(widenOnly=True)
 
     @staticmethod
     def _referenceText(row):
