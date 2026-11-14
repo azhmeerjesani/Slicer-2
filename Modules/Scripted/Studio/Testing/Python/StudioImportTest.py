@@ -1217,6 +1217,36 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             importer._availableMemoryBytes, importer._niftiDataShortfall = originalMemory, originalShortfall
 
+    def test_nifti2_scan_is_refused_with_reason(self):
+        """BB-1: a NIfTI-2 scan is refused with the reason (convert to NIfTI-1 or NRRD), as a planned refusal: no
+        traceback is logged and no node is created.
+        """
+        from StudioLib import importer
+
+        header = bytearray(544)
+        struct.pack_into("<i", header, 0, 540)
+        struct.pack_into("<8q", header, 16, 3, 4, 4, 4, 1, 1, 1, 1)
+        struct.pack_into("<hh", header, 12, 8, 32)
+        struct.pack_into("<q", header, 168, 544)
+        struct.pack_into("<8d", header, 104, 1, 1, 1, 1, 1, 0, 0, 0)
+        path = os.path.join(self.directory, "nifti2_T1w.nii.gz")
+        with open(path, "wb") as f:
+            f.write(gzip.compress(bytes(header) + bytes(64 * 4)))
+        recorder = logging.Handler()
+        records = []
+        recorder.emit = records.append
+        logging.getLogger().addHandler(recorder)
+        try:
+            result = importer.loadFiles([path], self._applyStudio())
+        finally:
+            logging.getLogger().removeHandler(recorder)
+        self._pump()
+        self.assertEqual(len(result.errors), 1)
+        self.assertIn("NIfTI-2", result.errors[0][1])
+        self.assertIn("NIfTI-1 or NRRD", result.errors[0][1])
+        self.assertFalse([r for r in records if r.levelno >= logging.ERROR or "Traceback" in r.getMessage()])
+        self.assertEqual(result.volumes, [])
+
     def test_int64_nifti_scan_is_refused(self):
         """BB-1: a NIfTI scan with 64-bit integer voxels (datatype 1024 or 1280, what nibabel writes for a numpy integer
         array) is refused in plain words before it is read: read as VTK_LONG, its first slice render ended the

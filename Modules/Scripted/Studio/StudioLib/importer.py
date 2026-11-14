@@ -1190,11 +1190,17 @@ def _niftiDatatype(path):
 
 
 def _checkScanVoxelType(path):
-    """Raise ``RefusedFileError`` (a message for the user) if the NIfTI scan ``path`` stores 64-bit integer voxels: the
+    """Raise ``RefusedFileError`` (a message for the user) if the NIfTI scan ``path`` is NIfTI-2 (not supported) or
+    stores 64-bit integer voxels: the
     reader reads them as VTK_LONG / VTK_LONG_LONG, which the image filters of the slice views and histograms are not
     compiled for, and the first slice render ends the application (3D Slicer does the same). It runs before the file is
     read, so no node is created. Lesions are read by the segmentation reader, which converts the type, and are not checked.
     """
+    if _niftiVoxelHeaderSize(path) == 540:
+        # the volume reader refuses NIfTI-2 with a developer text (and the generic handler would log a traceback)
+        raise RefusedFileError(
+            _("{name} cannot be opened: NIfTI-2 files are not supported. Convert it to NIfTI-1 or NRRD and open it "
+              "again.").format(name=os.path.basename(str(path))))
     typeName = _NIFTI_64BIT_INTEGER_DATATYPES.get(_niftiDatatype(path))
     if typeName is None:
         return
