@@ -413,6 +413,18 @@ class NoteTest(RefmapsTestBase):
         rows = refmaps.top_similar(current, [{"name": "μC_r", "values": current + 0.1 * self.rng.standard_normal(v), "kind": "connectome"}])
         self.assertIn("connectome", rows[0]["note"])
 
+    def test_connectome_axis_anchor_has_no_condition_notes(self):
+        v = self.bundle.n_voxels
+        anchor = self.rng.standard_normal(v)
+        cands = [{"name": "mu_like", "values": anchor.copy(), "condition": "tremor", "kind": "map"},
+                 {"name": "PC1", "values": anchor + 0.01 * self.rng.standard_normal(v), "kind": "connectome"}]
+        rows = refmaps.top_similar(anchor, cands, condition=None, anchor_name="μC_r")
+        self.assertEqual([row["note"] for row in rows], ["", ""])
+        # a study-map anchor still gets the notes
+        rows = refmaps.top_similar(anchor, cands, condition="aphasia")
+        self.assertTrue(all(row["note"] for row in rows))
+        self.assertIn("aphasia", " ".join(row["note"] for row in rows))
+
 
 class _FakeResponse:
     def __init__(self, payload):

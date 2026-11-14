@@ -894,6 +894,14 @@ class CompareCard:
         if len(names) < 2:
             return []
         condition = str(self.conditionEdit.text or "").strip() or None
+        anchor = used[0]
+        anchorKind = "connectome" if anchor.group == "connectome" else anchor.info.get("kind") or "map"
+        anchorName = None
+        if anchorKind in ("connectome", "degree"):
+            condition = None  # a connectome axis (μC_r, PC1, degree) has no clinical condition: no 'unrelated condition' notes
+            anchorName = names[0]
+        elif anchor.group not in ("result", "group", "instudy", "lesion", "other"):
+            condition = anchor.info.get("condition") or None  # a reference map of its own condition
         candidates = []
         for name, source in zip(names[1:], used[1:], strict=True):
             sourceCondition = source.info.get("condition")
@@ -902,7 +910,7 @@ class CompareCard:
             kind = "connectome" if source.group == "connectome" else source.info.get("kind") or "map"
             candidates.append({"name": name, "values": maps[name], "condition": sourceCondition, "kind": kind})
         try:
-            return refmaps.top_similar(maps[names[0]], candidates, k=refmaps.TOP_K, condition=condition, reference=reference)
+            return refmaps.top_similar(maps[names[0]], candidates, k=refmaps.TOP_K, condition=condition, reference=reference, anchor_name=anchorName)
         except Exception:
             logging.exception("Lesion network mapping: the most similar maps could not be ranked")
             return []

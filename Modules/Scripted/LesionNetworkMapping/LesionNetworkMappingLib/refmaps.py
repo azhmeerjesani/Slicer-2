@@ -1329,7 +1329,9 @@ def unrelated(condition, other, related=()):
     return theirs not in {normalize_condition(item) for item in related or ()}
 
 
-def _note(row, condition, threshold):
+def _note(row, condition, threshold, anchor_name=None):
+    if anchor_name:
+        return ""  # the anchor is itself a connectome axis: neither note applies
     if row["kind"] in ("connectome", "degree") and math.isfinite(row["r"]) and abs(row["r"]) > threshold:
         return (f"|r| = {abs(row['r']):.2f} with {row['name']}: the map follows the connectome's own structure; "
                 f"see the partial r given μC_r and PC1.")
@@ -1341,11 +1343,12 @@ def _note(row, condition, threshold):
     return ""
 
 
-def top_similar(current, candidates, k=TOP_K, condition=None, related=(), threshold=NOTE_THRESHOLD, reference=None, covariate_keys=PARTIAL_COVARIATES):
+def top_similar(current, candidates, k=TOP_K, condition=None, related=(), threshold=NOTE_THRESHOLD, reference=None, covariate_keys=PARTIAL_COVARIATES, anchor_name=None):
     """The ``k`` maps most similar to ``current`` (by |Pearson r|), each with a note when needed.
 
     :param current: (V,) map.
     :param candidates: [{"name", "values" (V,), "condition" (optional), "kind" (optional: "map", "connectome", "degree", ...)}].
+    :param anchor_name: set when ``current`` is a connectome axis (mu_C_r, PC1, degree): no condition or structure notes are made.
     :param condition: the current map's condition; candidates of another (not ``related``) condition are "unrelated".
     :return: rows {name, r, rho, partial_r, condition, kind, unrelated, note} sorted by |r| (largest first).
     """
@@ -1360,7 +1363,7 @@ def top_similar(current, candidates, k=TOP_K, condition=None, related=(), thresh
         partial = similarity.partial_spatial_correlation(current, values, covariates) if covariates is not None else None
         row = {"name": item["name"], "r": r, "rho": rho, "partial_r": partial, "condition": item.get("condition"), "kind": item.get("kind", "map"),
                "unrelated": unrelated(condition, item.get("condition"), related)}
-        row["note"] = _note(row, condition, threshold)
+        row["note"] = _note(row, condition, threshold, anchor_name)
         rows.append(row)
     rows.sort(key=lambda row: -abs(row["r"]) if math.isfinite(row["r"]) else 1.0)
     return rows[: int(k)]
