@@ -871,6 +871,18 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         with open(os.path.join(outside, "methods.md"), encoding="utf-8") as f:
             self.assertIn(f"The analysis ran as one pipeline (run {outside_run}", f.read())
 
+    def test_finished_run_methods_and_report_do_not_say_pending(self):
+        """methods.* and report.html are written during the export and report stages; a finished run rewrites them once every stage
+        (finish included) is recorded, so neither describes a stage of the finished run as pending.
+        """
+        self.assertEqual(self.pipeline_json["status"], "done")
+        stages = {record["name"]: record["status"] for record in self.pipeline_json["stages"]}
+        for name in ("export", "report", "finish"):
+            self.assertEqual(stages[name], "done", name)
+        for name in ("methods.md", "methods.html", "methods.txt", "report.html"):
+            with open(os.path.join(self.out, name), encoding="utf-8") as f:
+                self.assertNotRegex(f.read(), r"\bpending\b", name)
+
     def test_resumed_run_methods_cite_the_run_that_finished(self):
         """A run stopped while the report is made has already written the export; the run that resumes it writes it again, so the
         methods, the sidecars and the report name the run that finished (not the cancelled one), and a finished run's export is reused.

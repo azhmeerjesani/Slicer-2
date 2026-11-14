@@ -3560,6 +3560,8 @@ class Runner:
                                         "inbox": relpath(inbox, self.study.path) if inbox else None}
         self.stage_event("finish", "done")
         self._write_pipeline_json(status)
+        self._refresh_final_documents()
+        self._write_pipeline_json(status)
         computed = sum(1 for row in self.mapped_rows if ((self.results.get("maps") or {}).get("maps") or {}).get(row["participant_id"], {}).get("cache") == "new")
         maps_result = self.results.get("maps") or {}
         if maps_result.get("provider") == "engine":
@@ -3573,6 +3575,42 @@ class Runner:
                   elapsed=round(time.monotonic() - self.started, 3), stages={name: record.get("status") for name, record in self.stage_records.items()}, warnings=len(self.warnings), run_id=self.run_id,
                   inbox=inbox, status=status)
         return EXIT_OK
+
+    def _refresh_final_documents(self):
+        """Rewrite methods.* and report.html once every stage is recorded as finished.
+
+        Both are written during the export and report stages, when pipeline.json still lists those stages and finish as
+        pending; the shared files of a finished run must not describe it that way.
+        """
+        from . import export
+
+        export_record = self.stage_records.get("export") or {}
+        if self.providers["export"].kind == "preferred" and export_record.get("status") in ("done", "reused") and os.path.isfile(self.path("methods.md")):
+            try:
+                export.write_methods(self.study.path, self.out, formats=("md", "html", "txt"), runs=self._methods_runs())
+            except jobs.Cancelled:
+                raise
+            except Exception as exc:
+                self.warn(f"The methods sections could not be refreshed ({type(exc).__name__}: {exc}).", code="methods_failed")
+        if (self.stage_records.get("report") or {}).get("status") in ("done", "reused") and os.path.isfile(self.path("report.html")):
+            try:
+                report = importlib.import_module(f"{PACKAGE}.report")
+                report.render_report(self.out, self.emit, self.cancel, atlas=self.config.atlas, atlas_labels=self.config.atlas_labels, template=self.config.template, convention=self.config.figure_convention)
+            except jobs.Cancelled:
+                raise
+            except Exception as exc:
+                self.warn(f"The report could not be refreshed ({type(exc).__name__}: {exc}).", code="report_failed")
+        for name in ("export", "report"):  # a later run reuses a stage only while its outputs keep the recorded sizes
+            state = _read_json(self._state_path(name))
+            if not state or state.get("status") != "done":
+                continue
+            outputs = state.get("outputs") or {}
+            resized = {path: os.path.getsize(self.absp(path)) for path in outputs if os.path.isfile(self.absp(path))}
+            if resized != outputs and set(resized) == set(outputs):
+                state["outputs"] = resized
+                jobs.write_json_atomic(self._state_path(name), state)
+                if name in self.stage_records:
+                    self.stage_records[name]["outputs"] = resized
 
     def _update_run(self, status, summary=None):
         if not self.run_id:
