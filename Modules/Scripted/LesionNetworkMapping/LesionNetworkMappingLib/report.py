@@ -1105,7 +1105,9 @@ class _Report:
             note = f'<p class="amber">The gallery shows the first {GALLERY_MAX} of {len(order)} lesions.</p>'
         intro = (f"<p>One strip per lesion in supplementary-table order: the lesion (red) on the axial slice through its centroid; its T map on that slice with the lesion outlined in white; "
                  f"the axial maximum-|T| projection over the template's maximum projection. Map values with |T| below {_num(threshold)} are hidden; colour range ±{_num(window)} shared by all strips. {_e(self.orientation_text())}</p>")
-        content = intro + note + f'<details{" open" if len(order) <= GALLERY_OPEN_MAX else ""}><summary>{len(order[:GALLERY_MAX])} {'lesion' if len(order[:GALLERY_MAX]) == 1 else 'lesions'}</summary><div class="gal">' + "".join(figures_html) + "</div></details>"
+        shown = len(order[:GALLERY_MAX])
+        word = "lesion" if shown == 1 else "lesions"
+        content = intro + note + f'<details{" open" if len(order) <= GALLERY_OPEN_MAX else ""}><summary>{shown} {word}</summary><div class="gal">' + "".join(figures_html) + "</div></details>"
         return self.section("gallery", "Lesion gallery", content)
 
     # 13. methods
