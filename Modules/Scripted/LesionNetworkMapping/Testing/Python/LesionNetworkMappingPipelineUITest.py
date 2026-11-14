@@ -734,6 +734,29 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
         self.assertTrue(widget.computeButton.enabled, widget.computeReasonLabel.text)
         self.assertEqual(widget.computeReasonLabel.text, "")
 
+    def test_b1b_options_button_is_right_aligned_when_the_card_run_button_is_hidden(self):
+        """With the pinned footer button (Studio) the card's own Run and Stop buttons are hidden: the options button then
+        stays at the right edge of the card instead of floating alone in the middle of the row.
+        """
+        card, widget = self.card, self.widget
+        self._settle()
+        widget.ctx.primaryPinned = True
+        try:
+            card.widget.setFixedWidth(420)
+            card.widget.show()
+            card.apply()
+            _pump(200)
+            self.assertFalse(card.runButton.isVisible())
+            self.assertTrue(card.optionsButton.isVisible())
+            right = card.optionsButton.mapTo(card.widget, qt.QPoint(card.optionsButton.width, 0)).x()
+            self.assertGreaterEqual(right, card.widget.width - 8, f"options button ends at {right} of {card.widget.width}")
+        finally:
+            widget.ctx.primaryPinned = False
+            card.widget.setMinimumWidth(0)
+            card.widget.setMaximumWidth(16777215)
+            card.apply()
+            _pump(100)
+
     def test_b2_refused_rule_is_refused_before_the_run(self):
         """A primary rule refused for the connectome's N (|T| >= 7 convention, N = 20) disables Run everything with the rule's
         banner (as the Map card refuses it); a click starts no run, so the last run's report stays.

@@ -1262,6 +1262,9 @@ class PipelineCard:
         self.stopButton.setToolTip(_("Stop the cohort analysis. Completed work is kept: the next run resumes from it."))
         self.stopButton.hide()
         row.addWidget(self.stopButton, 1)
+        # Zero-stretch spacer: takes the free width only while Run and Stop are hidden
+        # (pinned footer button), so the options button stays right-aligned, not centred.
+        row.addStretch(0)
         self.optionsButton = self._button("⋯", "LNMPipelineOptionsButton", self.showOptions, "ghost", None)
         self.optionsButton.setFixedSize(32, 32)
         self.optionsButton.setToolTip(_("Options of the cohort analysis…"))
