@@ -731,6 +731,44 @@ class LesionNetworkMappingConnectomeManagerTest(unittest.TestCase):
             qt.QSettings().setValue(CONNECTOMES_SETTING, saved)
             self.widget.refreshConnectomes(select=self.paths[0])
 
+    def test_same_long_name_connectomes_stay_apart_when_the_name_is_cut(self):
+        # Two bundles with one long name in folders lab-A and lab-B: the Name column is capped, and cutting the label at
+        # its right end made both rows read "GSP1000 (Yeo 2011), 1000 subjec…". The cut falls in the middle instead.
+        import qt
+        from LesionNetworkMapping import CONNECTOMES_SETTING
+        from LesionNetworkMappingLib import connectome
+
+        long = "GSP1000 (Yeo 2011), 1000 subjects, MNI152NLin6Asym 2 mm, a name longer than the Name column"
+        paths = []
+        for lab in ("lab-A", "lab-B"):
+            folder = os.path.join(self.tmp, "longname", lab)
+            os.makedirs(folder, exist_ok=True)
+            paths.append(os.path.abspath(connectome.make_synthetic(os.path.join(folder, "c.lnmc"), shape=(8, 9, 8), n_subjects=3, runs=(12, 12), name=long)["path"]))
+        saved = list(qt.QSettings().value(CONNECTOMES_SETTING) or [])
+        manager = None
+        try:
+            for path in paths:
+                self.logic.registerConnectome(path)
+            if self.widget.managerDialog is not None:
+                self.widget.managerDialog.hide()
+                self.widget.managerDialog = None
+            manager = self.widget.openManager()
+            _pump(200)
+            table = manager.table
+            self.assertEqual(table.textElideMode, qt.Qt.ElideMiddle)
+            texts = [str(table.item(r, 0).text()) for r in range(table.rowCount) if "a name longer" in str(table.item(r, 0).text())]
+            self.assertEqual(len(texts), 2, texts)
+            metrics = qt.QFontMetrics(table.font)
+            width = min(manager.NAME_COLUMN_WIDTH[1], metrics.horizontalAdvance(texts[0]) - 40)
+            shown = [metrics.elidedText(text, table.textElideMode, width) for text in texts]
+            self.assertEqual(len(set(shown)), 2, shown)
+        finally:
+            if manager is not None:
+                manager.hide()
+            self.widget.managerDialog = None
+            qt.QSettings().setValue(CONNECTOMES_SETTING, saved)
+            self.widget.refreshConnectomes(select=self.paths[0])
+
     def test_open_manager_terms_column_follows_the_tick_in_the_connectome_card(self):
         widget = self.widget
         manager = widget.openManager()

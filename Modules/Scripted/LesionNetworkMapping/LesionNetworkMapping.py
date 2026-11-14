@@ -2047,6 +2047,9 @@ class ConnectomeManagerDialog(qt.QDialog):
         layout.addWidget(intro)
         self.table = widget.widgets.tableView(list(self.COLUMNS))
         self.table.setObjectName("LNMManagerTable")
+        # A name too long for its column (capped at NAME_COLUMN_WIDTH) is cut in the middle: the end of the label is
+        # what tells same-name bundles apart (" · N subjects", " · folder"); cut at the right, both rows read alike
+        self.table.setTextElideMode(qt.Qt.ElideMiddle)
         # The Name column takes the room left by the others, which are as wide as their contents (all stretched, the
         # numbers had as much room as the name, which was cut off first)
         header = self.table.horizontalHeader()
