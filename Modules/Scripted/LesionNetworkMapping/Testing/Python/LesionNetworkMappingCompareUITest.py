@@ -197,6 +197,25 @@ class LesionNetworkMappingCompareUITest(unittest.TestCase):
         self.assertLess(self.card.results.minimumSizeHint.width(), HEATMAP_MAX_PX - 100)
         self.assertLess(self.card.heatmapScroll.minimumSizeHint.width(), HEATMAP_MAX_PX - 100)
 
+    def test_6b_pairs_table_map_names_are_not_cut_to_letters(self):
+        """Map A / Map B fit their contents (up to a cap) instead of sharing what the number columns leave over."""
+        import qt
+
+        from LesionNetworkMappingUI.card_compare import PAIR_NAME_MAX_PX
+
+        self._compare(withReference=True)
+        self.card.showComparison()
+        table = self.card.pairsTable
+        header = table.horizontalHeader()
+        for column in (0, 1):
+            self.assertNotEqual(int(header.sectionResizeMode(column)), int(qt.QHeaderView.Stretch))
+        self.assertGreater(table.rowCount, 0)
+        self.assertEqual(header.maximumSectionSize, PAIR_NAME_MAX_PX)
+        slicer.app.processEvents()
+        for column in (0, 1):
+            self.assertGreaterEqual(header.sectionSize(column), min(table.sizeHintForColumn(column), PAIR_NAME_MAX_PX))
+            self.assertGreaterEqual(header.sectionSize(column), 50)
+
     def test_7_excluded_maps_notice_names_the_maps_one_sentence_each(self):
         """The notice for left-out maps uses the short name (not the list label with the licence badge) and ends each sentence."""
         import numpy as np

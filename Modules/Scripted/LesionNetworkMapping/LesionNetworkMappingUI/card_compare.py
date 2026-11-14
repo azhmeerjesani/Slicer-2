@@ -41,6 +41,7 @@ JOB_MODULE = "LesionNetworkMappingLib.refmaps"
 TERMS_MODULE = "LesionNetworkMappingLib.leaddbs"
 ROW_HEIGHT = 22
 TABLE_FONT_PX = 11
+PAIR_NAME_MAX_PX = 120  # the widest a map-name column of the pairs table grows
 HEATMAP_MAX_PX = 380
 DEFAULT_PERMUTATIONS = 1000
 MAX_LESION_ROWS = 400
@@ -314,8 +315,14 @@ class CompareCard:
                 item.setToolTip(tip)
         self.pairsTable.verticalHeader().setDefaultSectionSize(ROW_HEIGHT)
         header = self.pairsTable.horizontalHeader()
-        for column in range(2, len(PAIR_COLUMNS)):
+        # Every column fits its contents. With the numbers at their content width the two Stretch columns got 35 to 48 px each:
+        # "μC…", "P…", "m…", and the headers "Map A" / "Map B" were clipped. The names keep their width (a long one
+        # elides in the middle, the tooltip has it whole) and a narrow inspector scrolls the table sideways instead
+        for column in range(len(PAIR_COLUMNS)):
             header.setSectionResizeMode(column, qt.QHeaderView.ResizeToContents)
+        header.setMaximumSectionSize(PAIR_NAME_MAX_PX)
+        self.pairsTable.setTextElideMode(qt.Qt.ElideMiddle)
+        self.pairsTable.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAsNeeded)
         widgets._font(self.pairsTable, TABLE_FONT_PX)
         results.addWidget(self.pairsTable)
         self.topTitle = self._title(_("Most similar to the first map"))
@@ -940,7 +947,7 @@ class CompareCard:
                 elif column < 2:
                     item.setToolTip(text)
                 self.pairsTable.setItem(row, column, item)
-        self.pairsTable.setFixedHeight(ROW_HEIGHT * (min(len(rows), 10) + 1) + 8)
+        self.pairsTable.setFixedHeight(ROW_HEIGHT * (min(len(rows), 10) + 1) + 8 + 16)  # 16: room for the sideways scroll bar
         self._showTop()
         self._showLicences()
         self.results.show()
