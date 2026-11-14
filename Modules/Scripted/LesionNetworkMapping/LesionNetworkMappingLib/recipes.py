@@ -432,7 +432,9 @@ def rule_text(rule):
 
 
 def describe_change(field, old, new):
-    """Text of one change: "n_perm 1000 instead of 5000"."""
+    """Text of one change: "n_perm 1000 instead of 5000" (a reason is quoted: "reason volume is not a covariate: …")."""
+    if field == "design.volume_off_reason":  # a reason, not a setting: "X instead of none" read as one garbled phrase
+        return f"{FIELD_LABELS[field]}: {new}" if new else f"{FIELD_LABELS[field]} removed"
     return f"{FIELD_LABELS.get(field, field)} {format_value(field, new)} instead of {format_value(field, old)}"
 
 
@@ -975,20 +977,71 @@ def plan_status(study):
     return {"state": state, "locked_at": plan.get("locked_at"), "sha256": stored, "sha8": stored[:8], "recipe": plan.get("recipe"), "deviations": len(deviations), "path": path, "chip": chip}
 
 
+#: Deviations already warned about as skipped ({(log path, time, field, new)}): the Recipe card asks for the
+#: effective parameters on every poll, and one invalid record must not log a warning each time
+_SKIP_WARNED = set()
+
+
+class _Replay:
+    """Applies the recorded deviations of the plan's parameters in the order recorded.
+
+    A deviation that is valid only together with a later one (the covariates without volume_ml, recorded before the
+    reason volume is off: one Record writes both, in the order of the fields) is held back and applied together with
+    the later records, so it is not skipped and asked for again. A record that never becomes valid is skipped with one
+    warning.
+    """
+
+    def __init__(self, study, params, warn=True):
+        self.study, self.params, self.warn = study, params, warn
+        self.deferred = []  # (field, item, error) not valid yet
+
+    @staticmethod
+    def _set(params, items):
+        for item in items:
+            params = set_field(params, item["field"], item.get("new"))
+        return normalize_parameters(params)
+
+    def apply(self, item):
+        """Apply one deviation record; return the plan fields that took effect (empty for another field)."""
+        field = item.get("field")
+        if not field or not isinstance(field, str) or field not in flatten_parameters(self.params):
+            return []
+        held = [entry[1] for entry in self.deferred]
+        errors = (RecipeError, TypeError, ValueError, AttributeError)
+        if held:
+            try:
+                self.params = self._set(self.params, [*held, item])
+                self.deferred = []
+                return [entry["field"] for entry in held] + [field]
+            except errors:
+                pass
+        try:
+            self.params = self._set(self.params, [item])
+        except errors as exc:
+            self.deferred.append((field, item, exc))
+            return []
+        self.deferred = [entry for entry in self.deferred if entry[0] != field]  # older values of this field
+        return [field]
+
+    def finish(self):
+        """The parameters; warn (once) about the records that were never valid."""
+        for field, item, exc in self.deferred:
+            key = (deviations_path(self.study), str(item.get("time")), field, repr(item.get("new")))
+            if self.warn and key not in _SKIP_WARNED:
+                _SKIP_WARNED.add(key)
+                logging.warning(f"Deviation of {field} skipped (invalid recorded value {item.get('new')!r}): {exc}")
+        return self.params
+
+
 def effective_parameters(study):
     """The locked parameters with every recorded deviation applied (None without a plan)."""
     plan = read_plan(study)
     if plan is None:
         return None
-    params = normalize_parameters(plan.get("parameters") or {})
+    replay = _Replay(study, normalize_parameters(plan.get("parameters") or {}))
     for item in read_deviations(study):
-        field = item.get("field")
-        if field and field in flatten_parameters(params):
-            try:
-                params = normalize_parameters(set_field(params, field, item.get("new")))
-            except (RecipeError, TypeError, ValueError, AttributeError) as exc:
-                logging.warning(f"Deviation of {field} skipped (invalid recorded value {item.get('new')!r}): {exc}")
-    return params
+        replay.apply(item)
+    return replay.finish()
 
 
 def effective_steps(study):
@@ -1090,6 +1143,7 @@ def analysis_parameters(study, scope):
     except RecipeError as exc:
         logging.warning(f"The locked plan's parameters are not valid: {exc}")
         return None
+    replay = _Replay(study, params, warn=False)
     own = {}  # the analysis's own deviations
     prefix = f"{scope}."
     for item in read_deviations(study):
@@ -1100,13 +1154,10 @@ def analysis_parameters(study, scope):
                 own[field] = _analysis_value(field, item.get("new"))
             except (TypeError, ValueError) as exc:
                 logging.warning(f"Deviation of {scope}.{field} skipped (invalid recorded value {item.get('new')!r}): {exc}")
-        elif field and field in flatten_parameters(params):  # a deviation of the plan, as effective_parameters applies it
-            try:
-                params = normalize_parameters(set_field(params, field, item.get("new")))
-            except (RecipeError, TypeError, ValueError, AttributeError):
-                continue
-            own.pop(field, None)
-    flat = flatten_parameters(params)
+        else:  # a deviation of the plan, as effective_parameters applies it
+            for applied in replay.apply(item):
+                own.pop(applied, None)
+    flat = flatten_parameters(replay.params)
     return {field: copy.deepcopy(own[field] if field in own else flat.get(field)) for field in ANALYSIS_FIELDS}
 
 

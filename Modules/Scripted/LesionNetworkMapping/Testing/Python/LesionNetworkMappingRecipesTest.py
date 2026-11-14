@@ -10,6 +10,7 @@ import contextlib
 import glob
 import io
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -370,6 +371,33 @@ class PlanLockTest(_TempCase):
         self.assertEqual([item["description"] for item in recipes.pending_deviations(study, legacy)], ["specificity test legacy-welch instead of glm"])
         recipes.record_deviation(study, "n_perm", 1000, 10, "hand edit")
         self.assertEqual(recipes.effective_parameters(study)["n_perm"], 1000)
+
+    def test_volume_off_after_lock_is_settled_by_one_record(self):
+        """Turning the volume covariate off after the lock is settled by one Record: the covariates, recorded before the
+        reason volume is off, are not skipped, asked again or warned about on every poll
+        (bug recipes-plan-lock-roi-gui:locked-plan-volume-covariate-off-deviation-never-applies-asks-again-warning-flood).
+        """
+        study = self.make_study()
+        plan = self.lock(study)
+        current = recipes.set_field(recipes.set_field(plan["parameters"], "design.covariates", []), "design.volume_off_reason", "volumes matched by design")
+        pending = recipes.pending_deviations(study, current)
+        self.assertEqual([item["field"] for item in pending], ["design.covariates", "design.volume_off_reason"])
+        self.assertEqual(pending[1]["description"], "reason volume is not a covariate: volumes matched by design")
+        for item in pending:  # as the Recipe card's Record does
+            recipes.record_deviation(study, item["field"], item["old"], item["new"], "one reason", description=item["description"])
+        with self.assertNoLogs(level="WARNING"):
+            for _poll in range(3):
+                self.assertEqual(recipes.effective_parameters(study)["design"]["covariates"], [])
+                self.assertEqual(recipes.pending_deviations(study, current), [])
+        self.assertEqual(recipes.analysis_parameters(study, "contrast")["design.covariates"], [])
+        self.assertEqual(len(recipes.read_deviations(study)), 2)
+        # A record that never becomes valid is skipped with one warning, not one per poll
+        recipes.record_deviation(study, "n_perm", 5000, 10, "hand edit")
+        with self.assertLogs(level="WARNING") as logs:
+            for _poll in range(3):
+                self.assertEqual(recipes.effective_parameters(study)["n_perm"], 5000)
+            logging.warning("end")
+        self.assertEqual(sum("Deviation of n_perm skipped" in line for line in logs.output), 1)
 
     def test_cohort_analysis_follows_a_recorded_plan_change(self):
         """After a change of the plan is recorded, an analysis that still held the plan's value follows it; one the user
