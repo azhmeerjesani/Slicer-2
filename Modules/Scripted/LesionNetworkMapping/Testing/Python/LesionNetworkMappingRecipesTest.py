@@ -340,6 +340,23 @@ class PlanLockTest(_TempCase):
         self.assertEqual(plan["parameters"]["n_perm"], 10000)
         self.assertEqual([item["field"] for item in plan["deviations_from_recipe"]], ["n_perm"])
 
+    def test_locked_primary_contrast_is_the_contrast_that_runs(self):
+        """The primary contrast chosen in Lock plan is the one Run everything tests, listed as a change from the recipe (BB-1)."""
+        recipe = self.builtin("classic_ferguson2019_adapted")
+        for target in ("A>B", "B>A", "two_sided", "contrast:B>A"):
+            study = self.make_study(f"study-{len(target)}-{target.replace('>', 'gt').replace(':', '-')}")
+            hypotheses = {"primary": target} if target.startswith("contrast:") else {"primary": {"kind": "contrast", "contrast": target}}
+            plan = recipes.lock_plan(study, recipe, recipes.apply(recipe), hypotheses, now=self.NOW)
+            wanted = plan["hypotheses"]["primary"]["contrast"]
+            self.assertEqual(wanted, target.replace("contrast:", ""))
+            self.assertEqual(plan["parameters"]["design"]["contrast"], wanted)
+            effective = recipes.effective_parameters(study)
+            self.assertEqual(effective["design"]["contrast"], wanted)
+            self.assertEqual(recipes.pipeline_options(effective, recipes.effective_steps(study))["contrast"], wanted)
+            fields = [item["field"] for item in plan["deviations_from_recipe"]]
+            self.assertEqual(fields, [] if wanted == "A>B" else ["design.contrast"])
+            self.assertEqual(recipes.plan_status(study)["state"], "locked")
+
     def test_deviation_log_and_methods(self):
         study = self.make_study()
         with self.assertRaises(recipes.RecipeError):

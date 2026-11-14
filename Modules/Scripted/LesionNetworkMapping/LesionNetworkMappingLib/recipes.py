@@ -864,7 +864,7 @@ def lock_plan(study, recipe, params, hypotheses, now=None, locked_by=None, super
     """Lock the analysis plan of a study; return the plan dict (with its ``sha256``).
 
     :param recipe: the :class:`Recipe` the plan starts from (its record and the differences are stored).
-    :param params: the parameters to lock (normalized here); hypotheses' n_perm, alpha, rule and seeds win over them.
+    :param params: the parameters to lock (normalized here); hypotheses' n_perm, alpha, rule, seeds and primary contrast win over them.
     :param hypotheses: see :func:`normalize_hypotheses`.
     :param now: lock time (ISO text; default: now, UTC).
     :param supersede_reason: replace an existing plan (archived as ``analysis_plan.superseded-<sha8>.json``); the
@@ -877,8 +877,13 @@ def lock_plan(study, recipe, params, hypotheses, now=None, locked_by=None, super
         raise RecipeError(f"The analysis plan is already locked ({previous.get('locked_at')} · {str(previous.get('sha256'))[:8]}); changes are recorded as deviations")
     params = normalize_parameters(params)
     hyp = normalize_hypotheses(study, hypotheses, params)
-    # The hypotheses state the primary rule, alpha, n_perm and seeds: the parameters follow them
-    params = normalize_parameters({**params, "rule": hyp["primary_rule"], "alpha": hyp["alpha"], "n_perm": hyp["n_perm"], "seeds": hyp["seeds"]})
+    # The hypotheses state the primary rule, alpha, n_perm, seeds and (for a group hypothesis) the contrast: the
+    # parameters follow them, so the locked hypothesis is the test that runs (a contrast that differs from the recipe's
+    # is listed in deviations_from_recipe)
+    design = dict(params["design"])
+    if hyp["primary"]["kind"] == "contrast":
+        design["contrast"] = hyp["primary"]["contrast"]
+    params = normalize_parameters({**params, "rule": hyp["primary_rule"], "alpha": hyp["alpha"], "n_perm": hyp["n_perm"], "seeds": hyp["seeds"], "design": design})
     name = getattr(study, "name", None) or os.path.basename(os.path.normpath(root))
     plan = {
         "format": PLAN_FORMAT,
