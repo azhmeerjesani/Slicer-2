@@ -2353,6 +2353,31 @@ class ProjectWriter(SlotWriter):
             self.sceneConflictPath = moved(os.path.normpath(self.sceneConflictPath), oldPath, newPath)
         self.slotDir = newPath
 
+    def unchangedSceneFiles(self):
+        """The scene files of the project (its scene, and the "(Slicer Studio)" scene of a conflict) as Studio last read or
+        wrote them: their names relative to the project folder. Taken before a change that Studio itself makes to them
+        (the scenes follow the moved templates' new ids when the Slicer Studio folder moves), so that ``followSceneFiles``
+        can record that change as Studio's own, never as another program's.
+        """
+        names = []
+        for path in (self.project.scenePath, self.sceneConflictPath):
+            if not path:
+                continue
+            record = self.records.get(_canonical(path))
+            if record is not None and record["stat"] == _statOrNone(path):
+                names.append(os.path.relpath(os.path.normpath(path), os.path.normpath(self.project.path)))
+        return names
+
+    def followSceneFiles(self, names):
+        """Studio itself changed the scene files ``names`` (``unchangedSceneFiles``, relative to the project folder): record
+        them as they are now, so that the next save writes over them instead of taking them for another program's change.
+        """
+        for name in names or ():
+            path = os.path.join(self.project.path, name)
+            stat = _statOrNone(path)
+            if stat is not None and _canonical(path) in self.records:
+                self._record(path, ours=False, stat=stat)  # keeps whether Studio wrote it
+
     #
     # Plan (main thread)
     #

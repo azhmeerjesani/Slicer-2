@@ -2807,6 +2807,10 @@ class AutosaveService:
                 raise OSError(_("Slicer Studio is still copying or saving a project. Wait until it is finished, then try again."))
             if project is not None:
                 project.unlock()
+            # The open project's scene files as this Studio last wrote them: when the move makes them follow the moved
+            # templates' new ids, that change is Studio's own, not another program's ("<project> (Slicer Studio).mrml")
+            writer = self.projectWriter if project is not None else None
+            unchangedScenes = writer.unchangedSceneFiles() if writer is not None else []
             # Nothing is written into the old folder while it moves (poll, heartbeat of project.json)
             timers = [timer for timer in (self._pollTimer, self._heartbeatTimer) if timer.isActive()]
             for timer in timers:
@@ -2885,6 +2889,8 @@ class AutosaveService:
                             # Moved as "<name> 2": its scene file follows the folder name, as Rename does
                             projects.renameSceneFile(newPath, project.scenePath)
                         self._relocateProject(project.path, newPath)
+                        if writer is not None and writer is self.projectWriter:
+                            writer.followSceneFiles(unchangedScenes)
                     else:
                         project.lock()
                 if failed:

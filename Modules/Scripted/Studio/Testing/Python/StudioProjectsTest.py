@@ -10832,6 +10832,59 @@ sys.exit(web.command_local(args))
             os.environ[projects.ROOT_ENVIRONMENT] = self.root
 
 
+    def test_121_open_project_saves_into_its_scene_after_a_move_renamed_its_template_id(self):
+        """Change folder > Move into a folder that has a template with the same id as the open project's scan (BB-1): the
+        move rewrote the open project's scene so that it names the moved template's new id ("user:...-2"). That change is
+        Studio's own, but the writer's record of the scene still held its old size, so the next save took it for another
+        program's change: it wrote "<project> (Slicer Studio).mrml" with the edits made after the move, and the Library
+        opened the stale "<project>.mrml" without them. Now the open project goes on saving into its own scene.
+        """
+        from StudioLib import templates
+
+        projects = self.projects
+        builtin = templates.builtinTemplates()[0]
+        settings = qt.QSettings()
+        previous = settings.value(templates.DEFAULT_KEY)
+        oldRoot = os.path.normpath(self.root)
+        newRoot = os.path.normpath(os.path.join(self.tempDir, "moved ids", "Slicer Studio"))
+        theirs = templates.addTemplate(builtin.imagePath, name="My template", rootPath=newRoot)
+        mine = templates.addTemplate(builtin.maskPath, name="My template", rootPath=oldRoot)
+        self.assertEqual(mine.id, theirs.id, "the two templates have the same id")
+        service = self._service()
+        volume, _path = self._userVolume()
+        volume.SetAttribute(templates.TEMPLATE_ID_ATTRIBUTE, mine.id)
+        project = self._projectFor(service)
+        self._save(service)
+        os.environ.pop(projects.ROOT_ENVIRONMENT)
+        settings.setValue(projects.ROOT_KEY, oldRoot)
+        try:
+            service.moveRoot(newRoot, moveContent=True, run=lambda function: function())
+            self.assertEqual(projects.root(), newRoot)
+            newId = volume.GetAttribute(templates.TEMPLATE_ID_ATTRIBUTE)
+            self.assertNotEqual(newId, theirs.id, "the open project's scan follows its template's new id")
+            with open(project.scenePath, encoding="utf-8") as f:
+                self.assertIn(f"Studio.TemplateId:{newId}", f.read(), "the move rewrote the open project's scene")
+            # Keep working, then save
+            slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "AfterMoveEdit")
+            self._save(service)
+            self.assertIsNone(service.projectWriter.sceneConflictPath, "no 'Another program changed' conflict")
+            scenes = sorted(entry for entry in os.listdir(project.path) if entry.endswith(projects.SCENE_EXTENSION))
+            self.assertEqual(scenes, [os.path.basename(project.scenePath)], "one scene, no '(Slicer Studio)' copy")
+            sceneFile = projects.sceneFile(project.path)
+            with open(sceneFile, encoding="utf-8") as f:
+                self.assertIn("AfterMoveEdit", f.read(), "the scene the Library opens has the edit made after the move")
+        finally:
+            if previous is None:
+                settings.remove(templates.DEFAULT_KEY)
+            else:
+                settings.setValue(templates.DEFAULT_KEY, previous)
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            projects.clearPendingMove()
+            projects.clearPartialMove()
+            projects.discardMoveJournal()
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 
