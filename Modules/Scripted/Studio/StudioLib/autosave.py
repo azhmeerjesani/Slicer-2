@@ -1846,6 +1846,12 @@ class AutosaveService:
         projects = self._projects()
         if self.project is not None and self.project is not project:
             self.releaseProject()
+        if inPlace and not os.path.isfile(project.scenePath):
+            # The scene was loaded from a scene file not named after the folder (a scene folder from official 3D Slicer put
+            # into Projects/, a folder renamed outside, opened with File > Open): it becomes "<folder name>.mrml", which
+            # every save rewrites. Left as it was, it would keep naming the data files that the first save moves into the
+            # kind folders, and official 3D Slicer would fail to load it (BB-1).
+            projects.adoptRenamedScene(project.path, keepPrivate=True)
         if not project.lock():
             return False
         self._lockedAnnounced.clear()  # a later loss of the lock is news again

@@ -11148,6 +11148,50 @@ sys.exit(web.command_local(args))
             self.assertEqual(self.projects.readJson(self.projects.projectFile(project.path))["state"], "closed")
 
 
+    def test_123_official_scene_folder_put_into_projects_keeps_one_working_scene(self):
+        """A scene folder that official 3D Slicer saved ("case.mrml" with its data files beside it), copied into Projects/,
+        is listed as a project. Opening it from the Library (or opening its .mrml with File > Open) and saving it moved the
+        data files into the kind folders and wrote "<folder name>.mrml", while "case.mrml" stayed next to it, still naming
+        the files at the folder top that were gone: official 3D Slicer could no longer load it (BB-1). The scene now follows
+        the folder name when the project is opened, so the folder keeps one scene, and every file it names exists.
+        """
+        projects = self.projects
+        projectsFolder = os.path.join(self.root, "Projects")
+        for variant in ("library", "file"):
+            folder = os.path.join(projectsFolder, f"From colleague {variant}")
+            os.makedirs(folder)
+            volume, _path = self._userVolume("T1", shape=(12, 14, 16), extension=".nrrd")
+            points = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "F")
+            points.AddControlPoint(1, 2, 3)
+            self.assertTrue(slicer.util.saveNode(volume, os.path.join(folder, "T1.nrrd")))
+            self.assertTrue(slicer.util.saveNode(points, os.path.join(folder, "F.mrk.json")))
+            self.assertTrue(slicer.util.saveScene(os.path.join(folder, "case.mrml")))
+            slicer.mrmlScene.Clear(0)
+            self.assertFalse(os.path.exists(os.path.join(folder, ".studio")), "a plain scene folder of official 3D Slicer")
+            self.assertIn(os.path.basename(folder), [info.name for info in projects.listProjects()])
+
+            service = self._service()
+            if variant == "library":
+                self.assertTrue(service.openProject(folder))
+            else:
+                slicer.util.loadScene(os.path.join(folder, "case.mrml"))
+            self.assertIsNotNone(service.project, variant)
+            self.assertEqual(os.path.normcase(service.project.path), os.path.normcase(folder))
+            slicer.mrmlScene.GetFirstNodeByName("F").SetNthControlPointPosition(0, 7, 7, 7)
+            self._save(service)
+
+            scenes = sorted(name for name in os.listdir(folder) if name.endswith(".mrml"))
+            self.assertEqual(scenes, [os.path.basename(folder) + ".mrml"], f"{variant}: one scene, no stale one beside it")
+            with open(os.path.join(folder, scenes[0]), encoding="utf-8") as f:
+                names = re.findall(r'fileName="([^"]*)"', f.read())
+            self.assertTrue(names, variant)
+            for name in names:
+                self.assertTrue(os.path.isfile(os.path.join(folder, urllib.parse.unquote(name))), f"{variant}: {name} exists")
+            service.dispose()
+            self.services.remove(service)
+            slicer.mrmlScene.Clear(0)
+            self.io.backgroundWriter().drain(10.0)
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 

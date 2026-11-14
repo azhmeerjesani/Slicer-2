@@ -1900,22 +1900,28 @@ def renameSceneFile(projectPath, oldScene, name=None):
     return newPath
 
 
-def adoptRenamedScene(projectPath):
+def adoptRenamedScene(projectPath, keepPrivate=False):
     """Follow a project folder that was renamed outside Slicer Studio (file manager, copy and rename).
 
-    A Studio project folder (it has ``.studio/project.json``) without "<folder name>.mrml" but with exactly one other scene
-    file gets that scene renamed like ``renameFolder`` does, and its ``project.json`` name updated. Otherwise the old-named
-    scene would stay next to the one that every save writes, and official 3D Slicer would open the outdated one. A folder with
-    several scenes is left alone (which one is the project's is not known). Return the scene file of the project (as
-    ``sceneFile``); it never raises.
+    A project folder without "<folder name>.mrml" but with exactly one other scene file gets that scene renamed like
+    ``renameFolder`` does, and its ``project.json`` name updated (if it has one). Otherwise the old-named scene would stay
+    next to the one that every save writes, and official 3D Slicer would open the outdated one. This also covers a scene
+    folder that official 3D Slicer wrote and that was put into Projects/ (it has no ``.studio``): the first save moves its
+    data files into the kind folders and rewrites only "<folder name>.mrml", so its own scene would keep naming files that
+    are gone (BB-1). A folder with several scenes is left alone (which one is the project's is not known). ``keepPrivate``:
+    the scene is already loaded, so a folder whose scene has a "<scene>_Private" folder of hidden nodes (which would be
+    renamed under the loaded nodes) is left alone too. Return the scene file of the project (as ``sceneFile``); it never
+    raises.
     """
     projectPath = os.path.normpath(str(projectPath))
     try:
         expected = os.path.join(projectPath, os.path.basename(projectPath) + SCENE_EXTENSION)
-        if not os.path.isfile(expected) and os.path.isfile(projectFile(projectPath)) and not isLockedByOther(projectPath):
+        if not os.path.isfile(expected) and os.path.isdir(projectPath) and not isLockedByOther(projectPath):
             scenes = [name for name in os.listdir(projectPath)
                       if name.lower().endswith(SCENE_EXTENSION) and ".studio-tmp" not in name
                       and os.path.isfile(os.path.join(projectPath, name))]
+            if keepPrivate and len(scenes) == 1 and os.path.isdir(os.path.join(projectPath, scenes[0].split(".")[0] + "_Private")):
+                scenes = []
             if len(scenes) == 1:
                 renameSceneFile(projectPath, os.path.join(projectPath, scenes[0]))
                 data = readProjectJson(projectPath)
