@@ -8293,6 +8293,29 @@ class StudioProjectsTest(unittest.TestCase):
             current.unlock()
 
 
+
+    def test_87b_kill_during_first_scan_copy_with_empty_lesion_is_deleted(self):
+        """The first save writes the empty lesion that opening a scan creates before the scan copy is done: a kill in
+        between left it beside the .studio-part file and the folder was kept as an unopenable "Empty" card (BB-1).
+        """
+        projects = self.projects
+        project = projects.createProject("Killed lesion")
+        os.makedirs(os.path.join(project.path, "Images"))
+        os.makedirs(os.path.join(project.path, "Segmentations"))
+        with open(os.path.join(project.path, "Images", "big.nii.gz.studio-part"), "wb") as f:
+            f.write(b"\1" * 1024)
+        lesion = os.path.join(project.path, "Segmentations", "Lesions (big).seg.nrrd")
+        with open(lesion, "wb") as f:
+            f.write(b"\0" * 3000)
+        self.assertTrue(projects.isNeverSaved(project.path))
+        # Strokes (a big file), or no interrupted copy: kept
+        with open(lesion, "wb") as f:
+            f.write(b"\0" * (projects.EMPTY_LESION_MAX_BYTES + 1))
+        self.assertFalse(projects.isNeverSaved(project.path))
+        with open(lesion, "wb") as f:
+            f.write(b"\0" * 3000)
+        os.remove(os.path.join(project.path, "Images", "big.nii.gz.studio-part"))
+        self.assertFalse(projects.isNeverSaved(project.path))
     def test_88_chooser_uses_a_studio_folder_without_projects_as_is(self):
         """Choose… on a Slicer Studio folder that has no Projects/ yet (only "About this folder.txt", studies, templates or
         LNM/ folders: subfolders are made only when something is written there) nested a "Slicer Studio" folder inside it,

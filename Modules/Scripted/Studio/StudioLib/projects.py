@@ -2068,9 +2068,46 @@ def _onlyTemporaryFiles(path):
     return all(_onlyTemporaryFiles(os.path.join(path, entry)) for entry in entries)
 
 
+#: Largest size of the segmentation file that the first save writes for the lesion that opening a scan creates (no strokes)
+EMPTY_LESION_MAX_BYTES = 64 * 1024
+
+
+def _hasPartFile(path):
+    """True if a file or folder under ``path`` has the name of a copy in progress (".studio-part")."""
+    for _folder, _dirs, files in os.walk(path):
+        if any(".studio-part" in name for name in files):
+            return True
+    return False
+
+
+def _onlyEmptyLesions(projectPath, name):
+    """True if ``name`` in the project folder is "Segmentations", with segmentation files that are small (the lesion that
+    opening a scan creates, which the first save writes before it has finished copying the scan) and temporary files only.
+    """
+    folder = os.path.join(projectPath, name)
+    if name != "Segmentations" or os.path.islink(folder) or not os.path.isdir(folder):
+        return False
+    try:
+        entries = os.listdir(folder)
+    except OSError:
+        return False
+    for entry in entries:
+        path = os.path.join(folder, entry)
+        if _onlyTemporaryFiles(path):
+            continue
+        try:
+            if not (entry.endswith(".seg.nrrd") and os.path.isfile(path) and not os.path.islink(path)
+                    and os.path.getsize(path) <= EMPTY_LESION_MAX_BYTES):
+                return False
+        except OSError:
+            return False
+    return True
+
+
 def isNeverSaved(projectPath):
     """True if the project folder never got its first save: a .studio/project.json without "savedAt", no scene file, and
-    nothing else in the folder but temporary files of the interrupted save (the folder of a project is created when its
+    nothing else in the folder but temporary files of the interrupted save and the small empty lesion that the first save
+    wrote before the scan copy was finished (the folder of a project is created when its
     first scan is loaded, and the first scene is written seconds later: a kill, or a full disk, in between left it).
     Such a folder holds nothing of the user's, and it cannot be opened. Worker-safe.
     """
@@ -2086,7 +2123,11 @@ def isNeverSaved(projectPath):
         names = os.listdir(projectPath)
     except OSError:
         return False
-    return all(name == PRIVATE_DIR or _onlyTemporaryFiles(os.path.join(projectPath, name)) for name in names)
+    # A kill during the scan copy of the first save (a ".studio-part" file) left the empty lesion that opening the scan
+    # created, written before the copy: it is not the user's either
+    interrupted = _hasPartFile(projectPath)
+    return all(name == PRIVATE_DIR or _onlyTemporaryFiles(os.path.join(projectPath, name))
+               or (interrupted and _onlyEmptyLesions(projectPath, name)) for name in names)
 
 
 def removeUnsavedProjects(rootPath=None):
