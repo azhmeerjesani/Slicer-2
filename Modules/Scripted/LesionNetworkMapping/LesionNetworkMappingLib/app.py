@@ -440,7 +440,7 @@ def design_options(path):
 
 
 #: argparse destination -> PipelineConfig field of the options passed through as they are
-_PASSTHROUGH = ("preview_n", "preview_seed", "sensitivity", "specificity", "nulls", "null_seed", "perm_seed", "alpha", "scores", "native", "include_unreviewed", "strict", "memory_budget_gb",
+_PASSTHROUGH = ("preview_n", "preview_seed", "sensitivity", "specificity", "nulls", "null_seed", "perm_seed", "alpha", "scores", "native", "include_unreviewed", "strict", "allow_rule_anyway", "memory_budget_gb",
                 "template", "atlas", "atlas_labels", "figure_convention", "recompute", "build_references", "slicer", "nice")
 
 
@@ -704,6 +704,7 @@ def _parser(commands=()):
     parser.add_argument("--native", choices=pipeline.NATIVE_MODES, default=None)
     parser.add_argument("--include-unreviewed", action="store_true", default=None)
     parser.add_argument("--strict", action="store_true", default=None)
+    parser.add_argument("--allow-rule-anyway", action="store_true", default=None, help="apply a threshold rule that is refused for the connectome's N (recorded)")
     parser.add_argument("--memory-budget-gb", type=float, default=None)
     parser.add_argument("--template", default=None, help="background template NIfTI of the figures and the report")
     parser.add_argument("--atlas", default=None)

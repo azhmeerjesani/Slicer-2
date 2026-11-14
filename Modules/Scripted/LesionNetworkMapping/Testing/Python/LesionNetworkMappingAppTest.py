@@ -562,6 +562,26 @@ class AppLevelsTest(unittest.TestCase):
                 expected = volume(self.inprocess[sid][column])
                 np.testing.assert_allclose(self.participant_maps[(sid, key)], expected, rtol=0, atol=TOLERANCE, err_msg=f"{sid} {key}")
 
+    def test_blocked_rule_remedy_is_an_option_slicer_lnm_accepts(self):
+        """A real run blocked by a rule refused for the connectome's N (exit 5) names remedies that slicer-lnm accepts:
+        every --option of the hint is one of its options, and the run repeated with it is not blocked (BB-1).
+        """
+        rule = json.dumps({"kind": "t_convention", "value": 7.0, "reference_n": 1000})
+        args = [self.bids, os.path.join(self.tmp, "refused rule out"), "participant", "--connectome", self.fx["bundle"], *COMMON, *BIDS_OPTIONS, "--rule", rule]
+        code, events, _stdout, stderr = cli(*args)
+        error = last_event(events)
+        self.assertEqual(code, pipeline.EXIT_BLOCKED, stderr[-2000:] + str(error))
+        self.assertEqual(error["code"], "blocked")
+        hints = " ".join([*error["fixes"], *(block.get("fix") or "" for block in error["blocks"])])
+        named = set(re.findall(r"--[a-z][a-z-]*", hints))
+        self.assertIn("--allow-rule-anyway", named, hints)
+        accepted = {option for action in app._parser()._actions for option in action.option_strings}
+        self.assertFalse(named - accepted, f"the remedy names options slicer-lnm does not have: {sorted(named - accepted)}")
+        code, events, _stdout, stderr = cli(*args, *sorted(named))
+        self.assertEqual(code, 0, stderr[-2000:] + str(last_event(events)))
+        saved = read_json(os.path.join(args[1], self.run_name, pipeline.PIPELINE_JSON))
+        self.assertIn("allow_rule_anyway", json.dumps(saved))
+
     # Group level
 
     def test_group_level_reuses_participant_maps(self):
