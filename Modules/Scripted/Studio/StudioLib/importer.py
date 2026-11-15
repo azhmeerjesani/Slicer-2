@@ -998,9 +998,16 @@ def _nrrdHasDegenerateDirections(path):
     return False
 
 
-def _checkNiftiComplete(path):
+#: Memory that a load needs as a multiple of the image bytes: a volume is held about twice (NIfTI library, then image);
+#: a lesion (segmentation route: reader, labelmap, segment copies) peaks at about 3.7 times
+_VOLUME_MEMORY_FACTOR = 2
+_LESION_MEMORY_FACTOR = 4
+
+
+def _checkNiftiComplete(path, memoryFactor=_VOLUME_MEMORY_FACTOR):
     """Raise ``RuntimeError`` (a message for the user) if the data of the NIfTI file ``path`` stops before the end that its
     header promises: the voxels that are missing would be read as 0, and a lesion would lose part of its volume.
+    A file whose voxels need more than ``memoryFactor`` times less than the memory that is left is refused as too large.
     """
     if isNiftiFile(path):
         name = os.path.basename(str(path))
@@ -1034,7 +1041,7 @@ def _checkNiftiComplete(path):
         # Refuse an image whose header already shows that it cannot fit in memory before any data is read: counting the
         # data of a highly compressed file would otherwise decompress all of it on the GUI thread first.
         need, have = _niftiImageBytes(path), _availableMemoryBytes()
-        if need is not None and have is not None and need * 2 > have:
+        if need is not None and have is not None and need * memoryFactor > have:
             raise RefusedFileError(_tooLargeMessage(path))
     if _niftiHasInvalidDataOffset(path):
         raise RefusedFileError(
@@ -1402,7 +1409,7 @@ def loadLesion(path):
     An image whose values are beyond ``LESION_LABEL_VALUE_LIMIT`` is refused (``RuntimeError``) before it is read.
     A failed load leaves no node in the scene.
     """
-    _checkNiftiComplete(path)
+    _checkNiftiComplete(path, _LESION_MEMORY_FACTOR)
     _checkLesionValueRange(path)
     segmentationClasses = ("vtkMRMLSegmentationNode", "vtkMRMLSegmentationStorageNode")
     existing = set().union(*(_sceneNodeIds(className) for className in segmentationClasses))
