@@ -6487,6 +6487,11 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             volume = None
         if self._mapHiddenBySeedMode():
             volume = None  # a page without the Result card shows no lesion map (_followSeedModeInViews)
+        pendingId, self._pendingGroupVolumeId = getattr(self, "_pendingGroupVolumeId", None), None
+        pending = slicer.mrmlScene.GetNodeByID(pendingId) if pendingId else None
+        if volume is None and pending is not None:
+            # A group map (VLSM, overlap...) that finished while another workspace was shown: drawn now that Map is entered
+            display.showLayers(self._templateUnderMaps(load=True), pending, node.opacity if node is not None else 0.8)
         if volume is not None:
             display.showLayers(self._templateUnderMaps(load=True), volume, node.opacity if node is not None else 0.8)
             qa = self.ctx.card("qa") if self.ctx is not None else None

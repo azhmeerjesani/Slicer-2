@@ -1175,6 +1175,11 @@ def showGroupFile(ctx, path, desc, name, scopeOf=None, space=CONNECTOME_SPACE):
             mappage = None
     if mappage is not None:
         mappage.captureLayers()
+        # A map finished while another workspace (Library) is shown: entering Map puts the layers back, so Map draws it
+        # again when entered (showMapLayers); in Map itself nothing waits
+        shell = ctx.shell()
+        away = shell is not None and shell.currentWorkspace() != "map"
+        widget._pendingGroupVolumeId = volume.GetID() if away else None
         template = mappage.templateVolume(ctx.bundle, load=False)
         if template is None:
             # Loading the template file takes about as long as showing the map: the map is shown now, the template in

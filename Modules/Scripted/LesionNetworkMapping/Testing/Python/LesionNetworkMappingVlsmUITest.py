@@ -271,6 +271,65 @@ class LesionNetworkMappingVlsmUITest(unittest.TestCase):
             _pump(100)
             shutil.rmtree(study2, ignore_errors=True)
 
+    def test_map_finished_outside_map_is_drawn_when_map_is_entered(self):
+        # BB-1: a VLSM that finished while Library was shown was drawn in the hidden views, and entering Map put the
+        # earlier layers back: Map showed the template with no map. Map now draws the map it is waiting for when entered.
+        from unittest import mock
+
+        import numpy as np
+        from LesionNetworkMappingLib import nifti
+        from LesionNetworkMappingUI import cohort_contrast
+
+        tab, widget = self.vlsm, self.widget
+        path = os.path.join(self.tmp, "vlsm_hidden_desc-tstat_map.nii.gz")
+        data = np.zeros(self.fx["fine_shape"], dtype=np.float32)
+        data[2:6, 2:6, 2:6] = 4.0
+        nifti.write_nifti(path, data, self.fx["fine_affine"])
+
+        class _Shell:
+            workspace = "library"
+
+            def currentWorkspace(self):
+                return self.workspace
+
+            def isActive(self):
+                return True
+
+        fake = _Shell()
+
+        def foregrounds():
+            return {node.GetForegroundVolumeID() for node in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode")}
+
+        tab.refresh()
+        _pump(50)
+        storedOutputs = tab.outputs
+        card = widget.ctx.card("cohort")
+        try:
+            with mock.patch.object(widget.ctx, "shell", return_value=fake):
+                tab.outputs = [("vlsmTestTstat", "Statistic (T)", path)]
+                volume = tab.showMap(0)
+                _pump(100)
+                self.assertIsNotNone(volume)
+                self.assertEqual(widget._pendingGroupVolumeId, volume.GetID())
+                slicer.util.setSliceViewerLayers(foreground=None)  # what entering Map does to the views
+                self.assertNotIn(volume.GetID(), foregrounds())
+                widget.showMapLayers()
+                self.assertIn(volume.GetID(), foregrounds(), "Map entered without drawing the finished map")
+                self.assertIsNone(widget._pendingGroupVolumeId)
+                # Shown while Map is the workspace: nothing waits
+                fake.workspace = "map"
+                tab.showMap(0)
+                _pump(100)
+                self.assertIsNone(widget._pendingGroupVolumeId)
+        finally:
+            tab.outputs = storedOutputs
+            for node in list(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")):
+                if node.GetAttribute(cohort_contrast.GROUP_VOLUME_ATTRIBUTE) == "1":
+                    slicer.mrmlScene.RemoveNode(node)
+            card.groupVolumeId = None
+            tab.refresh()
+            _pump(100)
+
     def test_map_space_is_the_study_grid_not_the_connectome(self):
         # BB-1: a VLSM map got Studio.Space from the selected connectome (connectome.json "space"), although VLSM runs on
         # the study's lesions on the study's template grid; its NIfTI export then declared the connectome's space. The
