@@ -1179,7 +1179,7 @@ def statistics_section(records, used):
             if kind == "robustness":
                 body = robustness_text(summary, records.params(record), records.seeds(record))
             elif kind == "nulls":
-                body = nulls_text(summary)
+                body = nulls_text(summary, records.params(record), records.seeds(record), nulls)
             else:
                 body = _generic_text(summary)
             text = f"{KIND_LABELS.get(kind, kind.capitalize())} (run {record['id']}): {body or 'summary ' + NOT_RECORDED}."
@@ -1506,26 +1506,106 @@ NULL_KIND_TEXT = {
 NULL_MODE_TEXT = {"exact_pooled": "exact pooled", "approximate": "approximate (fast parcel mode)"}
 
 
-def nulls_text(summary):
-    """Methods sentence of one null-model run from its registry summary; missing values are "not recorded".
+def _null_kind_status(kind, summary, record):
+    """The status tag of a null kind (addendum 3.6): from nulls.json, the summary, else nulls.KIND_INFO."""
+    for source in (record, summary):
+        status = source.get("kind_status") if isinstance(source, dict) else None
+        if isinstance(status, str) and status:
+            return status
+    try:
+        from . import nulls as nullslib  # numpy: imported only when a null-model run is described
+    except ImportError:
+        return None
+    return (nullslib.KIND_INFO.get(kind) or {}).get("status")
+
+
+def _null_mode_text(kind, mode, params, record):
+    """'approximate (fast parcel mode)', or for an exact run 'pooled exact null (K_pool = 20 per lesion)' (addendum 3.6)."""
+    if mode != "exact_pooled":
+        return NULL_MODE_TEXT.get(mode, _or_nr(mode))
+    label = record.get("label") if isinstance(record, dict) else None
+    if isinstance(label, str) and label.startswith("pooled exact null"):
+        return label
+    k_pool = _number(params.get("k_pool"))
+    if kind == "rl_cohort_shift" and k_pool:
+        return f"pooled exact null ({k_pool} cohort shifts)"
+    if kind not in ("rl_cohort_shift", "empirical_pool") and k_pool:
+        return f"pooled exact null (K_pool = {k_pool} per lesion)"
+    return NULL_MODE_TEXT["exact_pooled"]
+
+
+def _parity_group_text(name, verdict):
+    if not isinstance(verdict, dict):
+        return f"{name} {NOT_RECORDED}"
+    return (
+        f"{name} n = {_number(verdict.get('n')) or NOT_RECORDED}, median partial r {_number(verdict.get('median_partial_r')) or NOT_RECORDED}, "
+        f"median top-10% Dice {_number(verdict.get('median_top10_dice')) or NOT_RECORDED} ({'passed' if verdict.get('passed') else 'failed'})"
+    )
+
+
+def _null_parity_text(parity):
+    """The parity gate numbers of a fast-mode null run (nulls.json "parity"): constants, groups, lesions left out."""
+    if not isinstance(parity, dict) or not parity:
+        return f"fast/exact parity gate {NOT_RECORDED}"
+    constants = parity.get("constants") if isinstance(parity.get("constants"), dict) else {}
+    text = (
+        f"fast/exact parity gate on {_number(parity.get('n')) or NOT_RECORDED} exactly mapped lesions "
+        f"(pass: median partial r >= {_number(constants.get('partial_r')) or NOT_RECORDED} and median top-10% Dice >= {_number(constants.get('top10_dice')) or NOT_RECORDED})"
+    )
+    groups = [_parity_group_text(name, verdict) for key in ("strata", "size_bins") if isinstance(parity.get(key), dict) for name, verdict in parity[key].items()]
+    if groups:
+        text += ": " + ", ".join(groups)
+    excluded = parity.get("excluded")
+    if isinstance(excluded, list):
+        names = [str(item.get("name")) for item in excluded if isinstance(item, dict) and item.get("name")]
+        if names:
+            text += f"; {len(names)} lesion{'' if len(names) == 1 else 's'} left out by the gate ({', '.join(names[:10])}{', ...' if len(names) > 10 else ''})"
+        else:
+            text += "; no lesion left out by the gate"
+    return text
+
+
+def nulls_text(summary, params=None, seeds=None, record=None):
+    """Methods sentence of one null-model run; missing values are "not recorded".
 
     :param summary: the run's registry summary (kind, mode, k, n_lesions, n_fwe_05, min_attainable_p, classic_rule).
+    :param params: the run's registry params (kind, mode, k, k_pool, rule, sign, overlap).
+    :param seeds: the run's registry seeds (the null seed is ``seeds["null"]``).
+    :param record: the run's nulls.json (kind_status, label, rule, k_pool, seeds, parity), when it belongs to this run.
     :return: the text without the run label and the final full stop ("" for a summary that is not a dict).
     """
     if not isinstance(summary, dict) or not summary:
         return ""
-    kind = summary.get("kind")
-    mode = summary.get("mode")
+    params = params if isinstance(params, dict) else {}
+    seeds = seeds if isinstance(seeds, dict) else {}
+    record = record if isinstance(record, dict) else {}
+    kind = summary.get("kind") or params.get("kind")
+    mode = summary.get("mode") or params.get("mode")
     k, lesions, n_fwe = _number(summary.get("k")), _number(summary.get("n_lesions")), summary.get("n_fwe_05")
+    status = _null_kind_status(kind, summary, record)
     parts = [
         (
-            f"{NULL_KIND_TEXT.get(kind, _or_nr(kind))}, {NULL_MODE_TEXT.get(mode, _or_nr(mode))}, "
+            f"{NULL_KIND_TEXT.get(kind, _or_nr(kind))}{f' [status: {status}]' if status else ''}, {_null_mode_text(kind, mode, params, record)}, "
             f"{k or NOT_RECORDED} null cohorts of the {lesions or NOT_RECORDED} case lesions"
         ),
     ]
     requested = _number(summary.get("k_requested"))
     if requested is not None and k is not None and requested != k:
         parts[0] += f" ({requested} requested; only {k} could be drawn)"
+    if params or record:
+        # How the overlap was counted, and how to draw the same null cohorts again
+        rule = params.get("rule") if isinstance(params.get("rule"), dict) else record.get("rule")
+        overlap = _number(params.get("overlap", record.get("overlap_pct")))
+        k_pool = params.get("k_pool") if "k_pool" in params else record.get("k_pool")
+        seed = seeds.get("null")
+        if seed is None and isinstance(record.get("seeds"), dict):
+            seed = record["seeds"].get("seed")
+        text = f"rule {_rule_param_text(rule)}, ≥ {overlap + '%' if overlap else NOT_RECORDED} overlap, sign {_or_nr(params.get('sign', record.get('sign')))}"
+        if kind != "empirical_pool" and not (mode == "approximate" and kind in ("rl_cohort_shift", "rl_overlap")):
+            text += f", K_pool = {_number(k_pool) or NOT_RECORDED} {'shared cohort shifts' if kind == 'rl_cohort_shift' else 'relocations per lesion'}"
+        parts.append(text + f", seed {_or_nr(seed)}")
+    if mode == "approximate" and (params or record):
+        parts.append(_null_parity_text(record.get("parity")))
     if summary.get("below_min_k"):
         parts.append("too few null cohorts for any voxel to reach p <= 0.05")
     warnings = [str(text).rstrip(".") for text in summary.get("warnings") or [] if text]
