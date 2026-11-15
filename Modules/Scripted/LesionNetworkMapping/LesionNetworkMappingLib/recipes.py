@@ -682,6 +682,20 @@ def is_partial(recipe, module_available=None):
     return any(not step["available"] for step in available_steps(recipe, module_available))
 
 
+def distinct_labels(recipes, labeller=None):
+    """One list label per recipe. Recipes whose labels collide get their file name added, so they can be told apart."""
+    labels = [labeller(r) if labeller else r.title for r in recipes]
+    counts = {}
+    for label in labels:
+        counts[label] = counts.get(label, 0) + 1
+    result = []
+    for recipe, label in zip(recipes, labels, strict=True):
+        if counts[label] > 1 and recipe.path:
+            label += f" ({os.path.basename(recipe.path)})"
+        result.append(label)
+    return result
+
+
 def partial_badge(recipe, module_available=None):
     """"" or "2 steps not available in this build: Coordinate seeds, …"."""
     missing = [step["label"] for step in available_steps(recipe, module_available) if not step["available"]]

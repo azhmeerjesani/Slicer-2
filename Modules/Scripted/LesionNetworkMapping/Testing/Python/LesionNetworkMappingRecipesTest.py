@@ -239,6 +239,18 @@ class ApplyDiffTest(_TempCase):
         self.assertEqual(sorted(recipe.id for recipe in loaded), sorted(recipe.id for recipe in recipes.load_recipes()))  # the built-ins still load
         self.assertEqual(sorted(os.path.basename(path) for path, _message in errors), sorted(f"{name}.json" for name in bad))
 
+    def test_same_title_lab_recipes_get_distinct_labels(self):
+        base = self.builtin("classic_ferguson2019_adapted")
+        params = recipes.apply(base)
+        folder = self.path("labdup")
+        for name in ("lab_recipe.json", "lab_recipe_2.json"):
+            recipes.save_lab_recipe(os.path.join(folder, name), params, base, title="Same name", recipe_id=name[:-5])
+        lab = [r for r in recipes.load_recipes(folders=[folder]) if r.status == "lab"]
+        labels = recipes.distinct_labels(lab, lambda r: f"{r.title} · lab")
+        self.assertEqual(len(set(labels)), 2)
+        self.assertTrue(any("lab_recipe_2.json" in label for label in labels))
+        self.assertEqual(recipes.distinct_labels(lab[:1], lambda r: f"{r.title} · lab"), ["Same name · lab"])
+
     def test_lab_recipe_is_shareable(self):
         base = self.builtin("classic_ferguson2019_adapted")
         params = recipes.set_field(recipes.apply(base), "n_perm", 10000)

@@ -555,9 +555,9 @@ class RecipeHeader:
         try:
             self.combo.clear()
             self.combo.addItem(_("Choose a recipe…"), "")
-            for recipe in self.recipes:
-                tag = {"adapted": _("adapted"), "established": _("established"), "2026-preprint": _("2026 preprint"), "lab": _("lab")}.get(recipe.status, recipe.status)
-                text = f"{recipe.title} · {tag}"
+            tags = {"adapted": _("adapted"), "established": _("established"), "2026-preprint": _("2026 preprint"), "lab": _("lab")}
+            labels = recipes.distinct_labels(self.recipes, lambda r: f"{r.title} · {tags.get(r.status, r.status)}")
+            for recipe, text in zip(self.recipes, labels, strict=True):
                 badge = recipes.partial_badge(recipe)
                 if badge:
                     text += " · " + _("partial")
