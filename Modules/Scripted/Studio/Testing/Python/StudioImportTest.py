@@ -2937,6 +2937,36 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         studioShell.dispose()
         self._pump()
 
+    def test_open_project_scene_toast_does_not_name_the_internal_scene_file(self):
+        """After a closed project opens in place ("Continuing Projects/x"), the last toast is not "Loaded x.mrml"."""
+        from StudioLib import autosave
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        sceneFile = os.path.join(self.directory, "Projects", "p one", "p one.mrml")
+
+        class Service:
+            def __init__(self, current):
+                self.current = current
+
+            def isOpenProjectScene(self, path):
+                return self.current and path == sceneFile
+
+        saved = autosave.instance
+        try:
+            for current, expected in ((True, False), (False, True)):
+                autosave.instance = lambda current=current: Service(current)
+                result = importer.LoadResult()
+                result.scenes.append(sceneFile)
+                before = len(studioShell.recentMessages())
+                importer._loadToast(result, studioShell)
+                texts = [text for _time, text, _level in studioShell.recentMessages()[before:]]
+                self.assertEqual(any("Loaded p one.mrml" in text for text in texts), expected, texts)
+        finally:
+            autosave.instance = saved
+        studioShell.dispose()
+        self._pump()
+
     def test_studio_folder_argument_shows_the_library(self):
         """The Slicer Studio folder or its Projects folder as an argument is recognised, not offered to Add Data empty."""
         from StudioLib import importer

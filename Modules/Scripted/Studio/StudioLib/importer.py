@@ -2816,7 +2816,23 @@ def _loadToast(result, shell):
     elif result.alreadyOpenScenes:
         shell.toast(_("{name} is already open").format(name=result.alreadyOpenScenes[0]))
     elif result.scenes:
+        if _isOpenProjectScene(result.scenes[0]):
+            # A Studio project's scene opened as the project ("Continuing Projects/x" says so): its internal scene file is
+            # not something the user opened (they dropped a scan, or the project folder), and "Loaded x.mrml" would replace
+            # that message at once
+            return
         shell.toast(_("Loaded {name}").format(name=os.path.basename(result.scenes[0])))
+
+
+def _isOpenProjectScene(path):
+    """True if ``path`` is the scene file of the project that is open now."""
+    try:
+        from . import autosave
+
+        service = autosave.instance()
+        return service is not None and bool(service.isOpenProjectScene(path))
+    except (ImportError, AttributeError):
+        return False
 
 
 def _recordedFileType(properties):
