@@ -2131,6 +2131,40 @@ def _routeStudyLoad(paths, kinds, shell):
     return paths, kinds
 
 
+def _headerDataFiles(paths):
+    """The paths that are the data file of a detached header dropped with them (a ``.raw`` of a ``.nhdr`` or ``.mhd``, an
+    ``.img`` of a ``.hdr``): the header loads the scan, so the data file is not a file to open by itself.
+    """
+    present = {os.path.normcase(os.path.abspath(str(path))) for path in paths}
+    dataFiles = set()
+    for path in paths:
+        extension = _extension(str(path))
+        if extension not in (".nhdr", ".mhd", ".hdr"):
+            continue
+        folder = os.path.dirname(os.path.abspath(str(path)))
+        names = []
+        if extension == ".hdr":
+            names.append(os.path.splitext(os.path.basename(str(path)))[0] + ".img")
+        else:
+            separator = ":" if extension == ".nhdr" else "="
+            wanted = ("data file", "datafile") if extension == ".nhdr" else ("elementdatafile",)
+            try:
+                with open(path, "rb") as f:
+                    text = f.read(65536).decode("latin-1")
+            except OSError:
+                continue
+            for line in text.splitlines():
+                key, found, value = line.partition(separator)
+                if found and key.strip().lower() in wanted and value.split():
+                    names.append(value.split()[0])
+                    break
+        for name in names:
+            key = os.path.normcase(os.path.normpath(os.path.join(folder, name)))
+            if key in present and key != os.path.normcase(os.path.abspath(str(path))):
+                dataFiles.add(key)
+    return dataFiles
+
+
 def loadFiles(paths, shell=None, pairedLesion=None):
     """Load files directly (see the module documentation) and return a ``LoadResult``.
 
@@ -2150,6 +2184,10 @@ def loadFiles(paths, shell=None, pairedLesion=None):
     paths = [os.path.abspath(str(path)) for path in paths]
     if not paths:
         return result
+    dataFiles = _headerDataFiles(paths)
+    if dataFiles:
+        # The data file of a header dropped with it (.nhdr + .raw) is read by the header, not on its own
+        paths = [path for path in paths if os.path.normcase(path) not in dataFiles]
     kinds = [fileKind(path) for path in paths]
     if shell is None:
         # Classic: 3D Slicer's routes (a picture or a table goes to Add Data, a statistical map is a volume)

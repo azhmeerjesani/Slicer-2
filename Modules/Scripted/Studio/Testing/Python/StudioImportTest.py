@@ -497,6 +497,48 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertIsNotNone(sourceVolume, path)
             self.assertEqual(sourceVolume.GetID(), proxy.GetID())
 
+    def test_header_dropped_with_its_data_file_loads_once(self):
+        """BB-1: a detached header dropped together with its data file (.nhdr + .raw, .mhd + .raw, .hdr + .img) loads the scan
+        once, as the header alone does: the data file is read by the header, not sent to the Add Data dialog.
+        """
+        from StudioLib import importer
+
+        data = (np.random.default_rng(3).random((8, 9, 10)) * 100).astype("<i2")
+        headers = {
+            "pairnhdr": ("nhdr", ("NRRD0004\ntype: short\ndimension: 3\nspace: left-posterior-superior\nsizes: 10 9 8\n"
+                         "space directions: (1,0,0) (0,1,0) (0,0,1)\nkinds: domain domain domain\nendian: little\n"
+                         "encoding: raw\nspace origin: (0,0,0)\ndata file: pairnhdr.raw\n\n")),
+            "pairmhd": ("mhd", ("ObjectType = Image\nNDims = 3\nBinaryData = True\nBinaryDataByteOrderMSB = False\n"
+                        "TransformMatrix = 1 0 0 0 1 0 0 0 1\nOffset = 0 0 0\nElementSpacing = 1 1 1\nDimSize = 10 9 8\n"
+                        "ElementType = MET_SHORT\nElementDataFile = pairmhd.raw\n")),
+        }
+        studioShell = self._applyStudio()
+        calls = []
+        original = importer.openAddDataDialog
+        importer.openAddDataDialog = lambda paths: calls.append(list(paths))
+        try:
+            for name, (extension, text) in headers.items():
+                header = os.path.join(self.directory, f"{name}.{extension}")
+                raw = os.path.join(self.directory, f"{name}.raw")
+                with open(header, "w") as f:
+                    f.write(text)
+                data.tofile(raw)
+                slicer.mrmlScene.Clear(0)
+                self._pump()
+                result = importer.handleDrop([header, raw], shell=studioShell)
+                self._pump()
+                self.assertEqual(calls, [], name)
+                self.assertEqual(result.errors, [], name)
+                self.assertEqual([node.GetName() for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")], [name])
+            # .hdr + .img: only the header goes on, the .img is its data file
+            hdr, img = (os.path.join(self.directory, f"analyze.{ext}") for ext in ("hdr", "img"))
+            for path in (hdr, img):
+                open(path, "wb").close()
+            self.assertEqual(importer._headerDataFiles([hdr, img]), {os.path.normcase(img)})
+            self.assertEqual(importer._headerDataFiles([img]), set())
+        finally:
+            importer.openAddDataDialog = original
+
     def _volumeNode(self):
         node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "StudioImportTestPlain")
         slicer.util.updateVolumeFromArray(node, np.zeros((8, 12, 16), np.int16))
