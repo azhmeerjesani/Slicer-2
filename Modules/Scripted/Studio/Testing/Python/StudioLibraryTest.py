@@ -321,6 +321,26 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             draw.viewGaps = original
         self.assertEqual(library.CurrentWorkCard._metricsToolTip({"metrics": None}), "")
 
+    def test_study_grid_question_wording(self):
+        """The ambiguous-grid question uses the singular for one file, names the grid in user words (no registry key) and the
+        answer buttons name the space in full ('MNI152Lin (SPM)', not 'Lin').
+        """
+        from StudioLib import library
+
+        one = library.gridQuestionText("TF2009-2mm", 1)
+        self.assertTrue(one.startswith("1 file is on the"), one)
+        self.assertNotIn("1 files", one)
+        self.assertIn("Which space is it in?", one)
+        many = library.gridQuestionText("SPM-1mm", 3)
+        self.assertTrue(many.startswith("3 files are on the"), many)
+        for text in (one, many):
+            self.assertNotIn("TF2009-2mm", text)
+            self.assertNotIn("SPM-1mm", text)
+        self.assertIn("SPM", many)
+        self.assertEqual(library.gridAnswerText("MNI152Lin"), "MNI152Lin (SPM)")
+        self.assertEqual(library.gridAnswerText("MNIColin27"), "MNIColin27")
+        self.assertEqual(library.gridAnswerText("MNI152NLin2009cAsym"), "MNI152NLin2009cAsym")
+
     def test_empty_state_unchanged(self):
         """Nothing loaded: the 480x220 drop zone, the three buttons and Recent; a stray segmentation changes nothing."""
         from StudioLib import library

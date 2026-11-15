@@ -4541,6 +4541,37 @@ def studyCounts(studyObject):
     return text
 
 
+def gridDisplayName(gridId):
+    """A grid in user words ("TemplateFlow 2009 grid, 2 mm"), not by its registry key ("TF2009-2mm")."""
+    try:
+        from LesionNetworkMappingLib import geometry
+
+        spec = geometry.GRID_BY_ID.get(gridId)
+    except Exception:
+        spec = None
+    if spec is None:
+        return str(gridId)
+    size = f"{spec.resolution} mm"
+    if spec.family == "spm":
+        return _("SPM/ICBM grid, {size}").format(size=size)
+    if spec.family == "2009":
+        return _("TemplateFlow 2009 grid, {size}").format(size=size)
+    return _("{grid} grid, {size}").format(grid=gridId, size=size)
+
+
+def gridQuestionText(gridId, count):
+    """The question about an ambiguous grid, with the singular for one file."""
+    name = gridDisplayName(gridId)
+    if count == 1:
+        return _("1 file is on the {grid}, which several templates share. Which space is it in?").format(grid=name)
+    return _("{n} files are on the {grid}, which several templates share. Which space are they in?").format(n=count, grid=name)
+
+
+def gridAnswerText(candidate):
+    """Button text of a candidate space: the full name ("MNI152Lin (SPM)"), never a shortened one ("Lin")."""
+    return {"MNI152Lin": "MNI152Lin (SPM)"}.get(candidate, candidate)
+
+
 #
 # Inspector cards of a study (STUDY, SUBJECT, BATCH, IMPORT)
 #
@@ -4656,11 +4687,11 @@ class StudyCard(qt.QObject):
         _clearLayout(self.questionsLayout)
         for gridId, candidates, count in questions:
             label = _cardLabel("StudioStudyGridQuestion", 12, "text")
-            label.setText(_("{n} files are on the {grid} grid, which several templates share. Which space are they in?").format(n=count, grid=gridId))
+            label.setText(gridQuestionText(gridId, count))
             self.questionsLayout.addWidget(label)
             buttons = []
             for candidate in candidates:
-                button = qt.QPushButton(candidate.replace("MNI152", ""))
+                button = qt.QPushButton(gridAnswerText(candidate))
                 button.setObjectName("StudioStudyGridAnswer")
                 button.setToolTip(candidate)
                 ui.setRole(button, "secondary")
