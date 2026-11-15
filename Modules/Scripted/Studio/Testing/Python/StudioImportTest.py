@@ -1034,6 +1034,32 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertIn("is damaged", message)
         self.assertFalse([r for r in records if "Traceback" in r.getMessage() or r.levelno >= logging.ERROR])
 
+    def test_nonfinite_vox_offset_is_refused_in_plain_words(self):
+        """BB-1: a NIfTI whose vox_offset is NaN or infinite raised ValueError/OverflowError from int(): an ERROR
+        traceback, the error badge and a bare box. It is refused in plain words with a RefusedFileError.
+        """
+        from StudioLib import importer
+
+        def niftiPath(name, offset):
+            header = bytearray(348)
+            struct.pack_into("<i", header, 0, 348)
+            struct.pack_into("<8h", header, 40, 3, 8, 8, 6, 1, 1, 1, 1)
+            struct.pack_into("<hh", header, 70, 2, 8)
+            struct.pack_into("<8f", header, 76, 1, 1, 1, 1, 1, 0, 0, 0)
+            struct.pack_into("<f", header, 108, offset)
+            header[344:348] = b"n+1\0"
+            path = os.path.join(self.directory, name)
+            with open(path, "wb") as f:
+                f.write(bytes(header) + bytes(4) + bytes([1]) * (8 * 8 * 6))
+            return path
+
+        importer._checkNiftiComplete(niftiPath("sub-ok_T1w.nii", 352))  # no RefusedFileError
+        for name, offset in (("sub-nan_T1w.nii", float("nan")), ("sub-inf_T1w.nii", float("inf")),
+                             ("sub-ninf_T1w.nii", float("-inf"))):
+            with self.assertRaises(importer.RefusedFileError) as context:
+                importer._checkNiftiComplete(niftiPath(name, offset))
+            self.assertIn("invalid data offset", str(context.exception))
+
     def test_gzipChecksumFailureIsRefused(self):
         """BB-1: a ``.nii.gz`` with a flipped bit that still decodes to full length (gzip CRC mismatch) is refused as damaged
         instead of opening silently with changed voxels; an intact one is not.

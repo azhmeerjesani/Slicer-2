@@ -697,6 +697,20 @@ def _imageValueRange(path):
     return low, high
 
 
+def _niftiHasInvalidDataOffset(path):
+    """True if the NIfTI-1 header of ``path`` gives a data offset (``vox_offset``) that is not a number (NaN) or is
+    infinite or absurdly large.
+    """
+    header = _niftiHeader(path, 348) if isNiftiFile(path) and os.path.isfile(path) else None
+    if header is None or len(header) < 348:
+        return False
+    for byteOrder in ("<", ">"):
+        if struct.unpack(byteOrder + "i", header[0:4])[0] == 348:
+            voxOffset = struct.unpack(byteOrder + "f", header[108:112])[0]
+            return not math.isfinite(voxOffset) or voxOffset > 2 ** 62
+    return False
+
+
 def _niftiDataShortfall(path):
     """``(have, need)`` in bytes if the data of the NIfTI file ``path`` is shorter than its header says, None if it is
     complete or cannot be judged (not NIfTI, unreadable header: the readers report those). The ITK reader zero-fills the
@@ -713,7 +727,10 @@ def _niftiDataShortfall(path):
         if sizeOfHeader == 348:
             dims = struct.unpack(byteOrder + "8h", header[40:56])
             bitsPerVoxel = _niftiBitsPerVoxel(struct.unpack(byteOrder + "2h", header[70:74]))
-            offset = max(int(struct.unpack(byteOrder + "f", header[108:112])[0]), 352)
+            voxOffset = struct.unpack(byteOrder + "f", header[108:112])[0]
+            if not math.isfinite(voxOffset) or voxOffset > 2 ** 62:
+                return None  # _niftiHasInvalidDataOffset reports it
+            offset = max(int(voxOffset), 352)
             break
         if sizeOfHeader == 540 and len(header) >= 540:
             dims = struct.unpack(byteOrder + "8q", header[16:80])
@@ -949,6 +966,10 @@ def _checkNiftiComplete(path):
         need, have = _niftiImageBytes(path), _availableMemoryBytes()
         if need is not None and have is not None and need * 2 > have:
             raise RefusedFileError(_tooLargeMessage(path))
+    if _niftiHasInvalidDataOffset(path):
+        raise RefusedFileError(
+            _("{name} is damaged: its header gives an invalid data offset (where the image data starts is not a "
+              "number), so it was not opened.").format(name=os.path.basename(str(path))))
     shortfall = _niftiDataShortfall(path)
     if shortfall is not None:
         raise RefusedFileError(
