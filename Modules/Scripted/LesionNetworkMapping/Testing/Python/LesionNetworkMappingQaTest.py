@@ -727,6 +727,20 @@ class QaGroupChipFastModeTest(unittest.TestCase):
         self.assertIn("fast-mode map (approximate", text)
         self.assertIn("(shown in the QA card)", card_nulls.NullsCard.groupQaText({"available": True, "mean": values, "statistic": "T"}))
 
+    def test_nulls_card_shows_run_warnings_and_small_k(self):
+        """The card shows a run's recorded warnings and a K below MIN_K (bug nulls-run-warnings-dropped-cohort-shift-k-shrinks-to-3)."""
+        from LesionNetworkMappingUI import card_nulls
+
+        card = card_nulls.NullsCard
+        shifts = {"code": "shifts", "message": "Only 3 of 20 shared shifts keep the cohort inside the brain."}
+        text = card.warningsText({"k": 3, "k_requested": 20, "below_min_k": True, "warnings": [shifts, {"code": "min_k", "message": "Only 3 null cohorts (of 20 requested): ..."}]})
+        self.assertIn("Only 3 of 20 shared shifts", text)
+        self.assertIn("no voxel can reach p ≤ 0.05", text)
+        self.assertNotIn("(of 20 requested): ...", text)  # the card's own sentence replaces the min_k warning
+        self.assertIn("no voxel can reach p ≤ 0.05", card.warningsText({"k": 5}))  # an older record without the flag
+        self.assertEqual(card.warningsText({"k": 1000, "warnings": []}), "")
+        self.assertIn("not calibrated", card.groupQaText({"available": False, "level": "not_calibrated", "k": 3, "text": "only 3 null cohorts; at least 19 are needed for a percentile"}))
+
 
 def _edit_preprocessing(bundle_path):
     """Change the preprocessing record of connectome.json, which makes the bundle's reference maps stale."""

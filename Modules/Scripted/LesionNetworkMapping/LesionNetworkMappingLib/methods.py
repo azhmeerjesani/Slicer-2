@@ -1517,6 +1517,14 @@ def nulls_text(summary):
             f"{k or NOT_RECORDED} null cohorts of the {lesions or NOT_RECORDED} case lesions"
         ),
     ]
+    requested = _number(summary.get("k_requested"))
+    if requested is not None and k is not None and requested != k:
+        parts[0] += f" ({requested} requested; only {k} could be drawn)"
+    if summary.get("below_min_k"):
+        parts.append("too few null cohorts for any voxel to reach p <= 0.05")
+    warnings = [str(text).rstrip(".") for text in summary.get("warnings") or [] if text]
+    if warnings:
+        parts.append("warnings: " + "; ".join(warnings))
     if _number(n_fwe) is None:
         parts.append(f"voxels reaching PFWE <= 0.05 {NOT_RECORDED}")
     elif float(n_fwe) == 0:

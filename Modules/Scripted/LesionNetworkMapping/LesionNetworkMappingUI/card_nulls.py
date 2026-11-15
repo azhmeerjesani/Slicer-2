@@ -329,6 +329,10 @@ class NullsCard:
         self.approxBanner.setObjectName("LNMNullsApproximateBanner")
         self.approxBanner.hide()
         inner.addWidget(self.approxBanner)
+        self.warningsBanner = widgets.banner("", level="warn")
+        self.warningsBanner.setObjectName("LNMNullsWarningsBanner")
+        self.warningsBanner.hide()
+        inner.addWidget(self.warningsBanner)
         self.staleLabel = label("", "LNMNullsStale", "secondaryText")
         self.staleLabel.hide()
         inner.addWidget(self.staleLabel)
@@ -947,6 +951,9 @@ class NullsCard:
         widgets.setChipLevel(self.modeChip, "warn" if approximate else "ok", _("Approximate (fast mode)") if approximate else _("Exact pooled null"))
         statusTag = next((row[3] for row in KIND_ROWS if row[0] == record.get("kind")), record.get("kind_status") or "")
         basisText = _("{kind} [{status}] · {label} · K = {k}").format(kind=record.get("kind"), status=statusTag, label=record.get("mode_label"), k=record.get("k"))
+        requested = record.get("k_requested")
+        if requested is not None and record.get("k") is not None and int(requested) != int(record["k"]):
+            basisText += " " + _("(of {n} requested)").format(n=int(requested))
         if record.get("kind") == "rl_strength":
             basisText += " · " + (_("Strength map: Absolute hubness") if self.recordStrength(record) == "abs" else _("Strength map: Signed μC_r"))
         self.basisLabel.setText(basisText)
@@ -954,6 +961,9 @@ class NullsCard:
             widgets.setBannerText(self.approxBanner, _("Approximate: fast mode uses the parcel index (approximate z-scale, rank rules only); your observed map was recomputed in fast mode, like with like. "
                                                        "Fast-mode maps are never final observed maps."))
         self.approxBanner.setVisible(approximate)
+        warningsText = self.warningsText(record)
+        widgets.setBannerText(self.warningsBanner, warningsText)
+        self.warningsBanner.setVisible(bool(warningsText))
         stale = self.staleReasons(record)
         self.staleLabel.setText(_("Settings changed since this run ({names}): run again to update.").format(names=", ".join(stale)) if stale else "")
         self.staleLabel.setVisible(bool(stale))
@@ -979,6 +989,24 @@ class NullsCard:
         _fitTable(self.outputsTable, len(shown))
         hasBias = BIAS_DESC in outputs and os.path.isfile(os.path.join(folder, outputs[BIAS_DESC]))
         self.biasCheck.setVisible(hasBias)
+
+    @staticmethod
+    def warningsText(record):
+        """The banner text of a run's recorded warnings (nulls.json ``warnings``) and of a K too small to reach p ≤ 0.05, or ""."""
+        k = record.get("k")
+        lines = []
+        try:
+            belowMin = bool(record.get("below_min_k")) or (k is not None and int(k) < MIN_K)
+        except (TypeError, ValueError):
+            belowMin = False
+        if belowMin:
+            lines.append(_("Only {k} null cohorts: no voxel can reach p ≤ 0.05 (at least {n} are needed). Do not report these p-values.").format(k=k, n=MIN_K))
+        for item in record.get("warnings") or []:
+            text = item.get("message") if isinstance(item, dict) else item
+            code = item.get("code") if isinstance(item, dict) else None
+            if text and not (belowMin and code == "min_k"):
+                lines.append(str(text))
+        return "\n".join(lines)
 
     @staticmethod
     def groupQaText(group, strength=None):

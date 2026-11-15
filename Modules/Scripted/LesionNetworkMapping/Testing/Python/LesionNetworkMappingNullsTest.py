@@ -464,6 +464,56 @@ class NullsTest(unittest.TestCase):
         self.assertEqual(record["design"]["iterations"], 150)
         self.assertLessEqual(record["design"]["ks_best_median"], record["design"]["ks_initial_median"])
 
+    def test_cohort_shift_shortfall_is_recorded_and_flagged(self):
+        """Fewer shared shifts than requested: the warning, the requested K and K < MIN_K reach nulls.json, the run registry
+        (methods) and the group QA (bug nulls-run-warnings-dropped-cohort-shift-k-shrinks-to-3).
+        """
+        from LesionNetworkMappingLib import methods
+
+        # A brain that is the lesions' bounding box: with 98% of the weight kept inside, only 3 of 20 shared shifts fit
+        ijk = np.stack(np.unravel_index(self.bundle.mask_indices, SHAPE), axis=1)
+        occupied = np.zeros(self.bundle.n_voxels, dtype=bool)
+        for positions, _weights in self.cohort.columns:
+            occupied[positions] = True
+        low, high = ijk[occupied].min(axis=0), ijk[occupied].max(axis=0)
+        box = np.all((ijk >= low) & (ijk <= high), axis=1)
+        events = []
+        root = self.path("shift-shortfall-root")
+        os.makedirs(root, exist_ok=True)
+        record = nulls.run(self.bundle, self.path("shift-shortfall"), maps_tsv=self.maps_tsv, kind="rl_cohort_shift", mode="exact", k=20, k_pool=20, rule=TOP10,
+                           brain_mask=box, min_inside=0.98, seed=7, reference=self.reference, run_root=root, emit=lambda event, **fields: events.append(dict(fields, event=event)))
+        k = record["k"]
+        self.assertLess(k, nulls.MIN_K)
+        self.assertEqual(record["k_requested"], 20)
+        self.assertTrue(record["below_min_k"])
+        self.assertTrue(record["inference"]["below_min_k"])
+        self.assertIn("no voxel can reach p ≤ 0.05", record["inference"]["discreteness"])
+        codes = [item["code"] for item in record["warnings"]]
+        self.assertIn("shifts", codes)
+        self.assertIn("min_k", codes)
+        self.assertIn(f"Only {k} of 20 shared shifts", next(item["message"] for item in record["warnings"] if item["code"] == "shifts"))
+        self.assertEqual([e["message"] for e in events if e["event"] == "warning" and e.get("code") in ("shifts", "min_k")], [item["message"] for item in record["warnings"] if item["code"] in ("shifts", "min_k")])
+        with open(self.path("shift-shortfall", nulls.NULLS_JSON), encoding="utf-8") as f:
+            saved = json.load(f)
+        self.assertEqual(saved["warnings"], record["warnings"])
+        self.assertEqual(saved["k_requested"], 20)
+        # No percentile verdict among a handful of null cohorts
+        self.assertFalse(record["group_qa"]["available"])
+        self.assertIn(f"at least {nulls.MIN_K}", record["group_qa"]["text"])
+        # The run registry summary, and so the methods, say what was asked for and what went wrong
+        summary = runs.read_summary(root, runs.list_runs(root, kind="nulls")[-1])
+        self.assertEqual((summary["k"], summary["k_requested"], summary["below_min_k"]), (k, 20, True))
+        text = methods.nulls_text(summary)
+        self.assertIn(f"{k} null cohorts", text)
+        self.assertIn("20 requested", text)
+        self.assertIn("p <= 0.05", text)
+        self.assertIn(f"Only {k} of 20 shared shifts", text)
+        # A run with enough cohorts has neither flag nor min_k warning
+        enough = nulls.run(self.bundle, self.path("shift-enough"), maps_tsv=self.maps_tsv, kind="rl_independent", mode="exact", k=30, k_pool=4, rule=TOP10, emit=_quiet, register=False)
+        self.assertFalse(enough["below_min_k"])
+        self.assertEqual(enough["k_requested"], 30)
+        self.assertNotIn("min_k", [item["code"] for item in enough["warnings"]])
+
     def test_empirical_pool(self):
         pool_dir = self.path("pool")
         os.makedirs(pool_dir, exist_ok=True)

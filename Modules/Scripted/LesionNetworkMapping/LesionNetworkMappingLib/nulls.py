@@ -172,6 +172,10 @@ ANNEAL_T0, ANNEAL_T1 = 0.05, 5e-4  # temperatures of the geometric cooling (KS d
 POOL_MATCHES = 10
 SD_FLOOR = 0.5  # lesion counts: floor of the null standard deviation in the standardised excess
 ALPHA = 0.05
+# Warning codes recorded in nulls.json (their messages name participants, never local paths; a mapping step's other
+# warnings, such as an unreadable lesion file with its path, stay in that step's own records and the job log)
+RECORDED_WARNINGS = frozenset({"excluded", "shifts", "relocations", "pool", "min_k", "parity_gate", "parity_index", "index_subjects", "observed_check", "resume_mismatch", "outside_mask"})
+MIN_K = 19  # the smallest K whose minimum attainable p, 1/(K+1), is at most ALPHA (the card's minimum)
 QA_VOXELS = 30_000  # voxels of the group QA sample (engine.NULL_MAX_VOXELS)
 DICE_BINARIZE_AT = 0.5  # lesionset.BINARIZE_AT
 
@@ -896,7 +900,11 @@ class NullOverlap:
             "discreteness": (
                 f"The smallest attainable p is 1/(K+1) = {min_p:.3g} (K = {k}); BH-FDR reaches q ≤ {ALPHA:g} only when at least "
                 f"{fdr_floor_voxels(n_voxels, min_p)} voxels reach it."
+                if min_p <= ALPHA else
+                f"The smallest attainable p is 1/(K+1) = {min_p:.3g} (K = {k}), above {ALPHA:g}: no voxel can reach p ≤ {ALPHA:g} or q ≤ {ALPHA:g}; "
+                f"at least {MIN_K} null cohorts are needed."
             ),
+            "below_min_k": bool(min_p > ALPHA),
         }
         numbers["classic_rule"]["text"] = fpr_text(self.overlap_pct, observed_fraction, fractions)
         return {"maps": maps, "z": z, "max_null": max_null, "mean": mean, "sd": sd, "numbers": numbers}
@@ -1506,6 +1514,10 @@ def _group_qa(context, observed_overlap, observed_mean, null_overlap_sample, nul
     if reference is None:
         level, text = qa.NOT_CALIBRATED, "not calibrated (no reference maps for this connectome and subject list)"
         return {"available": False, "level": level, "text": text}
+    k = int(null_overlap_sample.shape[0])
+    if k < MIN_K:  # a percentile among a handful of null cohorts is no verdict
+        return {"available": False, "level": qa.NOT_CALIBRATED, "k": k,
+                "text": f"only {k} null cohort{'' if k == 1 else 's'}; at least {MIN_K} are needed for a percentile"}
     out = {"available": True, "null_kind": context.kind, "voxels": int(context.sample.size)}
     for name, observed, nulls in (("overlap", observed_overlap, null_overlap_sample), ("mean", observed_mean, null_mean_sample)):
         try:
@@ -1664,7 +1676,18 @@ def run(
     from . import cohortmaps, engine, export, fastmap
     from .connectome import ConnectomeBundle
 
-    emit = emit or jobs.emit
+    outer_emit = emit or jobs.emit
+    run_warnings = []  # every warning of the run, for nulls.json and the methods (not only the job log)
+
+    def emit(event, **fields):
+        if event == "warning" and fields.get("code") in RECORDED_WARNINGS:
+            item = {"code": fields.get("code"), "message": fields.get("message")}
+            for key in ("participants", "participant_id"):
+                if fields.get(key) is not None:
+                    item[key] = fields[key]
+            run_warnings.append(item)
+        return outer_emit(event, **fields)
+
     cancel = _cancel_token(cancel)
     started = time.monotonic()
     rule = thresholds.normalize_rule(rule)
@@ -1677,6 +1700,7 @@ def run(
     os.makedirs(out_dir, exist_ok=True)
     budget_bytes = cohortmaps.default_budget_bytes() if budget_bytes is None else int(budget_bytes)
     on_the_fly = mode == "fast" and kind in ("rl_cohort_shift", "rl_overlap")
+    k_requested = k_pool if kind == "rl_cohort_shift" and not on_the_fly else int(k)  # the exact cohort shift draws K = K_pool shifts
     stage_names = (["lesion maps"] if study is not None else []) + ["design"] + ([] if on_the_fly else ["null maps"]) + ["null cohorts", "inference", "write"]
     stage_index = {"value": 0}
 
@@ -1913,17 +1937,23 @@ def run(
             if worst is not None and worst > 1e-3:
                 emit("warning", code="observed_check", message=f"The observed maps differ from their remapping in the null passes by up to {worst:.2g} (relative): check that maps.tsv belongs to this connectome.")
 
+        if result["numbers"].get("below_min_k"):
+            emit("warning", code="min_k", message=f"Only {k_sets} null cohort{'' if k_sets == 1 else 's'} (of {k_requested} requested): the smallest attainable p is "
+                 f"{result['numbers']['min_attainable_p']:.3g}, so no voxel can reach p ≤ {ALPHA:g}; at least {MIN_K} null cohorts are needed.")
+
         # Outputs
         stage("write")
         _remove_outputs(out_dir, bundle.name)
         record = _write_outputs(context, bundle, info, out_dir, cohort, result, group_qa, design, parity_report, parity_source, sets, shifts, shared_shifts, set_shifts,
-                                null_mean, resolved, maps_tsv, run_id, parents, argv, started, fast_index, parity, pool, pool_maps, brain_mask)
+                                null_mean, resolved, maps_tsv, run_id, parents, argv, started, fast_index, parity, pool, pool_maps, brain_mask,
+                                k_requested=k_requested, warnings=run_warnings)
         outputs = record.pop("outputs_list")
         shutil.rmtree(work, ignore_errors=True)
         numbers = result["numbers"]
         if run_id:
             runs.update(run_root, run_id, status="done", ended=record["created"], outputs=outputs,
-                        summary={"kind": kind, "mode": MODE_RECORDS[mode], "k": k_sets, "n_lesions": n_lesions, "n_fwe_05": numbers["n_fwe_05"],
+                        summary={"kind": kind, "mode": MODE_RECORDS[mode], "k": k_sets, "k_requested": k_requested, "below_min_k": bool(numbers.get("below_min_k")),
+                                 "warnings": [item["message"] for item in run_warnings if item.get("message") and item.get("code") != "min_k"], "n_lesions": n_lesions, "n_fwe_05": numbers["n_fwe_05"],
                                  "min_attainable_p": numbers["min_attainable_p"], "classic_rule": numbers["classic_rule"]["text"]})
         emit("done", outputs=[os.path.join(out_dir, name) for name in outputs], elapsed=round(time.monotonic() - started, 3), run_id=run_id, k=k_sets,
              mode=MODE_RECORDS[mode], classic_rule=numbers["classic_rule"]["text"], min_attainable_p=numbers["min_attainable_p"])
@@ -1966,8 +1996,12 @@ def _sidecar_path(map_path):
 
 
 def _write_outputs(context, bundle, info, out_dir, cohort, result, group_qa, design, parity_report, parity_source, sets, shifts, shared_shifts, set_shifts, null_mean,
-                   resolved, maps_tsv, run_id, parents, argv, started, fast_index, parity, pool, pool_maps, brain_mask):
-    """Write the maps (exact mask header), their sidecars, nulls.json, the null design and the null group maps."""
+                   resolved, maps_tsv, run_id, parents, argv, started, fast_index, parity, pool, pool_maps, brain_mask, k_requested=None, warnings=()):
+    """Write the maps (exact mask header), their sidecars, nulls.json, the null design and the null group maps.
+
+    ``k_requested``: the null cohorts asked for (``k`` may be fewer, for example when few cohort shifts fit); ``warnings``:
+    the run's warning events ({code, message, ...}), recorded in nulls.json.
+    """
     from . import export, nifti
     from .cohort import mask_geometry
     from .glm import _write_on_mask
@@ -1987,6 +2021,8 @@ def _write_outputs(context, bundle, info, out_dir, cohort, result, group_qa, des
         "mode_label": label,
         "approximate": context.mode == "fast",
         "k": numbers["k"],
+        "k_requested": int(k_requested) if k_requested is not None else numbers["k"],
+        "below_min_k": bool(numbers.get("below_min_k")),
         "k_pool": context.k_pool if context.kind not in ("empirical_pool",) and not (context.mode == "fast" and context.kind in ("rl_cohort_shift", "rl_overlap")) else None,
         "min_attainable_p": numbers["min_attainable_p"],
         "min_attainable_q": numbers["min_attainable_q"],
@@ -2067,6 +2103,7 @@ def _write_outputs(context, bundle, info, out_dir, cohort, result, group_qa, des
         },
         "participants": list(cohort.ids),
         "excluded": cohort.excluded,
+        "warnings": [dict(item) for item in warnings],
         "design": design,
         "inference": {key: value for key, value in numbers.items() if key != "classic_rule"},
         "classic_rule": numbers["classic_rule"],
