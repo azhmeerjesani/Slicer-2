@@ -1329,6 +1329,18 @@ def _modality(text):
     return None
 
 
+def _dicomScanOfLesion(node, kind):
+    """The DICOM-derived volume that a lesion segmentation named "Lesions (<scan name>)" belongs to, else None."""
+    if kind != KIND_SEGMENTATION or node is None or node.GetScene() is None:
+        return None
+    match = re.match(r"^Lesions?\s*\((.+)\)$", node.GetName() or "")
+    if not match:
+        return None
+    scans = [volume for volume in slicer.util.getNodesByClass("vtkMRMLVolumeNode", node.GetScene())
+             if volume.GetName() == match.group(1) and isDicomNode(volume)]
+    return scans[0] if len(scans) == 1 else None
+
+
 def defaultBaseName(node, kind=None, bids=False):
     """The base file name (without extension) proposed for ``node``.
 
@@ -1340,6 +1352,10 @@ def defaultBaseName(node, kind=None, bids=False):
     name = node.GetName()
     if isDicomNode(node):
         return dicomFileName(node)
+    scan = _dicomScanOfLesion(node, kind)
+    if scan is not None:
+        # "Lesions (3: T1 axial)" of a DICOM scan: named like the scan ("003_T1_axial"), so that both files share one subject
+        return dicomFileName(scan)
     if not bids:
         return safeName(name)
     subject = bidsSubject(node)

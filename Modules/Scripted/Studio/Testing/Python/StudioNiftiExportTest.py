@@ -401,6 +401,26 @@ class StudioNiftiExportTest(unittest.TestCase):
             else:
                 settings.remove(settingsKey)
 
+    def test_03b_lesion_of_dicom_scan_shares_the_scan_name(self):
+        """A project export names the lesion of a DICOM scan after the scan ("003_T1_axial_label-Lesion_mask"), so that a
+        study made from the folder pairs both files as one subject.
+        """
+        ijkToRas = np.eye(4)
+        scan = self._volume("3: T1 axial", np.zeros((6, 6, 6), np.int16), ijkToRas)
+        scan.SetAttribute("DICOM.instanceUIDs", "1.2.3.4.5")
+        values = {"0008,103e": "T1 axial", "0020,0011": "3"}
+        original = self.export._dicomValue
+        self.export._dicomValue = lambda uid, tag: values.get(tag, "")
+        try:
+            segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions (3: T1 axial)")
+            other = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions (unknown scan)")
+            self.assertEqual(self.export.defaultBaseName(scan, bids=True), "003_T1_axial")
+            self.assertEqual(self.export.defaultBaseName(segmentation, bids=True), "003_T1_axial")
+            self.assertEqual(self.export.defaultBaseName(other, bids=True), self.export.safeName("Lesions (unknown scan)"))
+            self.assertEqual(self.export.maskBaseName("003_T1_axial", "Lesion"), "003_T1_axial_label-Lesion_mask")
+        finally:
+            self.export._dicomValue = original
+
     def test_04_label_map_and_segmentation(self):
         """Label maps keep their values; segmentations as one label map (1..N, .tsv and ITK-SNAP tables) or one mask per
         segment; empty segments are skipped with a note.
