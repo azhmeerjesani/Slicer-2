@@ -1669,6 +1669,39 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         # MNI grid, x < 0: the left hemisphere
         self.assertEqual(metrics["sides"], "Left")
 
+    def test_22b_lesion_metrics_memory_stays_small(self):
+        """A large lesion's metrics allocate a few bytes per voxel, not ~100 (a half-scan Threshold OOM-killed the app)."""
+        import tracemalloc
+
+        import numpy as np
+
+        from StudioLib import lesioncard
+
+        mask = np.zeros((70, 256, 256), bool)
+        mask[3:67, 2:250, 1:255] = True
+        mask[10, 10, 10] = False
+        voxels = int(np.count_nonzero(mask))
+        matrix = np.array([[-0.9, 0.1, 0.05, 90.0], [0.1, 1.0, 0.0, -126.0], [0.0, 0.0, 1.0, -72.0], [0.0, 0.0, 0.0, 1.0]])
+        tracemalloc.start()
+        try:
+            metrics = lesioncard.computeLesionMetrics(mask, None, matrix, axis=0)
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(metrics["voxels"], voxels)
+        self.assertEqual(metrics["parts"], 1)
+        # ndimage.label's int32 labels are 4 bytes per voxel of the bounding box; per-voxel index arrays were ~93
+        self.assertLess(peak, 8 * mask[3:67, 2:250, 1:255].size, peak)
+        # The same centroid and x extent as from every voxel centre
+        kk, jj, ii = np.nonzero(mask)
+        indices = np.vstack((ii, jj, kk, np.ones(ii.size)))
+        expectedCentroid = matrix @ indices.mean(axis=1)
+        xs = matrix[0] @ indices
+        for axisIndex in range(3):
+            self.assertAlmostEqual(metrics["centroid_ras"][axisIndex], expectedCentroid[axisIndex], places=6)
+        self.assertAlmostEqual(metrics["x_min"], float(xs.min()), places=6)
+        self.assertAlmostEqual(metrics["x_max"], float(xs.max()), places=6)
+
     def test_23_draw_save_keeps_lesion_grid(self):
         """A 91x109x91 NLin6Asym mask shown on the 2009c template is saved on its own grid with identical voxels (U3)."""
         import os

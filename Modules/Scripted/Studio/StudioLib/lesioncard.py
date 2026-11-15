@@ -152,11 +152,24 @@ def computeLesionMetrics(array_kji, spacing, ijkToRAS, axis=0, brainMask=None):
         gapsByAxis.append([int(index) + offset for index in np.flatnonzero(~occupied)])
     gaps = gapsByAxis[axis]
 
-    kk, jj, ii = np.nonzero(crop)
-    indices = np.vstack((ii + i0, jj + j0, kk + k0, np.ones(ii.size))).astype(float)
-    centroid = matrix @ indices.mean(axis=1)
-    xs = matrix[0] @ indices
-    xMin, xMax = float(xs.min()), float(xs.max())
+    # Centroid and x extent without per-voxel index arrays (they cost about 100 bytes per lesion voxel: a large
+    # Threshold froze the GUI and ran out of memory). The mean index comes from the voxel counts per i, j and k plane;
+    # x is linear in (i, j, k), so its extent comes slice by slice from one (j, i) plane of x values.
+    meanIndex = [float(np.dot(np.count_nonzero(crop, axis=tuple(other for other in range(3) if other != countAxis)),
+                              np.arange(crop.shape[countAxis], dtype=float))) / voxels + (k0, j0, i0)[countAxis]
+                 for countAxis in range(3)]
+    centroid = matrix @ np.array([meanIndex[2], meanIndex[1], meanIndex[0], 1.0])
+    xi = matrix[0, 0] * np.arange(i0, i1 + 1, dtype=float)
+    xj = matrix[0, 1] * np.arange(j0, j1 + 1, dtype=float)
+    xPlane = xj[:, None] + xi[None, :]
+    xMin, xMax = math.inf, -math.inf
+    for sliceIndex in range(crop.shape[0]):
+        sliceMask = crop[sliceIndex]
+        xk = matrix[0, 2] * (k0 + sliceIndex) + matrix[0, 3]
+        sliceMin = float(np.min(xPlane, where=sliceMask, initial=math.inf))
+        if sliceMin != math.inf:
+            xMin = min(xMin, sliceMin + xk)
+            xMax = max(xMax, float(np.max(xPlane, where=sliceMask, initial=-math.inf)) + xk)
     voxelWidthX = float(np.linalg.norm(matrix[0, :3])) or 1.0
 
     outside = None
