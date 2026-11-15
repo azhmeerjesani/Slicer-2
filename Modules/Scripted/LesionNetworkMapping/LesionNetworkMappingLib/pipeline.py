@@ -3598,7 +3598,8 @@ class Runner:
         if (self.stage_records.get("report") or {}).get("status") in ("done", "reused") and os.path.isfile(self.path("report.html")):
             try:
                 report = importlib.import_module(f"{PACKAGE}.report")
-                report.render_report(self.out, self.emit, self.cancel, atlas=self.config.atlas, atlas_labels=self.config.atlas_labels, template=self.config.template, convention=self.config.figure_convention)
+                # no emit: Finish is already reported, so the second render must not print stage-15 progress again
+                report.render_report(self.out, None, self.cancel, atlas=self.config.atlas, atlas_labels=self.config.atlas_labels, template=self.config.template, convention=self.config.figure_convention)
             except jobs.Cancelled:
                 raise
             except Exception as exc:

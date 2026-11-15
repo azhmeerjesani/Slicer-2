@@ -883,6 +883,16 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
             with open(os.path.join(self.out, name), encoding="utf-8") as f:
                 self.assertNotRegex(f.read(), r"\bpending\b", name)
 
+    def test_no_report_progress_after_finish(self):
+        """The refresh of report.html after Finish is silent: no stage-15 progress follows the Finish event, and the figure counter ends at its total."""
+        names = [(event.get("event"), event.get("name"), event.get("status")) for event in self.events]
+        finish = names.index(("stage", "finish", "done"))
+        late = [event for event in self.events[finish + 1:] if event.get("event") == "progress"]
+        self.assertEqual(late, [], "no progress event after Finish")
+        report_progress = [event for event in self.events[:finish] if event.get("event") == "progress" and event.get("stage") == "report"]
+        self.assertTrue(report_progress)
+        self.assertEqual(report_progress[-1]["done"], report_progress[-1]["total"], "the figure counter ends at its real total")
+
     def test_resumed_run_methods_cite_the_run_that_finished(self):
         """A run stopped while the report is made has already written the export; the run that resumes it writes it again, so the
         methods, the sidecars and the report name the run that finished (not the cancelled one), and a finished run's export is reused.

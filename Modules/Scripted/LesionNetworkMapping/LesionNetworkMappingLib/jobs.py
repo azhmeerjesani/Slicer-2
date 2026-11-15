@@ -207,6 +207,7 @@ def emit(event, **fields):
     gone) never raises: later events are discarded.
     """
     fields.pop("t", None)
+    fields.pop("final", None)  # the pipeline's Emitter reads this flag to skip its progress throttle
     if event == "start":
         fields.setdefault("pid", os.getpid())
         if "version" not in fields:

@@ -481,7 +481,7 @@ class _Report:
         body += [self.qa_section(), self.clusters(), self.gallery(), self.methods(), self.checklist(), self.reproduce(), self.files()]
         if self.emit is not None and self.total != self.done:  # the start estimate was high: end the bar at 100%
             self.total = self.done
-            self.emit("progress", stage="report", done=self.done, total=self.total, unit="figures")
+            self.emit("progress", stage="report", done=self.done, total=self.total, unit="figures", final=True)
         footer = f'<section id="footer"><div class="disc" role="note">{_e(export.DISCLAIMER)}</div></section>'
         title = f"Lesion network mapping report: {self.study_name()}" + (f" ({self.watermark})" if self.watermark else "")
         page = (
