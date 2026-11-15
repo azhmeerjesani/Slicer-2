@@ -2800,6 +2800,26 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             ],
         )
 
+    def test_control_set_link_toast_gives_the_reason_when_nothing_is_linked(self):
+        """A set whose ids clash with the study's subjects links nothing: the toast says why, not '0 control rows updated'."""
+        import types
+
+        from StudioLib import libcard_controls
+
+        toasts = []
+        report = {"added": [], "updated": [], "removed": [], "skipped": [{"id": "a", "reason": "sub-FlatCtla is already a subject of the study"}] * 3}
+        study = types.SimpleNamespace(link_control_set=lambda name, ids=None, root=None: report)
+        session = types.SimpleNamespace(study=study, flush=lambda: None)
+        saved = libcard_controls._toast, libcard_controls._notify, libcard_controls.registryRoot
+        libcard_controls._toast = lambda text, ms=3000, **kw: toasts.append(text)
+        libcard_controls._notify = lambda session: None
+        libcard_controls.registryRoot = lambda: ""
+        try:
+            libcard_controls.linkSet(session, {"name": "Flat-Ctl"})
+        finally:
+            libcard_controls._toast, libcard_controls._notify, libcard_controls.registryRoot = saved
+        self.assertEqual(toasts, ["Nothing linked: 3 skipped · sub-FlatCtla is already a subject of the study"])
+
     def test_control_sets_list_elides_long_rows_without_a_scroll_bar(self):
         """A row of the Control sets list that does not fit is elided with an ellipsis: the list has no horizontal scroll bar (the
         row was as wide as its text, so it was cut mid-word at the panel edge and the bar took height from the fixed-height list).

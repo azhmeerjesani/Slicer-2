@@ -457,6 +457,11 @@ def linkSet(session, entry, ids=None):
     session.flush()
     _notify(session)
     added, updated, removed = len(report["added"]), len(report["updated"]), len(report.get("removed") or [])
+    if not (added or updated or removed) and report["skipped"]:
+        # Nothing was linked: say why (the first reason), not "0 control rows updated"
+        text = _("Nothing linked: {n} skipped").format(n=len(report["skipped"])) + " · " + str(report["skipped"][0].get("reason", ""))
+        _toast(text, 6000)
+        return report
     if added:
         text = (_("{n} control lesion linked (no files copied)") if added == 1 else _("{n} control lesions linked (no files copied)")).format(n=added)
     else:
