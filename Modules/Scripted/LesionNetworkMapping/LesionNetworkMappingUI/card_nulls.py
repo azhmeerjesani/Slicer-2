@@ -444,6 +444,14 @@ class NullsCard:
         cases = int(groups.get("case") or 0)
         return cases if cases >= 2 and cases <= mapped else mapped
 
+    def studyLesionCount(self):
+        """Lesions of the study known before mapping (the cohort info of the Map module), same rule as lesionCount()."""
+        widget = _mapWidget()
+        info = getattr(widget, "cohortInfo", None) or {}
+        total = int(info.get("n") or 0)
+        cases = int((info.get("groups") or {}).get("case") or 0)
+        return cases if cases >= 2 and cases <= total else total
+
     def participantsPath(self):
         study = self.ctx.study
         path = getattr(study, "path", None) if study is not None else None
@@ -586,6 +594,8 @@ class NullsCard:
             enabled, reason = widget.cohortComputeState() if widget is not None else (False, _("The Map module is not available."))
             if not enabled:
                 return False, reason
+            if 0 < self.studyLesionCount() < 2:
+                return False, _("The null models need at least 2 lesions.")
             return True, _("Run maps the lesions first (cohort maps), then runs the null models.")
         if self.lesionCount() < 2:
             return False, _("The null models need at least 2 lesions.")
@@ -743,8 +753,9 @@ class NullsCard:
             self.statusLabel.setText(_("The lesions are not mapped with this connectome yet: Run maps them first."))
         else:
             record = self.cohortRecord() or {}
-            self.statusLabel.setText(_("{n} lesions · N={subjects} connectome subjects · conn-{label}").format(
-                n=self.lesionCount(), subjects=record.get("n", "?"), label=(record.get("bundle") or {}).get("label", "?")))
+            count = self.lesionCount()
+            self.statusLabel.setText((_("{n} lesion · N={subjects} connectome subjects · conn-{label}") if count == 1 else _("{n} lesions · N={subjects} connectome subjects · conn-{label}")).format(
+                n=count, subjects=record.get("n", "?"), label=(record.get("bundle") or {}).get("label", "?")))
         self.statusLabel.setVisible(True)
         estimate = self.estimateText() if not self.running() else ""
         self.estimateLabel.setText(estimate)
