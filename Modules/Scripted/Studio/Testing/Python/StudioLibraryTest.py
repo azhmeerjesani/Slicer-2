@@ -3175,6 +3175,36 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         )
         self.assertEqual(libcard_cohort.subsetText("s", 2, 1), "Subset s: 2 cases + 1 control")
 
+    def test_lesion_overview_in_views_sits_over_the_template_when_no_background(self):
+        """With no background volume the overlap count goes over the study template, not onto black as the background."""
+        from LesionNetworkMappingLib import nifti
+        from StudioLib import libcard_cohort
+
+        slicer.mrmlScene.Clear(0)
+        folder = tempfile.mkdtemp(prefix="studio-overview-")
+        try:
+            affine = np.diag([2.0, 2.0, 2.0, 1.0])
+            paths = {}
+            for key, data in (("count", np.ones((6, 6, 6), np.uint8)), ("percent", np.full((6, 6, 6), 50, np.uint8)), ("template", np.full((6, 6, 6), 100, np.uint8))):
+                paths[key] = os.path.join(folder, key + ".nii.gz")
+                nifti.write_nifti(paths[key], data, affine)
+            overview = {"count": paths["count"], "percent": paths["percent"], "max_count": 1}
+            nodes = libcard_cohort.showOverlapInViews(overview, template=paths["template"])
+            composite = slicer.app.layoutManager().sliceWidget("Red").sliceLogic().GetSliceCompositeNode()
+            background = slicer.mrmlScene.GetNodeByID(composite.GetBackgroundVolumeID())
+            self.assertIsNotNone(background)
+            self.assertNotEqual(background.GetID(), nodes["count"].GetID())
+            self.assertEqual(composite.GetForegroundVolumeID(), nodes["count"].GetID())
+            self.assertAlmostEqual(composite.GetForegroundOpacity(), 0.85)
+            # without a template the old behaviour stays: the count is the background
+            slicer.mrmlScene.Clear(0)
+            nodes = libcard_cohort.showOverlapInViews(overview)
+            composite = slicer.app.layoutManager().sliceWidget("Red").sliceLogic().GetSliceCompositeNode()
+            self.assertEqual(composite.GetBackgroundVolumeID(), nodes["count"].GetID())
+        finally:
+            slicer.mrmlScene.Clear(0)
+            shutil.rmtree(folder, ignore_errors=True)
+
     def test_network_map_result_is_a_map_not_a_scan(self):
         """Map network results (LNM.Result, computing/partial/finished) are maps, never among the scans to trace on."""
         import numpy as np

@@ -683,10 +683,12 @@ def overlapColorTable(name, entries, maximum):
     return node
 
 
-def showOverlapInViews(overview, show=True):
+def showOverlapInViews(overview, show=True, template=None):
     """Load the overlap count and percent maps, give them discrete colour tables and show the count in the slice views.
 
     :param overview: the ``overview`` of a result (``count``, ``percent``, ``max_count``).
+    :param template: path of the study's display template: when the views have no background volume it becomes the background,
+        so the overlap can be located anatomically (without it the count map itself is the background, on black).
     :return: ``{"count": volume node, "percent": volume node, "countTable": colour table, "peak": [R, A, S] of a voxel with the most lesions}``.
     """
     removeOverlapNodes()
@@ -715,9 +717,18 @@ def showOverlapInViews(overview, show=True):
         composite = scene.GetFirstNodeByClass("vtkMRMLSliceCompositeNode")
         if composite is not None:
             background = composite.GetBackgroundVolumeID()
-        if background:
+        if not background and template:
+            try:
+                tpl = slicer.util.loadVolume(template, {"show": False})
+                tpl.SetAttribute("Studio.Role", "template")
+                background = tpl.GetID()
+                slicer.util.setSliceViewerLayers(background=tpl, foreground=nodes["count"], foregroundOpacity=0.85)
+            except Exception:
+                background = None
+                logging.debug(f"Studio cohort diagnostics: the template could not be shown under the overlap:\n{traceback.format_exc()}")
+        elif background:
             slicer.util.setSliceViewerLayers(foreground=nodes["count"], foregroundOpacity=0.85)
-        else:
+        if not background:
             slicer.util.setSliceViewerLayers(background=nodes["count"], foreground=None, foregroundOpacity=0.85)
         if nodes["peak"] is not None:
             try:
@@ -1285,7 +1296,9 @@ class CohortCard:
 
     def _afterOverview(self, overview):
         try:
-            showOverlapInViews(overview)
+            session = _session()
+            study = getattr(session, "study", None)
+            showOverlapInViews(overview, template=self._template(study) if study is not None else None)
         except Exception:
             logging.error(f"Studio cohort diagnostics: the overlap maps could not be shown:\n{traceback.format_exc()}")
             _toast(_("The overlap maps were written but could not be shown in the views"), 5000, level="warning")
