@@ -576,6 +576,46 @@ class StudioProjectsTest(unittest.TestCase):
         self.assertIn(".raw.gz", suffixes[".nhdr"])
         self.assertNotIn(".mgz", [suffix for values in suffixes.values() for suffix in values])
 
+    def test_05d_new_file_of_a_save_that_never_committed_does_not_stay(self):
+        """BB-1: a new lesion's file is complete in the project when the program dies before the scene file is written.
+        Opening the project again moves that file (the scene does not name it) to .studio/removed, so that it does not
+        stay for good and the next "Lesion 2" is not written as "Lesion 2 2"; a file that the scene names is kept.
+        """
+        from unittest import mock
+
+        service = self._service()
+        volume, _path = self._userVolume()
+        self._lesion(volume)
+        project = self._projectFor(service)
+        self._save(service)
+        second, _segmentId, _array = self._lesion(volume, name="Lesion 2")
+        crash = OSError(5, "killed")
+        with mock.patch.object(type(service.projectWriter), "commit", side_effect=crash):
+            service.saveNow("test", progress=False)
+        self.io.backgroundWriter().drain(30.0)
+        strayFile = os.path.join(project.path, "Segmentations", "Lesion 2.seg.nrrd")
+        pending = os.path.join(project.path, ".studio", "pending-files.json")
+        self.assertTrue(os.path.isfile(strayFile), "the new file is in place before the scene file is written")
+        self.assertTrue(os.path.isfile(pending), "and it is written down before")
+        self.assertIn("Segmentations/Lesion 2.seg.nrrd", open(pending, encoding="utf-8").read())
+        # A new session reads the scene file as it was committed: it does not name "Lesion 2"
+        slicer.mrmlScene.RemoveNode(second)
+        writer = self.io.ProjectWriter(project)
+        writer.recordSceneFiles(slicer.mrmlScene)
+        self.assertFalse(os.path.exists(strayFile))
+        self.assertFalse(os.path.exists(pending))
+        removed = [path for path in _relativeFiles(project.path) if path.startswith(".studio/removed/")]
+        self.assertEqual([os.path.basename(path) for path in removed], ["Lesion 2.seg.nrrd"], removed)
+        # A file that the scene names stays, and a save clears the list
+        third, _segmentId, _array = self._lesion(volume, name="Lesion 2")
+        self._save(service)
+        self.assertEqual(third.GetStorageNode().GetFileName(), strayFile, "the name is free again")
+        self.assertFalse(os.path.exists(pending))
+        writer = self.io.ProjectWriter(project)
+        writer._journalNew(os.path.join(project.path, "Segmentations", "Never there.seg.nrrd"))
+        writer.recordSceneFiles(slicer.mrmlScene)
+        self.assertTrue(os.path.isfile(strayFile))
+
     def test_06_copy_on_open_and_continue(self):
         projects = self.projects
         # A scene saved by 3D Slicer somewhere else

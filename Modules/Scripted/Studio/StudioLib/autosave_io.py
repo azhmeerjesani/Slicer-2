@@ -1957,6 +1957,9 @@ PORTABLE_SEQUENCE_EXTENSIONS = (".seq.nrrd", ".seq.nhdr", ".nrrd", ".nhdr")
 #: of the project that Studio took over from files outside it, the outside file each one came from: a file the user opens
 #: again is then "already open", also after the project saved it (and after a restart)
 SOURCES_FILE = "sources.json"
+#: .studio/pending-files.json: the new files of the generation being written (see ``ProjectWriter._journalNew``)
+PENDING_FILES = "pending-files.json"
+PENDING_FORMAT = "slicer-studio-pending-files"
 SOURCES_FORMAT = "slicer-studio-sources"
 #: prefix of the values of .studio/sources.json: a hash of the outside file's path, never the path itself (the project
 #: folder is shared whole, and the folder of a scan is often named after the patient)
@@ -2213,9 +2216,73 @@ class ProjectWriter(SlotWriter):
         #: ``vtkMRMLScene::GetStoredTime()`` after the scene file was last read or written by this writer: a later value
         #: means that this Slicer wrote the scene to a file since (the official Save dialog), not another program
         self._sceneStoredTime = None
+        #: project-relative names ("/") of the new files that a generation wrote before its scene file (journal in
+        #: .studio/pending-files.json): a crash in between leaves them, complete but unreferenced, in the project
+        self._pendingNew = []
+        self._pendingLock = threading.Lock()
 
     def manifestPath(self):
         return None
+
+    def _pendingPath(self):
+        return os.path.join(self.project.path, ".studio", PENDING_FILES)
+
+    def _journalNew(self, path):
+        """Write down ``path``, a new file of the project, before it is created (main thread or background writer).
+        ``finalize()`` clears the journal once the scene file names the files; ``recoverPending()`` reads what a crash left.
+        """
+        relative = self._projectRelative(path)
+        if relative is None or os.path.lexists(path):
+            return
+        with self._pendingLock:
+            if relative in self._pendingNew:
+                return
+            self._pendingNew.append(relative)
+            try:
+                os.makedirs(os.path.dirname(self._pendingPath()), exist_ok=True)
+                atomicWriteJson(self._pendingPath(), {"format": PENDING_FORMAT, "version": 1, "files": list(self._pendingNew)})
+            except OSError as error:
+                logging.warning(f"Slicer Studio: the list of new project files could not be written: {error}")
+
+    def _clearPending(self):
+        with self._pendingLock:
+            self._pendingNew = []
+            _removeQuietly(self._pendingPath())
+
+    def recoverPending(self, referenced):
+        """Move the new files that an interrupted generation wrote and that the scene file does not name (``referenced``:
+        canonical paths) to .studio/removed, so that they do not stay in the project for good and a later file does not
+        have to be called "name 2". Files that the scene names, and files that were there before, are never touched.
+        """
+        data = readJson(self._pendingPath())
+        names = data.get("files") if isinstance(data, dict) and data.get("format") == PENDING_FORMAT else None
+        removedDir = None
+        projectCanonical = _canonical(self.project.path)
+        for name in names if isinstance(names, list) else ():
+            if not isinstance(name, str) or not name or os.path.isabs(name) or ".." in name.replace("\\", "/").split("/"):
+                continue
+            path = os.path.join(self.project.path, *name.split("/"))
+            if _canonical(path) in referenced or not _isUnder(_canonical(path), projectCanonical) or self._isPrivateFile(path) \
+                    or os.path.dirname(_canonical(path)) == projectCanonical:
+                continue
+            base, extension = _projects().splitExtension(os.path.basename(path))
+            candidates = [path] + [os.path.join(os.path.dirname(path), base + suffix) for suffix in _COMPANION_SUFFIXES.get(extension.lower(), ())]
+            for candidate in candidates:
+                if not os.path.lexists(candidate) or _canonical(candidate) in referenced:
+                    continue
+                if removedDir is None:
+                    removedDir = os.path.join(self.project.path, ".studio", "removed", time.strftime("%Y%m%d-%H%M%S"))
+                    os.makedirs(removedDir, exist_ok=True)
+                try:
+                    shutil.move(candidate, os.path.join(removedDir, _projects().uniqueName(removedDir, os.path.basename(candidate))))
+                except OSError:
+                    continue
+            folder = os.path.dirname(path)
+            try:
+                os.rmdir(folder)  # never leave an empty kind folder
+            except OSError:
+                pass
+        _removeQuietly(self._pendingPath())
 
     def hasContent(self):
         return os.path.isfile(self.project.scenePath)
@@ -2272,10 +2339,12 @@ class ProjectWriter(SlotWriter):
         self._sceneStoredTime = scene.GetStoredTime()
         rootDirectory = scene.GetRootDirectory()
         stored = self._readSources()
+        referenced = set()
         nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
         nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         for index in range(nodes.GetNumberOfItems()):
             node = nodes.GetItemAsObject(index)
+            referenced.update(_canonical(path) for path in _storagePaths(node.GetStorageNode(), rootDirectory))
             hidden = node.GetHideFromEditors()
             if hidden and not node.IsA("vtkMRMLSequenceNode"):
                 continue
@@ -2287,6 +2356,7 @@ class ProjectWriter(SlotWriter):
             if source:
                 self.sources[node.GetID()] = source if source.startswith(SOURCE_ID_PREFIX) else sourceId(source)
         self._sourcesWritten = stored
+        self.recoverPending(referenced)
 
     def _sourcesPath(self):
         return os.path.join(self.project.path, ".studio", SOURCES_FILE)
@@ -2617,6 +2687,7 @@ class ProjectWriter(SlotWriter):
                 if plan.cancelled:
                     return None
                 os.makedirs(os.path.dirname(destination), exist_ok=True)
+                self._journalNew(destination)
                 temporary = destination + ".studio-part"
                 start = time.perf_counter()
                 try:
@@ -2845,6 +2916,7 @@ class ProjectWriter(SlotWriter):
                     pass
         for path in plan.temporary:
             removeTree(path)
+        self._clearPending()  # the scene file names every file of this generation
         if plan.projectJson is not None:
             os.makedirs(os.path.join(projectDir, ".studio"), exist_ok=True)
             atomicWriteJson(os.path.join(projectDir, ".studio", "project.json"), plan.projectJson)
@@ -2933,6 +3005,7 @@ class _ProjectWriteJob:
         destination = writer.target(plan, node, extension)
         folder = os.path.dirname(destination)
         os.makedirs(folder, exist_ok=True)
+        writer._journalNew(destination)
         temporary = os.path.join(folder, f"{PROJECT_TEMPORARY_PREFIX}{uuid.uuid4().hex[:8]}")
         os.makedirs(temporary)
         plan.temporary.append(temporary)
@@ -3081,6 +3154,7 @@ class _ProjectSnapshotJob(_SnapshotJob):
             if plan.cancelled:
                 return None
             os.makedirs(os.path.dirname(destination), exist_ok=True)
+            writer._journalNew(destination)
             start = time.perf_counter()
             written = writeScalarNrrd(destination, snapshot, rows, level=1)
             if plan.cancelled and isNewFile:
