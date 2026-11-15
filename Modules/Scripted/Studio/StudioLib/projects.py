@@ -1463,6 +1463,26 @@ def _tryLockAt(lockPath, lastAlive=None):
     return lock if lock.tryLock(0) else None
 
 
+def _lockCreateFailure(projectPath):
+    """The true reason why the lock file of the project cannot be created (a full disk is not a read-only file system)."""
+    probe = _lockPath(projectPath) + ".probe"
+    try:
+        descriptor = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(descriptor, b"x" * 4096)  # QLockFile writes its content: a full disk fails here
+        finally:
+            os.close(descriptor)
+    except OSError as error:
+        return error.strerror or os.strerror(error.errno or errno.EIO)
+    else:
+        return os.strerror(errno.EIO)  # it can be created now: a passing failure
+    finally:
+        try:
+            os.remove(probe)
+        except OSError:
+            pass
+
+
 def isWritable(projectPath):
     """True if Slicer Studio can save into the project folder: it (and its .studio folder, if any) can be written.
 
@@ -1544,7 +1564,7 @@ class Project:
         if lock is None:
             if not os.path.lexists(_lockPath(self.path)):
                 # No lock file, so nobody holds the lock: the lock file could not be created
-                return self._cannotWrite(os.strerror(errno.EROFS))
+                return self._cannotWrite(_lockCreateFailure(self.path))
             return False
         self._lock = lock
         self._lockKey = _lockKey(_lockPath(self.path))

@@ -11275,6 +11275,36 @@ sys.exit(web.command_local(args))
             slicer.mrmlScene.Clear(0)
             self.io.backgroundWriter().drain(10.0)
 
+    def test_124_lock_failure_on_a_full_disk_is_not_called_read_only(self):
+        """The lock file of a new project cannot be written on a full disk (ENOSPC): the reason given is the disk, not a
+        "Read-only file system" (BB-1), and a failed creation is tried again by the poll once the pause is over.
+        """
+        import errno
+        from unittest import mock
+
+        projects = self.projects
+        folder = os.path.join(self.root, "Projects", "Full disk")
+        project = projects.createProject("Full disk")
+        try:
+            real = os.write
+
+            def full(descriptor, data):
+                if len(data) == 4096:
+                    raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+                return real(descriptor, data)
+
+            with mock.patch.object(projects, "_tryLock", return_value=None), mock.patch("os.write", full):
+                self.assertFalse(project.lock())
+            self.assertTrue(project.readOnly)
+            self.assertIn(os.strerror(errno.ENOSPC), project.lastError)
+            self.assertNotIn(os.strerror(errno.EROFS), project.lastError)
+            self.assertFalse(os.path.exists(os.path.join(project.path, ".studio", "lock.probe")))
+        finally:
+            project.unlock()
+            projects.removeCreatedProject(project.path)
+            shutil.rmtree(folder, ignore_errors=True)
+
+
 def _sphere(center=(0, 0, 0)):
     import vtk
 

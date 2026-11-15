@@ -476,6 +476,7 @@ class AutosaveService:
         #: {path the crash offer was made with: where that project is now} (Change folder > Move follows it)
         self._recoveryPaths = {}
         self._lastProjectCheck = None
+        self._projectRetryAt = 0.0  # when a project whose creation failed (full disk) is tried again
         #: projects (normalized paths) whose "open in another Slicer Studio" warning was shown while retrying to attach
         self._lockedAnnounced = set()
         #: projects (normalized paths) whose scene was read while another Slicer Studio had them open:
@@ -1678,7 +1679,8 @@ class AutosaveService:
             if self._studyOpen():
                 self.releaseProjectForStudy()
             return
-        if fingerprint == self._lastProjectCheck or self._recovering or _loadHolds or not self.projectsActive():
+        retry = self._projectRetryAt and _clock() >= self._projectRetryAt
+        if (fingerprint == self._lastProjectCheck and not retry) or self._recovering or _loadHolds or not self.projectsActive():
             return
         self._startProjectForScene(scene, fingerprint)
 
@@ -1719,6 +1721,7 @@ class AutosaveService:
         if self._sceneBusy(scene):
             return
         self._lastProjectCheck = fingerprint
+        self._projectRetryAt = 0.0
         projects = self._projects()
         if not projects.sceneHasUserData(scene):
             return
@@ -1806,6 +1809,7 @@ class AutosaveService:
             reason = plainOSError(project.lastError) if getattr(project, "lastError", None) else _("it cannot be written")
             self._pause(_("Autosave paused: the Slicer Studio folder cannot be written ({reason}). Press Ctrl+S to save "
                           "once there is room.").format(reason=reason), retrySeconds=30.0)
+            self._projectRetryAt = _clock() + 30.0
             self._announceRootFailedOnce(reason)
             return None
         if announce:
