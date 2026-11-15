@@ -36,9 +36,10 @@ residual of a figure as symptom scores).
 
 ## Bringing lesions in
 
-- **Space.** Each lesion is identified as being in MNI152NLin2009cAsym or MNI152NLin6Asym space (from its grid, 1 mm or
-  2 mm), or in the scan's own **native** space. Studio never guesses: a lesion on an unknown grid is treated as native, and
-  a grid that does not name its space (the TemplateFlow 2009 grids hold 2009c and 2009a images) is asked once.
+- **Space.** Each lesion's space comes from its grid: MNI152NLin2009cAsym or MNI152NLin6Asym (1 mm or 2 mm), the
+  other known template grids (ATLAS v2.0's MNI152NLin2009aSym, SPM's MNI152Lin, your own registered MNI templates), or
+  the scan's own **native** space. Studio never guesses: a lesion on an unknown grid is treated as native, and a grid
+  that does not name its space (the TemplateFlow 2009 grids hold 2009c and 2009a images) gets its default and is asked once.
   The Seed card says "Native space: normalize to MNI first" and links to the Normalize card.
 - **Draw** traces lesions on the MNI template, or on the patient's own scan. **Done → next** saves the
   lesion, writes the study row and opens the next case of the queue; the queues (untraced, needs review, changes

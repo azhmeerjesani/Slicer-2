@@ -232,13 +232,26 @@ def _same_grid(header, other, tolerance=1e-3):
     return all(abs(float(a[i][j]) - float(b[i][j])) <= tolerance for i in range(4) for j in range(4))
 
 
+def _header_space(header, grid_answers=None):
+    """Template space of a NIfTI header's grid: the space of any registry grid (ATLAS/McGill 2009a, SPM, the user's
+    registered MNI templates, ...), else "native". An ambiguous grid gives its answer in ``grid_answers`` ({grid id:
+    space}, study.json), else its default space.
+    """
+    from .geometry import NATIVE_SPACE, detect_grid_candidates
+
+    match = detect_grid_candidates(header["shape"][:3], header["affine"])
+    if match is None:
+        return NATIVE_SPACE
+    return (grid_answers or {}).get(match.grid_id) or match.space
+
+
 def detect_file_space(path):
-    """Template space of a NIfTI file from its header: "MNI152NLin6Asym", "MNI152NLin2009cAsym" or "native"."""
-    from .geometry import detect_space
+    """Template space of a NIfTI file from its header: the space of any registry grid (e.g. "MNI152NLin6Asym",
+    "MNI152NLin2009cAsym", "MNI152NLin2009aSym", "MNI152Lin") or "native".
+    """
     from .nifti import read_nifti_header
 
-    header = read_nifti_header(path)
-    return detect_space(header["shape"][:3], header["affine"])
+    return _header_space(read_nifti_header(path))
 
 
 class TableError(ValueError):
@@ -1849,7 +1862,6 @@ class Study:
           "warnings": [{"path", "message"}]} (files that are added but lie at different places in
           different programs because their sform and qform disagree).
         """
-        from .geometry import detect_space
         from .nifti import XFORM_WARNING_MM, read_nifti_header, xform_disagreement
 
         rules = self.rules
@@ -1898,8 +1910,10 @@ class Study:
                     "message": f"The sform and qform disagree by up to {disagreement:.2g} mm: Slicer may show this image at another place than FSL and the network mapping, which use the sform.",
                 })
 
+        answers = self.grid_answers
+
         def file_space(item):
-            return detect_space(item[1]["shape"][:3], item[1]["affine"])
+            return _header_space(item[1], answers)
 
         for sid, kinds in candidates.items():
             # The lesion first: the scan should be in its space (BIDS derivatives may hold native and template T1w files)

@@ -84,6 +84,40 @@ class StudyTest(unittest.TestCase):
         self.assertTrue(Study.is_study(folder))
         self.assertFalse(Study.is_study(self.tmp))
 
+    def test_add_files_records_the_space_of_any_registry_grid(self):
+        """Lesions on ATLAS (McGill 2009a), SPM and user-template grids get that grid's space, not "native"."""
+        from LesionNetworkMappingLib import geometry
+
+        def on_grid(name, grid_id):
+            spec = geometry.GRID_BY_ID[grid_id]
+            return self._image(f"in/{name}_lesion.nii.gz", shape=spec.shape, affine=spec.affine)
+
+        on_grid("sub-mcgill", "McGill2009a-1mm")
+        on_grid("sub-spm", "SPM-1mm")
+        on_grid("sub-nlin6", "NLin6-2mm")
+        self._image("in/sub-native_lesion.nii.gz")
+        user_affine = np.array([[1.0, 0, 0, -60.0], [0, 1, 0, -80.0], [0, 0, 1, -40.0], [0, 0, 0, 1]])
+        geometry.register_grid(geometry.grid_spec_from_affine("user:studytest", (120, 150, 100), user_affine, "MNI152NLin2009cAsym"))
+        try:
+            self._image("in/sub-user_lesion.nii.gz", shape=(120, 150, 100), affine=user_affine)
+            created = Study.create(self.path("Spaces"))
+            created.add_files(self.path("in"))
+            spaces = {row["participant_id"]: row["space"] for row in created.subjects}
+            self.assertEqual(spaces, {
+                "sub-mcgill": "MNI152NLin2009aSym", "sub-spm": "MNI152Lin", "sub-nlin6": "MNI152NLin6Asym",
+                "sub-native": "native", "sub-user": "MNI152NLin2009cAsym",
+            })
+            self.assertEqual(study.detect_file_space(self.path("in/sub-mcgill_lesion.nii.gz")), "MNI152NLin2009aSym")
+            self.assertEqual(study.detect_file_space(self.path("in/sub-user_lesion.nii.gz")), "MNI152NLin2009cAsym")
+            self.assertEqual(study.detect_file_space(self.path("in/sub-native_lesion.nii.gz")), "native")
+            # An answered ambiguous grid gives its answer to lesions added later
+            created.grid_answers = {"SPM-1mm": "MNIColin27"}
+            on_grid("sub-spm2", "SPM-1mm")
+            created.add_files(self.path("in/sub-spm2_lesion.nii.gz"))
+            self.assertEqual(created.subject("sub-spm2")["space"], "MNIColin27")
+        finally:
+            geometry.unregister_grid("user:studytest")
+
     def test_unknown_columns_keep_their_order(self):
         folder = self.path("bids")
         os.makedirs(folder)
