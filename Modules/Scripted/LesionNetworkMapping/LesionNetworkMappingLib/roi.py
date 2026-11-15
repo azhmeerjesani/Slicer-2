@@ -127,6 +127,15 @@ class RoiResult:
         }
 
 
+def roi_names(paths):
+    """ROI names from mask file names (without .nii/.nii.gz); two masks with the same name are refused, as in a plan lock."""
+    names = [os.path.basename(path).split(".nii")[0] for path in paths]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise RoiError("ROI names must be unique; rename the mask files that share the name " + ", ".join(duplicates))
+    return names
+
+
 def roi_glm(design, means, names=None, n_perm=None, seed=None, allow_blocked=False):
     """The design's permutation GLM on ROI means, family-wise corrected by the maximum statistic across ROIs.
 
@@ -268,7 +277,7 @@ def _run_glm(args):
     indices = geometry.mask_indices(np.asarray(mask_data).reshape(shape) != 0)
     try:
         rois = np.array([read_roi(path, shape, mask_affine, indices) for path in args.roi])
-        names = [os.path.basename(path).split(".nii")[0] for path in args.roi]
+        names = roi_names(args.roi)
         voxels = rois.sum(axis=1)
         out_dir = os.path.abspath(args.out)
         os.makedirs(out_dir, exist_ok=True)

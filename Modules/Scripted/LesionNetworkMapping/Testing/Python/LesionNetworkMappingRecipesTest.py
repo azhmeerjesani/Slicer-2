@@ -555,6 +555,11 @@ class RoiTest(_TempCase):
         with self.assertRaises(roi.RoiError):
             roi.roi_means(maps, np.zeros(6))
 
+    def test_roi_names_refuse_duplicate_file_names(self):
+        self.assertEqual(roi.roi_names(["a/left.nii.gz", "b/right.nii"]), ["left", "right"])
+        with self.assertRaisesRegex(roi.RoiError, "must be unique"):
+            roi.roi_names(["rois/left/roi.nii.gz", "rois/right/roi.nii.gz"])
+
     def test_roi_max_stat_equals_brute_force(self):
         design, rng = self.design()
         maps = rng.standard_normal((design.n, 40))
