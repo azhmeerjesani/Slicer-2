@@ -146,9 +146,31 @@ class Popover:
         geometry = getattr(screen, "availableGeometry", None) if screen is not None else None
         geometry = geometry() if callable(geometry) else geometry  # a property in PythonQt, a method elsewhere
         available = geometry.height() if geometry is not None else 768
-        self.frame.setFixedHeight(int(max(60, min(height, 0.7 * available))))
-        self.frame.move(anchor.mapToGlobal(qt.QPoint(0, anchor.height)))
+        height = int(max(60, min(height, 0.7 * available)))
+        self.frame.setFixedHeight(height)
+        self.frame.move(self.position(anchor, geometry, POPOVER_WIDTH, height))
         self.frame.show()
+
+    @staticmethod
+    def position(anchor, geometry, width, height):
+        """The global top-left point of a ``width`` x ``height`` popover for ``anchor``, kept inside ``geometry`` (the screen's available area).
+
+        Below the anchor, left-aligned with it; right-aligned with it when that would pass the screen's right edge (as for a button at the
+        right of a header), and above it when there is no room below. A plain ``Qt::Popup`` frame is not moved on screen by Qt (unlike a QMenu).
+        """
+        topLeft = anchor.mapToGlobal(qt.QPoint(0, 0))
+        x, y = topLeft.x(), topLeft.y() + anchor.height
+        if geometry is None:
+            return qt.QPoint(x, y)
+        left, top = geometry.x(), geometry.y()
+        right, bottom = left + geometry.width(), top + geometry.height()  # exclusive edges
+        if x + width > right:
+            x = topLeft.x() + anchor.width - width
+        x = max(left, min(x, right - width))
+        if y + height > bottom and topLeft.y() - height >= top:
+            y = topLeft.y() - height
+        y = max(top, min(y, bottom - height))
+        return qt.QPoint(x, y)
 
 
 class LockPlanDialog:
