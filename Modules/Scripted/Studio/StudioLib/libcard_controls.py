@@ -402,7 +402,7 @@ class AddControlSetDialog:
             self.progressLabel.setText(str(e))
             return False
         root = registryRoot()
-        if os.path.exists(os.path.join(root, name, controlsets.CONTROLSET_JSON)):
+        if os.path.exists(os.path.join(root, name, controlsets.CONTROLSET_JSON)) or controlsets.case_twin(name, root) is not None:
             self.progressLabel.setText(_("A control set named {name} is already registered.").format(name=name))
             return False
         _importForWorker()

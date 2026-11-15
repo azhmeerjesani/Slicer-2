@@ -329,6 +329,22 @@ def _find_set_dir(name, registry):
     return None
 
 
+def case_twin(name, root=None):
+    """The registered set name (a registry folder, or a name a renamed folder records) that differs from ``name`` only in
+    letter case, else None: two such sets would be one folder on a case-insensitive disk (macOS, exFAT).
+    """
+    registry = registry_root(root)
+    try:
+        folders = [entry for entry in os.listdir(registry) if os.path.isfile(os.path.join(registry, entry, CONTROLSET_JSON))]
+    except OSError:
+        return None
+    names = folders + [value for value in _recorded_names(registry).values() if value]
+    for other in names:
+        if other != name and other.lower() == name.lower():
+            return other
+    return None
+
+
 def load(name, root=None):
     """The registry entry of a set (a dict as in the module docstring, plus "dir" and the absolute "folder_path").
 
@@ -695,6 +711,9 @@ def register_folder(folder, name, source=None, licence_note=None, space=None, as
     from .geometry import space_family
 
     name = validate_name(name)
+    twin = case_twin(name, root)
+    if twin is not None:
+        raise FileExistsError(f"A control set named {twin!r} is already registered (a name that differs only in letter case is the same folder on some disks)")
     target = _find_set_dir(name, registry_root(root)) or set_dir(name, root)  # a set renamed by hand keeps its name
     json_path = os.path.join(target, CONTROLSET_JSON)
     if os.path.exists(json_path) and not replace:

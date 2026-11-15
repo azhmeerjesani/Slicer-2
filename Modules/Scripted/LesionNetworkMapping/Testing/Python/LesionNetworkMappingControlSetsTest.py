@@ -119,6 +119,18 @@ class ControlSetsTestBase(unittest.TestCase):
 
 
 class RegistryTest(ControlSetsTestBase):
+    def test_register_folder_refuses_a_name_that_differs_only_in_case(self):
+        self.register("BidsCtl")
+        for twin in ("bidsctl", "BIDSCTL"):
+            with self.assertRaises(FileExistsError):
+                self.register(twin)
+            with self.assertRaises(FileExistsError):
+                self.register(twin, replace=True)
+        self.assertEqual(controlsets.case_twin("bidsctl", self.root), "BidsCtl")
+        self.assertIsNone(controlsets.case_twin("BidsCtl", self.root))
+        self.assertEqual([entry["name"] for entry in controlsets.list_sets(self.root)], ["BidsCtl"])
+        self.assertEqual(self.register("BidsCtl", replace=True)["name"], "BidsCtl")
+
     def test_register_folder_records_the_set(self):
         entry = self.register()
         folder = os.path.join(self.root, "Ferguson490")
