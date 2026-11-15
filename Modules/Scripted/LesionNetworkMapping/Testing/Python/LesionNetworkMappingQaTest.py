@@ -741,6 +741,19 @@ class QaGroupChipFastModeTest(unittest.TestCase):
         self.assertEqual(card.warningsText({"k": 1000, "warnings": []}), "")
         self.assertIn("not calibrated", card.groupQaText({"available": False, "level": "not_calibrated", "k": 3, "text": "only 3 null cohorts; at least 19 are needed for a percentile"}))
 
+    def test_nulls_card_arguments_resume_a_stopped_run(self):
+        """BB-1 nulls-stop-then-run-recomputes-exact-null-maps: Run passes --resume so the saved batches of a stopped run are kept."""
+        from types import SimpleNamespace
+
+        from LesionNetworkMappingUI import card_nulls
+
+        fake = SimpleNamespace(
+            ctx=SimpleNamespace(bundle=SimpleNamespace(path="bundle"), study=None), outDir=lambda: "out", effectiveMode=lambda: "exact",
+            overlapSettings=lambda: (0.5, "both"), kValue=lambda: 3000, rule=lambda: None, kind="rl_independent", usesPool=lambda: True,
+            kPoolSpin=SimpleNamespace(value=300), participantsPath=lambda: "", seedSpin=SimpleNamespace(value=1), controlSet=None)
+        args = card_nulls.NullsCard.arguments(fake, "maps.tsv")
+        self.assertIn("--resume", args)
+
 
 def _edit_preprocessing(bundle_path):
     """Change the preprocessing record of connectome.json, which makes the bundle's reference maps stale."""

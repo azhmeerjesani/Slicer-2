@@ -781,6 +781,8 @@ class NullsCard:
         study = self.ctx.study
         if getattr(study, "path", None):
             args += ["--run-root", study.path]
+        # A stopped exact run keeps its engine batches: continue them (the engine discards them when the settings differ).
+        args.append("--resume")
         return args
 
     def run(self):
