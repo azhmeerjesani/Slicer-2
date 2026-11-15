@@ -55,6 +55,11 @@ failed normalization QC are excluded, reported as warning events and in cohortma
 never writes participants.tsv: a lesion volume that the study does not have yet (volume_ml = n/a) is
 posted to the study inbox (``Study.post_results``, source "cohortmaps").
 
+Space: with a template (MNI) connectome, the lesions that may not be in MNI space (the study records a native space
+for the subject, or the file is not on a known template grid and its header does not say MNI;
+``engine.native_space_notice``) are mapped with a "native_space" warning event and listed in cohortmaps.json
+("native_space"): never silently treated as MNI.
+
 Command line (JSON events, see ``jobs``; exit codes 0 done, 1 error, 2 usage, 3 cancelled, 75 locked)::
 
     python -m LesionNetworkMappingLib.cohortmaps (--study DIR | --lesions-tsv F [--study DIR]) --bundle B --out DIR
@@ -687,6 +692,30 @@ def _unreadable_detail(path, exc):
     return {"reason": EXCLUDED_UNREADABLE, "path": path, "message": f"{type(exc).__name__}: {exc}"}
 
 
+def _native_space_lesions(items, bundle, study=None):
+    """Participant ids of the lesions that may not be in MNI space while the connectome is a template connectome
+    (``engine.native_space_notice``): the space the study records for the subject, else the space of the file's grid.
+    """
+    from .geometry import detect_space
+
+    template = engine.template_connectome(bundle)
+    if not template:
+        return []
+    native = []
+    for item in items:
+        sid, path = item["participant_id"], item["lesion"]
+        space = study.value(sid, "space") if study is not None and sid in study else None
+        if not space:
+            try:
+                detected = detect_space(path)
+            except (OSError, TypeError, ValueError):
+                detected = None
+            space = detected[0] if detected is not None else None
+        if engine.native_space_notice(space, path, template):
+            native.append(sid)
+    return native
+
+
 def _lookup_items(context, lesions):
     """Hash every lesion file and look its key up in the cache.
 
@@ -1128,6 +1157,13 @@ def run(
             _emit_unreadable(emit, sid, detail)
         for reason, sids in excluded.items():
             emit("warning", code="excluded", reason=reason, participants=sids, message=f"{len(sids)} lesion(s) excluded ({reason}): {', '.join(sids[:10])}{' ...' if len(sids) > 10 else ''}")
+        native = _native_space_lesions(items, bundle, study_obj)
+        record["native_space"] = native
+        if native:
+            emit("warning", code="native_space", participants=native, message=(
+                f"{len(native)} lesion(s) may not be in MNI space, but the connectome is: {', '.join(native[:10])}{' ...' if len(native) > 10 else ''}. "
+                "They are not on a known MNI template grid and their headers do not say MNI (or the study records a native space), "
+                "so they are mapped as if they were in MNI space. Normalize native lesions to MNI first."))
 
         # Work: lesions without a valid entry (computed), and entries without QA for these settings
         work, seen = [], set()

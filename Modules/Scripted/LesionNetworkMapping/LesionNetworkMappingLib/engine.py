@@ -63,6 +63,9 @@ The template space of each lesion (--lesion-space, one per --lesion or one for a
 the lesion file's grid when it is a known template grid) is recorded with its lesion in run.json ("space",
 "space_notice") and in the QA values ("lesion_space", "space_notice"): the notice says that a lesion on
 another MNI template family than the connectome gives an approximate map (see ``geometry.family_notice``).
+With a template (MNI) connectome, a lesion declared in a native space, or one that is not on a known template
+grid and whose header does not say MNI, is mapped with a "native_space" warning event and its notice says so
+(see ``native_space_notice``): it is never silently treated as MNI.
 """
 
 import os
@@ -81,8 +84,8 @@ import numpy as np
 
 from . import jobs
 from .connectome import ConnectomeBundle, _is_cancelled
-from .geometry import detect_space, family_notice, from_masked_vector, resample_to_grid, to_masked_vector
-from .nifti import XFORM_WARNING_MM, read_nifti, read_nifti_header, write_nifti, xform_disagreement
+from .geometry import detect_space, family_notice, from_masked_vector, resample_to_grid, space_family, to_masked_vector
+from .nifti import XFORM_MNI, XFORM_WARNING_MM, read_nifti, read_nifti_header, write_nifti, xform_disagreement
 
 RMAX = 0.999999  # r is clipped to +/-RMAX before the Fisher transform
 DEFAULT_CHUNK = 8192
@@ -834,12 +837,57 @@ def connectome_space(bundle):
     return str(declared) if declared else None
 
 
+def template_connectome(bundle):
+    """Whether the bundle is an MNI template connectome: on a known template grid, or declaring a template space in its
+    connectome.json (the Map workspace's test). A lesion mapped with it must be in MNI space.
+    """
+    try:
+        if detect_space((tuple(bundle.shape), bundle.affine)) is not None:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return space_family((getattr(bundle, "metadata", None) or {}).get("space")) not in ("native", "unknown")
+
+
+def _header_says_mni(path):
+    """Whether the transform of a lesion file that the engine uses (the sform, else the qform) has the MNI code (4)."""
+    try:
+        header = read_nifti_header(path)
+    except (OSError, TypeError, ValueError, KeyError):
+        return False
+    code = header["sform_code"] if header["sform_code"] > 0 else header["qform_code"]
+    return code == XFORM_MNI
+
+
+NATIVE_SPACE_NOTICE = ("The lesion is in native (subject) space, but the connectome is in MNI space: its scanner coordinates were used as "
+                       "MNI coordinates, so the map is not valid. Normalize the lesion to MNI first.")
+UNKNOWN_SPACE_NOTICE = ("The lesion is not on a known MNI template grid and its header does not say MNI, but the connectome is in MNI space: "
+                        "it was mapped as if it were in MNI space. If it is in native (scanner) space, normalize it to MNI first; "
+                        "if it is already in MNI space, give its template with --lesion-space.")
+
+
+def native_space_notice(space, path, template):
+    """The note for a lesion that may not be in MNI space while the connectome is a template connectome
+    (:func:`template_connectome`), or "": a lesion declared in a native (subject) space, or one whose space is not
+    known (not on a known template grid, no --lesion-space) and whose header does not have the MNI code. The Map
+    workspace refuses such a lesion and the pipeline preflight excludes it; the command line maps it with this note
+    and a warning event, never silently.
+    """
+    if not template:
+        return ""
+    if space is None:
+        return "" if path is not None and _header_says_mni(path) else UNKNOWN_SPACE_NOTICE
+    return NATIVE_SPACE_NOTICE if space_family(space) == "native" else ""
+
+
 def _lesion_spaces(paths, given, bundle):
     """[{"space", "space_notice"}] of the lesion files: the --lesion-space values (one per lesion or one for all),
-    else the space of each file's grid when it is a known template grid (None otherwise), with the template-family
-    notice against the connectome's space ("" when the families match or a space is not known).
+    else the space of each file's grid when it is a known template grid (None otherwise), with the native-space
+    notice (:func:`native_space_notice`) or else the template-family notice against the connectome's space ("" when
+    the families match or a space is not known).
     """
     target = connectome_space(bundle)
+    template = template_connectome(bundle)
     out = []
     for index, path in enumerate(paths):
         if given:
@@ -851,7 +899,7 @@ def _lesion_spaces(paths, given, bundle):
                 detected = None
             space = detected[0] if detected is not None else None
         space = str(space) if space else None
-        out.append({"space": space, "space_notice": family_notice(space, target)})
+        out.append({"space": space, "space_notice": native_space_notice(space, path, template) or family_notice(space, target)})
     return out
 
 
@@ -1276,13 +1324,15 @@ def main(argv=None):
             return _parcel_run(args, bundle, ids, run, cancel, started)
         names, weights, qc = [], [], []
         spaces = _lesion_spaces(args.lesion, args.lesion_space, bundle)
-        for path in args.lesion:
+        for path, space in zip(args.lesion, spaces, strict=True):
             cancel.raise_if_cancelled(done=0)
             lesion_weights_vector, lesion_qc_values = prepare_lesion(path, bundle, supersample=args.supersample, binarize=not seed_probabilistic(path, args.probabilistic))
             name = _unique_name(_lesion_name(path), names)
             names.append(name)
             weights.append(lesion_weights_vector)
             qc.append({"lesion": name, **lesion_qc_values})
+            if space["space_notice"] in (NATIVE_SPACE_NOTICE, UNKNOWN_SPACE_NOTICE):
+                jobs.emit("warning", code="native_space", lesion=name, message=space["space_notice"])
             if lesion_qc_values["voxels_in_mask"] == 0:
                 jobs.emit("warning", lesion=name, message="The lesion does not overlap the connectome mask; its maps are all zero.")
             disagreement = xform_disagreement(read_nifti_header(path))

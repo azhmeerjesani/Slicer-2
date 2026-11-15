@@ -5,6 +5,9 @@ space-mismatch notice is a QA value, and all QA values go to the sidecar and qa.
 A lesion on the FSL MNI152NLin6Asym 2 mm grid mapped with a connectome on MNI152NLin2009cAsym (the demo's
 declared space) gives an approximate map; before the fix the notice was only shown in the Map module.
 
+A lesion in native (scanner) space mapped with an MNI connectome by the engine or cohortmaps command line gets a
+"native_space" warning event and a recorded note (BB-1 bug engine-cohortmaps-cli-native-lesion-mapped-silently-as-mni).
+
 Run without Slicer's GUI:
 
     cd Modules/Scripted/LesionNetworkMapping
@@ -124,6 +127,87 @@ class LesionSpaceRecordTest(unittest.TestCase):
         # reproduce.sh repeats the recorded space
         with open(files["reproduce"], encoding="utf-8") as f:
             self.assertIn("--lesion-space", f.read())
+
+    def _native_lesion(self, name, code=1):
+        """A FLAIR-like lesion in scanner space (80 x 80 x 20 voxels of 1.2 x 1.2 x 3 mm, sform and qform code ``code``),
+        on no known template grid, with a blob near the origin (inside the synthetic connectome's grid).
+        """
+        shape = (80, 80, 20)
+        affine = np.array([[1.2, 0, 0, -47.4], [0, 1.2, 0, -47.4], [0, 0, 3.0, -28.5], [0, 0, 0, 1.0]])
+        ijk = np.indices(shape).reshape(3, -1).T
+        world = ijk @ affine[:3, :3].T + affine[:3, 3]
+        data = (np.linalg.norm(world - np.array([2.0, 0.0, 0.0]), axis=1) <= 7.0).reshape(shape).astype(np.uint8)
+        path = os.path.join(self.tmp, name)
+        nifti.write_nifti(path, data, affine, sform_code=code, qform_code=code)
+        self.assertIsNone(geometry.detect_space(path))
+        return path
+
+    @staticmethod
+    def _events(result):
+        events = []
+        for line in result.stdout.splitlines():
+            try:
+                events.append(json.loads(line))
+            except ValueError:
+                continue
+        return events
+
+    def _map_native(self, lesion, out, *extra):
+        result = _run_engine("--bundle", self.bundle, "--lesion", lesion, "--out", out, "--run-json", os.path.join(out, "run.json"), "--threads", "1", *extra)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with open(os.path.join(out, "run.json"), encoding="utf-8") as f:
+            run = json.load(f)
+        with open(os.path.join(out, "qa.json"), encoding="utf-8") as f:
+            qa = json.load(f)
+        warnings = [event for event in self._events(result) if event.get("event") == "warning" and event.get("code") == "native_space"]
+        return run, qa, warnings
+
+    def test_native_lesion_with_mni_connectome_is_never_silent(self):
+        """A scanner-space lesion (no known grid, header code 1) mapped with an MNI connectome gets a native_space
+        warning event and a recorded note (run.json, qa.json); before the fix it was mapped silently as MNI.
+        """
+        from LesionNetworkMappingLib import engine
+
+        lesion = self._native_lesion("sub-01_FLAIR_lesion.nii.gz")
+        run, qa, warnings = self._map_native(lesion, os.path.join(self.tmp, "run-native"))
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertEqual(warnings[0]["lesion"], run["lesions"][0]["name"])
+        self.assertIsNone(run["lesions"][0]["space"])
+        self.assertEqual(run["lesions"][0]["space_notice"], engine.UNKNOWN_SPACE_NOTICE)
+        self.assertEqual(qa["lesions"][run["lesions"][0]["name"]]["space_notice"], engine.UNKNOWN_SPACE_NOTICE)
+        # Declared native: the native-space note, not the template-family ("a few millimetres apart") note
+        run, qa, warnings = self._map_native(lesion, os.path.join(self.tmp, "run-native-given"), "--lesion-space", "native")
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertEqual(run["lesions"][0]["space"], "native")
+        self.assertEqual(run["lesions"][0]["space_notice"], engine.NATIVE_SPACE_NOTICE)
+        self.assertNotIn("approximate", run["lesions"][0]["space_notice"])
+        self.assertEqual(geometry.family_notice("native", CONNECTOME_SPACE), "")
+        # A lesion already in MNI space: its header says MNI (code 4), or its template is given
+        mni = self._native_lesion("sub-02_space-MNI_lesion.nii.gz", code=nifti.XFORM_MNI)
+        run, qa, warnings = self._map_native(mni, os.path.join(self.tmp, "run-header-mni"))
+        self.assertEqual(warnings, [])
+        self.assertEqual(run["lesions"][0]["space_notice"], "")
+        run, qa, warnings = self._map_native(lesion, os.path.join(self.tmp, "run-given-mni"), "--lesion-space", CONNECTOME_SPACE)
+        self.assertEqual(warnings, [])
+        self.assertEqual(run["lesions"][0]["space_notice"], "")
+        # A lesion on a known template grid: no native-space warning
+        run, qa, warnings = self._map_native(self.lesion, os.path.join(self.tmp, "run-fsl-grid"))
+        self.assertEqual(warnings, [])
+
+    def test_native_lesion_in_cohortmaps_is_never_silent(self):
+        lesion = self._native_lesion("sub-01_FLAIR_lesion.nii.gz")
+        tsv = os.path.join(self.tmp, "lesions.tsv")
+        with open(tsv, "w", encoding="utf-8") as f:
+            f.write(f"participant_id\tlesion\nsub-01\t{os.path.basename(lesion)}\nsub-07\t{os.path.basename(self.lesion)}\n")
+        out = os.path.join(self.tmp, "cohort-native")
+        result = subprocess.run([sys.executable, "-m", "LesionNetworkMappingLib.cohortmaps", "--lesions-tsv", tsv, "--bundle", self.bundle, "--out", out, "--threads", "1"],
+                                check=False, capture_output=True, text=True, env=_env(), timeout=300)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        warnings = [event for event in self._events(result) if event.get("event") == "warning" and event.get("code") == "native_space"]
+        self.assertEqual(len(warnings), 1, result.stdout)
+        self.assertEqual(warnings[0]["participants"], ["sub-01"])
+        with open(os.path.join(out, "cohortmaps.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["native_space"], ["sub-01"])
 
     def test_space_count_must_match_the_lesions(self):
         result = _run_engine("--bundle", self.bundle, "--lesion", self.lesion, "--lesion", self.lesion, "--lesion-space", "A", "--lesion-space", "B", "--lesion-space", "C",

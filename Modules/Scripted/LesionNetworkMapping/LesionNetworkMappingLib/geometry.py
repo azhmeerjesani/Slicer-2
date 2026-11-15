@@ -484,15 +484,15 @@ def same_family(a, b):
 
 def family_notice(seed_space, connectome_space):
     """The note for a lesion (seed) on a template of another MNI family than the connectome, or "" when
-    the families match, either space is not known or the connectome's family is not known (the text
+    the families match, either space is not known, the lesion is in a native space or the connectome's family is not known (the text
     recorded in run.json, qa.json, the sidecars and methods; the Map module shows the same note).
     "MNI" (an MNI template of no known family, e.g. one of the user's own templates) is "MNI (other)".
     """
     if not seed_space or not connectome_space:
         return ""
     connectome_family = space_family(connectome_space)
-    if connectome_family in ("native", "unknown") or space_family(seed_space) == connectome_family:
-        return ""
+    if connectome_family in ("native", "unknown") or space_family(seed_space) in (connectome_family, "native"):
+        return ""  # a lesion in a native (subject) space is not a template-family question (engine.native_space_notice)
     shown = "MNI (other)" if seed_space == "MNI" else seed_space
     return (f"The lesion is on {shown}, the connectome on {connectome_space}: the template families are a few millimetres apart, "
             "so the map is approximate near subcortical structures.")
