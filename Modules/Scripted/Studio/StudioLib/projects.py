@@ -279,6 +279,49 @@ def setRoot(path, chosen=True):
     return path
 
 
+OUTSIDE_PROJECTS_KEY = "Studio/OpenOutsideProjects"
+
+
+def outsideProjectPaths():
+    """The projects that were open outside the Slicer Studio folder (a project left in the old folder by Change folder >
+    Keep, one opened from elsewhere): a crash with one open is offered at the next start (fork-only key; local paths).
+    """
+    try:
+        value = json.loads(str(qt.QSettings().value(OUTSIDE_PROJECTS_KEY) or "[]"))
+    except ValueError:
+        return []
+    return [str(path) for path in value if path] if isinstance(value, list) else []
+
+
+def _storeOutsideProjects(paths):
+    settings = qt.QSettings()
+    if paths:
+        settings.setValue(OUTSIDE_PROJECTS_KEY, json.dumps(paths))
+    else:
+        settings.remove(OUTSIDE_PROJECTS_KEY)
+    settings.sync()
+
+
+def noteOutsideProject(projectPath):
+    """Remember ``projectPath`` when it is not in the Projects folder of the Slicer Studio folder."""
+    key = os.path.normcase(os.path.realpath(projectPath))
+    folder = os.path.normcase(os.path.realpath(projectsFolder()))
+    if os.path.dirname(key) == folder:
+        return
+    paths = outsideProjectPaths()
+    if any(os.path.normcase(os.path.realpath(path)) == key for path in paths):
+        return
+    _storeOutsideProjects(paths + [os.path.normpath(projectPath)])
+
+
+def forgetOutsideProjects(keep):
+    """Keep only the remembered projects whose paths are in ``keep``."""
+    paths = outsideProjectPaths()
+    kept = [path for path in paths if path in keep]
+    if kept != paths:
+        _storeOutsideProjects(kept)
+
+
 def recordPendingMove(oldRoot, newRoot):
     """Record that the content of ``oldRoot`` is being moved to ``newRoot`` (written now: a kill during the move must find it).
 

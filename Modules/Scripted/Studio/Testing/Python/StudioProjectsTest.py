@@ -11304,6 +11304,49 @@ sys.exit(web.command_local(args))
             projects.removeCreatedProject(project.path)
             shutil.rmtree(folder, ignore_errors=True)
 
+    def test_125_crash_with_a_project_kept_in_the_old_folder_is_offered(self):
+        """Change folder > Keep them where they are leaves the open project in the old folder (BB-1): a crash with it open
+        was not offered at the next start, which scanned only the new folder's projects (the offer came after the old
+        folder was chosen again). A project that was open outside the folder is remembered (Studio/OpenOutsideProjects).
+        """
+        projects = self.projects
+        settings = qt.QSettings()
+        service = self._service()
+        _volume, _path = self._userVolume()
+        project = self._projectFor(service)
+        self._save(service)
+        path = project.path
+        newRoot = os.path.join(self.tempDir, "New folder")
+        try:
+            os.environ.pop(projects.ROOT_ENVIRONMENT, None)  # the environment would override the chosen folder
+            projects.setRoot(self.root)
+            service.moveRoot(newRoot, moveContent=False)
+            self.assertEqual(projects.root(), os.path.normpath(newRoot))
+            self.assertTrue(os.path.isdir(path), "kept in the old folder")
+            self._save(service)
+            # A crash: the lock of a process that is gone and project.json still "open"
+            project.unlock()
+            service.project = None
+            service.projectWriter = None
+            projects.setCurrentProject(None)
+            self.io.backgroundWriter().drain(10.0)
+            self.assertEqual(projects.readJson(projects.projectFile(path))["state"], "open")
+            restarted = self._service()
+            offered = []
+            restarted.setProjectPresenter(offered.append)
+            crashed = restarted.scanProjectsAtStartup()
+            self.assertEqual([info.name for info in crashed], [project.name])
+            self.assertEqual(len(offered), 1)
+            self.io.backgroundWriter().drain(10.0)
+            self.assertEqual(projects.readJson(projects.projectFile(path))["state"], "crashed", "offered once")
+            self.assertEqual(restarted.scanProjectsAtStartup(), [])
+            self.assertEqual(projects.outsideProjectPaths(), [], "no longer remembered once offered")
+        finally:
+            settings.remove(projects.OUTSIDE_PROJECTS_KEY)
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+
 
 def _sphere(center=(0, 0, 0)):
     import vtk

@@ -1876,6 +1876,7 @@ class AutosaveService:
         self.projectWriter.recordSceneFiles(scene, readStats)
         self._readStats.pop(os.path.normcase(os.path.realpath(project.path)), None)
         project.writeJson(state="open", executor=io.backgroundWriter())
+        self._noteOutsideProject(project)
         io.backgroundWriter().submit(projects.pruneRemoved, project.path)
         leftovers = projects.temporaryLeftovers(project.path)
         if leftovers:
@@ -2978,7 +2979,15 @@ class AutosaveService:
 
                 templates.followRenamedIds(renamedIds)
         projects.setRoot(newRoot)
+        if self.project is not None:
+            self._noteOutsideProject(self.project)  # Keep: the open project stays in the old folder
         return moved
+
+    def _noteOutsideProject(self, project):
+        try:
+            self._projects().noteOutsideProject(project.path)
+        except Exception:
+            logging.error("Slicer Studio: remembering the project outside the folder failed:\n" + traceback.format_exc())
 
     def _followPartialMove(self, oldRoot, newRoot, renamed, renamedIds):
         """After a move that failed partway (the new disk is full): what the settings and this session remember of the
@@ -3189,7 +3198,16 @@ class AutosaveService:
             return []
         io = _io()
         crashed = []
-        for info in projects.listProjects():
+        candidates = projects.listProjects()
+        listed = {os.path.normcase(os.path.realpath(info.path)) for info in candidates}
+        remembered = projects.outsideProjectPaths()
+        for path in remembered:
+            # A project that was open outside the folder (left there by Change folder > Keep, opened from elsewhere)
+            key = os.path.normcase(os.path.realpath(path))
+            if key not in listed and os.path.isfile(projects.projectFile(path)):
+                listed.add(key)
+                candidates.append(projects.ProjectInfo(path))
+        for info in candidates:
             if info.state != "open" or info.isCurrent() or projects.isLockedByOther(info.path):
                 continue
             if info.scene is None:
@@ -3197,6 +3215,9 @@ class AutosaveService:
             crashed.append(info)
             data = dict(info.data, state="crashed")
             io.backgroundWriter().submit(io.atomicWriteJson, projects.projectFile(info.path), data)
+        if remembered:
+            # Still open elsewhere (locked by another Slicer Studio) stays remembered; the rest is offered now or no longer open
+            projects.forgetOutsideProjects([info.path for info in candidates if info.state == "open" and projects.isLockedByOther(info.path)])
         self._pendingProjectRecoveries = crashed
         self._recoveryPaths = {os.path.normpath(info.path): info.path for info in crashed}
         if crashed:
