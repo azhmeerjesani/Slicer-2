@@ -368,11 +368,15 @@ class ShareDialog:
         from .libcard_cohort import _Worker
 
         self.worker = _Worker(self._onDone, self._onProgress)
+        self._fitted = False
         self.preview()
         self._fitToScreen()
+        self._fitted = True
 
-    def _fitToScreen(self, fraction=0.9):
-        """Open tall enough to show every option without scrolling, but never taller than most of the screen."""
+    def _fitToScreen(self, fraction=0.9, growOnly=False):
+        """Open tall enough to show every option without scrolling, but never taller than most of the screen.
+        With growOnly the dialog is only made taller (ticking options adds rows; the user's own resizing is kept).
+        """
 
         def hint(widget):
             size = widget.sizeHint
@@ -387,6 +391,10 @@ class ShareDialog:
             available = available() if callable(available) else available
             width = min(width, int(available.width() * fraction))
             height = min(height, int(available.height() * fraction))
+        if growOnly:
+            if height <= self.dialog.height:
+                return
+            width = max(width, self.dialog.width)
         self.dialog.resize(width, height)
 
     @staticmethod
@@ -535,6 +543,8 @@ class ShareDialog:
         self.items = items
         self.checklistLabel.setText(self.checklistHtml(items))
         self._updateButtons()
+        if self._fitted:
+            self._fitToScreen(growOnly=True)  # options and checklist rows appear as boxes are ticked
 
     def unwritableFolder(self, output):
         """The folder the export would have to write into when it cannot be written (the output itself when it is an existing

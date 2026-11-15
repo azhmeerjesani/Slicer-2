@@ -3494,6 +3494,61 @@ class StudioRegressionTest(unittest.TestCase):
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
 
+    def test_21a_share_dialog_grows_when_options_are_ticked(self):
+        import numpy as np
+        from LesionNetworkMappingLib import geometry, nifti
+        from StudioLib import libcard_share, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Share grow study")
+        os.makedirs(folder)
+        paths = []
+        for index in range(1, 3):
+            paths.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(paths[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        dialog = None
+        try:
+            session = study_ui.createStudy(paths, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            study = session.study
+            maps = os.path.join(study.path, "derivatives", "lnm", "glm-a")
+            os.makedirs(maps, exist_ok=True)
+            data = np.zeros(grid.shape, np.float32)
+            data[10:14, 10:14, 10:14] = 1
+            nifti.write_nifti(os.path.join(maps, "group_desc-tmap_map.nii.gz"), data, grid.affine)
+            study.add_subject("sub-own1", space="MNI152NLin2009cAsym")
+            cube = np.zeros(grid.shape, np.uint8)
+            cube[20:24, 20:24, 20:24] = 1
+            rel = study.lesion_relpath("sub-own1")
+            os.makedirs(os.path.dirname(study.abspath(rel)), exist_ok=True)
+            nifti.write_nifti(study.abspath(rel), cube, grid.affine)
+            study.set("sub-own1", {"lesion": rel})
+            study.save()
+            dialog = libcard_share.ShareDialog(session)
+            dialog.dialog.show()
+            slicer.app.processEvents()
+            for check in (dialog.lesionsCheck, dialog.mapsCheck, dialog.neurovaultCheck):
+                if check.enabled:
+                    check.setChecked(True)
+                dialog.preview()
+                slicer.app.processEvents()
+                slicer.app.processEvents()
+                scroll = dialog._scroll.verticalScrollBar
+                scroll = scroll() if callable(scroll) else scroll
+                screen = libcard_share.ui.screenOf(slicer.util.mainWindow())
+                available = screen.availableGeometry
+                available = available() if callable(available) else available
+                if dialog.dialog.height < int(available.height() * 0.9) - 2:
+                    self.assertEqual(scroll.maximum, 0, f"the dialog should show every option without scrolling after {check.text}")
+        finally:
+            if dialog is not None:
+                dialog.dialog.close()
+            study_ui.closeStudy()
+
     def test_21b_share_dialog_refuses_an_output_inside_the_study_before_export(self):
         """An output inside the study folder, or reached through a symbolic link to it, shows an "Output chosen" blocker and keeps
         Export disabled (it was refused only after Export, and not at all through a link) (BB-1).
