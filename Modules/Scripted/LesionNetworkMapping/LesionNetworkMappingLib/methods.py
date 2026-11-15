@@ -106,6 +106,8 @@ KIND_LABELS = {
 VLSM_JSON = "vlsm.json"
 #: The record of a validation run (validate.VALIDATION_JSON; validate imports numpy, so it is imported only when needed)
 VALIDATION_JSON = "validation.json"
+#: The record of a nulls run (nulls.NULLS_JSON; nulls imports numpy, so it is not imported here)
+NULLS_JSON = "nulls.json"
 #: How VLSM results are described: VLSM tests lesion location, not a network (vlsm.INTERPRETATION)
 VLSM_CLAIM = "Voxel-based lesion-symptom mapping results are described as lesion locations associated with the tested contrast or score; VLSM tests location, not the network."
 NULL_CAPTION = "Null models benchmark significance; they do not by themselves establish disease specificity (van den Heuvel et al. 2026); see also Zalesky & Cash 2026; Siddiqi et al. 2026."
@@ -1148,6 +1150,10 @@ def statistics_section(records, used):
                 validation = records.run_json(record, VALIDATION_JSON)
                 if isinstance(validation, dict) and validation.get("run_id") not in (None, record["id"]):
                     continue  # a later validation run wrote its results to the same folder: only that run is cited
+            if kind == "nulls":
+                nulls = records.run_json(record, NULLS_JSON)
+                if isinstance(nulls, dict) and nulls.get("run_id") not in (None, record["id"]):
+                    continue  # a later nulls run of the same kind and mode wrote its results to the same folder: only that run is cited
             if kind == "vlsm" and record["id"] not in vlsm_records:
                 other = records.run_json(record, VLSM_JSON)
                 if isinstance(other, dict) and other.get("run_id") not in (None, record["id"]):

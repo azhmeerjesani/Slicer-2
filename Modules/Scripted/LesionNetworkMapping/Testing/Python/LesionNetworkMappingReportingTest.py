@@ -305,6 +305,27 @@ class MethodsTest(_StudyCase):
         self.assertNotIn(f"(run {old_seeds})", text)
         self.assertEqual(len([line for line in text.splitlines() if line.startswith("Robustness")]), 2)
 
+    def test_overwritten_nulls_runs_are_not_cited(self):
+        # Two nulls runs of the same kind and mode write one folder (nulls-<kind>-<mode>): only the run whose id is in
+        # nulls.json is cited (bug bash: every finished nulls run was cited, with the overwritten run's stale numbers)
+        self.make_study([("sub-01", {"group": "case"})])
+        folder = self.run_dir("nulls-rl_independent-exact")
+        first = self.register("nulls", folder, summary={"mode": "exact", "kind": "rl_independent", "k_pool": 20, "n_voxels": 24})
+        second = self.register("nulls", folder, summary={"mode": "exact", "kind": "rl_independent", "k_pool": 20, "n_voxels": 30})
+        export.write_json_atomic(os.path.join(folder, "nulls.json"), {"run_id": second})
+        # A run without a readable nulls.json, or one without a run id, is still cited
+        legacy_folder = self.run_dir("nulls-rl_strength-exact")
+        legacy = self.register("nulls", legacy_folder, summary={"mode": "exact", "kind": "rl_strength", "k_pool": 20})
+        no_id_folder = self.run_dir("nulls-shuffle-exact")
+        no_id = self.register("nulls", no_id_folder, summary={"mode": "exact", "kind": "shuffle", "k_pool": 20})
+        export.write_json_atomic(os.path.join(no_id_folder, "nulls.json"), {"run_id": None})
+        text = {section.id: section.text() for section in methods.methods_sections(self.root)}["statistics"]
+        self.assertIn(f"(run {second})", text)
+        self.assertNotIn(f"(run {first})", text)
+        self.assertIn(f"(run {legacy})", text)
+        self.assertIn(f"(run {no_id})", text)
+        self.assertEqual(len([line for line in text.splitlines() if line.startswith(methods.KIND_LABELS["nulls"])]), 3)
+
     def test_acknowledgement_only_for_gsp_bundles(self):
         self.make_study([("sub-01", {})])
         self.cohortmaps(gsp=False)
