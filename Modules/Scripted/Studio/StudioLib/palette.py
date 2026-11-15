@@ -2000,7 +2000,13 @@ class Palette:
 def _invoke(entry, shell):
     try:
         entry.callback()
-    except Exception:
+    except Exception as e:
+        if getattr(e, "user_problem", False):
+            # A problem with the user's own file: its message says what to do (a warning, not a program error)
+            logging.warning(f"Studio: {entry.title}: {e}")
+            if shell is not None and shell.isActive():
+                shell.toast(str(e), 8000, level="warning")
+            return
         logging.error(f"Studio: Search entry {entry.id} failed:\n{traceback.format_exc()}")
         if shell is not None and shell.isActive():
             shell.toast(_("{title} failed: see the error log").format(title=entry.title), 4000)

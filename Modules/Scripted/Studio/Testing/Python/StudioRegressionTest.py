@@ -2944,6 +2944,19 @@ class StudioRegressionTest(unittest.TestCase):
                 study_ui.createStudy(paths, folder=folder, openIt=False)
             self.assertIn(message, str(raised.exception))
             self.assertEqual(sorted(os.listdir(folder)), sorted(before + ["participants.tsv"]))
+            if "participant_id column" not in message:
+                # The repeated id is a problem with the user's table: a warning, never a program error (no ERROR record, no error box)
+                self.assertTrue(getattr(raised.exception, "user_problem", False), message)
+                from unittest import mock
+
+                from StudioLib import library
+
+                with mock.patch.object(slicer.util, "warningDisplay") as warn, mock.patch.object(slicer.util, "errorDisplay") as err:
+                    library._runAction(lambda: study_ui.createStudy(paths, folder=folder, openIt=False), "Failed to create the study.")
+                self.assertEqual(warn.call_count, 1)
+                self.assertEqual(err.call_count, 0)
+                # and the group question is skipped for it
+                self.assertEqual(study_ui.askGroupMapping(folder), {})
         fixed = "participant_id\tage\tnote\n01\t40\tfixed table\n02\t42\tfixed table\n"
         with open(tsv, "w", encoding="utf-8") as f:
             f.write(fixed)

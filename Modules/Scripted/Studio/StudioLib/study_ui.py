@@ -691,7 +691,10 @@ def askGroupMapping(folder, parent=None, table=None):
         if not os.path.isfile(tablePath) or studyModule.Study.is_study(folder):
             return {}
     try:
-        proposal = groupMappingProposal(*readTable(tablePath))
+        columns, rows = readTable(tablePath)
+        if os.path.basename(tablePath) == studyModule.PARTICIPANTS_TSV and "participant_id" in columns:
+            checkParticipantIds(tablePath, rows)  # refused before the groups are asked
+        proposal = groupMappingProposal(columns, rows)
     except (OSError, ValueError):
         return {}  # createStudy says what is wrong with the table
     if proposal is None:
@@ -838,6 +841,29 @@ def _makeDirs(path, root, made):
     made.extend(reversed(missing))
 
 
+class ParticipantTableError(ValueError):
+    """The participants table of the user's folder cannot be used (a repeated id): a problem with the user's file, not a program error."""
+
+    user_problem = True
+
+
+def checkParticipantIds(path, rows):
+    """Refuse a participants table that repeats an id, or has ids that differ only in letter case (ids name the lesion files).
+
+    :raises ParticipantTableError: with a message that names the table and the id.
+    """
+    studyModule = _lnm("study")
+    seen = {}
+    for row in rows:
+        sid = studyModule.participant_label(row["participant_id"])
+        twin = seen.get(sid.casefold())
+        if twin == sid:
+            raise ParticipantTableError(_("{path}: {id} appears twice (after normalizing the ids to sub-<label>)").format(path=path, id=sid))
+        if twin is not None:
+            raise ParticipantTableError(_("{path}: {id} differs from {other} only in letter case: on macOS they would share files").format(path=path, id=sid, other=twin))
+        seen[sid.casefold()] = sid
+
+
 def adoptFolder(folder, name=None, groupColumn=None, groupMapping=None, template=None):
     """Make a study of a folder that has a participants.tsv (adopt in place) and return the opened ``Study``.
 
@@ -866,16 +892,10 @@ def adoptFolder(folder, name=None, groupColumn=None, groupMapping=None, template
     if "participant_id" not in columns:
         raise ValueError(_("{path} has no participant_id column").format(path=tsvPath))
     added = []
-    seen = {}
+    checkParticipantIds(tsvPath, rows)
     for row in rows:
         original = row["participant_id"]
         sid = studyModule.participant_label(original)
-        twin = seen.get(sid.casefold())
-        if twin == sid:
-            raise ValueError(_("{path}: {id} appears twice (after normalizing the ids to sub-<label>)").format(path=tsvPath, id=sid))
-        if twin is not None:  # ids name the lesion files: one file on macOS
-            raise ValueError(_("{path}: {id} differs from {other} only in letter case: on macOS they would share files").format(path=tsvPath, id=sid, other=twin))
-        seen[sid.casefold()] = sid
         if sid != original:
             row["participant_id"] = sid
             if studyModule.is_missing(row.get("source_id")):
@@ -1597,7 +1617,11 @@ def newStudyDialog(shell=None):
     groups = askGroupMapping(folder)
     if groups is None:
         return None
-    return createStudy(niftiFiles, shell, folder=folder, **groups)
+    try:
+        return createStudy(niftiFiles, shell, folder=folder, **groups)
+    except ParticipantTableError as e:
+        _toast(shell, str(e), ms=8000, level="warning")
+        return None
 
 
 def openParticipantsTable(path, shell=None):
