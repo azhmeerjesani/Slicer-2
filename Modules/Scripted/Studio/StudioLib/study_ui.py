@@ -1083,6 +1083,18 @@ def _commonFolder(files):
         return folders[0]
 
 
+def _creationMessage(how, name, n):
+    """The toast of a made or opened study; "1 subject" in the singular (``how``: created, adopted or opened)."""
+    one = n == 1
+    text = {
+        "created": _("Study {name} created: 1 subject") if one else _("Study {name} created: {n} subjects"),
+        "adopted": _("Study {name} created in place: 1 subject (participants.tsv kept, backup in .studio)") if one else _(
+            "Study {name} created in place: {n} subjects (participants.tsv kept, backup in .studio)"),
+        "opened": _("Study {name}: 1 subject") if one else _("Study {name}: {n} subjects"),
+    }[how]
+    return text.format(name=name, n=n)
+
+
 def createStudy(files, shell=None, folder=None, groupColumn=None, groupMapping=None, name=None, openIt=True, table=None):
     """Create a study of NIfTI files (a dropped folder, a loaded set) and open it; return the ``StudySession``.
 
@@ -1152,17 +1164,13 @@ def createStudy(files, shell=None, folder=None, groupColumn=None, groupMapping=N
     session = openStudy(studyObject, shell)
     if session is None:
         # The open project could not be saved and the user keeps working in it: the study is made, Library opens it later
-        text = _("Study {name}: {n} subjects") if how == "opened" else _("Study {name} created: {n} subjects")
-        _toast(_currentShell(shell), text.format(name=studyObject.name, n=len(studyObject)), ms=5000, action=lambda: _showFolder(folder), actionText=_("Show folder"), level="consequence")
+        text = _creationMessage("opened" if how == "opened" else "created", studyObject.name, len(studyObject))
+        _toast(_currentShell(shell), text, ms=5000, action=lambda: _showFolder(folder), actionText=_("Show folder"), level="consequence")
         return None
     session.creationReport = {"how": how, "seconds": elapsed, "report": report, "files": len(files)}
     session._gridRows = gridRows
     shell = _currentShell(shell)
-    message = {
-        "created": _("Study {name} created: {n} subjects"),
-        "adopted": _("Study {name} created in place: {n} subjects (participants.tsv kept, backup in .studio)"),
-        "opened": _("Study {name}: {n} subjects"),
-    }[how].format(name=studyObject.name, n=len(studyObject))
+    message = _creationMessage(how, studyObject.name, len(studyObject))
     if imported is not None:
         message += " · " + _("{table} imported").format(table=os.path.basename(importPath))
     elif importProblem:

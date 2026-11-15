@@ -714,6 +714,16 @@ class StudioRegressionTest(unittest.TestCase):
 
     # Atlas download failure (BB-1)
 
+    def test_new_study_toast_is_singular_for_one_subject(self):
+        """The toast of a made or opened study says "1 subject", not "1 subjects" (BB-1)."""
+        from StudioLib import study_ui
+
+        for how in ("created", "adopted", "opened"):
+            self.assertIn("1 subject", study_ui._creationMessage(how, "S", 1))
+            self.assertNotIn("1 subjects", study_ui._creationMessage(how, "S", 1))
+            self.assertIn("3 subjects", study_ui._creationMessage(how, "S", 3))
+            self.assertIn("0 subjects", study_ui._creationMessage(how, "S", 0))
+
     def test_atlas_download_failure_chip_is_one_readable_line(self):
         """The Draw QC chip names the reason of a failed "Get atlases" job as a whole sentence: no cut at 120 characters in the
         middle of a word, no URL that cannot wrap, and the text stays a short sentence.
