@@ -1331,6 +1331,124 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             importer._availableMemoryBytes, importer._niftiDataShortfall = originalMemory, originalShortfall
 
+    def test_compressed_nifti_is_decompressed_once_by_the_completeness_check(self):
+        """BB-1: _checkNiftiComplete runs on the GUI thread, so a .nii.gz is decompressed in one pass for the data count
+        and the gzip trailer check together (it was twice), and a flipped bit or a cut-off stream is still found.
+        """
+        import gzip
+
+        from StudioLib import importer
+
+        header = bytearray(348)
+        struct.pack_into("<i", header, 0, 348)
+        struct.pack_into("<8h", header, 40, 3, 64, 64, 64, 1, 1, 1, 1)
+        struct.pack_into("<hh", header, 70, 2, 8)
+        struct.pack_into("<f", header, 108, 352)
+        struct.pack_into("<8f", header, 76, 1, 1, 1, 1, 0, 0, 0, 0)
+        header[344:348] = b"n+1\0"
+        raw = bytes(header) + bytes(4) + bytes(64 * 64 * 64)
+        good = os.path.join(self.directory, "once_T1w.nii.gz")
+        with gzip.open(good, "wb") as f:
+            f.write(raw)
+        data = bytearray(open(good, "rb").read())
+        flipped = os.path.join(self.directory, "once_flipped_T1w.nii.gz")
+        bad = bytearray(data)
+        bad[-6] ^= 0xFF  # the CRC in the trailer
+        with open(flipped, "wb") as f:
+            f.write(bad)
+        cut = os.path.join(self.directory, "once_cut_T1w.nii.gz")
+        with open(cut, "wb") as f:
+            f.write(data[:len(data) // 2])
+
+        decompressed = [0]
+        original = gzip.GzipFile.read1
+
+        def counting(self, size=-1):
+            chunk = original(self, size)
+            decompressed[0] += len(chunk)
+            return chunk
+
+        gzip.GzipFile.read1 = counting
+        try:
+            importer._checkNiftiComplete(good)
+            # one pass over the stream (plus a few header reads), not two
+            self.assertLess(decompressed[0], 1.5 * len(raw))
+            with self.assertRaises(importer.RefusedFileError) as context:
+                importer._checkNiftiComplete(flipped)
+            self.assertIn("gzip", str(context.exception))
+            with self.assertRaises(importer.RefusedFileError) as context:
+                importer._checkNiftiComplete(cut)
+            self.assertIn("stops after", str(context.exception))
+        finally:
+            gzip.GzipFile.read1 = original
+
+    def test_large_compressed_nifti_is_checked_off_the_gui_thread(self):
+        """BB-1: the completeness check of a large .nii.gz (seconds of decompression) runs in a worker thread while the
+        GUI thread keeps handling events, so the window is not frozen before the reader starts; the findings are the same.
+        """
+        import threading
+
+        from StudioLib import importer
+
+        header = bytearray(348)
+        struct.pack_into("<i", header, 0, 348)
+        struct.pack_into("<8h", header, 40, 3, 64, 64, 64, 1, 1, 1, 1)
+        struct.pack_into("<hh", header, 70, 2, 8)
+        struct.pack_into("<f", header, 108, 352)
+        struct.pack_into("<8f", header, 76, 1, 1, 1, 1, 0, 0, 0, 0)
+        header[344:348] = b"n+1\0"
+        raw = bytes(header) + bytes(4) + bytes(64 * 64 * 64)
+        good = os.path.join(self.directory, "threaded_T1w.nii.gz")
+        with gzip.open(good, "wb") as f:
+            f.write(raw)
+        data = bytearray(open(good, "rb").read())
+        flipped = os.path.join(self.directory, "threaded_flipped_T1w.nii.gz")
+        bad = bytearray(data)
+        bad[-6] ^= 0xFF  # the CRC in the trailer
+        with open(flipped, "wb") as f:
+            f.write(bad)
+        cut = os.path.join(self.directory, "threaded_cut_T1w.nii.gz")
+        with open(cut, "wb") as f:
+            f.write(data[:len(data) // 2])
+
+        self.assertGreaterEqual(importer.NIFTI_SCAN_THREAD_BYTES, 64 * 1024**2)  # ordinary scans stay on the direct path
+        readers = set()
+        original = gzip.GzipFile.read1
+
+        def slowRead(self, size=-1):
+            if size > 1024:  # the data pass, not the header reads
+                readers.add(threading.current_thread() is threading.main_thread())
+                time.sleep(0.1)
+            return original(self, size)
+
+        fired = []
+        timer = qt.QTimer()
+        timer.setSingleShot(True)
+        timer.connect("timeout()", lambda: fired.append(True))
+        originalLimit = importer.NIFTI_SCAN_THREAD_BYTES
+        gzip.GzipFile.read1 = slowRead
+        try:
+            # under the limit: checked directly, as before
+            importer._checkNiftiComplete(good)
+            self.assertEqual(readers, {True})
+            readers.clear()
+            importer.NIFTI_SCAN_THREAD_BYTES = 64 * 64 * 64
+            timer.start(0)
+            importer._checkNiftiComplete(good)
+            self.assertEqual(readers, {False}, "the data of a large .nii.gz was decompressed on the GUI thread")
+            self.assertEqual(fired, [True], "the GUI thread handled no events during the check")
+            with self.assertRaises(importer.RefusedFileError) as context:
+                importer._checkNiftiComplete(flipped)
+            self.assertIn("gzip", str(context.exception))
+            with self.assertRaises(importer.RefusedFileError) as context:
+                importer._checkNiftiComplete(cut)
+            self.assertIn("stops after", str(context.exception))
+            self.assertEqual(readers, {False})
+        finally:
+            gzip.GzipFile.read1 = original
+            importer.NIFTI_SCAN_THREAD_BYTES = originalLimit
+            timer.stop()
+
     def test_memory_guard_sees_cgroup_limit(self):
         """BB-1: the memory guard counts the room that a control group (a container's --memory, a Slurm job, a systemd
         MemoryMax) still allows, also when the limit is set on a group above this one, so a scan that does not fit is

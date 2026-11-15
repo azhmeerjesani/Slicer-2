@@ -711,11 +711,13 @@ def _niftiHasInvalidDataOffset(path):
     return False
 
 
-def _niftiDataShortfall(path):
+def _niftiDataShortfall(path, _trailerResult=None):
     """``(have, need)`` in bytes if the data of the NIfTI file ``path`` is shorter than its header says, None if it is
     complete or cannot be judged (not NIfTI, unreadable header: the readers report those). The ITK reader zero-fills the
     missing voxels and reports success, so a file cut short opened as a whole image. A ``.nii.gz`` whose compressed
-    stream itself is cut off (no gzip end marker) counts the data it holds.
+    stream itself is cut off (no gzip end marker) counts the data it holds. With a list as ``_trailerResult`` the pass
+    goes on to the end of the gzip stream (the trailer) and appends True to the list if the stream is damaged inside,
+    False if not: one decompression for both checks (see ``_niftiScan``).
     """
     if not isNiftiFile(path) or not os.path.isfile(path):
         return None
@@ -758,9 +760,16 @@ def _niftiDataShortfall(path):
                     if not chunk:
                         break
                     have += len(chunk)
+                if _trailerResult is not None and have >= need:
+                    while f.read1(1 << 22):
+                        pass  # on to the trailer: its CRC and length are checked at the end of the stream
+                    _trailerResult.append(False)
         except EOFError:
-            pass  # the stream is cut off: the ITK reader zero-fills the rest and reports success, so it counts as short
+            if _trailerResult is not None and have >= need:
+                _trailerResult.append(False)  # only the trailer is cut off: not this check's business
         except (OSError, zlib.error):
+            if _trailerResult is not None and have >= need:
+                _trailerResult.append(True)  # damaged inside, after all of the announced data
             return None  # damaged in another way: the reader reports it
     return (have, need) if have < need else None
 
@@ -782,6 +791,67 @@ def _niftiGzipChecksumFails(path):
     except (OSError, zlib.error):
         return True
     return False
+
+
+def _niftiScan(path):
+    """``(shortfall, checksumFails)`` of the NIfTI file ``path``, as ``_niftiDataShortfall`` and ``_niftiGzipChecksumFails``
+    give them, but with a single decompression of a ``.nii.gz`` (a highly compressed file of several GB of voxels took
+    seconds per pass on the GUI thread).
+    """
+    trailer = []
+    shortfall = _niftiDataShortfall(path, trailer)
+    if shortfall is not None:
+        return shortfall, False  # cut off: the shortfall is the finding, the CRC of a missing trailer is not
+    if trailer:
+        return None, trailer[0]
+    # not a gzip file, or damaged before the announced data ended: the separate check decides (it ends at the damage)
+    return None, _niftiGzipChecksumFails(path)
+
+
+#: A ``.nii.gz`` whose header announces at least this many bytes of voxels is checked in a worker thread (decompressing
+#: it takes about a second per GB), so the window is not frozen meanwhile. Smaller files are checked directly.
+NIFTI_SCAN_THREAD_BYTES = 512 * 1024**2
+
+
+def _niftiScanResponsive(path):
+    """``_niftiScan(path)``, but for a large ``.nii.gz`` the decompression runs in a worker thread (it reads the file
+    only: no MRML, VTK or Qt) while this thread keeps the window painted behind a "Checking…" dialog. A highly
+    compressed file of several GB of voxels froze the window for many seconds before its reader even started.
+    """
+    import threading
+
+    try:
+        large = _isGzipFile(path) and (_niftiImageBytes(path) or 0) >= NIFTI_SCAN_THREAD_BYTES
+    except Exception:
+        large = False
+    if not large or threading.current_thread() is not threading.main_thread() or qt.QApplication.instance() is None:
+        return _niftiScan(path)
+    result = {}
+
+    def run():
+        try:
+            result["value"] = _niftiScan(path)
+        except BaseException as error:
+            result["error"] = error
+
+    thread = threading.Thread(target=run, name="StudioNiftiCheck", daemon=True)
+    dialog = qt.QProgressDialog(
+        _("Checking {name}…").format(name=os.path.basename(str(path))), "", 0, 0, slicer.util.mainWindow())
+    dialog.setObjectName("StudioImportCheckProgress")
+    dialog.setCancelButton(None)
+    dialog.setMinimumDuration(500)
+    dialog.setWindowModality(qt.Qt.ApplicationModal)
+    thread.start()
+    try:
+        while thread.is_alive():
+            slicer.app.processEvents(qt.QEventLoop.ExcludeUserInputEvents)
+            thread.join(0.02)
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+    if "error" in result:
+        raise result["error"]
+    return result["value"]
 
 
 class RefusedFileError(RuntimeError):
@@ -970,13 +1040,13 @@ def _checkNiftiComplete(path):
         raise RefusedFileError(
             _("{name} is damaged: its header gives an invalid data offset (where the image data starts is not a "
               "number), so it was not opened.").format(name=os.path.basename(str(path))))
-    shortfall = _niftiDataShortfall(path)
+    shortfall, checksumFails = _niftiScanResponsive(path)
     if shortfall is not None:
         raise RefusedFileError(
             _("{name} is damaged: its image data stops after {have:,} of the {need:,} bytes that its header announces "
               "(the file was probably cut short by a failed copy or download). It was not opened; copy it again from "
               "its source.").format(name=os.path.basename(str(path)), have=shortfall[0], need=shortfall[1]))
-    if _niftiGzipChecksumFails(path):
+    if checksumFails:
         raise RefusedFileError(
             _("{name} is damaged: its compressed data does not pass the check of the gzip format (a bit was changed, "
               "probably by a faulty copy or download), so the voxels would be wrong. It was not opened; copy it again "
