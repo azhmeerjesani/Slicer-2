@@ -7031,6 +7031,49 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertEqual(item["sha256"], byName[item["name"]]["content_sha256"], "the link records the set it resolves to")
             self.assertEqual(len(controlsets.study_control_lesions(opened, item["name"], registry(newRoot))), 2)
 
+    def test_79c_root_move_keeps_a_hand_renamed_control_set_linked(self):
+        """A set folder renamed by hand (LNM/ControlSets/Ctl -> CtlRenamed, its controlset.json still says "Ctl", which its
+        studies link) and then Change folder > Move (BB-1): the moved set is named after its folder and the moved study
+        follows it, so its rows still resolve to the set's lesions.
+        """
+        try:
+            import numpy as np
+            from LesionNetworkMappingLib import controlsets, nifti
+            from LesionNetworkMappingLib.geometry import GRID_BY_ID
+            from LesionNetworkMappingLib.study import Study
+        except ImportError:
+            self.skipTest("the Map module is not available")
+        projects = self.projects
+        oldRoot = os.path.join(self.tempDir, "A", "Slicer Studio")
+        newRoot = os.path.join(self.tempDir, "B", "deeper", "Slicer Studio")
+        grid = GRID_BY_ID["NLin6-2mm"]
+        ijk = np.indices(grid.shape).reshape(3, -1).T
+        world = ijk @ grid.affine[:3, :3].T + grid.affine[:3, 3]
+        folder = os.path.join(self.userDir, "ctl")
+        os.makedirs(folder, exist_ok=True)
+        for n in range(2):
+            inside = np.linalg.norm(world - np.asarray((-20, n * 8, 0), float), axis=1) <= 5 + n
+            nifti.write_nifti(os.path.join(folder, f"ctl_{n:03d}_lesion.nii.gz"), inside.reshape(grid.shape).astype(np.uint8), grid.affine)
+
+        def registry(rootPath):
+            return controlsets.root_for_data_directory(os.path.join(rootPath, projects.LNM_DIR))
+
+        controlsets.register_folder(folder, "Ctl", root=registry(oldRoot), space="MNI152NLin6Asym")
+        created = Study.create(os.path.join(oldRoot, projects.STUDIES_DIR, "Stroke"), name="Stroke", space="MNI152NLin6Asym")
+        created.link_control_set("Ctl", root=registry(oldRoot))
+        created.save()
+        os.rename(os.path.join(registry(oldRoot), "Ctl"), os.path.join(registry(oldRoot), "CtlRenamed"))
+
+        projects.moveContent(oldRoot, newRoot, renamed={})
+
+        self.assertEqual([entry["name"] for entry in controlsets.list_sets(registry(newRoot))], ["CtlRenamed"])
+        opened = Study.open(os.path.join(newRoot, projects.STUDIES_DIR, "Stroke"))
+        opened.controlset_root = registry(newRoot)
+        self.assertEqual([item["name"] for item in opened.control_sets], ["CtlRenamed"])
+        rows = controlsets.linked_rows(opened)
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(os.path.isfile(opened.abspath(row["lesion"])) for row in rows), [row["lesion"] for row in rows])
+
     def test_80_interrupted_root_move_to_another_volume_leaves_no_partial_copy_under_the_real_name(self):
         """Change folder > Move to another volume, killed during the copy, then the same move again (BB-1). The copy went
         straight to its real name (Projects/, or Projects/P2 when the new folder had Projects/ already), so the kill left

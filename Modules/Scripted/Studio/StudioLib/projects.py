@@ -2748,7 +2748,8 @@ def _uniqueControlSetName(folder, name):
 
 def _controlSetsBefore(oldRoot):
     """What a move of ``oldRoot`` needs to make its control sets follow it (``_controlSetsFollowMove``), read before
-    anything moves: ``{"sets": {set folder name: absolute lesion folder}, "studies": [study folder names]}``, or None when
+    anything moves: ``{"sets": {set folder name: absolute lesion folder}, "names": {set folder name: the name studies link it
+    by}, "studies": [study folder names]}``, or None when
     LNM/ControlSets/ of ``oldRoot`` has no set. Worker-safe; never raises.
     """
     registry = os.path.join(oldRoot, LNM_DIR, LNM_CONTROL_SETS_DIR)
@@ -2762,7 +2763,14 @@ def _controlSetsBefore(oldRoot):
         sets[name] = os.path.normpath(folder if os.path.isabs(folder) else os.path.join(directory, *folder.split("/")))
     if not sets:
         return None
-    return {"sets": sets, "studies": sorted(_visibleNames(os.path.join(oldRoot, STUDIES_DIR)))}
+    # the name studies link each set by: a set folder renamed by hand keeps the name its controlset.json records
+    linkNames = {}
+    with contextlib.suppress(Exception):
+        from LesionNetworkMappingLib import controlsets
+
+        linkNames = {name: controlsets._set_name(name, str(readJson(os.path.join(registry, name, "controlset.json")).get("name") or ""), registry)
+                     for name in sets}
+    return {"sets": sets, "names": linkNames, "studies": sorted(_visibleNames(os.path.join(oldRoot, STUDIES_DIR)))}
 
 
 def _controlSetsFollowMove(before, oldRoot, newRoot, absoluteRenames):
@@ -2801,8 +2809,9 @@ def _controlSetsFollowMove(before, oldRoot, newRoot, absoluteRenames):
         except Exception:
             logging.warning(f"Slicer Studio: the moved control set {directory} could not follow the move", exc_info=True)
             continue
-        if os.path.basename(directory) != name:
-            names[name] = os.path.basename(directory)
+        linkName = (before.get("names") or {}).get(name) or name
+        if os.path.basename(directory) != linkName:
+            names[linkName] = os.path.basename(directory)
     if not names:
         return
     for name in before.get("studies") or ():

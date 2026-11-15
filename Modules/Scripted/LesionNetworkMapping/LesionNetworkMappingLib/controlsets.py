@@ -279,25 +279,79 @@ def _read_entry(path):
     return entry
 
 
+def _recorded_names(registry):
+    """{set folder name: the name its controlset.json records} of the registry's sets (unreadable entries are skipped)."""
+    out = {}
+    try:
+        names = os.listdir(registry)
+    except OSError:
+        return out
+    for name in names:
+        path = os.path.join(registry, name, CONTROLSET_JSON)
+        if not NAME_PATTERN.match(name) or not os.path.isfile(path):
+            continue
+        try:
+            out[name] = str(_read_entry(path).get("name") or "")
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def _set_name(folder_name, recorded, registry):
+    """The name of the set in the registry folder ``folder_name`` whose controlset.json records the name ``recorded``.
+
+    Studies link a set by name ("controlset:<name>/<rel>"). A set folder renamed by hand (in the file manager) still
+    records its old name, which its studies link: the set keeps that name while no other folder of the registry has it
+    and no other set records it; otherwise (and for a moved set, :func:`relocate`) it is named after its folder.
+    """
+    if not recorded or recorded == folder_name or not NAME_PATTERN.match(recorded) or recorded in (".", ".."):
+        return folder_name
+    other = os.path.join(registry, recorded)
+    if os.path.lexists(other):  # another set's folder, or this one on a case-insensitive file system
+        try:
+            return recorded if os.path.samefile(other, os.path.join(registry, folder_name)) else folder_name
+        except OSError:
+            return folder_name
+    claims = [name for name, value in _recorded_names(registry).items() if value == recorded]
+    return recorded if claims == [folder_name] else folder_name
+
+
+def _find_set_dir(name, registry):
+    """The folder of the set named ``name`` in ``registry``: <registry>/<name>, else the one renamed folder that still
+    records ``name`` (:func:`_set_name`), else None.
+    """
+    folder = os.path.join(registry, name)
+    if os.path.isfile(os.path.join(folder, CONTROLSET_JSON)):
+        return folder
+    claims = [folder_name for folder_name, value in _recorded_names(registry).items() if value == name and folder_name != name]
+    if len(claims) == 1 and _set_name(claims[0], name, registry) == name:
+        return os.path.join(registry, claims[0])
+    return None
+
+
 def load(name, root=None):
     """The registry entry of a set (a dict as in the module docstring, plus "dir" and the absolute "folder_path").
 
+    The set named ``name`` is the folder <registry>/<name>, or a folder renamed by hand that still records ``name``
+    (:func:`_set_name`): the entry's "name" is the name studies link it by, "dir" its folder.
     ``name`` may also be an entry (returned as it is). Raises FileNotFoundError for a set that is not registered.
     """
     if isinstance(name, dict):
         return name
-    folder = set_dir(name, root)
-    path = os.path.join(folder, CONTROLSET_JSON)
-    if not os.path.isfile(path):
-        raise FileNotFoundError(f"No control set named {name!r} in {registry_root(root)}")
-    entry = dict(_read_entry(path))
+    name = validate_name(name)
+    registry = registry_root(root)
+    folder = _find_set_dir(name, registry)
+    if folder is None:
+        raise FileNotFoundError(f"No control set named {name!r} in {registry}")
+    entry = dict(_read_entry(os.path.join(folder, CONTROLSET_JSON)))
+    entry["name"] = _set_name(os.path.basename(folder), str(entry.get("name") or ""), registry)
     entry["dir"] = folder
     entry["folder_path"] = _join(folder, entry.get("folder") or ".")
     return entry
 
 
 def list_sets(root=None):
-    """The registered sets (entries, sorted by name); unreadable entries are skipped."""
+    """The registered sets (entries, sorted by folder name); unreadable entries are skipped."""
     registry = registry_root(root)
     out = []
     try:
@@ -305,19 +359,25 @@ def list_sets(root=None):
     except OSError:
         return out
     for name in names:
-        if not NAME_PATTERN.match(name) or not os.path.isfile(os.path.join(registry, name, CONTROLSET_JSON)):
+        path = os.path.join(registry, name, CONTROLSET_JSON)
+        if not NAME_PATTERN.match(name) or not os.path.isfile(path):
             continue
         try:
-            out.append(load(name, registry))
+            entry = dict(_read_entry(path))
         except (OSError, ValueError):
             continue
+        folder = os.path.join(registry, name)
+        entry["name"] = _set_name(name, str(entry.get("name") or ""), registry)
+        entry["dir"] = folder
+        entry["folder_path"] = _join(folder, entry.get("folder") or ".")
+        out.append(entry)
     return out
 
 
 def unregister(name, root=None):
     """Remove a set from the registry (its controlset.json, lesions.tsv and map cache). The lesion files are not touched."""
-    folder = set_dir(name, root)
-    if not os.path.isfile(os.path.join(folder, CONTROLSET_JSON)):
+    folder = _find_set_dir(validate_name(name), registry_root(root))
+    if folder is None:
         raise FileNotFoundError(f"No control set named {name!r}")
     _entries_cache.pop(os.path.join(folder, CONTROLSET_JSON), None)
     shutil.rmtree(folder)
@@ -635,7 +695,7 @@ def register_folder(folder, name, source=None, licence_note=None, space=None, as
     from .geometry import space_family
 
     name = validate_name(name)
-    target = set_dir(name, root)
+    target = _find_set_dir(name, registry_root(root)) or set_dir(name, root)  # a set renamed by hand keeps its name
     json_path = os.path.join(target, CONTROLSET_JSON)
     if os.path.exists(json_path) and not replace:
         raise FileExistsError(f"A control set named {name!r} is already registered")

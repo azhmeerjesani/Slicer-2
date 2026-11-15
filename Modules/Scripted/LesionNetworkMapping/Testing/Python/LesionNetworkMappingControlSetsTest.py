@@ -351,6 +351,40 @@ class StudyLinkTest(ControlSetsTestBase):
         self.assertEqual(study.control_sets, [{"name": "Shrinking", "sha256": changed["content_sha256"]}])
         self.assertTrue(os.path.isfile(os.path.join(self.folder, "masks", "ctl_005_lesion.nii.gz")))  # files are never removed
 
+    def test_a_set_folder_renamed_by_hand_stays_linked(self):
+        """A registry folder renamed in the file manager still records the name its studies link: the set keeps that name,
+        the linked rows resolve to its files and its maps cache, and Link again works (BB-1).
+        """
+        entry = self.register("Ctl")
+        study = self.study("A", cases=[((-8.0, 0.0, 0.0), 5.0)])
+        study.link_control_set("Ctl")
+        study.save()
+        os.rename(os.path.join(self.root, "Ctl"), os.path.join(self.root, "CtlRenamed"))
+        reopened = Study.open(study.path)
+        sets = controlsets.list_sets(self.root)
+        self.assertEqual([(item["name"], os.path.basename(item["dir"])) for item in sets], [("Ctl", "CtlRenamed")])
+        self.assertEqual(len(controlsets.linked_rows(reopened, sets[0]["name"])), self.n_usable)  # what the card counts
+        lesions, excluded = cohortmaps.study_lesions(reopened)
+        self.assertEqual((len(lesions), excluded), (self.n_usable + 1, {}))
+        self.assertTrue(all(os.path.isfile(reopened.abspath(row["lesion"])) for row in controlsets.linked_rows(reopened)))
+        self.assertEqual(controlsets.study_maps_cache_roots(reopened, self.root), [os.path.join(self.root, "CtlRenamed", controlsets.CACHE_DIR)])
+        again = reopened.link_control_set("Ctl", root=self.root)
+        self.assertEqual((len(again["added"]), len(again["updated"])), (0, self.n_usable))
+        self.assertEqual(controlsets.load("CtlRenamed", self.root)["content_sha256"], entry["content_sha256"])
+        # Registering the old name again does not take the renamed set's studies away from it
+        with self.assertRaises(FileExistsError):
+            self.register("Ctl")
+        self.assertFalse(os.path.exists(os.path.join(self.root, "Ctl")))
+        # A new folder that has the old name: each set is named after its own folder, and the rows link the folder "Ctl"
+        shutil.copytree(os.path.join(self.root, "CtlRenamed"), os.path.join(self.root, "Ctl"))
+        self.assertEqual(sorted((item["name"], os.path.basename(item["dir"])) for item in controlsets.list_sets(self.root)),
+                         [("Ctl", "Ctl"), ("CtlRenamed", "CtlRenamed")])
+        self.assertEqual(controlsets.load("Ctl", self.root)["dir"], os.path.join(self.root, "Ctl"))
+        # Unregistering by the linked name removes the renamed folder
+        shutil.rmtree(os.path.join(self.root, "Ctl"))
+        controlsets.unregister("Ctl", self.root)
+        self.assertEqual(controlsets.list_sets(self.root), [])
+
     def test_a_link_without_rows_is_not_recorded(self):
         self.register("Set1")
         self.register("Set-1")  # its participant ids collide with Set1's
