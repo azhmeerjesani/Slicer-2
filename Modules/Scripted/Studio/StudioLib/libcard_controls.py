@@ -23,6 +23,7 @@ card refreshes. Nothing else is written to the settings. Works in Classic (the S
 import logging
 import math
 import os
+import re
 import sys
 import traceback
 import types
@@ -325,7 +326,10 @@ class AddControlSetDialog:
             nSkipped = len(self.scan["skipped"])
             text += " · " + (_("{n} file skipped") if nSkipped == 1 else _("{n} files skipped")).format(n=nSkipped)
         if controlsets.NO_GRID in self.scan["grids"]:
-            text += "\n" + _("Lesions that are not on a standard template grid are left out.")
+            if len(self.scan["grids"]) == 1:
+                text += "\n" + _("No lesion is on a standard template grid, so none can be registered.")
+            else:
+                text += "\n" + _("Lesions that are not on a standard template grid are left out.")
         mixed = controlsets.scan_mixed_families(self.scan)
         if mixed:
             text += "\n" + mixed
@@ -360,8 +364,31 @@ class AddControlSetDialog:
                 out[question["grid_id"]] = question["candidates"][combo.currentIndex - 1]
         return out
 
+    def _hasUsableLesions(self):
+        """True when at least one lesion sits on a template grid (an unanswered question counts as usable) and the lesions
+        that will be used are of one template family, which is what ``controlsets.register_folder`` requires.
+        """
+        controlsets = _lnm("controlsets")
+        space_family = _lnm("geometry").space_family
+
+        answers = self.answers()
+        families, nUsable = set(), 0
+        for gridId, grid in self.scan["grids"].items():
+            if gridId == controlsets.NO_GRID or not grid.get("n"):
+                continue
+            nUsable += 1
+            if gridId in answers:
+                family = space_family(answers[gridId])
+            elif grid.get("family"):
+                family = grid["family"]
+            else:
+                family = space_family(grid["candidates"][0]) if grid.get("candidates") else None
+            if family:
+                families.add(family)
+        return nUsable > 0 and len(families) <= 1
+
     def _updateButtons(self):
-        ready = bool(self.scan and self.scan["lesions"]) and bool(str(self.nameEdit.text).strip()) and len(self.answers()) == len(self.questions)
+        ready = bool(self.scan and self.scan["lesions"] and self._hasUsableLesions()) and bool(str(self.nameEdit.text).strip()) and len(self.answers()) == len(self.questions)
         self.registerButton.setEnabled(ready and not self.worker.isBusy())
 
     def register(self):
@@ -391,10 +418,18 @@ class AddControlSetDialog:
         stage, done, total = progress
         self.progressLabel.setText(f"{stage} {done}/{total}" if total else stage)
 
+    def _plainError(self, error):
+        """The worker error as a plain sentence: no Python exception class and no absolute folder path."""
+        text = re.sub(r"^[A-Za-z_][\w.]*(Error|Exception):\s*", "", str(error))
+        folder = str((self.scan or {}).get("folder") or "")
+        if folder:
+            text = re.sub(r"\s+in\s+" + re.escape(folder), "", text).replace(folder, _("the folder"))
+        return text.rstrip(". ") + "."
+
     def _onDone(self, entry, error):
         self.cancelButton.setText(_("Cancel"))
         if error:
-            self.progressLabel.setText(_("Stopped.") if error == "cancelled" else _("Not registered: {error}").format(error=error))
+            self.progressLabel.setText(_("Stopped.") if error == "cancelled" else _("Not registered: {error}").format(error=self._plainError(error)))
             self._updateButtons()
             return
         self.entry = entry

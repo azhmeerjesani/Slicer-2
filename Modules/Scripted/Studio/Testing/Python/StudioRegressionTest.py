@@ -3430,6 +3430,52 @@ class StudioRegressionTest(unittest.TestCase):
                 self.assertIn("2 files skipped", text)
                 self.assertIn("2 lesions are on", tips[0])
 
+    def test_20c_control_set_register_blocked_for_unusable_scans(self):
+        """Add control set: Register stays disabled when no lesion is on a template grid or the families are mixed (the scan text
+        says so), and a worker refusal shows as a plain sentence without the exception class or the folder path (BB-1).
+        """
+        from unittest import mock
+
+        from LesionNetworkMappingLib import geometry
+
+        from StudioLib import libcard_controls
+
+        if slicer.util.mainWindow() is None:
+            self.skipTest("needs the main window")
+        controlsets = libcard_controls._lnm("controlsets")
+
+        def grid(gridId, n=2):
+            spec = geometry.GRID_BY_ID[gridId]
+            return {"candidates": list(spec.candidates), "ambiguous": spec.ambiguous, "family": spec.family, "resolution": spec.resolution, "n": n, "hints": {}}
+
+        noGrid = {"candidates": [], "ambiguous": False, "family": None, "resolution": None, "n": 2, "hints": {}}
+        lesions = [{"id": "a", "rel": "a.nii", "grid_id": None}, {"id": "b", "rel": "b.nii", "grid_id": None}]
+        scans = {
+            "offgrid": {"grids": {controlsets.NO_GRID: noGrid}},
+            "mixed": {"grids": {"NLin6-2mm": grid("NLin6-2mm"), "McGill2009a-1mm": grid("McGill2009a-1mm")}},
+            "good": {"grids": {"NLin6-2mm": grid("NLin6-2mm"), controlsets.NO_GRID: noGrid}},
+            "ambiguous": {"grids": {"TF2009-2mm": grid("TF2009-2mm"), "NLin6-2mm": grid("NLin6-2mm")}},
+        }
+        expected = {"offgrid": False, "mixed": False, "good": True, "ambiguous": False}
+        for name, scan in scans.items():
+            scan.update({"folder": self.directory, "lesions": lesions, "skipped": [], "all_lesions": True})
+            with mock.patch.object(controlsets, "scan_folder", lambda folder, scan=scan: dict(scan)):
+                dialog = libcard_controls.addControlSet(self.directory, modal=False)
+                try:
+                    dialog.nameEdit.setText("set")
+                    dialog._updateButtons()
+                    self.assertEqual(dialog.registerButton.enabled, expected[name], name)
+                    if name == "offgrid":
+                        self.assertIn("none can be registered", dialog.scanLabel.text)
+                    if name == "ambiguous":
+                        dialog.spaceCombos[0].setCurrentIndex(1)
+                        self.assertFalse(dialog.registerButton.enabled)  # 2009 and fsl6 lesions
+                    message = dialog._plainError(f"ValueError: No usable control lesion in {self.directory}")
+                    self.assertEqual(message, "No usable control lesion.")
+                    self.assertNotIn(self.directory, message)
+                finally:
+                    dialog.dialog.close()
+
     def test_21_share_dialog_shows_success_after_export(self):
         """After a successful "Export study for sharing" the dialog shows the success ("Exported N files to ...") and Close, and
         its checklist has no failure mark: the folder that was just written is not reported as "It already exists" and Export
