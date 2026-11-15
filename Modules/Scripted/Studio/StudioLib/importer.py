@@ -712,22 +712,22 @@ def _niftiDataShortfall(path):
         sizeOfHeader = struct.unpack(byteOrder + "i", header[0:4])[0]
         if sizeOfHeader == 348:
             dims = struct.unpack(byteOrder + "8h", header[40:56])
-            bitpix = struct.unpack(byteOrder + "h", header[72:74])[0]
+            bitsPerVoxel = _niftiBitsPerVoxel(struct.unpack(byteOrder + "2h", header[70:74]))
             offset = max(int(struct.unpack(byteOrder + "f", header[108:112])[0]), 352)
             break
         if sizeOfHeader == 540 and len(header) >= 540:
             dims = struct.unpack(byteOrder + "8q", header[16:80])
-            bitpix = struct.unpack(byteOrder + "h", header[14:16])[0]
+            bitsPerVoxel = _niftiBitsPerVoxel(struct.unpack(byteOrder + "2h", header[12:16]))
             offset = max(struct.unpack(byteOrder + "q", header[168:176])[0], 544)
             break
     else:
         return None
-    if not 1 <= dims[0] <= 7 or bitpix <= 0 or any(size < 1 for size in dims[1:dims[0] + 1]):
+    if not 1 <= dims[0] <= 7 or bitsPerVoxel is None or any(size < 1 for size in dims[1:dims[0] + 1]):
         return None
     voxels = 1
     for size in dims[1:dims[0] + 1]:
         voxels *= size
-    need = offset + (voxels * bitpix + 7) // 8
+    need = offset + (voxels * bitsPerVoxel + 7) // 8
     if not _isGzipFile(path):
         have = os.path.getsize(path)
     else:
@@ -872,6 +872,24 @@ def _niftiHasDegenerateGeometry(path):
 
 #: The ``datatype`` codes that the NIfTI standard defines (a header with another code cannot be read)
 _NIFTI_DATATYPE_CODES = frozenset((1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 768, 1024, 1280, 1536, 1792, 2048, 2304))
+
+#: Bytes per voxel of each NIfTI ``datatype`` code, as the NIfTI reader sizes the image data (``nifti_datatype_sizes``
+#: in niftilib): the reader ignores ``bitpix``, so a header whose ``bitpix`` disagrees with its ``datatype`` is still
+#: read with this many bytes per voxel. Binary (1) has no byte size there.
+_NIFTI_DATATYPE_BYTES = {
+    2: 1, 256: 1, 4: 2, 512: 2, 128: 3, 2304: 4, 8: 4, 16: 4, 768: 4, 32: 8, 64: 8, 1024: 8, 1280: 8,
+    1536: 16, 1792: 16, 2048: 32,
+}
+
+
+def _niftiBitsPerVoxel(datatypeAndBitpix):
+    """The bits per voxel of a NIfTI header given its ``(datatype, bitpix)``: from ``datatype`` as the readers do, from
+    ``bitpix`` only when the datatype has no byte size (binary or unknown), None if neither gives a size.
+    """
+    datatype, bitpix = datatypeAndBitpix
+    if datatype in _NIFTI_DATATYPE_BYTES:
+        return 8 * _NIFTI_DATATYPE_BYTES[datatype]
+    return bitpix if bitpix > 0 else None
 
 
 def _nrrdHasDegenerateDirections(path):
@@ -1105,11 +1123,12 @@ def _niftiImageBytes(path):
     for byteOrder in ("<", ">"):
         sizeOfHeader = struct.unpack(byteOrder + "i", header[0:4])[0]
         if sizeOfHeader in (348, 540):
-            bitpix = struct.unpack(byteOrder + "h", header[72:74] if sizeOfHeader == 348 else header[14:16])[0]
+            bitsPerVoxel = _niftiBitsPerVoxel(
+                struct.unpack(byteOrder + "2h", header[70:74] if sizeOfHeader == 348 else header[12:16]))
             voxels = 1
             for size in dims[1:dims[0] + 1]:
                 voxels *= size
-            return voxels * max(bitpix, 8) // 8 if bitpix > 0 else None
+            return voxels * max(bitsPerVoxel, 8) // 8 if bitsPerVoxel is not None else None
     return None
 
 

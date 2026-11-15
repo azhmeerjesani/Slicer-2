@@ -722,6 +722,52 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(result.errors, [])
         self.assertEqual(len(result.volumes), 1)
 
+    def test_nifti_data_size_follows_datatype_not_bitpix(self):
+        """BB-1: the readers size the voxels from ``datatype`` and ignore ``bitpix``, so the cut-short check does too: an
+        int16 lesion (or a float32 scan) whose header says bitpix 8 and that holds only the bytes of a uint8 image is
+        refused as damaged, not opened with half its voxels; a complete uint8 image whose bitpix says 64 is not refused.
+        """
+        from StudioLib import importer
+
+        def niftiBytes(datatype, bitpix, data):
+            header = bytearray(348)
+            struct.pack_into("<i", header, 0, 348)
+            struct.pack_into("<8h", header, 40, 3, 20, 20, 20, 1, 1, 1, 1)
+            struct.pack_into("<hh", header, 70, datatype, bitpix)
+            struct.pack_into("<8f", header, 76, 1, 1, 1, 1, 1, 0, 0, 0)
+            struct.pack_into("<f", header, 108, 352)
+            header[344:348] = b"n+1\0"
+            return bytes(header) + bytes(4) + data
+
+        mask = np.zeros((20, 20, 20), np.uint8)
+        mask[2:18, 2:18, 2:18] = 1
+        paths = {}
+        for name, content in (
+            ("sub-01_lesion.nii", niftiBytes(4, 8, mask.tobytes())),  # int16, bitpix lies (8)
+            ("sub-02_T1w.nii", niftiBytes(16, 8, mask.tobytes())),  # float32, bitpix lies (8)
+            ("sub-03_T1w.nii", niftiBytes(2, 64, mask.tobytes())),  # uint8, complete, bitpix lies (64)
+        ):
+            paths[name] = os.path.join(self.directory, name)
+            with open(paths[name], "wb") as f:
+                f.write(content)
+        self.assertEqual(importer._niftiDataShortfall(paths["sub-01_lesion.nii"]), (352 + 8000, 352 + 16000))
+        self.assertEqual(importer._niftiDataShortfall(paths["sub-02_T1w.nii"]), (352 + 8000, 352 + 32000))
+        self.assertIsNone(importer._niftiDataShortfall(paths["sub-03_T1w.nii"]))
+        self.assertEqual(importer._niftiImageBytes(paths["sub-02_T1w.nii"]), 32000)
+        self.assertEqual(importer._niftiImageBytes(paths["sub-03_T1w.nii"]), 8000)
+        studioShell = self._applyStudio()
+        for name in ("sub-01_lesion.nii", "sub-02_T1w.nii"):
+            result = importer.loadFiles([paths[name]], studioShell)
+            self._pump()
+            self.assertEqual(len(result.errors), 1, name)
+            self.assertIn("damaged", result.errors[0][1], name)
+            self.assertEqual(result.volumes + result.segmentations, [], name)
+            self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLVolumeNode")), 0, name)
+        result = importer.loadFiles([paths["sub-03_T1w.nii"]], studioShell)
+        self._pump()
+        self.assertEqual(result.errors, [])
+        self.assertEqual(len(result.volumes), 1)
+
     def test_recent_file_damaged_since_is_refused_as_damaged(self):
         """BB-1: a recent file (File > Recent, Library "Opened from elsewhere", Search) that was cut short after it was
         first opened is refused as damaged with its reason, as with a drop or Open...: no half zero-filled scan is loaded.
