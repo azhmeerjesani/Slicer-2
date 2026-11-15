@@ -266,6 +266,25 @@ class VlsmRunTest(unittest.TestCase):
         self.assertIn("smallest attainable p 0.001", legacy)
         self.assertNotIn("min_p", legacy)
 
+    def test_tfce_record_and_methods_state_parameters_and_result(self):
+        """A TFCE run records H, E, steps and connectivity in vlsm.json and the methods paragraph states them and the TFCE
+        result (bug bash: "H = not recorded, E = not recorded" and the TFCE-significant voxels were left out).
+        """
+        from LesionNetworkMappingLib import methods, tfce as tfcelib
+
+        study, _scores = make_study(os.path.join(self.tmp, "tfce-study"), n=24, seed=5)
+        spec = designlib.DesignSpec(test="continuous", score_column="score", contrast="negative", group_column=None, covariates=["volume_ml"])
+        record = vlsm.vlsm(study.path, spec, grid=self.grid, space=SPACE, min_lesions=6, min_percent=0, n_perm=50, seed=3, tfce=True)
+        tfce = record["tfce"]
+        self.assertTrue(tfce["enabled"])
+        self.assertEqual((tfce["H"], tfce["E"], tfce["steps"], tfce["connectivity"]),
+                         (tfcelib.DEFAULT_H, tfcelib.DEFAULT_E, tfcelib.DEFAULT_STEPS, tfcelib.DEFAULT_CONNECTIVITY))
+        self.assertIn("n_significant", tfce)
+        text = methods.vlsm_paragraph(record, "vlsm-1")
+        self.assertNotIn("H = not recorded", text)
+        self.assertIn(f"TFCE (H = {methods._number(tfcelib.DEFAULT_H)}, E = {methods._number(tfcelib.DEFAULT_E)}, {tfcelib.DEFAULT_STEPS} steps", text)
+        self.assertIn(f"TFCE: {tfce['n_significant']} voxels with TFCE FWE p", text)
+
     def test_methods_name_the_covariate_transforms(self):
         """The covariates clause names the model actually fitted: log(volume_ml), z(age) (BB-1: a run with log volume was
         described as plain lesion volume, so copied methods text reported another model).

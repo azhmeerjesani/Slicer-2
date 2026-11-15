@@ -1233,6 +1233,16 @@ def _vlsm_excluded_text(data):
     return f"{total} not analysed: {reasons}" if reasons else f"{total} not analysed"
 
 
+def _tfce_extra_text(tfce):
+    """", 100 steps, 26-connectivity" when the record has them (older records do not)."""
+    text = ""
+    if tfce.get("steps") is not None:
+        text += f", {tfce['steps']} steps"
+    if tfce.get("connectivity") is not None:
+        text += f", {tfce['connectivity']}-connectivity"
+    return text
+
+
 def vlsm_paragraph(data, run_id=None):
     """Methods text of a vlsm.json record (voxel-based lesion-symptom mapping, L-50): binary lesion masks, the design
     and contrast, the covariates, the minimum-overlap rule and the voxels it left, the permutation method, the
@@ -1258,7 +1268,7 @@ def vlsm_paragraph(data, run_id=None):
     if all_lesioned:
         text += f" ({all_lesioned} voxels lesioned in every lesion were not tested: no variance)"
     tfce_text = (
-        f"TFCE (H = {_number(tfce.get('H')) or NOT_RECORDED}, E = {_number(tfce.get('E')) or NOT_RECORDED}) with FWE from the maximum TFCE of each permutation (Smith & Nichols, 2009)"
+        f"TFCE (H = {_number(tfce.get('H')) or NOT_RECORDED}, E = {_number(tfce.get('E')) or NOT_RECORDED}{_tfce_extra_text(tfce)}) with FWE from the maximum TFCE of each permutation (Smith & Nichols, 2009)"
         if tfce.get("enabled")
         else "TFCE was not used"
     )
@@ -1270,6 +1280,8 @@ def vlsm_paragraph(data, run_id=None):
         f"Result: {_or_nr(fwe.get('n_significant'))} voxels with FWE p ≤ {alpha}, {_or_nr(fdr.get('n_significant'))} with FDR q ≤ {_number(fdr.get('alpha')) or NOT_RECORDED}; "
         f"the smallest observed FWE p was {_number(fwe.get('min_p')) or NOT_RECORDED} (the smallest attainable p is {_number(data.get('min_attainable_p', data.get('min_p'))) or NOT_RECORDED})."
     )
+    if tfce.get("enabled") and tfce.get("n_significant") is not None:
+        text += f" TFCE: {tfce['n_significant']} voxels with TFCE FWE p ≤ {alpha}; the smallest observed TFCE FWE p was {_number(tfce.get('min_p')) or NOT_RECORDED}."
     if fdr and fdr.get("enabled", True):
         # The FDR floor, as in glm_paragraph: FDR 0 next to FWE-significant voxels is often this floor, not a result
         text += f" BH-FDR reaches q ≤ {_number(fdr.get('alpha')) or 0.05} only when at least {_or_nr(fdr.get('floor_voxels'))} voxels reach the smallest attainable p (FDR floor)"
