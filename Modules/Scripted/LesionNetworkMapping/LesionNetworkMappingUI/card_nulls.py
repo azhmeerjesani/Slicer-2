@@ -925,7 +925,9 @@ class NullsCard:
             reasons.append(_("overlap criterion"))
         if record.get("sign") != sign:
             reasons.append(_("sign"))
-        if int(record.get("k") or 0) != self.kValue() and not (self.kind == "rl_cohort_shift" and self.effectiveMode() == "exact"):
+        # K asked for: a run can finish with fewer null cohorts (for example few shared cohort shifts fit), so compare what was requested
+        requestedK = record.get("k_requested")
+        if int(record.get("k") or 0 if requestedK is None else requestedK) != self.kValue() and not (self.kind == "rl_cohort_shift" and self.effectiveMode() == "exact"):
             reasons.append("K")
         if record.get("k_pool") is not None and self.usesPool() and int(record["k_pool"]) != int(self.kPoolSpin.value):
             reasons.append("K_pool")

@@ -719,6 +719,26 @@ class QaGroupChipFastModeTest(unittest.TestCase):
         self.assertNotIn("μC_r, ", card.groupQaText(group, strength="abs").split("r(group map")[0])
         self.assertIn("mean connectivity, μC_r", card.groupQaText(group, strength="signed"))
 
+    def test_nulls_card_fast_cohort_shift_with_fewer_shifts_is_not_stale(self):
+        """BB-1 cohort-shift-fast-permanent-stale-k: a run that kept K = 3 of 200 requested is not marked stale."""
+        import types
+
+        from LesionNetworkMappingLib import thresholds
+        from LesionNetworkMappingUI import card_nulls
+
+        card = card_nulls.NullsCard
+        fake = types.SimpleNamespace(kind="rl_cohort_shift", kPoolSpin=types.SimpleNamespace(value=2000), seedSpin=types.SimpleNamespace(value=0))
+        fake.rule = lambda: thresholds.normalize_rule(None)
+        fake.overlapSettings = lambda: (0.0, "both")
+        fake.kValue = lambda: 200
+        fake.usesPool = lambda: False
+        fake.effectiveMode = lambda: "fast"
+        record = {"rule": thresholds.normalize_rule(None), "overlap_pct": 0, "sign": "both", "k": 3, "k_requested": 200, "seeds": {"seed": 0}, "kind": "rl_cohort_shift"}
+        self.assertEqual(card.staleReasons(fake, record), [])
+        fake.kValue = lambda: 100
+        self.assertEqual(card.staleReasons(fake, record), ["K"])
+        self.assertEqual(card.staleReasons(fake, {key: value for key, value in record.items() if key != "k_requested"}), ["K"])  # older record: K itself
+
     def test_nulls_card_labels_fast_group_qa(self):
         from LesionNetworkMappingUI import card_nulls
 
