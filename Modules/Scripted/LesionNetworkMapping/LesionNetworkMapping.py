@@ -1534,6 +1534,18 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
                         info["lesion"] = lesionPath if os.path.isfile(lesionPath) else None
                 except (OSError, ValueError, TypeError):
                     pass
+        else:
+            # A group map of a pipeline run (``group_..._map.nii.gz``) has a ``<map>.json`` sidecar with the number of lesion maps:
+            # that is its N (a GLM with covariates has df = N - 1 - covariates, so df + 1 would understate it)
+            groupSidecar = re.sub(r"(?i)\.nii(\.gz)?$", "", os.path.abspath(path)) + ".json"
+            try:
+                with open(groupSidecar, encoding="utf-8") as f:
+                    record = json.load(f)
+                if record.get("format") == "slicer-lnm-group-map" and int(record.get("n_maps") or 0) > 0:
+                    info["n"] = int(record["n_maps"])
+                    info["groupSidecar"] = groupSidecar
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
         try:
             header = nifti.read_nifti_header(path)
         except Exception:
@@ -1541,6 +1553,8 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
         if header is not None:
             if match is None and header.get("intent_code") not in (3, 5):
                 info["statistic"] = "r" if header.get("intent_code") == 2 else "T"
+            if header.get("intent_code") == 3 and header["intent_params"][0] > 0:
+                info["df"] = round(header["intent_params"][0])
             if info["n"] is None and header.get("intent_code") == 3 and header["intent_params"][0] > 0:
                 info["n"] = round(header["intent_params"][0]) + 1
         if info["n"] is None and info["siblings"].get("T") and os.path.normpath(info["siblings"]["T"]) != info["path"]:
@@ -6410,6 +6424,12 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         """
         from LesionNetworkMappingLib import thresholds
 
+        df = self.loadedMap.get("df") if self.loadedMap is not None and self.loadedMap.get("groupSidecar") else None
+        if df and n and n != df + 1:
+            # a group map whose N (lesion maps) differs from df + 1 (covariates): the T quantiles use the map's own df
+            import dataclasses
+
+            return dataclasses.replace(self._resolveRule(rule, df + 1, values, note), n=n)
         if self.loadedMap is not None and not self._loadedOnBundleGrid():
             v = len(values) if values is not None else 0
             if not v:
