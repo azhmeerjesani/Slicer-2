@@ -324,6 +324,13 @@ class StudyLinkTest(ControlSetsTestBase):
         self.assertEqual(row["hemisphere"], "L")
         self.assertEqual(float(row["volume_ml"]), entry["lesions"][0]["volume_ml"])
         self.assertEqual(reopened.subject("sub-Ferguson490ctl006")["dimensionality"], "2D")
+        # The linked rows carry the file stamp, so a run does not measure the control lesions again
+        from LesionNetworkMappingLib import preflight
+
+        crows = [r for r in reopened.subjects if r["group"] == "control"]
+        self.assertEqual(len(crows), self.n_usable)
+        for crow in crows:
+            self.assertTrue(preflight.metrics_fresh(crow, os.stat(reopened.abspath(crow["lesion"]))), crow["participant_id"])
         with open(os.path.join(study.path, "participants.tsv"), encoding="utf-8") as f:
             self.assertNotIn(self.data, f.read())  # no absolute local path in the shared table
         # The control lesions are found by the analyses (cohortmaps' study rows)

@@ -1454,6 +1454,13 @@ class Study:
                 "dimensionality": lesion.get("dimensionality"),
                 "hemisphere": lesion.get("hemisphere"),
             }
+            # The file's size and time (not paths): a run then trusts the cached metrics instead of measuring every control again
+            try:
+                stat = os.stat(controlsets.resolve_path(values["lesion"], root or self.controlset_root))
+                values["lesion_mtime"] = stat.st_mtime
+                values["lesion_size"] = stat.st_size
+            except OSError:
+                values["lesion_mtime"] = values["lesion_size"] = None
             sid = linked.get(lesion["id"])
             if sid is not None:
                 self.set(sid, values)
