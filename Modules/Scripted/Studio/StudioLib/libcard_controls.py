@@ -210,7 +210,7 @@ def mismatchLines(report, flag=SMD_FLAG):
     if family.get("differ"):
         lines.append((_("Template family differs: set {setSpace}, study {studySpace}").format(setSpace=family["set_space"], studySpace=family["study_space"]), "warning"))
     elif family.get("study_space"):
-        lines.append((_("Same template family ({family})").format(family=family["set"]), "text2"))
+        lines.append((_("Same template family ({family})").format(family=_lnm("geometry").family_name(family["set"])), "text2"))
     return lines
 
 

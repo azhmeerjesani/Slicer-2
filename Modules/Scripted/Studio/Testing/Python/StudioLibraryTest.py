@@ -2836,6 +2836,14 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             ],
         )
 
+    def test_control_set_card_names_the_template_family_readably(self):
+        """The 'Same template family' line gives the family name (MNI152NLin6Asym), not the internal id (fsl6)."""
+        from StudioLib import libcard_controls
+
+        report = {"covariates": {}, "family": {"set": "fsl6", "study": "fsl6", "set_space": "NLin6", "study_space": "NLin6", "differ": False}}
+        lines = libcard_controls.mismatchLines(report)
+        self.assertEqual(lines, [("Same template family (MNI152NLin6Asym)", "text2")])
+
     def test_control_set_link_toast_gives_the_reason_when_nothing_is_linked(self):
         """A set whose ids clash with the study's subjects links nothing: the toast says why, not '0 control rows updated'."""
         import types
