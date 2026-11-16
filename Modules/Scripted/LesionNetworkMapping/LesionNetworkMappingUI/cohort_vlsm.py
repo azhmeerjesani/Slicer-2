@@ -817,8 +817,8 @@ class VlsmTab(CohortTab):
             return None
         return (x, y, z)
 
-    def _showFirstMap(self):
-        super()._showFirstMap()
+    def afterFirstMapLayers(self):
+        # After the layers are final: the first run of a session loads the template later, and that re-fits the views
         if not self._cleanedUp:
             self.jumpToCluster()
 

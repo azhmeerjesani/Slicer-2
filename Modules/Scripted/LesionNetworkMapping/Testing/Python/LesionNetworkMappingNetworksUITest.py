@@ -521,6 +521,72 @@ class LesionNetworkMappingNetworksUITest(unittest.TestCase):
             slicer.app.processEvents()
             shutil.rmtree(folder, ignore_errors=True)
 
+    def test_group_map_callback_runs_after_the_deferred_template_layers(self):
+        """While the template is not loaded yet (the first run of a Studio session), showGroupFile loads it and sets the
+        slice layers in a later event loop pass, which re-fits the views: ``onLayers`` (the VLSM view jump) runs after
+        that pass, not before it, so the jump is not undone.
+        """
+        import os
+        import shutil
+        import tempfile
+        from types import SimpleNamespace
+        from unittest import mock
+
+        import numpy as np
+
+        from LesionNetworkMappingLib import display, nifti
+        from LesionNetworkMappingUI import cohort_contrast
+        from StudioLib import mappage
+
+        widget = slicer.modules.LesionNetworkMappingWidget
+        cohortCard = widget.ctx.card("cohort")
+        folder = tempfile.mkdtemp(prefix="lnm-group-onlayers-")
+        try:
+            data = np.zeros((6, 6, 6), dtype=np.float32)
+            data[2:4, 2:4, 2:4] = 1.0
+            path = os.path.join(folder, "map.nii.gz")
+            nifti.write_nifti(path, data, np.eye(4))
+            bundle = SimpleNamespace(name="B", path=folder, shape=data.shape, affine=np.eye(4), metadata={})
+            shell = mock.MagicMock()
+            shell.currentWorkspace.return_value = "map"
+            events = []
+            template = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "TestTemplate")
+
+            class Context:
+                def __init__(self, ctx):
+                    self._ctx = ctx
+                    self.bundle = bundle
+
+                def __getattr__(self, name):
+                    return getattr(self._ctx, name)
+
+                def shell(self):
+                    return shell
+
+            def templateVolume(bundle=None, load=True):
+                return template if load else None
+
+            with mock.patch.object(mappage, "templateVolume", templateVolume), \
+                    mock.patch.object(mappage, "captureLayers", lambda: None), \
+                    mock.patch.object(display, "showLayers", lambda *args: events.append("layers")):
+                volume = cohort_contrast.showGroupFile(Context(cohortCard.ctx), path, "overlapPct", "Group onLayers",
+                                                       onLayers=lambda: events.append("callback"))
+                self.assertIsNotNone(volume)
+                self.assertNotIn("callback", events, "the callback must wait for the deferred template layers")
+                deadline = time.time() + 5
+                while "callback" not in events and time.time() < deadline:
+                    slicer.app.processEvents()
+                    time.sleep(0.01)
+            self.assertEqual(events, ["layers", "layers", "callback"])
+        finally:
+            slicer.mrmlScene.RemoveNode(template)
+            for node in list(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")):
+                if node.GetAttribute(cohort_contrast.GROUP_VOLUME_ATTRIBUTE) == "1":
+                    slicer.mrmlScene.RemoveNode(node)
+            cohortCard.groupVolumeId = None
+            slicer.app.processEvents()
+            shutil.rmtree(folder, ignore_errors=True)
+
     def test_2009_family_map_uses_the_2009c_atlases(self):
         """A map of the 2009 template family (the bundled MNI152NLin2009cAsym template's) is labelled and split into
         networks with the catalog's 2009c atlases (Schaefer, Tian S1), which the Atlases menu and Get atlases offer;

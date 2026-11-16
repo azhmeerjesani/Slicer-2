@@ -1031,7 +1031,10 @@ class CohortTab:
 
     def _showFirstMap(self):
         if not self._cleanedUp and self.outputs:
-            self.showMap(0)
+            self.showMap(0, onLayers=self.afterFirstMapLayers)
+
+    def afterFirstMapLayers(self):
+        """Called when the layers of the first map of a finished run are final (nothing by default)."""
 
     def readResult(self, folder):
         raise NotImplementedError
@@ -1067,12 +1070,13 @@ class CohortTab:
     def onMapClicked(self, row, column):
         self.showMap(row)
 
-    def showMap(self, index):
+    def showMap(self, index, onLayers=None):
         """Show one output map in the Cohort card's group map volume; return the volume."""
         if not 0 <= index < len(self.outputs):
             return None
         desc, text, path = self.outputs[index]
-        volume = showGroupFile(self.ctx, path, desc, f"{self.TITLE}: {text}", scopeOf=self.connectomeDir, space=self.mapSpace())
+        volume = showGroupFile(self.ctx, path, desc, f"{self.TITLE}: {text}", scopeOf=self.connectomeDir, space=self.mapSpace(),
+                               onLayers=onLayers)
         if volume is not None:
             self.mapsTable.selectRow(index)
         return volume
@@ -1133,12 +1137,14 @@ def groupVolume(ctx):
     return None
 
 
-def showGroupFile(ctx, path, desc, name, scopeOf=None, space=CONNECTOME_SPACE):
+def showGroupFile(ctx, path, desc, name, scopeOf=None, space=CONNECTOME_SPACE, onLayers=None):
     """Show a group map file in the group map volume with its own colour table copy (``display.applyGroupMapDisplay``),
     over the template; return the volume, or None. ``scopeOf()`` gives the folder of the results the map belongs to (the
     tab's ``connectomeDir``): when it changes (another study or connectome), the map leaves the slice views.
     ``space`` is the map's template space (``Studio.Space``): ``CONNECTOME_SPACE`` (default) for the cohort's connectome's, None
     for none (the attribute is removed and the grid is recognised from the file).
+    ``onLayers()`` is called once the slice layers are final: at once, or after the deferred template step (which re-fits
+    the views), so that a view jump made by the caller is not undone.
     """
     from LesionNetworkMappingLib import display
 
@@ -1168,6 +1174,7 @@ def showGroupFile(ctx, path, desc, name, scopeOf=None, space=CONNECTOME_SPACE):
     node = ctx.parameterNode
     opacity = getattr(node, "opacity", 0.8) if node is not None else 0.8
     mappage = None
+    deferred = False
     if ctx.shell() is not None:
         try:
             from StudioLib import mappage
@@ -1191,13 +1198,18 @@ def showGroupFile(ctx, path, desc, name, scopeOf=None, space=CONNECTOME_SPACE):
                     shown = slicer.mrmlScene.GetNodeByID(volumeId)
                     if shown is not None and loaded is not None and loaded.GetScene() is not None:
                         display.showLayers(loaded, shown, opacity)
+                    if onLayers is not None:
+                        onLayers()
 
                 qt.QTimer.singleShot(TEMPLATE_LAYER_DELAY_MS, layers)
 
             qt.QTimer.singleShot(0, showTemplate)
+            deferred = True
     else:
         template = widget.logic.templateVolume()
     display.showLayers(template, volume, opacity)
+    if onLayers is not None and not deferred:
+        onLayers()
     return volume
 
 
