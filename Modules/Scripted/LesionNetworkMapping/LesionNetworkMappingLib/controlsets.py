@@ -100,11 +100,47 @@ class AmbiguousSpaceError(ValueError):
 # Registry location
 
 
-def default_data_directory():
-    """The default ``Studio/LNM/DataDirectory`` without Qt: /data/SlicerStudio in the web or Docker build, else ~/Documents/SlicerStudio."""
-    if os.environ.get("SLICER_STUDIO_WEB") or os.path.exists("/.dockerenv"):
+#: The Slicer Studio folder (StudioLib.projects, without Qt): $SLICER_STUDIO_PROJECTS_ROOT, else <Documents>/Slicer Studio
+#: (/data/Slicer Studio in the web build); the data directory's default is its LNM folder (A-09, D-A16)
+STUDIO_ROOT_ENV = "SLICER_STUDIO_PROJECTS_ROOT"
+STUDIO_FOLDER_NAME = "Slicer Studio"
+STUDIO_LNM_DIR = "LNM"
+
+
+def _is_web_build():
+    return bool(os.environ.get("SLICER_STUDIO_WEB")) or os.path.exists("/.dockerenv")
+
+
+def legacy_data_directory():
+    """The default ``Studio/LNM/DataDirectory`` before A-09: /data/SlicerStudio in the web or Docker build, else
+    <Documents>/SlicerStudio.
+    """
+    if _is_web_build():
         return "/data/SlicerStudio"
     return os.path.join(_documents_directory(), "SlicerStudio")
+
+
+def default_data_directory():
+    """The default ``Studio/LNM/DataDirectory`` without Qt, as the application gives it when the setting is unset
+    (``normalize_controller.dataDirectory``): the former default folder (:func:`legacy_data_directory`) when it already
+    holds data, else <Slicer Studio folder>/LNM, where the Slicer Studio folder is $SLICER_STUDIO_PROJECTS_ROOT, else
+    <Documents>/Slicer Studio (/data/Slicer Studio in the web build). The settings themselves (a data directory or a
+    Slicer Studio folder chosen in the application) are not read here: :data:`ENV_ROOT` names another registry.
+    """
+    legacy = legacy_data_directory()
+    try:
+        if os.path.isdir(legacy) and os.listdir(legacy):
+            return legacy
+    except OSError:
+        pass
+    studio = os.environ.get(STUDIO_ROOT_ENV, "").strip()
+    if studio:
+        studio = os.path.normpath(os.path.abspath(os.path.expanduser(studio)))
+    elif _is_web_build():
+        studio = "/data/" + STUDIO_FOLDER_NAME
+    else:
+        studio = os.path.join(_documents_directory(), STUDIO_FOLDER_NAME)
+    return os.path.join(studio, STUDIO_LNM_DIR)
 
 
 def _documents_directory():
@@ -874,6 +910,33 @@ def is_control_row(row, name=None):
 def linked_rows(study, name=None):
     """The study rows linked from control sets (from the set ``name``)."""
     return [row for row in study.subjects if is_control_row(row, name)]
+
+
+def unregistered_sets(study, root=None, participants=None):
+    """{name: [participant ids]} of the control sets that a study's included rows link but that are not registered in
+    the registry (``root``, else the study's ``controlset_root``, else :func:`registry_root`'s default): a study made
+    with another registry (the application's) opened where that registry is not named (:data:`ENV_ROOT`).
+
+    :param participants: only these participant ids (None: every row).
+    """
+    root = root if root is not None else getattr(study, "controlset_root", None)
+    registry = registry_root(root)
+    found = {}
+    for row in linked_rows(study):
+        if participants is not None and row["participant_id"] not in participants:
+            continue
+        if str(row.get("include", "1")).strip().lower() in ("0", "false", "no"):
+            continue
+        name = parse_path(row["lesion"])[0]
+        if name not in found:
+            try:
+                load(name, registry)
+                found[name] = None
+            except (OSError, ValueError, KeyError):
+                found[name] = []
+        if found[name] is not None:
+            found[name].append(row["participant_id"])
+    return {name: sids for name, sids in found.items() if sids}
 
 
 def rename_sets_in_study(study, names):

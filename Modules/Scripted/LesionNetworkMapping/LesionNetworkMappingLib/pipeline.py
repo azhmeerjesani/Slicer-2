@@ -1149,6 +1149,48 @@ def _primary_rule_refused(config, n, v):
     return f"The threshold rule {thresholds.rule_label(rule)} cannot be used: {resolved.banner or f'it is not allowed for N = {n}.'}"
 
 
+def _reproduce_controlset_lines(study):
+    """reproduce_pipeline.sh lines that name the control-set registry of a run (the study's linked ``controlset:`` rows
+    resolve there) unless $SLICER_STUDIO_CONTROLSETS names another one; none for a study without linked sets.
+    """
+    from . import controlsets
+
+    if study is None or not controlsets.linked_rows(study):
+        return []
+    registry = controlsets.registry_root(getattr(study, "controlset_root", None))
+    variable = controlsets.ENV_ROOT
+    return [
+        f"# The study links control sets: their lesions are read from this control-set registry (${variable} names another one).",
+        f"DEFAULT_{variable}={shlex.quote(registry)}",
+        f'{variable}="${{{variable}:-$DEFAULT_{variable}}}"',
+        f"export {variable}",
+    ]
+
+
+def _unregistered_control_sets_block(study, selected=None):
+    """The run-level block of control sets that the study links but the control-set registry in use does not hold, or
+    None. Their rows would otherwise be excluded one by one ("lesion file missing") and the run would analyse another
+    cohort (no controls: no case-control GLM) with exit code 0, as a terminal run without the application's registry did.
+    """
+    from . import controlsets
+
+    try:
+        missing = controlsets.unregistered_sets(study, participants=selected)
+    except Exception:  # an unreadable registry: the row checks report the files
+        return None
+    if not missing:
+        return None
+    names = ", ".join(sorted(missing))
+    n = sum(len(sids) for sids in missing.values())
+    plural = len(missing) > 1
+    return {"id": "control_set_unregistered",
+            "message": (f"The control set{'s' if plural else ''} {names} linked by this study {'are' if plural else 'is'} not in the control-set registry "
+                        f"used by this run, so {n} control lesion{'s' if n != 1 else ''} would be left out. Name the registry the study was made with "
+                        f"(Slicer Studio: <Slicer Studio folder>/LNM/ControlSets) in the environment variable {controlsets.ENV_ROOT}, or register "
+                        f"the set{'s' if plural else ''} again."),
+            "fix": f"Set {controlsets.ENV_ROOT}"}
+
+
 def _builtin_row_checks(study, config):
     """{sid: reason} of the rows the plan's own checks exclude (the fallback of preflight.run_preflight)."""
     from . import nifti
@@ -1337,6 +1379,9 @@ def plan(config, hash_lesions=True, providers=None):
         excluded = _builtin_row_checks(checked, config)
     if selected is not None:
         excluded.update((sid, NOT_SELECTED) for sid in study.subject_ids if sid not in selected)
+    block = _unregistered_control_sets_block(study, selected)
+    if block:
+        blocks.append(block)
 
     rows = []
     for row in study.subjects:
@@ -3498,6 +3543,7 @@ class Runner:
             f"DEFAULT_PYTHONSLICER={shlex.quote(pythonslicer)}",
             f"DEFAULT_SLICER_LNM={shlex.quote(slicer_lnm)}",
             'OUT="${OUT:-reproduced}"',
+            *_reproduce_controlset_lines(getattr(self, "study", None)),
             f"DEFAULT_LNM_LIBRARY_DIR={shlex.quote(LIB_PARENT)}",
             'LNM_LIBRARY_DIR="${LNM_LIBRARY_DIR:-$DEFAULT_LNM_LIBRARY_DIR}"',
             'LNM_ENTRY=""',

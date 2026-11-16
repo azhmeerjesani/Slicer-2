@@ -637,6 +637,46 @@ class CacheTest(ControlSetsTestBase):
         record = cohortmaps.read_record(os.path.join(pipeline.default_out(config, self.bundle.name), pipeline.STAGES_DIR, "cohortmaps", cohortmaps.COHORTMAPS_JSON))
         self.assertIsNotNone(record, result.stdout[-2000:] + result.stderr[-2000:])
         self.assertEqual((record["lesions"]["cache_hits"], record["lesions"]["computed"]), (self.n_usable, len(cases)), result.stderr[-2000:])
+        # reproduce_pipeline.sh names the registry the linked controls were read from (unless $SLICER_STUDIO_CONTROLSETS is set)
+        with open(os.path.join(pipeline.default_out(config, self.bundle.name), pipeline.REPRODUCE_PIPELINE), encoding="utf-8") as f:
+            script = f.read()
+        self.assertIn(f"DEFAULT_{controlsets.ENV_ROOT}={self.root}\n", script)
+        self.assertIn(f'{controlsets.ENV_ROOT}="${{{controlsets.ENV_ROOT}:-$DEFAULT_{controlsets.ENV_ROOT}}}"\nexport {controlsets.ENV_ROOT}\n', script)
+
+    def test_run_without_the_studys_registry_stops(self):
+        """Bug headless-pipeline-reproduce-controlset-registry-default-differs-drops-all-controls: a study made in the
+        application, run from a terminal (or its reproduce_pipeline.sh) where the registry was not named, excluded every
+        linked control ("lesion file missing"), skipped the GLM and ended with exit code 0. The run now stops.
+        """
+        from LesionNetworkMappingLib import pipeline
+
+        self.register("Ferguson490")
+        study = self.study("A", cases=[((-8.0, 0.0, 0.0), 5.0), ((8.0, 0.0, 0.0), 5.0), ((0.0, 8.0, 0.0), 5.0)])
+        study.link_control_set("Ferguson490")
+        study.save()
+        home = self.path("home")
+        env = {key: value for key, value in os.environ.items() if key not in (controlsets.ENV_ROOT, controlsets.STUDIO_ROOT_ENV, "XDG_CONFIG_HOME")}
+        env.update(HOME=home, SLICER_LNM_OFFLINE="1", PYTHONPATH=MODULE_DIR + os.pathsep + os.environ.get("PYTHONPATH", ""))
+        Study.controlset_root = None
+        self.addCleanup(controlsets.set_data_directory_resolver, controlsets._data_directory_resolver)
+        controlsets.set_data_directory_resolver(None)
+        args = ["run", "--study", study.path, "--bundle", self.bundle.path, "--accept-terms", "--null-relocations", "0"]
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(controlsets.unregistered_sets(Study.open(study.path)), {"Ferguson490": [row["participant_id"] for row in controlsets.linked_rows(study)]})
+            planned = pipeline.plan(pipeline.config_from_args(pipeline._parser().parse_args(args)))
+        self.assertEqual(planned.exit_code, pipeline.EXIT_BLOCKED)
+        self.assertEqual([block["id"] for block in planned.blocks], ["control_set_unregistered"])
+        self.assertIn("Ferguson490", planned.blocks[0]["message"])
+        self.assertIn(controlsets.ENV_ROOT, planned.blocks[0]["message"])
+        self.assertNotIn(self.tmp, planned.blocks[0]["message"])
+        result = subprocess.run([sys.executable, "-m", "LesionNetworkMappingLib.pipeline", *args, "--events", "json", "--nulls", "off", "--no-report"],
+                                cwd=MODULE_DIR, env=env, capture_output=True, text=True, encoding="utf-8", timeout=900, check=False)
+        self.assertEqual(result.returncode, pipeline.EXIT_BLOCKED, result.stdout[-2000:] + result.stderr[-2000:])
+        self.assertNotIn('"event": "done"', result.stdout)
+        # With the registry named, the same plan maps every linked control
+        with mock.patch.dict(os.environ, dict(env, **{controlsets.ENV_ROOT: self.root}), clear=True):
+            planned = pipeline.plan(pipeline.config_from_args(pipeline._parser().parse_args(args)))
+        self.assertEqual((planned.blocks, planned.count("excluded")), ([], 0))
 
 
 if __name__ == "__main__":

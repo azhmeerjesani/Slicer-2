@@ -66,6 +66,39 @@ class RegistryRootResolverTest(unittest.TestCase):
                 controlsets.set_data_directory_resolver(resolver)
                 self.assertEqual(controlsets.registry_root(), default)
 
+    def test_default_is_the_applications_default(self):
+        """Bug headless-pipeline-reproduce-controlset-registry-default-differs-drops-all-controls: outside the application
+        the default was <Documents>/SlicerStudio/ControlSets, the application's <Slicer Studio folder>/LNM/ControlSets.
+        """
+        home = os.path.join(self.tmp, "home")
+        env = {key: value for key, value in os.environ.items() if key not in (controlsets.ENV_ROOT, controlsets.STUDIO_ROOT_ENV, "XDG_CONFIG_HOME", "SLICER_STUDIO_WEB")}
+        env["HOME"] = home
+        controlsets.set_data_directory_resolver(None)
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch("sys.platform", "linux"):
+            documents = os.path.join(home, "Documents")
+            self.assertEqual(controlsets.default_data_directory(), os.path.join(documents, "Slicer Studio", "LNM"))
+            self.assertEqual(controlsets.registry_root(), os.path.join(documents, "Slicer Studio", "LNM", controlsets.REGISTRY_DIR))
+            # The Slicer Studio folder named by the environment (as in the application)
+            with mock.patch.dict(os.environ, {controlsets.STUDIO_ROOT_ENV: os.path.join(self.tmp, "studio")}):
+                self.assertEqual(controlsets.default_data_directory(), os.path.join(self.tmp, "studio", "LNM"))
+            # The former default folder stays in use when it holds data (normalize_controller.dataDirectory)
+            os.makedirs(os.path.join(documents, "SlicerStudio", controlsets.REGISTRY_DIR))
+            self.assertEqual(controlsets.default_data_directory(), os.path.join(documents, "SlicerStudio"))
+
+    @unittest.skipUnless(HAS_APP, "needs the Slicer application")
+    def test_matches_the_applications_default(self):
+        import qt
+
+        from LesionNetworkMappingUI import normalize_controller
+
+        from StudioLib import projects
+
+        if not projects.isEnabled():
+            self.skipTest("Classic: the data directory is the former default")
+        if qt.QSettings().value("Studio/LNM/DataDirectory") or (not os.environ.get(controlsets.STUDIO_ROOT_ENV) and qt.QSettings().value("Studio/Projects/Root")):
+            self.skipTest("a data directory or Slicer Studio folder is set in the settings")
+        self.assertEqual(os.path.normpath(controlsets.default_data_directory()), os.path.normpath(normalize_controller.dataDirectory()))
+
 
 @unittest.skipUnless(HAS_APP, "needs the Slicer application")
 class ApplicationRegistryRootTest(unittest.TestCase):
