@@ -4,6 +4,11 @@ A circuit seeded from a cluster (or the peak of a cluster) of the Fz-thresholded
 (circuit.json ``parent`` and the Circuits card's "from ..."), although the cluster was cut from the Fz map. The parent is now the
 run output of the statistic the cluster source was made from: T, Fz (``_desc-AvgRFz``) or r (``_desc-AvgR``).
 
+A map file shown as the result without a run (``showMapFile``: the Circuits card's Show, Library, browsing) gave no parent at
+all, so a circuit cut from a circuit's own T map lost its lineage and could be declared frozen and tested on the same lesions
+(bug seed-this-circuits-with-local-connectome:circuits-cluster-of-shown-circuit-loses-provenance-frozen-allows-double-dipping).
+The parent is now the shown file, or its sibling of the cluster's statistic.
+
 Needs the Slicer application::
 
     python3 Utilities/Scripts/StudioTestRunner.py --home $(mktemp -d) unittest LesionNetworkMapping LesionNetworkMappingCircuitsParentTest
@@ -89,6 +94,31 @@ class CircuitsParentTest(unittest.TestCase):
             handle.write(b"x")
         card.ctx.currentRun.outputs = [self.paths["T"], preview]
         self.assertEqual(card.seedSource().parent, preview)
+
+    def _shownMapCard(self, statistic, kind, loaded):
+        """A card whose result is a map file shown without a run (``currentRun`` None, the widget's ``loadedMap`` set)."""
+        card = self._card(statistic, kind)
+        card.ctx.currentRun = None
+        widget = types.SimpleNamespace(loadedMap=loaded)
+        original = self.module.mapWidget
+        self.module.mapWidget = lambda: widget
+        self.addCleanup(setattr, self.module, "mapWidget", original)
+        return card
+
+    def test_shown_map_file_is_the_parent(self):
+        loaded = {"path": self.paths["T"], "statistic": "T", "siblings": dict(self.paths)}
+        for kind in ("cluster", "peak"):
+            with self.subTest(kind=kind):
+                self.assertEqual(self._shownMapCard("T", kind, loaded).seedSource().parent, self.paths["T"])
+
+    def test_shown_map_file_sibling_of_the_cluster_statistic(self):
+        loaded = {"path": self.paths["T"], "statistic": "T", "siblings": dict(self.paths)}
+        self.assertEqual(self._shownMapCard("Fz", "cluster", loaded).seedSource().parent, self.paths["Fz"])
+        loaded = {"path": self.paths["T"], "statistic": "T", "siblings": {"T": self.paths["T"]}}
+        self.assertIsNone(self._shownMapCard("Fz", "cluster", loaded).seedSource().parent)
+
+    def test_no_run_and_no_shown_map_gives_no_parent(self):
+        self.assertIsNone(self._shownMapCard("T", "cluster", None).seedSource().parent)
 
 
 if __name__ == "__main__":

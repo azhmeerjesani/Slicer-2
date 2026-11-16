@@ -575,6 +575,15 @@ class CircuitsCard:
             match = re.search(r"_desc-(AvgRFz|AvgR|T)(?=[^A-Za-z]|PreviewN|Subset|_funcmap)", os.path.basename(path))
             if match and match.group(1) == label and os.path.isfile(path):
                 return path
+        if run is None:
+            # A map file shown as the result (Library, browsing, this card's Show) has no run: its file, or its sibling
+            # of ``statistic``, is the parent, so a circuit cut from a circuit's map keeps that circuit's lineage
+            widget = mapWidget()
+            loaded = getattr(widget, "loadedMap", None) if widget is not None else None
+            if loaded:
+                path = loaded.get("path") if loaded.get("statistic") == statistic else (loaded.get("siblings") or {}).get(statistic)
+                if path and os.path.isfile(path):
+                    return path
         return None
 
     def mapSigns(self, path):
