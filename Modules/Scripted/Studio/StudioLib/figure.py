@@ -339,6 +339,16 @@ def canTrace(sourceVolumeNode=None):
 #
 
 
+def sideAnswerFromState(panel, state):
+    """Whether a rebuilt ``panel`` has its own side answer: the saved "side_answered" when it is there (a sagittal panel
+    that only took the paper's side is not answered), else (files saved before it was kept) a confirmed sagittal side.
+    """
+    if not (panel.ownSide and panel.confirmed):
+        return False
+    answered = state.get("side_answered") if isinstance(state, dict) else None
+    return bool(answered) if isinstance(answered, bool) else True
+
+
 class Panel:
     """One figure panel: its crop volume, placement transform, landmark lists, cut plane and fit."""
 
@@ -524,6 +534,8 @@ class Panel:
             "plane": self.plane, "z_mm": self.z, "pitch_deg": self.pitch, "roll_deg": self.roll, "model": self.model,
             "convention": self.convention, "crop_px": list(self.cropPx), "figure": self.label, "panel": self.panelLabel,
             "source_name": self.sourceName,
+            # A sagittal panel that only took the paper's side keeps following it after a reopen (``sideAnswerFromState``)
+            "side_answered": bool(self.sideAnswered),
             "landmarks": [{"name": name, "fig_px": [float(value) for value in pixel], "tpl_ras": [float(value) for value in point]}
                           for name, pixel, point in zip(names, pixels, points, strict=True)],
         }
@@ -1650,7 +1662,7 @@ class FigureSession:
             z_mm=panel.z, pitch_deg=panel.pitch, roll_deg=panel.roll)
         # Unknown keys are kept by the fit file format: the confirmation, the labels and the source's file name (no path)
         record.update({"convention_confirmed": panel.confirmed, "figure": panel.label, "panel": panel.panelLabel,
-                       "source_name": panel.sourceName, "panel_index": panel.index})
+                       "source_name": panel.sourceName, "panel_index": panel.index, "side_answered": bool(panel.sideAnswered)})
         if self.sid:
             record["participant_id"] = self.sid
         return record
@@ -1790,7 +1802,7 @@ class FigureSession:
         panel = self.addPanel(figureNode, select=False)
         panel.cropPath = pngPath
         panel.plane = state.get("plane", "axial")
-        panel.sideAnswered = panel.ownSide and panel.confirmed
+        panel.sideAnswered = sideAnswerFromState(panel, state)
         cut = state.get("cut_plane") or state
         panel.z = float(cut.get("z_mm", 0.0))
         panel.pitch = float(cut.get("pitch_deg", 0.0))
@@ -1874,7 +1886,7 @@ class FigureSession:
                              (TEMPLATE_LANDMARKS_REFERENCE, panel.templateLandmarksId)):
             figureNode.SetNodeReferenceID(role, nodeId)
         panel.plane = state.get("plane") if state.get("plane") in PLANE_TITLES else "axial"
-        panel.sideAnswered = panel.ownSide and panel.confirmed
+        panel.sideAnswered = sideAnswerFromState(panel, state)
         panel.z = float(state.get("z_mm", 0.0))
         panel.pitch = float(state.get("pitch_deg", 0.0))
         panel.roll = float(state.get("roll_deg", 0.0))

@@ -3151,6 +3151,77 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(sagittal.convention, "radiological")
         self.assertFalse(sagittal.sideAnswered)
 
+    def test_33d3_figure_sagittal_default_side_is_not_answered_after_a_reopen(self):
+        """A sagittal panel that only took the paper's side still follows it after the tracing is resumed from the scene
+        or rebuilt from a saved state, and still asks where anterior is; one answered for itself stays answered
+        (BB-1 figure-sagittal-default-side-reads-confirmed-for-this-panel-after-reopen).
+        """
+        import os
+        import tempfile
+
+        if not _hasFigureTracing():
+            self.skipTest("figure tracing is not in this build")
+        from StudioLib import figure, importer
+
+        studioShell = self._applyStudio()
+        self._startOnTemplate(studioShell)
+        self.addCleanup(lambda: figure.closeFigure(removeNodes=True))
+        directory = tempfile.mkdtemp(prefix="StudioTestFigureSagittalReopen", dir=slicer.app.temporaryPath)
+        paths = []
+        for name in ("paper_fig3a.png", "paper_fig3b.png", "paper_fig3c.png"):
+            image = qt.QImage(200, 220, qt.QImage.Format_RGB32)
+            image.fill(qt.QColor(20, 20, 20))
+            paths.append(os.path.join(directory, name))
+            self.assertTrue(image.save(paths[-1]))
+        # Panel 1 axial (the paper's side: radiological), panel 2 sagittal with the paper's side only, panel 3 sagittal
+        # answered for itself (anterior on the right)
+        importer.handleDrop([paths[0]], shell=studioShell)
+        self._pump(10)
+        session = figure.session()
+        session.setPlane("axial")
+        session.setConvention("radiological")
+        for path, answer in ((paths[1], None), (paths[2], "neurological")):
+            session.enterTrace()
+            self._pump(6)
+            importer.handleDrop([path], shell=studioShell)
+            self._pump(10)
+            session.setPlane("sagittal")
+            if answer:
+                session.setConvention(answer)
+        self.assertEqual(len(session.panels), 3)
+        axial, inherited, answered = session.panels
+        self.assertEqual((inherited.convention, inherited.sideAnswered), ("radiological", False))
+        self.assertEqual((answered.convention, answered.sideAnswered), ("neurological", True))
+        self.assertIs(inherited.state()["side_answered"], False)
+        self.assertIs(answered.state()["side_answered"], True)
+        for panel in session.panels:
+            panel.storeState(tracing=False)
+        states = [panel.state() for panel in session.panels]
+        cropPath = session._writeCrop(inherited)
+        figure.closeFigure(resumable=True)
+        self.assertEqual(figure.resumeFromScene(shell=studioShell, enterTrace=False), 3)
+        resumed = figure.session()
+        axial, inherited, answered = resumed.panels
+        self.assertEqual((inherited.plane, inherited.convention, inherited.sideAnswered), ("sagittal", "radiological", False))
+        self.assertEqual((answered.plane, answered.convention, answered.sideAnswered), ("sagittal", "neurological", True))
+        resumed.selectPanel(1)
+        self._pump(2)
+        card = figure.card()
+        self.assertEqual(card.conventionState.text, "Taken from the paper's side: check where anterior is")
+        # The paper's side answered again on the axial panel still sets the default side, not an own answer
+        resumed.setConvention("neurological", panel=axial)
+        self.assertEqual((inherited.convention, answered.convention), ("neurological", "neurological"))
+        resumed.setConvention("radiological", panel=axial)
+        self.assertEqual((inherited.convention, answered.convention), ("radiological", "neurological"))
+        # A panel rebuilt from a saved state (a draft or a fit record) keeps it too; an older state without the key is
+        # still read as before (a confirmed sagittal side is its own)
+        rebuilt = resumed.panelFromState(states[1], cropPath, select=False, place=False)
+        self.assertEqual((rebuilt.convention, rebuilt.sideAnswered), ("radiological", False))
+        older = dict(states[1])
+        older.pop("side_answered")
+        self.assertTrue(figure.sideAnswerFromState(rebuilt, older))
+        self.assertTrue(figure.sideAnswerFromState(rebuilt, states[2]))
+
     def test_33e_figure_landmark_list_deleted_from_the_view_menu_is_replaced(self):
         """A landmark list deleted from the view menu ("Delete Point List") is replaced by an empty one: the fit is
         reset (the card no longer shows the old pairs) and "Add pair" still starts a placement.
