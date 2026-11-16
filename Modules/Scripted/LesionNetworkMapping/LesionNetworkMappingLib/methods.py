@@ -1154,6 +1154,11 @@ def statistics_section(records, used):
                 nulls = records.run_json(record, NULLS_JSON)
                 if isinstance(nulls, dict) and nulls.get("run_id") not in (None, record["id"]):
                     continue  # a later nulls run of the same kind and mode wrote its results to the same folder: only that run is cited
+            circuit = None
+            if kind == "circuits":
+                circuit = _circuit_record(records, record)
+                if circuit is False:
+                    continue  # a later circuit, damage or target run wrote its results to the same folder: only that run is cited
             if kind == "vlsm" and record["id"] not in vlsm_records:
                 other = records.run_json(record, VLSM_JSON)
                 if isinstance(other, dict) and other.get("run_id") not in (None, record["id"]):
@@ -1175,6 +1180,10 @@ def statistics_section(records, used):
                     section.paragraph(validation_paragraph(validation, record["id"]))
                 else:
                     section.paragraph(validation_summary_text(summary, records.params(record), record["id"]))
+                continue
+            if kind == "circuits":
+                # Its own paragraph from circuit.json / damage.json / targets.json (parent result, seed, connectome, provenance), never the summary keys
+                section.paragraph(circuits_paragraph(circuit, records.params(record), summary, record["id"]))
                 continue
             if kind == "robustness":
                 body = robustness_text(summary, records.params(record), records.seeds(record))
@@ -1487,6 +1496,80 @@ def validation_summary_text(summary, params=None, run_id=None):
         f"primary metric {metric}: circuit model {_number(summary.get('circuit')) or NOT_RECORDED}; Δ{metric} vs lesion volume {_number(summary.get('delta_vs_volume')) or NOT_RECORDED} ({_ci_text(summary.get('delta_ci'))}); "
         f"whole-CV bootstrap B = {_or_nr(params.get('n_boot'))}; {_p_perm_text(summary.get('p_perm'), params.get('n_perm'))}."
     )
+
+
+CIRCUIT_RECORDS = {"seed": "circuit.json", "damage": "damage.json", "targets": "targets.json"}
+CIRCUIT_SIGN_TEXT = {"both": "both signs", "pos": "positive voxels", "neg": "negative voxels"}
+CIRCUIT_PARENT_TEXT = {"circuit.json": "an earlier circuit", "cohort.json": "a cohort result", "glm.json": "a GLM result", "slnm.json": "an sLNM result",
+                       "validation.json": "a validation result", "nulls.json": "a null-model result", "cohortmaps.json": "a cohort of lesion maps",
+                       "vlsm.json": "a VLSM result", "run.json": "an engine run"}
+
+
+def _circuit_record(records, record):
+    """The result file of a circuits run (circuit.json, damage.json or targets.json by its command): a dict, None when the
+    run has no readable file, or False when a later run wrote its results to the same folder (the file names another run).
+    """
+    name = CIRCUIT_RECORDS.get((records.params(record) or {}).get("command"))
+    data = records.run_json(record, name) if name else None
+    if not isinstance(data, dict):
+        return None
+    return False if data.get("run_id") not in (None, record["id"]) else data
+
+
+def _circuit_parent_text(data):
+    parent = data.get("parent")
+    if not isinstance(parent, dict) or not (parent.get("file") or parent.get("run_id")):
+        return "no parent result recorded"
+    what = CIRCUIT_PARENT_TEXT.get(parent.get("record"), "a result map")
+    where = os.path.basename(str(parent["file"]).replace("\\", "/")) if parent.get("file") else None
+    text = f"seeded from {what}" + (f" ({where})" if where else "")
+    if parent.get("run_id"):
+        text += f", run {parent['run_id']}"
+    return text
+
+
+def _circuit_seed_text(seed):
+    seed = seed if isinstance(seed, dict) else {}
+    voxels = _number(seed.get("voxels_in_mask"))
+    if seed.get("kind") == "peak":
+        xyz = seed.get("peak_xyz")
+        where = f" at ({', '.join(_number(v) or NOT_RECORDED for v in xyz)}) mm" if isinstance(xyz, (list, tuple)) else ""
+        text = f"a spherical seed{where} of radius {_or_nr(_number(seed.get('radius_mm')))} mm"
+    else:
+        text = f"a binary seed ({CIRCUIT_SIGN_TEXT.get(seed.get('sign'), _or_nr(seed.get('sign')))} of the result)"
+    return f"{text}, {voxels or NOT_RECORDED} voxels in the connectome mask"
+
+
+def circuits_paragraph(data, params=None, summary=None, run_id=None):
+    """Methods text of a circuits run (seed-this, damage scores or stimulation targets) from its result file ``data``
+    (circuit.json, damage.json, targets.json; None when it is gone: the registry params and summary are named instead).
+    """
+    label = KIND_LABELS["circuits"]
+    params, summary = params or {}, summary or {}
+    command = params.get("command")
+    run = f"run {run_id or (data or {}).get('run_id') or NOT_RECORDED}"
+    if not isinstance(data, dict):
+        return f"{label} ({run}; result file {NOT_RECORDED}): {_generic_text(summary) or 'summary ' + NOT_RECORDED}."
+    if command == "damage":
+        circuit = data.get("circuit") or {}
+        same = data.get("provenance") == "same_cohort"
+        status = ("same-cohort circuit: the scores describe these lesions only and are not tested against an outcome of the same lesions"
+                  if same else "frozen circuit, independent of the scored lesions (" + _or_nr(data.get("provenance_basis")) + ")")
+        text = (f"{label} ({run}): damage scores of {_or_nr(data.get('n'))} lesions against the circuit {_or_nr(circuit.get('name'))} "
+                f"(sum, mean and percentage inside the circuit, residualized on {_or_nr(data.get('residualized_on'))}); {status}.")
+        return text
+    if command == "targets":
+        null = data.get("null") or {}
+        return (f"{label} ({run}): {_or_nr(data.get('n'))} user-given stimulation targets scored against {_or_nr(null.get('k'))} random gray-matter spheres of the same radius "
+                f"(seed {_or_nr(null.get('seed'))}); research use only.")
+    bundle = data.get("bundle") or {}
+    text = (f"{label} ({run}): circuit {_or_nr(data.get('name'))}, {_circuit_parent_text(data)}; {_circuit_seed_text(data.get('seed'))}; "
+            f"connectome {_or_nr(bundle.get('label') or bundle.get('name'))}, N = {_or_nr(data.get('n'))} subjects.")
+    if (data.get("source") or {}).get("known"):
+        text += " Damage scores of the lesions behind the parent result are same-cohort and descriptive only."
+    else:
+        text += " Its independence of a lesion cohort is not established (no source lesions recorded)."
+    return text
 
 
 def _generic_text(data, keys=None):

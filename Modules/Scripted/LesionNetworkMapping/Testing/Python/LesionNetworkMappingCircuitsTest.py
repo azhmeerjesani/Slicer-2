@@ -584,6 +584,31 @@ class SeedThisTest(unittest.TestCase):
         t = nifti.read_nifti(neg["maps"]["T"])[0].reshape(-1)[bundle.mask_indices]
         self.assertLess(t[self.meta["blobs"]["A2"]["mask"]].mean(), 0.0)
 
+    def test_methods_describe_the_circuit_and_cite_only_the_current_run(self):
+        """The methods name the parent result and its run, the seed, the connectome and N (not a key dump), and cite only
+        the circuits run whose files are in the folder (bug bash: two runs into one folder were both cited).
+        """
+        from LesionNetworkMappingLib import methods
+
+        parent, root, parent_run = self._parent("cohortMethods")
+        out = os.path.join(self.tmp, "circuits", "circuit-MethodsA")
+        first = circuits.seed_this(self.meta["path"], out, "MethodsA", roi=parent, parent=parent, run_root=root, emit=_quiet)
+        second = circuits.seed_this(self.meta["path"], out, "MethodsA", roi=parent, parent=parent, run_root=root, emit=_quiet)
+        peak = circuits.seed_this(self.meta["path"], os.path.join(self.tmp, "circuits", "circuit-MethodsP"), "MethodsP",
+                                  peak=self.meta["blobs"]["A"]["center_world"], radius_mm=4.0, run_root=root, emit=_quiet)
+        self.assertNotEqual(first["run_id"], second["run_id"])
+        text = methods.render([methods.find_section(methods.methods_sections(root), "statistics")], "txt")
+        self.assertEqual(text.count("Circuits (run"), 2, text)
+        self.assertNotIn(first["run_id"], text)
+        for run_id in (second["run_id"], peak["run_id"], parent_run):
+            self.assertIn(run_id, text)
+        self.assertIn("seeded from", text)
+        self.assertIn("group_conn-Syn_desc-conj_map.nii.gz", text)
+        self.assertIn("of radius 4 mm", text)
+        self.assertIn("N = 4 subjects", text)
+        self.assertIn("same-cohort and descriptive only", text)
+        self.assertNotIn("voxels 98", text)
+
     def test_peak_sphere_seed(self):
         out = os.path.join(self.tmp, "peak")
         record = circuits.seed_this(self.meta["path"], out, "PeakA", peak=self.meta["blobs"]["A"]["center_world"], radius_mm=4.0, emit=_quiet)
