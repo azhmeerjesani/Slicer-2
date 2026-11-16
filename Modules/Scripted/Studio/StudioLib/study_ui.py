@@ -3658,6 +3658,19 @@ class StudySession:
                 return sid
         return None
 
+    def resumeTarget(self):
+        """The subject that the study's primary action opens when nothing is selected and no case is open (L-45): with an active
+        queue, the restored queue position when the queue still has it to do, else the queue's next case; None without a queue
+        (the caller then falls back to the next untraced subject) or when the queue has nothing left.
+        """
+        spec = self.queue()
+        if spec is None:
+            return None
+        position = self._queuePosition
+        if position in self.study and _safe(spec["todo"], self.study.subject(position)):
+            return position
+        return self.next_subject(None)
+
     def _stepTarget(self, delta, queue=None):
         """The subject Alt+→ (``delta`` 1) or Alt+← (-1) opens in a queue (default: the active one), without wrapping."""
         spec = self._resolveQueue(queue)

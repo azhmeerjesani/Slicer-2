@@ -4567,8 +4567,8 @@ class StudyPage(qt.QObject):
         if studySession is None:
             return None
         sids = self.list.selectedIds()
-        sid = sids[0] if sids else studySession.current() or studySession.study.next_subject(None, status="untraced") or (
-            studySession.study.subject_ids[0] if len(studySession.study) else None)
+        sid = sids[0] if sids else studySession.current() or studySession.resumeTarget() or studySession.study.next_subject(
+            None, status="untraced") or (studySession.study.subject_ids[0] if len(studySession.study) else None)
         if sid is None:
             return None
         return _runAction(lambda: studySession.open(sid), _("Failed to open {sid}.").format(sid=sid))

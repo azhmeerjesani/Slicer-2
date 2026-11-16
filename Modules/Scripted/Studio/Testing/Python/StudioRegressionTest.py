@@ -9283,6 +9283,54 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertEqual(study_ui.registeredConnectomeSpaces(), ["MNI152NLin2009cAsym", "MNI152NLin6Asym"])
         self.assertEqual(study_ui.registeredConnectomeSpace(), "MNI152NLin2009cAsym")
 
+    def test_106_open_in_draw_resumes_at_the_restored_queue_position(self):
+        """BB-1: with nothing selected and no case open, Open in Draw continues at the restored queue position (or the queue's
+        next case), not at the first untraced case of the study outside the queue.
+        """
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import library, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Resume study")
+        os.makedirs(folder)
+        paths = []
+        for index in range(1, 5):
+            paths.append(os.path.join(folder, f"sub-0{index}_T1w.nii.gz"))
+            nifti.write_nifti(paths[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        try:
+            session = study_ui.createStudy(paths, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            for sid in ("sub-03", "sub-04"):
+                session.study.set(sid, qc_flags="multipart")
+            session.setQueue(study_ui.QUEUE_FLAGGED)
+            session._queuePosition = "sub-04"
+            session._current = None
+            self.assertEqual(session.resumeTarget(), "sub-04")
+            page = library.StudyPage()
+            opened = []
+            session.open = lambda sid, *args, **kwargs: opened.append(sid)
+            try:
+                page._open()
+                self.assertEqual(opened[-1:], ["sub-04"])
+            finally:
+                del session.open
+                page.dispose()
+            session._queuePosition = None
+            self.assertEqual(session.resumeTarget(), "sub-03")
+            session.setQueue(None)
+            self.assertIsNone(session.resumeTarget())
+        finally:
+            study_ui.closeStudy()
+            studioShell.dispose()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.mrmlScene.Clear(0)
+
     def test_105_study_mni_lesion_on_an_unknown_grid_is_mni_in_draw_and_map(self):
         """BB-1: a study lesion recorded in MNI152NLin2009cAsym (participants.tsv space, BIDS space- name) on a grid that is no
         known MNI grid (a cropped 1 mm or a 1.5 mm grid) is mapped as MNI by the pipeline and Map's cohort mode, but once its
