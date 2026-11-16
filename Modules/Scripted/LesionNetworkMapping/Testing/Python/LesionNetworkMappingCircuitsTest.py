@@ -546,6 +546,43 @@ class SeedThisTest(unittest.TestCase):
         self.assertTrue(circuits.parent_changed(circuits.read_circuit(record["maps"]["T"])))
         self.assertFalse(circuits.parent_changed({}))
 
+    def test_superseded_conjunction_is_not_attributed_to_the_later_run(self):
+        """A conjunction map left in the folder by an earlier cohort run is not credited to the later run that did not make it,
+        and the circuit seeded from it is out of date (bug circuits-conjunction-source-seeds-superseded-conj-and-attributes-it-to-new-run).
+        """
+        parent, root, run_a = self._parent("cohortRerun")
+        # run_root holds the cohort folder and the circuits, as a study does: the parent is stored as a relative path
+        folder = os.path.dirname(parent)
+        overlap = os.path.join(folder, "group_conn-Syn_desc-overlapCount_map.nii.gz")
+        shutil.copyfile(parent, overlap)
+
+        def write_cohort(run_id, outputs):
+            with open(os.path.join(folder, "cohort.json"), "w", encoding="utf-8") as handle:
+                json.dump({"run_id": run_id, "maps_tsv": "maps.tsv", "outputs": outputs}, handle)
+
+        write_cohort(run_a, {"conj": os.path.basename(parent), "overlapCount": os.path.basename(overlap), "peaks": "peaks.tsv"})
+        self.assertFalse(circuits.superseded_output(parent))
+        first = circuits.seed_this(self.meta["path"], os.path.join(self.tmp, "circuits", "circuit-ConjRunA"), "ConjRunA", roi=parent, parent=parent,
+                                   run_root=self.tmp, emit=_quiet)
+        self.assertEqual(first["parent"]["run_id"], run_a)
+        self.assertFalse(circuits.parent_changed(circuits.read_circuit(first["maps"]["T"])))
+        # Run B re-makes the group maps without the conjunction: the old conj file stays in the folder
+        run_b = runs.register(root, "glm", folder, status="done")
+        write_cohort(run_b, {"overlapCount": os.path.basename(overlap), "peaks": "peaks.tsv"})
+        self.assertTrue(circuits.superseded_output(parent))
+        self.assertFalse(circuits.superseded_output(overlap))
+        found = circuits.parent_record(parent)
+        self.assertIsNone(found["run_id"])
+        self.assertTrue(found.get("superseded"))
+        self.assertEqual(circuits.parent_record(overlap)["run_id"], run_b)
+        second = circuits.seed_this(self.meta["path"], os.path.join(self.tmp, "circuits", "circuit-ConjRunB"), "ConjRunB", roi=parent, parent=parent,
+                                    run_root=self.tmp, emit=_quiet)
+        self.assertNotEqual(second["parent"]["run_id"], run_b)
+        self.assertNotIn(run_b, second["parents"])
+        self.assertNotIn(run_b, runs.load(self.tmp)[second["run_id"]]["parents"])
+        # The circuit of run A's conjunction no longer looks current
+        self.assertTrue(circuits.parent_changed(circuits.read_circuit(first["maps"]["T"])))
+
     def test_vlsm_map_parent_links_its_lesions(self):
         """A cluster of a VLSM statistic map opened as a file (Clusters card, no --source-maps) is linked to the VLSM run and
         its lesions.tsv, so declaring the circuit frozen cannot unlock an association on those lesions (bug

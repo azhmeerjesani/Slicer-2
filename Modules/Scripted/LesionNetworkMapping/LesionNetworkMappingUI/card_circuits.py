@@ -536,8 +536,12 @@ class CircuitsCard:
         return rows[row], table, source
 
     def _groupMapPath(self):
-        """(path, desc) of the group map shown by the Cohort card when it is a binary (conjunction or sensitivity) map."""
-        from LesionNetworkMappingLib import display
+        """(path, desc) of the group map shown by the Cohort card when it is a binary (conjunction or sensitivity) map.
+
+        Only a map the last cohort run in that folder made counts: one its cohort.json does not list is a left-over of an
+        earlier run (a re-run without the conjunction leaves the old one in place), not the current result.
+        """
+        from LesionNetworkMappingLib import circuits, display
 
         node = None
         for candidate in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
@@ -554,7 +558,8 @@ class CircuitsCard:
         wanted = [desc] if desc else ["conj", "sens"]
         for prefix in wanted:
             for name in names:
-                if name.startswith("group_") and f"_desc-{prefix}" in name and name.endswith("_map.nii.gz"):
+                if name.startswith("group_") and f"_desc-{prefix}" in name and name.endswith("_map.nii.gz") \
+                        and not circuits.superseded_output(os.path.join(folder, name)):
                     return os.path.join(folder, name), name.split("_desc-", 1)[1].split("_", 1)[0]
         return None, desc
 

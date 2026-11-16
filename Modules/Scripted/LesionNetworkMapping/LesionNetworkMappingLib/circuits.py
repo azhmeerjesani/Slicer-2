@@ -344,9 +344,44 @@ def lesions_of_maps(maps_tsv):
     return {"sha256": sha, "participants": sids, "pairs": pairs}
 
 
+#: Run records whose "outputs" list every map the run wrote into a folder that later runs re-use with other maps (a cohort run
+#: without the conjunction leaves the previous run's conjunction map beside its own): a map they do not list is not theirs
+OUTPUT_LISTING_RECORDS = ("cohort.json",)
+
+
+def _listed_outputs(record):
+    """The base names of the files a run record lists under "outputs" ({key: name}, {key: {"path": ...}} or [name]), or None."""
+    outputs = record.get("outputs") if isinstance(record, dict) else None
+    values = outputs.values() if isinstance(outputs, dict) else outputs if isinstance(outputs, list) else None
+    if values is None:
+        return None
+    names = set()
+    for value in values:
+        if isinstance(value, dict):
+            value = value.get("path")
+        if isinstance(value, str) and value:
+            names.add(os.path.basename(value))
+    return names or None
+
+
+def superseded_output(map_path):
+    """Whether ``map_path`` is a left-over of an earlier run: the run record next to it (OUTPUT_LISTING_RECORDS) lists its outputs
+    and this file is not among them (the last run there did not write it). False when there is no such record or it lists none.
+    """
+    folder, base = os.path.split(os.path.abspath(os.fspath(map_path)))
+    for name in OUTPUT_LISTING_RECORDS:
+        listed = _listed_outputs(_read_json(os.path.join(folder, name)))
+        if listed is not None:
+            return base not in listed
+    return False
+
+
 def parent_record(map_path):
     """What a parent map was made from: {"record": file name, "run_id", "kind", "maps_tsv", "lesions": {sha256, participants},
     "study"} from the run record next to it (PARENT_RECORDS; for vlsm.json, "maps_tsv" is its lesions.tsv), or {} when there is none.
+
+    A map that record does not list among its outputs (:func:`superseded_output`, a left-over of an earlier run) gets
+    {"record", "kind", "run_id": None, "superseded": True}: the run that wrote it is unknown, never the later run's.
     """
     folder = os.path.dirname(os.path.abspath(os.fspath(map_path)))
     for name in PARENT_RECORDS:
@@ -354,6 +389,8 @@ def parent_record(map_path):
         if record is None:
             continue
         out = {"record": name, "run_id": record.get("run_id") or record.get("id"), "kind": record.get("kind") or os.path.splitext(name)[0]}
+        if name in OUTPUT_LISTING_RECORDS and superseded_output(map_path):
+            return {**out, "run_id": None, "superseded": True}
         if name == CIRCUIT_JSON:
             source = record.get("source") or {}
             out["lesions"] = {"sha256": list(source.get("lesion_sha256") or []), "participants": list(source.get("participants") or [])}
@@ -582,7 +619,8 @@ def read_circuit(path):
 
 
 def parent_changed(record):
-    """Whether the parent map a circuit was seeded from no longer is the file it recorded (re-run in place, edited or replaced).
+    """Whether the parent map a circuit was seeded from no longer is the file it recorded (re-run in place, edited or replaced,
+    or left over from an earlier run that a later run in its folder superseded without making it again).
 
     ``record`` is :func:`read_circuit`'s result. True when ``parent.sha256`` is recorded, the parent file exists and its sha256
     differs; False when there is no parent, no recorded sha256 or the file is missing (nothing to compare).
@@ -591,6 +629,8 @@ def parent_changed(record):
     path, recorded = parent.get("file"), parent.get("sha256")
     if not path or not recorded or not os.path.isfile(path):
         return False
+    if superseded_output(path):  # a later run in that folder did not make this map again: it is no longer the current result
+        return True
     return _sha256(path) != recorded
 
 
