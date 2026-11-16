@@ -149,6 +149,28 @@ def setRaterName(name):
     qt.QSettings().setValue(RATER_SETTING, str(name or "").strip())
 
 
+def raterNameDialog(parent):
+    """The question for the rater's name: an input dialog with the Studio dialog chrome (VISUAL 4.7), a primary OK and a
+    secondary Cancel without the legacy style icons.
+    """
+    from . import ui
+
+    dialog = qt.QInputDialog(parent)
+    dialog.setObjectName("StudioRaterNameDialog")
+    dialog.setWindowTitle(_("Your name"))
+    dialog.setLabelText(_("Name or initials recorded with each review (kept in this computer's settings):"))
+    dialog.sizeHint  # QInputDialog builds its buttons on the first size query
+    box = dialog.findChild("QDialogButtonBox")
+    if box is not None:
+        for button, role in ((box.button(qt.QDialogButtonBox.Ok), "primary"), (box.button(qt.QDialogButtonBox.Cancel), "secondary")):
+            if button is not None:
+                button.setIcon(qt.QIcon())
+                button.setMinimumHeight(36)
+                ui.setRole(button, role)
+    ui.dialogChrome(dialog)
+    return dialog
+
+
 def raterName(ask=True, parent=None):
     """The name recorded with a review: ``Studio/RaterName``, asked once when it is not set.
 
@@ -160,8 +182,11 @@ def raterName(ask=True, parent=None):
         return name
     if not ask or _isTesting() or slicer.util.mainWindow() is None:
         return UNNAMED
-    text = qt.QInputDialog.getText(parent or slicer.util.mainWindow(), _("Your name"),
-                                   _("Name or initials recorded with each review (kept in this computer's settings):"))
+    dialog = raterNameDialog(parent or slicer.util.mainWindow())
+    run = getattr(dialog, "exec", None) or dialog.exec_
+    accepted = run() == qt.QDialog.Accepted
+    text = dialog.textValue() if accepted else ""
+    dialog.deleteLater()
     text = str(text or "").strip()
     if not text:
         return None
