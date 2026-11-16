@@ -2136,8 +2136,20 @@ class StudiesSection(qt.QObject):
         self._timer.setInterval(REFRESH_DELAY_MS)
         self._timer.connect("timeout()", self.refresh)
         projects.addListener(self.scheduleRefresh)
+        # Closing or opening a study notifies only study_ui's listeners, not the projects ones: follow them too, so the
+        # study just closed is listed at once (it is then in the recent studies) instead of after leaving the Library.
+        self._studyUi = None
+        try:
+            from . import study_ui
+            self._studyUi = study_ui
+            study_ui.addListener(self._onStudyChanged)
+        except Exception:
+            logging.error(f"Studio: the studies list cannot follow the study:\n{traceback.format_exc()}")
         ui.bindStyleSheet(self.widget, self._styleSheet)
         self.refresh()
+
+    def _onStudyChanged(self, _session=None):
+        self.scheduleRefresh()
 
     @staticmethod
     def _styleSheet():
@@ -2250,6 +2262,8 @@ class StudiesSection(qt.QObject):
 
     def dispose(self):
         projects.removeListener(self.scheduleRefresh)
+        if self._studyUi is not None:
+            self._studyUi.removeListener(self._onStudyChanged)
         self._timer.stop()
         try:
             slicer.app.disconnect("aboutToQuit()", self._removeEventFilters)

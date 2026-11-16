@@ -219,6 +219,22 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             section.widget.deleteLater()
 
+    def test_studies_section_follows_the_study_listeners(self):
+        """Close study / open study notify study_ui's listeners: the Studies section refreshes (BB-1)."""
+        from StudioLib import projects_ui, study_ui
+
+        section = projects_ui.StudiesSection()
+        try:
+            section._timer.stop()
+            study_ui._notify(None)
+            self.assertTrue(section._timer.isActive())
+            section._timer.stop()
+            section.dispose()
+            study_ui._notify(None)
+            self.assertFalse(section._timer.isActive())
+        finally:
+            section.widget.deleteLater()
+
     #
     # Current work
     #
