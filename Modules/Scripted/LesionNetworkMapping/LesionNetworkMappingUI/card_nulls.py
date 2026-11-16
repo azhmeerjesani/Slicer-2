@@ -254,23 +254,32 @@ class NullsCard:
         spin.connect("valueChanged(int)", lambda v: self.onSettingsChanged())
         return spin
 
+    @staticmethod
+    def _addFormRow(grid, label, field):
+        row = grid.rowCount()
+        grid.addWidget(label, row, 0, qt.Qt.AlignLeft | qt.Qt.AlignVCenter)
+        grid.addWidget(field, row, 1)
+
     def _buildSettings(self, layout):
-        form = qt.QFormLayout()
-        form.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
-        form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
+        # A grid, not a QFormLayout: a QFormLayout keeps the vertical spacing of hidden rows (blank gaps),
+        # a QGridLayout skips rows whose widgets are all hidden.
+        form = qt.QGridLayout()
+        form.setColumnStretch(1, 1)
+        form.setVerticalSpacing(6)
+        form.setHorizontalSpacing(6)
         self.kSpin = self._spin("LNMNullsK", MIN_K, MAX_K, DEFAULT_K, _("Null cohorts: the permutation p has the floor 1 / (K + 1). Fast mode computes at most 10,000."), 100)
         self.kLabel = qt.QLabel(_("Null cohorts (K)"))
-        form.addRow(self.kLabel, self.kSpin)
+        self._addFormRow(form, self.kLabel, self.kSpin)
         self.kPoolSpin = self._spin("LNMNullsKPool", 1, 1000, 20, _("Relocations of each lesion that are mapped; every null cohort draws one per lesion (exact default 20, fast default 100)."), 5)
         self.kPoolSpin.connect("valueChanged(int)", self.onKPoolChanged)
         self.kPoolLabel = qt.QLabel(_("Relocations per lesion (K_pool)"))
-        form.addRow(self.kPoolLabel, self.kPoolSpin)
+        self._addFormRow(form, self.kPoolLabel, self.kPoolSpin)
         self.topSpin = self._spin("LNMNullsTopPct", 1, 50, TOP_PCT_DEFAULT, _("Fast mode has no T and no exact Fz scale: a lesion's map passes where it is in the top x% of |value| in the brain mask."))
         self.topLabel = qt.QLabel(_("Rank rule: top x %"))
-        form.addRow(self.topLabel, self.topSpin)
+        self._addFormRow(form, self.topLabel, self.topSpin)
         self.seedSpin = self._spin("LNMNullsSeed", 0, 1000000, 0, _("Seed of the relocations and the null cohorts (the same seed gives the same nulls)"))
         self.seedLabel = qt.QLabel(_("Seed"))
-        form.addRow(self.seedLabel, self.seedSpin)
+        self._addFormRow(form, self.seedLabel, self.seedSpin)
         self.strengthCombo = qt.QComboBox()
         self.strengthCombo.setObjectName("LNMNullsStrength")
         self.strengthCombo.addItem(_("Signed μC_r"), "signed")
@@ -278,7 +287,7 @@ class NullsCard:
         self.strengthCombo.setToolTip(_("The map whose value each relocated lesion keeps: the signed mean connectivity (default) or the absolute hubness (recorded)"))
         self.strengthCombo.connect("currentIndexChanged(int)", lambda index: self.onSettingsChanged())
         self.strengthLabel = qt.QLabel(_("Strength map"))
-        form.addRow(self.strengthLabel, self.strengthCombo)
+        self._addFormRow(form, self.strengthLabel, self.strengthCombo)
         layout.addLayout(form)
         self.controlRow = qt.QWidget()
         controlLayout = qt.QHBoxLayout(self.controlRow)
