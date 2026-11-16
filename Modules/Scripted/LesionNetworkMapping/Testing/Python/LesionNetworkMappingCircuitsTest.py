@@ -522,6 +522,20 @@ class SeedThisTest(unittest.TestCase):
         self.assertLess(t[blobs["B"]["mask"]].mean(), 0.0)
         self.assertEqual(circuits.find_circuits(os.path.dirname(out))[0]["name"], "ConjA")
 
+    def test_parent_changed_after_the_parent_is_rewritten(self):
+        """A circuit whose parent map was re-run in place (same file name, new content) is out of date (bug
+        circuits-not-marked-out-of-date-after-source-vlsm-rerun).
+        """
+        parent, _root, _run_id = self._parent("cohortStale")
+        out = os.path.join(self.tmp, "circuits", "circuit-Stale")
+        # run_root holds both folders, as a study does: the parent is then stored as a relative path
+        record = circuits.seed_this(self.meta["path"], out, "Stale", roi=parent, parent=parent, run_root=self.tmp, emit=_quiet)
+        self.assertFalse(circuits.parent_changed(circuits.read_circuit(record["maps"]["T"])))
+        data, affine = nifti.read_nifti(parent)[:2]
+        nifti.write_nifti(parent, np.asarray(data) * 2.0 + 1.0, affine)
+        self.assertTrue(circuits.parent_changed(circuits.read_circuit(record["maps"]["T"])))
+        self.assertFalse(circuits.parent_changed({}))
+
     def test_vlsm_map_parent_links_its_lesions(self):
         """A cluster of a VLSM statistic map opened as a file (Clusters card, no --source-maps) is linked to the VLSM run and
         its lesions.tsv, so declaring the circuit frozen cannot unlock an association on those lesions (bug

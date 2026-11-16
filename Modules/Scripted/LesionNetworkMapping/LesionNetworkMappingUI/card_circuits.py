@@ -863,7 +863,25 @@ class CircuitsCard:
             parts.append(made)
         bundle = record.get("bundle") or {}
         parts.append(f"{bundle.get('name') or '?'} · N={record.get('n')}")
-        self.circuitLabel.setText(" · ".join(parts))
+        text = " · ".join(parts)
+        if self.staleText(record):
+            text += "\n" + self.staleText(record)
+        self.circuitLabel.setText(text)
+
+    @staticmethod
+    def staleText(record):
+        """A sentence when the map this circuit was seeded from has changed since (re-run), else ""."""
+        from LesionNetworkMappingLib import circuits
+
+        try:
+            changed = circuits.parent_changed(record)
+        except Exception:
+            changed = False
+        if not changed:
+            return ""
+        run = (record.get("parent") or {}).get("run_id")
+        return _("Out of date: the map this circuit was seeded from has changed since{run}. Seed again to update; until then this is not the current result.").format(
+            run=" " + _("(run {id})").format(id=run) if run else "")
 
     def openCircuit(self, path=None):
         """Add a circuit map from a file (a dialog when ``path`` is None); return its path or None."""
@@ -977,6 +995,9 @@ class CircuitsCard:
         text = _("{n} lesion(s) scored ({basis}).").format(n=len(damage["rows"]), basis=provenance["basis"]) + posted
         if excluded:
             text += " " + _("{n} left out (no occupancy).").format(n=excluded)
+        stale = self.staleText(self.currentCircuitRecord())
+        if stale:
+            text += " " + stale
         if damage.get("threshold") is None and not damage.get("binary"):
             text += " " + _("% in: set a threshold above (e.g. the Result card's T threshold); with auto it is computed for binary circuits only.")
         self.damageLabel.setText(text)

@@ -581,6 +581,19 @@ def read_circuit(path):
     return record
 
 
+def parent_changed(record):
+    """Whether the parent map a circuit was seeded from no longer is the file it recorded (re-run in place, edited or replaced).
+
+    ``record`` is :func:`read_circuit`'s result. True when ``parent.sha256`` is recorded, the parent file exists and its sha256
+    differs; False when there is no parent, no recorded sha256 or the file is missing (nothing to compare).
+    """
+    parent = (record or {}).get("parent") or {}
+    path, recorded = parent.get("file"), parent.get("sha256")
+    if not path or not recorded or not os.path.isfile(path):
+        return False
+    return _sha256(path) != recorded
+
+
 def find_circuits(folder):
     """circuit.json records (absolute paths) in the sub-folders of ``folder`` (``<run root>/circuits``), newest first."""
     found = []
