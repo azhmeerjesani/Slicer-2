@@ -683,6 +683,17 @@ def resolve_rule(rule, n, n_voxels, gsr=None):
     return resolved
 
 
+def rule_resolved_record(resolved):
+    """What nulls.json records as the observed rule: the resolved rule, or the rank-rule note for top_pct.
+
+    A top_pct rule is resolved per map, so :func:`resolve_rule` returns a placeholder for it (no value, "no non-zero
+    values"): that placeholder must not be written as if it were the rule that was applied.
+    """
+    if resolved is None or (resolved.kind or (resolved.rule or {}).get("kind")) == "top_pct":
+        return {"kind": "top_pct", "note": "resolved per map (rank rule)"}
+    return resolved.to_dict()
+
+
 def rule_values(rows, rule, n, n_voxels, gsr=None):
     """(L,) threshold of each map (row) under the rule: one value for N-derived rules, a percentile per map for top_pct.
 
@@ -2106,7 +2117,7 @@ def _write_outputs(context, bundle, info, out_dir, cohort, result, group_qa, des
         "observed": {
             "maps": "the cohortmaps maps of the same connectome subjects (exact engine)" if context.mode == "exact" else "recomputed in fast mode from the same index (like with like)",
             "same_rule": True,
-            "rule_resolved": resolved.to_dict() if resolved is not None else {"kind": "top_pct", "note": "resolved per map (rank rule)"},
+            "rule_resolved": rule_resolved_record(resolved),
         },
         "participants": list(cohort.ids),
         "excluded": cohort.excluded,

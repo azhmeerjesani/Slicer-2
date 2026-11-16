@@ -322,6 +322,14 @@ class NullsTest(unittest.TestCase):
             np.testing.assert_array_equal(pool.overlap(row).sum(axis=0), expected)
         np.testing.assert_array_equal(pool.draw(25, seed=9), sets)
 
+    def test_rule_resolved_of_a_top_pct_rule_is_the_rank_rule_note(self):
+        note = {"kind": "top_pct", "note": "resolved per map (rank rule)"}
+        resolved = nulls.resolve_rule(TOP10, N_LESIONS, 3752)
+        self.assertEqual(nulls.rule_resolved_record(resolved), note)
+        self.assertEqual(nulls.rule_resolved_record(None), note)
+        other = nulls.resolve_rule({"kind": "custom_t", "value": 3.0}, N_LESIONS, 3752)
+        self.assertEqual(nulls.rule_resolved_record(other), other.to_dict())
+
     def test_exact_run_outputs_and_resume(self):
         out = self.path("exact")
         events = []
@@ -331,6 +339,8 @@ class NullsTest(unittest.TestCase):
         self.assertEqual(events[-1][0], "done")
         self.assertEqual([f["name"] for e, f in events if e == "stage"], ["design", "null maps", "null cohorts", "inference", "write"])
         self.assertEqual(record["k"], 60)
+        with open(os.path.join(out, "nulls.json"), encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["observed"]["rule_resolved"], {"kind": "top_pct", "note": "resolved per map (rank rule)"})
         self.assertAlmostEqual(record["min_attainable_p"], 1 / 61)
         self.assertEqual(record["group_qa"]["overlap"]["k"], 60)
         self.assertIn(record["group_qa"]["overlap"]["level"], ("below", "amber", "red", "not_calibrated"))
