@@ -1981,6 +1981,47 @@ class StudioProjectsTest(unittest.TestCase):
             studioShell.dispose()
             slicer.app.processEvents()
 
+    def test_23b_second_scene_opened_in_draw_is_the_draw_lesion(self):
+        """A second scene file opened while Draw shows a project (Draw stays shown, so it is not entered again) is bound
+        as the first one was: its lesion is the Draw lesion and can be saved, not "No lesion" with the tools greyed out
+        (the closing of the previous scene had unbound the editor).
+        """
+        from StudioLib import draw, importer, shell
+
+        bundles = []
+        for name in ("Scene A", "Scene B"):
+            slicer.mrmlScene.Clear(0)
+            volume, _path = self._userVolume(name + " scan", shape=(12, 14, 16), extension=".nrrd")
+            self._lesion(volume, name + " lesion")
+            bundlePath = os.path.join(self.tempDir, name + ".mrb")
+            self.assertTrue(slicer.util.saveScene(bundlePath))
+            bundles.append((name, bundlePath))
+        slicer.mrmlScene.Clear(0)
+        service = self._service()
+        running = self.autosave._service
+        self.autosave._service = service  # as the running service of the application
+        studioShell = shell.Shell(force=True)
+        try:
+            studioShell.apply()
+            slicer.app.processEvents()
+            for index, (name, bundlePath) in enumerate(bundles):
+                result = importer.loadFiles([bundlePath], studioShell)
+                self.io.backgroundWriter().drain(30.0)
+                _pumpFor(0.3)
+                self.assertEqual(result.scenes, [bundlePath])
+                self.assertEqual(service.project.name, name)
+                self.assertEqual(studioShell.currentWorkspace(), "draw")
+                editor = draw.segmentEditor()
+                self.assertIsNotNone(editor)
+                segmentationNode = editor.segmentationNode()
+                self.assertIsNotNone(segmentationNode, f"scene #{index + 1} ({name}): Draw edits its lesion")
+                self.assertEqual(segmentationNode.GetName(), name + " lesion")
+                self.assertEqual(editor.sourceVolumeNode().GetName() if editor.sourceVolumeNode() else None, name + " scan")
+        finally:
+            self.autosave._service = running
+            studioShell.dispose()
+            slicer.app.processEvents()
+
     def test_24_reopen_outside_file_after_save(self):
         """A file from outside the folder that the project took over (copied into Images/, Lesions/...) is "already open" when
         it is opened again (Open…, drop, Recent, a folder card's Load all), also after a restart: no second node, no second

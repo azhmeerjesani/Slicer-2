@@ -682,6 +682,12 @@ class _DrawSession(VTKObservationMixin):
         self._followTimer.setSingleShot(True)
         self._followTimer.setInterval(30)
         self._followTimer.connect("timeout()", self._followStroke)
+        # A scene loaded while Draw is shown (a scene file or project opened in Draw): bound like an entry, after the
+        # loader made its own choice (importer.selectInSegmentEditor())
+        self._bindTimer = qt.QTimer()
+        self._bindTimer.setSingleShot(True)
+        self._bindTimer.setInterval(0)
+        self._bindTimer.connect("timeout()", self._bindAfterImport)
 
     @property
     def shell(self):
@@ -732,6 +738,7 @@ class _DrawSession(VTKObservationMixin):
         self._timer.stop()
         self._metricsTimer.stop()
         self._refreshTimer.stop()
+        self._bindTimer.stop()
         self._followTimer.stop()
         if self._adoptTimer.isActive():
             self._adoptTimer.stop()
@@ -1103,9 +1110,35 @@ class _DrawSession(VTKObservationMixin):
         # A handler of its own: the event argument of a shared handler does not tell the MRML scene events apart
         if not self.hasObserver(scene, scene.EndCloseEvent, self._onSceneEndClose):
             self.addObserver(scene, scene.EndCloseEvent, self._onSceneEndClose)
+        if not self.hasObserver(scene, scene.EndImportEvent, self._onSceneEndImport):
+            self.addObserver(scene, scene.EndImportEvent, self._onSceneEndImport)
 
     def _onSceneChanged(self, caller, event):
         self._refreshTimer.start()
+
+    def _onSceneEndImport(self, caller, event):
+        self._bindTimer.start()
+
+    def _bindAfterImport(self):
+        """A scene loaded while Draw is shown leaves the editor without a lesion when it replaced the scene (a second
+        scene file or project opened in Draw: the closing unbound it, and Draw is not entered again). Bind it as an entry
+        does (``enter()``): the lesion of the scene, else one bound to its scan; a lesion that the loader selected is kept.
+        """
+        if not self.active:
+            return
+        editor = segmentEditor()
+        if editor is None or editor.segmentationNode() is not None:
+            return
+        if extension().ensureSegmentation(editor) is None:
+            return
+        self._applyVoxelViewDefault(editor)
+        self._restore(editor)
+        self._observe(editor)
+        self._observeSegmentation(editor.segmentationNode())
+        self._snapshot = _Snapshot(editor)
+        self._timer.start()
+        self.refreshPanel()
+        self._metricsTimer.start()
 
     def _onSceneEndClose(self, caller, event):
         self._voxelViewDefaulted = set()
