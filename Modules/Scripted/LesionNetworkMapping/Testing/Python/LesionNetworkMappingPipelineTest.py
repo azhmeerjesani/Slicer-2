@@ -963,6 +963,23 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertEqual((code, calls), (0, []))
         self.assertEqual(stage_status(events)["maps"], "reused")
 
+    def test_second_recompute_does_not_reuse_the_private_map_cache(self):
+        """Every --recompute maps everything again: the private cache that the previous --recompute left in stages/cohortmaps/cache
+        is not reused (BB-1: the second run ended with 'N reused', also for a damaged map the user wanted to get rid of).
+        """
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-recompute-twice"))
+        out = fx["out"]
+        records = []
+        for _run in range(2):
+            code, _events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST, "--recompute"))
+            self.assertEqual(code, 0, stderr[-2000:])
+            found = glob.glob(os.path.join(out, "**", "cohortmaps.json"), recursive=True)
+            self.assertTrue(found)
+            lesions = read_json(found[0])["lesions"]
+            records.append((lesions["computed"], lesions["cache_hits"]))
+        self.assertGreater(records[0][0], 0)
+        self.assertEqual(records[1], (records[0][0], 0), records)
+
     def test_no_stale_group_maps_after_skip_or_stop(self):
         """GLM and conjunction maps of an earlier run never pass for the results of a run that skipped or stopped those stages."""
         fx = fixture.make_fixture(os.path.join(self.tmp, "f-stale"))

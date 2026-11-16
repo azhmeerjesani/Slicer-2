@@ -2479,6 +2479,12 @@ class Runner:
         folder = self.stage_dir("cohortmaps")
         lesions_tsv = self._write_lesions_tsv(rows)
         cache = os.path.join(folder, "cache") if self.config.recompute else os.path.join(self.study.path, *cohortmaps.CACHE_RELPATH)
+        finished = os.path.join(folder, "cache.finished")
+        if self.config.recompute and os.path.isfile(finished):
+            # The private cache is what an earlier, finished --recompute left (the map files of its run point into it): recompute means
+            # every map is made again, so a later --recompute starts it empty. A stopped or failed run leaves no marker: its resume keeps it.
+            shutil.rmtree(cache, ignore_errors=True)
+            os.remove(finished)
         args = ["--lesions-tsv", lesions_tsv, "--bundle", self.bundle.path, "--out", folder, "--cache", cache, "--null-relocations", str(self.null_k), "--null-seed", str(self.config.null_seed)]
         if not self.config.recompute:  # the maps of the study's linked control sets, mapped once in their own caches
             from . import controlsets
@@ -2521,7 +2527,11 @@ class Runner:
         lesions = record.get("lesions") or {}
         result = {"maps_tsv": self.rel(maps_tsv), "maps": result_maps, "excluded": excluded, "computed": lesions.get("computed"), "cache_hits": lesions.get("cache_hits"), "provider": "cohortmaps",
                   "run_id": record.get("run_id")}
-        return self._save("maps", fp, result, outputs, child_run_id=child.run_id, events=child.events, start=start)
+        saved = self._save("maps", fp, result, outputs, child_run_id=child.run_id, events=child.events, start=start)
+        if self.config.recompute:
+            with open(finished, "w", encoding="utf-8") as f:
+                f.write("the maps of this run are in cache/\n")
+        return saved
 
     @staticmethod
     def _filter_maps_tsv(source, target, drop):
