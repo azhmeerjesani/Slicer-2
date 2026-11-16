@@ -352,12 +352,14 @@ class AppHelpersTest(unittest.TestCase):
         darby = recipes.find_recipe("darby2019_cnm", recipes.load_recipes())
         with_roi = recipes.Recipe(dict(copy.deepcopy(darby.data), steps=[*darby.steps, "roi"]), origin=darby.origin, path=darby.path)
         where = {step["id"]: step["where"] for step in recipes.to_pipeline_config(with_roi, module_available=lambda name: True)["outside_pipeline"]}
-        self.assertEqual(where["roi"], "Map ▸ Recipe (ROI inference) or python -m LesionNetworkMappingLib.roi")
+        self.assertEqual(where["roi"], "command line: python -m LesionNetworkMappingLib.roi glm")
+        # regression: no Map control named "Recipe (ROI inference)" exists, so no text may point to one
+        self.assertNotIn("Map ▸ Recipe", " ".join(recipes.MANUAL_STEP_PLACES.values()))
         with mock.patch.object(jobs, "APP_PROG", "slicer-lnm"):
             self.assertEqual(jobs.command_text(text), "build them with 'slicer-lnm reference build'")
             self.assertEqual(jobs.JsonArgumentParser(prog="python -m LesionNetworkMappingLib.glm").prog, "slicer-lnm glm")
             where = {step["id"]: step["where"] for step in recipes.to_pipeline_config(with_roi, module_available=lambda name: True)["outside_pipeline"]}
-            self.assertEqual(where["roi"], "Map ▸ Recipe (ROI inference) or slicer-lnm roi")
+            self.assertEqual(where["roi"], "command line: slicer-lnm roi glm")
         # run_library_command sets the name for the library hints and restores it afterwards
         seen = {}
 

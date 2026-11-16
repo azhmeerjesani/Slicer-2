@@ -112,7 +112,7 @@ STEPS = {
 #: Where a step without a pipeline stage is run
 MANUAL_STEP_PLACES = {
     "coordinates": "Map ▸ Seed ▸ Coordinates",
-    "roi": "Map ▸ Recipe (ROI inference) or python -m LesionNetworkMappingLib.roi",
+    "roi": "command line: python -m LesionNetworkMappingLib.roi glm",
     "validation": "Map ▸ Validate",
     "robustness": "Map ▸ Robust",
 }
