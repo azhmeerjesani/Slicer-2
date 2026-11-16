@@ -680,7 +680,7 @@ class CircuitsCard:
         folder = self.circuitsFolder()
         candidate, counter = name, 2
         while os.path.exists(os.path.join(folder, f"circuit-{candidate}")):
-            candidate, counter = f"{name}{counter}", counter + 1
+            candidate, counter = f"{name}Run{counter}", counter + 1
         return candidate, os.path.join(folder, f"circuit-{candidate}")
 
     def seedThis(self):
