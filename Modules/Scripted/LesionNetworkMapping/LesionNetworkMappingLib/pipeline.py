@@ -1305,6 +1305,12 @@ def plan(config, hash_lesions=True, providers=None):
     overrides = _overrides(config)
     blocks, warnings, infos = [], [], []
     report = None
+    # --participant-label: the checks (and the design counts) cover only the selected participants; the others are
+    # only "not selected", never excluded for another reason
+    selected = None if config.participant_label is None else set(config.participant_label)
+    checked = study
+    if selected is not None:
+        checked = Study(study.path, dict(study.metadata), study.columns, [row for row in study.subjects if row["participant_id"] in selected], study.dictionary)
 
     # Rows: preflight (L-17), else the plan's own checks
     if providers["preflight"].kind == "preferred":
@@ -1315,7 +1321,7 @@ def plan(config, hash_lesions=True, providers=None):
             design_spec = {"test": "two_group", "group_column": "group", "levels": ["case", "control"], "contrast": config.contrast, "covariates": config.covariates,
                            "input": "Fz" if config.input == "AvgFz" else "T", "inference": {"n_perm": config.perm, "seed": config.perm_seed, "tfce": config.tfce, "fdr": config.fdr},
                            "volume_off_reason": config.volume_off_reason}
-        report = preflight.run_preflight(study, bundle, recipe_rule=config.rule, design_spec=design_spec, accepted_terms=bool(config.accept_terms), strict=config.strict,
+        report = preflight.run_preflight(checked, bundle, recipe_rule=config.rule, design_spec=design_spec, accepted_terms=bool(config.accept_terms), strict=config.strict,
                                          overrides=overrides, n_subjects=len(subject_ids), out_dir=out)
         excluded = dict(report["excluded"])
         for check in preflight.blocking_checks(report):
@@ -1328,7 +1334,9 @@ def plan(config, hash_lesions=True, providers=None):
             elif check["level"] == "info" and check["id"] not in ("include_off", "qc_fail"):
                 infos.append({"code": check["id"], "message": check["message"]})
     else:
-        excluded = _builtin_row_checks(study, config)
+        excluded = _builtin_row_checks(checked, config)
+    if selected is not None:
+        excluded.update((sid, NOT_SELECTED) for sid in study.subject_ids if sid not in selected)
 
     rows = []
     for row in study.subjects:
@@ -1843,7 +1851,7 @@ class Runner:
         if plan_result.exit_code == EXIT_NO_LESION:
             raise PipelineError("No lesion can be analysed: every subject is excluded.", code="no_eligible", exit_code=EXIT_NO_LESION, excluded={row["participant_id"]: row["reason"] for row in self.rows})
         for row in self.rows:
-            if row["status"] == "excluded":
+            if row["status"] == "excluded" and row["reason"] != NOT_SELECTED:  # not selected: one info (_select)
                 self.warn(f"excluded: {row['reason']}", code="excluded", participant_id=row["participant_id"])
         self._warn_preflight()
         self.subject_ids = plan_result.subject_ids
@@ -2243,19 +2251,23 @@ class Runner:
         return path
 
     def _select(self):
-        """Exclude the rows of the participants that ``config.participant_label`` leaves out (after the plan, which covers the whole study)."""
+        """Exclude the rows of the participants that ``config.participant_label`` leaves out and say how many.
+
+        :func:`plan` already gives them the reason NOT_SELECTED (its checks cover only the selected participants);
+        a plan made without the selection is corrected here.
+        """
         wanted = self.config.participant_label
         if wanted is None or self._selected:
             return
         self._selected = True
         wanted = set(wanted)
-        dropped = []
+        dropped = 0
         for row in self.rows:
-            if row["participant_id"] not in wanted and row["status"] != "excluded":
+            if row["participant_id"] not in wanted:
                 row["status"], row["reason"] = "excluded", NOT_SELECTED
-                dropped.append(row["participant_id"])
+                dropped += 1
         if dropped:
-            self.info(f"{len(dropped)} subjects not selected by --participant-label", code="not_selected")
+            self.info(f"{dropped} subject{'' if dropped == 1 else 's'} not selected by --participant-label", code="not_selected")
 
     def _snapshot(self, rows):
         """Byte copies of the analysed lesions in inputs/lesions/ (verified against the planned sha256)."""

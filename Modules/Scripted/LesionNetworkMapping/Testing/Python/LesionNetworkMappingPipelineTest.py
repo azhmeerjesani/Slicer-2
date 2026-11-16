@@ -1346,6 +1346,31 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertEqual(stages["nulls"]["status"], "skip", stages["nulls"])
         self.assertIn("at least 2 lesions", stages["nulls"]["reason"])
 
+    def test_participant_label_rows_are_only_not_selected(self):
+        """--participant-label: the plan's checks and design counts cover the selected participants only, and a left-out
+        subject is only "not selected", even when its lesion file is unreadable (BB-1: methods.md gave it the reason
+        "lesion file unreadable" and Prepare counted case n = 7 while the GLM counted n = 6).
+        """
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-labels"))
+        damaged = os.path.join(fx["study"], "lesions", f"sub-08_space-{fixture.SPACE}_desc-lesion_mask.nii.gz")
+        with open(damaged, "rb") as f:
+            head = f.read(300)
+        with open(damaged, "wb") as f:
+            f.write(head)
+        selected = ["sub-01", "sub-02", "sub-03", "sub-04", "sub-05", "sub-06", "sub-09", "sub-10", "sub-11", "sub-12"]  # 6 cases, 4 controls
+        config = pipeline.PipelineConfig(study=fx["study"], bundle=fx["bundle"], accept_terms=True, nulls="off", specificity="glm", participant_label=selected)
+        planned = pipeline.plan(config)
+        reasons = {row["participant_id"]: row["reason"] for row in planned.rows}
+        self.assertEqual({sid for sid, reason in reasons.items() if reason == pipeline.NOT_SELECTED}, set(reasons) - set(selected))
+        self.assertEqual(reasons["sub-08"], pipeline.NOT_SELECTED)
+        self.assertEqual(sorted(row["participant_id"] for row in planned.rows if row["status"] != "excluded"), selected)
+        messages = [item["message"] for item in planned.warnings + planned.infos]
+        self.assertFalse([message for message in messages if "sub-08" in message or "unreadable" in message], messages)
+        counts = {count for message in messages for count in re.findall(r"\bcase \(n = (\d+)\)", message)}
+        self.assertLessEqual(counts, {"6"}, messages)
+        self.assertNotIn("sub-08", planned.preflight["excluded"])
+        self.assertEqual(planned.preflight["counts"]["subjects"], len(selected))
+
     def test_auto_nulls_with_fast_index_fall_back_to_exact_when_the_parity_gate_refuses(self):
         """--nulls auto with a top-x% rule and a fast index (D-A23): without reference maps the parity gate cannot pass,
         so the plan takes the exact pooled null; when the gate refuses fast mode at run time, the stage runs the exact
