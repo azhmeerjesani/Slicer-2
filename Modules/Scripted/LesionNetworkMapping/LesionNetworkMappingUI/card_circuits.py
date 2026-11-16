@@ -633,8 +633,10 @@ class CircuitsCard:
                 return SeedSource(kind, error=_("Select a cluster in the Clusters card."))
             mask = (np.asarray(table.cluster_vector).reshape(source.grid.shape) == int(row["cluster"])).astype(np.uint8)
             parent = getattr(source, "path", None) or (self._resultMapPath(source.statistic) if source.key == "result" else None)
-            text = _("Seed: cluster {id} of {map} ({voxels:,} voxels, {threshold}; peak {where}).").format(
-                id=row["cluster"], map=source.name, voxels=int(mask.sum()), threshold=source.thresholdText(), where=whereText(*row["xyz"]))
+            nVoxels = int(mask.sum())
+            seedText = _("Seed: cluster {id} of {map} ({voxels:,} voxel, {threshold}; peak {where}).") if nVoxels == 1 else _("Seed: cluster {id} of {map} ({voxels:,} voxels, {threshold}; peak {where}).")
+            text = seedText.format(
+                id=row["cluster"], map=source.name, voxels=nVoxels, threshold=source.thresholdText(), where=whereText(*row["xyz"]))
             return SeedSource(kind, parent=parent, name=f"Cluster{row['cluster']}", text=text, roiData=(mask, np.asarray(source.grid.affine)))
         # Peak sphere: the selected cluster's peak, else the crosshair
         radius = float(self.radiusSpin.value)
@@ -859,7 +861,8 @@ class CircuitsCard:
             peak = seed.get("peak_xyz") or (0, 0, 0)
             parts.append(_("{radius:g} mm sphere at {where}").format(radius=seed.get("radius_mm") or 0, where=whereText(*peak)))
         else:
-            voxels = _("{voxels:,} seed voxels").format(voxels=int(seed.get("voxels_in_mask") or 0))
+            nSeed = int(seed.get("voxels_in_mask") or 0)
+            voxels = (_("{voxels:,} seed voxel") if nSeed == 1 else _("{voxels:,} seed voxels")).format(voxels=nSeed)
             if seed.get("sign") in ("pos", "neg"):
                 voxels += " (" + SIGN_TEXT[seed["sign"]] + ")"
             parts.append(voxels)
@@ -1288,7 +1291,8 @@ class CircuitsCard:
         rows = []
         for row in result["rows"]:
             where = whereText(row["x"], row["y"], row["z"])
-            tip = _("{radius:g} mm sphere, {voxels} voxels; peak percentile {peak}; {gm}").format(
+            tipText = _("{radius:g} mm sphere, {voxels} voxel; peak percentile {peak}; {gm}") if row["voxels"] == 1 else _("{radius:g} mm sphere, {voxels} voxels; peak percentile {peak}; {gm}")
+            tip = tipText.format(
                 radius=row["radius_mm"], voxels=row["voxels"], peak=_number(row["percentile_peak"], 3), gm=_("centre in gray matter") if row["in_gm"] else _("centre outside gray matter"))
             if row["note"]:
                 tip += f"; {row['note']}"
