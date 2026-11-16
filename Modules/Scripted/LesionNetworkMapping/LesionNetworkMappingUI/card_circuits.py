@@ -27,6 +27,7 @@ import slicer
 from slicer.i18n import tr as _
 
 from . import ORDER_CIRCUITS, widgets
+from .card_clusters import formatCoordinate
 
 #: Fork-only settings (SPEC Appendix B): the radius of peak seeds and the default radius of targets
 SEED_RADIUS_SETTING = "Studio/LNM/Circuits/SeedRadiusMm"
@@ -94,9 +95,12 @@ def _number(value, digits=3):
 
 
 def whereText(x, y, z):
-    """"L 38 · A 44 · S 26": direction letters, never a minus sign (USABILITY §7.5); RAS (MNI) mm."""
+    """"L 38 · A 44 · S 26": direction letters, never a minus sign (USABILITY §7.5); RAS (MNI) mm.
+
+    Rounded half away from zero like the Clusters card (``formatCoordinate``), not half to even.
+    """
     def part(value, negative, positive):
-        return f"{negative if value < 0 else positive} {abs(value):.0f}"
+        return f"{negative if value < 0 else positive} {formatCoordinate(abs(value))}"
 
     return " · ".join((part(x, "L", "R"), part(y, "P", "A"), part(z, "I", "S")))
 
