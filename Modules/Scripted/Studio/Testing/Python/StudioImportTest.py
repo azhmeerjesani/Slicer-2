@@ -3780,8 +3780,11 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIsNone(lesion.GetNodeReference(role))
         self.assertNotEqual(self._editor().segmentationNode().GetID(), lesion.GetID())
 
-    def _writeDicomSeries(self, folderName, slices=6, size=24, headerSize=None):
-        """A synthetic axial MR series of one series UID written with pydicom; return its folder (None without pydicom)."""
+    def _writeDicomSeries(self, folderName, slices=6, size=24, headerSize=None, positions=None):
+        """A synthetic axial MR series of one series UID written with pydicom; return its folder (None without pydicom).
+
+        ``positions``: the slice positions in mm (default: every 3 mm), for a series with a missing slice.
+        """
         try:
             import pydicom
             from pydicom.dataset import FileDataset, FileMetaDataset
@@ -3791,7 +3794,8 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         folder = os.path.join(self.directory, folderName)
         os.makedirs(folder, exist_ok=True)
         studyUid, seriesUid, frameUid = generate_uid(), generate_uid(), generate_uid()
-        for number in range(slices):
+        positions = positions if positions is not None else [float(number) * 3.0 for number in range(slices)]
+        for number, position in enumerate(positions):
             meta = FileMetaDataset()
             meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.4"
             meta.MediaStorageSOPInstanceUID = generate_uid()
@@ -3807,7 +3811,7 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             dataset.Modality = "MR"
             dataset.SeriesNumber = 2
             dataset.InstanceNumber = number + 1
-            dataset.ImagePositionPatient = [-24.0, -24.0, float(number) * 3.0]
+            dataset.ImagePositionPatient = [-24.0, -24.0, float(position)]
             dataset.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
             dataset.PixelSpacing = [2.0, 2.0]
             dataset.SliceThickness = 3.0
@@ -3996,6 +4000,74 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self._pump(8)
             self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")), before + 1)
             self.assertEqual(len(warnings), 2)
+        finally:
+            slicer.util.warningDisplay = originalWarning
+            if slicer.dicomDatabase.isOpen:
+                slicer.dicomDatabase.closeDatabase()
+            if originalSetting:
+                settings.setValue(settingsKey, originalSetting)
+                if originalOpen and os.path.isdir(str(originalSetting)):
+                    DICOMUtils.openDatabase(str(originalSetting))
+            else:
+                settings.remove(settingsKey)
+
+    def test_dicom_browser_load_of_several_series_refuses_damaged_ones(self):
+        """BB-1: several series loaded at once from the DICOM browser get the checks of one series. A series whose header
+        lies (more or less image data than Rows x Columns) is refused with the damage message and removed before autosave
+        saves it in a project, while the honest series opens; a series with a missing slice loaded with another is named.
+        """
+        from DICOMLib import DICOMUtils
+        from StudioLib import autosave, importer
+
+        good = self._writeDicomSeries("dicom multi good")
+        if good is None:
+            return  # pydicom is not available in this build
+        lyingLong = self._writeDicomSeries("dicom multi lying long", headerSize=512)
+        lyingShort = self._writeDicomSeries("dicom multi lying short", size=32, headerSize=16)
+        other = self._writeDicomSeries("dicom multi other")
+        gap = self._writeDicomSeries("dicom multi gap", positions=[0.0, 3.0, 6.0, 12.0, 15.0, 18.0])
+        studioShell = self._applyStudio()
+        settings = qt.QSettings()
+        settingsKey = slicer.dicomDatabaseDirectorySettingsKey
+        originalSetting = settings.value(settingsKey)
+        originalOpen = bool(slicer.dicomDatabase is not None and slicer.dicomDatabase.isOpen)
+        DICOMUtils.openTemporaryDatabase(os.path.join(self.directory, "dicom multi database"))
+        warnings = []
+        originalWarning = slicer.util.warningDisplay
+        slicer.util.warningDisplay = lambda text, *args, **kwargs: warnings.append(text)
+        try:
+            for folder in (good, lyingLong, lyingShort, other, gap):
+                DICOMUtils.importDicom(folder)
+            uid = lambda folder: slicer.dicomDatabase.seriesForFile(os.path.join(folder, "slice00.dcm"))
+            volumes = lambda: [node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode") if not node.GetHideFromEditors()]
+            slicer.util.selectModule("DICOM")
+            self._pump(4)
+            self.assertEqual(studioShell.currentModuleName(), "DICOM")
+            # The good series with both damaged ones (what the browser's Load button does for the patient)
+            DICOMUtils.loadSeriesByUID([uid(good), uid(lyingLong), uid(lyingShort)])
+            self.assertTrue(autosave._loadHolds)
+            self._wait(importer.TRANSIENT_LOAD_WINDOW_MS + 1500)
+            self.assertFalse(autosave._loadHolds)
+            self.assertEqual(len(volumes()), 1)
+            self.assertEqual(volumes()[0].GetAttribute("DICOM.instanceUIDs").split()[0],
+                             slicer.dicomDatabase.instanceForFile(os.path.join(good, "slice00.dcm")))
+            self.assertEqual(len(warnings), 1)
+            self.assertEqual(warnings[0].count("This DICOM series is damaged"), 2)
+            self.assertIn("would show as black", warnings[0])
+            self.assertIn("would show scrambled", warnings[0])
+            # The good series that is left opens as one series loaded alone does
+            self.assertEqual(studioShell.currentWorkspace(), "draw")
+            # Two honest series, one of them with a missing slice: both stay where they are, and the gap is named
+            slicer.mrmlScene.Clear(0)
+            slicer.util.selectModule("DICOM")
+            self._pump(4)
+            DICOMUtils.loadSeriesByUID([uid(other), uid(gap)])
+            self._wait(importer.TRANSIENT_LOAD_WINDOW_MS + 1500)
+            self.assertEqual(len(volumes()), 2)
+            self.assertEqual(len(warnings), 1)
+            self.assertEqual(len(importer.irregularGeometryVolumes(volumes())), 1)
+            self.assertIn("a slice is missing or the slice spacing is uneven",
+                          " ".join(text for _time, text, _level in studioShell.recentMessages()[-3:]))
         finally:
             slicer.util.warningDisplay = originalWarning
             if slicer.dicomDatabase.isOpen:

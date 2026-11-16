@@ -2829,6 +2829,20 @@ def irregularGeometryVolumes(nodes):
     return found
 
 
+def _irregularGeometryToast(nodes, shell):
+    """Say that a volume of ``nodes`` has a missing slice or an uneven slice spacing; return True if one has."""
+    irregular = irregularGeometryVolumes(nodes)
+    if not irregular:
+        return False
+    # The series has a missing slice or an uneven spacing (Slicer corrected the geometry with a grid transform): a
+    # consequence of an automatic action (USABILITY 6.3), it stays until the next input, so the "Saving to
+    # Projects/x" of the project that the load creates does not replace it before it is read
+    shell.toast(_("{name}: a slice is missing or the slice spacing is uneven. The image is shown corrected: "
+                  "check measurements and the lesion on it.").format(name=irregular[0].GetName()),
+                ms=7000, level="warning", sticky=True)
+    return True
+
+
 def _loadToast(result, shell):
     fractional = [node for node in result.segmentations if node.GetAttribute(LESION_FRACTIONAL_ATTRIBUTE)]
     if fractional:
@@ -2836,14 +2850,7 @@ def _loadToast(result, shell):
         shell.toast(_("{name} has fractional values (a probabilistic mask): every voxel above 0 is shown as the lesion. "
                       "The file is unchanged.").format(name=fractional[0].GetName()), ms=6000, level="warning")
         return
-    irregular = irregularGeometryVolumes(result.nodes())
-    if irregular:
-        # The series has a missing slice or an uneven spacing (Slicer corrected the geometry with a grid transform): a
-        # consequence of an automatic action (USABILITY 6.3), it stays until the next input, so the "Saving to
-        # Projects/x" of the project that the load creates does not replace it before it is read
-        shell.toast(_("{name}: a slice is missing or the slice spacing is uneven. The image is shown corrected: "
-                      "check measurements and the lesion on it.").format(name=irregular[0].GetName()),
-                    ms=7000, level="warning", sticky=True)
+    if _irregularGeometryToast(result.nodes(), shell):
         return
     held = getattr(shell, "consequenceHeld", None)
     if callable(held) and held():
@@ -6219,7 +6226,8 @@ def _removeVolumeAndHelpers(node):
 
 class _TransientLoadWatcher(VTKObservationMixin):
     """A scan added while the Sample Data or DICOM module is shown opens in Draw (with a "Lesion" segment), as if it was
-    opened from Library. Scene imports and multi-volume loads (more than one volume within 500 ms) are left alone.
+    opened from Library. Scene imports are left alone; multi-volume loads (more than one volume within 500 ms) stay
+    where they are, but a damaged DICOM series among them is refused and an uneven slice spacing is named.
     """
 
     def __init__(self, shell):
@@ -6273,16 +6281,27 @@ class _TransientLoadWatcher(VTKObservationMixin):
         try:
             nodes = [slicer.mrmlScene.GetNodeByID(nodeId) for nodeId in added]
             nodes = [node for node in nodes if node is not None and _referenceKind(node) is None]
-            if len(nodes) != 1 or not self.shell.isActive() or self.shell.currentModuleName() not in (*TRANSIENT_LOADER_MODULES, _DRAW_MODULE):
+            if not nodes or not self.shell.isActive() or self.shell.currentModuleName() not in (*TRANSIENT_LOADER_MODULES, _DRAW_MODULE):
                 return
-            try:
-                _checkDicomVolumeComplete(nodes[0])
-            except RefusedFileError as e:
-                # A damaged series loaded from the DICOM browser (or imported with its Import button): refused as on a
-                # drop, so the zero-filled scan is neither opened in Draw nor saved as a project
-                logging.warning(f"Studio: {nodes[0].GetName()} was not opened: {e}")  # planned refusal: no traceback
-                _removeVolumeAndHelpers(nodes[0])
-                slicer.util.warningDisplay(str(e))
+            # A damaged series loaded from the DICOM browser (or imported with its Import button), alone or with other
+            # series: refused as on a drop, so the zero-filled or scrambled scan is neither opened nor saved as a project
+            refusals = []
+            for node in list(nodes):
+                try:
+                    _checkDicomVolumeComplete(node)
+                except RefusedFileError as e:
+                    logging.warning(f"Studio: {node.GetName()} was not opened: {e}")  # planned refusal: no traceback
+                    _removeVolumeAndHelpers(node)
+                    nodes.remove(node)
+                    refusals.append(str(e))
+            if refusals:
+                slicer.util.warningDisplay("\n\n".join(refusals))
+            if not nodes:
+                return
+            if len(nodes) > 1:
+                # Several volumes (a multi-volume sample, several series of the browser) are left where they are, but a
+                # series with a missing slice or an uneven spacing is still named
+                _irregularGeometryToast(nodes, self.shell)
                 return
             if _isTemplate(nodes[0]):
                 # The MNI template of the Sample Data module: "Start on MNI template" on it (its "Lesions" is reused)
