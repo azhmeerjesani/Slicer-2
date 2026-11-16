@@ -577,6 +577,15 @@ class RecipeHeader:
         finally:
             self.combo.blockSignals(False)
 
+    def _restoreComboIndex(self):
+        """Show the current recipe in the combo again (a pick that was not applied must not leave its label there)."""
+        index = self.combo.findData(self.recipe.id) if self.recipe is not None else 0
+        self.combo.blockSignals(True)
+        try:
+            self.combo.setCurrentIndex(max(0, index))
+        finally:
+            self.combo.blockSignals(False)
+
     def recipeById(self, recipeId):
         return next((recipe for recipe in self.recipes if recipe.id == recipeId), None)
 
@@ -592,7 +601,8 @@ class RecipeHeader:
         """Choose a recipe: set the threshold rule and the Run everything options, and remember it in the study."""
         recipes = _recipes()
         if self.plan() is not None:
-            self.refresh()  # the combo is disabled while a plan is locked; nothing changes
+            self._restoreComboIndex()  # the combo is disabled while a plan is locked; nothing changes
+            self.refresh()
             return False
         self.recipe = recipe
         self._setMapSettings(recipes.apply(recipe), recipe.steps, "recipe")
@@ -1018,13 +1028,19 @@ def paletteEntries(shell=None):
         header = _headerOrNone()
         return header is None or header.plan() is not None
 
+    def canChoose():
+        header = _headerOrNone()
+        return header is None or header.plan() is None
+
     def chooseRecipe(header):
+        if not header.combo.isEnabled():  # a locked plan keeps its recipe; showPopup would open on a disabled combo
+            return
         header.combo.setFocus()
         header.combo.showPopup()
 
     return [
         {"id": "lnm.recipe", "title": _("Choose an analysis recipe (lesion network mapping)…"), "category": _("Map"),
-         "synonyms": ["recipe", "pipeline preset", "cookbook", "ferguson", "boes", "sLNM"], "callback": lambda: showInMap(chooseRecipe),
+         "synonyms": ["recipe", "pipeline preset", "cookbook", "ferguson", "boes", "sLNM"], "callback": lambda: showInMap(chooseRecipe), "enabled": canChoose,
          "description": _("Named, cited analysis pipelines with their differences from the source")},
         {"id": "lnm.lock-plan", "title": _("Lock analysis plan…"), "category": _("Map"), "synonyms": ["pre-registration", "preregister", "analysis plan", "hypotheses", "roi"],
          "callback": lambda: showInMap(lambda header: header.onLockClicked()), "enabled": canLock,

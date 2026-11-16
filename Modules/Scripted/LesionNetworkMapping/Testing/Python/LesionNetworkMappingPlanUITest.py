@@ -250,6 +250,27 @@ class LesionNetworkMappingPlanUITest(unittest.TestCase):
         deviations = self.recipes.read_deviations(self.study)
         self.assertEqual([(item["field"], item["old"], item["new"]) for item in deviations[recorded:]], [("n_perm", 5000, 2000)])
 
+    def test_9_search_choose_recipe_is_off_while_locked(self):
+        """The Search entry is disabled on a locked plan, never opens the disabled combo, and a stray pick keeps the locked recipe's label."""
+        from LesionNetworkMappingUI import card_recipe
+
+        entry = card_recipe.paletteEntries()[0]
+        self.assertEqual(entry["id"], "lnm.recipe")
+        self.assertFalse(entry["enabled"](), "Choose an analysis recipe is offered although the plan is locked")
+        before = self.header.combo.currentText
+        self.assertFalse(self.header.combo.isEnabled())
+        entry["callback"]()
+        _pump(50)
+        view = self.header.combo.view()
+        self.assertFalse(view.isVisible(), "the popup of the disabled combo opened")
+        other = next(r for r in self.header.recipes if r.id != self.header.recipe.id)
+        index = self.header.combo.findData(other.id)
+        self.header.combo.setCurrentIndex(index)  # as a click in a popup does ...
+        self.header.onRecipeActivated(index)  # ... and reports the pick (the combo's activated signal)
+        _pump(50)
+        self.assertEqual(self.header.combo.currentText, before)
+        self.assertEqual(self.header.combo.itemData(self.header.combo.currentIndex), self.header.recipe.id)
+
 
 if __name__ == "__main__":
     unittest.main()
