@@ -26,6 +26,7 @@ import qt
 from slicer.i18n import tr as _
 
 from . import widgets
+from .card_clusters import formatCoordinate
 from .cohort_contrast import (
     CONTRASTS,
     DEFAULT_PERM,
@@ -997,10 +998,13 @@ def _excludedText(excluded, limit=8):
 
 
 def _whereText(x, y, z):
-    """World coordinates with direction letters: "R 7 A 7 S 7" (RAS mm)."""
+    """World coordinates with direction letters: "R 7 A 7 S 7" (RAS mm).
+
+    Rounded half away from zero like the Clusters card (``formatCoordinate``), not half to even.
+    """
 
     def part(value, negative, positive):
-        return f"{positive if value >= 0 else negative} {abs(value):.0f}"
+        return f"{positive if value >= 0 else negative} {formatCoordinate(abs(value))}"
 
     return " ".join([part(x, "L", "R"), part(y, "P", "A"), part(z, "I", "S")])
 
