@@ -493,6 +493,33 @@ class WarningTest(_Fixture):
             json.dump({"inputs": {"lesion": {"sha256": preflight._sha256(native)}}}, f)
         self.assertNotIn("norm_stale", _ids(self.preflight()))
 
+    def test_recorded_non_mni_space_is_excluded_like_native(self):
+        """A lesion recorded in Talairach (a study space label that is not MNI) or in a misspelt space is excluded with the
+        native_space warning; before the fix it was included with an info note saying its space was "not recorded"
+        (BB-1 bug non-mni-declared-space-talairach-mapped-as-mni). "MNI" (an MNI template of no known family) stays included.
+        """
+        self.add_many(3)
+        self.add("sub-tal", space="Talairach")
+        self.add("sub-typo", space="MNI512NLin6Asym")
+        self.add("sub-native", space="native")
+        self.add("sub-other", space="MNI")
+        report = self.preflight()
+        check = _check(report, "native_space")
+        self.assertEqual(check["level"], "warn")
+        self.assertEqual(sorted(check["subjects"]), ["sub-native", "sub-tal", "sub-typo"])
+        self.assertIn("Talairach", check["message"])
+        self.assertIn("not a known MNI template space", check["message"])
+        self.assertEqual(report["excluded"]["sub-tal"], preflight.EXCLUDED_NOT_MNI)
+        self.assertEqual(report["excluded"]["sub-typo"], preflight.EXCLUDED_NOT_MNI)
+        self.assertEqual(report["excluded"]["sub-native"], "native space: not normalized")
+        self.assertIn("sub-other", report["included"])
+        unknown = _check(report, "space_unknown")
+        self.assertEqual(unknown["subjects"], ["sub-other"])
+        self.assertNotIn("not recorded", unknown["message"])
+        # The override includes them, as for native lesions
+        report = self.preflight(overrides=["native_space"])
+        self.assertIn("sub-tal", report["included"])
+
     def test_cohort_columns(self):
         self.add_many(3, group="case", dimensionality="2D", flipped="1", source_type="case_report", doi="10.1/x")
         self.add_many(3, prefix="sub-k", group="control", dimensionality="3D")

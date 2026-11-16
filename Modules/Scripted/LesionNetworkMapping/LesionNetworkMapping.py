@@ -1568,11 +1568,12 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
         """The lesions of a study that the Cohort seed maps, and why the others are not mapped.
 
         Uses ``cohortmaps.study_lesions`` (``Study.analysis_rows``: include = 1, review approval when the study requires
-        it, normalization QC). With a connectome on an MNI grid, lesions in native space are left out (they must be
+        it, normalization QC). With a connectome on an MNI grid, lesions in native space, or in a recorded space that is
+        not a known MNI template space (Talairach, a misspelt label: ``geometry.is_mni_space``), are left out (they must be
         normalized to MNI first, as for a single lesion). Returns {lesions [(sid, path)], excluded {reason: [sids]},
         native [sids], groups {group: count}, n}.
         """
-        from LesionNetworkMappingLib import cohortmaps
+        from LesionNetworkMappingLib import cohortmaps, geometry
         from LesionNetworkMappingLib.study import detect_file_space, is_missing
 
         lesions, excluded = cohortmaps.study_lesions(study, includeUnreviewed)
@@ -1586,7 +1587,7 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
                     space = detect_file_space(path)
                 except Exception:
                     space = None
-            if space == "native":
+            if checkSpace and space and not geometry.is_mni_space(space):
                 native.append(sid)
             else:
                 kept.append((sid, path))
@@ -4341,7 +4342,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             self.cohortExcludedLabel.hide()
         native = (info or {}).get("native") or []
         if native:
-            self.widgets.setBannerText(self.cohortNativeBanner, _("{n} native lesions not yet normalized (not mapped): normalize them to MNI first.").format(n=len(native)))
+            self.widgets.setBannerText(self.cohortNativeBanner, _("{n} lesions not in MNI space (native and not yet normalized, or another template space) are not mapped: normalize them to MNI first.").format(n=len(native)))
         self.cohortNativeBanner.setVisible(bool(native))
 
     def onOpenCohortStudy(self):

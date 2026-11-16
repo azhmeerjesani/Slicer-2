@@ -63,7 +63,8 @@ The template space of each lesion (--lesion-space, one per --lesion or one for a
 the lesion file's grid when it is a known template grid) is recorded with its lesion in run.json ("space",
 "space_notice") and in the QA values ("lesion_space", "space_notice"): the notice says that a lesion on
 another MNI template family than the connectome gives an approximate map (see ``geometry.family_notice``).
-With a template (MNI) connectome, a lesion declared in a native space, or one that is not on a known template
+With a template (MNI) connectome, a lesion declared in a native space or in a space that is not a known MNI
+template space (Talairach, a misspelt label), or one that is not on a known template
 grid and whose header does not say MNI, is mapped with a "native_space" warning event and its notice says so
 (see ``native_space_notice``): it is never silently treated as MNI.
 """
@@ -84,7 +85,7 @@ import numpy as np
 
 from . import jobs
 from .connectome import ConnectomeBundle, _is_cancelled
-from .geometry import detect_space, family_notice, from_masked_vector, resample_to_grid, space_family, to_masked_vector
+from .geometry import detect_space, family_notice, from_masked_vector, is_mni_space, resample_to_grid, space_family, to_masked_vector
 from .nifti import XFORM_MNI, XFORM_WARNING_MM, read_nifti, read_nifti_header, write_nifti, xform_disagreement
 
 RMAX = 0.999999  # r is clipped to +/-RMAX before the Fisher transform
@@ -864,11 +865,17 @@ NATIVE_SPACE_NOTICE = ("The lesion is in native (subject) space, but the connect
 UNKNOWN_SPACE_NOTICE = ("The lesion is not on a known MNI template grid and its header does not say MNI, but the connectome is in MNI space: "
                         "it was mapped as if it were in MNI space. If it is in native (scanner) space, normalize it to MNI first; "
                         "if it is already in MNI space, give its template with --lesion-space.")
+#: The note for a lesion declared in a space that is not an MNI template space (Talairach, ...) or whose label is not
+#: recognised (a misspelt template name); "{space}" is the declared label
+NOT_MNI_SPACE_NOTICE = ("The lesion is in {space} space, which is not a known MNI template space, but the connectome is in MNI space: "
+                        "its coordinates were used as MNI coordinates, so the map is not valid. Transform the lesion to MNI first; "
+                        "if it is already in MNI space, give its MNI template with --lesion-space.")
 
 
 def native_space_notice(space, path, template):
     """The note for a lesion that may not be in MNI space while the connectome is a template connectome
-    (:func:`template_connectome`), or "": a lesion declared in a native (subject) space, or one whose space is not
+    (:func:`template_connectome`), or "": a lesion declared in a native (subject) space, one declared in a space that
+    is not a known MNI template space (Talairach, a misspelt label: ``geometry.is_mni_space``), or one whose space is not
     known (not on a known template grid, no --lesion-space) and whose header does not have the MNI code. The Map
     workspace refuses such a lesion and the pipeline preflight excludes it; the command line maps it with this note
     and a warning event, never silently.
@@ -877,7 +884,17 @@ def native_space_notice(space, path, template):
         return ""
     if space is None:
         return "" if path is not None and _header_says_mni(path) else UNKNOWN_SPACE_NOTICE
-    return NATIVE_SPACE_NOTICE if space_family(space) == "native" else ""
+    if space_family(space) == "native":
+        return NATIVE_SPACE_NOTICE
+    return "" if is_mni_space(space) else NOT_MNI_SPACE_NOTICE.format(space=space)
+
+
+def is_space_warning(notice):
+    """Whether a lesion's space notice (:func:`native_space_notice`) says that it may not be in MNI space (a
+    "native_space" warning), not only that its MNI template family differs from the connectome's.
+    """
+    head, _sep, tail = NOT_MNI_SPACE_NOTICE.partition("{space}")
+    return notice in (NATIVE_SPACE_NOTICE, UNKNOWN_SPACE_NOTICE) or (bool(notice) and notice.startswith(head) and notice.endswith(tail))
 
 
 def _lesion_spaces(paths, given, bundle):
@@ -1331,7 +1348,7 @@ def main(argv=None):
             names.append(name)
             weights.append(lesion_weights_vector)
             qc.append({"lesion": name, **lesion_qc_values})
-            if space["space_notice"] in (NATIVE_SPACE_NOTICE, UNKNOWN_SPACE_NOTICE):
+            if is_space_warning(space["space_notice"]):
                 jobs.emit("warning", code="native_space", lesion=name, message=space["space_notice"])
             if lesion_qc_values["voxels_in_mask"] == 0:
                 jobs.emit("warning", lesion=name, message="The lesion does not overlap the connectome mask; its maps are all zero.")

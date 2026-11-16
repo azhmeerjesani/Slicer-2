@@ -6,7 +6,9 @@ A lesion on the FSL MNI152NLin6Asym 2 mm grid mapped with a connectome on MNI152
 declared space) gives an approximate map; before the fix the notice was only shown in the Map module.
 
 A lesion in native (scanner) space mapped with an MNI connectome by the engine or cohortmaps command line gets a
-"native_space" warning event and a recorded note (BB-1 bug engine-cohortmaps-cli-native-lesion-mapped-silently-as-mni).
+"native_space" warning event and a recorded note (BB-1 bug engine-cohortmaps-cli-native-lesion-mapped-silently-as-mni);
+so does a lesion declared in Talairach space or with a label that is not a known MNI template (BB-1 bug
+non-mni-declared-space-talairach-mapped-as-mni).
 
 Run without Slicer's GUI:
 
@@ -208,6 +210,48 @@ class LesionSpaceRecordTest(unittest.TestCase):
         self.assertEqual(warnings[0]["participants"], ["sub-01"])
         with open(os.path.join(out, "cohortmaps.json"), encoding="utf-8") as f:
             self.assertEqual(json.load(f)["native_space"], ["sub-01"])
+
+    def test_non_mni_declared_space_is_never_silent(self):
+        """A lesion declared in Talairach space or with a label that is not a known MNI template (a misspelt one) gets a
+        native_space warning event and the not-MNI note; before the fix it got no warning and the template-family
+        ("a few millimetres apart, approximate") note (BB-1 bug non-mni-declared-space-talairach-mapped-as-mni).
+        """
+        from LesionNetworkMappingLib import engine
+
+        lesion = self._native_lesion("sub-03_lesion.nii.gz", code=3)  # header code 3: Talairach
+        for index, label in enumerate(("Talairach", "TT_N27", "MNI512NLin6Asym")):
+            run, qa, warnings = self._map_native(lesion, os.path.join(self.tmp, f"run-not-mni-{index}"), "--lesion-space", label)
+            notice = engine.NOT_MNI_SPACE_NOTICE.format(space=label)
+            self.assertEqual(len(warnings), 1, (label, warnings))
+            self.assertEqual(run["lesions"][0]["space_notice"], notice)
+            self.assertEqual(qa["lesions"][run["lesions"][0]["name"]]["space_notice"], notice)
+            self.assertNotIn("approximate", notice)
+            self.assertEqual(geometry.family_notice(label, CONNECTOME_SPACE), "")
+            self.assertTrue(engine.is_space_warning(notice))
+        # MNI template labels of no known family keep the template-family note and no warning
+        for label in ("MNI", "MNI305", "userAbc1", "user:abc"):
+            self.assertTrue(geometry.is_mni_space(label), label)
+            self.assertEqual(engine.native_space_notice(label, lesion, True), "")
+            self.assertFalse(engine.is_space_warning(geometry.family_notice(label, CONNECTOME_SPACE)))
+        run, qa, warnings = self._map_native(lesion, os.path.join(self.tmp, "run-mni-other"), "--lesion-space", "MNI")
+        self.assertEqual(warnings, [])
+        self.assertIn("MNI (other)", run["lesions"][0]["space_notice"])
+
+    def test_non_mni_study_space_in_cohortmaps_is_never_silent(self):
+        """cohortmaps --study: a subject whose recorded space is Talairach is listed in native_space with a warning."""
+        from LesionNetworkMappingLib import cohortmaps
+        from LesionNetworkMappingLib.study import Study
+
+        study = Study.create(os.path.join(self.tmp, "study-tal"), name="Talairach", space=CONNECTOME_SPACE)
+        target = os.path.join(study.path, "lesions", os.path.basename(self.lesion))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copyfile(self.lesion, target)
+        study.add_subject("sub-07", {"lesion": study.relpath(target), "space": "Talairach"})
+        bundle = connectome.ConnectomeBundle.open(self.bundle)
+        items = [{"participant_id": "sub-07", "lesion": target}]
+        self.assertEqual(cohortmaps._native_space_lesions(items, bundle, study), ["sub-07"])
+        study.set("sub-07", space="MNI152NLin6Asym")
+        self.assertEqual(cohortmaps._native_space_lesions(items, bundle, study), [])
 
     def test_space_count_must_match_the_lesions(self):
         result = _run_engine("--bundle", self.bundle, "--lesion", self.lesion, "--lesion", self.lesion, "--lesion-space", "A", "--lesion-space", "B", "--lesion-space", "C",

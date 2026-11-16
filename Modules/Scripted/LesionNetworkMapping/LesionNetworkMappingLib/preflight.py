@@ -91,6 +91,9 @@ CACHE_COPIES = 1
 DISK_HEADROOM_BYTES = 256 * 1024**2
 NORMALIZATION_JSON = "normalization.json"
 MAX_LISTED = 5
+#: The exclusion reason of a lesion whose recorded space is not a known MNI template space (Talairach, a misspelt label),
+#: with a template connectome (the "native_space" check; not "native space: ...", which the pipeline normalizes)
+EXCLUDED_NOT_MNI = "space not MNI: transform to MNI first"
 #: sha256 cache of lesion files in a study: {"version", "files": {path relative to the study: [size, mtime_ns, sha256]}}
 HASH_CACHE_RELPATH = (studylib.PRIVATE_DIR, "cache", "lesion_sha256.json")
 HASH_CACHE_VERSION = 1
@@ -188,6 +191,32 @@ def _listed(sids, limit=MAX_LISTED):
 
 def _count(n, word, plural=None):
     return f"{n} {word if n == 1 else plural or word + 's'}"
+
+
+def _native_space_message(sids, details):
+    """The message of the "native_space" check: lesions in a native space, or (``details``: {sid: space label}) in a
+    space that is not a known MNI template space (Talairach, a misspelt label; ``geometry.is_mni_space``).
+    """
+    others = sorted({str(label) for sid, label in details.items() if sid in sids and label})
+    native = [sid for sid in sids if not details.get(sid)]
+    verb = "is" if len(sids) == 1 else "are"
+    if not others:
+        return f"{_count(len(sids), 'lesion')} {verb} in native space and not yet normalized ({_listed(sids)}): normalize to MNI in the Library."
+    where = "in native space or in" if native else "in"
+    return (f"{_count(len(sids), 'lesion')} {verb} {where} a space that is not a known MNI template space ({', '.join(others)}) and not yet "
+            f"normalized ({_listed(sids)}): normalize to MNI in the Library, or set the space if it is already an MNI template.")
+
+
+def _space_unknown_message(conn_family):
+    def message(sids, details):
+        recorded = sorted({str(label) for sid, label in details.items() if sid in sids and label})
+        if recorded and len(recorded) == len(sids):
+            return (f"The space of {_count(len(sids), 'lesion')} is an MNI template of no known family ({', '.join(recorded)}: {_listed(sids)}): "
+                    f"{'it is' if len(sids) == 1 else 'they are'} assumed to be in the connectome's family ({conn_family}).")
+        return (f"The space of {_count(len(sids), 'lesion')} is not recorded and {'its' if len(sids) == 1 else 'their'} grid is not a known template grid "
+                f"({_listed(sids)}): {'it is' if len(sids) == 1 else 'they are'} assumed to be in the connectome's space ({conn_family}).")
+
+    return message
 
 
 def _number(text):
@@ -609,14 +638,14 @@ def run_preflight(
         collector.add(check_id, "block", sid, message_fn, fix or _library_fix(), "subject", True)
         exclude(sid, reason)
 
-    def warn_exclusion(check_id, sid, message_fn, reason, fix_label):
+    def warn_exclusion(check_id, sid, message_fn, reason, fix_label, detail=None):
         overridden = check_id in overrides
 
         def message(sids, details, base=message_fn):
             text = base(sids, details)
             return text + (" Included anyway (override recorded)." if overridden else " They are excluded unless you include them anyway.")
 
-        collector.add(check_id, "warn", sid, message, lambda sids: _fix(FIX_INCLUDE, fix_label, check=check_id, subjects=sids), "subject", not overridden)
+        collector.add(check_id, "warn", sid, message, lambda sids: _fix(FIX_INCLUDE, fix_label, check=check_id, subjects=sids), "subject", not overridden, detail)
         if not overridden:
             exclude(sid, reason)
 
@@ -776,22 +805,19 @@ def run_preflight(
                 detail=list(match.candidates),
             )
         family = geometry.space_family(space) if space else (match.family if match is not None else "unknown")
-        if family == "unknown" and conn_family not in (None, "unknown"):
-            collector.add(
-                "space_unknown",
-                "info",
-                sid,
-                lambda sids, _d: f"The space of {_count(len(sids), 'lesion')} is not recorded and {'its' if len(sids) == 1 else 'their'} grid is not a known template grid ({_listed(sids)}): {'it is' if len(sids) == 1 else 'they are'} assumed to be in the connectome's space ({conn_family}).",
-                _library_fix("Set the space"),
-            )
+        # A recorded space that is not a known MNI template space (Talairach, a misspelt label) is treated like a native one
+        not_mni = space is not None and family != "native" and not geometry.is_mni_space(space)
+        if family == "unknown" and not not_mni and conn_family not in (None, "unknown"):
+            collector.add("space_unknown", "info", sid, _space_unknown_message(conn_family), _library_fix("Set the space"), detail=str(space) if space else None)
         normalized = not schema.is_missing(row.get("norm_method"))
-        if family == "native" and not normalized:
+        if (family == "native" or (not_mni and conn_family not in (None, "unknown"))) and not normalized:
             warn_exclusion(
                 "native_space",
                 sid,
-                lambda sids, _d: f"{_count(len(sids), 'lesion')} {'is' if len(sids) == 1 else 'are'} in native space and not yet normalized ({_listed(sids)}): normalize to MNI in the Library.",
-                "native space: not normalized",
+                _native_space_message,
+                EXCLUDED_NOT_MNI if not_mni else "native space: not normalized",
                 "Include native lesions anyway",
+                detail=str(space) if not_mni else None,
             )
         if normalized and row.get("norm_qc") != "pass":
             warn_exclusion(
