@@ -1540,6 +1540,47 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             importer.NIFTI_SCAN_THREAD_BYTES = originalLimit
             timer.stop()
 
+    def test_nifti_check_threads_by_compressed_size(self):
+        """BB-1: a .nii.gz whose header announces little but whose gzip stream is large (data after the image) is checked
+        in the worker thread too: the compressed size decides as well, not only the header.
+        """
+        import threading
+
+        from StudioLib import importer
+
+        self.assertGreaterEqual(importer.NIFTI_SCAN_THREAD_FILE_BYTES, 64 * 1024)
+        self.assertLessEqual(importer.NIFTI_SCAN_THREAD_FILE_BYTES * 1030, 4 * importer.NIFTI_SCAN_THREAD_BYTES)
+        header = bytearray(348)
+        struct.pack_into("<i", header, 0, 348)
+        struct.pack_into("<8h", header, 40, 3, 8, 8, 8, 1, 1, 1, 1)
+        struct.pack_into("<hh", header, 70, 2, 8)
+        struct.pack_into("<f", header, 108, 352)
+        struct.pack_into("<8f", header, 76, 1, 1, 1, 1, 0, 0, 0, 0)
+        header[344:348] = b"n+1\0"
+        path = os.path.join(self.directory, "tailsize_T1w.nii.gz")
+        with gzip.open(path, "wb") as f:
+            f.write(bytes(header) + bytes(4) + bytes(8 ** 3) + os.urandom(256 * 1024))  # trailing data after the image
+        readers = set()
+        original = gzip.GzipFile.read1
+
+        def spyRead(self, size=-1):
+            if size > 1024:
+                readers.add(threading.current_thread() is threading.main_thread())
+            return original(self, size)
+
+        originalLimit = importer.NIFTI_SCAN_THREAD_FILE_BYTES
+        gzip.GzipFile.read1 = spyRead
+        try:
+            importer._checkNiftiComplete(path)
+            self.assertEqual(readers, {True})  # below the limit: direct
+            readers.clear()
+            importer.NIFTI_SCAN_THREAD_FILE_BYTES = os.path.getsize(path)
+            importer._checkNiftiComplete(path)
+            self.assertEqual(readers, {False}, "a gzip stream with much data after the image was read on the GUI thread")
+        finally:
+            gzip.GzipFile.read1 = original
+            importer.NIFTI_SCAN_THREAD_FILE_BYTES = originalLimit
+
     def test_memory_guard_sees_cgroup_limit(self):
         """BB-1: the memory guard counts the room that a control group (a container's --memory, a Slurm job, a systemd
         MemoryMax) still allows, also when the limit is set on a group above this one, so a scan that does not fit is

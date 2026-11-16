@@ -811,6 +811,9 @@ def _niftiScan(path):
 #: A ``.nii.gz`` whose header announces at least this many bytes of voxels is checked in a worker thread (decompressing
 #: it takes about a second per GB), so the window is not frozen meanwhile. Smaller files are checked directly.
 NIFTI_SCAN_THREAD_BYTES = 512 * 1024**2
+#: So is a ``.nii.gz`` of at least this many compressed bytes whatever its header says: deflate expands at most about
+#: 1030:1, so this much can hold 512 MiB or more, and the check reads the stream to its end, also data after the image.
+NIFTI_SCAN_THREAD_FILE_BYTES = 512 * 1024
 
 
 def _niftiScanResponsive(path):
@@ -821,7 +824,9 @@ def _niftiScanResponsive(path):
     import threading
 
     try:
-        large = _isGzipFile(path) and (_niftiImageBytes(path) or 0) >= NIFTI_SCAN_THREAD_BYTES
+        large = _isGzipFile(path) and (
+            (_niftiImageBytes(path) or 0) >= NIFTI_SCAN_THREAD_BYTES
+            or os.path.getsize(path) >= NIFTI_SCAN_THREAD_FILE_BYTES)
     except Exception:
         large = False
     if not large or threading.current_thread() is not threading.main_thread() or qt.QApplication.instance() is None:
