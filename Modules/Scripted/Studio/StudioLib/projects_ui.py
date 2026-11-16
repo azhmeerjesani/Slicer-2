@@ -618,6 +618,13 @@ def saveNow(shell=None):
     project = service.currentProject() if service is not None else None
     if project is None and service is not None:
         project = service.ensureProject()
+    if project is None and service is not None and projects.isRootMissing():
+        # The chosen Slicer Studio folder cannot be found (a drive that is not connected): no project can be made, and the
+        # official Save dialog would write the scene and the lesion into the home folder
+        change = None if projects.isRootFromEnvironment() else (lambda *_args: changeRootDialog())
+        message(projects.rootMissingText(), level="warning", action=change,
+                actionText=_("Change folder…") if change else None, ms=8000, toolTip=projects.root())
+        return False
     if project is None and service is not None and service.rootUnwritable():
         # The Slicer Studio folder cannot be written and the data's folder is still the project it was opened from (read-only
         # too): the official Save dialog would aim every row at that folder, ask to replace the originals and then fail

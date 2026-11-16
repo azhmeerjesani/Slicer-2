@@ -5549,6 +5549,56 @@ class StudioProjectsTest(unittest.TestCase):
             standIn.deleteLater()
             real.setObjectName("FileSaveSceneAction")
 
+    def test_61bb_ctrl_s_with_missing_studio_folder_explains_instead_of_official_save_dialog(self):
+        """Ctrl+S when the chosen Slicer Studio folder cannot be found (a drive that is not connected; BB-1): no project is
+        made, and the official Save dialog would write the scene and the lesion into the home folder. Ctrl+S says that the
+        folder cannot be found, with Change folder…, as for a read-only folder (61b); the folder is not created.
+        """
+        from StudioLib import projects_ui
+
+        projects = self.projects
+        missing = os.path.normpath(os.path.join(self.tempDir, "unplugged 61bb", "Slicer Studio"))
+        settings = qt.QSettings()
+        saved = {key: settings.value(key) for key in (projects.ROOT_KEY, projects.ROOT_CHOSEN_KEY)}
+        environment = os.environ.pop(projects.ROOT_ENVIRONMENT, None)
+        settings.setValue(projects.ROOT_KEY, missing)
+        settings.setValue(projects.ROOT_CHOSEN_KEY, True)
+        mainWindow = slicer.util.mainWindow()
+        real = mainWindow.findChild("QAction", "FileSaveSceneAction")
+        real.setObjectName("FileSaveSceneActionHidden")
+        standIn = qt.QAction(mainWindow)
+        standIn.setObjectName("FileSaveSceneAction")
+        classicDialogs = []
+        standIn.connect("triggered()", lambda: classicDialogs.append(1))
+        toasts = []
+        original = projects_ui.message
+        projects_ui.message = lambda text, **kwargs: toasts.append((str(text), kwargs))
+        running = self.autosave._service
+        service = self._service()
+        try:
+            self.autosave._service = service
+            self._userVolume()
+            service.poll()
+            self.assertTrue(projects.isRootMissing())
+            self.assertIsNone(service.project)
+            self.assertFalse(projects_ui.saveNow())
+            self.assertEqual(classicDialogs, [], "the official Save dialog did not open")
+            self.assertTrue(any("cannot be found" in text for text, _kwargs in toasts), toasts)
+            self.assertFalse(os.path.exists(missing), "the missing folder is not created")
+        finally:
+            projects_ui.message = original
+            self.autosave._service = running
+            for key, value in saved.items():
+                if value is None:
+                    settings.remove(key)
+                else:
+                    settings.setValue(key, value)
+            if environment is not None:
+                os.environ[projects.ROOT_ENVIRONMENT] = environment
+            standIn.setObjectName("")
+            standIn.deleteLater()
+            real.setObjectName("FileSaveSceneAction")
+
     def test_61c_close_or_quit_with_unwritable_studio_folder_never_offers_the_official_save(self):
         """Ctrl+W and quit after an edit while the Slicer Studio folder cannot be written (BB-1): no project exists, and the
         official "Save before closing scene?" / "Save before exit?" question offered its Save Data dialog aimed at the
