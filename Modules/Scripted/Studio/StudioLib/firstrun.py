@@ -317,9 +317,17 @@ def projectCloseSummary():
         return None
     service = autosave.instance() if hasattr(autosave, "instance") else None
     project = service.currentProject() if service is not None and hasattr(service, "currentProject") else None
-    if project is None:
-        return None
     global _unsavedProjectQuit
+    if project is None:
+        # No project could be made (the Slicer Studio folder cannot be written): the classic "Save before exit?" would offer
+        # the official Save Data dialog aimed at the read-only folder the data came from; the Studio question offers
+        # "Save a copy…" elsewhere instead
+        reason = service.unsavedSceneOutsideUnwritableRoot() if hasattr(service, "unsavedSceneOutsideUnwritableRoot") else ""
+        if not reason:
+            return None
+        _unsavedProjectQuit = (None, reason)
+        return CLOSE_MODE_LESION_SAVED, _("The scene could not be saved: {reason}. Quitting now discards its changes. "
+                                          "Quit?").format(reason=reason)
     ok = service.flushForClose()
     if not ok:
         reason = getattr(service, "_projectPausedReason", "") or _("see the error log")

@@ -5499,6 +5499,86 @@ class StudioProjectsTest(unittest.TestCase):
             standIn.deleteLater()
             real.setObjectName("FileSaveSceneAction")
 
+    def test_61c_close_or_quit_with_unwritable_studio_folder_never_offers_the_official_save(self):
+        """Ctrl+W and quit after an edit while the Slicer Studio folder cannot be written (BB-1): no project exists, and the
+        official "Save before closing scene?" / "Save before exit?" question offered its Save Data dialog aimed at the
+        read-only folder the data came from (it asked to replace the originals, then failed; the only exit left discarded
+        the edits). The Studio question asks instead ("Save a copy…", close or quit without saving, "Keep working").
+        """
+        from unittest import mock
+
+        from StudioLib import firstrun, projects_ui
+
+        projects = self.projects
+        blocker = os.path.join(self.tempDir, "a file 61c")
+        with open(blocker, "w") as f:
+            f.write("not a folder")
+        os.environ[projects.ROOT_ENVIRONMENT] = os.path.join(blocker, "Slicer Studio")
+        mainWindow = slicer.util.mainWindow()
+        if not hasattr(mainWindow, "closeSceneSummaryRequested"):
+            self.skipTest("the main window has no close scene summary hook")
+        asked = []
+
+        def answer(index):
+            def question(parent, title, text, buttons, default=0):
+                asked.append((title, text, list(buttons), default))
+                return index
+            return question
+
+        def emit(signalName, index):
+            mainWindow.setProperty(firstrun.CLOSE_MODE_PROPERTY, "")
+            with mock.patch.object(projects_ui, "_question", answer(index)):
+                getattr(mainWindow, signalName)()
+            return mainWindow.property(firstrun.CLOSE_MODE_PROPERTY)
+
+        running = self.autosave._service
+        service = self._service()
+        service.connectCloseSummary()
+        try:
+            self.autosave._service = service
+            self._userVolume()
+            service.poll()
+            slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Edit")  # an edit that is not saved
+            service.poll()
+            self.assertIsNone(service.project)
+            self.assertTrue(service.rootUnwritable())
+            with mock.patch.object(projects_ui, "_service", lambda: service), mock.patch.object(projects_ui, "_shell", lambda: None), \
+                    mock.patch.object(firstrun, "runningJobNotice", lambda sceneOnly=False: ""):
+                # Ctrl+W (File > Close Scene), "Keep working": the main window cancels the close, no official question
+                self.assertEqual(emit("closeSceneSummaryRequested", 2), "cancel")
+                self.assertEqual(len(asked), 1, "the Studio question is asked instead of the official one")
+                title, text, buttons, default = asked[0]
+                self.assertEqual(title, "Close scene")
+                self.assertEqual(buttons, ["Save a copy…", "Close without saving", "Keep working"])
+                self.assertEqual(default, 2, "keeping the work is the default")
+                self.assertIn("cannot be written", text)
+                # "Close without saving": the scene closes without the official question
+                self.assertEqual(emit("closeSceneSummaryRequested", 1), "projectSaved")
+                service._discardOnClose = False
+                # Quit (Studio's close prompt): the Studio question too, never "Save session…" (the official Save Data dialog)
+                mainWindow.setProperty(firstrun.CLOSE_ANSWER_PROPERTY, "")
+                summary = firstrun.projectCloseSummary()
+                self.assertIsNotNone(summary, "the classic 'Save before exit?' is not used")
+                self.assertEqual(summary[0], firstrun.CLOSE_MODE_LESION_SAVED)
+                with mock.patch.object(projects_ui, "_question", answer(2)):
+                    firstrun.askCloseQuestion()
+                self.assertEqual(mainWindow.property(firstrun.CLOSE_ANSWER_PROPERTY), "cancel", "Keep working cancels the quit")
+                self.assertEqual(asked[-1][0], "Quit")
+                self.assertEqual(asked[-1][2], ["Save a copy…", "Quit without saving", "Keep working"])
+                firstrun.projectCloseSummary()
+                with mock.patch.object(projects_ui, "_question", answer(1)):
+                    firstrun.askCloseQuestion()
+                self.assertEqual(mainWindow.property(firstrun.CLOSE_ANSWER_PROPERTY), "quit")
+            # An empty scene (nothing to lose) keeps the classic behaviour: nothing is asked by Studio
+            slicer.mrmlScene.Clear(0)
+            self.assertEqual(service.unsavedSceneOutsideUnwritableRoot(), "")
+            self.assertIsNone(firstrun.projectCloseSummary())
+        finally:
+            self.autosave._service = running
+            mainWindow.setProperty(firstrun.CLOSE_ANSWER_PROPERTY, "")
+            mainWindow.setProperty(firstrun.CLOSE_MODE_PROPERTY, "")
+            firstrun._unsavedProjectQuit = None
+
     def test_62_unwritable_studio_folder_is_reported_once_not_after_every_edit(self):
         """The Slicer Studio folder cannot be created (a read-only volume, BB-1): no project can be made, and every new
         scene fingerprint tries again. The user is told once, in plain words (no error number, no path, no Retry that would

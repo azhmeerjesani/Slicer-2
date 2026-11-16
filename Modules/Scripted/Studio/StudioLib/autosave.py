@@ -2291,7 +2291,15 @@ class AutosaveService:
         asked as for Load Scene instead: "Save a copy…" elsewhere, close or quit without saving, or keep working. Studio's
         own close prompt (``firstrun``) asks the quit question itself.
         """
-        if saved is not False or self.project is None or self._recovering != 0 or not self.enabled() or self._studyOpen():
+        project, reason = self.project, self._projectPausedReason
+        if saved is None and project is None:
+            # No project could be made: the Slicer Studio folder cannot be written. The scene's files are still those it was
+            # opened from (a project in that read-only folder): the official Save Data dialog would aim every row there, ask
+            # to replace them and fail, so the same Studio question is asked (as Ctrl+S explains instead of saving there)
+            reason = self.unsavedSceneOutsideUnwritableRoot()
+            if not reason:
+                return
+        elif saved is not False or project is None or self._recovering != 0 or not self.enabled() or self._studyOpen():
             return
         mainWindow = slicer.util.mainWindow()
         if mainWindow is None or mainWindow.property("SlicerStudioCloseMode"):
@@ -2304,7 +2312,7 @@ class AutosaveService:
             from StudioLib import projects_ui
 
             title = _("Quit") if verb == "quit" else _("Close scene")
-            answer = projects_ui.askReplaceUnsavedProject(title, self.project, self._projectPausedReason, verb=verb)
+            answer = projects_ui.askReplaceUnsavedProject(title, project, reason, verb=verb)
         except Exception:
             logging.error("Slicer Studio: asking about the project that could not be saved failed:\n" + traceback.format_exc())
             answer = "cancel"
@@ -2317,6 +2325,23 @@ class AutosaveService:
         # A copy holds the edits, or the user chose to drop them: the close does not try (and fail) to save again
         self._discardOnClose = True
         mainWindow.setProperty("SlicerStudioCloseMode", "projectSaved")
+
+    def unsavedSceneOutsideUnwritableRoot(self):
+        """The reason the scene cannot be saved when it has unsaved user data, no project and the Slicer Studio folder cannot
+        be written (no project can be made, ``rootUnwritable``), else "". The close and quit questions then offer
+        "Save a copy…" elsewhere instead of the official Save Data dialog, which would aim at the read-only folder.
+        """
+        if self.project is not None or self._recovering != 0 or not self.projectsActive() or not self.rootUnwritable():
+            return ""
+        scene = slicer.mrmlScene
+        try:
+            modified = bool(scene.GetStorableNodesModifiedSinceRead()) or bool(scene.GetModifiedSinceRead())
+            if not modified or not self._projects().sceneHasUserData(scene):
+                return ""
+        except Exception:
+            logging.error("Slicer Studio: checking the scene for unsaved changes failed:\n" + traceback.format_exc())
+            return ""
+        return _("the Slicer Studio folder cannot be written")
 
     def _markProjectSavedForClose(self):
         """The project is up to date: the main window asks nothing about "unsaved" scene state (the views and the hierarchy

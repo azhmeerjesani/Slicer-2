@@ -858,17 +858,24 @@ def askReplaceUnsavedProject(title, project, reason="", verb="open", notice=""):
     the project's own files in place, which on a full disk truncates the files saved before. ``notice`` (a running job
     that is stopped) comes first.
     """
-    name = project.relativeName() if project is not None else _("The open project")
     reason = reason or _("see the error log")
-    if verb == "quit":
-        text = _("{project} could not be saved: {reason}. Quitting now discards its changes since the last save.").format(project=name, reason=reason)
-        goOn = _("Quit without saving")
-    elif verb == "close":
-        text = _("{project} could not be saved: {reason}. Closing it now discards its changes since the last save.").format(project=name, reason=reason)
-        goOn = _("Close without saving")
+    if project is None:
+        # No project (the Slicer Studio folder cannot be written): the scene was never saved by Studio
+        if verb == "quit":
+            text = _("The scene could not be saved: {reason}. Quitting now discards its changes.").format(reason=reason)
+        elif verb == "close":
+            text = _("The scene could not be saved: {reason}. Closing it now discards its changes.").format(reason=reason)
+        else:
+            text = _("The scene could not be saved: {reason}. Opening now discards its changes.").format(reason=reason)
     else:
-        text = _("{project} could not be saved: {reason}. Opening now discards its changes since the last save.").format(project=name, reason=reason)
-        goOn = _("Open without saving")
+        name = project.relativeName()
+        if verb == "quit":
+            text = _("{project} could not be saved: {reason}. Quitting now discards its changes since the last save.").format(project=name, reason=reason)
+        elif verb == "close":
+            text = _("{project} could not be saved: {reason}. Closing it now discards its changes since the last save.").format(project=name, reason=reason)
+        else:
+            text = _("{project} could not be saved: {reason}. Opening now discards its changes since the last save.").format(project=name, reason=reason)
+    goOn = {"quit": _("Quit without saving"), "close": _("Close without saving")}.get(verb, _("Open without saving"))
     if notice:
         text = f"{notice}\n\n{text}"
     while True:
