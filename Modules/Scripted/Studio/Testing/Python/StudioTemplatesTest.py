@@ -129,6 +129,13 @@ class StudioTemplatesTest(unittest.TestCase):
         self.inputMd5 = {path: _md5(path) for path in _allFiles(self.inputs)}
         templates.registerGrids(force=True)
         self.services = []
+        self.addCleanup(self._assertNoParentlessPanels)  # registered first, so it runs after every deleteLater cleanup
+
+    def _assertNoParentlessPanels(self):
+        # A parentless settings panel alive at exit makes Slicer exit abnormally (code 1) although every test passed
+        qt.QApplication.sendPostedEvents(None, 52)  # QEvent.DeferredDelete
+        leaked = [w for w in slicer.app.topLevelWidgets() if w.objectName == self.ui.PANEL_OBJECT_NAME]
+        self.assertEqual(leaked, [], "a test left a parentless TemplatesSettingsPanel alive (add self.addCleanup(panel.deleteLater))")
 
     def tearDown(self):
         from StudioLib import autosave_io
@@ -2255,6 +2262,7 @@ class StudioTemplatesTest(unittest.TestCase):
         template = templates.templateById(template.id)
         self.assertFalse(template.isAvailable())
         panel = ui.TemplatesSettingsPanel()
+        self.addCleanup(panel.deleteLater)
         panel.refresh()
         button = panel.rowFor(template.id).findChild(qt.QPushButton, "studioTemplateSetDefault")
         self.assertIsNotNone(button)
