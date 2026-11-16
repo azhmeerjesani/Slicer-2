@@ -1393,10 +1393,55 @@ class StudioProjectsTest(unittest.TestCase):
                     slicer.app.processEvents()
                 for card in section.cards():
                     name = card.findChild("QLabel", "studioProjectCardName")
-                    elidedCards += name.text.endswith("…")
+                    elidedCards += "…" in name.text
                     need = qt.QFontMetrics(name.font).horizontalAdvance(name.text)
                     self.assertLessEqual(need, name.contentsRect().width, f"{width}: the elided name is wider than its label")
             self.assertGreater(elidedCards, 0, "no name was elided: the test checks nothing")
+        finally:
+            section.setViewMode(remembered)
+            section.widget.hide()
+            section.dispose()
+            section.widget.setParent(None)
+            section.widget.deleteLater()
+            qt.QCoreApplication.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+            slicer.app.processEvents()
+
+    def test_13bca_duplicate_card_names_stay_distinguishable_when_elided(self):
+        """A project and its duplicates ('X', 'X copy', 'X copy 2') keep distinct card names when the name is elided
+        (the end ellipsis cut off the ' copy' suffix and all three cards read the same; BB-1).
+        """
+        from StudioLib import projects_ui
+
+        service = self._service()
+        self._userVolume()
+        self._projectFor(service)
+        base = "sub-patient2024 ses-followup12m T1w long name for the card"
+        service.renameProject(base)
+        self._save(service)
+        section = projects_ui.ProjectsSection()
+        remembered = section.viewMode
+        try:
+            section.setViewMode("grid")
+            section.widget.resize(500, 500)
+            section.widget.show()
+            section.refresh()
+            slicer.app.processEvents()
+            card = section.cards()[0]
+            name = card.findChild("QLabel", "studioProjectCardName")
+            for suffix in ("", " copy", " copy 2"):
+                full = base + suffix
+                name.setProperty("fullText", full)
+                for width in range(120, 200, 10):
+                    metrics = qt.QFontMetrics(name.font)
+                    if metrics.horizontalAdvance(full) <= width:
+                        continue
+                    elided = metrics.elidedText(full, qt.Qt.ElideMiddle, width)
+                    self.assertTrue(elided.endswith(full[-6:]), f"{width}: the end of '{full}' is hidden: {elided}")
+            name.setProperty("fullText", base + " copy 2")
+            card.resize(card.width, card.height)
+            section.elideCard(card)
+            self.assertIn("…", name.text)
+            self.assertTrue(name.text.endswith("copy 2"), name.text)
         finally:
             section.setViewMode(remembered)
             section.widget.hide()

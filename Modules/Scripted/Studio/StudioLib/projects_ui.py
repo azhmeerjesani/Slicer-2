@@ -1928,7 +1928,9 @@ class ProjectsSection(qt.QObject):
             if text is None:
                 continue
             width = max(0, (label.width if card.property("studioProjectView") == "list" else self._gridTextWidth(card)))
-            elided = qt.QFontMetrics(label.font).elidedText(str(text), qt.Qt.ElideRight, width)
+            # The name is elided in the middle so that a ' copy' / ' copy 2' / ' 2' suffix stays visible.
+            mode = qt.Qt.ElideMiddle if label.objectName == "studioProjectCardName" else qt.Qt.ElideRight
+            elided = qt.QFontMetrics(label.font).elidedText(str(text), mode, width)
             if label.text != elided:
                 label.setText(elided)
 
