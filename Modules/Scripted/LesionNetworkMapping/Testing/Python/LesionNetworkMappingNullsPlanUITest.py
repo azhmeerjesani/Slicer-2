@@ -164,5 +164,95 @@ class LesionNetworkMappingNullsPlanUITest(unittest.TestCase):
         self.assertEqual(self.header.pending, [], self._pendingText())
 
 
+class LesionNetworkMappingNullsPlanFastUITest(unittest.TestCase):
+    """A locked plan whose null models run in fast mode on a cohort without a fast index: the untouched card is not a
+    change from the plan, and a later reason is recorded only for the user's own change; bug
+    recipes-plan-lock-roi-gui:locked-plan-nulls-card-phantom-deviation-when-plan-nulls-fast.
+    """
+
+    def setUp(self):
+        import lnm_pipeline_fixture as fixture
+
+        from LesionNetworkMapping import LesionNetworkMappingLogic
+        from LesionNetworkMappingLib import recipes
+        from LesionNetworkMappingUI import card_pipeline
+
+        self.recipes = recipes
+        self.cp = card_pipeline
+        self.tmp = tempfile.mkdtemp(prefix="lnm nulls plan fast ")
+        self.fx = fixture.make_fixture(os.path.join(self.tmp, "f1"), extra_rows=False)
+        self.study = self.fx["study"]
+        qt.QSettings().remove(card_pipeline.OPTIONS_SETTING)
+        slicer.util.selectModule("LesionNetworkMapping")
+        self.widget = slicer.modules.LesionNetworkMappingWidget
+        bundle = LesionNetworkMappingLogic.registerConnectome(self.fx["bundle"])
+        LesionNetworkMappingLogic.setTermsAccepted(bundle, True)
+        self.widget.refreshConnectomes(select=bundle.path)
+        self.widget.openCohortStudy(self.study)
+        card_pipeline.setCohortSeed(self.widget)
+        self.ctx = self.widget.ctx
+        self.header = self.ctx.card("recipe")
+        self.nulls = self.ctx.card("nulls")
+        recipe = next(recipe for recipe in self.header.recipes if recipe.id == "vdh2026_standard_settings")
+        assert self.header.applyRecipe(recipe)
+        _pump(100)
+
+    def tearDown(self):
+        try:
+            from StudioLib import study_ui
+
+            study_ui.closeStudy()
+        except Exception:
+            pass
+        qt.QSettings().remove(self.cp.OPTIONS_SETTING)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _setOption(self, key, value):
+        options = self.cp.loadOptions()
+        options[key] = value
+        self.cp.saveOptions(options)
+        self.header.refresh()
+        _pump(50)
+
+    def _pending(self):
+        self.nulls.refresh()
+        self.header.refresh()
+        _pump(50)
+        return [change["field"] for change in self.header.pending]
+
+    def test_plan_locked_with_fast_nulls(self):
+        """Locked with nulls fast: nothing waits for a reason, the card keeps fast and its Run says why it waits."""
+        self._setOption("nulls", "fast")
+        plan = self.header.lockPlan(HYPOTHESES)
+        _pump(100)
+        self.assertEqual(plan["parameters"]["nulls"]["mode"], "fast")
+        self.assertFalse(self.nulls.fast.enabled, "the fixture has no fast index")
+        self.assertEqual(self._pending(), [], "the untouched Null models card is counted as changed")
+        self.assertEqual(self.nulls.effectiveMode(), "fast")
+        enabled, reason = self.nulls.runState()
+        self.assertFalse(enabled)
+        self.assertNotIn("Changed after the analysis plan was locked", reason)
+        self.assertIn("fast mode", reason)
+        self.header.restorePlanSettings()
+        self.assertEqual(self._pending(), [])
+        # Exact is the user's own change: it waits for a reason
+        self.nulls.setMode("exact")
+        self.assertEqual(self._pending(), ["nulls_card.nulls.mode"])
+        self.assertEqual(self.recipes.read_deviations(self.study), [])
+
+    def test_recorded_change_to_fast_nulls(self):
+        """Run everything's nulls exact to fast with a reason: the card follows; the next reason is only for n_perm."""
+        self.header.lockPlan(HYPOTHESES)
+        _pump(100)
+        self.assertEqual(self._pending(), [])
+        self._setOption("nulls", "fast")
+        self.header.recordPending("Exact nulls too slow")
+        self.assertEqual(self._pending(), [], "a change of the Null models card appeared that the user never made")
+        self._setOption("perm", 1000)
+        records = self.header.recordPending("Compute budget")
+        self.assertNotIn("nulls_card.nulls.mode", [record["field"] for record in records])
+        self.assertFalse(any(str(item.get("field")).startswith("nulls_card.") for item in self.recipes.read_deviations(self.study)), self.recipes.read_deviations(self.study))
+
+
 if __name__ == "__main__":
     unittest.main()

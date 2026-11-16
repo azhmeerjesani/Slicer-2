@@ -600,6 +600,8 @@ class NullsCard:
         mode = self.effectiveMode()
         if mode == "fast" and not self.fast.enabled:
             prefix = _("rl_overlap runs in fast mode only. ") if self.kind == "rl_overlap" else ""
+            if self.kind != "rl_overlap" and self.planMode() == "fast":
+                prefix = _("The locked analysis plan runs the null models in fast mode (choose Exact and give the reason to run them exactly). ")
             return False, prefix + self.fast.reason
         if self.kind == "empirical_pool" and self.controlSet is None:
             return False, _("Choose the control set (Control set…): a folder of lesion masks, a lesions table or the maps.tsv of mapped control lesions.")
@@ -642,8 +644,11 @@ class NullsCard:
                 self.progress.setJob(None)
                 self.progress.widget.hide()
         self.fast = manager_fastindex.fastModeState(self.ctx.bundle, mapsTsv) if self.ctx.bundle is not None else manager_fastindex.FastModeState(reason=_("Choose a connectome in the Connectome card."))
-        if self.mode == "fast" and not self.fast.enabled:
-            self.mode = "exact"  # fast mode is gone (another cohort, an out-of-date parity report): never run it silently
+        if self.mode == "fast" and not self.fast.enabled and self.planMode() != "fast":
+            # fast mode is gone (another cohort, an out-of-date parity report): never run it silently. A locked plan
+            # with fast null models keeps fast (Run waits for the fast index): falling back to exact would be a change
+            # from the plan that the user never made.
+            self.mode = "exact"
         self._updating = True
         try:
             self.showKinds()
@@ -680,6 +685,19 @@ class NullsCard:
             logging.exception("Lesion network mapping: the null model settings could not be compared with the locked analysis plan")
             return []
 
+    def planMode(self):
+        """The null models mode ("exact", "fast" or "off") the card follows under the locked plan, or None without one."""
+        from LesionNetworkMappingLib import recipes
+
+        path = self.studyPath()
+        if not path or self._cleanedUp:
+            return None
+        try:
+            values = recipes.analysis_parameters(path, self.PLAN_SCOPE)
+        except (recipes.RecipeError, TypeError, ValueError, OSError):
+            return None
+        return values.get("nulls.mode") if values else None
+
     def showPlanPending(self):
         """Let the Recipe header show (or stop showing) the card's changes from the locked plan."""
         pending = [change["description"] for change in self.planPending()]
@@ -699,7 +717,7 @@ class NullsCard:
             self.kind = kinds[0]
             self.kindButtons[self.kind].setChecked(True)
         if values.get("nulls.mode") in MODES:
-            self.mode = values["nulls.mode"] if (values["nulls.mode"] == "exact" or self.fast.enabled) else "exact"
+            self.mode = values["nulls.mode"]  # fast without the fast index: Run says why (runState), never exact silently
         if values.get("nulls.k") is not None:
             self.kSpin.setValue(int(values["nulls.k"]))
         if values.get("seeds.nulls") is not None:
