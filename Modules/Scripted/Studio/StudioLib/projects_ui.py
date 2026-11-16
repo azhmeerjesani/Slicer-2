@@ -745,16 +745,19 @@ def _freeBytes(folder):
         return None
 
 
-def saveCopyAs(path=None, startFolder=None):
+def saveCopyAs(path=None, startFolder=None, exportsExisted=None):
     """Save a copy as… (Export): the whole scene as one .mrb file anywhere. The project stays where it is.
     ``startFolder`` is where the dialog starts (default: Exports/ of the project, see ``saveCopyStartFolder``).
+    ``exportsExisted``: whether Exports/ was there before the caller computed ``startFolder`` (which may have created it);
+    None = look now.
     """
     service = _service()
     mainWindow = slicer.util.mainWindow()
     project = service.currentProject() if service is not None else None
     if path is None:
         exports = os.path.join(project.path, projects.EXPORTS) if project is not None else None
-        exportsExisted = exports is None or os.path.isdir(exports)
+        if exportsExisted is None or exports is None:
+            exportsExisted = exports is None or os.path.isdir(exports)
         start = os.path.join(startFolder or saveCopyStartFolder(), (project.name if project is not None else "Scene") + ".mrb")
         path = qt.QFileDialog.getSaveFileName(mainWindow, _("Save a copy as"), start, _("Slicer data bundle") + " (*.mrb)")
         if not exportsExisted and (not path or os.path.realpath(os.path.dirname(os.path.abspath(path))) != os.path.realpath(exports)):
@@ -884,7 +887,9 @@ def askReplaceUnsavedProject(title, project, reason="", verb="open", notice=""):
             return "discard"
         if answer != 0:
             return "cancel"
-        if saveCopyAs(startFolder=rescueCopyStartFolder()):
+        project = projects.currentProject()
+        exportsBefore = project is None or os.path.isdir(os.path.join(project.path, projects.EXPORTS))
+        if saveCopyAs(startFolder=rescueCopyStartFolder(), exportsExisted=exportsBefore):
             return "save"
         # The copy was not saved (cancelled or failed): ask again, the edits are still only in memory
 

@@ -2730,6 +2730,15 @@ class StudioProjectsTest(unittest.TestCase):
             self.assertIsNone(projects_ui.saveCopyAs())
             self.assertTrue(os.path.isdir(exports), "an Exports/ folder that existed stays")
             os.rmdir(exports)
+            # The rescue copy of the could-not-be-saved question computes its start folder first (which creates Exports/):
+            # cancelled, it leaves no empty folder either
+            self.assertFalse(os.path.isdir(exports))
+            self.assertIsNone(projects_ui.saveCopyAs(startFolder=projects_ui.rescueCopyStartFolder(), exportsExisted=False))
+            self.assertFalse(os.path.isdir(exports), "a cancelled rescue copy leaves no empty Exports/ folder")
+            os.makedirs(exports)
+            self.assertIsNone(projects_ui.saveCopyAs(startFolder=projects_ui.rescueCopyStartFolder(), exportsExisted=True))
+            self.assertTrue(os.path.isdir(exports), "an Exports/ folder that existed stays")
+            os.rmdir(exports)
         finally:
             qt.QFileDialog.getSaveFileName = realGetSaveFileName
             self.autosave._service = running
