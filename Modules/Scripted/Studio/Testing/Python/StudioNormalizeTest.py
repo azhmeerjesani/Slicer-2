@@ -421,6 +421,11 @@ class StudioNormalizeTest(unittest.TestCase):
         self.assertEqual(len(events), 1, events)
         self.assertEqual((events[0]["from"], events[0]["to"]), ("unreviewed", "pass"))
         self.assertEqual(self.chips(["sub-01"]), {"sub-01": "Pass"})
+        # The judged row leaves the queue: the row that takes its place is selected, so the SUBJECT card stays shown (BB-1)
+        self.assertEqual([row["participant_id"] for row in listWidget.model.rows], ["sub-02", "sub-03"])
+        self.assertEqual(library.studySelection(), ["sub-02"])
+        self.assertEqual(listWidget.selectedIds(), ["sub-02"])
+        self.assertTrue(_wait(lambda: self.section().sid == "sub-02" and self.section().widget.isVisible(), 10), "the SUBJECT card was hidden")
         # analysis_rows excludes the rows that are normalized and not passed
         rows, excluded = self.Study.open(path).analysis_rows()
         self.assertEqual(sorted(row["participant_id"] for row in rows), ["sub-01", "sub-04"])
@@ -459,8 +464,10 @@ class StudioNormalizeTest(unittest.TestCase):
         review = ln._qcResultFor("sub-02").review()
         self.assertEqual(review.get("verdict"), "fail")
         self.assertEqual(self.chips(["sub-02"]), {"sub-02": "Fail"})
-        # Next to review is offered after a verdict
-        self.assertTrue(_wait(lambda: not section.nextRow.isHidden(), 5))
+        # The mosaic verdict goes on with the next row of the queue, as P / X do (BB-1): its mosaic is shown in turn
+        self.assertEqual(library.studySelection(), ["sub-03"])
+        self.assertTrue(_wait(lambda: self.section().sid == "sub-03" and self.section().widget.isVisible() and self.section().qcPanel is not None, 20),
+                        "the next row of the queue was not shown after the mosaic verdict")
         # P in the list writes norm_qc while the review filter is active
         listWidget.setFilter("norm_review")
         listWidget.selectIds(["sub-03"])

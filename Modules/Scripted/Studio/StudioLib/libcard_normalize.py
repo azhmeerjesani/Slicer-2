@@ -1200,7 +1200,9 @@ def setNormQc(sid, verdict, via="button"):
     _lnm("study").Study.post_result(session.study.path, sid, {"norm_qc": verdict}, "normalize-review", audit=audit)
     current._expectQc[sid] = verdict
     try:
-        session.applyInbox()
+        # In the 'Normalization to review' queue the judged row leaves the list: go on with the next one, as P / X do
+        with library.keepQueuePlace([sid]):
+            session.applyInbox()
     finally:
         current._expectQc.pop(sid, None)
     current._snapshotQc()

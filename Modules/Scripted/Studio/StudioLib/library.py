@@ -3041,6 +3041,42 @@ def _setStudySelection(sids, source=None):
                 logging.error(f"Studio Library: study selection update failed:\n{traceback.format_exc()}")
 
 
+class keepQueuePlace:
+    """Context manager around a QC verdict on ``sids`` (P / X keys, the QC mosaic's Looks right / Doesn't look right).
+
+    In a QC filter (QC fail, Normalization to review) the judged rows leave the list and the selection becomes empty: the
+    row that takes their place is then selected, so that the next verdict goes to the next subject of the queue and the
+    SUBJECT card stays shown (BB-1). ``views`` are the lists to follow (default: the live subject lists).
+    """
+
+    def __init__(self, sids, views=None):
+        self.sids = list(sids)
+        self.views = views
+        self.places = []
+
+    def __enter__(self):
+        views = self.views if self.views is not None else [view for view in _studyViews if isinstance(view, StudyList)]
+        selected = set(studySelection())
+        for view in views:
+            if not _isAlive(view.widget) or not all(sid in selected for sid in self.sids):
+                continue
+            first = min((view.model.rowOf(sid) for sid in self.sids), default=-1)
+            if first >= 0:
+                self.places.append((view, first))
+        return self
+
+    def __exit__(self, excType, excValue, tb):
+        if excType is not None:
+            return False
+        for view, first in self.places:
+            if not _isAlive(view.widget) or studySelection() or view.selectedIds():
+                break
+            if all(view.model.rowOf(sid) < 0 for sid in self.sids) and view.model.rowCount() > 0:
+                view.selectIds([view.model.sid(min(first, view.model.rowCount() - 1))])
+                break
+        return False
+
+
 def _listenToStudies():
     if _studyListening[0]:
         return
@@ -3730,12 +3766,8 @@ class StudyList(qt.QObject):
         if studySession is None or not sids:
             return
         column = self.qcColumn()
-        first = min((self.model.rowOf(sid) for sid in sids), default=-1)
-        studySession.setQc(sids, value, column)
-        # In a QC filter (QC fail, Normalization to review) the marked rows leave the list: go on with the row that takes
-        # their place, so that the next P / X marks the next subject of the queue (BB-1)
-        if first >= 0 and not self.selectedIds() and all(self.model.rowOf(sid) < 0 for sid in sids) and self.model.rowCount() > 0:
-            self.selectIds([self.model.sid(min(first, self.model.rowCount() - 1))])
+        with keepQueuePlace(sids, views=[self]):
+            studySession.setQc(sids, value, column)
         shell = _shell()
         if shell is not None:
             label = {"pass": _("pass"), "fail": _("fail"), "unreviewed": _("not reviewed")}.get(value, value)
