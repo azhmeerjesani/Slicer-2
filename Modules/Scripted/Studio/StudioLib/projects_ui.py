@@ -2755,6 +2755,7 @@ class ProjectsUi:
 
         self.closeCrashOffer()
         self.crashCard = CrashCard(infos, self)
+        projects.addListener(self._closeOfferIfOpened)
         library.showNotice(CRASH_NOTICE_KEY, self.crashCard.widget)
         if self.shell.currentWorkspace() != "library":
             self.crashNotice = ui.noticeLine(_("Slicer Studio closed unexpectedly: your project {name} was saved").format(name=infos[0].name),
@@ -2771,9 +2772,20 @@ class ProjectsUi:
         self.closeCrashOffer()
         openProject(_recoveryPath(path), self.shell)
 
+    def _closeOfferIfOpened(self):
+        """The offered project was opened another way (its card, Recent, Ctrl+O, Search): the offer is done."""
+        card = self.crashCard
+        current = projects.currentProject()
+        if card is None or current is None:
+            return
+        here = os.path.normcase(os.path.realpath(current.path))
+        if any(os.path.normcase(os.path.realpath(_recoveryPath(info.path))) == here for info in card.infos):
+            self.closeCrashOffer()
+
     def closeCrashOffer(self):
         from . import library
 
+        projects.removeListener(self._closeOfferIfOpened)
         self.shell.clearInspectorNotice(CRASH_NOTICE_KEY)
         if self.crashNotice is not None:
             if _isAlive(self.crashNotice):

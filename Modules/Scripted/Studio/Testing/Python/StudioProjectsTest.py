@@ -1022,6 +1022,37 @@ class StudioProjectsTest(unittest.TestCase):
         finally:
             other.unlock()
 
+    def test_09b_crash_card_closes_when_offered_project_is_opened_another_way(self):
+        """The crash card closes once the project it offers is open (its card, Recent, Ctrl+O, Search), not only by its button."""
+        from StudioLib import projects_ui, shell
+
+        projects = self.projects
+        service = self._service()
+        self._userVolume()
+        project = self._projectFor(service)
+        self._save(service)
+        path = project.path
+        project.unlock()
+        service.project = None
+        service.projectWriter = None
+        projects.setCurrentProject(None)
+        self.io.backgroundWriter().drain(10.0)
+        studioShell = shell.Shell(force=True)
+        ui_ = None
+        try:
+            studioShell.apply()
+            ui_ = projects_ui.ProjectsUi(studioShell)
+            infos = [info for info in projects.listProjects() if info.path == path]
+            self.assertEqual(len(infos), 1)
+            ui_.presentCrash(infos)
+            self.assertIsNotNone(ui_.crashCard)
+            self.assertTrue(service.openProject(path))
+            self.assertIsNone(ui_.crashCard, "the offer is closed once its project is open")
+        finally:
+            if ui_ is not None:
+                ui_.closeCrashOffer()
+            studioShell.dispose()
+
     def test_10_study_and_classic(self):
         service = self._service(studio=False)
         volume, _path = self._userVolume()
