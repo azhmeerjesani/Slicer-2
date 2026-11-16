@@ -51,6 +51,7 @@ import os
 import re
 import shutil
 import sys
+import zlib
 
 FORMAT = "slicer-studio-controlset"
 VERSION = 1
@@ -492,7 +493,7 @@ def scan_folder(folder, lesion_rule=None, id_regex=None):
         rel = _rel(path, folder)
         try:
             header = read_nifti_header(path)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, EOFError, zlib.error) as exc:  # a .nii.gz cut short in its header: EOFError
             skipped.append({"rel": rel, "reason": _unreadable(exc, path)})
             continue
         shape = tuple(header["shape"])

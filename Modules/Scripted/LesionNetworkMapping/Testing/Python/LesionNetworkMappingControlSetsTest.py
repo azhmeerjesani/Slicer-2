@@ -200,6 +200,27 @@ class RegistryTest(ControlSetsTestBase):
             self.assertTrue(cleaned.startswith(controlsets.SKIPPED_UNREADABLE + ": "), cleaned)
             self.assertGreater(len(cleaned), len(controlsets.SKIPPED_UNREADABLE) + 10, cleaned)
 
+    def test_scan_skips_a_gzip_file_cut_short_in_its_header(self):
+        # An interrupted download cut inside the 348-byte header: gzip raises EOFError (not an OSError). The scan
+        # must list that one file as skipped by name, not refuse the whole folder.
+        folder = os.path.join(self.tmp, "cut-header")
+        for name, center, radius in CONTROLS[:2]:
+            _sphere(os.path.join(folder, name), NLIN6, center, radius)
+        bad = _sphere(os.path.join(folder, "ctl_009_lesion.nii.gz"), NLIN6, (0.0, 0.0, 0.0), 5.0)
+        with open(bad, "rb") as f:
+            raw = f.read()
+        with open(bad, "wb") as f:
+            f.write(raw[:60])
+        scan = controlsets.scan_folder(folder)
+        self.assertEqual(len(scan["lesions"]), 2, scan)
+        reasons = {item["rel"]: item["reason"] for item in scan["skipped"]}
+        self.assertIn("ctl_009_lesion.nii.gz", reasons)
+        self.assertTrue(reasons["ctl_009_lesion.nii.gz"].startswith(controlsets.SKIPPED_UNREADABLE + ": "), reasons)
+        self.assertNotIn(os.sep, reasons["ctl_009_lesion.nii.gz"])
+        entry = controlsets.register_folder(folder, "CutHeader", root=self.root)
+        self.assertEqual(entry["n"], 2)
+        self.assertIn("ctl_009_lesion.nii.gz", {item["rel"] for item in entry["skipped"]})
+
     def test_names_are_validated(self):
         for name in ("", "../x", "a/b", ".hidden", "x" * 65, "with space"):
             with self.assertRaises(ValueError, msg=name):
