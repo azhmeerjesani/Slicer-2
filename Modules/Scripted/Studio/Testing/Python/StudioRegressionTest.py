@@ -9160,3 +9160,44 @@ class StudioRegressionTest(unittest.TestCase):
             for _ in range(4):
                 slicer.app.processEvents()
             slicer.mrmlScene.Clear(0)
+
+    def test_104_warp_offered_when_the_nlin6_connectome_is_registered_after_the_study(self):
+        """BB-1: a study created (or adopted) before its MNI152NLin6Asym connectome was registered keeps the 2009c space in
+        study.json trace_policy, and canWarpToConnectomeSpace read only that: the Preflight's "Transform the lesions" said the
+        lesions could not be warped there, and the Library had no warp either. A registered NLin6 connectome now makes 2009c
+        lesions warpable, whatever order the study and the connectome were made in.
+        """
+        from StudioLib import study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        key = "Studio/LNM/Connectomes"
+        settings = qt.QSettings()
+        previous = settings.value(key)
+        self.addCleanup(lambda: settings.setValue(key, previous) if previous is not None else settings.remove(key))
+        settings.remove(key)
+        study = self._study([("sub-01", {}, False)])
+        study.trace_policy = {**study.trace_policy, "space": "MNI152NLin2009cAsym"}
+        study.save()
+        session = study_ui.openStudy(study.path, None, showLibrary=False)
+        self.addCleanup(study_ui.closeStudy)
+        slicer.app.processEvents()
+        # No connectome: nothing to warp to
+        self.assertEqual(session.study.trace_policy.get("space"), "MNI152NLin2009cAsym")
+        self.assertFalse(study_ui.canWarpToConnectomeSpace(session, "sub-01"))
+        # A 2009c connectome: still nothing to warp to
+        bundles = []
+        for name, spaceName in (("conn2009", "MNI152NLin2009cAsym"), ("connNLin6", "MNI152NLin6Asym")):
+            bundle = os.path.join(self.directory, name)
+            os.makedirs(bundle)
+            with open(os.path.join(bundle, "connectome.json"), "w", encoding="utf-8") as f:
+                json.dump({"name": name, "space": spaceName}, f)
+            bundles.append(bundle)
+        settings.setValue(key, bundles[:1])
+        self.assertFalse(study_ui.canWarpToConnectomeSpace(session, "sub-01"))
+        # The NLin6 connectome registered after the study was created: the 2009c lesion can be warped
+        settings.setValue(key, bundles)
+        self.assertEqual(session.study.trace_policy.get("space"), "MNI152NLin2009cAsym")
+        self.assertTrue(study_ui.canWarpToConnectomeSpace(session, "sub-01"))
+        self.assertEqual(study_ui.registeredConnectomeSpaces(), ["MNI152NLin2009cAsym", "MNI152NLin6Asym"])
+        self.assertEqual(study_ui.registeredConnectomeSpace(), "MNI152NLin2009cAsym")

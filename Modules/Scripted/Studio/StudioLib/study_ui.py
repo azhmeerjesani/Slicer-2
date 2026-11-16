@@ -714,24 +714,33 @@ def askGroupMapping(folder, parent=None, table=None):
 #
 
 
-def registeredConnectomeSpace():
-    """The space of the first registered connectome bundle (``Studio/LNM/Connectomes`` → connectome.json ``space``;
-    a GSP1000 bundle without one is MNI152NLin6Asym), else None.
+def registeredConnectomeSpaces():
+    """The spaces of the registered connectome bundles, in registration order (``Studio/LNM/Connectomes`` → connectome.json
+    ``space``; a GSP1000 bundle without one is MNI152NLin6Asym). Bundles that do not open or name no space are left out.
     """
     value = qt.QSettings().value("Studio/LNM/Connectomes")
     paths = [value] if isinstance(value, str) else list(value or [])
+    spaces = []
     for path in paths:
         try:
             with open(os.path.join(str(path), "connectome.json"), encoding="utf-8") as f:
                 manifest = json.load(f)
         except (OSError, ValueError):
             continue
-        spaceName = manifest.get("space") if isinstance(manifest, dict) else None
+        if not isinstance(manifest, dict):
+            continue
+        spaceName = manifest.get("space")
         if spaceName:
-            return str(spaceName)
-        if "gsp" in str(manifest.get("name", "")).lower():
-            return GSP_SPACE
-    return None
+            spaces.append(str(spaceName))
+        elif "gsp" in str(manifest.get("name", "")).lower():
+            spaces.append(GSP_SPACE)
+    return spaces
+
+
+def registeredConnectomeSpace():
+    """The space of the first registered connectome bundle (see :func:`registeredConnectomeSpaces`), else None."""
+    spaces = registeredConnectomeSpaces()
+    return spaces[0] if spaces else None
 
 
 def _userDefaultTemplate():
@@ -4733,16 +4742,23 @@ class StudySession:
 
 
 def canWarpToConnectomeSpace(studySession, sid):
-    """True when the subject's lesion is on a 2009 template grid and the connectome space is MNI152NLin6Asym."""
+    """True when the subject's lesion is on a 2009 template grid and the connectome space is MNI152NLin6Asym.
+
+    The connectome space is that of a registered connectome bundle, or the study's ``trace_policy`` space: the policy copies the
+    connectome space only when the study is created, so a study made (or adopted) before its NLin6 connectome was registered
+    still says 2009c there.
+    """
     if studySession is None or sid not in studySession.study:
         return False
     row = studySession.study.subject(sid)
     lesion = studySession.study.abspath(row.get("lesion"))
-    target = studySession.study.trace_policy.get("space")
-    if not lesion or not os.path.isfile(lesion) or target != "MNI152NLin6Asym":
+    if not lesion or not os.path.isfile(lesion):
         return False
     geometry = _lnm("geometry")
-    return geometry.space_family(str(row.get("space") or "")) == "2009"
+    if geometry.space_family(str(row.get("space") or "")) != "2009":
+        return False
+    target = "MNI152NLin6Asym"
+    return studySession.study.trace_policy.get("space") == target or target in registeredConnectomeSpaces()
 
 
 def _lesionEditedDuringWarp(studySession, sid, originalLesion, lesionStamp):
