@@ -943,6 +943,52 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertEqual((code, calls), (0, []))
         self.assertEqual((stage_status(events).get("export"), stage_status(events).get("report")), ("reused", "reused"))
 
+    def test_stopped_or_killed_rerun_is_never_cited_by_the_study_methods(self):
+        """Every pipeline run of an output folder rewrites its pipeline.json from its start. After a finished run, a rerun that is
+        stopped (or killed: its registry record stays "running") leaves its own stages there: the study's methods (Report card,
+        methods export) say that the latest run did not finish, never pair the finished run's id with the stopped run's stages,
+        and never cite the stopped run in Thresholds (BB-1 methods-cite-killed-pipeline-rerun).
+        """
+        from LesionNetworkMappingLib import methods
+
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-stopped-rerun"))
+        out = fx["out"]
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST))
+        self.assertEqual(code, 0, stderr[-2000:])
+        finished = done_event(events)["run_id"]
+        text = methods.render(methods.methods_sections(fx["study"]), "txt")
+        self.assertIn(f"The analysis ran as one pipeline (run {finished}", text)
+        self.assertIn(f"Run {finished}: rule", text)
+        stopped = {}
+
+        def on_event(event, process):
+            if "at" not in stopped and event["event"] == "stage" and event.get("name") == "maps" and event.get("status") == "running":
+                open(os.path.join(out, pipeline.PRIVATE_DIR, pipeline.STOP_NAME), "w").close()
+                stopped["at"] = event["_wall"]
+
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST, "--recompute"), on_event=on_event)
+        self.assertIn("at", stopped, "the maps stage was reached")
+        self.assertEqual(code, 3, stderr[-2000:])
+        rerun = read_json(os.path.join(out, pipeline.PIPELINE_JSON))["run_id"]
+        self.assertNotEqual(rerun, finished)
+        status = {record["id"]: record.get("status") for record in runs.list_runs(fx["study"])}
+        self.assertEqual((status[finished], status[rerun]), ("done", "cancelled"))
+        for registry_status, expected in (("cancelled", "was stopped before it finished"), ("running", "has not finished")):
+            if registry_status == "running":  # a killed run: its record is never updated
+                runs.update(fx["study"], rerun, status="running")
+            sections = methods.methods_sections(fx["study"])
+            text = methods.render(sections, "txt")
+            pipeline_text = methods.render([methods.find_section(sections, "pipeline")], "txt")
+            self.assertNotIn("The analysis ran as one pipeline", text, registry_status)
+            self.assertIn(f"The latest pipeline run (run {rerun}) {expected}", text, registry_status)
+            self.assertIn(finished, pipeline_text, registry_status)
+            self.assertNotIn(rerun, text.replace(pipeline_text.strip(), ""), f"{registry_status}: only the Pipeline section names the stopped run")
+            self.assertNotRegex(text, r"(?m)^- (maps|nulls|export|report): provider", registry_status)
+            thresholds = text[text.index("Thresholds\n"):]
+            thresholds = thresholds[:thresholds.index("Maps are stored unthresholded")]
+            self.assertNotIn(rerun, thresholds, registry_status)
+            self.assertIn(f"Run {finished}: rule", thresholds, registry_status)
+
     def test_recompute_run_is_reused_by_the_next_run(self):
         """--recompute ("Recompute everything") forces its own run only: the stages it completed are reused by the next run without
         it, after a stop in the report (A-04c: completed work is kept and resumed on the next click) and after a finished run.

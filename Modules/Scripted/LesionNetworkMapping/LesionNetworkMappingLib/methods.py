@@ -77,6 +77,12 @@ PIPELINE_JSON = "pipeline.json"
 PIPELINE_FORMAT = "slicer-lnm-pipeline"  # pipeline.FORMAT_NAME
 # The kind of the runs that a pipeline stage makes as child jobs (pipeline.json "stages": "child_run_id", comma-separated)
 PIPELINE_CHILD_KINDS = {"maps": "cohortmaps", "nulls": "nulls", "specificity": "glm", "slnm": "slnm"}
+#: How the methods name a pipeline run that has not finished, by its registry status (:func:`pipeline_section`)
+PIPELINE_UNFINISHED_TEXTS = {
+    "running": "has not finished (it is still running or was interrupted)",
+    "cancelled": "was stopped before it finished",
+    "failed": "failed before it finished",
+}
 # Stage statuses of a pipeline run that leave no result of the stage: the pipeline dropped the earlier outputs (pipeline._drop_stale)
 PIPELINE_NO_RESULT = ("failed", "blocked", "error", "skipped", "unavailable", "cancelled")
 NORMALIZATION_JSON = "normalization.json"
@@ -609,7 +615,17 @@ class Records:
                 # Coordinate, atrophy and stimulation seeds (coords.py): the run folder's seeds.json
                 "seeds": _seed_record(folder),
             })
-        run_ids = {os.path.realpath(self.run_dir(record) or ""): record["id"] for record in self.runs.values() if self.run_dir(record)}
+        # A folder's provenance.json is written by a run that reached its export, so it is cited with the folder's latest
+        # finished run: a later run that is still running, was stopped or failed there (it shares the folder) never is.
+        run_ids, done_ids = {}, {}
+        for record in self.runs.values():
+            folder = self.run_dir(record)
+            if folder:
+                real = os.path.realpath(folder)
+                run_ids[real] = record["id"]
+                if record.get("status") == "done":
+                    done_ids[real] = record["id"]
+        run_ids.update(done_ids)
         for folder in self._folders():
             real = os.path.realpath(folder)
             if real in seen:
@@ -632,17 +648,48 @@ class Records:
         return list(groups.values())
 
     def pipeline(self):
-        """(pipeline.json content, run id or None), or (None, None)."""
+        """(pipeline.json content, run id or None), or (None, None).
+
+        The content and the id are always those of the same run: the id is the one the pipeline.json names. When the
+        registry's pipeline.json belongs to a run that has not finished, :meth:`pipeline_interrupted` says so.
+        """
+        data, run_id, _interrupted = self._pipeline_lookup()
+        return data, run_id
+
+    def pipeline_interrupted(self):
+        """None, or {"run_id", "status", "finished"} when the pipeline.json found through the registry belongs to a pipeline
+        run that has not finished (still running, stopped, failed or killed). Every pipeline run of an output folder rewrites
+        the folder's pipeline.json from its start, so a stopped or killed rerun leaves its own stages there in place of
+        those of the last finished run ("finished": that run's id, or None).
+        """
+        return self._pipeline_lookup()[2]
+
+    def _pipeline_lookup(self):
+        if "pipeline" in self._cache:
+            return self._cache["pipeline"]
+        result = None, None, None
         for folder in [*self.include_dirs, self.root]:
             data = _read_json(os.path.join(folder, PIPELINE_JSON))
             if data is not None:
-                return data, data.get("run_id")
-        records = self.done_runs("pipeline") or [record for record in self.runs.values() if record.get("kind") == "pipeline"]
-        for record in reversed(records):
-            data = self.run_json(record, PIPELINE_JSON)
-            if data is not None:
-                return data, record["id"]
-        return None, None
+                result = data, data.get("run_id"), None
+                break
+        else:
+            done = self.done_runs("pipeline")
+            records = done or [record for record in self.runs.values() if record.get("kind") == "pipeline"]
+            for record in reversed(records):
+                data = self.run_json(record, PIPELINE_JSON)
+                if data is None:
+                    continue
+                owner = data.get("run_id") or record["id"]
+                owner_record = record if owner == record["id"] else self.runs.get(owner)
+                status = owner_record.get("status") if owner_record else None
+                if owner_record is None or status == "done":  # a run of another registry: cited as its pipeline.json names it
+                    result = data, owner, None
+                else:
+                    result = data, owner, {"run_id": owner, "status": status or data.get("status"), "finished": record["id"] if done else None}
+                break
+        self._cache["pipeline"] = result
+        return result
 
     def normalizations(self):
         """normalization.json contents of the study's native-space lesions (derivatives/normalization/*/ and normalization runs)."""
@@ -823,6 +870,17 @@ def pipeline_section(records):
     data, run_id = records.pipeline()
     if data is None:
         return section.paragraph(f"Pipeline: {NOT_RECORDED} (no {PIPELINE_JSON}).")
+    interrupted = getattr(records, "pipeline_interrupted", lambda: None)()  # duck-typed records without it: never interrupted
+    if interrupted:
+        # Never cite a half-written run, nor mix its stages with the id of another run (they share the output folder)
+        state = PIPELINE_UNFINISHED_TEXTS.get(interrupted["status"], PIPELINE_UNFINISHED_TEXTS["running"])
+        text = f"The latest pipeline run (run {interrupted['run_id']}) {state}, so it is not described here."
+        if interrupted["finished"]:
+            text += (f" The last finished pipeline run is {interrupted['finished']}; its stage record ({PIPELINE_JSON}) was replaced when run "
+                     f"{interrupted['run_id']} started, so its stages are {NOT_RECORDED}.")
+        else:
+            text += f" No pipeline run has finished: stages {NOT_RECORDED}."
+        return section.paragraph(text + " Run the pipeline again to completion to record them.")
     head = f"The analysis ran as one pipeline (run {run_id or NOT_RECORDED}"
     recipe = data.get("recipe")
     outside = []
