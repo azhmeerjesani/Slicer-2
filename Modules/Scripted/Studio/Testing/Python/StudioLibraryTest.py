@@ -2882,6 +2882,87 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(os.environ.get(controlsets.ENV_ROOT), newRoot)
         self.assertEqual(os.path.normpath(controlsets.registry_root()), os.path.normpath(newRoot))
 
+    def test_control_sets_card_lists_a_linked_set_that_is_not_registered(self):
+        """A study that links a set this computer's registry does not hold (removed, or the study opened on another computer)
+        lists it in the Control sets card as not registered, with Unlink and Register again…, and its rows are flagged 'Not
+        found' in the Flags column: the card said 'No control sets yet' with no Unlink and the rows looked fine (BB-1).
+        """
+        import types
+
+        from LesionNetworkMappingLib.study import Study
+        from StudioLib import libcard_controls, libcard_flags
+
+        registry = tempfile.mkdtemp(prefix="StudioCtlUnreg")
+        self.cleanup.append(lambda: shutil.rmtree(registry, ignore_errors=True))
+        rows = [{"participant_id": f"sub-Poolc{i}", "group": "control", "source_type": "control_db", "status": "traced",
+                 "lesion": f"controlset:Pool/sub-c{i}.nii.gz"} for i in range(3)]
+        rows.append({"participant_id": "sub-01", "group": "case", "status": "traced", "lesion": "lesions/sub-01.nii.gz"})
+        study = types.SimpleNamespace(control_sets=[{"name": "Pool", "sha256": "0" * 64}], subjects=rows)
+
+        def unlinkControlSet(name):
+            removed = [row["participant_id"] for row in study.subjects if str(row.get("lesion", "")).startswith(f"controlset:{name}/")]
+            study.subjects = [row for row in study.subjects if row["participant_id"] not in removed]
+            study.control_sets = [item for item in study.control_sets if item["name"] != name]
+            return removed
+
+        study.unlink_control_set = unlinkControlSet
+        session = types.SimpleNamespace(study=study, flush=lambda: None)
+        entries = []
+        names = ("_session", "registeredSets", "registryRoot", "_toast", "_notify")
+        saved = {name: getattr(libcard_controls, name) for name in names}
+        savedRoot = Study.controlset_root
+        libcard_controls._session = lambda: session
+        libcard_controls.registeredSets = lambda: list(entries)
+        libcard_controls.registryRoot = lambda: registry
+        libcard_controls._toast = lambda text, ms=3000, **kw: None
+        libcard_controls._notify = lambda session: None
+        Study.controlset_root = registry
+        host = qt.QWidget()
+        self.cleanup.append(host.deleteLater)
+        try:
+            card = libcard_controls.ControlSetsCard(None)
+            self.cleanup.append(card.dispose)
+            qt.QVBoxLayout(host).addWidget(card.widget)
+            host.show()
+            card.refresh()
+            slicer.app.processEvents()
+            status = str(card.statusLabel.text)
+            self.assertNotIn("No control sets yet", status)
+            self.assertIn("not registered on this computer", status)
+            self.assertEqual(card.list.count, 1)
+            self.assertTrue(str(card.list.item(0).text()).startswith("Pool · not registered on this computer"))
+            self.assertTrue(card.details.visible)
+            self.assertTrue(card.unlinkButton.visible)
+            self.assertEqual(str(card.linkButton.text), "Register again…")
+            self.assertIn("3 linked control rows", str(card.linkLabel.text))
+            self.assertFalse(card.mapRow.visible)
+            self.assertFalse(card.mapControls())
+            # The rows whose lesion files cannot be found are flagged; a case row is not
+            self.assertEqual(libcard_flags.flagsCell(rows[0])[:2], ("Not found", "warn"))
+            self.assertTrue(libcard_flags.hasFlags(rows[0]))
+            self.assertEqual(libcard_flags.flagsCell(rows[-1])[0], "—")
+            # Register again… opens Add control set… with the name filled in
+            dialog = card.registerAgain(modal=False)
+            try:
+                self.assertEqual(str(dialog.nameEdit.text), "Pool")
+            finally:
+                dialog.cancel()
+                libcard_controls._dialogs.remove(dialog)
+            # With another set registered, the status counts it and still lists Pool
+            entries.append({"name": "Other", "n": 2, "space": "MNI152NLin6Asym"})
+            card.refresh()
+            self.assertEqual(str(card.statusLabel.text), "1 registered · 1 linked to this study · 1 linked set is not registered on this computer")
+            self.assertEqual([str(card.list.item(i).text()).split(" · ")[0] for i in range(card.list.count)], ["Pool", "Other"])
+            # Unlink removes the rows and the record; Pool is no longer listed
+            card.list.setCurrentRow(0)
+            self.assertEqual(card.unlink(), ["sub-Poolc0", "sub-Poolc1", "sub-Poolc2"])
+            self.assertEqual(study.control_sets, [])
+            self.assertEqual([str(card.list.item(i).text()).split(" · ")[0] for i in range(card.list.count)], ["Other"])
+        finally:
+            for name, value in saved.items():
+                setattr(libcard_controls, name, value)
+            Study.controlset_root = savedRoot
+
     def test_control_sets_list_elides_long_rows_without_a_scroll_bar(self):
         """A row of the Control sets list that does not fit is elided with an ellipsis: the list has no horizontal scroll bar (the
         row was as wide as its text, so it was cut mid-word at the panel edge and the bar took height from the fixed-height list).
