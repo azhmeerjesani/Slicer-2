@@ -982,6 +982,72 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertIn("voxel size of 0", message)
         self.assertFalse([r for r in records if "Traceback" in r.getMessage() or r.levelno >= logging.ERROR])
 
+    def test_damaged_statistical_maps_are_refused_in_plain_words(self):
+        """BB-1: a statistical map file skipped the damaged-file checks of scans and lesions. A map with a voxel size of 0
+        or a dimension below 1 opened in Map at a made-up 1 mm grid (a cyan wash, voxel indices as mm in the peak
+        table); one with a NaN affine, more voxels than the file holds or a cut .nii.gz logged an ERROR traceback with a
+        reasonless "Cannot show ... as a map" toast and left a NaN-geometry map that a new project saved. They are
+        refused before anything is loaded, in the same plain words as a scan, with WARNING records only.
+        """
+        from StudioLib import importer
+
+        def write(name, dims=(8, 8, 6), pixdim=(2, 2, 2), sformCode=1, srow=(2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0),
+                  voxels=8 * 8 * 6, gz=False):
+            header = bytearray(348)
+            struct.pack_into("<i", header, 0, 348)
+            struct.pack_into("<8h", header, 40, 3, *dims, 1, 1, 1, 1)
+            struct.pack_into("<hh", header, 70, 16, 32)  # float32
+            struct.pack_into("<8f", header, 76, 1, *pixdim, 1, 0, 0, 0)
+            struct.pack_into("<f", header, 108, 352)
+            struct.pack_into("<2h", header, 252, 0, sformCode)
+            struct.pack_into("<12f", header, 280, *srow)
+            header[344:348] = b"n+1\0"
+            data = bytes(header) + bytes(4) + np.full(voxels, 3.0, np.float32).tobytes()
+            path = os.path.join(self.directory, name)
+            if gz:
+                data = gzip.compress(data)
+                data = data[:len(data) // 2]  # cut in half: no gzip end marker
+            with open(path, "wb") as f:
+                f.write(data)
+            return path
+
+        nan = float("nan")
+        damaged = {
+            write("sm-zeropix_desc-T_statmap.nii", pixdim=(0, 0, 0), sformCode=0): "voxel size of 0",
+            write("sm-negdim_desc-T_statmap.nii", dims=(8, -8, 6), sformCode=0): "invalid image size",
+            write("sm-nansform_desc-T_statmap.nii", srow=(nan, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0)): "invalid position",
+            write("sm-liedims_desc-T_statmap.nii", dims=(64, 64, 64)): "image data stops after",
+            write("sm-cut_desc-T_statmap.nii.gz", dims=(64, 64, 64), voxels=64 * 64 * 64, gz=True): "image data stops after",
+        }
+        for path in damaged:
+            self.assertEqual(importer.fileKind(path), "statmap", path)
+        studioShell = self._applyStudio()
+        studioShell.switchTo("library")
+        self._pump()
+        volumesBefore = slicer.mrmlScene.GetNodesByClass("vtkMRMLScalarVolumeNode").GetNumberOfItems()
+        recorder = logging.Handler()
+        records = []
+        recorder.emit = records.append
+        logging.getLogger().addHandler(recorder)
+        try:
+            result = importer.loadFiles(list(damaged), studioShell)
+            self._pump(8)
+        finally:
+            logging.getLogger().removeHandler(recorder)
+        self.assertEqual(result.statmaps, [])
+        self.assertEqual({path for path, _message in result.errors}, set(damaged))
+        for path, message in result.errors:
+            self.assertIn(damaged[path], message, path)
+        self.assertFalse([r.getMessage() for r in records if "Traceback" in r.getMessage() or r.levelno >= logging.ERROR])
+        self.assertEqual(slicer.mrmlScene.GetNodesByClass("vtkMRMLScalarVolumeNode").GetNumberOfItems(), volumesBefore)
+        self.assertNotEqual(studioShell.currentWorkspace(), "map")
+        # An honest map still opens in Map
+        good = write("sm-good_desc-T_statmap.nii")
+        result = importer.loadFiles([good], studioShell)
+        self._pump(8)
+        self.assertEqual(len(result.statmaps), 1)
+        self.assertFalse(result.errors)
+
     def test_unknown_datatype_and_degenerate_nrrd_directions_are_refused_in_plain_words(self):
         """BB-1: a NIfTI with a datatype code that NIfTI does not define, and an NRRD whose space directions are all zero
         or not numbers, fell through to the ITK reader: a bare 'Slicer error' box, an ERROR traceback and the error badge.

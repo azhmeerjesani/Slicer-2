@@ -2427,8 +2427,15 @@ def loadFiles(paths, shell=None, pairedLesion=None):
         statmapPaths = [path for path, kind in zip(paths, kinds, strict=True) if kind == "statmap"]
         figurePaths = [path for path, kind in zip(paths, kinds, strict=True) if kind == "figure"]
         for path in statmapPaths:
-            if _routeStatMap(path, shell, result):
-                loadedPaths.append(path)
+            try:
+                if _routeStatMap(path, shell, result):
+                    loadedPaths.append(path)
+            except RefusedFileError as e:
+                # A damaged map (header that lies, data cut short, too large): the same plain refusal as a scan's
+                refused.append(path)
+                _noteLoadResult(path, False)
+                logging.warning(f"Studio: {path} was not opened: {e}")  # planned refusal: no traceback
+                result.errors.append((path, str(e)))
         if figurePaths:
             if _openFigure(figurePaths[0], shell, result):
                 loadedPaths.append(figurePaths[0])
@@ -6048,7 +6055,8 @@ def _routeStatMap(path, shell, result, mapNode=None):
 
     ``mapNode``: the map is already loaded (by a route of 3D Slicer). A map whose file is already open is not loaded
     again: its overlay is shown again. If the overlay cannot be made, the map is shown as a plain overlay: it never
-    becomes a scan of Draw (no segmentation is bound to it).
+    becomes a scan of Draw (no segmentation is bound to it). A map file that is damaged or too large raises
+    ``RefusedFileError`` before anything is loaded (``loadFiles`` announces it).
     """
     reopened = None if mapNode is not None else _openReference(path, space.ROLE_STATMAP)
     if mapNode is None:
@@ -6063,6 +6071,10 @@ def _routeStatMap(path, shell, result, mapNode=None):
             if shell is not None:
                 shell.toast(_("{name} is already open").format(name=shown.GetName()))
             return True
+        if reopened is None:
+            # A map file whose header lies (voxel size 0 or not a number, a dimension below 1, more data than the file
+            # holds) or that is too large is refused before anything is loaded, as a scan is: raises RefusedFileError
+            _checkNiftiComplete(path)
         if reopened is None and mappage is not None and callable(getattr(mappage, "loadMap", None)):
             volume = mappage.loadMap(path, shell)
             if volume is not None:
