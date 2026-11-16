@@ -941,10 +941,85 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
         return first
 
     @staticmethod
-    def seedArray(segNode, segmentId):
-        """The segment as (data uint8 indexed [i, j, k], 4x4 IJK→RAS affine) on **its own geometry** (the segmentation's reference geometry)."""
+    def _seedArrayFromLabelmap(segNode, segmentId, borrow=False):
+        """``seedArray`` read straight from the segment's binary labelmap when it lies on the reference geometry (no
+        parent transform, same voxel grid), else None.
+
+        Exporting the segment to a labelmap node (``seedArray``'s general route) holds the whole reference grid as 16-bit
+        voxels and then a binary copy: for a large lesion that is three times its voxel count on the GUI thread, more
+        than the memory left once it is loaded. This reads the voxels of the segment's own image into one uint8 mask.
+
+        With ``borrow`` the mask is, when it can be, a **read-only view of the segment's own voxels** (a uint8 labelmap
+        that covers the reference grid and holds only this segment as 1): no memory at all, and none to touch for the
+        first time (on the GUI thread that alone takes seconds for a very large lesion). Such a view is only valid until
+        the segment changes: for a check that reads it at once (``checkSeed``), never to keep.
+        """
+        import numpy as np
+        from vtk.util import numpy_support
+
+        if segNode.GetParentTransformNode() is not None:
+            return None
+        segmentation = segNode.GetSegmentation()
+        segment = segmentation.GetSegment(segmentId)
+        name = slicer.vtkSegmentationConverter.GetBinaryLabelmapRepresentationName()
+        if segment is None or not segmentation.ContainsRepresentation(name):
+            return None
+        geometry = slicer.vtkOrientedImageData()
+        serialized = segmentation.GetConversionParameter(slicer.vtkSegmentationConverter.GetReferenceImageGeometryParameterName())
+        if not serialized or not slicer.vtkSegmentationConverter.DeserializeImageGeometry(serialized, geometry, False):
+            return None
+        image = segment.GetRepresentation(name)
+        if image is None or not image.IsA("vtkOrientedImageData") or image.GetNumberOfScalarComponents() > 1:
+            return None
+        imageMatrix, geometryMatrix = vtk.vtkMatrix4x4(), vtk.vtkMatrix4x4()
+        image.GetImageToWorldMatrix(imageMatrix)
+        geometry.GetImageToWorldMatrix(geometryMatrix)
+        imageToWorld = np.array([[imageMatrix.GetElement(row, column) for column in range(4)] for row in range(4)])
+        affine = np.array([[geometryMatrix.GetElement(row, column) for column in range(4)] for row in range(4)])
+        if not np.allclose(imageToWorld, affine, rtol=0.0, atol=1e-6 * max(1.0, float(np.abs(affine).max()))):
+            return None
+        low = np.array(geometry.GetExtent()[0::2])
+        high = np.array(geometry.GetExtent()[1::2])
+        if np.any(high < low):
+            return None
+        # The exported labelmap starts at voxel 0 of the reference extent
+        affine = affine.copy()
+        affine[:3, 3] = affine[:3, :3] @ low + affine[:3, 3]
+        dims = high - low + 1
+        scalars = image.GetPointData().GetScalars()
+        imageLow = np.array(image.GetExtent()[0::2])
+        imageHigh = np.array(image.GetExtent()[1::2])
+        voxels = None
+        if scalars is not None and np.all(imageHigh >= imageLow):
+            imageDims = imageHigh - imageLow + 1
+            voxels = numpy_support.vtk_to_numpy(scalars).reshape(int(imageDims[2]), int(imageDims[1]), int(imageDims[0]))
+            if (borrow and voxels.dtype == np.uint8 and segment.GetLabelValue() == 1 and np.array_equal(imageLow, low)
+                    and np.array_equal(imageHigh, high) and (voxels.size == 0 or int(voxels.max()) <= 1)):
+                borrowed = voxels.view()
+                borrowed.flags.writeable = False
+                return np.transpose(borrowed, (2, 1, 0)), affine
+        mask = np.zeros((int(dims[2]), int(dims[1]), int(dims[0])), np.uint8)  # [k, j, i]
+        if voxels is not None:
+            start, stop = np.maximum(low, imageLow), np.minimum(high, imageHigh)
+            if np.all(stop >= start):
+                source = voxels[start[2] - imageLow[2]:stop[2] - imageLow[2] + 1, start[1] - imageLow[1]:stop[1] - imageLow[1] + 1,
+                                start[0] - imageLow[0]:stop[0] - imageLow[0] + 1]
+                target = mask[start[2] - low[2]:stop[2] - low[2] + 1, start[1] - low[1]:stop[1] - low[1] + 1, start[0] - low[0]:stop[0] - low[0] + 1]
+                np.equal(source, segment.GetLabelValue(), out=target.view(np.bool_))
+        return np.transpose(mask, (2, 1, 0)), affine
+
+    @classmethod
+    def seedArray(cls, segNode, segmentId, borrow=False):
+        """The segment as (data uint8 indexed [i, j, k], 4x4 IJK→RAS affine) on **its own geometry** (the segmentation's reference geometry).
+
+        ``borrow``: the data may be a read-only view of the segment's own voxels, valid only until the segment changes
+        (``_seedArrayFromLabelmap``); by default it is always a copy of the caller's own.
+        """
         import numpy as np
 
+        direct = cls._seedArrayFromLabelmap(segNode, segmentId, borrow)
+        if direct is not None:
+            return direct
         labelmap = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "__lnm_seed__")
         labelmap.SetHideFromEditors(True)
         labelmap.SetSaveWithScene(False)
@@ -966,10 +1041,18 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
                     return np.zeros((int(dims[0]), int(dims[1]), int(dims[2])), np.uint8), np.array([[matrix.GetElement(row, column) for column in range(4)] for row in range(4)])
                 data = np.zeros((0, 0, 0), np.uint8)
             else:
-                data = slicer.util.arrayFromVolume(labelmap)  # [k, j, i]
+                data = slicer.util.arrayFromVolume(labelmap)  # [k, j, i], a view of the exported image (it keeps it alive)
             labelmap.GetIJKToRASMatrix(matrix)
             affine = np.array([[matrix.GetElement(row, column) for column in range(4)] for row in range(4)])
-            return (np.transpose(data, (2, 1, 0)) != 0).astype(np.uint8), affine
+            # Binarize without full-size temporaries (a large lesion would otherwise be copied two more times on the GUI
+            # thread): a uint8 export is binarized in place, any other type into a single uint8 copy
+            if data.dtype == np.uint8:
+                np.minimum(data, 1, out=data)
+            else:
+                mask = np.empty(data.shape, np.uint8)
+                np.not_equal(data, 0, out=mask.view(np.bool_))
+                data = mask
+            return np.transpose(data, (2, 1, 0)), affine
         finally:
             displayNode = labelmap.GetDisplayNode()
             if displayNode is not None and displayNode.GetColorNode() is not None:
@@ -977,15 +1060,16 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
             slicer.mrmlScene.RemoveNode(labelmap)
 
     @classmethod
-    def analysisSeedArray(cls, segNode, segmentId):
+    def analysisSeedArray(cls, segNode, segmentId, borrow=False):
         """``(data, affine, extrusion)``: the lesion that Map analyses for a segment (``seedArray``).
 
         A 2D tracing of the subject open in a Slicer Studio study is shown as drawn, but the study analyses it extruded by its
         2D policy (``desc-lesion``, which the cohort maps): the seed is then that extruded mask and ``extrusion`` describes
         it (``lesionqc.analysisSeed``: mode, total_mm, effective_mm, description, drawnVoxels). Otherwise ``extrusion`` is
         None and the seed is the segment as it is (also in official 3D Slicer, without Studio).
+        ``borrow``: as for ``seedArray`` (a seed to read at once, not to keep).
         """
-        data, affine = cls.seedArray(segNode, segmentId)
+        data, affine = cls.seedArray(segNode, segmentId, borrow)
         try:
             from StudioLib import lesionqc
         except ImportError:
@@ -1114,11 +1198,51 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
         return _("The lesion is on {seed}, the connectome on {connectome}: the template families are a few millimetres apart, "
                  "so the map is approximate near subcortical structures.").format(seed=shown, connectome=connectomeSpace)
 
+    #: Memory that checking a seed needs, in bytes per voxel of its grid: the uint8 mask, with headroom for the 2D extrusion
+    SEED_MEMORY_FACTOR = 2
+    #: More for the float32 weights of a probabilistic lesion (the file's values, then the weights)
+    SEED_WEIGHTS_MEMORY_FACTOR = 12
+    #: More against a connectome (asked only once the lesion is known to be on its grid): ``engine.prepare_lesion`` holds
+    #: the lesion as float64 twice, and a binary copy
+    SEED_CONNECTOME_MEMORY_FACTOR = 17
+
+    @classmethod
+    def seedTooLargeReason(cls, segNode, bundle=None):
+        """Why the seed of ``segNode`` is too large to check and map with the memory that is left (a message), else "".
+
+        Map reads the segment on the segmentation's reference geometry (and resamples it onto a connectome's grid): a
+        lesion that the drop accepted (``importer`` budgets only for loading it) can need more memory than is left, and
+        running out kills the application.
+        Without Slicer Studio, or when the free memory is not known, nothing is refused.
+        """
+        try:
+            from StudioLib import importer
+        except ImportError:
+            return ""
+        geometry = slicer.vtkOrientedImageData()
+        serialized = segNode.GetSegmentation().GetConversionParameter(slicer.vtkSegmentationConverter.GetReferenceImageGeometryParameterName())
+        if not serialized or not slicer.vtkSegmentationConverter.DeserializeImageGeometry(serialized, geometry, False):
+            return ""
+        dims = geometry.GetDimensions()
+        factor = cls.SEED_MEMORY_FACTOR
+        if segNode.GetAttribute(importer.LESION_FRACTIONAL_ATTRIBUTE):
+            factor += cls.SEED_WEIGHTS_MEMORY_FACTOR
+        if bundle is not None:
+            factor += cls.SEED_CONNECTOME_MEMORY_FACTOR
+        need = int(dims[0]) * int(dims[1]) * int(dims[2]) * factor
+        have = importer._availableMemoryBytes()
+        if have is None or need <= have:
+            return ""
+        megabyte = 1024 * 1024
+        return _("The lesion is too large to map with the memory that is left (it needs about {need:,} MB, {have:,} MB are free). "
+                 "Close other projects or applications, or map a cropped or resampled copy of the lesion.").format(
+                     need=-(-need // megabyte), have=max(int(have), 0) // megabyte)
+
     def checkSeed(self, segNode, segmentId, bundle=None):
         """Check a seed against a connectome; return a dict.
 
         Keys: ``ok`` (bool), ``reason`` (why it cannot be mapped, or ""), ``kind`` ("", "empty", "native",
-        "outside", "small"), ``space`` ((name, resolution) or None), ``volumeMl``, ``notice`` (a lesion on a template
+        "outside", "small", "toolarge": more than the memory that is left, ``seedTooLargeReason``), ``space`` ((name, resolution) or None), ``volumeMl``, ``notice`` (a lesion on a template
         of another MNI family than the connectome, e.g. one of the user's own templates: it maps, with this note),
         ``extrusion`` and ``extrusionNotice`` (a 2D tracing of a study subject mapped as the study's extruded analysis lesion,
         ``analysisSeedArray``; None and "" otherwise), and with a bundle ``qc`` (``engine.prepare_lesion``'s voxels_in_mask, weight_total, ...).
@@ -1130,11 +1254,19 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
         if segNode is None or not segmentId or segNode.GetSegmentation().GetSegment(segmentId) is None:
             result.update(reason=_("Choose the lesion segment."), kind="none")
             return result
-        data, affine, extrusion = self.analysisSeedArray(segNode, segmentId)
+        tooLarge = self.seedTooLargeReason(segNode)
+        if tooLarge:
+            result.update(reason=tooLarge, kind="toolarge")
+            return result
+        # Borrowed: read here and now, on the GUI thread, so a large lesion is not copied (no memory, and no seconds
+        # spent touching new memory for the first time)
+        data, affine, extrusion = self.analysisSeedArray(segNode, segmentId, borrow=True)
         voxels = int(np.count_nonzero(data))
         weighted = self.seedIsWeighted(data)
-        # The volume of a probabilistic lesion is the sum of its weights (the engine's source volume), not its voxel count
-        result["volumeMl"] = float(np.clip(data, 0, None).sum(dtype=np.float64)) * abs(float(np.linalg.det(affine[:3, :3]))) / 1000.0
+        # The volume of a probabilistic lesion is the sum of its weights (the engine's source volume), not its voxel count;
+        # a binary mask's sum is its voxel count (no full-size copy of a large lesion)
+        total = float(np.clip(data, 0, None).sum(dtype=np.float64)) if weighted else float(voxels)
+        result["volumeMl"] = total * abs(float(np.linalg.det(affine[:3, :3]))) / 1000.0
         result["weighted"] = weighted
         if weighted:
             result["weightNotice"] = _("Probabilistic lesion (desc-lesionProb): mapped with its values as weights, as a cohort and the command line map it.")
@@ -1172,6 +1304,10 @@ class LesionNetworkMappingLogic(ScriptedLoadableModuleLogic):
                 result.update(reason=_("The lesion lies outside the connectome's grid: it is not in the connectome's space."), kind="outside")
                 return result
         result["notice"] = self.familyNotice(result["space"], connectomeSpace[0] if connectomeSpace else declaredSpace)
+        tooLarge = self.seedTooLargeReason(segNode, bundle)
+        if tooLarge:
+            result.update(reason=tooLarge, kind="toolarge")
+            return result
         qc = engine.prepare_lesion((data, affine), bundle, binarize=not weighted)[1]
         result["qc"] = qc
         if qc.get("weight_total", 0.0) < 1.0:
@@ -4353,7 +4489,8 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             r, g, b = segment.GetColor()
             self.seedSwatch.setStyleSheet(f"background-color: rgb({int(r * 255)},{int(g * 255)},{int(b * 255)}); border-radius: 2px;")
             self.seedSwatch.show()
-            self.seedNameLabel.setText(f"{segment.GetName()} · {check.get('volumeMl', 0.0):.2f} mL")
+            # A lesion too large to read has no volume yet (it was not read): only its name
+            self.seedNameLabel.setText(segment.GetName() if check.get("kind") == "toolarge" else f"{segment.GetName()} · {check.get('volumeMl', 0.0):.2f} mL")
         else:
             self.seedSwatch.hide()
             self.seedNameLabel.setText(_("No lesion selected"))
@@ -4362,7 +4499,7 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
             name, resolution = space
             self.widgets.setChipLevel(self.seedSpaceChip, "ok", f"{name}" + (f" {resolution:g} mm" if isinstance(resolution, (int, float)) else ""))
             self.seedSpaceChip.show()
-        elif check.get("kind") in ("native",) or (segment is not None and check.get("kind") not in ("empty", "none") and self.bundle is None):
+        elif check.get("kind") in ("native",) or (segment is not None and check.get("kind") not in ("empty", "none", "toolarge") and self.bundle is None):
             self.widgets.setChipLevel(self.seedSpaceChip, "warn", _("Native space"))
             self.seedSpaceChip.show()
         else:
