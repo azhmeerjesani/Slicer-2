@@ -522,6 +522,36 @@ class SeedThisTest(unittest.TestCase):
         self.assertLess(t[blobs["B"]["mask"]].mean(), 0.0)
         self.assertEqual(circuits.find_circuits(os.path.dirname(out))[0]["name"], "ConjA")
 
+    def test_vlsm_map_parent_links_its_lesions(self):
+        """A cluster of a VLSM statistic map opened as a file (Clusters card, no --source-maps) is linked to the VLSM run and
+        its lesions.tsv, so declaring the circuit frozen cannot unlock an association on those lesions (bug
+        circuits-clusters-card-vlsm-cluster-loses-provenance-frozen-allows-double-dipping).
+        """
+        parent, _root, _run_id = self._parent("vlsmA")
+        folder = os.path.dirname(parent)
+        os.remove(os.path.join(folder, "cohort.json"))
+        os.remove(os.path.join(folder, "maps.tsv"))
+        stat = os.path.join(folder, "vlsm_desc-T_stat.nii.gz")
+        os.rename(parent, stat)
+        with open(os.path.join(folder, "lesions.tsv"), "w", encoding="utf-8") as handle:
+            handle.write("participant_id\tlesion_sha256\tvolume_ml\n" + f"sub-01\t{'c' * 64}\t1.0\nsub-02\t{'d' * 64}\t2.0\n")
+        with open(os.path.join(folder, "vlsm.json"), "w", encoding="utf-8") as handle:
+            json.dump({"format": "slicer-lnm-vlsm", "run_id": "vlsm-run-1", "lesions_tsv": "lesions.tsv"}, handle)
+        found = circuits.parent_record(stat)
+        self.assertEqual(found["record"], "vlsm.json")
+        self.assertEqual(found["run_id"], "vlsm-run-1")
+        self.assertEqual(found["lesions"]["sha256"], ["c" * 64, "d" * 64])
+        record = circuits.seed_this(self.meta["path"], os.path.join(self.tmp, "circuits", "circuit-Cluster1"), "Cluster1", roi=stat, parent=stat, register=False, emit=_quiet)
+        self.assertIn("vlsm-run-1", record["parents"])
+        self.assertTrue(record["source"]["known"])
+        self.assertEqual(record["source"]["lesion_sha256"], ["c" * 64, "d" * 64])
+        scored = {"sha256": ["c" * 64], "participants": [], "pairs": [(None, "c" * 64)]}
+        sha = file_sha256(record["maps"]["T"])
+        provenance = circuits.provenance_of(record["maps"]["T"], sha, scored, frozen_sha256=sha)
+        self.assertEqual(provenance["provenance"], "same_cohort")
+        # The bare VLSM map (no circuit.json) is not independent either
+        self.assertEqual(circuits.provenance_of(stat, file_sha256(stat), scored, frozen_sha256=file_sha256(stat))["provenance"], "same_cohort")
+
     def test_signed_conjunction_seeds_one_sign(self):
         """A +1 / -1 conjunction map seeds its positive or its negative region, never their union unless asked."""
         bundle = connectome.ConnectomeBundle.open(self.meta["path"])

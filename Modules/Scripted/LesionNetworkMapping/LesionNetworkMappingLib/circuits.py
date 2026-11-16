@@ -86,7 +86,7 @@ SCORE_TEXT = {
 }
 RESID_SUFFIX = "_resid"
 #: Records next to a parent map that tell its run and its lesions (in this order)
-PARENT_RECORDS = ("circuit.json", "cohort.json", "glm.json", "slnm.json", "validation.json", "nulls.json", "cohortmaps.json", "run.json")
+PARENT_RECORDS = ("circuit.json", "cohort.json", "glm.json", "slnm.json", "validation.json", "nulls.json", "cohortmaps.json", "vlsm.json", "run.json")
 #: Gray-matter prior probability above which a voxel is gray matter (random target spheres are centred there)
 GM_THRESHOLD = 0.5
 DEFAULT_K = 1000
@@ -346,7 +346,7 @@ def lesions_of_maps(maps_tsv):
 
 def parent_record(map_path):
     """What a parent map was made from: {"record": file name, "run_id", "kind", "maps_tsv", "lesions": {sha256, participants},
-    "study"} from the run record next to it (PARENT_RECORDS), or {} when there is none.
+    "study"} from the run record next to it (PARENT_RECORDS; for vlsm.json, "maps_tsv" is its lesions.tsv), or {} when there is none.
     """
     folder = os.path.dirname(os.path.abspath(os.fspath(map_path)))
     for name in PARENT_RECORDS:
@@ -363,6 +363,9 @@ def parent_record(map_path):
         maps_tsv = _maps_tsv_of(record, folder)
         if maps_tsv is None and name == "cohortmaps.json" and os.path.isfile(os.path.join(folder, "maps.tsv")):
             maps_tsv = os.path.join(folder, "maps.tsv")
+        if maps_tsv is None and name == "vlsm.json":  # a VLSM result: its lesions.tsv (participant_id, lesion_sha256) names the lesions
+            lesions_tsv = _resolve(record.get("lesions_tsv") or "lesions.tsv", folder)
+            maps_tsv = lesions_tsv if lesions_tsv and os.path.isfile(lesions_tsv) else None
         if maps_tsv is not None:
             out["maps_tsv"] = maps_tsv
             out["lesions"] = lesions_of_maps(maps_tsv)
