@@ -8624,6 +8624,87 @@ class StudioRegressionTest(unittest.TestCase):
             pump()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
 
+    def test_106_case_strip_leaves_the_open_case_for_a_second_tracing(self):
+        """A blind second tracing started while another case is open in Draw: the case strip kept that case's paper fields
+        (DOI, figure, modality) and queue under the traced subject, because the study session's subject was closed for the
+        pass without telling the study listeners (BB-1). It now hides (the session has no subject during the pass).
+        """
+        from LesionNetworkMappingLib import agreement, geometry, nifti
+
+        from StudioLib import adjudicate, casestrip, review, shell, study_ui
+
+        if slicer.util.mainWindow() is None or not study_ui.isAvailable():
+            self.skipTest("needs the main window and the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.directory, "Second strip study")
+        os.makedirs(folder)
+        sids = ("sub-01", "sub-02", "sub-03")
+        scans = []
+        for sid in sids:
+            scans.append(os.path.join(folder, f"{sid}_T1w.nii.gz"))
+            nifti.write_nifti(scans[-1], np.zeros(grid.shape, np.uint8), grid.affine)
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: None
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        originalAdjudicateToast = adjudicate._toast
+        adjudicate._toast = lambda text, ms=3000, **kwargs: None
+        self.addCleanup(setattr, adjudicate, "_toast", originalAdjudicateToast)
+        self.addCleanup(review.setRaterName, review.storedRaterName())
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+
+        def pump():
+            for _ in range(6):
+                slicer.app.processEvents()
+
+        try:
+            session = study_ui.createStudy(scans, studioShell, folder=folder)
+            self.assertIsNotNone(session)
+            session.study.set("sub-03", doi="10.1000/beta", figure="6", image_modality="CT")
+            review.setRaterName("Alice")
+            for sid in sids[:2]:
+                session.open(sid, switchToDraw=False)
+                segmentationNode, volumeNode = session.segmentationNode(), session.volumeNode()
+                segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+                array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode)
+                array[20:23, 30:33, 20:23] = 1
+                slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, volumeNode)
+                pump()
+                self.assertIsNotNone(session.done())
+                pump()
+            agreement.assign(session.study, sids=list(sids[:2]), rater="Bob", who="Alice")
+            session.flush()
+            review.setRaterName("Bob")
+            # Bob has sub-03 (another paper) open in Draw: the strip shows it
+            self.assertTrue(session.open("sub-03", switchToDraw=True))
+            pump()
+            casestrip._ensureCard()
+            strip = casestrip.strip()
+            self.assertIsNotNone(strip)
+            self.assertEqual(strip._sid, "sub-03")
+            self.assertFalse(strip.widget.isHidden())
+
+            state = adjudicate.startSecondTracing(shell=studioShell)
+            self.assertIsNotNone(state)
+            pump()
+            self.assertEqual(state.current, "sub-01")
+            self.assertIsNone(session.current())
+            self.assertIn(strip._sid, (None, state.current), "the case strip still shows the case open before the pass")
+            if strip._sid is None:
+                self.assertTrue(strip.widget.isHidden())
+            # The next case of the pass too
+            state.step(1)
+            pump()
+            self.assertEqual(state.current, "sub-02")
+            self.assertIn(strip._sid, (None, state.current))
+        finally:
+            if adjudicate.state() is not None:
+                adjudicate.state().exit(quiet=True, keepScene=True)
+            study_ui.closeStudy()
+            studioShell.dispose()
+            pump()
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+
     def test_92_readme_figure_letters_match_the_app(self):
         """The README says a figure shows no letters until its side is answered and then only R and L (as studio.md and
         orientation.py say), not that it gets no patient letters at all.

@@ -178,6 +178,11 @@ def releaseSession(session):
     session._openStamp = None
     session._dirty = False
     session._markedDirty = False
+    # The subject is closed: the views that follow the study (the case strip, which hides without a subject) are told,
+    # so that they never keep showing the closed case during a second tracing or an adjudication
+    studyUi = _studyUi()
+    if studyUi is not None:
+        studyUi._notify(session)
     return True
 
 
