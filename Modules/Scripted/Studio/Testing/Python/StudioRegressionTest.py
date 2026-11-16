@@ -9201,3 +9201,60 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertTrue(study_ui.canWarpToConnectomeSpace(session, "sub-01"))
         self.assertEqual(study_ui.registeredConnectomeSpaces(), ["MNI152NLin2009cAsym", "MNI152NLin6Asym"])
         self.assertEqual(study_ui.registeredConnectomeSpace(), "MNI152NLin2009cAsym")
+
+    def test_105_study_mni_lesion_on_an_unknown_grid_is_mni_in_draw_and_map(self):
+        """BB-1: a study lesion recorded in MNI152NLin2009cAsym (participants.tsv space, BIDS space- name) on a grid that is no
+        known MNI grid (a cropped 1 mm or a 1.5 mm grid) is mapped as MNI by the pipeline and Map's cohort mode, but once its
+        subject was opened Draw called it scanner space and single-lesion Map refused it as native ("normalize to MNI
+        first"). The opened lesion now carries the recorded space (Studio.Space with its voxel size); a native row does not.
+        """
+        from LesionNetworkMappingLib import geometry, nifti
+        from LesionNetworkMappingLib import study as studyModule
+
+        from StudioLib import space, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        grid = geometry.GRID_BY_ID["TF2009-1mm"].grid
+        cases = {
+            "crop": ((150, 180, 150), np.array(grid.affine, dtype=float) + np.array([[0, 0, 0, 20.0], [0, 0, 0, 25.0], [0, 0, 0, 20.0], [0, 0, 0, 0]]), 1),
+            "res15": ((128, 152, 128), np.array([[1.5, 0, 0, -96.0], [0, 1.5, 0, -132.0], [0, 0, 1.5, -78.0], [0, 0, 0, 1]]), 1.5),
+        }
+        for name, (shape, affine, resolution) in cases.items():
+            with self.subTest(grid=name):
+                self.assertIn(geometry.detect_space(shape, affine), (None, "native"))
+                folder = os.path.join(self.directory, f"MNI off-grid study {name}")
+                studyObject = studyModule.Study.create(folder, name=name, space="MNI152NLin2009cAsym")
+                data = np.zeros(shape, np.uint8)
+                ijk = np.round(np.linalg.inv(affine) @ np.array([-30.0, -10.0, 10.0, 1.0]))[:3].astype(int)
+                data[ijk[0] - 4:ijk[0] + 4, ijk[1] - 4:ijk[1] + 4, ijk[2] - 4:ijk[2] + 4] = 1
+                for sid, rowSpace in (("sub-01", "MNI152NLin2009cAsym"), ("sub-02", "native")):
+                    label = "MNI152NLin2009cAsym" if rowSpace != "native" else "T1w"
+                    relative = f"lesions/{sid}_space-{label}_desc-lesion_mask.nii.gz"
+                    nifti.write_nifti(os.path.join(folder, relative), data, affine)
+                    studyObject.add_subject(sid, lesion=relative, space=rowSpace)
+                studyObject.save()
+                try:
+                    session = study_ui.openStudy(folder, None, showLibrary=False)
+                    slicer.app.processEvents()
+                    self.assertTrue(session.open("sub-01", switchToDraw=False))
+                    segmentationNode = session.segmentationNode()
+                    self.assertEqual(space.spaceOf(segmentationNode), ("MNI152NLin2009cAsym", resolution))
+                    try:
+                        from LesionNetworkMapping import LesionNetworkMappingLogic
+                    except ImportError:
+                        LesionNetworkMappingLogic = None
+                    if LesionNetworkMappingLogic is not None:
+                        connectome = geometry.GRID_BY_ID["TF2009-2mm"].grid
+                        self.assertEqual(LesionNetworkMappingLogic.seedSpace(segmentationNode, connectome.shape, connectome.affine),
+                                         ("MNI152NLin2009cAsym", resolution))
+                    # A native row on the same grid stays in scanner space
+                    self.assertTrue(session.open("sub-02", switchToDraw=False))
+                    segmentationNode = session.segmentationNode()
+                    self.assertIsNone(segmentationNode.GetAttribute(space.SPACE_ATTRIBUTE))
+                    self.assertIsNone(space.spaceOf(segmentationNode))
+                finally:
+                    study_ui.closeStudy()
+                    for _ in range(4):
+                        slicer.app.processEvents()
+                    slicer.mrmlScene.Clear(0)

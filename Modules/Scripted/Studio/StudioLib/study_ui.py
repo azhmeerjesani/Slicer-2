@@ -1305,6 +1305,38 @@ def _tagAnsweredGridSpace(studyObject, row, path, segmentationNode):
     return value
 
 
+def _tagRecordedRowSpace(row, segmentationNode):
+    """Tag the opened lesion of ``row`` with the MNI space the study records for it (``Studio.Space`` "<space> <voxel
+    size>") when nothing else names its space: no ``Studio.Space`` yet and a grid that is no known MNI grid (a cropped or
+    resampled MNI lesion). participants.tsv, the BIDS name and the pipeline (Run everything, Map's cohort mode) treat the
+    lesion as in that space, so Draw's space line and single-lesion Map do too, instead of calling it scanner space and
+    offering to normalize it a second time. A native or unrecognized row space changes nothing. Return the value set, or
+    None.
+    """
+    if segmentationNode is None or segmentationNode.GetAttribute(space.SPACE_ATTRIBUTE):
+        return None
+    rowSpace = row.get("space") if row else None
+    if _missing(rowSpace):
+        return None
+    rowSpace = str(rowSpace).strip()
+    try:
+        if not _lnm("geometry").is_mni_space(rowSpace):
+            return None
+    except Exception:
+        return None
+    if " " in rowSpace or space.spaceOf(segmentationNode) is not None:
+        return None
+    grid = space.gridOf(segmentationNode)
+    box = space.worldBox(*grid) if grid is not None else None
+    value = rowSpace
+    if box is not None:
+        resolution = float(box[1].min())
+        if resolution > 0:
+            value = f"{rowSpace} {round(resolution, 3):g}"
+    segmentationNode.SetAttribute(space.SPACE_ATTRIBUTE, value)
+    return value
+
+
 def _applyGridAnswers(studyObject, gridRows):
     answers = studyObject.grid_answers
     for gridId, entry in gridRows.items():
@@ -4013,6 +4045,8 @@ class StudySession:
             _tagAnsweredGridSpace(self.study, row, lesionPath, segmentationNode)
         if not scanPath and lesionPath:
             self._tagTemplateLesionSpace(row, segmentationNode)
+        if lesionPath:
+            _tagRecordedRowSpace(row, segmentationNode)
         displayNode = segmentationNode.GetDisplayNode()
         if displayNode is not None:
             displayNode.SetVisibility(True)
