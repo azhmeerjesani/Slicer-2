@@ -3365,6 +3365,14 @@ class StudioRegressionTest(unittest.TestCase):
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
 
+    def test_21a_leaves_no_shell_behind(self):
+        """The share dialog test disposes its Studio shell, so later tests do not run against a stale one (BB-1)."""
+        from StudioLib import shell
+
+        shell._shell = None
+        self.test_21a_share_dialog_grows_when_options_are_ticked()
+        self.assertIsNone(shell._shell, "a test that makes a Shell must dispose it")
+
     def test_21b_unwritable_folders_are_named_in_plain_words(self):
         """A control set or a share export into a folder that cannot be written says "The folder ... cannot be written. Choose
         another folder." (no exception class, errno or temporary name) and the share checklist flags such an output before
@@ -3604,6 +3612,7 @@ class StudioRegressionTest(unittest.TestCase):
             if dialog is not None:
                 dialog.dialog.close()
             study_ui.closeStudy()
+            studioShell.dispose()
 
     def test_21b_share_dialog_refuses_an_output_inside_the_study_before_export(self):
         """An output inside the study folder, or reached through a symbolic link to it, shows an "Output chosen" blocker and keeps
@@ -6741,7 +6750,7 @@ class StudioRegressionTest(unittest.TestCase):
         def stops(first):
             """The Tab stops of the window, from ``first`` round the focus chain."""
             result, widget = [], first
-            for _ in range(2000):
+            for _ in range(200000):  # the chain holds every widget of the window, and grows with what earlier tests left
                 if int(widget.focusPolicy) & tab:
                     result.append(widget)
                 widget = widget.nextInFocusChain()
