@@ -4181,6 +4181,57 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertNotAlmostEqual(float(row["volume_ml"]), before, places=2)
         self.assertEqual(row["lesion_size"], str(os.stat(path).st_size))
 
+    def test_24c_lesion_file_changed_outside_studio_reopens_review_and_agreement(self):
+        """An approved lesion whose file another program rewrote stayed approved, with no ``modified`` stamp, so the review
+        gate passed voxels nobody reviewed and the Agreement card kept its summary as current (BB-1). Like an edit in Draw,
+        the refresh that measures the new voxels now stamps ``modified`` and reopens the review; a file whose voxels did
+        not change (a copy, a touch) keeps its approval.
+        """
+        from LesionNetworkMappingLib import nifti
+        from LesionNetworkMappingLib import review as rules
+        from LesionNetworkMappingLib import study as studyModule
+
+        from StudioLib import libcard_agreement, library, study_ui
+
+        traced = {"rater2_status": "done", "rater2": "BB"}  # a pair that the agreement summary counts
+        study = self._study([("sub-01", traced, False), ("sub-02", {}, False)])
+        session = study_ui.openStudy(study.path, None, showLibrary=False)
+        self.addCleanup(study_ui.closeStudy)
+        self.assertTrue(session.waitForMetrics(60))
+        slicer.app.processEvents()
+        for sid in ("sub-01", "sub-02"):
+            rules.apply_transition(session.study, sid, "pending", "Tracer")
+            rules.apply_transition(session.study, sid, "approved", "Rita Reviewer")
+        session.flush()
+        summary = {"created": studyModule.now_iso()}
+        self.assertFalse(libcard_agreement._stale(session.study, summary))
+        time.sleep(1.1)
+        # sub-01: other voxels; sub-02: the same voxels written again (a newer stamp only)
+        path = session.study.abspath(session.study.subject("sub-01")["lesion"])
+        data, affine = nifti.read_nifti(path)[:2]
+        other = np.zeros(data.shape, np.uint8)
+        other[2:6, 2:6, 2:6] = 1
+        nifti.write_nifti(path, other, affine)
+        same = session.study.abspath(session.study.subject("sub-02")["lesion"])
+        data2, affine2 = nifti.read_nifti(same)[:2]
+        os.remove(same)
+        nifti.write_nifti(same, (np.asarray(data2) > 0).astype(np.uint8), affine2)
+        for changed in (path, same):
+            os.utime(changed, (os.stat(changed).st_atime, os.stat(changed).st_mtime + 5))
+        library.refreshStudy()
+        self.assertTrue(session.waitForMetrics(60))
+        slicer.app.processEvents()
+        row = session.study.subject("sub-01")
+        self.assertEqual(row["review_status"], "pending", row)
+        self.assertFalse(study_ui._missing(row.get("modified")), row)
+        self.assertNotIn("sub-01", [r["participant_id"] for r in session.study.analysis_rows(require_review=True)[0]])
+        self.assertTrue(libcard_agreement._stale(session.study, summary))
+        kept = session.study.subject("sub-02")
+        self.assertEqual(kept["review_status"], "approved", kept)
+        self.assertTrue(study_ui._missing(kept.get("modified")), kept)
+        audit = [json.loads(line) for line in open(rules.audit_path(session.study), encoding="utf-8")]
+        self.assertTrue(any(r.get("sid") == "sub-01" and r.get("to") == "pending" and r.get("via") == "outside" for r in audit), audit)
+
     def test_25_cleared_description_of_a_registered_column_is_what_the_dialog_shows(self):
         """Columns...: clearing the description of a registered column (age) removed it from participants.json, but
         ``column_spec`` fell back to the registry's, so the reopened dialog showed "Age" again (BB-1). The file now holds

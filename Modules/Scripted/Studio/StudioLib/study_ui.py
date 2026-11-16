@@ -1908,6 +1908,30 @@ def metricsValues(maskKji, ijkToRas, lesionSpace=None, brainMask=None):
     return values
 
 
+#: participants.tsv metrics that tell whether a lesion file's voxels changed (its mtime alone also changes on a copy)
+CONTENT_METRICS = ("volume_ml", "n_parts", "centroid_x", "centroid_y", "centroid_z")
+
+
+def _metricsDiffer(before, values):
+    """True when the stored metrics ``before`` ({column: text}) and the new ``values`` describe different voxels (tolerant
+    of rounding: 0.01 % of the volume, 0.05 mm of the centroid; a metric that was not stored is not compared).
+    """
+    for key in CONTENT_METRICS:
+        old, new = before.get(key), values.get(key)
+        if _missing(old):
+            continue  # not measured before (an older study, or a volume written without the other metrics)
+        if new is None:
+            return True
+        try:
+            old, new = float(old), float(new)
+        except (TypeError, ValueError):
+            return True
+        tolerance = 1e-4 * max(abs(old), abs(new)) if key == "volume_ml" else (0.05 if key.startswith("centroid") else 0.0)
+        if abs(old - new) > tolerance + 1e-9:
+            return True
+    return False
+
+
 def _fileMetrics(path, lesionSpace, brainMask):
     """Metrics of a lesion file (worker thread): ``(values, mtime, size)``."""
     nifti = _lnm("nifti")
@@ -2426,6 +2450,7 @@ class StudySession:
         self._gridRows = {}
         self._metricsWriter = None
         self._metricsPending = set()
+        self._metricsBefore = {}  # sid -> (lesion_mtime, {metric: text}) of a measured lesion whose file changed since
         self._closed = False
         self._queue = None  # the active trace queue: {"key", "record"} (L-45)
         self._queuePosition = None  # the last subject opened while the queue was active
@@ -2972,7 +2997,7 @@ class StudySession:
             _notify(self)
             if not self._closed:
                 # A result that repoints the lesion or space (normalization, warp) leaves the metrics of the native file on the row
-                self.computeMissingMetrics()
+                self.computeMissingMetrics(outsideEdits=False)
         if self.lastInboxRejected and report:
             _toast(self._shell, self.inboxRejectedText(), ms=9000, level="warning")
         return applied
@@ -3197,8 +3222,13 @@ class StudySession:
 
     # Lesion metrics on import (R5), computed off the main thread, written on it
 
-    def computeMissingMetrics(self):
-        """Compute the metrics of lesion files whose row has none (or whose file changed) in the background."""
+    def computeMissingMetrics(self, outsideEdits=True):
+        """Compute the metrics of lesion files whose row has none (or whose file changed) in the background.
+
+        :param outsideEdits: a measured lesion whose voxels changed is an edit made outside Studio: its row is stamped
+          ``modified`` and an approved or rejected review is reopened, like an edit in Draw (False for the inbox, whose
+          results repoint the lesion on purpose).
+        """
         studyModule = _lnm("study")
         work = []
         for row in self.study.subjects:
@@ -3214,6 +3244,11 @@ class StudySession:
             cached = row.get("lesion_mtime") == studyModule.format_value(round(stat.st_mtime, 3)) and row.get("lesion_size") == str(stat.st_size)
             if known and (cached or studyModule.is_missing(row.get("lesion_mtime"))):
                 continue
+            if known and outsideEdits:
+                # A measured lesion whose file changed outside Studio: _onMetrics compares the new metrics with these
+                self._metricsBefore[sid] = (row.get("lesion_mtime"), {key: row.get(key) for key in CONTENT_METRICS})
+            else:
+                self._metricsBefore.pop(sid, None)
             work.append((sid, path, None if studyModule.is_missing(row.get("space")) else row["space"]))
         if not work:
             return 0
@@ -3235,15 +3270,41 @@ class StudySession:
             return
         values, mtime, size = result
         values = {key: value for key, value in values.items() if not key.startswith("_")}
+        before = self._metricsBefore.pop(sid, None)
+        row = self.study.subject(sid)
+        # Changed outside Studio (and not rewritten by Studio meanwhile): like an edit in Draw, the lesion is modified now
+        # and an approval or rejection of the earlier voxels is reopened (an approval is for the voxels that were reviewed)
+        changed = before is not None and row.get("lesion_mtime") == before[0] and _metricsDiffer(before[1], values)
         values["lesion_mtime"] = round(mtime, 3)
         values["lesion_size"] = size
+        if changed:
+            values["modified"] = _lnm("study").now_iso()
         self.study.set(sid, values)
+        if changed:
+            self._reopenAfterOutsideEdit(sid)
         self.scheduleSave()
         if not self._metricsPending:
             _notify(self)
 
+    def _reopenAfterOutsideEdit(self, sid):
+        """Reopen the review of ``sid`` (approved or rejected -> pending, audited ``via`` "outside") after its lesion file
+        was changed by another program, and record the new state in the lesion sidecar.
+        """
+        rules = _reviewRules()
+        row = self.study.subject(sid)
+        if rules is None or rules.status_of(row) not in ("approved", "rejected"):
+            return
+        target = rules.status_after_done(self.study, row, edited=True)
+        if not target:
+            return
+        reviewValues = self._reopenReview(sid, target, via="outside")
+        if reviewValues:
+            with contextlib.suppress(ValueError, OSError):
+                self.study.write_lesion_sidecar(sid, studio=reviewValues)
+
     def _onMetricsError(self, sid, error):
         self._metricsPending.discard(sid)
+        self._metricsBefore.pop(sid, None)
         logging.warning(f"Studio: the lesion metrics of {sid} could not be computed: {error}")
 
     def waitForMetrics(self, timeoutS=30.0):
@@ -4270,9 +4331,10 @@ class StudySession:
             return None
         return rules.status_after_done(self.study, row, edited=True)
 
-    def _reopenReview(self, sid, target):
+    def _reopenReview(self, sid, target, via="leave"):
         """Move the review of ``sid`` to ``target`` after its reviewed lesion was rewritten without Done (audited, ``via``
-        "leave"). Return the ``SlicerStudio`` sidecar values of the new review state, or None when it was not recorded.
+        "leave", or "outside" for a file changed by another program). Return the ``SlicerStudio`` sidecar values of the
+        new review state, or None when it was not recorded.
         """
         rules = _lnm("review")
         try:
@@ -4282,7 +4344,7 @@ class StudySession:
         except Exception:
             who = "unnamed"
         try:
-            rules.apply_transition(self.study, sid, target, who, extra={"via": "leave", "edited": True})
+            rules.apply_transition(self.study, sid, target, who, extra={"via": via, "edited": True})
         except Exception:
             logging.error(f"Studio: the review of {sid} could not be reopened after its lesion changed:\n{traceback.format_exc()}")
             return None
