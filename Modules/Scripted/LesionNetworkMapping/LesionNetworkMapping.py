@@ -4248,9 +4248,15 @@ class LesionNetworkMappingWidget(ScriptedLoadableModuleWidget, VTKObservationMix
         study, bundle = self.cohortStudy, self.bundle
         self.cohortMapsPath = None
         if study is not None and bundle is not None:
-            candidate = os.path.join(self.cohortOutputDir(), "maps.tsv")
-            if os.path.isfile(candidate) and os.path.isfile(os.path.join(os.path.dirname(candidate), "cohortmaps.json")) and not self._cohortFolderOfOtherConnectome(os.path.dirname(candidate)):
-                self.cohortMapsPath = candidate
+            cohortDir = self.cohortOutputDir()
+            # The Cohort card's own folder first, then the folder that Run everything / Maps only (pipeline stage "cohortmaps") fills
+            stageDir = os.path.join(os.path.dirname(cohortDir), "stages", "cohortmaps")
+            candidates = [(cohortDir, "maps.tsv"), (stageDir, "maps_kept.tsv"), (stageDir, "maps.tsv")]
+            for folder, name in candidates:
+                candidate = os.path.join(folder, name)
+                if os.path.isfile(candidate) and os.path.isfile(os.path.join(folder, "cohortmaps.json")) and not self._cohortFolderOfOtherConnectome(folder):
+                    self.cohortMapsPath = candidate
+                    break
         self._publishCohortMaps()
         return self.cohortMapsPath
 

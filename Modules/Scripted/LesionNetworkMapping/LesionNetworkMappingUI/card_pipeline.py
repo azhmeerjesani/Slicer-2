@@ -1006,6 +1006,12 @@ def _afterDone(job, model):
             model.inboxApplied = True
         except Exception:
             logging.exception("Lesion network mapping: the study inbox could not be merged")
+    widget = _mapWidget()
+    if widget is not None and hasattr(widget, "_findCohortMaps"):
+        try:  # the run's lesion maps (stages/cohortmaps) are now the maps that the Validate and Nulls cards reuse
+            widget._findCohortMaps()
+        except Exception:
+            logging.exception("Lesion network mapping: the cohort maps could not be looked up after the run")
     report = (model.doneEvent or {}).get("report")
     _toast(_("Cohort analysis finished · report ready") if report else _("Cohort analysis finished"), 4000)
 

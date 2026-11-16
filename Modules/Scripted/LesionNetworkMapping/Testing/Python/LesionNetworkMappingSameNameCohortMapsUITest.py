@@ -81,6 +81,24 @@ class LesionNetworkMappingSameNameCohortMapsUITest(unittest.TestCase):
         self.assertEqual(widget.cohortOutputDir(), self.folder, "B maps its lesions into the cohort folder of its name")
         self.assertIsNone(widget.cohortOutputDir(ownOnly=True), "the cards of B show the results in A's cohort folder")
 
+    def test_3_run_everything_stage_maps_count_as_mapped(self):
+        """Run everything writes maps.tsv into stages/cohortmaps (not cohort/): the cards must still see the lesions as mapped."""
+        study = types.SimpleNamespace(path=os.path.join(self.tmp, "StudyStages"))
+        stage = os.path.join(study.path, "derivatives", "lnm", "conn-Synthetic", "stages", "cohortmaps")
+        os.makedirs(stage)
+        shutil.copy(os.path.join(self.folder, "cohortmaps.json"), stage)
+        stageMaps = os.path.join(stage, "maps.tsv")
+        shutil.copy(self.mapsTsv, stageMaps)
+        widget = self._widget("A")
+        widget.cohortStudy = study
+        self.assertEqual(widget._findCohortMaps(), stageMaps)
+        keptMaps = os.path.join(stage, "maps_kept.tsv")
+        shutil.copy(stageMaps, keptMaps)
+        self.assertEqual(widget._findCohortMaps(), keptMaps)
+        other = self._widget("B")
+        other.cohortStudy = study
+        self.assertIsNone(other._findCohortMaps(), "the stage maps of connectome A are taken by B")
+
 
 if __name__ == "__main__":
     unittest.main()
