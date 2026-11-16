@@ -8,7 +8,8 @@ connectome of the Seed and Connectome cards, as one heavy job of the application
   the secondary "Maps only" (D-A26). Nothing else gets a key; Stop is a button, never Esc.
 - **Run.** The job gets ``--parent-pid``, ``--events json``, ``--nice 5``, ``--keep-awake``, ``--software`` and, only when
   ``Studio/LNM/AcceptedTerms/<sha>`` is true, ``--accept-terms``; the options of the dialog (``Studio/LNM/Pipeline/Options``)
-  and ``Studio/LNM/MemoryBudgetGB``. The runner adds ``--cancel-file`` and ``--threads``. The open study session is
+  and ``Studio/LNM/MemoryBudgetGB``; with a chosen recipe (or a locked plan), ``--recipe-record`` (``recipes.pipeline_recipe``:
+  the recipe, the locked plan's sha256 and the recipe steps outside the pipeline, as ``slicer-lnm --recipe`` records them). The runner adds ``--cancel-file`` and ``--threads``. The open study session is
   flushed first (the pipeline reads participants.tsv). The click does no hashing: it reuses the last plan.
 - **Progress.** Every pipeline job of the runner feeds a :class:`PipelineModel` (module level, so a card created later
   re-attaches to a running job); a 100 ms coalescing timer applies it to the card (nine stage rows, the
@@ -425,8 +426,11 @@ def _atlasPaths(choice, refresh=False):
     return result
 
 
-def configDict(studyPath, bundlePath, options, rule=None, software=None, acceptTerms=False, parentPid=None, recompute=False):
-    """The ``pipeline.PipelineConfig`` fields of a run (also what the staleness plan uses)."""
+def configDict(studyPath, bundlePath, options, rule=None, software=None, acceptTerms=False, parentPid=None, recompute=False, recipe=None):
+    """The ``pipeline.PipelineConfig`` fields of a run (also what the staleness plan uses).
+
+    :param recipe: the pipeline.json "recipe" record of the run (:func:`recipeRecord`); a run key, not an analysis setting.
+    """
     config = {"study": studyPath, "bundle": bundlePath, "rule": rule, "extra_rules": list(options.get("extra_rules") or []),
               "sensitivity": float(options.get("sensitivity", 90.0)), "specificity": options.get("specificity") or "auto",
               "perm": int(options.get("perm") or 5000), "perm_seed": int(options.get("perm_seed") or 0), "alpha": float(options.get("alpha") or 0.05),
@@ -458,7 +462,29 @@ def configDict(studyPath, bundlePath, options, rule=None, software=None, acceptT
         config["software"] = dict(software)
     if parentPid:
         config["parent_pid"] = int(parentPid)
+    if recipe:
+        config["recipe"] = dict(recipe)
     return config
+
+
+def recipeRecord(studyPath, recipe=None, folders=()):
+    """pipeline.json "recipe" of a Run everything of the study (``recipes.pipeline_recipe``), or None without a recipe.
+
+    The recipe is the study's choice (its locked plan's recipe first, ``recipes.selected_recipe``), else ``recipe`` (the
+    one chosen in the Recipe header); the record names it, the locked plan's sha256 and the steps outside the pipeline.
+    """
+    from LesionNetworkMappingLib import recipes
+
+    try:
+        chosen = (recipes.selected_recipe(studyPath) or {}).get("id")
+        if chosen and (recipe is None or recipe.id != chosen):
+            recipe = recipes.find_recipe(chosen, study=studyPath, folders=folders)
+        if recipe is None:
+            return None
+        return recipes.pipeline_recipe(recipes.to_pipeline_config(recipe, studyPath))
+    except Exception:
+        logging.exception("Lesion network mapping: the recipe of the cohort analysis could not be recorded")
+        return None
 
 
 def commandArguments(config):
@@ -469,6 +495,8 @@ def commandArguments(config):
     args += ["--nice", str(config.get("nice", NICE)), "--keep-awake", config.get("keep_awake", "auto")]
     if config.get("software"):
         args += ["--software", json.dumps(config["software"], sort_keys=True)]
+    if config.get("recipe"):
+        args += ["--recipe-record", json.dumps(config["recipe"], sort_keys=True)]
     if config.get("accept_terms"):
         args.append("--accept-terms")
     if config.get("rule"):
@@ -513,7 +541,7 @@ def commandArguments(config):
 
 def planKey(config):
     """What the staleness plan depends on (the analysis settings, not the run options)."""
-    ignored = ("accept_terms", "parent_pid", "software", "events", "nice", "keep_awake", "threads", "recompute", "atlas", "atlas_labels")
+    ignored = ("accept_terms", "parent_pid", "software", "events", "nice", "keep_awake", "threads", "recompute", "atlas", "atlas_labels", "recipe")
     return json.dumps({key: value for key, value in config.items() if key not in ignored}, sort_keys=True, default=str)
 
 
@@ -1434,7 +1462,22 @@ class PipelineCard:
             return None
         options = options if options is not None else self.options()
         return configDict(study.path, bundle.path, options, rule=self.rule(), software=self.software() if forRun else None, acceptTerms=forRun and termsAccepted(bundle),
-                          parentPid=os.getpid() if forRun else None, recompute=recompute)
+                          parentPid=os.getpid() if forRun else None, recompute=recompute, recipe=self.recipeRecord(study) if forRun else None)
+
+    def recipeRecord(self, study=None):
+        """pipeline.json "recipe" of a run now (:func:`recipeRecord`: the study's recipe, else the Recipe header's)."""
+        study = study if study is not None else self.study()
+        if study is None:
+            return None
+        header = self.ctx.card("recipe") if hasattr(self.ctx, "card") else None
+        folders = ()
+        try:
+            from LesionNetworkMappingUI import card_recipe
+
+            folders = card_recipe.recipeFolders()
+        except Exception:
+            logging.exception("Lesion network mapping: the recipe folders could not be read")
+        return recipeRecord(os.fspath(study.path), getattr(header, "recipe", None), folders)
 
     def outDir(self, options=None):
         """The output folder of the run: ``<study>/derivatives/lnm/conn-<label>[_n-<N>]`` (the pipeline's default)."""

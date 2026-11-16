@@ -4041,6 +4041,7 @@ def _add_run_arguments(parser):
     parser.add_argument("--recompute", action="store_true", default=S, help="ignore every saved stage and the map cache")
     parser.add_argument("--accept-terms", action="store_true", default=S, help="accept the data use terms of the connectome")
     parser.add_argument("--software", default=S, help="JSON object recorded as the exporting software")
+    parser.add_argument("--recipe-record", dest="recipe", default=S, help="JSON recipe record recorded as pipeline.json \"recipe\" (recipes.pipeline_recipe; Run everything in Map)")
     parser.add_argument("--parent-pid", type=int, default=S, help="stop when this process is gone")
     parser.add_argument("--nice", type=int, default=S)
     parser.add_argument("--keep-awake", choices=KEEP_AWAKE_MODES, default=S)
@@ -4100,6 +4101,7 @@ _CONFIG_PARSE = {
     "rule": lambda text: json.loads(text) if isinstance(text, str) else text,
     "extra_rules": lambda items: [json.loads(item) if isinstance(item, str) else item for item in items],
     "software": lambda text: json.loads(text) if isinstance(text, str) else text,
+    "recipe": lambda text: json.loads(text) if isinstance(text, str) else text,
     "covariates": lambda text: [name.strip() for name in text.split(",") if name.strip()] if isinstance(text, str) else text,
 }
 

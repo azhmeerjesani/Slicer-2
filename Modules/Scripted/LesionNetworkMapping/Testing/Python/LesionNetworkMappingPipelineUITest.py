@@ -967,5 +967,54 @@ class LesionNetworkMappingPipelinePlanSeedsTest(unittest.TestCase):
         self.assertTrue({"perm_seed", "null_seed", "alpha", "fdr"} <= set(cp.KEPT_OPTION_KEYS))
 
 
+
+class LesionNetworkMappingPipelineRecipeRecordTest(unittest.TestCase):
+    """Run everything records the chosen recipe and the locked plan's sha256 in pipeline.json, as slicer-lnm --recipe does (BB-1)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="lnm-pipeline-recipe-")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_run_everything_records_the_recipe_and_the_plan(self):
+        from LesionNetworkMappingLib import methods, pipeline, recipes
+        from LesionNetworkMappingLib.study import Study
+        from LesionNetworkMappingUI import card_pipeline as cp
+
+        study = Study.create(os.path.join(self.tmp, "study"), name="study")
+        study.save()
+        # No recipe chosen: nothing is recorded and the command line is unchanged
+        self.assertIsNone(cp.recipeRecord(study.path))
+        self.assertNotIn("--recipe-record", cp.commandArguments(cp.configDict(study.path, "/bundle.lnmc", dict(cp.DEFAULT_OPTIONS))))
+        recipe = recipes.find_recipe("vdh2026_standard_settings", recipes.load_recipes())
+        self.assertIn("robustness", recipe.steps)  # a step that runs outside the pipeline (Map > Robust)
+        recipes.select_recipe(study.path, recipe)
+        self.assertEqual(cp.recipeRecord(study.path)["id"], recipe.id)
+        self.assertNotIn("plan_sha256", cp.recipeRecord(study.path))
+        plan = recipes.lock_plan(study.path, recipe, recipes.apply(recipe), {"primary": {"kind": "contrast", "contrast": "A>B"}})
+        record = cp.recipeRecord(study.path)
+        expected = recipes.pipeline_recipe(recipes.to_pipeline_config(recipe, study.path))  # what slicer-lnm --recipe records
+        self.assertEqual(record, expected)
+        self.assertEqual((record["id"], record["plan_sha256"]), (recipe.id, plan["sha256"]))
+        self.assertIn("robustness", record["outside_pipeline"])
+        params = recipes.effective_parameters(study.path)
+        options = recipes.pipeline_options(params, recipe.steps, dict(cp.DEFAULT_OPTIONS))
+        config = cp.configDict(study.path, "/bundle.lnmc", options, rule=params["rule"], recipe=record)
+        # The recipe is a run key: it does not change what is up to date
+        self.assertEqual(cp.planKey(config), cp.planKey(cp.configDict(study.path, "/bundle.lnmc", options, rule=params["rule"])))
+        run = pipeline.config_from_args(pipeline._parser().parse_args(cp.commandArguments(config)))
+        self.assertEqual(run.recipe, record)  # pipeline.json "recipe"
+        self.assertNotIn("recipe", run.to_json(analysis_only=True))
+        # The methods name the recipe and the recipe steps outside the pipeline
+        out = os.path.join(self.tmp, "out")
+        os.makedirs(out)
+        with open(os.path.join(out, "pipeline.json"), "w", encoding="utf-8") as f:
+            json.dump({"format": pipeline.FORMAT_NAME, "run_id": "pipeline-test", "recipe": run.recipe, "stages": []}, f)
+        text = methods.pipeline_section(methods.Records(study.path, include_dirs=[out])).text()
+        self.assertIn(f"recipe {recipe.id}", text)
+        self.assertIn("outside the pipeline (not part of this run): robustness", text)
+
+
 if __name__ == "__main__":
     unittest.main()

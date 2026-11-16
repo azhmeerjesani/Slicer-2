@@ -39,7 +39,8 @@ threshold rule and Run everything's options, and their deviations are recorded a
 example "contrast.n_perm"), so a deviation of one never changes what the other follows.
 
 Pipeline (A-04): :func:`to_pipeline_config` turns a recipe into ``pipeline.PipelineConfig`` fields and a
-recipe record (with the locked plan's sha256) for pipeline.json.
+recipe record (with the locked plan's sha256) for pipeline.json; :func:`pipeline_recipe` adds the steps outside the
+pipeline (the record that ``slicer-lnm --recipe`` and Run everything in Map pass on).
 
 Command line::
 
@@ -1447,6 +1448,15 @@ def to_pipeline_config(recipe, study=None, params=None, module_available=None):
 
     outside = [{"id": step, "label": STEPS[step][0], "where": jobs.command_text(MANUAL_STEP_PLACES.get(step, "Map"))} for step in steps if STEPS[step][2] is None]
     return {"config": config, "recipe": record, "steps": checked, "unavailable": [step["id"] for step in checked if not step["available"]], "outside_pipeline": outside}
+
+
+def pipeline_recipe(converted):
+    """pipeline.json "recipe" of a :func:`to_pipeline_config` result: its record with the ids of the steps outside the pipeline.
+
+    The command line (``slicer-lnm --recipe``) and Run everything in Map both record this, so methods and the report name
+    the recipe (and the locked plan's sha256) and list the recipe steps this run does not do.
+    """
+    return {**converted["recipe"], "outside_pipeline": [step["id"] for step in converted.get("outside_pipeline") or []]}
 
 
 # Command line

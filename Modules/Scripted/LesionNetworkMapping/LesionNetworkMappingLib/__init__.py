@@ -190,6 +190,7 @@ _EXPORTS = {
         "plan_status",
         "save_lab_recipe",
         "to_pipeline_config",
+        "pipeline_recipe",
         "selected_recipe",
         "select_recipe",
         "compare_parameters",

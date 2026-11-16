@@ -463,7 +463,7 @@ def build_config(args, study_path, emit=None):
         values.update(converted["config"])
         outside = converted.get("outside_pipeline") or []
         # pipeline.json "recipe" (read by methods and the report), with the steps this run does not do
-        values["recipe"] = {**converted["recipe"], "outside_pipeline": [step["id"] for step in outside]}
+        values["recipe"] = recipes.pipeline_recipe(converted)
         if emit is not None and converted.get("unavailable"):
             emit("info", code="recipe_steps", message=f"Recipe {recipe.id}: not available in this build: {', '.join(converted['unavailable'])}")
         if emit is not None:
