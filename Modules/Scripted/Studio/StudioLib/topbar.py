@@ -84,6 +84,12 @@ _DICOM_FIRST_RUN_SQL_LINES = re.compile(r"^(?:SQL failed:.*|Error:\s*|Driver not
 _DICOM_FIRST_RUN_ROWS = 8
 #: At most this many of those SQL errors per notice (CTK logs three): a longer burst is counted
 _DICOM_FIRST_RUN_MAX_SQL_ERRORS = 4
+#: DCMTK's read messages for a file that is not DICOM (a NIfTI or a report next to the series: the indexer tries every
+#: file of the folder). The row must start with a DCMTK "W: Dcm..." or "E: Dcm..." line and hold only such lines.
+_DCMTK_FIRST_LINE = re.compile(r"^[WE]: Dcm\w+: ")
+_DCMTK_NOT_DICOM_LINES = re.compile(
+    r"^(?:[WEIF]: Dcm\w+: .*|Could not load\s+\".*\"\s*|DCMTK says:.*|Could not read DICOM file:.*|\s*)$",
+)
 
 #: Description of each workspace in its tooltip
 _WORKSPACE_DESCRIPTIONS = {
@@ -1432,6 +1438,10 @@ class TopBar:
     def _isExpectedFirstRunMessage(self, row, isError):
         """True for the messages of the first DICOM use of a profile (``_DICOM_FIRST_RUN_NOTICE``), not counted."""
         description = self.errorLogModel.index(row, _DESCRIPTION_COLUMN).data() or ""
+        if isError:
+            lines = description.splitlines()
+            if lines and _DCMTK_FIRST_LINE.match(lines[0]) and all(_DCMTK_NOT_DICOM_LINES.match(line) for line in lines):
+                return True  # a file in the DICOM folder that is not DICOM: skipped by the indexer, the series loads
         if description.startswith(_DICOM_FIRST_RUN_NOTICE):
             self._dicomFirstRunRow = row
             self._dicomFirstRunSqlErrors = 0

@@ -1171,6 +1171,32 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(topBar.errorCount(), before + 7 + 10 - topbar._DICOM_FIRST_RUN_MAX_SQL_ERRORS)
         topBar._onErrorLogViewed()
 
+    def test_error_badge_ignores_dcmtk_non_dicom_file(self):
+        """DCMTK's read messages for a non-DICOM file next to a series are not counted; other errors still are."""
+        studioShell = self._applyStudio()
+        topBar = studioShell.topBar
+        self._pump()
+        topBar._scanErrors()
+        before = topBar.errorCount()
+        logging.warning("unrelated message")
+        logging.error(
+            "W: DcmFileFormat: Could not determine Transfer Syntax from File Meta Information Header\n"
+            "W: DcmItem: Length of element (ff04,bccc) is odd\n"
+            "E: DcmElement: Unknown Tag & Data (ff04,bccc) larger (2136291449) than remaining bytes in file\n"
+            'Could not load  "/tmp/x/other_scan.nii.gz" \n'
+            "DCMTK says:  I/O suspension or premature end of stream\n"
+            "Could not read DICOM file:/tmp/x/other_scan.nii.gz",
+        )
+        self._pump(10)
+        topBar._scanErrors()
+        self.assertEqual(topBar.errorCount(), before)
+        logging.warning("unrelated message")
+        logging.error('Could not load "/tmp/x/real.nrrd"')
+        self._pump(10)
+        topBar._scanErrors()
+        self.assertEqual(topBar.errorCount(), before + 1)
+        topBar._onErrorLogViewed()
+
     def test_error_badge_ignores_blank_stderr_line(self):
         """A stray newline on stderr (CTK's FD reader logs it as an empty Critical entry at some starts) is not an error to count."""
         from StudioLib import topbar
