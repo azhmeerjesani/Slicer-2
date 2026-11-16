@@ -1835,6 +1835,7 @@ class CurrentWorkCard(qt.QObject):
         self._scanRows = []
         self._blocks = {}
         self._pendingMetrics = []
+        self._metricsJob = None  # (lesion ID, draw.MetricsJob) of the metrics that a worker thread computes
         self._metricsTimer = qt.QTimer()
         self._metricsTimer.setSingleShot(True)
         self._metricsTimer.setInterval(0)
@@ -2049,7 +2050,8 @@ class CurrentWorkCard(qt.QObject):
                 block.metricsLabel.style().polish(block.metricsLabel)
             # The tool tip: the whole text (it may be elided) and the counts
             setElidedText(block.metricsLabel, plain, "\n".join(part for part in (plain, self._metricsToolTip(summary)) if part))
-            if queue and summary["metrics"] is None and lesion.GetSegmentation().GetNumberOfSegments() and lesionId not in self._pendingMetrics:
+            if queue and summary["metrics"] is None and lesion.GetSegmentation().GetNumberOfSegments() and lesionId not in self._pendingMetrics \
+                    and not (self._metricsJob is not None and self._metricsJob[0] == lesionId):
                 self._pendingMetrics.append(lesionId)
             state, text = lesionSaveInfo(lesion)
             block.stateLabel.setProperty("plainText", text)
@@ -2083,22 +2085,40 @@ class CurrentWorkCard(qt.QObject):
         )
 
     def _computeNext(self):
-        """Compute the metrics of the next lesion with a cold cache (one per event loop iteration)."""
+        """Compute the metrics of the next lesion with a cold cache, in a worker thread (``draw.MetricsJob``): a large lesion
+        takes seconds and must not freeze the window. The card says "…" until the result is in; polled every 30 ms.
+        """
         if not _isAlive(self.widget):
             return
+        job = self._metricsJob
+        if job is not None:
+            if not job[1].done:
+                self._metricsTimer.start(30)
+                return
+            self._metricsJob = None
+            try:
+                if job[1].error is not None:
+                    raise job[1].error
+                job[1].finish()
+            except Exception:
+                logging.error(f"Studio Library: lesion metrics failed:\n{traceback.format_exc()}")
+            else:
+                self._updateTexts()
         while self._pendingMetrics:
             lesionId = self._pendingMetrics.pop(0)
             lesion = slicer.mrmlScene.GetNodeByID(lesionId)
             if lesion is None or lesionId not in self._blocks:
                 continue
             try:
-                lesionSummary(lesion, compute=True)
+                started = _draw().lesionMetricsJob(lesion) if lesion.GetSegmentation().GetNumberOfSegments() else None
             except Exception:
                 logging.error(f"Studio Library: lesion metrics failed:\n{traceback.format_exc()}")
                 continue
-            self._updateTexts(queue=False)
-            if self._pendingMetrics:
-                self._metricsTimer.start()
+            if started is None:
+                self._updateTexts(queue=False)
+                continue
+            self._metricsJob = (lesionId, started)
+            self._metricsTimer.start(30)
             return
 
     #

@@ -1522,6 +1522,11 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._template(studioShell, fill=True, rasCenter=(-40.0, -20.0, 10.0))
         canvas = self._library(studioShell)
         label = self._labels(canvas, "StudioCurrentWorkLesionMetrics")[0]
+        for _step in range(100):  # the metrics come from a worker thread
+            if self._plain(label) != "…":
+                break
+            self._pump(2)
+            self._wait(30)
         whole = self._plain(label)
         self.assertTrue(whole.endswith("1 part"), whole)
         label.setFixedWidth(400)
@@ -1553,10 +1558,82 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         canvas.refreshData()
         metrics = self._labels(canvas, "StudioCurrentWorkLesionMetrics")
         self.assertEqual(self._plain(metrics[0]), "…")
-        self._pump(10)
-        self._wait(50)
+        for _step in range(100):
+            if draw.lesionMetrics(segmentationNode) is not None:
+                break
+            self._pump(2)
+            self._wait(30)
+        self._pump(4)
         self.assertNotEqual(self._plain(self._labels(canvas, "StudioCurrentWorkLesionMetrics")[0]), "…")
         self.assertIsNotNone(draw.lesionMetrics(segmentationNode))
+
+    def test_metrics_of_a_large_lesion_do_not_block_the_window(self):
+        """Library-switch freeze with a large lesion: the metrics run in a worker thread (the card says "…" meanwhile), and
+        the emptiness scan of the NIfTI export neither builds a full-size mask nor repeats while the voxels are unchanged.
+        """
+        import threading
+        import time
+
+        from StudioLib import draw, lesioncard, library, niftiexport
+
+        studioShell = self._applyStudio()
+        _volumeNode, segmentationNode = self._template(studioShell, fill=True)
+        draw._metricsCache.clear()
+        threads = []
+        original = lesioncard.computeLesionMetrics
+
+        def slow(*args, **kwargs):
+            threads.append(threading.current_thread())
+            time.sleep(1.0)  # what a lesion of hundreds of millions of voxels takes; sleeping releases the GIL like numpy does
+            return original(*args, **kwargs)
+
+        lesioncard.computeLesionMetrics = slow
+        try:
+            started = time.monotonic()
+            studioShell.switchTo("library")
+            self._pump(8)
+            library_canvas = canvas = library.canvas()
+            canvas.refreshData()
+            self._pump(8)
+            self.assertLess(time.monotonic() - started, 0.8, "the switch waited for the metrics")
+            self.assertEqual(self._plain(self._labels(library_canvas, "StudioCurrentWorkLesionMetrics")[0]), "…")
+            for _step in range(200):
+                if draw.lesionMetrics(segmentationNode) is not None:
+                    break
+                self._pump(2)
+                self._wait(30)
+        finally:
+            lesioncard.computeLesionMetrics = original
+        self.assertIsNotNone(draw.lesionMetrics(segmentationNode))
+        self.assertEqual(len(threads), 1)
+        self.assertIsNot(threads[0], threading.main_thread())
+        self._pump(4)
+        self.assertNotEqual(self._plain(self._labels(library_canvas, "StudioCurrentWorkLesionMetrics")[0]), "…")
+        # Emptiness: slab by slab, no comparison mask of the whole labelmap, and cached by the content
+        segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+        draw._emptyCache.clear()
+        oldSlab = draw._SCAN_SLAB_VOXELS
+        draw._SCAN_SLAB_VOXELS = 1000
+        originalAny = draw._anyVoxel
+        calls = []
+
+        def counting(*args):
+            calls.append(1)
+            return originalAny(*args)
+
+        draw._anyVoxel = counting
+        try:
+            self.assertEqual(niftiexport.unavailableReason(segmentationNode), "")
+            self.assertEqual(niftiexport.unavailableReason(segmentationNode), "")
+            self.assertEqual(len(calls), 1, "the emptiness scan repeated for unchanged voxels")
+            array = np.zeros((20, 30, 40), np.uint8)
+            self.assertFalse(originalAny(array, 1))
+            array[19, 29, 39] = 1
+            self.assertTrue(originalAny(array, 1))
+            self.assertFalse(originalAny(array, 2))
+        finally:
+            draw._anyVoxel = originalAny
+            draw._SCAN_SLAB_VOXELS = oldSlab
 
     #
     # New lesion, Close

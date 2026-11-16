@@ -39,6 +39,7 @@ import json
 import logging
 import math
 import os
+import threading
 import pkgutil
 import re
 import tempfile
@@ -370,11 +371,10 @@ def _selectedSegmentId(segmentationNode, editor=None):
 _metricsCache = {}
 
 
-def _labelmapArray(segmentationNode, segmentId):
-    """``(mask_kji, ijkToRAS 4x4 numpy, labelmap MTime)`` of a segment's internal binary labelmap, or None when empty.
+def _labelmapInputs(segmentationNode, segmentId):
+    """``(array_kji view, label value, ijkToRAS 4x4 numpy, labelmap)`` of a segment's internal binary labelmap, or None when empty.
 
-    The array is the shared layer (other segments may use other label values): the mask compares with this
-    segment's label value. ``ijkToRAS`` maps the array's (i, j, k) index to RAS.
+    ``array_kji`` is a view of the shared layer without a copy (other segments may use other label values).
     """
     try:
         labelmap = segmentationNode.GetBinaryLabelmapInternalRepresentation(segmentId)
@@ -391,7 +391,40 @@ def _labelmapArray(segmentationNode, segmentId):
     extent = labelmap.GetExtent()
     offset = np.eye(4)
     offset[:3, 3] = (extent[0], extent[2], extent[4])
-    return array == labelValue, matrix @ offset, labelmap.GetMTime()
+    return array, labelValue, matrix @ offset, labelmap
+
+
+def _labelmapArray(segmentationNode, segmentId):
+    """``(mask_kji, ijkToRAS 4x4 numpy, labelmap MTime)`` of a segment's internal binary labelmap, or None when empty.
+
+    The array is the shared layer (other segments may use other label values): the mask compares with this
+    segment's label value. ``ijkToRAS`` maps the array's (i, j, k) index to RAS.
+    """
+    inputs = _labelmapInputs(segmentationNode, segmentId)
+    if inputs is None:
+        return None
+    array, labelValue, matrix, labelmap = inputs
+    return array == labelValue, matrix, labelmap.GetMTime()
+
+
+#: Slab size (voxels) of the emptiness scan: no full-size comparison mask, and the scan stops at the first voxel found
+_SCAN_SLAB_VOXELS = 4 * 1024 * 1024
+
+
+def _anyVoxel(array, labelValue):
+    """True if any voxel of ``array`` equals ``labelValue``; slab by slab with an early exit (no full-size temporary)."""
+    if array.ndim == 0 or array.size == 0:
+        return False
+    perSlice = max(1, array.size // array.shape[0])
+    step = max(1, _SCAN_SLAB_VOXELS // perSlice)
+    for start in range(0, array.shape[0], step):
+        if (array[start:start + step] == labelValue).any():
+            return True
+    return False
+
+
+#: {(node ID, segment ID): (stamp, segmentation, empty)} of isLesionEmpty() with the labelmap content
+_emptyCache = {}
 
 
 def _contentStamp(segmentationNode):
@@ -427,13 +460,21 @@ def lesionMetrics(segmentationNode, compute=False, segmentId=None, axis=0):
         return cached[2]
     if not compute:
         return None
-    data = _labelmapArray(segmentationNode, segmentId)
-    if data is None:
-        metrics = lesioncard.computeLesionMetrics(np.zeros((1, 1, 1), bool), (1, 1, 1), np.eye(4), axis=axis)
-        matrix = None
-    else:
-        mask, matrix, _mtime = data
-        metrics = lesioncard.computeLesionMetrics(mask, None, matrix, axis=axis)
+    inputs = _labelmapInputs(segmentationNode, segmentId)
+    metrics, matrix = _rawMetrics(inputs, axis)
+    return _storeMetrics(segmentationNode, key, stamp, metrics, matrix)
+
+
+def _rawMetrics(inputs, axis):
+    """``(lesioncard.computeLesionMetrics() result, ijkToRAS or None)`` of ``_labelmapInputs()``: numpy only (it runs in a worker thread too)."""
+    if inputs is None:
+        return lesioncard.computeLesionMetrics(np.zeros((1, 1, 1), bool), (1, 1, 1), np.eye(4), axis=axis), None
+    array, labelValue, matrix, _labelmap = inputs
+    return lesioncard.computeLesionMetrics(array == labelValue, None, matrix, axis=axis), matrix
+
+
+def _storeMetrics(segmentationNode, key, stamp, metrics, matrix):
+    """Complete the raw metrics (``mL``, ``centroidRas``, ``sides``: MRML, main thread) and cache them by ``stamp``."""
     metrics = dict(metrics)
     metrics["mL"] = metrics["ml"]
     metrics["centroidRas"] = metrics["centroid_ras"]
@@ -447,6 +488,57 @@ def lesionMetrics(segmentationNode, compute=False, segmentId=None, axis=0):
     if len(_metricsCache) > 64:
         _metricsCache.pop(next(iter(_metricsCache)))
     return metrics
+
+
+class MetricsJob:
+    """``lesionMetrics(compute=True)`` in a worker thread, so a large lesion does not freeze the window.
+
+    ``start()`` reads the MRML inputs on the calling (main) thread; the thread only runs numpy and scipy on the labelmap
+    view (the job holds the labelmap, so it stays alive). Poll ``done`` and call ``finish()`` on the main thread: it caches
+    the result and returns the metrics (None when the lesion was closed meanwhile or the thread failed).
+    """
+
+    def __init__(self, segmentationNode, segmentId=None, axis=0):
+        self._node = segmentationNode
+        self._segmentId = segmentId or _selectedSegmentId(segmentationNode)
+        self._axis = axis
+        self._key = (segmentationNode.GetID(), self._segmentId, axis)
+        self._stamp = _contentStamp(segmentationNode)
+        self._segmentation = segmentationNode.GetSegmentation()
+        self._inputs = _labelmapInputs(segmentationNode, self._segmentId)
+        self._result = None
+        self.error = None
+        self.done = False
+        self._thread = threading.Thread(target=self._run, name="StudioLesionMetrics", daemon=True)
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def _run(self):
+        try:
+            self._result = _rawMetrics(self._inputs, self._axis)
+        except BaseException as error:
+            self.error = error
+        finally:
+            self.done = True
+
+    def finish(self):
+        if self._result is None or self._segmentation is not self._node.GetSegmentation():
+            return None
+        metrics, matrix = self._result
+        self._inputs = None
+        return _storeMetrics(self._node, self._key, self._stamp, metrics, matrix)
+
+
+def lesionMetricsJob(segmentationNode, segmentId=None, axis=0):
+    """A started ``MetricsJob`` when the metrics are not cached (and there is a segment), else None."""
+    if segmentationNode is None:
+        return None
+    segmentId = segmentId or _selectedSegmentId(segmentationNode)
+    if not segmentId or lesionMetrics(segmentationNode, segmentId=segmentId, axis=axis) is not None:
+        return None
+    return MetricsJob(segmentationNode, segmentId, axis).start()
 
 
 #: space.isMni() of segmentations: {node ID: (reference geometry, Studio.Space, result)}
@@ -475,11 +567,21 @@ def isLesionEmpty(segmentationNode, segmentIds=None):
     segmentation = segmentationNode.GetSegmentation()
     if segmentIds is None:
         segmentIds = [segmentation.GetNthSegmentID(index) for index in range(segmentation.GetNumberOfSegments())]
+    stamp = _contentStamp(segmentationNode)
     for segmentId in segmentIds:
-        data = _labelmapArray(segmentationNode, segmentId)
-        if data is not None and data[0].any():
+        key = (segmentationNode.GetID(), segmentId)
+        cached = _emptyCache.get(key)
+        if cached is not None and cached[0] == stamp and cached[1] is segmentation:
+            hasVoxel = cached[2]
+        else:
+            inputs = _labelmapInputs(segmentationNode, segmentId)
+            hasVoxel = inputs is not None and _anyVoxel(inputs[0], inputs[1])
+            _emptyCache[key] = (stamp, segmentation, hasVoxel)
+            if len(_emptyCache) > 256:
+                _emptyCache.pop(next(iter(_emptyCache)))
+        if hasVoxel:
             return False
-        if data is None and segmentationNode.GetBinaryLabelmapInternalRepresentation(segmentId) is None:
+        if segmentationNode.GetBinaryLabelmapInternalRepresentation(segmentId) is None:
             # Not a binary labelmap (closed surface source): empty only when its source representation is
             if segmentHasNonLabelmapContent(segmentationNode, segmentId):
                 return False
