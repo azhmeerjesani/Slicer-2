@@ -2521,12 +2521,35 @@ def attachService(service):
     registerPaletteProvider()
 
 
+CREATED_WAIT_MS = 1000
+CREATED_MAX_WAITS = 300
+
+
+def _announceCreated(text, toolTip, waits=0):
+    """Say that a new project was created ("Saving to Projects/x · Rename").
+
+    The load that created the project may have shown a consequence that stays until the next input ("a slice is
+    missing or the slice spacing is uneven", USABILITY 6.3): this message (it carries an action) would replace it at
+    once, so it waits until that consequence is gone (and is dropped if the project was closed meanwhile).
+    """
+    if waits:
+        service = _service()
+        current = service.currentProject() if service is not None else None
+        if current is None or current.path != toolTip:
+            return
+    shell = _shell()
+    visible = getattr(shell, "consequenceVisible", None) if shell is not None else None
+    if callable(visible) and visible() and waits < CREATED_MAX_WAITS:
+        qt.QTimer.singleShot(CREATED_WAIT_MS, lambda: _announceCreated(text, toolTip, waits + 1))
+        return
+    message(text, action=lambda *_args: renameDialog(), actionText=_("Rename"), ms=6000, toolTip=toolTip)
+
+
 def announce(event, project, **info):
     """Messages of the project engine (``AutosaveService.setProjectAnnouncer``)."""
     name = project.relativeName() if project is not None else ""
     if event == "created":
-        message(_("Saving to {project}").format(project=name), action=lambda *_args: renameDialog(), actionText=_("Rename"), ms=6000,
-                toolTip=project.path if project is not None else None)
+        _announceCreated(_("Saving to {project}").format(project=name), project.path if project is not None else None)
     elif event == "copy":
         message(_("Opened a copy in {project}. The original is not changed.").format(project=name), level="consequence",
                 action=lambda *_args: renameDialog(), actionText=_("Rename"), toolTip=project.path if project is not None else None)

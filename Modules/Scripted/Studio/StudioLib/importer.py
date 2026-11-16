@@ -2801,10 +2801,12 @@ def _loadToast(result, shell):
         return
     irregular = irregularGeometryVolumes(result.nodes())
     if irregular:
-        # The series has a missing slice or an uneven spacing (Slicer corrected the geometry with a grid transform)
+        # The series has a missing slice or an uneven spacing (Slicer corrected the geometry with a grid transform): a
+        # consequence of an automatic action (USABILITY 6.3), it stays until the next input, so the "Saving to
+        # Projects/x" of the project that the load creates does not replace it before it is read
         shell.toast(_("{name}: a slice is missing or the slice spacing is uneven. The image is shown corrected: "
                       "check measurements and the lesion on it.").format(name=irregular[0].GetName()),
-                    ms=7000, level="warning")
+                    ms=7000, level="warning", sticky=True)
         return
     held = getattr(shell, "consequenceHeld", None)
     if callable(held) and held():

@@ -5086,6 +5086,39 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         result.volumes.append(volume)
         importer._loadToast(result, studioShell)
         self.assertIn("slice is missing", studioShell.toastText())
+        # The warning is a consequence that stays until the next input: the "Saving to Projects/x" of the project that
+        # the drop creates (with no project open) waits for it instead of replacing it at once (BB-1)
+        from StudioLib import projects_ui
+
+        class FakeProject:
+            path = os.path.join(self.directory, "Projects", "7 gap scan")
+
+            def relativeName(self):
+                return "Projects/7 gap scan"
+
+        project = FakeProject()
+
+        class FakeService:
+            def currentProject(self):
+                return project
+
+        savedService, savedShell, savedWait = projects_ui._service, projects_ui._shell, projects_ui.CREATED_WAIT_MS
+        projects_ui._service = FakeService
+        # The messages go to this test's shell (not to the shell of the application)
+        projects_ui._shell = lambda: studioShell
+        projects_ui.CREATED_WAIT_MS = 50
+        try:
+            projects_ui.announce("created", project)
+            self._wait(300)
+            self.assertIn("slice is missing", studioShell.toastText())
+            self.assertTrue(studioShell.consequenceVisible())
+            # The next input closes the warning: the project message is shown then
+            studioShell._stickyToast.hide()
+            self._wait(300)
+            self.assertIn("Saving to Projects/7 gap scan", studioShell.toastText())
+        finally:
+            projects_ui._service, projects_ui._shell, projects_ui.CREATED_WAIT_MS = savedService, savedShell, savedWait
+        studioShell._stickyToast.hide()
         # A volume without a transform keeps the plain toast
         volume.SetAndObserveTransformNodeID(None)
         self.assertEqual(importer.irregularGeometryVolumes([volume]), [])

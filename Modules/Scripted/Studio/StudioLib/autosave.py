@@ -1807,8 +1807,11 @@ class AutosaveService:
             # would add another). The creation is tried again soon, not after the long pause of a failed save.
             projects.removeCreatedProject(project.path)
             reason = plainOSError(project.lastError) if getattr(project, "lastError", None) else _("it cannot be written")
-            self._pause(_("Autosave paused: the Slicer Studio folder cannot be written ({reason}). Press Ctrl+S to save "
-                          "once there is room.").format(reason=reason), retrySeconds=30.0)
+            from StudioLib import ui
+
+            # The key as this platform shows it ("⌘S" on macOS)
+            self._pause(_("Autosave paused: the Slicer Studio folder cannot be written ({reason}). Press {key} to save "
+                          "once there is room.").format(reason=reason, key=ui.keyText("Ctrl+S")), retrySeconds=30.0)
             self._projectRetryAt = _clock() + 30.0
             self._announceRootFailedOnce(reason)
             return None
