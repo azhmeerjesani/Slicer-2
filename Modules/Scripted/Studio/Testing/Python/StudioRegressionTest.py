@@ -9060,3 +9060,43 @@ class StudioRegressionTest(unittest.TestCase):
                 slicer.app.processEvents()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
+
+    def test_103_answered_grid_space_is_the_open_lesions_space(self):
+        """BB-1: the space answered for an ambiguous grid (study.json grid_answers) is the space of the lesion once its subject
+        is opened (Studio.Space), so Draw's space line and Map's seed space use it, not the grid's default space; answering
+        while the subject is open retags the open lesion too.
+        """
+        from LesionNetworkMappingLib import geometry, nifti
+
+        from StudioLib import space, study_ui
+
+        grid = geometry.GRID_BY_ID["SPM-1mm"].grid
+        data = np.zeros(grid.shape, np.uint8)
+        data[80:84, 100:104, 90:93] = 1
+        folder = os.path.join(self.directory, "Answered grid study")
+        os.makedirs(folder)
+        path = os.path.join(folder, "sub-01_lesion.nii.gz")
+        nifti.write_nifti(path, data, grid.affine)
+        try:
+            session = study_ui.createStudy([path], None, folder=folder)
+            self.assertEqual([question[0] for question in session.gridQuestions()], ["SPM-1mm"])
+            session.answerGrid("SPM-1mm", "MNIColin27")
+            sid = session.study.subjects[0]["participant_id"]
+            self.assertEqual(session.study.subject(sid).get("space"), "MNIColin27")
+            self.assertTrue(session.open(sid, switchToDraw=False))
+            segmentationNode = session.segmentationNode()
+            self.assertEqual(space.spaceOf(segmentationNode), ("MNIColin27", 1))
+            try:
+                from LesionNetworkMapping import LesionNetworkMappingLogic
+            except ImportError:
+                LesionNetworkMappingLogic = None
+            if LesionNetworkMappingLogic is not None:
+                self.assertEqual(LesionNetworkMappingLogic.seedSpace(segmentationNode, grid.shape, grid.affine), ("MNIColin27", 1))
+            # A new answer while the subject is open is the open lesion's space at once
+            session.answerGrid("SPM-1mm", "MNI152Lin")
+            self.assertEqual(space.spaceOf(session.segmentationNode()), ("MNI152Lin", 1))
+        finally:
+            study_ui.closeStudy()
+            for _ in range(4):
+                slicer.app.processEvents()
+            slicer.mrmlScene.Clear(0)

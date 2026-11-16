@@ -1262,6 +1262,40 @@ def _gridCandidates(studyObject):
     return found
 
 
+def _tagAnsweredGridSpace(studyObject, row, path, segmentationNode):
+    """Tag the lesion of ``row`` (read from ``path``) with the space answered for its ambiguous registry grid
+    (``Studio.Space`` "<space> <resolution>"): the study's ``grid_answers`` for that grid, else the row's ``space`` when
+    it is one of the grid's candidates. Draw's space line and Map's seed space then name the user's answer instead of
+    the grid's default space. A ``Studio.Space`` that names another space than the grid's candidates (a template's) is
+    left as it is. Return the value set, or None.
+    """
+    if segmentationNode is None:
+        return None
+    if not path or not _isNifti(path) or not os.path.isfile(path):
+        return None
+    try:
+        header = _lnm("nifti").read_nifti_header(path)
+        match = _lnm("geometry").detect_grid_candidates(header["shape"][:3], header["affine"])
+    except (OSError, ValueError):
+        return None
+    if match is None or not match.ambiguous:
+        return None
+    answer = studyObject.grid_answers.get(match.grid_id)
+    if not answer:
+        rowSpace = row.get("space")
+        answer = None if _missing(rowSpace) else str(rowSpace)
+    existing = segmentationNode.GetAttribute(space.SPACE_ATTRIBUTE)
+    if answer not in match.candidates or (existing and existing.partition(" ")[0] not in match.candidates):
+        return None
+    resolution = match.resolution
+    try:
+        value = f"{answer} {float(resolution):g}" if resolution is not None else answer
+    except (TypeError, ValueError):
+        value = answer
+    segmentationNode.SetAttribute(space.SPACE_ATTRIBUTE, value)
+    return value
+
+
 def _applyGridAnswers(studyObject, gridRows):
     answers = studyObject.grid_answers
     for gridId, entry in gridRows.items():
@@ -3154,6 +3188,10 @@ class StudySession:
                     and not os.path.isfile(before) and os.path.basename(before).startswith(f"{self._current}_space-"):
                 self._gridReference = moved
                 self._lesionStamp = _fileStamp(moved)
+            # The open lesion is in the answered space too (Draw's space line, Map's seed space)
+            segmentationNode = self.segmentationNode()
+            if segmentationNode is not None and self._gridReference:
+                _tagAnsweredGridSpace(self.study, self.study.subject(self._current), self._gridReference, segmentationNode)
         self.flush()
         _notify(self)
 
@@ -3901,6 +3939,8 @@ class StudySession:
                 gridReference = scanPath or self._templateFiles.get(volumeNode.GetID()) or _storagePath(volumeNode)
         segmentationNode.SetName(sid)
         segmentationNode.SetAttribute(SUBJECT_ATTRIBUTE, sid)
+        if lesionPath:
+            _tagAnsweredGridSpace(self.study, row, lesionPath, segmentationNode)
         if not scanPath and lesionPath:
             self._tagTemplateLesionSpace(row, segmentationNode)
         displayNode = segmentationNode.GetDisplayNode()
