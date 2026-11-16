@@ -612,6 +612,8 @@ class CircuitsCard:
                 return SeedSource(kind, error=error)
             # A signed map (+1 / -1, the Cohort card's sign "both") seeds one sign at a time; an unsigned one its non-zero voxels
             positive, negative = self.mapSigns(path)
+            if not positive and not negative:
+                return SeedSource(kind, error=_("The conjunction map has no voxel: there is nothing to seed. Loosen the threshold or the sensitivity in the Cohort card."))
             signed = positive and negative
             sign = self.seedSign() if signed else ("neg" if negative else "both")
             name = ("Conj" if desc.startswith("conj") else "Sens") + SIGN_SUFFIX[sign]
@@ -726,8 +728,15 @@ class CircuitsCard:
         if self._cleanedUp:
             return
         self.seedProgress.update()
+        if job.state in ("failed", "cancelled"):
+            from .cohort_vlsm import _removeUnfinished
+
+            _removeUnfinished(out)  # no circuit.json: the folder holds nothing, and the next seed gets the same name
         if job.state == "failed":
-            self._setNotice(_("The circuit could not be made: {reason}").format(reason=job.failureReason))
+            import re
+
+            reason = re.sub(r"^\s*[A-Za-z_][\w.]*(Error|Exception):\s*", "", str(job.failureReason or ""))
+            self._setNotice(_("The circuit could not be made: {reason}").format(reason=reason or _("unknown error")))
         elif job.state == "cancelled":
             self._setNotice(_("Stopped: a circuit that did not finish has no maps."))
         else:
