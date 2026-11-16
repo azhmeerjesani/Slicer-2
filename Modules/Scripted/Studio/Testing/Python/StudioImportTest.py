@@ -764,6 +764,46 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(result.errors, [])
         self.assertEqual(len(result.volumes), 1)
 
+    def test_add_data_dialog_leaves_out_damaged_nifti(self):
+        """BB-1: Shift+drop (the Add Data dialog) refuses a cut-short NIfTI file like a plain drop does, and still lists the
+        good files: the dialog would load it zero-filled and a project would be started around it.
+        """
+        from StudioLib import importer
+
+        header = bytearray(348)
+        struct.pack_into("<i", header, 0, 348)
+        struct.pack_into("<8h", header, 40, 3, 8, 8, 6, 1, 1, 1, 1)
+        struct.pack_into("<hh", header, 70, 2, 8)
+        struct.pack_into("<8f", header, 76, 1, 1, 1, 1, 1, 0, 0, 0)
+        struct.pack_into("<f", header, 108, 352)
+        header[344:348] = b"n+1\0"
+        complete = bytes(header) + bytes(4) + bytes([1]) * 384
+        good = os.path.join(self.directory, "good_T1w.nii")
+        cut = os.path.join(self.directory, "cut_T1w.nii")
+        with open(good, "wb") as f:
+            f.write(complete)
+        with open(cut, "wb") as f:
+            f.write(complete[:-100])
+        shown = []
+        original = slicer.util.warningDisplay
+        slicer.util.warningDisplay = lambda text, **kw: shown.append(text)
+        try:
+            # the good file stays listed, the cut one is announced and left out
+            self.assertEqual(importer._leaveOutDamagedNifti([good, cut]), [good])
+            self.assertEqual(len(shown), 1)
+            self.assertIn("damaged", shown[0])
+            self.assertIn("cut_T1w.nii", shown[0])
+            self.assertEqual(importer._leaveOutDamagedNifti([good]), [good])
+            self.assertEqual(importer._leaveOutDamagedNifti([]), [])
+            self.assertEqual(len(shown), 1)
+            # only a refused file: no dialog opens (the real dialog would be modal), and the reason is shown
+            self.assertFalse(importer.openAddDataDialog([cut]))
+            self.assertEqual(len(shown), 2)
+            self.assertFalse(importer.handleDrop([cut], addData=True) is None)
+            self.assertEqual(len(shown), 3)
+        finally:
+            slicer.util.warningDisplay = original
+
     def test_nifti_data_size_follows_datatype_not_bitpix(self):
         """BB-1: the readers size the voxels from ``datatype`` and ignore ``bitpix``, so the cut-short check does too: an
         int16 lesion (or a float32 scan) whose header says bitpix 8 and that holds only the bytes of a uint8 image is

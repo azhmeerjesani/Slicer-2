@@ -2136,10 +2136,35 @@ def _addDataFiles(paths):
     return files
 
 
+def _leaveOutDamagedNifti(paths):
+    """``paths`` without the NIfTI files that a drop, Open... or Recent refuses (cut short, bad header, too large): the
+    dialog would load them silently (missing voxels read as 0) and a project would be started around them. The refused
+    files are announced with their reasons. Return None when files were given and all of them were refused.
+    """
+    kept, refused = [], []
+    for path in paths:
+        try:
+            _checkNiftiComplete(path)
+        except RuntimeError as e:
+            logging.warning(f"Studio: {path} was not opened: {e}")  # planned refusal: no traceback
+            _noteLoadResult(path, False)
+            name = os.path.basename(path)
+            refused.append((path, str(e) if str(e).startswith(name) else f"{name}: {e}"))
+            continue
+        kept.append(path)
+    if refused:
+        slicer.util.warningDisplay(_("Some files could not be loaded:") + "\n\n" + "\n".join(m for _p, m in refused),
+                                   detailedText="\n".join(f"{p}\n{m}" for p, m in refused))
+    return kept if kept or not refused else None
+
+
 def openAddDataDialog(paths):
     """Open the classic Add Data dialog with ``paths`` (files or folders) already listed."""
     global _addDataDialogs
     paths = _addDataFiles([str(path) for path in paths])
+    paths = _leaveOutDamagedNifti(paths)
+    if paths is None:
+        return False  # every file was refused (announced): an empty dialog would only confuse
     ioManager = slicer.app.ioManager()
     # While the dialog is open, a scan that it loads is also opened for drawing when Draw is shown (the transient module
     # watcher): otherwise Draw kept saying "Open a scan" over a scan, with no lesion and every tool disabled
