@@ -1515,6 +1515,7 @@ NULL_KIND_TEXT = {
     "rl_overlap": "relocated-lesion null models (overlap-preserving relocation)",
     "empirical_pool": "empirical-pool null models",
 }
+NULL_STRENGTH_TEXT = {"signed": "matched on signed mean connectivity μC_r", "abs": "matched on absolute hubness"}
 NULL_MODE_TEXT = {"exact_pooled": "exact pooled", "approximate": "approximate (fast parcel mode)"}
 
 
@@ -1595,9 +1596,14 @@ def nulls_text(summary, params=None, seeds=None, record=None):
     mode = summary.get("mode") or params.get("mode")
     k, lesions, n_fwe = _number(summary.get("k")), _number(summary.get("n_lesions")), summary.get("n_fwe_05")
     status = _null_kind_status(kind, summary, record)
+    kind_text = NULL_KIND_TEXT.get(kind, _or_nr(kind))
+    if kind == "rl_strength":
+        design = record.get("design") if isinstance(record.get("design"), dict) else {}
+        strength = params.get("strength") or design.get("strength") or record.get("strength")
+        kind_text = kind_text[:-1] + f", {NULL_STRENGTH_TEXT.get(strength, NOT_RECORDED)})"
     parts = [
         (
-            f"{NULL_KIND_TEXT.get(kind, _or_nr(kind))}{f' [status: {status}]' if status else ''}, {_null_mode_text(kind, mode, params, record)}, "
+            f"{kind_text}{f' [status: {status}]' if status else ''}, {_null_mode_text(kind, mode, params, record)}, "
             f"{k or NOT_RECORDED} null cohorts of the {lesions or NOT_RECORDED} case lesions"
         ),
     ]

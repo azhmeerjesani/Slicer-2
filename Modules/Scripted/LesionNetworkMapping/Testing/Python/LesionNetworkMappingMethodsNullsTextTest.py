@@ -107,3 +107,18 @@ class MethodsNullsTextTest(unittest.TestCase):
         paragraph = next(line for line in text.split("\n") if line.startswith("Null models"))
         for expected in ("experimental", "Top x%", "seed 4242", "parity gate on 12 exactly mapped lesions", "left out by the gate (sub-07)"):
             self.assertIn(expected, paragraph)
+
+    def test_rl_strength_names_the_strength_map(self):
+        """Bug rl-strength-abs-described-as-signed-muc-methods-omit-strength-map."""
+        summary = {**SUMMARY, "kind": "rl_strength"}
+        signed = self.methods.nulls_text(summary, params={"kind": "rl_strength", "strength": "signed"})
+        absolute = self.methods.nulls_text(summary, params={"kind": "rl_strength", "strength": "abs"})
+        self.assertIn("signed mean connectivity", signed)
+        self.assertIn("absolute hubness", absolute)
+        self.assertNotIn("hubness", signed)
+        self.assertIn("absolute hubness", self.methods.nulls_text(summary, record={"design": {"strength": "abs"}}))
+        self.assertIn(self.export.NOT_RECORDED, self.methods.nulls_text(summary))
+        self.assertIn("hubness", self.nulls.kind_description("rl_strength", "abs"))
+        self.assertNotIn("signed", self.nulls.kind_description("rl_strength", "abs"))
+        self.assertIn("signed mean connectivity", self.nulls.kind_description("rl_strength", "signed"))
+        self.assertEqual(self.nulls.kind_description("rl_independent", "abs"), self.nulls.KIND_INFO["rl_independent"]["description"])

@@ -344,6 +344,13 @@ def relocate_independent(relocator, k, seed=0):
     return columns, shifts
 
 
+def kind_description(kind, strength="signed"):
+    """KIND_INFO's description of ``kind``; rl_strength names the strength map that was used (signed μC_r or absolute hubness)."""
+    if kind == "rl_strength" and strength == "abs":
+        return "each lesion's centroid moved to one of the 100 brain voxels with the nearest absolute hubness (mean |Fz|)"
+    return KIND_INFO[kind]["description"]
+
+
 def lesion_strength(relocator, strength):
     """Weighted mean of a strength map (μC_r, or hubness) over each lesion's voxels (None for an empty lesion)."""
     strength = np.asarray(strength, dtype=np.float64).ravel()
@@ -2092,7 +2099,7 @@ def _write_outputs(context, bundle, info, out_dir, cohort, result, group_qa, des
         "elapsed": round(time.monotonic() - started, 3),
         **common,
         "label": label,
-        "description": KIND_INFO[context.kind]["description"],
+        "description": kind_description(context.kind, context.strength),
         "preserves": KIND_INFO[context.kind]["preserves"],
         "citation": KIND_INFO[context.kind]["citation"],
         "seeds": {"seed": context.seed, "relocations": "SeedSequence([seed, 1, lesion])", "sets": "SeedSequence([seed, 2])", "qa_sample": context.seed},
