@@ -552,6 +552,36 @@ class PlanLockTest(_TempCase):
         text = methods.find_section(methods.methods_sections(study.path), "deviations").text()
         self.assertIn("Contrast GLM: n_perm 500 instead of 5000 (reason: matched volumes; a preview first", text)
 
+    def test_nulls_card_deviations(self):
+        """The Null models card's kind, K, mode and seed are compared with a plan that has null models (bug
+        recipes-plan-lock-roi-gui:nulls-card-kind-and-k-changes-after-lock-not-deviations).
+        """
+        study = self.make_study()
+        recipe = self.builtin("vdh2026_standard_settings")
+        recipes.lock_plan(study, recipe, recipes.apply(recipe), {"primary": {"kind": "contrast", "contrast": "A>B"}, "rois": [], "seeds": {"permutation": 7}}, now=self.NOW)
+        planned = {"nulls.kinds": ["rl_independent"], "nulls.k": 1000, "nulls.mode": "exact", "seeds.nulls": 0}
+        self.assertEqual(recipes.analysis_parameters(study, "nulls_card"), planned)
+        self.assertEqual(recipes.analysis_pending(study, "nulls_card", planned), [])
+        # Another kind and K: both wait for a reason; the kind is recorded as the planned kinds with it added
+        current = dict(planned, **{"nulls.kinds": ["rl_cohort_shift"], "nulls.k": 200})
+        pending = recipes.analysis_pending(study, "nulls_card", current)
+        self.assertEqual([(item["field"], item["old"], item["new"], item["scope"]) for item in pending],
+                         [("nulls_card.nulls.kinds", ["rl_independent"], ["rl_independent", "rl_cohort_shift"], "nulls_card"), ("nulls_card.nulls.k", 1000, 200, "nulls_card")])
+        self.assertEqual(pending[1]["description"], "Null models card: null cohorts 200 instead of 1000")
+        self.assertEqual([item["field"] for item in recipes.analysis_pending(study, "nulls_card", dict(planned, **{"nulls.mode": "fast", "seeds.nulls": 3}))],
+                         ["nulls_card.nulls.mode", "nulls_card.seeds.nulls"])
+        for item in pending:
+            recipes.record_deviation(study, item["field"], item["old"], item["new"], "a cohort-shift check", description=item["description"])
+        self.assertEqual(recipes.analysis_pending(study, "nulls_card", current), [])
+        self.assertEqual(recipes.analysis_pending(study, "nulls_card", dict(current, **{"nulls.kinds": ["rl_independent"]})), [], "the planned kind stays allowed")
+        self.assertEqual(recipes.effective_parameters(study)["nulls"], {"mode": "exact", "kinds": ["rl_independent"], "k": 1000, "relocations": "auto"})
+        text = methods.find_section(methods.methods_sections(study.path), "deviations").text()
+        self.assertIn("Null models card: null cohorts 200 instead of 1000 (reason: a cohort-shift check", text)
+        # A plan without null models states no null-model settings: the card is not compared
+        other = self.make_study("other")
+        self.lock(other)
+        self.assertEqual(recipes.analysis_pending(other, "nulls_card", current), [])
+
     def test_selection(self):
         study = self.make_study()
         self.assertIsNone(recipes.selected_recipe(study))

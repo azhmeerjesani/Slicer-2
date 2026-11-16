@@ -17,6 +17,10 @@ the lesions are mapped first when they are not).
   with a toggle, the classic rule's false-positive-rate sentence, the minimum attainable p and q, the voxel counts, the group QA
   percentile and, in fast mode, the parity gate's exclusions. Every output says whether it is exact-pooled or approximate.
 - **Permanent caption** (``nulls.CAPTION``, addendum §3.6) under the card at all times.
+- **Locked analysis plan** (L-39): when the study's locked plan has null models, the card follows the plan's kinds, K,
+  mode and seed (``recipes.analysis_parameters``, scope "nulls_card"); a kind outside the planned kinds or another K,
+  mode or seed is shown in the Recipe header's reason row and holds Run until its reason is recorded
+  (``nulls_card.nulls.k`` in ``analysis_plan_deviations.jsonl``), as the Cohort card's Contrast and Symptom tabs do.
 
 The run's folder is ``<cohort maps folder>/nulls-<kind>-<mode>`` (nulls.json, the five maps with sidecars, no absolute path); the
 Cohort card's folder is where the QA card looks for the group QA, and the card tells the QA card to look again when a run ends
@@ -120,8 +124,14 @@ def _statusText(job):
     return f"{text} · {eta}" if eta else text
 
 
+_CURRENT = object()  # showState(): the cohort's current maps.tsv
+
+
 class NullsCard:
     """Controller of the Nulls card (see the module docstring)."""
+
+    #: recipes.ANALYSIS_SCOPES key: the kind, K, mode and seed follow the locked analysis plan (card_recipe.analysisTabs)
+    PLAN_SCOPE = "nulls_card"
 
     def __init__(self, ctx):
         self.ctx = ctx
@@ -143,6 +153,7 @@ class NullsCard:
         self._kPoolValues = {"exact": 20, "fast": 100}  # K_pool of each mode (their defaults differ), kept when the mode changes
         self._kPoolMode = "exact"
         self._referenceOk = {}
+        self._planShown = []  # the plan changes the Recipe header was last asked to show
         self._timer = qt.QTimer()
         self._timer.setSingleShot(True)
         self._timer.setInterval(DESIGN_DELAY_MS)
@@ -573,6 +584,10 @@ class NullsCard:
             return False, _("Choose a connectome in the Connectome card.")
         if self.running():
             return False, _("Mapping the lesions first…") if self.job is None or self.job.isFinished() else _("The null models are running…")
+        pending = self.planPending()
+        if pending:
+            return False, _("Changed after the analysis plan was locked: {changes}. Give the reason in the Recipe header (top of Map), or use the plan's settings.").format(
+                changes="; ".join(change["description"] for change in pending))
         mode = self.effectiveMode()
         if mode == "fast" and not self.fast.enabled:
             prefix = _("rl_overlap runs in fast mode only. ") if self.kind == "rl_overlap" else ""
@@ -629,6 +644,59 @@ class NullsCard:
             self._updating = False
         self.showState(mapsTsv)
         self.showResult()
+        self.showPlanPending()
+
+    #
+    # Locked analysis plan
+    #
+
+    def planValues(self):
+        """{recipes.NULLS_CARD_FIELDS field: value} of the run the card would start."""
+        return {"nulls.kinds": [self.kind], "nulls.k": self.kValue(), "nulls.mode": self.effectiveMode(), "seeds.nulls": int(self.seedSpin.value)}
+
+    def studyPath(self):
+        study = self.ctx.study
+        return os.fspath(study.path) if study is not None and getattr(study, "path", None) else None
+
+    def planPending(self):
+        """Changes of the card's settings from the locked plan that wait for a reason (recipes.analysis_pending)."""
+        from LesionNetworkMappingLib import recipes
+
+        path = self.studyPath()
+        if not path or self._cleanedUp:
+            return []
+        try:
+            return recipes.analysis_pending(path, self.PLAN_SCOPE, self.planValues())
+        except (recipes.RecipeError, TypeError, ValueError, OSError):
+            logging.exception("Lesion network mapping: the null model settings could not be compared with the locked analysis plan")
+            return []
+
+    def showPlanPending(self):
+        """Let the Recipe header show (or stop showing) the card's changes from the locked plan."""
+        pending = [change["description"] for change in self.planPending()]
+        if pending == self._planShown:
+            return
+        self._planShown = pending
+        header = self.ctx.card("recipe")
+        if header is not None and hasattr(header, "refresh"):
+            header.refresh()
+
+    def applyPlanValues(self, values):
+        """Set the kind, K, mode and seed to ``values`` (recipes.analysis_parameters); nothing when the plan has no null models."""
+        if not values or values.get("nulls.mode") == "off":
+            return
+        kinds = [kind for kind in values.get("nulls.kinds") or [] if kind in KIND_IDS]
+        if kinds and self.kind not in kinds:
+            self.kind = kinds[0]
+            self.kindButtons[self.kind].setChecked(True)
+        if values.get("nulls.mode") in MODES:
+            self.mode = values["nulls.mode"] if (values["nulls.mode"] == "exact" or self.fast.enabled) else "exact"
+        if values.get("nulls.k") is not None:
+            self.kSpin.setValue(int(values["nulls.k"]))
+        if values.get("seeds.nulls") is not None:
+            self.seedSpin.setValue(int(values["seeds.nulls"]))
+        self.notice = ""
+        self.scheduleRefresh()
 
     def showKinds(self):
         if not self.kindButtons[self.kind].isChecked():
@@ -743,7 +811,9 @@ class NullsCard:
         extra = _(" (without mapping the control set)") if self.kind == "empirical_pool" else ""
         return _("Estimated time: about {time}{extra}.").format(time=duration(details["seconds"]), extra=extra)
 
-    def showState(self, mapsTsv):
+    def showState(self, mapsTsv=_CURRENT):
+        if mapsTsv is _CURRENT:  # the Recipe header after a reason was recorded
+            mapsTsv = self.currentMapsTsv()
         enabled, reason = self.runState()
         self.runButton.setEnabled(enabled)
         reasonText = self.notice or reason

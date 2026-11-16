@@ -1131,21 +1131,26 @@ def pending_deviations(study, current, steps=None):
     return out
 
 
-#: Analyses of the Map Cohort card that hold their own copy of plan parameters, with the text of their deviations
-ANALYSIS_SCOPES = {"contrast": "Contrast GLM", "symptom": "Symptom sLNM"}
+#: Analyses of the Map module that hold their own copy of plan parameters, with the text of their deviations: the Cohort
+#: card's Contrast and Symptom tabs, and the Null models card (its own kind, null cohorts, mode and seed)
+ANALYSIS_SCOPES = {"contrast": "Contrast GLM", "symptom": "Symptom sLNM", "nulls_card": "Null models card"}
 #: Plan parameters such an analysis may hold (the reason volume is off is a reason, not a setting: it is not compared)
 ANALYSIS_FIELDS = ("n_perm", "design.covariates", "design.tfce", "fdr", "statistic")
+#: Plan parameters the Null models card holds: the kind it runs (one of the planned kinds), K, the mode and the seed
+NULLS_CARD_FIELDS = ("nulls.kinds", "nulls.k", "nulls.mode", "seeds.nulls")
+#: The plan parameters of each analysis scope
+SCOPE_FIELDS = {"contrast": ANALYSIS_FIELDS, "symptom": ANALYSIS_FIELDS, "nulls_card": NULLS_CARD_FIELDS}
 
 
 def _analysis_value(field, value):
     """``value`` of an analysis ``field`` in the plan's types (raises ValueError or TypeError)."""
-    if field == "n_perm":
+    if field in ("n_perm", "nulls.k", "seeds.nulls"):
         if isinstance(value, bool):
-            raise ValueError("n_perm must be a number")
+            raise ValueError(f"{field} must be a number")
         return int(value)
-    if field == "design.covariates":
+    if field in ("design.covariates", "nulls.kinds"):
         if not isinstance(value, (list, tuple)):
-            raise ValueError("covariates must be a list")
+            raise ValueError(f"{field} must be a list")
         return [str(name) for name in value]
     if field in ("design.tfce", "fdr"):
         if not isinstance(value, bool):
@@ -1156,9 +1161,20 @@ def _analysis_value(field, value):
 
 def _analysis_same(field, a, b):
     """Whether the values ``a`` and ``b`` of an analysis ``field`` are the same setting."""
-    if field == "design.covariates":
-        return sorted(a or []) == sorted(b or [])  # the order of the covariates does not change the inference
+    if field in ("design.covariates", "nulls.kinds"):
+        return sorted(a or []) == sorted(b or [])  # the order of the covariates (or null kinds) does not change the inference
     return _same(a, b)
+
+
+def _analysis_covers(field, planned, value):
+    """Whether an analysis setting ``value`` of ``field`` is what the plan's ``planned`` value allows: the null kinds an
+    analysis runs must be among the planned kinds, any mode is the plan's "auto"; other fields are the same setting.
+    """
+    if field == "nulls.kinds":
+        return set(value or []) <= set(planned or [])
+    if field == "nulls.mode" and planned == "auto":
+        return True
+    return _analysis_same(field, planned, value)
 
 
 def analysis_follow(before, after, current):
@@ -1172,27 +1188,28 @@ def analysis_follow(before, after, current):
     if not before or not after:
         return {}
     out = {}
-    for field in ANALYSIS_FIELDS:
+    for field in after:
         if field not in current or _analysis_same(field, before.get(field), after.get(field)):
             continue
         try:
             value = _analysis_value(field, current[field])
         except (TypeError, ValueError):
             continue
-        if _analysis_same(field, before.get(field), value):
+        if _analysis_covers(field, before.get(field), value) and not _analysis_covers(field, after.get(field), value):
             out[field] = copy.deepcopy(after.get(field))
     return out
 
 
 def analysis_parameters(study, scope):
-    """{field: value} of :data:`ANALYSIS_FIELDS` that the Cohort-card analysis ``scope`` follows under the locked
-    plan: the plan's parameters with the deviations of the plan (as :func:`effective_parameters`) and the analysis's
-    own deviations ("<scope>.<field>") applied in the order recorded (the latest change of a field wins).
+    """{field: value} of the :data:`SCOPE_FIELDS` that the analysis ``scope`` follows under the locked plan: the plan's
+    parameters with the deviations of the plan (as :func:`effective_parameters`) and the analysis's own deviations
+    ("<scope>.<field>") applied in the order recorded (the latest change of a field wins).
 
     :return: None without a locked plan, or when its parameters are not valid.
     """
     if scope not in ANALYSIS_SCOPES:
         raise RecipeError(f"Unknown analysis {scope!r}; expected one of {', '.join(ANALYSIS_SCOPES)}")
+    fields = SCOPE_FIELDS[scope]
     plan = read_plan(study)
     if plan is None:
         return None
@@ -1206,7 +1223,7 @@ def analysis_parameters(study, scope):
     prefix = f"{scope}."
     for item in read_deviations(study):
         field = str(item.get("field") or "")
-        if field.startswith(prefix) and field[len(prefix):] in ANALYSIS_FIELDS:
+        if field.startswith(prefix) and field[len(prefix):] in fields:
             field = field[len(prefix):]
             try:
                 own[field] = _analysis_value(field, item.get("new"))
@@ -1216,25 +1233,34 @@ def analysis_parameters(study, scope):
             for applied in replay.apply(item):
                 own.pop(applied, None)
     flat = flatten_parameters(replay.params)
-    return {field: copy.deepcopy(own[field] if field in own else flat.get(field)) for field in ANALYSIS_FIELDS}
+    return {field: copy.deepcopy(own[field] if field in own else flat.get(field)) for field in fields}
 
 
 def analysis_pending(study, scope, current):
-    """Changes of the Cohort-card analysis ``scope``'s ``current`` settings ({field: value} of
-    :data:`ANALYSIS_FIELDS`) from what it follows under the locked plan (:func:`analysis_parameters`) that still
-    need a reason. Record each with :func:`record_deviation` (``field`` "<scope>.<field>", ``description``).
+    """Changes of the analysis ``scope``'s ``current`` settings ({field: value} of :data:`SCOPE_FIELDS`) from what it
+    follows under the locked plan (:func:`analysis_parameters`) that still need a reason. Record each with
+    :func:`record_deviation` (``field`` "<scope>.<field>", ``description``).
+
+    The Null models card ("nulls_card") is compared only when the plan has null models (``nulls.mode`` other than
+    "off"); a kind outside the planned kinds is recorded as the planned kinds with that kind added.
 
     :return: [{"field", "old", "new", "description", "scope"}]; empty without a plan.
     """
     planned = analysis_parameters(study, scope)
     if planned is None:
         return []
+    if scope == "nulls_card" and planned.get("nulls.mode") == "off":
+        return []
     out = []
-    for field in ANALYSIS_FIELDS:
+    for field in SCOPE_FIELDS[scope]:
         if field not in current:
             continue
         new, old = _analysis_value(field, current[field]), planned.get(field)
-        if not _analysis_same(field, old, new):
+        if field == "nulls.kinds":
+            if not old:  # the plan names no kinds: any kind is the plan's
+                continue
+            new = [*old, *(kind for kind in new if kind not in old)]
+        if not _analysis_covers(field, old, new):
             out.append({"field": f"{scope}.{field}", "old": old, "new": new, "description": f"{ANALYSIS_SCOPES[scope]}: {describe_change(field, old, new)}", "scope": scope})
     return out
 

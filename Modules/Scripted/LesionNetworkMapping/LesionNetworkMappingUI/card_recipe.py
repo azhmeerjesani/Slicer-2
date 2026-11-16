@@ -25,7 +25,9 @@ A header strip above the Seed card (every seed mode, Studio and Classic):
   blocked (``MapContext.setComputeEnabled(False, …, key="recipe")``); setting the value back clears it. The Cohort
   card's Contrast and Symptom analyses hold their own permutations, covariates and inference options
   (``recipes.analysis_pending``): their changes are shown in the same row ("Contrast GLM: n_perm 1000 instead of
-  5000"), hold only that analysis's Run until the reason is recorded, and are recorded as "contrast.n_perm".
+  5000"), hold only that analysis's Run until the reason is recorded, and are recorded as "contrast.n_perm". The
+  Null models card's kind, null cohorts (K), mode and seed are compared the same way when the plan has null models
+  ("Null models card: null cohorts 200 instead of 1000", recorded as "nulls_card.nulls.k").
 - **Deviations (n)** (``LNMDeviationsButton``) opens a popover with the log; the ⋯ menu has Recipe details…,
   Save as lab recipe…, Add recipe folder… and Reload recipes.
 
@@ -475,9 +477,15 @@ class RecipeHeader:
             return recipes.apply(self.recipe) if self.recipe is not None else recipes.normalize_parameters({})
 
     def analysisTabs(self):
-        """The Cohort-card analyses that hold their own copy of plan parameters (``PLAN_SCOPE``: Contrast, Symptom)."""
+        """The analyses that hold their own copy of plan parameters (``PLAN_SCOPE``): the Cohort card's Contrast and
+        Symptom tabs, and the Null models card (its kind, K, mode and seed).
+        """
         card = self.ctx.card("cohort")
-        return [controller for _key, controller in getattr(card, "tabControllers", None) or [] if getattr(controller, "PLAN_SCOPE", None)]
+        tabs = [controller for _key, controller in getattr(card, "tabControllers", None) or [] if getattr(controller, "PLAN_SCOPE", None)]
+        nulls = self.ctx.card("nulls")
+        if getattr(nulls, "PLAN_SCOPE", None):
+            tabs.append(nulls)
+        return tabs
 
     def analysisPending(self):
         """Changes of the Cohort-card analyses from the locked plan that wait for a reason (each with its ``scope``)."""
