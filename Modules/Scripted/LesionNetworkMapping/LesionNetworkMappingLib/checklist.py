@@ -364,10 +364,25 @@ def _j14_sharing(records):
     return DONE, f"publication manifest with {len(manifest.get('files') or [])} file(s)", evidence
 
 
+def _k15_evidence(records, path):
+    # Files outside the study root are cited relative to their output folder, never by absolute path
+    shown = records.relpath(path)
+    if os.path.isabs(shown):
+        for top in records.include_dirs:
+            rel = os.path.relpath(path, top)
+            if not rel.startswith(".."):
+                return "file:" + rel.replace(os.sep, "/")
+    return f"file:{shown}"
+
+
 def _k15_wording(records):
     found, violations = [], []
     bundles = os.path.normpath(records.path("derivatives", "lnm", "publication"))
-    for folder, folders, names in os.walk(records.path("derivatives")):
+    # The run's own output folder(s) (Records include_dirs) when given, so a BIDS-App run or a pipeline
+    # export outside the study checks the files it just wrote and never an earlier run's; else derivatives/
+    roots = list(records.include_dirs) or [records.path("derivatives")]
+    walks = (step for top in roots for step in os.walk(top))
+    for folder, folders, names in walks:
         # Pruned by folder name below derivatives/ (never by the study's own absolute path); the exported
         # bundles under derivatives/lnm/publication/ hold copies of the methods, not the study's own
         folders[:] = sorted(
@@ -384,10 +399,10 @@ def _k15_wording(records):
                 except (OSError, UnicodeDecodeError):
                     continue
                 if bad:
-                    violations.append(f"{records.relpath(path)}: {', '.join(sorted(set(bad)))}")
+                    violations.append(f"{_k15_evidence(records, path)[5:]}: {', '.join(sorted(set(bad)))}")
     if not found:
         return NOT_RUN, "no generated methods or report", []
-    evidence = [_file_evidence(records, path) for path in found]
+    evidence = [_k15_evidence(records, path) for path in found]
     if violations:
         return FLAGGED, "banned wording: " + "; ".join(violations), evidence
     return DONE, f"{len(found)} file(s) use the neutral wording and cite both sides of the debate", evidence

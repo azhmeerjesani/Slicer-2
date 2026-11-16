@@ -567,6 +567,26 @@ class ChecklistTest(_StudyCase):
         self.assertIn("localizes", item["value"])
 
 
+    def test_wording_item_uses_the_run_output_folder(self):
+        # A run whose output folder is outside the study (BIDS-App) checks its own methods, not an earlier run's
+        self.make_study([("sub-01", {})])
+        out = os.path.join(self.tmp, "outside", "conn-X")
+        files = export.write_methods(self.root, out)
+        with open(files["checklist"], encoding="utf-8") as f:
+            text = f.read()
+        row = next(line for line in text.splitlines() if line.startswith("| K15 |"))
+        self.assertIn("| done |", row)
+        self.assertIn("file:methods.md", row)
+        self.assertNotIn(self.tmp, row)
+        # An earlier run's methods in the study are not cited
+        with open(os.path.join(self.run_dir("report"), "methods.md"), "w", encoding="utf-8") as f:
+            f.write("This network localizes the symptom.\n")
+        files = export.write_methods(self.root, out)
+        with open(files["checklist"], encoding="utf-8") as f:
+            row = next(line for line in f.read().splitlines() if line.startswith("| K15 |"))
+        self.assertIn("| done |", row)
+        self.assertNotIn("localizes", row)
+
     def test_wording_item_under_a_cache_folder(self):
         # A study whose own path contains "cache" is still checked; only cache folders below derivatives/ are skipped
         self.root = os.path.join(self.tmp, "cache", "study")
