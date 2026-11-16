@@ -1424,7 +1424,7 @@ def plan(config, hash_lesions=True, providers=None):
     elif isinstance(config.scores, list):
         for column in config.scores:
             if column not in study.columns:
-                blocks.append({"id": "unknown_score", "message": f"The score column {column} is not in participants.tsv.", "fix": "Check --scores"})
+                blocks.append({"id": "unknown_score", "message": f"The score column {column} is not in participants.tsv.", "fix": f"Check the score column name against the participants.tsv columns ({', '.join(str(c) for c in study.columns)}); it comes from --scores or from score_column in the --design file"})
             else:
                 score_columns.append(column)
 

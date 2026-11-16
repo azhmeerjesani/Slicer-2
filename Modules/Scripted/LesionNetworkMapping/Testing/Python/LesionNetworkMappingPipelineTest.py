@@ -611,6 +611,19 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
             self.assertIn(statuses.get(name), ("done", "reused"), (name, statuses))
         self.assertTrue(os.path.isfile(os.path.join(out, "report.html")))
 
+    def test_unknown_score_block_does_not_name_an_option_the_user_did_not_use(self):
+        """A score column that is not in participants.tsv blocks the run; the fix names the participants.tsv columns and both
+        places the column can come from (--scores, or score_column in the --design file), not --scores alone.
+        """
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-score"), n_cases=6, n_controls=4, extra_rows=False)
+        config = pipeline.config_from_args(pipeline._parser().parse_args(run_args(fx, "--scores", "nope")))
+        blocks = [block for block in pipeline.plan(config, hash_lesions=False).blocks if block["id"] == "unknown_score"]
+        self.assertEqual(len(blocks), 1, "the plan blocks the unknown column")
+        self.assertIn("nope", blocks[0]["message"])
+        self.assertIn("participant_id", blocks[0]["fix"])
+        self.assertIn("score_column", blocks[0]["fix"])
+        self.assertNotEqual(blocks[0]["fix"], "Check --scores")
+
     def test_locked_plan_contrast_is_run(self):
         """Run everything runs the locked plan's one-sided contrast (Ferguson 2019: A>B, case > control), not a two-sided GLM (BB-1)."""
         if self.baseline:
