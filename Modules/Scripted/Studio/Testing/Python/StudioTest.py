@@ -3222,6 +3222,102 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertTrue(figure.sideAnswerFromState(rebuilt, older))
         self.assertTrue(figure.sideAnswerFromState(rebuilt, states[2]))
 
+    def test_33d4_figure_notice_answer_is_the_cards_answer(self):
+        """The inspector question "In this figure, the patient's right is on the …" answers like the Figure card: the
+        paper's side for every panel, the fits recomputed, a sagittal panel's answer its own; it is not asked on a
+        sagittal panel
+        (BB-1 figure-notice-answer-bypasses-card-paper-side-panel-side-and-refit).
+        """
+        import os
+        import tempfile
+
+        import numpy as np
+        import vtk
+
+        if not _hasFigureTracing():
+            self.skipTest("figure tracing is not in this build")
+        from LesionNetworkMappingLib import figurefit
+        from StudioLib import figure, importer
+
+        studioShell = self._applyStudio()
+        self._startOnTemplate(studioShell)
+        self.addCleanup(lambda: figure.closeFigure(removeNodes=True))
+        directory = tempfile.mkdtemp(prefix="StudioTestFigureNotice", dir=slicer.app.temporaryPath)
+        paths = []
+        for name in ("paperN_a.png", "paperN_s.png", "paperN_b.png", "paperN_c.png"):
+            image = qt.QImage(200, 160, qt.QImage.Format_RGB32)
+            image.fill(qt.QColor(20, 20, 20))
+            paths.append(os.path.join(directory, name))
+            self.assertTrue(image.save(paths[-1]))
+
+        def drop(path):
+            importer.handleDrop([path], shell=studioShell)
+            self._pump(10)
+            return figure.session().panels[-1]
+
+        def question():
+            notice = studioShell.inspectorNotice()
+            if notice is None or studioShell.inspectorNoticeKey() != "figure-convention":
+                return None
+            return notice
+
+        axial = drop(paths[0])
+        session = figure.session()
+        self.assertIsNotNone(question())
+        # A sagittal panel: the card asks where anterior is, so the patient's-right question is withdrawn
+        sagittal = drop(paths[1])
+        self.assertIsNotNone(question())
+        session.setPlane("sagittal")
+        self._pump(2)
+        self.assertIsNone(question())
+        # Panel B (axial, the patient's right on the image right): its pairs need a reflection until the side is answered
+        panelB = drop(paths[2])
+        self.assertFalse(session.tracing)
+        cut = figurefit.cut_plane("axial", panelB.z, 0.0, 0.0)
+        truth = np.array([[0.8, 0.0, 100.0], [0.0, 0.8, -80.0], [0.0, 0.0, 1.0]])
+        plane = np.array([[-40.0, -30.0], [40.0, -35.0], [0.0, 45.0], [-25.0, 20.0], [30.0, 10.0], [10.0, -50.0]])
+        pixels = figurefit.apply_2d(figurefit.convention_matrix("neurological"), figurefit.apply_2d(np.linalg.inv(truth), plane))
+        ras = cut.to_ras(plane)
+        for index, (pixel, point) in enumerate(zip(pixels, ras, strict=True)):
+            panelB.figureLandmarks().AddControlPoint(vtk.vtkVector3d(*panelB.localOf(pixel)))
+            panelB.templateLandmarks().AddControlPointWorld(vtk.vtkVector3d(*point))
+            panelB.templateLandmarks().SetNthControlPointLabel(index, f"L{index + 1}")
+        panelB.model = "affine"
+        session.updateFit(panelB)
+        self.assertIsNotNone(panelB.fitError)
+        notice = question()
+        self.assertIsNotNone(notice)
+        right = [button for button in notice.findChildren("QAbstractButton") if button.text == "Right"]
+        self.assertEqual(len(right), 1)
+        right[0].click()
+        self._pump(4)
+        self.assertIsNone(question())
+        # The paper's side: every panel takes it (the sagittal one as its default), and the fit is recomputed
+        self.assertEqual((axial.convention, panelB.convention, sagittal.convention), ("neurological",) * 3)
+        self.assertFalse(sagittal.sideAnswered)
+        self.assertIsNone(panelB.fitError)
+        self.assertLess(panelB.fit.rms_mm, 0.5)
+        session.selectPanel(0)
+        self._pump(2)
+        self.assertEqual(figure.card().conventionState.text, "Confirmed for this paper")
+        # An answer for a sagittal panel (the question of a figure resumed from a scene) is that panel's own side
+        importer.answerFigureConvention("radiological", sagittal.figureId)
+        self.assertEqual((sagittal.convention, sagittal.sideAnswered), ("radiological", True))
+        self.assertEqual((axial.convention, panelB.convention), ("neurological", "neurological"))
+        session.setConvention("radiological", panel=panelB)
+        session.setConvention("neurological", panel=panelB)
+        self.assertEqual(sagittal.convention, "radiological")
+        # A new panel takes the paper's confirmed side; its question, answered, is the paper's answer again
+        panelC = drop(paths[3])
+        self.assertEqual(panelC.convention, "neurological")
+        notice = question()
+        self.assertIsNotNone(notice)
+        next(button for button in notice.findChildren("QAbstractButton") if button.text == "Left").click()
+        self._pump(4)
+        self.assertEqual((axial.convention, panelB.convention, panelC.convention), ("radiological",) * 3)
+        self.assertEqual(sagittal.convention, "radiological")
+        self.assertTrue(sagittal.sideAnswered)
+
     def test_33e_figure_landmark_list_deleted_from_the_view_menu_is_replaced(self):
         """A landmark list deleted from the view menu ("Delete Point List") is replaced by an empty one: the fit is
         reset (the card no longer shows the old pairs) and "Add pair" still starts a placement.

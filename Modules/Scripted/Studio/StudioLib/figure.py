@@ -843,6 +843,17 @@ class FigureSession:
             target.place()
         self.changed()
 
+    def withdrawSideQuestion(self, panel):
+        """Withdraw U-07's question ("the patient's right is on the …", Compare) when it asks about a sagittal ``panel``:
+        a sagittal figure does not show the patient's right, the card asks where anterior is.
+        """
+        importer = _importer()
+        if panel is None or importer.noticeWidget("figure-convention") is None:
+            return
+        controller = importer.figureController()
+        if controller is not None and controller.figureId == panel.figureId and panel.ownSide:
+            importer._withdrawNotice("figure-convention", self.shell)
+
     def unconfirmedPanels(self):
         return [panel for panel in self.panels if not panel.confirmed]
 
@@ -1169,6 +1180,7 @@ class FigureSession:
                 panel.figure().SetAttribute(space.FIGURE_CONVENTION_ATTRIBUTE, paper or "unknown")
         panel.z = self._initialZ(plane, self.templateNode())
         panel.pitch = panel.roll = 0.0
+        self.withdrawSideQuestion(panel)
         self._planeChanged(panel)
 
     def setCut(self, z=None, pitch=None, roll=None, fromView=False):

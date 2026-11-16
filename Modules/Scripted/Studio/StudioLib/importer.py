@@ -5674,8 +5674,14 @@ def answerFigureConvention(convention, figureId=None):
     if controller is not None and controller.figureId == figure.GetID():
         controller.mirror(convention == "neurological")
     _withdrawNotice("figure-convention")
-    # The Draw Figure card shows the confirmation state (read from the attribute): refresh it now
     module = _figureModule()
+    # A panel of the Figure card: the answer is the card's (the paper's side for every panel, a sagittal panel's own
+    # anterior side, and the fits recomputed). The notice is withdrawn first, so the card does not answer it again.
+    tracing = module.session() if module is not None else None
+    panel = next((item for item in tracing.panels if item.figureId == figure.GetID()), None) if tracing is not None else None
+    if panel is not None and convention != "unknown":
+        tracing.setConvention(convention, panel)
+    # The Draw Figure card shows the confirmation state (read from the attribute): refresh it now
     card = getattr(module, "_card", None) if module is not None else None
     if card is not None:
         card.refresh()
