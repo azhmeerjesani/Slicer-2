@@ -68,9 +68,17 @@ class LesionNetworkMappingNullsOneLesionTest(unittest.TestCase):
         self.assertTrue(enabled)
         self.assertIn("maps the lesions first", reason)
 
-    def test_one_case_among_controls_counts_all_lesions(self):
+    def test_one_case_among_controls_is_refused_before_mapping(self):
+        # nulls.load_cohort keeps only the cases, so 1 case + 4 controls is 1 lesion for the nulls
         card = self.card({"n": 5, "groups": {"case": 1, "control": 4}})
-        self.assertEqual(card.studyLesionCount(), 5)
+        self.assertEqual(card.studyLesionCount(), 1)
+        enabled, reason = card.runState()
+        self.assertFalse(enabled)
+        self.assertEqual(reason, "The null models need at least 2 lesions.")
+
+    def test_two_cases_among_controls_count_the_cases(self):
+        card = self.card({"n": 6, "groups": {"case": 2, "control": 4}})
+        self.assertEqual(card.studyLesionCount(), 2)
         self.assertTrue(card.runState()[0])
 
 

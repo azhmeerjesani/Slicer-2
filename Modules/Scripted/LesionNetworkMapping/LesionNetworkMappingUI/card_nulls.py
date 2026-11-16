@@ -462,7 +462,7 @@ class NullsCard:
         widget = _mapWidget()
         groups = ((getattr(widget, "cohortInfo", None) or {}).get("groups")) or {}
         cases = int(groups.get("case") or 0)
-        return cases if cases >= 2 and cases <= mapped else mapped
+        return cases if cases >= 1 and cases <= mapped else mapped
 
     def studyLesionCount(self):
         """Lesions of the study known before mapping (the cohort info of the Map module), same rule as lesionCount()."""
@@ -470,7 +470,7 @@ class NullsCard:
         info = getattr(widget, "cohortInfo", None) or {}
         total = int(info.get("n") or 0)
         cases = int((info.get("groups") or {}).get("case") or 0)
-        return cases if cases >= 2 and cases <= total else total
+        return cases if cases >= 1 and cases <= total else total
 
     def participantsPath(self):
         study = self.ctx.study
