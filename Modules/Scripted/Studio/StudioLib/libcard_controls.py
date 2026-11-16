@@ -17,7 +17,7 @@ into the set's own cache, and linked to any number of studies without copying a 
 
 The registry folder follows ``Studio/LNM/DataDirectory`` (only read; fork-only, D-S1): it is set on
 ``Study.controlset_root`` and in the environment variable ``SLICER_STUDIO_CONTROLSETS`` (inherited by jobs) whenever the
-card refreshes. Nothing else is written to the settings. Works in Classic (the Studio module panel hosts the same cards).
+card refreshes and whenever the Slicer Studio folder changes (Change folder). Nothing else is written to the settings. Works in Classic (the Studio module panel hosts the same cards).
 """
 
 import logging
@@ -896,8 +896,27 @@ PALETTE_ACTIONS = [
      "callback": showControlSetsAction, "enabled": _paletteEnabled, "description": "Link control sets, check their mismatch with the cases and map them"},
 ]
 
+def _onProjectsChanged():
+    """The Slicer Studio folder changed (Change folder > Move or Keep, a new root): the registry folder follows it.
+
+    ``Study.controlset_root`` and the environment value (read first by ``controlsets.registry_root()`` and inherited by
+    jobs) would otherwise keep naming the old folder until the Control sets card renders again, so linked control lesions
+    would resolve in a folder that a move has deleted and drop out of the cohort (BB-1).
+    """
+    try:
+        registryRoot()
+    except Exception:
+        logging.debug(f"Studio control sets: the registry folder is not set:\n{traceback.format_exc()}")
+
+
+def _listenToProjects():
+    try:
+        from . import projects
+    except ImportError:
+        return
+    projects.addListener(_onProjectsChanged)
+
+
 _ensureImportCard()
-try:
-    registryRoot()
-except Exception:
-    logging.debug(f"Studio control sets: the registry folder is not set:\n{traceback.format_exc()}")
+_onProjectsChanged()
+_listenToProjects()

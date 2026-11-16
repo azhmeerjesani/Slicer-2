@@ -2840,6 +2840,48 @@ class StudioLibraryTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             libcard_controls._toast, libcard_controls._notify, libcard_controls.registryRoot = saved
         self.assertEqual(toasts, ["Nothing linked: 3 skipped · sub-FlatCtla is already a subject of the study"])
 
+    def test_control_set_registry_follows_a_change_of_the_studio_folder(self):
+        """After Change folder (Move), the control-set registry follows the new Slicer Studio folder at once: Study.controlset_root,
+        the environment value inherited by jobs and controlsets.registry_root() named the old, deleted folder until the Control
+        sets card rendered again, so the Map Cohort route dropped every linked control lesion (BB-1).
+        """
+        from LesionNetworkMappingLib import controlsets
+        from LesionNetworkMappingLib.study import Study
+        from StudioLib import libcard_controls, projects
+
+        if str(qt.QSettings().value(libcard_controls.DATA_DIRECTORY_SETTING) or "").strip():
+            self.skipTest("Studio/LNM/DataDirectory is set explicitly: the registry does not follow the Slicer Studio folder")
+        base = tempfile.mkdtemp(prefix="StudioCtlRoot")
+        self.cleanup.append(lambda: shutil.rmtree(base, ignore_errors=True))
+        rootA, rootB = os.path.join(base, "RootA"), os.path.join(base, "RootB")
+        os.makedirs(rootA)
+        os.makedirs(rootB)
+        variable = projects.ROOT_ENVIRONMENT
+        saved = os.environ.get(variable), os.environ.get(controlsets.ENV_ROOT), Study.controlset_root
+
+        def restore():
+            for name, value in ((variable, saved[0]), (controlsets.ENV_ROOT, saved[1])):
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+            Study.controlset_root = saved[2]
+            libcard_controls.registryRoot()
+
+        self.cleanup.append(restore)
+        os.environ[variable] = rootA
+        if libcard_controls.dataDirectory() != projects.lnmFolder():
+            self.skipTest("the former default data folder holds data: the registry does not follow the Slicer Studio folder")
+        libcard_controls.registryRoot()
+        oldRoot = os.path.join(rootA, projects.LNM_DIR, controlsets.REGISTRY_DIR)
+        self.assertEqual(Study.controlset_root, oldRoot)
+        os.environ[variable] = rootB
+        projects._notify()  # what setRoot() and Change folder > Move end with
+        newRoot = os.path.join(rootB, projects.LNM_DIR, controlsets.REGISTRY_DIR)
+        self.assertEqual(Study.controlset_root, newRoot)
+        self.assertEqual(os.environ.get(controlsets.ENV_ROOT), newRoot)
+        self.assertEqual(os.path.normpath(controlsets.registry_root()), os.path.normpath(newRoot))
+
     def test_control_sets_list_elides_long_rows_without_a_scroll_bar(self):
         """A row of the Control sets list that does not fit is elided with an ellipsis: the list has no horizontal scroll bar (the
         row was as wide as its text, so it was cut mid-word at the panel edge and the bar took height from the fixed-height list).
