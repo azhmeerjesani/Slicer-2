@@ -3055,6 +3055,13 @@ def _onStudySaved(studySession):
 
 def refreshStudy():
     """Show the open study (or its absence) in the canvas and in the module panel."""
+    session = _studySession()
+    if session is not None:
+        try:
+            # A lesion file changed outside Studio: its thumbnail is redrawn, so its metrics are measured again too
+            session.computeMissingMetrics()
+        except Exception:
+            logging.error(f"Studio Library: lesion metrics check failed:\n{traceback.format_exc()}")
     for view in list(_studyViews):
         if not _isAlive(view.widget):
             _studyViews.remove(view)

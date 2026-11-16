@@ -4143,6 +4143,35 @@ class StudioRegressionTest(unittest.TestCase):
         self.assertNotEqual(row["lesion_mtime"], before["lesion_mtime"])
         self.assertAlmostEqual(float(row["volume_ml"]), 1.0, places=2)
 
+    def test_24b_lesion_file_changed_outside_studio_is_measured_again_on_library_refresh(self):
+        """A lesion file replaced by another program got a new thumbnail but kept its old volume until the study was
+        reopened: ``library.refreshStudy`` now asks the session to measure rows whose file stamp changed (BB-1).
+        """
+        from LesionNetworkMappingLib import nifti
+
+        from StudioLib import library, study_ui
+
+        study = self._study([("sub-01", {}, False)])
+        folder = study.path
+        session = study_ui.openStudy(folder, None, showLibrary=False)
+        self.addCleanup(study_ui.closeStudy)
+        self.assertTrue(session.waitForMetrics(60))
+        slicer.app.processEvents()
+        row = session.study.subject("sub-01")
+        before = float(row["volume_ml"])
+        path = session.study.abspath(row["lesion"])
+        data, affine = nifti.read_nifti(path)[:2]
+        bigger = np.zeros(data.shape, np.uint8)
+        bigger[: data.shape[0] // 2, : data.shape[1] // 2, : data.shape[2] // 2] = 1
+        nifti.write_nifti(path, bigger, affine)
+        os.utime(path, (os.stat(path).st_atime, os.stat(path).st_mtime + 5))
+        library.refreshStudy()
+        self.assertTrue(session.waitForMetrics(60))
+        slicer.app.processEvents()
+        row = session.study.subject("sub-01")
+        self.assertNotAlmostEqual(float(row["volume_ml"]), before, places=2)
+        self.assertEqual(row["lesion_size"], str(os.stat(path).st_size))
+
     def test_25_cleared_description_of_a_registered_column_is_what_the_dialog_shows(self):
         """Columns...: clearing the description of a registered column (age) removed it from participants.json, but
         ``column_spec`` fell back to the registry's, so the reopened dialog showed "Age" again (BB-1). The file now holds
