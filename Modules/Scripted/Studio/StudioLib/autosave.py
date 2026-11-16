@@ -1923,11 +1923,26 @@ class AutosaveService:
         io = _io()
         if self.plan is not None and isinstance(self.plan, io.ProjectPlan):
             self._abortGeneration("the project is closed")
+        # A project that never got its first save (a copy of an opened scene on a nearly full disk, where project.json and
+        # the lock fit but the scene did not) holds nothing of the user's: Library would list it as "Empty" until the next
+        # start (``removeUnsavedProjects`` runs only then), so it goes away now, as ``removeCreatedProject`` does.
+        neverSaved = False
         try:
-            project.writeJson(state=state, executor=io.backgroundWriter())
+            neverSaved = self._projects().isNeverSaved(project.path)
         except Exception:
-            logging.error("Slicer Studio: project.json could not be written:\n" + traceback.format_exc())
+            logging.error("Slicer Studio: could not check the project:\n" + traceback.format_exc())
+        if not neverSaved:
+            try:
+                project.writeJson(state=state, executor=io.backgroundWriter())
+            except Exception:
+                logging.error("Slicer Studio: project.json could not be written:\n" + traceback.format_exc())
         project.unlock()
+        if neverSaved:
+            try:
+                self._projects().removePaths([project.path])
+                self._projects().notifyChanged()
+            except Exception:
+                logging.error("Slicer Studio: the unsaved project could not be removed:\n" + traceback.format_exc())
         self.project = None
         self.projectWriter = None
         self._savedFingerprint = None

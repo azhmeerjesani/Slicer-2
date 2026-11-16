@@ -11425,6 +11425,27 @@ sys.exit(web.command_local(args))
             projects.removeCreatedProject(project.path)
             shutil.rmtree(folder, ignore_errors=True)
 
+    def test_124b_project_that_never_got_a_save_is_removed_when_it_is_left(self):
+        """A copy project whose project.json and lock fit on a nearly full disk but whose scene never was saved is not left
+        as an "Empty" card in Library after the user leaves it (BB-1); a project that was saved stays.
+        """
+        projects = self.projects
+        service = self._service()
+        never = projects.createProject("Never saved copy")
+        self.assertTrue(service.attachProject(never))
+        self.assertTrue(projects.isNeverSaved(never.path))
+        service.releaseProject()
+        self.assertFalse(os.path.exists(never.path), "nothing was saved: no folder, no Library card")
+        self.assertNotIn("Never saved copy", [info.name for info in projects.listProjects()])
+        saved = projects.createProject("Saved copy")
+        data = projects.readJson(projects.projectFile(saved.path))
+        data["savedAt"] = "2026-11-01T10:00:00Z"
+        self.io.atomicWriteJson(projects.projectFile(saved.path), data)
+        self.assertTrue(service.attachProject(saved))
+        service.releaseProject()
+        self.io.backgroundWriter().drain(10.0)
+        self.assertTrue(os.path.isdir(saved.path), "a project with a saved time is kept")
+
     def test_125_crash_with_a_project_kept_in_the_old_folder_is_offered(self):
         """Change folder > Keep them where they are leaves the open project in the old folder (BB-1): a crash with it open
         was not offered at the next start, which scanned only the new folder's projects (the offer came after the old
