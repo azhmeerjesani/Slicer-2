@@ -144,6 +144,7 @@ class NullsCard:
         self.shownDesc = None
         self.lastMap = "sensNullExcess"  # the map of the table that the bias toggle returns to
         self.volumeId = None
+        self.mapScope = None  # the scope (cohort maps folder, connectome) of the map this card put in the slice views
         self.fast = manager_fastindex.FastModeState()
         self.controlSet = self._readControlSet()
         self.estimateSeconds = None
@@ -640,6 +641,7 @@ class NullsCard:
             self._scope = scope
             self.result = None
             self.notice = ""
+            self.hideMapOfOtherScope()
             if not self.running():
                 self.progress.setJob(None)
                 self.progress.widget.hide()
@@ -663,6 +665,17 @@ class NullsCard:
     #
     # Locked analysis plan
     #
+
+    def hideMapOfOtherScope(self):
+        """Another study or connectome is open: take the nulls map of the previous one out of the slice views (the card
+        no longer shows that result either), so that it is not read as a result of the one open now; return whether it was.
+        """
+        if self.mapScope is None or self.mapScope == self._scope:
+            return False
+        from LesionNetworkMappingLib import display
+
+        self.mapScope = None
+        return display.hideForeground(self.volume())
 
     def planValues(self):
         """{recipes.NULLS_CARD_FIELDS field: value} of the run the card would start."""
@@ -980,7 +993,11 @@ class NullsCard:
             if self.result is not None and (folder is None or os.path.abspath(folder) == os.path.abspath(self.outDir())):  # not another kind's result when the choice changed during the run
                 self.showMap("sensNullExcess")
             self.pushGroupQa()
-            self.message(_("Null models done: the maps are in the Nulls card"))
+            mapsFolder = self.mapsFolder()
+            if folder is None or (mapsFolder and os.path.abspath(os.path.dirname(folder)) == os.path.abspath(mapsFolder)):
+                self.message(_("Null models done: the maps are in the Nulls card"))
+            else:  # another study or connectome is open now: the card shows that one
+                self.message(_("Null models done for another study or connectome: open it again to see the maps in the Nulls card"))
 
     def pushGroupQa(self):
         """Tell the QA card to look again: it reads the group QA percentile of the newest run next to the cohort maps (``ctx.runChanged``)."""
@@ -1210,6 +1227,7 @@ class NullsCard:
         node = self.ctx.parameterNode
         display.showLayers(template, volume, node.opacity if node is not None else 0.8)
         self.shownDesc = desc
+        self.mapScope = self._scope
         if desc != BIAS_DESC:
             self.lastMap = desc
         return volume
