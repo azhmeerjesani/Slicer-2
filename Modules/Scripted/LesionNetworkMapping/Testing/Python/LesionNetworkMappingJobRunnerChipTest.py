@@ -29,7 +29,7 @@ import sys
 
 for event in EVENTS:
     print(json.dumps(event), flush=True)
-sys.exit(1)
+sys.exit(EXIT_CODE)
 """
 
 
@@ -50,11 +50,11 @@ class LesionNetworkMappingJobRunnerChipTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def run_job(self, name, events):
+    def run_job(self, name, events, exitCode=1):
         from LesionNetworkMappingUI import jobrunner
 
         with open(os.path.join(self.tmp, f"{name}.py"), "w", encoding="utf-8") as f:
-            f.write(f"EVENTS = {events!r}\n" + FAKE_JOB)
+            f.write(f"EVENTS = {events!r}\nEXIT_CODE = {exitCode!r}\n" + FAKE_JOB)
         runner = jobrunner.instance()
         original = runner._setChip
         runner._setChip = lambda job, text, level: (self.chips.append((text, level)), original(job, text, level))[1]
@@ -136,6 +136,26 @@ class LesionNetworkMappingJobRunnerChipTest(unittest.TestCase):
         self.assertNotIn("Report the problem", reason)
         self.assertNotIn("exit abnormally", reason)
         self.assertNotIn(sys.prefix, reason)
+
+    def test_job_stops_with_the_application(self):
+        """Every job gets this application's pid (jobs.PARENT_PID_ENV): after a crash its watchdog stops it, though the launcher lives on."""
+        from LesionNetworkMappingLib import jobs
+        from LesionNetworkMappingUI import jobrunner
+
+        env = jobrunner.instance().environment(jobrunner.JobSpec("LesionNetworkMappingLib.nulls"), 1)
+        self.assertEqual(env.get(jobs.PARENT_PID_ENV), str(os.getpid()))
+
+    def test_locked_output_reads_plain_sentence(self):
+        """A run whose output another live run still holds: no absolute lock-file path, process id or internal file name."""
+        lock = os.path.join(self.tmp, "nulls-rl_independent-exact", ".nulls.lock")
+        message = f"{lock} is locked by process 21744 on vm since 2026-11-15T09:21:06Z"
+        job, _logs = self.run_job("locked_job", [{"event": "start"}, {"event": "error", "code": "locked", "message": message}], exitCode=75)
+        self.assertEqual(job.state, "failed")
+        reason = job.failureReason
+        self.assertIn("still writing its results", reason)
+        self.assertNotIn(self.tmp, reason)
+        self.assertNotIn(".lock", reason)
+        self.assertNotIn("21744", reason)
 
 
 if __name__ == "__main__":

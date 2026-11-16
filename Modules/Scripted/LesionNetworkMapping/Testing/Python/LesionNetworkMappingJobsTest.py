@@ -31,6 +31,7 @@ def _env(**extra):
     env["PYTHONPATH"] = MODULE_DIR + os.pathsep + env.get("PYTHONPATH", "")
     for name in jobs.THREAD_ENV_VARS:
         env.pop(name, None)
+    env.pop(jobs.PARENT_PID_ENV, None)
     env.update(extra)
     return env
 
@@ -257,6 +258,49 @@ class SelfTestJobTest(_TempDirTestCase):
         cancelled = _events(first + stdout)[-1]
         self.assertEqual(cancelled["event"], "cancelled")
         self.assertIn("is gone", cancelled["reason"])
+
+    def test_app_parent_pid_from_environment(self):
+        """A job of the app's job runner (SLICER_LNM_PARENT_PID, no --parent-pid) stops when the application is gone.
+
+        Regression: after a crash (kill -9) of the application the PythonSlicer launcher lives on, so the job's orphan
+        watchdog never fired; nulls, validate and calibrate kept computing unseen and holding their output lock.
+        """
+        if sys.platform == "win32":
+            self.skipTest("uses a POSIX sleep process")
+        application = subprocess.Popen(["sleep", "60"])
+        # An intermediate shell plays the PythonSlicer launcher, which outlives the application
+        launcher = subprocess.Popen(["sh", "-c", f'"{sys.executable}" -m LesionNetworkMappingLib.jobs selftest --seconds 60 --units 600; true'],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=_env(**{jobs.PARENT_PID_ENV: str(application.pid)}), cwd=self.tmp)
+        try:
+            first = launcher.stdout.readline()
+            self.assertEqual(json.loads(first)["event"], "start")
+            application.kill()
+            application.wait()
+            stdout, stderr = launcher.communicate(timeout=30)
+        finally:
+            for proc in (application, launcher):
+                if proc.poll() is None:
+                    proc.kill()
+        cancelled = _events(first + stdout)[-1]
+        self.assertEqual(cancelled["event"], "cancelled", stderr)
+        self.assertIn(f"process {application.pid} is gone", cancelled["reason"])
+
+    def test_env_parent_pid(self):
+        previous = os.environ.get(jobs.PARENT_PID_ENV)
+        try:
+            os.environ.pop(jobs.PARENT_PID_ENV, None)
+            self.assertIsNone(jobs.env_parent_pid([]))
+            os.environ[jobs.PARENT_PID_ENV] = "12345"
+            self.assertEqual(jobs.env_parent_pid(["--out", "x"]), 12345)
+            self.assertIsNone(jobs.env_parent_pid(["--parent-pid", "7"]))  # the command watches its own --parent-pid
+            self.assertIsNone(jobs.env_parent_pid(["--parent-pid=7"]))
+            for value in ("", "1", "abc", str(os.getpid())):
+                os.environ[jobs.PARENT_PID_ENV] = value
+                self.assertIsNone(jobs.env_parent_pid([]), value)
+        finally:
+            os.environ.pop(jobs.PARENT_PID_ENV, None)
+            if previous is not None:
+                os.environ[jobs.PARENT_PID_ENV] = previous
 
     def test_orphan_watchdog(self):
         if sys.platform == "win32":

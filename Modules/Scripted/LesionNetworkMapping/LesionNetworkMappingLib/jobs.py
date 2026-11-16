@@ -297,6 +297,24 @@ def _app_prog():
 APP_JOB_ENV = "SLICER_LNM_APP_JOB"
 
 
+#: Set by the app's job runner to the application's process id: ``run_job`` then stops the job (cancelled, resumable) when the
+#: application is gone, as ``--parent-pid`` does. The PythonSlicer launcher outlives a crashed application (it is re-parented,
+#: and the job stays its child), so the orphan watchdog alone does not notice the crash.
+PARENT_PID_ENV = "SLICER_LNM_PARENT_PID"
+
+
+def env_parent_pid(argv=()):
+    """The application process id of ``PARENT_PID_ENV`` (None when unset or invalid, when it is this process, or when ``argv``
+    has its own ``--parent-pid``, which the command then watches itself).
+    """
+    if any(str(arg) == "--parent-pid" or str(arg).startswith("--parent-pid=") for arg in argv):
+        return None
+    value = os.environ.get(PARENT_PID_ENV, "").strip()
+    if not value.isdigit() or int(value) <= 1 or int(value) == os.getpid():
+        return None
+    return int(value)
+
+
 def in_app_job():
     """True in a job that the app's job runner started (its messages are read in the app), False on a command line."""
     return os.environ.get(APP_JOB_ENV) == "1"
@@ -944,7 +962,8 @@ def run_job(main, argv=None, job=None, orphan=True, parent_pid=None, exit=True, 
       traceback lines, and exit 1.
     - SystemExit (from argparse, already reported) passes its code through.
 
-    The orphan watchdog runs by default (``orphan``), and ``parent_pid`` adds a parent watchdog:
+    The orphan watchdog runs by default (``orphan``), and ``parent_pid`` (else ``PARENT_PID_ENV``, which the app's job runner
+    sets, unless ``argv`` has its own ``--parent-pid``) adds a parent watchdog:
     when the watched process is gone every CancelToken reports cancellation. SIGTERM and SIGINT
     become cancellation requests, except inside the Slicer application (``signals=None`` and the
     ``slicer`` module is loaded), whose own handlers stay.
@@ -953,6 +972,8 @@ def run_job(main, argv=None, job=None, orphan=True, parent_pid=None, exit=True, 
     argv = list(sys.argv[1:] if argv is None else argv)
     if signals or (signals is None and "slicer" not in sys.modules):
         install_signal_handlers()
+    if not parent_pid:
+        parent_pid = env_parent_pid(argv)  # a job of the app's job runner: stop with the application (a crash included)
     if parent_pid:
         start_watchdogs(None, parent_pid=parent_pid, orphan=False)
     if orphan and _orphan_watchdog["thread"] is None:

@@ -16,6 +16,9 @@ cancel file, exit code 3 when cancelled). The runner:
   worker process (the pid of its start event, else the launcher's child processes) is terminated, then
   killed, then the PythonSlicer launcher; a job that still has not ended is detached (cancelled). Stop is
   a button, never the Esc key;
+- stops its jobs with the application, a crash included: every job gets ``SLICER_LNM_PARENT_PID`` (this
+  application's pid), whose watchdog in ``jobs.run_job`` cancels the job when the application is gone, so
+  that no job keeps computing unseen and holding its output lock after a crash;
 - shows the running job in the Studio status chip ("Mapping 34% · 2 min left", "Done",
   "Run failed: <reason>"); without the Studio shell (Classic, tests, no main window) nothing is shown;
 - never reports a silent success: a job succeeds only when it exits with 0 after a ``done`` event, every
@@ -675,11 +678,14 @@ class Job:
     def _errorText(self):
         """The reason of a failed process: its error event, else the last output line, else the exit code."""
         if self.errorEvent:
+            if self.errorEvent.get("code") == "locked":
+                # The library's message names the absolute path of an internal lock file and a process id: say what it means
+                return "another run of this analysis is still writing its results (in this or another Slicer window); try again when it has finished"
             message = str(self.errorEvent.get("message") or "").strip()
             if message:
                 return message
         if self.exitCode == _jobs.EXIT_LOCKED:
-            return "the output folder is locked by another job"
+            return "another run of this analysis is still writing its results (in this or another Slicer window); try again when it has finished"
         for line in reversed(self.logTail):
             text = line.strip()
             if not text:
@@ -827,6 +833,9 @@ class JobRunner:
         env[_jobs.MAX_THREADS_ENV] = str(threads)  # jobs.budget_threads() of nested workers
         env.setdefault("PYTHONUNBUFFERED", "1")
         env[_jobs.APP_JOB_ENV] = "1"  # the hints of the job name the app's controls
+        # The job stops when this application is gone, a crash included (the PythonSlicer launcher outlives a crash, so the
+        # job's orphan watchdog does not notice it): otherwise it keeps computing unseen and holds its output lock
+        env[_jobs.PARENT_PID_ENV] = str(os.getpid())
         # A job that reads the download cache without --cache (cached atlases of the pipeline) uses the application's
         # cache, where the cards download, not the library's default folder
         if not os.environ.get(_fetch.CACHE_ENV):
