@@ -3851,6 +3851,88 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             else:
                 settings.remove(settingsKey)
 
+    def test_dicom_series_with_header_smaller_than_pixel_data_is_refused(self):
+        """BB-1: a DICOM series whose header announces a smaller image than its pixel data holds (Rows/Columns lie
+        downward) is refused as damaged, as one that announces more: the reader took the first Rows x Columns values of
+        each frame, so it opened silently as a striped or sheared scan, and was saved as a project. The padding byte of
+        an odd length is not a mismatch, and a file cut short inside its pixel data is still refused.
+        """
+        from DICOMLib import DICOMUtils
+        from StudioLib import importer
+
+        folder = self._writeDicomSeries("dicom header smaller", size=32, headerSize=16)
+        if folder is None:
+            return  # pydicom is not available in this build
+        import pydicom
+
+        first = os.path.join(folder, "slice00.dcm")
+        self.assertEqual(importer._dicomPixelDataShortfall(first), (32 * 32 * 2, 16 * 16 * 2))
+        honest = self._writeDicomSeries("dicom header honest", size=32)
+        self.assertIsNone(importer._dicomPixelDataShortfall(os.path.join(honest, "slice00.dcm")))
+        # Only Columns lies (the image would be sheared)
+        variant = os.path.join(self.directory, "dicom columns only.dcm")
+        dataset = pydicom.dcmread(os.path.join(honest, "slice00.dcm"))
+        dataset.Columns = 24
+        dataset.save_as(variant)
+        self.assertEqual(importer._dicomPixelDataShortfall(variant), (32 * 32 * 2, 32 * 24 * 2))
+        # 8-bit pixels of an odd count: the one padding byte that DICOM requires is accepted
+        padded = os.path.join(self.directory, "dicom odd padded.dcm")
+        dataset = pydicom.dcmread(os.path.join(honest, "slice00.dcm"))
+        dataset.Rows, dataset.Columns = 5, 5
+        dataset.BitsAllocated = dataset.BitsStored = 8
+        dataset.HighBit = 7
+        dataset.PixelData = bytes(range(25)) + b"\0"
+        dataset.save_as(padded)
+        self.assertIsNone(importer._dicomPixelDataShortfall(padded))
+        # Trailing zeros of one row are padding (as in pydicom's MR_small_padded.dcm); one row of image values is not
+        for name, tail, expected in (("zeros", b"\0" * 64, None), ("values", b"\1" * 64, (32 * 32 * 2 + 64, 32 * 32 * 2))):
+            path = os.path.join(self.directory, f"dicom tail {name}.dcm")
+            dataset = pydicom.dcmread(os.path.join(honest, "slice00.dcm"))
+            dataset.PixelData = dataset.PixelData + tail
+            dataset.save_as(path)
+            self.assertEqual(importer._dicomPixelDataShortfall(path), expected, name)
+        # A file cut short inside its pixel data (its element still announces the full length) is short
+        cut = os.path.join(self.directory, "dicom cut.dcm")
+        with open(os.path.join(honest, "slice00.dcm"), "rb") as source:
+            data = source.read()
+        with open(cut, "wb") as target:
+            target.write(data[:-100])
+        self.assertEqual(importer._dicomPixelDataShortfall(cut), (32 * 32 * 2 - 100, 32 * 32 * 2))
+
+        studioShell = self._applyStudio()
+        settings = qt.QSettings()
+        settingsKey = slicer.dicomDatabaseDirectorySettingsKey
+        originalSetting = settings.value(settingsKey)
+        originalOpen = bool(slicer.dicomDatabase is not None and slicer.dicomDatabase.isOpen)
+        DICOMUtils.openTemporaryDatabase(os.path.join(self.directory, "dicom header smaller database"))
+        warnings = []
+        originalWarning = slicer.util.warningDisplay
+        slicer.util.warningDisplay = lambda text, *args, **kwargs: warnings.append(text)
+        try:
+            before = len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"))
+            self.assertEqual(importer.handleDrop([folder], shell=studioShell), "dicom")
+            self._pump(8)
+            self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")), before)
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("damaged", warnings[0])
+            self.assertIn("scrambled", warnings[0])
+            self.assertFalse([entry for entry in importer.recentFolders() if "header smaller" in entry["path"]])
+            # The honest series still opens
+            importer.handleDrop([honest], shell=studioShell)
+            self._pump(8)
+            self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")), before + 1)
+            self.assertEqual(len(warnings), 1)
+        finally:
+            slicer.util.warningDisplay = originalWarning
+            if slicer.dicomDatabase.isOpen:
+                slicer.dicomDatabase.closeDatabase()
+            if originalSetting:
+                settings.setValue(settingsKey, originalSetting)
+                if originalOpen and os.path.isdir(str(originalSetting)):
+                    DICOMUtils.openDatabase(str(originalSetting))
+            else:
+                settings.remove(settingsKey)
+
     def test_recent_lesion_node_name_has_no_extension(self):
         """A lesion mask re-opened from Recent is named like one opened with Open... (no ".nii.gz" in the node name,
         the toast or the project file name).

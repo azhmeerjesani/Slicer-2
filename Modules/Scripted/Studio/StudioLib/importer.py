@@ -3125,11 +3125,14 @@ def _folderFiles(path, limit=FOLDER_SCAN_MAX_FILES):
 
 
 def _dicomPixelDataShortfall(filePath):
-    """``(have, need)`` bytes if the pixel data of the DICOM file ``filePath`` is shorter than its header (Rows, Columns,
-    samples, bits, frames) announces, else None (also when it cannot tell: compressed, no pixel data, unreadable).
+    """``(have, need)`` bytes if the pixel data of the DICOM file ``filePath`` does not have the length that its header
+    (Rows, Columns, samples, bits, frames) announces, else None (also when it cannot tell: compressed, no pixel data,
+    unreadable). One byte more than an odd ``need`` (the padding to an even length that DICOM requires), or trailing zeros
+    of at most one row, are padding, not a mismatch.
 
-    The reader fills the missing voxels with 0 without a word, so a series whose header lies would open as a mostly black
-    scan of the size that the header gives.
+    The reader fills missing voxels with 0 without a word, so a series whose header announces more than the file holds
+    would open as a mostly black scan of the size that the header gives. When the header announces less, the reader takes
+    the first Rows x Columns values of each frame: the scan opens striped or sheared, without a word either (BB-1).
     """
     try:
         import pydicom
@@ -3142,22 +3145,52 @@ def _dicomPixelDataShortfall(filePath):
         if syntax is not None and syntax.is_compressed:
             return None
         frames = int(header.get("NumberOfFrames", 1) or 1)
-        need = (int(header.Rows) * int(header.Columns) * int(header.get("SamplesPerPixel", 1) or 1) * frames
-                * int(header.BitsAllocated) + 7) // 8
-        if size >= need + 65536:  # cannot be short: no need to read the pixels
-            return None
-        full = pydicom.dcmread(filePath, force=True)
+        samples = int(header.get("SamplesPerPixel", 1) or 1)
+        if str(header.get("PhotometricInterpretation", "")).strip() == "YBR_FULL_422" and samples == 3:
+            samples = 2  # uncompressed YBR_FULL_422: Y Y Cb Cr for each pair of pixels
+        need = (int(header.Rows) * int(header.Columns) * samples * frames * int(header.BitsAllocated) + 7) // 8
+        # The length of the pixel data without reading it (deferred): the length that its element announces, or what
+        # the file holds after the element's start when it is cut short
+        full = pydicom.dcmread(filePath, force=True, defer_size=4096)
         if "PixelData" not in full:
             return None
-        have = len(full.PixelData)
-        return (have, need) if have < need else None
+        try:
+            element = full.get_item("PixelData", keep_deferred=True)  # the raw element: its length and file position
+        except TypeError:  # pydicom < 2.4
+            element = full.get_item("PixelData")
+        length = getattr(element, "length", None)
+        valueStart = getattr(element, "value_tell", None)
+        if getattr(syntax, "is_deflated", False):
+            valueStart = None  # positions in the inflated data, not in the file
+        if length is None or valueStart is None:
+            valueStart = None
+            have = len(full.PixelData)
+        elif length == 0xFFFFFFFF:
+            return None  # encapsulated (undefined length): compressed frames
+        else:
+            have = max(0, min(int(length), size - int(valueStart)))
+        if have in (need, need + need % 2):
+            return None
+        rowBytes = (int(header.Columns) * samples * int(header.BitsAllocated) + 7) // 8
+        if need < have <= need + max(rowBytes, 1) + 1:
+            # Trailing zeros of at most one row: padding that some writers add (pydicom drops it too), not a header that
+            # lies (one row fewer loses a row of the image; one column fewer leaves an excess of about Rows values)
+            if valueStart is None:
+                tail = bytes(full.PixelData[need:have])
+            else:
+                with open(filePath, "rb") as file:
+                    file.seek(int(valueStart) + need)
+                    tail = file.read(have - need)
+            if not tail.strip(b"\0"):
+                return None
+        return (have, need)
     except Exception:
         logging.debug(f"Studio: {traceback.format_exc()}")
         return None
 
 
 def _checkDicomSeriesComplete(seriesUID, database):
-    """Raise ``RefusedFileError`` if an instance of the DICOM series ``seriesUID`` has less pixel data than its header says."""
+    """Raise ``RefusedFileError`` if an instance of the DICOM series ``seriesUID`` has less or more pixel data than its header says."""
     try:
         files = list(database.filesForSeries(seriesUID))
     except Exception:
@@ -3168,7 +3201,7 @@ def _checkDicomSeriesComplete(seriesUID, database):
 
 def _checkDicomVolumeComplete(node, database=None):
     """Raise ``RefusedFileError`` if a DICOM file that the volume ``node`` was loaded from (its ``DICOM.instanceUIDs``
-    attribute) has less pixel data than its header says: a series loaded from the DICOM browser gets the check of a drop.
+    attribute) has less or more pixel data than its header says: a series loaded from the DICOM browser gets the check of a drop.
     """
     uids = (node.GetAttribute("DICOM.instanceUIDs") or "").split() if node is not None else []
     database = database if database is not None else getattr(slicer, "dicomDatabase", None)
@@ -3187,15 +3220,21 @@ def _checkDicomVolumeComplete(node, database=None):
 
 
 def _checkDicomFilesComplete(files):
-    """Raise ``RefusedFileError`` if one of the DICOM ``files`` has less pixel data than its header says."""
+    """Raise ``RefusedFileError`` if one of the DICOM ``files`` has less or more pixel data than its header says."""
     for filePath in files:
         shortfall = _dicomPixelDataShortfall(filePath)
-        if shortfall is not None:
-            raise RefusedFileError(
-                _("This DICOM series is damaged: {name} holds {have:,} bytes of image data, but its header (image size) "
-                  "announces {need:,}. It was not opened, because the missing part would show as black. Export the "
-                  "series again from its source.").format(name=os.path.basename(filePath), have=shortfall[0],
-                                                            need=shortfall[1]))
+        if shortfall is None:
+            continue
+        have, need = shortfall
+        if have < need:
+            text = _("This DICOM series is damaged: {name} holds {have:,} bytes of image data, but its header (image "
+                     "size) announces {need:,}. It was not opened, because the missing part would show as black. Export "
+                     "the series again from its source.")
+        else:
+            text = _("This DICOM series is damaged: {name} holds {have:,} bytes of image data, but its header (image "
+                     "size) announces only {need:,}. It was not opened, because the image would show scrambled. Export "
+                     "the series again from its source.")
+        raise RefusedFileError(text.format(name=os.path.basename(filePath), have=have, need=need))
 
 
 def importDicomFolder(path, shell=None):
