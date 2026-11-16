@@ -275,13 +275,22 @@ class StudioImportTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             # The same NLin6 grid stored RAS
             (grid((91, 109, 91), 2.0, (-90.0, -126.0, -72.0)), ("MNI152NLin6Asym", 2)),
             (grid((97, 115, 97), 2.0, (-95.4, -132.5, -78.5)), None),
-            (grid((97, 115, 97), 2.0, (-96.5, -132.5, -78.49)), None),
-            # Within 1 mm of a template grid (detect_space's own default tolerance): still scan space
-            (grid((91, 109, 91), 2.0, (90.6, -126.0, -72.0), (-1, 1, 1)), None),
         ]
         for (dims, matrix), expected in cases:
             self.assertEqual(space.tableSpace(dims, matrix), expected, (dims, matrix[:3, 3]))
             self.assertEqual(space.spaceOf((dims, matrix)), expected, (dims, matrix[:3, 3]))
+        # A fraction of a voxel off a template grid (within detect_space's 1 mm origin tolerance, the verdict of Map's seed
+        # check, study intake and the engine): the exact table says no, spaceOf (Draw) gives the same answer as Map
+        dims, matrix = grid((97, 115, 97), 2.0, (-96.5, -132.5, -78.49))
+        self.assertEqual(space.spaceOf((dims, matrix)), ("MNI152NLin2009cAsym", 2))
+        for origin, expected in (((90.6, -126.0, -72.0), ("MNI152NLin6Asym", 2)), ((90.5, -126.0, -72.0), ("MNI152NLin6Asym", 2)),
+                                 ((91.1, -126.0, -72.0), None)):
+            dims, matrix = grid((91, 109, 91), 2.0, origin, (-1, 1, 1))
+            self.assertIsNone(space.tableSpace(dims, matrix))
+            self.assertEqual(space.spaceOf((dims, matrix)), expected, origin)
+            from LesionNetworkMappingLib import geometry
+            detected = geometry.detect_space((dims, matrix))
+            self.assertEqual(tuple(detected) if detected else None, expected, origin)
         oblique = np.eye(4)
         oblique[:3, :3] = [[0.0, -2.0, 0.0], [2.0, 0.0, 0.0], [0.0, 0.0, 2.0]]
         oblique[:3, :3] = oblique[:3, :3] @ np.array([[np.cos(0.3), -np.sin(0.3), 0], [np.sin(0.3), np.cos(0.3), 0], [0, 0, 1]])

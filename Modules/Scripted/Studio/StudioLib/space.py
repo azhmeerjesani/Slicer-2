@@ -5,8 +5,8 @@ This module is the single source of truth for two questions that several Studio 
 - **Is this image on an MNI grid?** ``spaceOf(node)`` answers with ``(spaceName, resolutionMm)`` or None:
   the node attribute ``Studio.Space`` first (written by normalization), else (for a segmentation) the ``Studio.Space``
   of a volume on exactly its grid (a lesion drawn on a template is in the template's space), else an exact table of the known template
-  grids (``KNOWN_GRIDS``, ±0.01 mm), else ``LesionNetworkMappingLib.geometry.detect_space`` with the same tolerance
-  when that library is importable, which also knows the grids of the user's own templates (A-10: ``templates`` registers
+  grids (``KNOWN_GRIDS``, ±0.01 mm), else ``LesionNetworkMappingLib.geometry.detect_space`` (origin tolerance 1 mm, as
+  Map's seed check and the engine) when that library is importable, which also knows the grids of the user's own templates (A-10: ``templates`` registers
   them; an anisotropic one is matched by its exact grid). A grid is compared through the RAS positions of its voxel
   centres, so a template stored LAS (FSL) or RAS (TemplateFlow) is recognized either way. ``hemisphereWord()``
   returns "Left", "Right" or "Both hemispheres" only on an MNI grid: in scanner space x = 0 is not the midline.
@@ -44,6 +44,10 @@ KNOWN_GRIDS = (
 )
 #: Tolerance of the built-in table (mm)
 GRID_TOLERANCE_MM = 0.01
+#: Origin tolerance of ``geometry.detect_space`` (mm): the verdict of Map's seed check, study intake and the engine CLI
+#: (``geometry.detect_grid``'s own default), so Draw, Map and the Normalize card give one answer for a lesion file that is a
+#: fraction of a voxel off a template grid (TemplateFlow files, resampled masks)
+DETECT_ORIGIN_TOLERANCE_MM = 1.0
 
 
 #
@@ -153,8 +157,8 @@ def tableSpace(dims, ijkToRas, tolerance=GRID_TOLERANCE_MM):
 def _detectSpace(source):
     """``LesionNetworkMappingLib.geometry.detect_space(source)`` when that library is importable (``False`` otherwise).
 
-    Its origin tolerance is ``GRID_TOLERANCE_MM``, as for the built-in table: a scan grid 1 mm away from a template grid
-    is not a template grid.
+    Its origin tolerance is ``DETECT_ORIGIN_TOLERANCE_MM`` (the Map seed check's and the engine's), not the exact table's
+    ``GRID_TOLERANCE_MM``: a file 0.5 mm off a template grid is on that template for every route; one more than 1 mm off is not.
     """
     try:
         from LesionNetworkMappingLib import geometry
@@ -167,7 +171,7 @@ def _detectSpace(source):
     if detect is None:
         return False
     try:
-        result = detect(source, origin_tolerance=GRID_TOLERANCE_MM)
+        result = detect(source, origin_tolerance=DETECT_ORIGIN_TOLERANCE_MM)
     except Exception:
         return False
     if result is None:
@@ -266,7 +270,7 @@ def spaceOf(nodeOrGeometry):
     else, for a segmentation, the ``Studio.Space`` of a volume on exactly its grid (``_sharedGridSpace``: a lesion drawn
     on one of your templates is in the space you chose for it, even on a built-in grid); else the built-in
     ``KNOWN_GRIDS``; else ``LesionNetworkMappingLib.geometry.detect_space`` when it is importable (more spaces and
-    resolutions, with the same ±0.01 mm origin tolerance); else your templates' unregistered grids.
+    resolutions, origin tolerance 1 mm like Map's seed check); else your templates' unregistered grids.
     A node under a parent transform is only recognized by its attribute (its grid is not where the file put it).
     """
     node = nodeOrGeometry if hasattr(nodeOrGeometry, "GetAttribute") else None
