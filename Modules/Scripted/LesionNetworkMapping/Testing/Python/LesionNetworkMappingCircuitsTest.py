@@ -463,6 +463,16 @@ class TargetScoreTest(unittest.TestCase):
         targets = circuits.read_targets(path, default_radius=7.0)
         self.assertEqual(targets, [{"label": "F-1", "x": -38.0, "y": 44.0, "z": 26.0, "radius_mm": 7.0}])
 
+    def test_target_radius_zero_is_refused_blank_is_default(self):
+        path = os.path.join(self.tmp, "targets_zero.csv")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("label,x,y,z,radius\nblank,1,2,3,\nzero,4,5,6,0\n")
+        with self.assertRaisesRegex(ValueError, "target 'zero'"):
+            circuits.read_targets(path, default_radius=5.0)
+        with self.assertRaises(ValueError):
+            circuits.normalize_targets([{"label": "neg", "x": 1, "y": 2, "z": 3, "radius_mm": -2}])
+        self.assertEqual(circuits.normalize_targets([{"label": "b", "x": 1, "y": 2, "z": 3}], 4.0)[0]["radius_mm"], 4.0)
+
 
 class SeedThisTest(unittest.TestCase):
     @classmethod

@@ -996,7 +996,7 @@ def association(damage, participants, outcome, outcome_type=None, positive=None,
 
 def _target(label, x, y, z, radius, default_radius):
     radius = _finite(radius)
-    radius = float(default_radius) if radius is None or radius <= 0 else radius
+    radius = float(default_radius) if radius is None else radius  # only a blank radius means the default; 0 or negative is refused below
     coords = [_finite(value) for value in (x, y, z)]
     if any(value is None for value in coords):
         raise ValueError(f"The target {label!r} has no valid x, y, z")

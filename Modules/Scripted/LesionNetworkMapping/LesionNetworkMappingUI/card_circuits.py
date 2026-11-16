@@ -1263,7 +1263,10 @@ class CircuitsCard:
             with slicer.util.WaitCursor():
                 self.targets = circuits.score_targets(targets, path, gm, circuit_space=space, gm_space=gmSpace, out_dir=self.targetsFolder(), run_root=self.registryRoot())
         except Exception as exc:
-            logging.exception("Lesion network mapping: the targets could not be scored")
+            if isinstance(exc, ValueError):
+                logging.warning(f"Lesion network mapping: the targets could not be scored: {exc}")  # a refusal of the input, not a failure
+            else:
+                logging.exception("Lesion network mapping: the targets could not be scored")
             self.targets = None
             self._showTargets()
             self.targetsLabel.setText(_("The targets could not be scored: {error}").format(error=exc))
