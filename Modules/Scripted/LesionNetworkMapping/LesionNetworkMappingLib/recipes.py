@@ -899,6 +899,15 @@ def lock_plan(study, recipe, params, hypotheses, now=None, locked_by=None, super
     if hyp["primary"]["kind"] == "contrast":
         design["contrast"] = hyp["primary"]["contrast"]
     params = normalize_parameters({**params, "rule": hyp["primary_rule"], "alpha": hyp["alpha"], "n_perm": hyp["n_perm"], "seeds": hyp["seeds"], "design": design})
+    # A score hypothesis is tested by the symptom sLNM step: a recipe without it gets the step, so Run everything tests
+    # the locked hypothesis (listed as a change from the recipe's steps)
+    recipe_steps = ordered_steps(recipe.steps)
+    steps = list(recipe_steps)
+    if hyp["primary"]["kind"] == "score" and "slnm" not in steps:
+        steps = ordered_steps(steps + ["slnm"])
+    deviations = [{key: change[key] for key in ("field", "recipe", "value", "description")} for change in diff(recipe, params)]
+    if steps != recipe_steps:
+        deviations.append({"field": "steps", "recipe": recipe_steps, "value": steps, "description": describe_change("steps", recipe_steps, steps)})
     name = getattr(study, "name", None) or os.path.basename(os.path.normpath(root))
     plan = {
         "format": PLAN_FORMAT,
@@ -908,8 +917,8 @@ def lock_plan(study, recipe, params, hypotheses, now=None, locked_by=None, super
         "study": {"name": name},
         "recipe": recipe.record(),
         "recipe_label": custom_label(recipe, params),
-        "deviations_from_recipe": [{key: change[key] for key in ("field", "recipe", "value", "description")} for change in diff(recipe, params)],
-        "steps": ordered_steps(recipe.steps),
+        "deviations_from_recipe": deviations,
+        "steps": steps,
         "parameters": params,
         "hypotheses": hyp,
         "note": "Pre-registration-lite plan: every later change of these parameters is recorded with its reason in analysis_plan_deviations.jsonl.",
@@ -1368,7 +1377,10 @@ def to_pipeline_config(recipe, study=None, params=None, module_available=None):
     if params is None:
         params = effective_parameters(study) if plan is not None and (plan.get("recipe") or {}).get("id") == recipe.id else apply(recipe)
     params = normalize_parameters(params)
+    # The locked plan's steps (for example sLNM added for a score hypothesis) when the plan is based on this recipe
     steps = recipe.steps
+    if plan is not None and (plan.get("recipe") or {}).get("id") == recipe.id:
+        steps = effective_steps(study) or steps
     options = pipeline_options(params, steps)
     config = {
         "rule": params["rule"],

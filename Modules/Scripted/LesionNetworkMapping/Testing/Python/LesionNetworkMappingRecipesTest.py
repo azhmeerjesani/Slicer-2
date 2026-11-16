@@ -415,6 +415,26 @@ class PlanLockTest(_TempCase):
             self.assertEqual(fields, [] if wanted == "A>B" else ["design.contrast"])
             self.assertEqual(recipes.plan_status(study)["state"], "locked")
 
+    def test_locked_score_hypothesis_runs_slnm(self):
+        """A score primary hypothesis locked on a recipe without sLNM adds the sLNM step, so Run everything tests it (BB-1)."""
+        recipe = self.builtin("classic_ferguson2019_adapted")
+        self.assertNotIn("slnm", recipe.steps)
+        study = self.make_study("study-score-primary")
+        plan = recipes.lock_plan(study, recipe, recipes.apply(recipe), {"primary": {"kind": "score", "score": "nihss"}}, now=self.NOW)
+        self.assertIn("slnm", plan["steps"])
+        self.assertEqual(plan["steps"], recipes.ordered_steps(plan["steps"]))
+        self.assertEqual([item["field"] for item in plan["deviations_from_recipe"]], ["steps"])
+        self.assertIn("slnm", recipes.effective_steps(study))
+        self.assertEqual(recipes.pipeline_options(recipes.effective_parameters(study), recipes.effective_steps(study))["scores"], "auto")
+        self.assertEqual(recipes.pending_deviations(study, recipes.effective_parameters(study), steps=recipes.effective_steps(study)), [])
+        self.assertEqual(recipes.to_pipeline_config(recipe, study)["config"]["scores"], "auto")
+        self.assertEqual(recipes.plan_status(study)["state"], "locked")
+        # A contrast hypothesis keeps the recipe's steps
+        other = self.make_study("study-contrast-primary")
+        plan = recipes.lock_plan(other, recipe, recipes.apply(recipe), {"primary": {"kind": "contrast", "contrast": "A>B"}}, now=self.NOW)
+        self.assertEqual(plan["steps"], recipes.ordered_steps(recipe.steps))
+        self.assertEqual(recipes.to_pipeline_config(recipe, other)["config"]["scores"], "none")
+
     def test_deviation_log_and_methods(self):
         study = self.make_study()
         with self.assertRaises(recipes.RecipeError):
