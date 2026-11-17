@@ -299,6 +299,26 @@ class StudioUpdatesTest(unittest.TestCase):
         self.assertTrue(v.isValid(v.STUDIO_VERSION))
         self.assertEqual(v.readVersionFile(os.path.join(os.path.dirname(v.__file__), "version.py")), v.STUDIO_VERSION)
 
+    def test_ReleaseComparedWithBuildVersion(self):
+        """A code update from main may bring a newer version.py: releases are compared with the version of the build
+        (bin/Python/studio_build_info.json), so that a release with compiled changes is never hidden by it."""
+        updates = self.updates
+        original = self.version.STUDIO_VERSION
+        updates.currentVersionOverride = None
+        try:
+            updates.buildInfoOverride = {"format": 1, "commit": "a" * 40, "studioVersion": "0.9.0"}
+            self.version.STUDIO_VERSION = "0.9.5"
+            self.assertEqual(updates.currentVersion(), "0.9.0")
+            manifest = updates.parseManifest(json.dumps({"version": "0.9.1", "assets": {}}))
+            updates.setSettingsValue("LastManifest", manifest.toJson())
+            service = updates.UpdateService(force=True)
+            self.services.append(service)
+            self.assertTrue(service.status.available)
+            self.assertEqual(service.status.version, "0.9.1")
+        finally:
+            updates.buildInfoOverride = None
+            self.version.STUDIO_VERSION = original
+
     def test_Manifests(self):
         updates = self.updates
         good = {"version": "1.2.0", "required": False, "minimumSupported": None, "notes": "n",
