@@ -190,7 +190,8 @@ disabled. Use official 3D Slicer for those extensions.
 Slicer Studio updates itself from the public releases of its repository,
 <https://github.com/azhmeerjesani/Slicer-2/releases>. The publisher creates each
 release by hand (see [Publish a release](#publish-a-release)); nothing needs an
-account or costs anything.
+account or costs anything. Between releases it also takes the newest Python code
+of the `main` branch (see [Code updates from main](#code-updates-from-main)).
 
 ### How checks work
 
@@ -250,6 +251,70 @@ new package yourself. When Slicer Studio cannot install an update itself, it kee
 the checked package in your Downloads folder and names its full path.
 **Install when I quit** installs the downloaded update the
 next time you quit, without restarting.
+
+### Code updates from main
+
+Between releases, an installed Slicer Studio also takes the newest code of the
+`main` branch, as far as it can without a new build:
+
+- **What it applies.** Only the Python files and resources that a build copies
+  as they are into the application: the scripted modules (Studio, Lesion
+  Network Mapping, ...) and the Python files in `bin/Python`. Anything that is
+  compiled into Slicer Studio (C++ code, CMake files, `.ui` or `.qrc` files
+  built into C++, command-line module descriptions, ...) needs a new build: when
+  newer commits on `main` change such a file, nothing is applied and Slicer
+  Studio says once "Newer code on main changes parts that are compiled into
+  Slicer Studio (N files, for example ...). It needs a new build and will come
+  with the next release." Changes to documentation and tests are ignored.
+- **When.** A few seconds after each start (and once a day while Slicer Studio
+  runs), in the background; it never slows the start-up down, and without a
+  network connection nothing happens. While a newer release is available, code
+  from `main` is not taken: install the release.
+- **What is sent.** Anonymous HTTPS requests to github.com with git's own
+  protocol (which commit is the newest on `main`, and its list of files, about
+  200 KB), and one request to `raw.githubusercontent.com` per changed file, at
+  that exact commit. No GitHub API, no account, nothing about you or your data.
+- **Checked.** The list of files must hash to the commit, and every downloaded
+  file must hash to its id in that list (git's SHA-1 object ids), so the
+  updated files are exactly those of the commit. The list of files of your
+  build is checked the same way against the commit it was built from.
+- **Applied at the next start.** The new files are prepared in your user data
+  folder (`StudioUpdate/commit/` in Slicer Studio's application data folder);
+  the installed application, and the signed macOS application, are never
+  changed. Then a notice says "Update ready · main @ abc1234 (Nov 16) · Restart
+  now · Later". **Restart now** closes Slicer Studio (it asks about unsaved
+  work as usual) and starts it again; with **Later** the update applies the
+  next time you start Slicer Studio. The first start with it says "Slicer
+  Studio now runs code from main @ abc1234."
+- **Automatic rollback.** If Slicer Studio does not start properly with a code
+  update (it closes, crashes or an updated module fails to load within about 5
+  seconds after the start-up), the next start goes back to the previous code
+  update, or to the installed version, and says so. That commit is not taken
+  again; a later commit on `main` is. If something goes wrong later, **Go back**
+  in **Settings** > **Updates** returns to the previous code update or to the
+  installed build at the next start.
+- **Settings** > **Updates** > **Code from main** shows the installed build
+  (version and commit), the code that runs, the last check, **Check main now**,
+  **Restart now**, **Go back**, and the switch "Also get code updates from main
+  between releases" (`Studio/Updates/CommitUpdates`, on by default). Turning it
+  off brings back the installed code at the next start. The environment
+  variable `SLICER_STUDIO_COMMIT_UPDATES=off` (or `SLICER_STUDIO_UPDATE_FEED=off`)
+  turns it off too.
+- **Not updated:** development builds (a build tree or a source checkout), a
+  build made from a source tree with uncommitted changes, the web version, runs
+  under `--testing`, and the command-line tools that do not start the
+  application (`PythonSlicer`, `slicer-lnm`): they run the installed code until
+  the next release. Installing a release removes every code update.
+
+**What you trust.** The code updates come straight from `main`, without a
+release in between. Anyone who can change `main` of
+`azhmeerjesani/Slicer-2` (a merged pull request, a collaborator's account that
+was taken over, a forced push) can change the code that runs on every
+computer with Slicer Studio, at its next start. Protect the branch on GitHub
+(required reviews, no forced pushes) and turn the switch off if that is not
+acceptable for you. Commits are not checked for signatures; what is checked is
+that the files are exactly those of the newest commit on `main`, as GitHub
+reports it over HTTPS.
 
 ### Web version
 

@@ -913,6 +913,15 @@ there is nothing to find today.**
   SHA-256 are checked against the manifest before anything is replaced, the application is swapped after it exits
   (the previous version is put back if that fails), and unsaved work is autosaved and offered for recovery by the new
   version. This has been tested with a local test feed and fixtures, not with a real release, and not on macOS.
+- **Code updates from main.** Between releases, an installed Slicer Studio also takes the Python and resource files of
+  new commits on `main` (scripted modules and `bin/Python`), checked a few seconds after each start in the background
+  with git's own protocol on github.com (no API) and files from `raw.githubusercontent.com` pinned to the commit and
+  verified against its git object ids. They are prepared in the user data folder (never inside the application) and
+  apply at the next start ("Update ready · Restart now"); a start that fails goes back automatically. Commits that
+  change anything compiled (C++, CMake, `.ui`, ...) wait for the next release. Anyone who can push to `main` can change
+  the code that runs at every installation's next start, so protect the branch. Details:
+  [Code updates from main](Docs/user_guide/install_studio.md#code-updates-from-main). This has been tested with a local
+  fake repository and its files, not in a built application.
 
 ### Settings added by Slicer Studio
 
@@ -960,6 +969,7 @@ classic behavior, so most of these keys have no effect there. The ones you may w
 | `Studio/Library/GridThumbSize` | `160` | Side of the thumbnails of the grid in pixels (120 to 220; the card-size slider) |
 | `Studio/LazyPythonWrappers` | `true` | Import the Python wrappers of the modules when they are first used (and the rest while the application is idle), which shortens the start; `false` imports them all at start. Read at start |
 | `Studio/Updates/AutoCheck` | `true` | Look for a newer version at start (Settings > Updates). Also kept: `Studio/Updates/LastCheck`, `Studio/Updates/LastManifest` and `Studio/Updates/SkippedVersion` |
+| `Studio/Updates/CommitUpdates` | `true` | Also take code updates from `main` between releases (Settings > Updates > Code from main; off: the installed code returns at the next start). Also kept: `Studio/Updates/CommitLastCheck`, `Studio/Updates/CommitLastHead`, `Studio/Updates/CommitLastResult` and `Studio/Updates/CommitNoticeHead` |
 | `Studio/Figure/LastFolder` | (none) | The folder of the last figure opened with *Open figure…* |
 | `Studio/LNM/MaxJobThreads` | (CPUs minus one) | Most threads of a Map job |
 | `Studio/LNM/MemoryBudgetGB` | (a quarter of the memory, at most 4 GB) | Memory budget of one pass of *Run everything*. Only read: set it yourself |

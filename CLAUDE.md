@@ -17,9 +17,12 @@
   `claude/hopeful-hawking-kibs73-bugbash`, created from the PR head, and pushes only there. Do not merge
   the PR, and do not open another PR unless the user asks.
 - In-app updates (decision D-U1): the app reads the public "latest release" download of this repository
-  at run time. The user creates and uploads releases by hand with the files that
+  at run time for full builds. The user creates and uploads releases by hand with the files that
   `Utilities/Scripts/SlicerStudioRelease/make_release.py` prepares; never create, edit or upload a
-  release yourself.
+  release yourself. In addition (user request, 2026-11-17), an installed app takes the Python and
+  resource files of new commits on `main` (git smart-HTTP refs and trees from github.com, files from
+  raw.githubusercontent.com pinned to the commit; no API; `StudioLib/updates_commit.py`); commits that
+  change anything compiled wait for a release.
 - Build packages locally instead. The macOS disk image is built on the user's Mac with
   `Utilities/Scripts/SlicerStudioMacOS/build_dmg.sh`, and the Linux package with `make package` in
   the build tree (see `Docs/user_guide/install_studio.md`).

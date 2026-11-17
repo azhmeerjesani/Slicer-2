@@ -100,3 +100,31 @@ would rename them), and that `--minimum-supported` is not newer than the release
   the release). Versions never go backwards: an installed newer version is kept.
 - Development builds (build trees) do not check by themselves and never install
   updates; Settings > Updates > *Check now* shows the latest release.
+
+## Build information and code updates from main
+
+Every build writes two files next to `slicerqt.py` (`bin/Python`), which the
+packages install: `studio_build_info.json` (the commit the build was made from,
+its tree, whether the source tree had uncommitted changes, `STUDIO_VERSION`) and
+`studio_build_files.json.gz` (the list of files of that commit, and where the
+build installs each Python file and resource it copies as it is). They are
+written by `make_build_info.py` (the `SlicerStudioBuildInfo` target, at every
+build) from the records of `CMake/SlicerStudioBuildInfo.cmake`, and hold
+relative paths only.
+
+An installed Slicer Studio uses them to take the Python and resource files of
+newer commits on `main` between releases (see
+`Docs/user_guide/install_studio.md`, "Code updates from main"). So:
+
+- build release packages from a **clean, committed** checkout of the commit you
+  publish: a build from a source tree with changes (`"dirty": true`) or without
+  git (`"commit": null`) never takes code updates. `build_dmg.sh` warns about
+  both;
+- a release still replaces everything: installing it removes the code updates
+  of the previous build.
+
+Run the tests of these files with plain Python:
+
+```console
+python3 Modules/Scripted/Studio/Testing/Python/StudioCommitUpdatesTest.py
+```
