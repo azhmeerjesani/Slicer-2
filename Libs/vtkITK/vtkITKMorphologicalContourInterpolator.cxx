@@ -15,6 +15,7 @@
 #include "vtkImageData.h"
 
 #include "itkMorphologicalContourInterpolator.h"
+#include "itkPlatformMultiThreader.h"
 
 vtkStandardNewMacro(vtkITKMorphologicalContourInterpolator);
 
@@ -57,6 +58,13 @@ void vtkITKMorphologicalContourInterpolatorExecute(vtkITKMorphologicalContourInt
   interpolatorFilter->SetHeuristicAlignment(self->GetHeuristicAlignment());
   interpolatorFilter->SetUseDistanceTransform(self->GetUseDistanceTransform());
   interpolatorFilter->SetUseBallStructuringElement(self->GetUseBallStructuringElement());
+
+  // itk::MorphologicalContourInterpolator keeps ITK filters in thread_local smart pointers of each thread that works for it.
+  // The worker threads of the default threader (TBB, or the ITK thread pool) end only when the process shuts down, after the
+  // global time stamp of ITK is gone, and the destructors of those filters then crash (SIGSEGV in itk::Object::Modified(),
+  // "exit abnormally", exit status 1, also in official 3D Slicer after Fill between slices). The platform threader runs the
+  // work in threads that end with the call, so the filters are destroyed while ITK is alive.
+  interpolatorFilter->SetMultiThreader(itk::PlatformMultiThreader::New());
 
   interpolatorFilter->SetInput(inImage);
   interpolatorFilter->Update();

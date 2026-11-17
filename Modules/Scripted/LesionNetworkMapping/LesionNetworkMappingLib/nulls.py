@@ -146,7 +146,7 @@ KIND_INFO = {
 # Permanent caption of every null output (addendum §3.6, exact text)
 CAPTION = (
     "Null models benchmark significance; they do not by themselves establish disease specificity "
-    "(van den Heuvel et al. 2026b); see also Zalesky & Cash 2026; Siddiqi et al. 2026."
+    "(van den Heuvel et al. 2026); see also Zalesky & Cash 2026; Siddiqi et al. 2026."
 )
 APPROX_LABEL = "approximate (fast parcel mode, approximate z-scale; rank rules only)"
 OUTPUT_DESCS = ("sensNullExcess", "sensNullP", "sensNullQ", "sensNullPFwe", "sensNullBias")
@@ -172,6 +172,10 @@ ANNEAL_T0, ANNEAL_T1 = 0.05, 5e-4  # temperatures of the geometric cooling (KS d
 POOL_MATCHES = 10
 SD_FLOOR = 0.5  # lesion counts: floor of the null standard deviation in the standardised excess
 ALPHA = 0.05
+# Warning codes recorded in nulls.json (their messages name participants, never local paths; a mapping step's other
+# warnings, such as an unreadable lesion file with its path, stay in that step's own records and the job log)
+RECORDED_WARNINGS = frozenset({"excluded", "shifts", "relocations", "pool", "min_k", "parity_gate", "parity_index", "index_subjects", "observed_check", "resume_mismatch", "outside_mask"})
+MIN_K = 19  # the smallest K whose minimum attainable p, 1/(K+1), is at most ALPHA (the card's minimum)
 QA_VOXELS = 30_000  # voxels of the group QA sample (engine.NULL_MAX_VOXELS)
 DICE_BINARIZE_AT = 0.5  # lesionset.BINARIZE_AT
 
@@ -338,6 +342,13 @@ def relocate_independent(relocator, k, seed=0):
         columns.append([(np.asarray(p, np.int64), np.asarray(w, np.float32)) for p, w in moved])
         shifts.append(lesion_shifts)
     return columns, shifts
+
+
+def kind_description(kind, strength="signed"):
+    """KIND_INFO's description of ``kind``; rl_strength names the strength map that was used (signed μC_r or absolute hubness)."""
+    if kind == "rl_strength" and strength == "abs":
+        return "each lesion's centroid moved to one of the 100 brain voxels with the nearest absolute hubness (mean |Fz|)"
+    return KIND_INFO[kind]["description"]
 
 
 def lesion_strength(relocator, strength):
@@ -672,6 +683,17 @@ def resolve_rule(rule, n, n_voxels, gsr=None):
     return resolved
 
 
+def rule_resolved_record(resolved):
+    """What nulls.json records as the observed rule: the resolved rule, or the rank-rule note for top_pct.
+
+    A top_pct rule is resolved per map, so :func:`resolve_rule` returns a placeholder for it (no value, "no non-zero
+    values"): that placeholder must not be written as if it were the rule that was applied.
+    """
+    if resolved is None or (resolved.kind or (resolved.rule or {}).get("kind")) == "top_pct":
+        return {"kind": "top_pct", "note": "resolved per map (rank rule)"}
+    return resolved.to_dict()
+
+
 def rule_values(rows, rule, n, n_voxels, gsr=None):
     """(L,) threshold of each map (row) under the rule: one value for N-derived rules, a percentile per map for top_pct.
 
@@ -690,7 +712,10 @@ def rule_values(rows, rule, n, n_voxels, gsr=None):
         elif sign == "neg":
             np.negative(scores, out=scores)
         if np.all(np.isfinite(scores)):
-            out[row] = np.percentile(scores, 100.0 - rule["value"], overwrite_input=True)
+            above = scores[scores > 0.0]
+            cut = np.percentile(scores, 100.0 - rule["value"], overwrite_input=True)
+            # As thresholds.resolve: the cut never goes below 0 (only voxels of the sign pass), NaN without any
+            out[row] = (cut if cut > 0.0 else above.min()) if above.size else np.nan
         else:
             out[row] = thresholds.resolve(rule, max(int(n), 1), n_voxels, values=values).value
     return out
@@ -891,9 +916,13 @@ class NullOverlap:
                 "false_positive_rate_note": "fraction of in-mask voxels where the classic rule passes, in the observed cohort and in each null cohort",
             },
             "discreteness": (
-                f"The smallest attainable p is 1/(K+1) = {min_p:.3g} (K = {k}); BH-FDR reaches q <= {ALPHA:g} only when at least "
+                f"The smallest attainable p is 1/(K+1) = {min_p:.3g} (K = {k}); BH-FDR reaches q ≤ {ALPHA:g} only when at least "
                 f"{fdr_floor_voxels(n_voxels, min_p)} voxels reach it."
+                if min_p <= ALPHA else
+                f"The smallest attainable p is 1/(K+1) = {min_p:.3g} (K = {k}), above {ALPHA:g}: no voxel can reach p ≤ {ALPHA:g} or q ≤ {ALPHA:g}; "
+                f"at least {MIN_K} null cohorts are needed."
             ),
+            "below_min_k": bool(min_p > ALPHA),
         }
         numbers["classic_rule"]["text"] = fpr_text(self.overlap_pct, observed_fraction, fractions)
         return {"maps": maps, "z": z, "max_null": max_null, "mean": mean, "sd": sd, "numbers": numbers}
@@ -1007,7 +1036,7 @@ def load_cohort(maps_tsv, bundle, participants=None, group_column="group", emit=
                 raise ValueError(f"The cache entry of {sid} has {stored} voxels, the connectome has {bundle.n_voxels}")
             column = _sparse_columns([(indices, values)], bundle.n_voxels)[0]
         elif not _na(row.get("lesion")) and os.path.isfile(row["lesion"]):
-            weights, _qc = engine.prepare_lesion(row["lesion"], bundle, supersample=int(record.get("supersample") or 2), binarize=not record.get("probabilistic"))
+            weights, _qc = engine.prepare_lesion(row["lesion"], bundle, supersample=int(record.get("supersample") or 2), binarize=not engine.seed_probabilistic(row["lesion"], record.get("probabilistic")))
             column = _sparse_columns(weights, bundle.n_voxels)[0]
         if column is None:
             cohort.excluded.append({"participant_id": sid, "reason": "the lesion weights are not available (cache entry and lesion file missing)"})
@@ -1110,7 +1139,9 @@ def find_fast_index(bundle, subject_ids=None, verify=False):
     """Folder of the fast parcel index of a bundle and subject list (fastmap.default_out_dir), or None.
 
     The index.json must be a fast index of this connectome mask and of exactly these subjects (all of the bundle's by
-    default), with its matrices present; ``verify`` also checks every file's sha256 (slow for large connectomes).
+    default), built from their current data (``fastmap.stale_data_reason``), with its matrices present; ``verify`` also
+    checks every file's sha256 and, for bundles that do not record their data fingerprint, the subjects' norms files
+    (slow for large connectomes).
     """
     from . import fastmap
     from .connectome import ConnectomeBundle, subjects_sha256
@@ -1130,12 +1161,14 @@ def find_fast_index(bundle, subject_ids=None, verify=False):
         return None
     if (metadata.get("bundle") or {}).get("mask_sha256") not in (None, bundle.mask_sha256):
         return None
+    if fastmap.stale_data_reason(metadata, bundle, ids, verify):
+        return None  # built from time series that were replaced since (the bundle was converted again)
     files = metadata.get("files") or {}
     if any(not os.path.isfile(os.path.join(folder, item.get("file", ""))) for item in files.values()):
         return None
     if verify:
         try:
-            fastmap.load_index(folder, bundle, verify=True)
+            fastmap.load_index(folder, bundle, verify=True, subject_ids=ids)
         except (OSError, ValueError):
             return None
     return folder
@@ -1271,7 +1304,7 @@ def _relocation_columns(context, relocator, cohort, reference, emit):
         key = STRENGTH_MAPS[context.strength]
         maps = getattr(reference, "maps", reference) if reference is not None else None
         if not maps or maps.get(key) is None:
-            raise jobs.JobError(f"rl_strength needs the bundle's reference maps ({key}); build them with 'python -m LesionNetworkMappingLib.reference build'", code="no_reference")
+            raise jobs.JobError(jobs.command_text(f"rl_strength needs the bundle's reference maps ({key}); build them with 'python -m LesionNetworkMappingLib.reference build'"), code="no_reference")
         columns, shifts, candidates = relocate_strength(relocator, maps[key], k_pool, seed, STRENGTH_CANDIDATES)
         values = lesion_strength(relocator, maps[key])
         info = {"strength": context.strength, "map": key, "candidates": STRENGTH_CANDIDATES, "lesion_strength": dict(zip(cohort.ids, values, strict=True)),
@@ -1499,6 +1532,10 @@ def _group_qa(context, observed_overlap, observed_mean, null_overlap_sample, nul
     if reference is None:
         level, text = qa.NOT_CALIBRATED, "not calibrated (no reference maps for this connectome and subject list)"
         return {"available": False, "level": level, "text": text}
+    k = int(null_overlap_sample.shape[0])
+    if k < MIN_K:  # a percentile among a handful of null cohorts is no verdict
+        return {"available": False, "level": qa.NOT_CALIBRATED, "k": k,
+                "text": f"only {k} null cohort{'' if k == 1 else 's'}; at least {MIN_K} are needed for a percentile"}
     out = {"available": True, "null_kind": context.kind, "voxels": int(context.sample.size)}
     for name, observed, nulls in (("overlap", observed_overlap, null_overlap_sample), ("mean", observed_mean, null_mean_sample)):
         try:
@@ -1657,7 +1694,18 @@ def run(
     from . import cohortmaps, engine, export, fastmap
     from .connectome import ConnectomeBundle
 
-    emit = emit or jobs.emit
+    outer_emit = emit or jobs.emit
+    run_warnings = []  # every warning of the run, for nulls.json and the methods (not only the job log)
+
+    def emit(event, **fields):
+        if event == "warning" and fields.get("code") in RECORDED_WARNINGS:
+            item = {"code": fields.get("code"), "message": fields.get("message")}
+            for key in ("participants", "participant_id"):
+                if fields.get(key) is not None:
+                    item[key] = fields[key]
+            run_warnings.append(item)
+        return outer_emit(event, **fields)
+
     cancel = _cancel_token(cancel)
     started = time.monotonic()
     rule = thresholds.normalize_rule(rule)
@@ -1670,6 +1718,7 @@ def run(
     os.makedirs(out_dir, exist_ok=True)
     budget_bytes = cohortmaps.default_budget_bytes() if budget_bytes is None else int(budget_bytes)
     on_the_fly = mode == "fast" and kind in ("rl_cohort_shift", "rl_overlap")
+    k_requested = k_pool if kind == "rl_cohort_shift" and not on_the_fly else int(k)  # the exact cohort shift draws K = K_pool shifts
     stage_names = (["lesion maps"] if study is not None else []) + ["design"] + ([] if on_the_fly else ["null maps"]) + ["null cohorts", "inference", "write"]
     stage_index = {"value": 0}
 
@@ -1685,14 +1734,6 @@ def run(
     parents = list(parent_runs or ())
     work = os.path.join(out_dir, WORK_DIR)
     try:
-        for desc in OUTPUT_DESCS:  # never leave the outputs of an earlier run next to this one's
-            path = export.group_map_path(out_dir, bundle.name, desc)
-            for name in (path, _sidecar_path(path)):
-                if os.path.exists(name):
-                    os.remove(name)
-        for name in (NULLS_JSON, SETS_NAME, NULL_GROUP_FILE, NULL_GROUP_VOXELS, PARITY_JSON):
-            if os.path.exists(os.path.join(out_dir, name)):
-                os.remove(os.path.join(out_dir, name))
         if not resume:
             shutil.rmtree(work, ignore_errors=True)
         if study is not None:
@@ -1704,6 +1745,9 @@ def run(
         cohort = load_cohort(maps_tsv, bundle, participants, group_column, emit)
         if cohort.run_id and cohort.run_id not in parents:
             parents.append(cohort.run_id)
+        if not cohortmaps.record_matches_bundle(cohort.record, bundle):
+            raise jobs.JobError(f"The lesion maps (maps.tsv) were computed with another connectome than {bundle.name!r} (another connectome.json): "
+                                "map the lesions with this connectome first", code="input")
         if len(cohort) < 2:
             raise jobs.JobError(f"The nulls need at least 2 lesions; {len(cohort)} can be used", code="no_lesions")
         if not cohort.subject_ids:
@@ -1743,11 +1787,14 @@ def run(
         if mode == "fast":
             index_path = index or find_fast_index(bundle, cohort.subject_ids)
             if index_path is None:
-                raise jobs.JobError("No fast index for this connectome and subject list: build it with 'python -m LesionNetworkMappingLib.fastmap build', or use exact mode", code="no_index")
+                raise jobs.JobError(jobs.command_text("No fast index for this connectome and subject list: build it with 'python -m LesionNetworkMappingLib.fastmap build', or use exact mode"), code="no_index")
             try:
                 fast_index = fastmap.load_index(index_path, bundle)
             except (OSError, ValueError) as exc:
-                raise jobs.JobError(f"The fast index cannot be used: {exc}", code="no_index") from None
+                reason = str(exc)
+                if not reason.startswith("The fast index"):  # the load_index sentences already name the index
+                    reason = f"The fast index cannot be used: {reason}"
+                raise jobs.JobError(reason if reason.endswith((".", "!", "?")) else reason + ".", code="no_index") from None
             if (fast_index.metadata.get("subjects") or {}).get("sha256") != cohort.subject_ids_sha256:
                 emit("warning", code="index_subjects", message="The fast index was built from other connectome subjects than the observed maps; the parity gate compares them.")
             parity_report, parity_source = _parity_for_fast(bundle, fast_index, cohort, parity, reference, emit)
@@ -1908,16 +1955,23 @@ def run(
             if worst is not None and worst > 1e-3:
                 emit("warning", code="observed_check", message=f"The observed maps differ from their remapping in the null passes by up to {worst:.2g} (relative): check that maps.tsv belongs to this connectome.")
 
+        if result["numbers"].get("below_min_k"):
+            emit("warning", code="min_k", message=f"Only {k_sets} null cohort{'' if k_sets == 1 else 's'} (of {k_requested} requested): the smallest attainable p is "
+                 f"{result['numbers']['min_attainable_p']:.3g}, so no voxel can reach p ≤ {ALPHA:g}; at least {MIN_K} null cohorts are needed.")
+
         # Outputs
         stage("write")
+        _remove_outputs(out_dir, bundle.name)
         record = _write_outputs(context, bundle, info, out_dir, cohort, result, group_qa, design, parity_report, parity_source, sets, shifts, shared_shifts, set_shifts,
-                                null_mean, resolved, maps_tsv, run_id, parents, argv, started, fast_index, parity, pool, pool_maps, brain_mask)
+                                null_mean, resolved, maps_tsv, run_id, parents, argv, started, fast_index, parity, pool, pool_maps, brain_mask,
+                                k_requested=k_requested, warnings=run_warnings)
         outputs = record.pop("outputs_list")
         shutil.rmtree(work, ignore_errors=True)
         numbers = result["numbers"]
         if run_id:
             runs.update(run_root, run_id, status="done", ended=record["created"], outputs=outputs,
-                        summary={"kind": kind, "mode": MODE_RECORDS[mode], "k": k_sets, "n_lesions": n_lesions, "n_fwe_05": numbers["n_fwe_05"],
+                        summary={"kind": kind, "mode": MODE_RECORDS[mode], "k": k_sets, "k_requested": k_requested, "below_min_k": bool(numbers.get("below_min_k")),
+                                 "warnings": [item["message"] for item in run_warnings if item.get("message") and item.get("code") != "min_k"], "n_lesions": n_lesions, "n_fwe_05": numbers["n_fwe_05"],
                                  "min_attainable_p": numbers["min_attainable_p"], "classic_rule": numbers["classic_rule"]["text"]})
         emit("done", outputs=[os.path.join(out_dir, name) for name in outputs], elapsed=round(time.monotonic() - started, 3), run_id=run_id, k=k_sets,
              mode=MODE_RECORDS[mode], classic_rule=numbers["classic_rule"]["text"], min_attainable_p=numbers["min_attainable_p"])
@@ -1937,13 +1991,35 @@ def run(
         lock.release()
 
 
+def _remove_outputs(out_dir, bundle_name):
+    """Remove the outputs of an earlier run of ``out_dir`` (nulls.json first), so that none is left next to a new run's.
+
+    Only called once a run has computed its result (the "write" stage): a run that is stopped or fails before that keeps
+    the earlier finished result, which exact pooled nulls may have taken hours to compute.
+    """
+    from . import export
+
+    for name in (NULLS_JSON, SETS_NAME, NULL_GROUP_FILE, NULL_GROUP_VOXELS, PARITY_JSON):
+        if os.path.exists(os.path.join(out_dir, name)):
+            os.remove(os.path.join(out_dir, name))
+    for desc in OUTPUT_DESCS:
+        path = export.group_map_path(out_dir, bundle_name, desc)
+        for name in (path, _sidecar_path(path)):
+            if os.path.exists(name):
+                os.remove(name)
+
+
 def _sidecar_path(map_path):
     return map_path[: -len(".nii.gz")] + ".json" if map_path.endswith(".nii.gz") else os.path.splitext(map_path)[0] + ".json"
 
 
 def _write_outputs(context, bundle, info, out_dir, cohort, result, group_qa, design, parity_report, parity_source, sets, shifts, shared_shifts, set_shifts, null_mean,
-                   resolved, maps_tsv, run_id, parents, argv, started, fast_index, parity, pool, pool_maps, brain_mask):
-    """Write the maps (exact mask header), their sidecars, nulls.json, the null design and the null group maps."""
+                   resolved, maps_tsv, run_id, parents, argv, started, fast_index, parity, pool, pool_maps, brain_mask, k_requested=None, warnings=()):
+    """Write the maps (exact mask header), their sidecars, nulls.json, the null design and the null group maps.
+
+    ``k_requested``: the null cohorts asked for (``k`` may be fewer, for example when few cohort shifts fit); ``warnings``:
+    the run's warning events ({code, message, ...}), recorded in nulls.json.
+    """
     from . import export, nifti
     from .cohort import mask_geometry
     from .glm import _write_on_mask
@@ -1963,6 +2039,8 @@ def _write_outputs(context, bundle, info, out_dir, cohort, result, group_qa, des
         "mode_label": label,
         "approximate": context.mode == "fast",
         "k": numbers["k"],
+        "k_requested": int(k_requested) if k_requested is not None else numbers["k"],
+        "below_min_k": bool(numbers.get("below_min_k")),
         "k_pool": context.k_pool if context.kind not in ("empirical_pool",) and not (context.mode == "fast" and context.kind in ("rl_cohort_shift", "rl_overlap")) else None,
         "min_attainable_p": numbers["min_attainable_p"],
         "min_attainable_q": numbers["min_attainable_q"],
@@ -2032,17 +2110,18 @@ def _write_outputs(context, bundle, info, out_dir, cohort, result, group_qa, des
         "elapsed": round(time.monotonic() - started, 3),
         **common,
         "label": label,
-        "description": KIND_INFO[context.kind]["description"],
+        "description": kind_description(context.kind, context.strength),
         "preserves": KIND_INFO[context.kind]["preserves"],
         "citation": KIND_INFO[context.kind]["citation"],
         "seeds": {"seed": context.seed, "relocations": "SeedSequence([seed, 1, lesion])", "sets": "SeedSequence([seed, 2])", "qa_sample": context.seed},
         "observed": {
             "maps": "the cohortmaps maps of the same connectome subjects (exact engine)" if context.mode == "exact" else "recomputed in fast mode from the same index (like with like)",
             "same_rule": True,
-            "rule_resolved": resolved.to_dict() if resolved is not None else {"kind": "top_pct", "note": "resolved per map (rank rule)"},
+            "rule_resolved": rule_resolved_record(resolved),
         },
         "participants": list(cohort.ids),
         "excluded": cohort.excluded,
+        "warnings": [dict(item) for item in warnings],
         "design": design,
         "inference": {key: value for key, value in numbers.items() if key != "classic_rule"},
         "classic_rule": numbers["classic_rule"],

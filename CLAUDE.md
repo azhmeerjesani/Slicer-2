@@ -38,9 +38,15 @@ The user pays for any usage beyond their plans, so even an accidental use costs 
 
 ## Agent concurrency
 
-- Run at most one agent at any time, day and night: one standalone agent, or one workflow whose agents
-  run strictly one after another (no `parallel()` or concurrent `pipeline()` stages). Wait for it to
-  finish before starting the next.
+- Run at most four agents at any time, day and night (the user set two on 2026-10-28, three on
+  2026-10-30, two on 2026-11-08 and four on 2026-11-10): for example one workflow with four agents
+  running at once, or two plus two separate agents. Agents that run at the same time never edit the same working tree or build tree at
+  once, run Slicer with their own throwaway HOME and `xvfb-run -a`, and never kill processes they did
+  not start.
+- Keep at least 5 GB of disk free at all times (the user, 2026-10-31). Each agent deletes its own large outputs,
+  throwaway HOMEs and temporary folders by explicit name when it finishes (run Slicer with TMPDIR inside its throwaway
+  folder so Slicer's temporary files and logs go there too); when free space is under 5 GB, clean up before starting
+  more work, and stop and report if it cannot be freed.
 - Use the cheapest model that does the job well: Haiku for mechanical edits, Sonnet for routine
   implementation, docs, tests and walkthroughs, Opus for design, C++, numerics, file compatibility
   and adversarial review. Use Fable when it is really needed: a second fix after a fix failed its

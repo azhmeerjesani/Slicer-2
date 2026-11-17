@@ -42,11 +42,12 @@ with the `.nii.gz` format is 3D Slicer's own NIfTI export and is unchanged.
 | Export | Files |
 | --- | --- |
 | A scan or other image | `<name>.nii.gz` with the image's own data type (int16, float32, uint8…). Window and level are display settings and are never applied to the voxels. |
+| A 4D image (fMRI, a 4D mask) | `<name>.nii.gz` with every time point, not only the one on screen: a 4D file whose fourth dimension is the time points, with the time step of the sequence in `pixdim[4]` (seconds). The export list says how many time points it has, and the sidecar has `TimePoints` and `RepetitionTime`. |
 | A label map | `<name>.nii.gz` with the same values, and their names and colours in the sidecar. |
 | A segmentation as one label map | `<name>_dseg.nii.gz` (values 1…N), `<name>_dseg.tsv` (a BIDS look-up table: index, name, colour) and `<name>_dseg.txt` (an ITK-SNAP label description file). Where segments overlap, a voxel has the value of the later segment. |
-| A segmentation as one mask per segment | `<name>_label-<segment>_mask.nii.gz` for each segment (uint8, 0 and 1). Empty segments are skipped, and the message says which. |
+| A segmentation as one mask per segment | `<name>_label-<segment>_mask.nii.gz` for each segment (uint8, 0 and 1). Empty segments are skipped, and the message says which. Letters and digits only, with accents dropped: "Left lesion" gives `label-Leftlesion` and "Ödem rechts" gives `label-Odemrechts`. A name with no letter that has a plain form (for example Chinese) gives `label-segment<N>`, N being the segment's number in the list; the sidecar keeps the real name. If two names give the same label ("Lesion 1" and "Lesion-1"), the later one gets `dup2` after it (`label-Lesion1dup2`), so a file name is never another segment's name. |
 | A map | `<name>.nii.gz` as float32, and with a threshold applied in Map `<name>_desc-thresholded_mask.nii.gz` (uint8: the voxels with \|value\| ≥ threshold, or one sign). |
-| A project | All of the above for every image, lesion (one mask per segment) and map of the project, with BIDS-like names when the names hold a subject (`sub-01_T1w.nii.gz`, `sub-01_label-Lesion_desc-lesion_mask.nii.gz`, `sub-01_stat-T_statmap.nii.gz`) and a `README.txt` that lists the files. Templates are not copied: they are public files known by name. |
+| A project | All of the above for every image, lesion (one mask per segment) and map of the project, with BIDS-like names when the names hold a subject (`sub-01_T1w.nii.gz`, `sub-01_label-Lesion_desc-lesion_mask.nii.gz`, `sub-01_stat-T_statmap.nii.gz`) and a `README.txt` that lists the files. Exporting the project again keeps `Exports/nifti/` in step with the project: the files of the earlier export that this one does not write again (the masks of segments you renamed, deleted or erased, images you closed) are named in the question and removed when you choose *Replace*. Files you put there yourself are kept, and the README names them: only an image with a `.json` sidecar written by Slicer Studio and listed in Slicer Studio's own README counts as a file of an earlier export. When you export into a folder that already holds a `README.txt` of your own, it is kept and the list is written to `README_SlicerStudio.txt` instead. Templates are not copied: they are public files known by name. |
 | DICOM series | `<series number>_<series description>.nii.gz`, for example `003_T1_MPRAGE.nii.gz`. |
 
 Every image has a `.json` sidecar next to it (BIDS style), which official 3D
@@ -73,9 +74,18 @@ modality, never the patient's name, identifier or dates.
   DICOM-derived volumes keep their full direction matrix. A left-handed grid is
   stored with `qfac = -1`, as 3D Slicer does.
 - **Transforms.** If a transform is applied to an image in the scene, the
-  exported copy is moved by it (a linear transform only changes the affine; a
-  non-linear one is resampled). The scene itself is not changed, and the sidecar
-  says which transform was applied.
+  exported copy is moved by it. A rigid transform, or one that only adds a
+  scale, only changes the affine. A non-linear transform is resampled. A linear
+  transform with shear (for example a 12-parameter affine registration with
+  different scales along rotated axes) is resampled too: a NIfTI affine cannot
+  hold shear in both sform and qform, so writing it unchanged would put the
+  image in different places in 3D Slicer (qform) and in FSL or nibabel (sform).
+  Scans are resampled with linear interpolation, label maps and lesions with
+  nearest neighbour. The scene itself is not changed, and the sidecar says which
+  transform was applied and whether the copy was resampled. The same holds after
+  **Harden transform** of such an affine: the image's own grid then has shear,
+  so the exported copy is resampled onto the closest grid without shear (codes
+  stay 1, and the sidecar's `GridResampled` says so).
 - **Codes.** sform and qform are both written and equal:
 
   | Code | Meaning | When |

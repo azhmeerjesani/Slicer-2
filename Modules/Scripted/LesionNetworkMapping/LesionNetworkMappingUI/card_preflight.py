@@ -383,6 +383,11 @@ class PreflightCard:
                 self.progressLabel.show()
                 widgets.setChipLevel(self.chip, "warn", _("Not checked"))
                 return
+        if not os.access(folder, os.W_OK | os.X_OK):  # a read-only study: say so, do not let the check fail with a traceback
+            self.progressLabel.setText(_("The study is read-only, so it was not checked."))
+            self.progressLabel.show()
+            widgets.setChipLevel(self.chip, "warn", _("Not checked"))
+            return
         outPath = os.path.join(folder, "preflight-live.json")
         try:
             os.remove(outPath)
@@ -750,6 +755,7 @@ class PreflightCard:
             "include-anyway": lambda: self.setOverride(check["id"], True),
             "probabilistic": self.setProbabilistic,
             "free-disk": self.explainDisk,
+            "two-d-policy": lambda: self.chooseTwoDPolicy(check),
         }.get(fix["id"])
         if handler is None:
             logging.warning(f"Lesion network mapping: the preflight fix {fix['id']!r} is not known")
@@ -762,31 +768,11 @@ class PreflightCard:
         return True
 
     def openLibrary(self, subjects, checkId=None):
-        """Open the Library with the subjects of a check selected (the list shows all subjects, scrolled to the first)."""
-        subjects = list(subjects or [])
-        shell = self.ctx.shell()
-        if shell is not None:
-            shell.switchTo("library")
-        elif hasattr(slicer.modules, "studio"):
-            slicer.util.selectModule("Studio")
-        try:
-            from StudioLib import library
-        except Exception:
-            return False
-        try:
-            for view in list(getattr(library, "_studyViews", [])):
-                if hasattr(view, "search"):
-                    view.search.setText("")
-                if hasattr(view, "setFilter"):
-                    view.setFilter("all")
-            library._setStudySelection(subjects)
-            for view in list(getattr(library, "_studyViews", [])):
-                row = view.model.rowOf(subjects[0]) if subjects and hasattr(view, "model") else -1
-                if row >= 0:
-                    view.table.scrollTo(view.model.index(row, 0))
-        except Exception:
-            logging.exception("Lesion network mapping: the Library could not be filtered to the subjects")
-        return True
+        """Open the Library with the subjects of a check selected (the list shows all subjects, scrolled to the first); the
+        study is opened there when the Library does not have it (it was chosen in Map's Seed card).
+        """
+        study = self.ctx.study
+        return widgets.showSubjectsInLibrary(getattr(study, "path", None) if study is not None else None, subjects, self.ctx.shell())
 
     def switchRuleToFwe(self):
         widget = _widget()
@@ -906,6 +892,20 @@ class PreflightCard:
             self.ctx.study.apply_inbox()
         if shell is not None and hasattr(shell, "refreshLibrary"):
             shell.refreshLibrary()
+
+    def chooseTwoDPolicy(self, check):
+        """The 2D policy card of the open study (Draw asks for it on Done; lesion files imported into a study were never drawn there)."""
+        study = self.ctx.study
+        try:
+            from StudioLib import lesionqc, study_ui
+
+            session = study_ui.session()
+        except Exception:
+            lesionqc = session = None
+        if lesionqc is None or session is None or study is None or os.path.normcase(os.path.abspath(session.study.path)) != os.path.normcase(os.path.abspath(study.path)):
+            self.openLibrary(check["subjects"], check["id"])  # the study opens there, and its 2D lesions are pointed out with Choose
+            return
+        lesionqc.core().askImportedPolicy(session)
 
     def offerTransform(self, fix, check):
         """Offer the template-family transform of the lesions (the Library's warp, ``transforms warp`` jobs)."""

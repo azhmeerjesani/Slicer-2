@@ -255,6 +255,17 @@ class ProvenanceGuardTest(unittest.TestCase):
         result = circuits.damage_scores(f.maps_tsv, f.circuit_path, mask=f.mask_path, emit=_quiet)
         self.assertEqual(result["provenance"]["provenance"], "same_cohort")
         self.assertEqual(result["provenance"]["basis"], circuits.NOT_ESTABLISHED)
+        # The refusal says "not established", never that the circuit was made from the same lesions
+        with self.assertRaises(circuits.CircularityError) as caught:
+            circuits.check_association(result)
+        self.assertIn("not established", str(caught.exception))
+        self.assertNotIn("made from the same lesions", str(caught.exception))
+        out = os.path.join(self.tmp, "damageU")
+        circuits.damage_scores(f.maps_tsv, f.circuit_path, mask=f.mask_path, out_dir=out, emit=_quiet)
+        with open(os.path.join(out, circuits.DAMAGE_JSON), encoding="utf-8") as handle:
+            association = json.load(handle)["association"]
+        self.assertIn("not established", association)
+        self.assertNotIn("made from the same lesions", association)
 
     def test_same_study_participants_count_as_overlap(self):
         """A re-traced lesion has another sha256, but the same participant of the same study is the same cohort."""
@@ -452,6 +463,16 @@ class TargetScoreTest(unittest.TestCase):
         targets = circuits.read_targets(path, default_radius=7.0)
         self.assertEqual(targets, [{"label": "F-1", "x": -38.0, "y": 44.0, "z": 26.0, "radius_mm": 7.0}])
 
+    def test_target_radius_zero_is_refused_blank_is_default(self):
+        path = os.path.join(self.tmp, "targets_zero.csv")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("label,x,y,z,radius\nblank,1,2,3,\nzero,4,5,6,0\n")
+        with self.assertRaisesRegex(ValueError, "target 'zero'"):
+            circuits.read_targets(path, default_radius=5.0)
+        with self.assertRaises(ValueError):
+            circuits.normalize_targets([{"label": "neg", "x": 1, "y": 2, "z": 3, "radius_mm": -2}])
+        self.assertEqual(circuits.normalize_targets([{"label": "b", "x": 1, "y": 2, "z": 3}], 4.0)[0]["radius_mm"], 4.0)
+
 
 class SeedThisTest(unittest.TestCase):
     @classmethod
@@ -511,6 +532,87 @@ class SeedThisTest(unittest.TestCase):
         self.assertLess(t[blobs["B"]["mask"]].mean(), 0.0)
         self.assertEqual(circuits.find_circuits(os.path.dirname(out))[0]["name"], "ConjA")
 
+    def test_parent_changed_after_the_parent_is_rewritten(self):
+        """A circuit whose parent map was re-run in place (same file name, new content) is out of date (bug
+        circuits-not-marked-out-of-date-after-source-vlsm-rerun).
+        """
+        parent, _root, _run_id = self._parent("cohortStale")
+        out = os.path.join(self.tmp, "circuits", "circuit-Stale")
+        # run_root holds both folders, as a study does: the parent is then stored as a relative path
+        record = circuits.seed_this(self.meta["path"], out, "Stale", roi=parent, parent=parent, run_root=self.tmp, emit=_quiet)
+        self.assertFalse(circuits.parent_changed(circuits.read_circuit(record["maps"]["T"])))
+        data, affine = nifti.read_nifti(parent)[:2]
+        nifti.write_nifti(parent, np.asarray(data) * 2.0 + 1.0, affine)
+        self.assertTrue(circuits.parent_changed(circuits.read_circuit(record["maps"]["T"])))
+        self.assertFalse(circuits.parent_changed({}))
+
+    def test_superseded_conjunction_is_not_attributed_to_the_later_run(self):
+        """A conjunction map left in the folder by an earlier cohort run is not credited to the later run that did not make it,
+        and the circuit seeded from it is out of date (bug circuits-conjunction-source-seeds-superseded-conj-and-attributes-it-to-new-run).
+        """
+        parent, root, run_a = self._parent("cohortRerun")
+        # run_root holds the cohort folder and the circuits, as a study does: the parent is stored as a relative path
+        folder = os.path.dirname(parent)
+        overlap = os.path.join(folder, "group_conn-Syn_desc-overlapCount_map.nii.gz")
+        shutil.copyfile(parent, overlap)
+
+        def write_cohort(run_id, outputs):
+            with open(os.path.join(folder, "cohort.json"), "w", encoding="utf-8") as handle:
+                json.dump({"run_id": run_id, "maps_tsv": "maps.tsv", "outputs": outputs}, handle)
+
+        write_cohort(run_a, {"conj": os.path.basename(parent), "overlapCount": os.path.basename(overlap), "peaks": "peaks.tsv"})
+        self.assertFalse(circuits.superseded_output(parent))
+        first = circuits.seed_this(self.meta["path"], os.path.join(self.tmp, "circuits", "circuit-ConjRunA"), "ConjRunA", roi=parent, parent=parent,
+                                   run_root=self.tmp, emit=_quiet)
+        self.assertEqual(first["parent"]["run_id"], run_a)
+        self.assertFalse(circuits.parent_changed(circuits.read_circuit(first["maps"]["T"])))
+        # Run B re-makes the group maps without the conjunction: the old conj file stays in the folder
+        run_b = runs.register(root, "glm", folder, status="done")
+        write_cohort(run_b, {"overlapCount": os.path.basename(overlap), "peaks": "peaks.tsv"})
+        self.assertTrue(circuits.superseded_output(parent))
+        self.assertFalse(circuits.superseded_output(overlap))
+        found = circuits.parent_record(parent)
+        self.assertIsNone(found["run_id"])
+        self.assertTrue(found.get("superseded"))
+        self.assertEqual(circuits.parent_record(overlap)["run_id"], run_b)
+        second = circuits.seed_this(self.meta["path"], os.path.join(self.tmp, "circuits", "circuit-ConjRunB"), "ConjRunB", roi=parent, parent=parent,
+                                    run_root=self.tmp, emit=_quiet)
+        self.assertNotEqual(second["parent"]["run_id"], run_b)
+        self.assertNotIn(run_b, second["parents"])
+        self.assertNotIn(run_b, runs.load(self.tmp)[second["run_id"]]["parents"])
+        # The circuit of run A's conjunction no longer looks current
+        self.assertTrue(circuits.parent_changed(circuits.read_circuit(first["maps"]["T"])))
+
+    def test_vlsm_map_parent_links_its_lesions(self):
+        """A cluster of a VLSM statistic map opened as a file (Clusters card, no --source-maps) is linked to the VLSM run and
+        its lesions.tsv, so declaring the circuit frozen cannot unlock an association on those lesions (bug
+        circuits-clusters-card-vlsm-cluster-loses-provenance-frozen-allows-double-dipping).
+        """
+        parent, _root, _run_id = self._parent("vlsmA")
+        folder = os.path.dirname(parent)
+        os.remove(os.path.join(folder, "cohort.json"))
+        os.remove(os.path.join(folder, "maps.tsv"))
+        stat = os.path.join(folder, "vlsm_desc-T_stat.nii.gz")
+        os.rename(parent, stat)
+        with open(os.path.join(folder, "lesions.tsv"), "w", encoding="utf-8") as handle:
+            handle.write("participant_id\tlesion_sha256\tvolume_ml\n" + f"sub-01\t{'c' * 64}\t1.0\nsub-02\t{'d' * 64}\t2.0\n")
+        with open(os.path.join(folder, "vlsm.json"), "w", encoding="utf-8") as handle:
+            json.dump({"format": "slicer-lnm-vlsm", "run_id": "vlsm-run-1", "lesions_tsv": "lesions.tsv"}, handle)
+        found = circuits.parent_record(stat)
+        self.assertEqual(found["record"], "vlsm.json")
+        self.assertEqual(found["run_id"], "vlsm-run-1")
+        self.assertEqual(found["lesions"]["sha256"], ["c" * 64, "d" * 64])
+        record = circuits.seed_this(self.meta["path"], os.path.join(self.tmp, "circuits", "circuit-Cluster1"), "Cluster1", roi=stat, parent=stat, register=False, emit=_quiet)
+        self.assertIn("vlsm-run-1", record["parents"])
+        self.assertTrue(record["source"]["known"])
+        self.assertEqual(record["source"]["lesion_sha256"], ["c" * 64, "d" * 64])
+        scored = {"sha256": ["c" * 64], "participants": [], "pairs": [(None, "c" * 64)]}
+        sha = file_sha256(record["maps"]["T"])
+        provenance = circuits.provenance_of(record["maps"]["T"], sha, scored, frozen_sha256=sha)
+        self.assertEqual(provenance["provenance"], "same_cohort")
+        # The bare VLSM map (no circuit.json) is not independent either
+        self.assertEqual(circuits.provenance_of(stat, file_sha256(stat), scored, frozen_sha256=file_sha256(stat))["provenance"], "same_cohort")
+
     def test_signed_conjunction_seeds_one_sign(self):
         """A +1 / -1 conjunction map seeds its positive or its negative region, never their union unless asked."""
         bundle = connectome.ConnectomeBundle.open(self.meta["path"])
@@ -528,6 +630,31 @@ class SeedThisTest(unittest.TestCase):
         neg = circuits.read_circuit(os.path.join(self.tmp, "signed-neg"))
         t = nifti.read_nifti(neg["maps"]["T"])[0].reshape(-1)[bundle.mask_indices]
         self.assertLess(t[self.meta["blobs"]["A2"]["mask"]].mean(), 0.0)
+
+    def test_methods_describe_the_circuit_and_cite_only_the_current_run(self):
+        """The methods name the parent result and its run, the seed, the connectome and N (not a key dump), and cite only
+        the circuits run whose files are in the folder (bug bash: two runs into one folder were both cited).
+        """
+        from LesionNetworkMappingLib import methods
+
+        parent, root, parent_run = self._parent("cohortMethods")
+        out = os.path.join(self.tmp, "circuits", "circuit-MethodsA")
+        first = circuits.seed_this(self.meta["path"], out, "MethodsA", roi=parent, parent=parent, run_root=root, emit=_quiet)
+        second = circuits.seed_this(self.meta["path"], out, "MethodsA", roi=parent, parent=parent, run_root=root, emit=_quiet)
+        peak = circuits.seed_this(self.meta["path"], os.path.join(self.tmp, "circuits", "circuit-MethodsP"), "MethodsP",
+                                  peak=self.meta["blobs"]["A"]["center_world"], radius_mm=4.0, run_root=root, emit=_quiet)
+        self.assertNotEqual(first["run_id"], second["run_id"])
+        text = methods.render([methods.find_section(methods.methods_sections(root), "statistics")], "txt")
+        self.assertEqual(text.count("Circuits (run"), 2, text)
+        self.assertNotIn(first["run_id"], text)
+        for run_id in (second["run_id"], peak["run_id"], parent_run):
+            self.assertIn(run_id, text)
+        self.assertIn("seeded from", text)
+        self.assertIn("group_conn-Syn_desc-conj_map.nii.gz", text)
+        self.assertIn("of radius 4 mm", text)
+        self.assertIn("N = 4 subjects", text)
+        self.assertIn("same-cohort and descriptive only", text)
+        self.assertNotIn("voxels 98", text)
 
     def test_peak_sphere_seed(self):
         out = os.path.join(self.tmp, "peak")

@@ -15,10 +15,10 @@ structure built once (:class:`TfceGrid`), which is what the GLM permutation loop
 values come from the maximum TFCE of each permutation (glm.py). Each height labels only the box of
 the voxels still above it, which gives the same clusters as labelling the whole box.
 
-Cost on the reference host (4 cores): 0.7-0.95 s per one-sided map on the 91 x 109 x 91 box of a
-2 mm MNI mask (up to 100 ``scipy.ndimage.label`` calls on shrinking boxes), so 1.3-1.9 s per
-two-sided permutation (the addendum's 1.3 s per one-sided map labelled the whole box at every
-height); :func:`tfce_eta` scales the upper value (measured under shared load) by the size of the box.
+Cost on the reference host (4 cores): about 1.3 s per one-sided map on the 91 x 109 x 91 box of a
+2 mm MNI mask (up to 100 ``scipy.ndimage.label`` calls on shrinking boxes), so about 2.6 s per
+two-sided permutation (re-measured in the bug bash: 2.3-2.8 s); :func:`tfce_eta` scales that by the
+size of the box and adds a small fixed cost per map.
 """
 
 import math
@@ -32,9 +32,12 @@ DEFAULT_E = 0.5
 DEFAULT_STEPS = 100
 DEFAULT_CONNECTIVITY = 26
 CONNECTIVITIES = {6: 1, 18: 2, 26: 3}
-#: Measured seconds per one-sided map per voxel of the bounding box (0.95 s on 91 x 109 x 91 with 3 BLAS
-#: threads, smooth maps, under shared load; the upper end of the L-07 measurements and its review)
-SECONDS_PER_BOX_VOXEL = 0.95 / (91 * 109 * 91)
+#: Measured seconds per one-sided map per voxel of the bounding box: 1.3 s on 91 x 109 x 91 (the addendum's
+#: figure; 1.25-1.55 s measured on this host, two-sided maps 2.3-2.8 s)
+SECONDS_PER_BOX_VOXEL = 1.3 / (91 * 109 * 91)
+#: Fixed cost per one-sided map (up to ``steps`` label calls and their set-up), which dominates small grids:
+#: a 20 x 24 x 20 box takes about 16 ms per one-sided map, of which the per-voxel rate explains 11 ms
+SECONDS_PER_MAP_OVERHEAD = 0.006
 REFERENCE_BOX = (91, 109, 91)
 
 
@@ -191,7 +194,9 @@ def tfce_eta(V, n_perm, two_sided=True, seconds_per_voxel=None, box_voxels=None)
     :param n_perm: number of maps enhanced (permutations, identity included).
     :param two_sided: two enhancements (positive and negative) per map.
     :param seconds_per_voxel: measured cost per box voxel and one-sided map (default: this host's
-      :data:`SECONDS_PER_BOX_VOXEL`, about 0.95 s for a 91 x 109 x 91 box); see :func:`measure_seconds_per_voxel`.
+      :data:`SECONDS_PER_BOX_VOXEL`, about 1.3 s for a 91 x 109 x 91 box, plus
+      :data:`SECONDS_PER_MAP_OVERHEAD` per map; a measured rate already includes the overhead);
+      see :func:`measure_seconds_per_voxel`.
     :param box_voxels: voxels of the bounding box, instead of ``V``.
     :return: seconds.
     :raises TypeError: ``V`` is a bare number.
@@ -206,8 +211,11 @@ def tfce_eta(V, n_perm, two_sided=True, seconds_per_voxel=None, box_voxels=None)
         voxels = int(np.prod(_box_size(bounding_box(V))))
     else:
         raise TypeError("tfce_eta needs the mask, its TfceGrid or the box shape (or box_voxels=); a voxel count is ambiguous")
-    rate = SECONDS_PER_BOX_VOXEL if seconds_per_voxel is None else float(seconds_per_voxel)
-    return float(voxels) * rate * (2 if two_sided else 1) * max(int(n_perm), 0)
+    if seconds_per_voxel is None:
+        per_map = float(voxels) * SECONDS_PER_BOX_VOXEL + SECONDS_PER_MAP_OVERHEAD
+    else:
+        per_map = float(voxels) * float(seconds_per_voxel)
+    return per_map * (2 if two_sided else 1) * max(int(n_perm), 0)
 
 
 def measure_seconds_per_voxel(grid, repeats=1, seed=0, H=DEFAULT_H, E=DEFAULT_E, steps=DEFAULT_STEPS):  # noqa: N803

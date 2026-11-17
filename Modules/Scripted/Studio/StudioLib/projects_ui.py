@@ -3,7 +3,7 @@ the save status and its menu, the crash offer, File menu and Search actions, and
 
 - **Folder chooser** (``StudioProjectsFolderDialog``): at the first start of Studio, before the tour and the other
   first-run cards (and after A-08's required-update dialog), "Where should Slicer Studio keep your work?" proposes
-  ``Documents/Slicer Studio`` with "Choose folder…" and a warning for a cloud-synced folder. Escape or closing the dialog
+  ``Documents/Slicer Studio`` with "Choose…" and a warning for a cloud-synced folder. Escape or closing the dialog
   accepts the proposal: it never blocks the application. Never shown under ``--testing``, with
   ``SLICER_STUDIO_PROJECTS_ROOT`` or in the web build.
 - **Library** (``ProjectsSection``, object name ``studioProjectsSection``): the projects of the folder, the most recently
@@ -22,6 +22,7 @@ A Studio plug-in (``shell.OPTIONAL_PLUGINS``): ``install(shell)`` when Studio is
 ``attachService(service)`` is called by the autosave service in both modes.
 """
 
+import errno
 import logging
 import os
 import sys
@@ -106,6 +107,22 @@ def _clock(seconds):
     return time.strftime("%H:%M", time.localtime(seconds)) if seconds else ""
 
 
+def _savedTime(seconds, now=None):
+    """The clock time of a save, with the date when it was not today ("01:29" or "01:29 on 11/09/26")."""
+    if not seconds:
+        return ""
+    clock = _clock(seconds)
+    today = time.localtime(now if now is not None else time.time())
+    then = time.localtime(seconds)
+    if (then.tm_year, then.tm_yday) == (today.tm_year, today.tm_yday):
+        return clock
+    try:
+        date = qt.QLocale().toString(qt.QDateTime.fromSecsSinceEpoch(int(seconds)).date(), qt.QLocale.ShortFormat)
+    except Exception:
+        date = time.strftime("%Y-%m-%d", then)
+    return _("{clock} on {date}").format(clock=clock, date=date)
+
+
 def _relativeTime(seconds):
     try:
         from . import library
@@ -115,11 +132,16 @@ def _relativeTime(seconds):
         return _clock(seconds)
 
 
-def message(text, level="info", action=None, actionText=None, ms=3000, toolTip=None):
-    """A toast in Studio, a status bar message in Classic."""
+def message(text, level="info", action=None, actionText=None, ms=3000, toolTip=None, sticky=False):
+    """A toast in Studio, a status bar message in Classic. ``sticky``: the toast stays until the next input (a consequence
+    the user must know about, USABILITY 6.3), so a later confirmation ("Loaded x") does not replace it at once.
+    """
     shell = _shell()
     if shell is not None:
-        shell.toast(text, ms=ms, action=action, actionText=actionText, level=level, toolTip=toolTip)
+        if sticky:
+            shell.toast(text, ms=ms, action=action, actionText=actionText, level=level, toolTip=toolTip, sticky=True)
+        else:
+            shell.toast(text, ms=ms, action=action, actionText=actionText, level=level, toolTip=toolTip)
         return
     mainWindow = slicer.util.mainWindow()
     statusBar = mainWindow.statusBar() if mainWindow is not None else None
@@ -129,25 +151,124 @@ def message(text, level="info", action=None, actionText=None, ms=3000, toolTip=N
         logging.warning(str(text))
 
 
+class _ChromeDialog(qt.QDialog):
+    """A small Studio confirmation or input dialog (VISUAL 4.7): the dialog chrome (card fill, radius 14, backdrop), the icon
+    tile beside the title and the body text, an optional content widget, and a footer with the primary button on the right
+    and the other buttons (secondary) before it. ``buttons`` are the button texts, the primary first and the last one is
+    the cancel button (Escape, closing the window). ``answer`` is the index of the clicked button (-1: not answered).
+    """
+
+    def __init__(self, parent, objectName, iconName, title, body, buttons, default=0, content=None):
+        qt.QDialog.__init__(self, parent or slicer.util.mainWindow())
+        self.setObjectName(objectName)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumWidth(420)
+        self.answer = -1
+        self.buttonWidgets = []
+        layout = qt.QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 22)
+        layout.setSpacing(16)
+        header, self.titleLabel, self.bodyLabel = ui.dialogHeader(iconName, title, body, objectName)
+        layout.addLayout(header)
+        if content is not None:
+            layout.addWidget(content)
+        footer = qt.QHBoxLayout()
+        footer.setSpacing(12)
+        footer.addStretch(1)
+        count = len(buttons)
+        # The primary button is on the right: the other buttons come before it, the cancel button first of them
+        order = ([count - 1] if count > 1 else []) + list(range(1, count - 1)) + [0]
+        for index in order:
+            button = qt.QPushButton(buttons[index])
+            button.setObjectName(f"{objectName}Button{index}")
+            button.setMinimumHeight(36)
+            button.setMinimumWidth(96)
+            primary = index == 0
+            button.setDefault(index == default)
+            button.setAutoDefault(index == default)
+            ui.setRole(button, "primary" if primary else "secondary")
+            button.connect("clicked()", lambda index=index: self._answer(index))
+            footer.addWidget(button)
+            self.buttonWidgets.append((index, button))
+        layout.addLayout(footer)
+        self._cancelIndex = count - 1
+        ui.dialogChrome(self)
+
+    def button(self, index):
+        for buttonIndex, button in self.buttonWidgets:
+            if buttonIndex == index:
+                return button
+        return None
+
+    def _answer(self, index):
+        self.answer = index
+        if index == self._cancelIndex:
+            self.reject()
+        else:
+            self.accept()
+
+    def reject(self):
+        # Escape and closing the window answer with the cancel button
+        if self.answer < 0:
+            self.answer = self._cancelIndex
+        qt.QDialog.reject(self)
+
+    def run(self):
+        run = getattr(self, "exec", None) or self.exec_
+        run()
+        return self.answer
+
+
 def _question(parent, title, text, buttons, default=0):
-    """A message box with the button texts ``buttons``; return the index of the clicked one (-1: closed)."""
-    box = qt.QMessageBox(parent or slicer.util.mainWindow())
-    box.setWindowTitle(title)
-    box.setText(text)
-    box.setIcon(qt.QMessageBox.Question)
-    created = []
-    for index, buttonText in enumerate(buttons):
-        role = qt.QMessageBox.RejectRole if index == len(buttons) - 1 else qt.QMessageBox.AcceptRole
-        created.append(box.addButton(buttonText, role))
-    box.setDefaultButton(created[default])
-    box.setEscapeButton(created[-1])
-    run = getattr(box, "exec", None) or box.exec_
-    run()
-    clicked = box.clickedButton()
-    for index, button in enumerate(created):
-        if clicked == button:
-            return index
-    return -1
+    """A confirmation with the button texts ``buttons`` (the first is the primary one, the last cancels); return the index of the
+    clicked one (-1: closed).
+    """
+    dialog = _ChromeDialog(parent, "StudioProjectsQuestion", "circle-help", title, text, buttons, default)
+    try:
+        return dialog.run()
+    finally:
+        dialog.deleteLater()
+
+
+def _notice(parent, title, text):
+    """A refusal or error in the Studio dialog chrome (one OK button), instead of the legacy "Slicer error" box."""
+    dialog = _ChromeDialog(parent, "StudioProjectsNotice", "triangle-alert", title, text, [_("OK")], 0)
+    try:
+        return dialog.run()
+    finally:
+        dialog.deleteLater()
+
+
+class RenameDialog(_ChromeDialog):
+    """"Rename project": the name field, Rename (primary) and Cancel (``StudioProjectsRenameDialog``). ``name`` is the text
+    when accepted, None otherwise.
+    """
+
+    def __init__(self, name, parent=None):
+        content = qt.QWidget()
+        content.setObjectName("StudioProjectsRenameContent")
+        column = qt.QVBoxLayout(content)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(6)
+        column.addWidget(ui.label(_("Name:"), "caption", "text3", "StudioProjectsRenameLabel"))
+        self.edit = qt.QLineEdit(name)
+        self.edit.setObjectName("StudioProjectsRenameEdit")
+        self.edit.setMinimumHeight(36)
+        # Select everything but leave the cursor at the start (selecting backwards), so a long name shows its beginning.
+        self.edit.setSelection(len(name), -len(name))
+        column.addWidget(self.edit)
+        _ChromeDialog.__init__(self, parent, "StudioProjectsRenameDialog", "pencil", _("Rename project"), None,
+                               [_("Rename"), _("Cancel")], 0, content)
+
+    @property
+    def name(self):
+        return str(self.edit.text) if self.answer == 0 else None
+
+    def run(self):
+        self.edit.setFocus()
+        _ChromeDialog.run(self)
+        return self.name
 
 
 #
@@ -156,10 +277,18 @@ def _question(parent, title, text, buttons, default=0):
 
 
 class FolderChooserDialog(qt.QDialog):
-    """"Where should Slicer Studio keep your work?" (``StudioProjectsFolderDialog``). Closing it accepts the proposal."""
+    """"Where should Slicer Studio keep your work?" (``StudioProjectsFolderDialog``).
 
-    def __init__(self, parent=None, proposal=None):
+    First start (``cancellable=False``): closing it accepts the proposal, the application is never blocked. Change… of
+    Settings, Saving (``cancellable=True``): it has a Cancel button, and Escape or closing the window cancels (``cancelled``).
+    """
+
+    def __init__(self, parent=None, proposal=None, cancellable=False):
         qt.QDialog.__init__(self, parent or slicer.util.mainWindow())
+        self.cancellable = bool(cancellable)
+        self.cancelled = False
+        #: First start: closed with Escape or the window button, not with Continue
+        self.dismissed = False
         self.setObjectName("StudioProjectsFolderDialog")
         self.setWindowTitle(_("Slicer Studio folder"))
         self.setModal(True)
@@ -174,13 +303,19 @@ class FolderChooserDialog(qt.QDialog):
         header.addWidget(ui.iconTile("folder", 40, 20, "StudioProjectsFolderIcon"), 0, qt.Qt.AlignTop)
         headerText = qt.QVBoxLayout()
         headerText.setSpacing(6)
-        title = qt.QLabel(_("Where should Slicer Studio keep your work?"))
+        if self.cancellable:
+            titleText = _("Choose a new Slicer Studio folder")
+            bodyText = _("Everything you open, draw and compute is saved here automatically, so there is no Save to remember.")
+        else:
+            titleText = _("Where should Slicer Studio keep your work?")
+            bodyText = _("Everything you open, draw and compute is saved here automatically, so there is no Save to remember. "
+                         "You can change this later in Settings › Saving.")  # noqa: RUF001
+        title = qt.QLabel(titleText)
         title.setObjectName("StudioProjectsFolderTitle")
         title.setWordWrap(True)
         ui.setText(title, "title")
         headerText.addWidget(title)
-        body = qt.QLabel(_("Everything you open, draw and compute is saved here automatically, so there is no Save to remember. "
-                           "You can change this later in Settings › Saving."))  # noqa: RUF001
+        body = qt.QLabel(bodyText)
         body.setObjectName("StudioProjectsFolderBody")
         body.setWordWrap(True)
         headerText.addWidget(body)
@@ -202,6 +337,7 @@ class FolderChooserDialog(qt.QDialog):
         self.pathLabel.setObjectName("StudioProjectsFolderPath")
         self.pathLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
         self.pathLabel.setMinimumWidth(320)
+        ui.elideLabel(self.pathLabel, "path")
         self.pathLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
         fieldLayout.addWidget(self.pathLabel, 1)
         pathRow.addWidget(pathField, 1)
@@ -209,6 +345,9 @@ class FolderChooserDialog(qt.QDialog):
         self.chooseButton.setObjectName("StudioProjectsFolderChooseButton")
         self.chooseButton.setToolTip(_("Choose another folder"))
         self.chooseButton.setMinimumHeight(36)
+        # Not an auto-default button: it takes the initial keyboard focus (first in the focus chain), and a focused auto-default
+        # button becomes the dialog's default, so Enter would open the folder picker instead of pressing "Continue" (BB-1)
+        self.chooseButton.setAutoDefault(False)
         ui.setRole(self.chooseButton, "secondary")
         self.chooseButton.connect("clicked()", self.choose)
         pathRow.addWidget(self.chooseButton, 0, qt.Qt.AlignVCenter)
@@ -226,6 +365,7 @@ class FolderChooserDialog(qt.QDialog):
         insideLayout.setSpacing(8)
         insideLayout.addWidget(ui.overline(_("Inside this folder"), "StudioProjectsFolderInsideTitle"))
         self._insideIcons = []
+        nameLabels = []
         for iconName, name, what in (
                 ("folder", _("Projects"), _("one folder per project: scans, lesions, maps, exports")),
                 ("folder", _("Studies"), _("lesion network mapping cohorts")),
@@ -239,10 +379,14 @@ class FolderChooserDialog(qt.QDialog):
             self._insideIcons.append(icon)
             row.addWidget(icon)
             nameLabel = ui.label(name, "name", "text")
-            nameLabel.setFixedWidth(128)
+            nameLabels.append(nameLabel)
             row.addWidget(nameLabel)
             row.addWidget(ui.label(what, "caption", "text3"), 1)
             insideLayout.addLayout(row)
+        # One column of 128 px, wider when the application font is larger (the names are never cut)
+        nameWidth = max([128] + [label.sizeHint.width() for label in nameLabels])
+        for label in nameLabels:
+            label.setFixedWidth(nameWidth)
         layout.addWidget(inside)
         # The footer (VISUAL 4.7): a line on the left, the single primary button on the right
         buttons = qt.QHBoxLayout()
@@ -252,6 +396,16 @@ class FolderChooserDialog(qt.QDialog):
         self.insideLabel.setWordWrap(True)
         ui.setText(self.insideLabel, "caption")
         buttons.addWidget(self.insideLabel, 1)
+        self.cancelButton = None
+        if self.cancellable:
+            self.cancelButton = qt.QPushButton(_("Cancel"))
+            self.cancelButton.setObjectName("StudioProjectsFolderCancelButton")
+            self.cancelButton.setAutoDefault(False)
+            self.cancelButton.setMinimumHeight(36)
+            self.cancelButton.setMinimumWidth(96)
+            ui.setRole(self.cancelButton, "secondary")
+            self.cancelButton.connect("clicked()", self.reject)
+            buttons.addWidget(self.cancelButton)
         self.continueButton = qt.QPushButton(_("Continue"))
         self.continueButton.setObjectName("StudioProjectsFolderContinueButton")
         self.continueButton.setDefault(True)
@@ -265,6 +419,8 @@ class FolderChooserDialog(qt.QDialog):
         # Dialog chrome (VISUAL 4.7, V-02): frameless, rounded, bordered, over a backdrop
         ui.dialogChrome(self, styleSheet=self._styleSheet)
         self._update()
+        # The keyboard focus starts on the primary answer, so Enter and Space both press "Continue"
+        self.continueButton.setFocus()
 
     def _styleSheet(self):
         for icon in getattr(self, "_insideIcons", []):
@@ -282,18 +438,27 @@ class FolderChooserDialog(qt.QDialog):
 
     def _update(self):
         # The home folder is written "~" (the full path is the tooltip)
-        self.pathLabel.setText(projects.shortPath(self.path))
-        self.pathLabel.setToolTip(self.path)
+        # A long path is elided in the middle so that the end (the folder that will be used) stays visible
+        ui.setElidedText(self.pathLabel, projects.shortPath(self.path), self.path)
         service = projects.syncedService(self.path)
+        # Web build: a folder outside /data is lost when the container is removed (same warning as the connectome destination)
+        notices = [projects.webFolderNotice(self.path)]
         if service:
-            self.syncedLabel.setText(_("This folder is synced to {service}. Scans can contain patient data: if they do, choose a folder that "
-                                       "is not synced.").format(service=service))
+            notices.append(_("This folder is synced to {service}. Scans can contain patient data: if they do, choose a folder that "
+                             "is not synced.").format(service=service))
+        notices = [text for text in notices if text]
+        if notices:
+            self.syncedLabel.setText(" ".join(notices))
             self.syncedLabel.show()
             self.syncedNotice.show()
         else:
             self.syncedLabel.setText("")
             self.syncedLabel.hide()
             self.syncedNotice.hide()
+        # The notice appears or disappears while the dialog is open: a dialog keeps its size otherwise, and the rows of
+        # "Inside this folder" would be squeezed and clipped (VISUAL 4.7)
+        if self.isVisible():
+            self.adjustSize()
 
     def setPath(self, path):
         self.path = os.path.normpath(str(path))
@@ -303,12 +468,15 @@ class FolderChooserDialog(qt.QDialog):
         start = self.path if os.path.isdir(self.path) else os.path.dirname(self.path)
         folder = qt.QFileDialog.getExistingDirectory(self, _("Choose the Slicer Studio folder"), start)
         if folder:
-            # A new, empty folder or an existing Slicer Studio folder is used as is; inside another folder, a
-            # "Slicer Studio" folder is proposed so that the user's own files stay apart
+            # A new, empty folder or an existing Slicer Studio folder (also one with only studies, templates or LNM/ files
+            # and no Projects/ yet; a user's own "Projects" folder does not make one: ``projects.isStudioFolder``) is used
+            # as is; inside another folder, a "Slicer Studio"
+            # folder is proposed so that the user's own files stay apart. A folder that holds only what an interrupted move
+            # into it left (hidden partial copies) is the folder of that move: the retry goes there again
             folder = os.path.normpath(folder)
-            if os.path.basename(folder) != projects.ROOT_FOLDER_NAME and not os.path.isdir(os.path.join(folder, projects.PROJECTS_DIR)):
+            if not projects.isStudioFolder(folder):
                 try:
-                    empty = not os.listdir(folder)
+                    empty = all(projects.isMoveLeftover(name) for name in os.listdir(folder))
                 except OSError:
                     empty = False
                 if not empty:
@@ -316,7 +484,13 @@ class FolderChooserDialog(qt.QDialog):
             self.setPath(folder)
 
     def reject(self):
-        # Escape or closing the window accepts the proposal (the application is never blocked)
+        if self.cancellable:
+            # Change…: Escape, closing the window or Cancel leaves the folder unchanged
+            self.cancelled = True
+            qt.QDialog.reject(self)
+            return
+        # First start: Escape or closing the window accepts the proposal (the application is never blocked)
+        self.dismissed = True
         self.accept()
 
 
@@ -325,6 +499,56 @@ def chooserNeeded():
     if slicer.app.testingEnabled() or slicer.util.mainWindow() is None:
         return False
     return projects.needsChooser()
+
+
+def _makeUsableRoot(path):
+    """Create the chosen Slicer Studio folder and check that it can be written. Raise OSError when it cannot be used
+    (a read-only drive, no permission, a file in the way): the folder setting must not change then.
+    """
+    projects.ensureRoot(path, recreate=True)
+    if not os.access(path, os.W_OK | os.X_OK):
+        try:
+            readOnly = bool(os.statvfs(path).f_flag & getattr(os, "ST_RDONLY", 1))
+        except (OSError, AttributeError):
+            readOnly = False
+        if readOnly:
+            raise OSError(errno.EROFS, os.strerror(errno.EROFS))
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES))
+    return path
+
+
+def _rootTraces(path):
+    """(the folder existed, its About file existed) before ``_makeUsableRoot`` made them."""
+    return os.path.isdir(path), os.path.exists(os.path.join(path, projects.ABOUT_FILE))
+
+
+def _undoRootTraces(path, before):
+    """Remove what ``_makeUsableRoot`` made in ``path`` (the About file, the empty folder) when the user backs out."""
+    existed, hadAbout = before
+    try:
+        if not hadAbout:
+            os.remove(os.path.join(path, projects.ABOUT_FILE))
+        if not existed:
+            os.rmdir(path)
+    except OSError:
+        pass
+
+
+def _cannotUseMessage(path, error):
+    """"The folder … cannot be used: <reason>. Choose another folder." for an OSError of ``_makeUsableRoot``."""
+    reason = (getattr(error, "strerror", None) or str(error)).strip()
+    return _("The folder {path} cannot be used: {reason}. Choose another folder.").format(path=projects.shortPath(path), reason=reason)
+
+
+def _usableOrNotice(parent, newRoot):
+    """True when ``newRoot`` was made and can be written; otherwise the reason is shown and False returned."""
+    try:
+        _makeUsableRoot(newRoot)
+    except OSError as error:
+        logging.warning(f"Slicer Studio: the folder {newRoot} cannot be used: {getattr(error, 'strerror', None) or 'not writable'}")
+        _notice(parent, _("Change the Slicer Studio folder"), _cannotUseMessage(newRoot, error))
+        return False
+    return True
 
 
 def showChooser(then=None, parent=None):
@@ -339,13 +563,20 @@ def showChooser(then=None, parent=None):
         global _chooser
         _chooser = None
         path = dialog.path
+        retry = False
         try:
+            # The folder is stored only once it exists and can be written: otherwise the next start asks again
+            _makeUsableRoot(path)
             projects.setRoot(path, chosen=True)
-            projects.ensureRoot(path)
         except OSError as error:
-            logging.error(f"Slicer Studio: the folder {path} cannot be created: {error}")
-            message(_("The folder {path} cannot be created: {error}").format(path=path, error=error), level="warning", ms=8000)
+            logging.warning(f"Slicer Studio: the folder {path} cannot be used: {getattr(error, 'strerror', None) or 'not writable'}")
+            message(_cannotUseMessage(path, error), level="warning", ms=8000, toolTip=path)
+            # Continue asks again; Escape or closing the window (never blocks the application) leaves the choice for the next start
+            retry = not getattr(dialog, "dismissed", False)
         dialog.deleteLater()
+        if retry:
+            showChooser(then, parent)
+            return
         if then is not None:
             try:
                 then()
@@ -378,9 +609,29 @@ def onStartupCompleted(then=None):
 
 
 def saveNow(shell=None):
-    """Save now (Ctrl+S): the open project, else the official Save dialog. Return True if saved."""
+    """Save now (Ctrl+S): the open project, else the official Save dialog. Return True if saved.
+
+    Data that was opened a moment ago has no project until the next autosave poll (up to 1 s); Ctrl+S then creates it
+    first (D-A16: Ctrl+S saves now), so that the classic Save dialog does not open and write files into the home folder.
+    """
     service = _service()
     project = service.currentProject() if service is not None else None
+    if project is None and service is not None:
+        project = service.ensureProject()
+    if project is None and service is not None and projects.isRootMissing():
+        # The chosen Slicer Studio folder cannot be found (a drive that is not connected): no project can be made, and the
+        # official Save dialog would write the scene and the lesion into the home folder
+        change = None if projects.isRootFromEnvironment() else (lambda *_args: changeRootDialog())
+        message(projects.rootMissingText(), level="warning", action=change,
+                actionText=_("Change folder…") if change else None, ms=8000, toolTip=projects.root())
+        return False
+    if project is None and service is not None and service.rootUnwritable():
+        # The Slicer Studio folder cannot be written and the data's folder is still the project it was opened from (read-only
+        # too): the official Save dialog would aim every row at that folder, ask to replace the originals and then fail
+        change = None if projects.isRootFromEnvironment() else (lambda *_args: changeRootDialog())
+        message(_("Not saved: the Slicer Studio folder cannot be written. Choose another folder to save into."), level="warning",
+                action=change, actionText=_("Change folder…") if change else None, ms=8000, toolTip=projects.root())
+        return False
     if project is None:
         mainWindow = slicer.util.mainWindow()
         action = mainWindow.findChild(qt.QAction, "FileSaveSceneAction") if mainWindow is not None else None
@@ -397,35 +648,171 @@ def saveNow(shell=None):
     return ok
 
 
-def saveCopyAs(path=None):
-    """Save a copy as… (Export): the whole scene as one .mrb file anywhere. The project stays where it is."""
+def saveCopyStartFolder():
+    """Folder of the "Save a copy as…" dialog: Exports/ of the open project (A-09, created here: a missing folder makes Qt
+    fall back to the current folder, HOME in the web container or "/" for a Finder-started app), else the last save
+    folder (/data in the web build), else the home folder. Always an existing folder (USABILITY 8, rule 6).
+    """
+    project = projects.currentProject()
+    if project is not None and os.path.isdir(project.path):
+        try:
+            folder = projects.exportsFolder(create=True)
+        except OSError:
+            folder = None
+        if folder and os.path.isdir(folder):
+            return folder
+    lastFolder = str(slicer.util.settingsValue("Studio/LastSaveFolder", "") or "")
+    if lastFolder and os.path.isdir(lastFolder):
+        return lastFolder
+    return qt.QDir.homePath()
+
+
+def writeBundleKeepingState(scene, path):
+    """Write the whole scene as one .mrb file like ``slicer.util.saveScene`` does, but without marking the data "modified".
+
+    The official scene writer (``vtkSlicerSceneWriter::WriteToMRB``) marks every storable node "modified since read" after the
+    bundle is written, because it restores the old file names while the bundle holds the data. For a project that is wrong:
+    the files of the project are unchanged, and the next project save would write every node again (a scan opened as
+    .nii.gz became a second, unreferenced .nrrd file in Images/). This calls ``vtkMRMLScene::WriteToMRB`` directly (what the
+    writer calls, with no screenshot, as ``slicer.util.saveScene`` does) and marks only the nodes that were already modified.
+    Returns True if the bundle was written; failures are logged as ``slicer.util.saveScene`` logs them.
+    """
+    import logging
+
+    import vtk
+
+    from . import autosave_io
+
+    path = os.path.abspath(path)
+    folder = os.path.dirname(path)
+    messages = slicer.vtkMRMLMessageCollection()
+    modified = vtk.vtkCollection()
+    scene.GetStorableNodesModifiedSinceRead(modified)
+    modifiedIds = [modified.GetItemAsObject(i).GetID() for i in range(modified.GetNumberOfItems())]
+    success = False
+    refused = not os.access(folder, os.W_OK)
+    if refused:
+        messages.AddMessage(vtk.vtkCommand.ErrorEvent, f"Failed to save scene as {path} (path {folder} is not writeable)")
+    else:
+        # The scene file name of the bundle is the copy's (the caller restores the project's)
+        scene.SetURL(path)
+        scene.SetRootDirectory(folder)
+        try:
+            with autosave_io.nodesOwnLook():  # Map's lesion outline is a view state, not the lesion's look
+                success = bool(scene.WriteToMRB(path, None, messages))
+        finally:
+            # Writing the data bundle made the nodes look written: the ones that were not saved yet are still to be saved
+            for nodeId in modifiedIds:
+                node = scene.GetNodeByID(nodeId)
+                if node is not None:
+                    node.StorableModified()
+    if not success:
+        text = f"Failed to save scene to file: {path}"
+        if messages.GetNumberOfMessages() > 0:
+            text += "\n" + messages.GetAllMessagesAsString()
+        # An unwritable folder is an expected refusal (the caller tells the user): a warning, not an error badge
+        (logging.warning if refused else logging.error)(text)
+    return success
+
+
+RESCUE_MIN_FREE_BYTES = 50 * 1024 * 1024
+
+
+def _folderLacksRoom(folder):
+    """True if ``folder`` cannot be written or its disk has (almost) no free space."""
+    import shutil
+
+    try:
+        return not os.access(folder, os.W_OK) or shutil.disk_usage(folder).free < RESCUE_MIN_FREE_BYTES
+    except OSError:
+        return True
+
+
+def rescueCopyStartFolder():
+    """Start folder of the rescue copy offered when the project could not be saved: the usual folder of "Save a copy as…",
+    unless that folder cannot be written or its disk is full (the very reason the save failed): then the last save folder
+    or the home folder, whichever has room (never the disk that just refused the save, if another one has room).
+    """
+    folder = saveCopyStartFolder()
+    if not _folderLacksRoom(folder):
+        return folder
+    lastFolder = str(slicer.util.settingsValue("Studio/LastSaveFolder", "") or "")
+    for candidate in (lastFolder, qt.QDir.homePath()):
+        if candidate and os.path.isdir(candidate) and not _folderLacksRoom(candidate):
+            return candidate
+    return folder
+
+
+def _freeBytes(folder):
+    import shutil
+
+    try:
+        return shutil.disk_usage(folder).free
+    except OSError:
+        return None
+
+
+def saveCopyAs(path=None, startFolder=None, exportsExisted=None):
+    """Save a copy as… (Export): the whole scene as one .mrb file anywhere. The project stays where it is.
+    ``startFolder`` is where the dialog starts (default: Exports/ of the project, see ``saveCopyStartFolder``).
+    ``exportsExisted``: whether Exports/ was there before the caller computed ``startFolder`` (which may have created it);
+    None = look now.
+    """
     service = _service()
     mainWindow = slicer.util.mainWindow()
     project = service.currentProject() if service is not None else None
     if path is None:
-        start = os.path.join(projects.exportsFolder(create=False) or os.path.expanduser("~"),
-                             (project.name if project is not None else "Scene") + ".mrb")
+        exports = os.path.join(project.path, projects.EXPORTS) if project is not None else None
+        if exportsExisted is None or exports is None:
+            exportsExisted = exports is None or os.path.isdir(exports)
+        start = os.path.join(startFolder or saveCopyStartFolder(), (project.name if project is not None else "Scene") + ".mrb")
         path = qt.QFileDialog.getSaveFileName(mainWindow, _("Save a copy as"), start, _("Slicer data bundle") + " (*.mrb)")
+        if not exportsExisted and (not path or os.path.realpath(os.path.dirname(os.path.abspath(path))) != os.path.realpath(exports)):
+            try:
+                os.rmdir(exports)  # created for the dialog and not used: never leave an empty folder in a project (A-09)
+            except OSError:
+                pass
         if not path:
             return None
     if not path.lower().endswith(".mrb"):
         path += ".mrb"
     if project is not None:
         service.saveNow("copy", progress=True)
+    wasClean = project is not None and service.isProjectClean()
+    existedBefore = os.path.exists(path)
     scene = slicer.mrmlScene
     url, rootDirectory = scene.GetURL(), scene.GetRootDirectory()
+    written = False
     try:
         with slicer.util.WaitCursor():
-            slicer.util.saveScene(path)
+            written = writeBundleKeepingState(scene, path)
     finally:
         # Writing a .mrb points the scene at the bundle: the scene stays in its project
         scene.SetURL(url)
         scene.SetRootDirectory(rootDirectory)
-    if os.path.isfile(path):
+        if project is not None:
+            service.adoptFingerprintAfterExport(wasClean)  # exporting a copy is not an edit
+    # Success is what the writer returns: an older file of that name is still there when the write failed
+    if written and os.path.isfile(path):
         message(_("Saved a copy as {name}").format(name=os.path.basename(path)), action=lambda: projects.showInFileManager(os.path.dirname(path)),
                 actionText=_("Show"), toolTip=path)
         return path
-    message(_("The copy could not be saved (see the error log)"), level="warning")
+    if not written and not existedBefore:
+        try:
+            os.remove(path)  # a partial bundle (0 bytes on a full disk) is a damaged file: never leave it behind
+        except OSError:
+            pass
+    folder = os.path.dirname(os.path.abspath(path))
+    free = _freeBytes(folder) if os.path.isdir(folder) else None
+    if os.path.isdir(folder) and not os.access(folder, os.W_OK):
+        text = _("The copy could not be saved: the folder {folder} cannot be written").format(folder=folder)
+    elif os.path.isfile(path) and not os.access(path, os.W_OK):
+        text = _("The copy could not be saved: {name} is read-only").format(name=os.path.basename(path))
+    elif free is not None and free < RESCUE_MIN_FREE_BYTES:
+        text = _("The copy could not be saved: the disk of {folder} is full. Choose a folder on another disk.").format(folder=folder)
+    else:
+        text = _("The copy could not be saved (see the error log)")
+    message(text, level="warning", toolTip=path)
     return None
 
 
@@ -439,36 +826,112 @@ def exportProjectAsNifti():
 def showProjectFolder():
     """Show the open project's folder in Finder, Explorer or Files (else the Slicer Studio folder)."""
     project = projects.currentProject()
-    path = project.path if project is not None else projects.root()
+    if project is None:
+        return showRootFolder()
+    path = project.path
     if not os.path.isdir(path):
-        projects.ensureRoot()
+        if not _ensureRootOrTell():
+            return False
     return projects.showInFileManager(path)
 
 
 def showRootFolder():
     root = projects.root()
-    if not os.path.isdir(root):
-        projects.ensureRoot(root)
+    if not os.path.isdir(root) and not _ensureRootOrTell():
+        return False
     return projects.showInFileManager(root)
 
 
-def newProject():
-    """New project (Ctrl+N): the open project is saved and closed; the next data opened or drawn starts the next one."""
-    service = _service()
-    if service is None:
+def _ensureRootOrTell():
+    """Create the Slicer Studio folder if it does not exist yet; a chosen folder that cannot be found (a drive that is not
+    connected) is not created again: the user is told instead. Return True if the folder exists now.
+    """
+    try:
+        projects.ensureRoot()
+    except projects.RootMissingError:
+        change = None if projects.isRootFromEnvironment() else (lambda *_args: changeRootDialog())
+        message(projects.rootMissingText(), level="warning", action=change, actionText=_("Change folder…") if change else None,
+                ms=8000, toolTip=projects.root())
         return False
-    service.newProject()
+    except OSError as error:
+        message(_("The Slicer Studio folder cannot be written ({reason}).").format(reason=(getattr(error, "strerror", None) or str(error)).strip()),
+                level="warning", ms=8000, toolTip=projects.root())
+        return False
     return True
 
 
-def closeScene():
-    """Close scene in Studio (Ctrl+W, File > Close Scene, Search): with a project open, it is saved first and closed (as New
-    project), so 3D Slicer does not ask "Save before closing scene?" about saved work; else the official action.
+def askReplaceUnsavedProject(title, project, reason="", verb="open", notice=""):
+    """The open project could not be saved and another scene is about to replace it (open a project, open a scene file;
+    ``verb`` "close": New project, Close scene; "quit": the application is closed). Ask what to do instead of losing its
+    edits: "save" (a copy was saved with "Save a copy as…"; the open, close or quit goes on), "discard" (go on without
+    saving) or "cancel" (keep working; the default, also Escape). Never the official Save Data dialog: it would write over
+    the project's own files in place, which on a full disk truncates the files saved before. ``notice`` (a running job
+    that is stopped) comes first.
+    """
+    reason = reason or _("see the error log")
+    if project is None:
+        # No project (the Slicer Studio folder cannot be written): the scene was never saved by Studio
+        if verb == "quit":
+            text = _("The scene could not be saved: {reason}. Quitting now discards its changes.").format(reason=reason)
+        elif verb == "close":
+            text = _("The scene could not be saved: {reason}. Closing it now discards its changes.").format(reason=reason)
+        else:
+            text = _("The scene could not be saved: {reason}. Opening now discards its changes.").format(reason=reason)
+    else:
+        name = project.relativeName()
+        if verb == "quit":
+            text = _("{project} could not be saved: {reason}. Quitting now discards its changes since the last save.").format(project=name, reason=reason)
+        elif verb == "close":
+            text = _("{project} could not be saved: {reason}. Closing it now discards its changes since the last save.").format(project=name, reason=reason)
+        else:
+            text = _("{project} could not be saved: {reason}. Opening now discards its changes since the last save.").format(project=name, reason=reason)
+    goOn = {"quit": _("Quit without saving"), "close": _("Close without saving")}.get(verb, _("Open without saving"))
+    if notice:
+        text = f"{notice}\n\n{text}"
+    while True:
+        answer = _question(slicer.util.mainWindow(), title, text, [_("Save a copy…"), goOn, _("Keep working")], default=2)
+        if answer == 1:
+            return "discard"
+        if answer != 0:
+            return "cancel"
+        project = projects.currentProject()
+        exportsBefore = project is None or os.path.isdir(os.path.join(project.path, projects.EXPORTS))
+        if saveCopyAs(startFolder=rescueCopyStartFolder(), exportsExisted=exportsBefore):
+            return "save"
+        # The copy was not saved (cancelled or failed): ask again, the edits are still only in memory
+
+
+def _confirmStopRun(title):
+    """True if no Map network / Normalize run would be stopped by closing the scene, or the user accepts stopping it."""
+    from . import firstrun
+
+    notice = firstrun.runningJobNotice(sceneOnly=True)
+    if not notice:
+        return True
+    return _question(slicer.util.mainWindow(), title, notice, [_("Stop and continue"), _("Cancel")], default=1) == 0
+
+
+def newProject():
+    """New project (Ctrl+N): the open project is saved and closed; the next data opened or drawn starts the next one.
+    A Map network or Normalize run that is going is stopped with the scene: the user is asked first.
     """
     service = _service()
-    if service is not None and service.currentProject() is not None:
-        service.newProject()
-        return True
+    if service is None:
+        return False
+    if not _confirmStopRun(_("New project")):
+        return False
+    return service.newProject() is not False
+
+
+def closeScene():
+    """Close scene in Studio (Ctrl+W, File > Close Scene, Search): with a project or a study open, it is saved first and closed (as New
+    project), so 3D Slicer does not ask "Save before closing scene?" about saved work; else the official action.
+    """
+    if not _confirmStopRun(_("Close scene")):
+        return False
+    service = _service()
+    if service is not None and (service.currentProject() is not None or service._studyOpen() or service.ensureProject() is not None):
+        return service.newProject(title=_("Close scene")) is not False
     mainWindow = slicer.util.mainWindow()
     action = mainWindow.findChild(qt.QAction, "FileCloseSceneAction") if mainWindow is not None else None
     if action is None:
@@ -491,7 +954,7 @@ class _CloseSceneMenuFilter(qt.QObject):
         if action is None or action.property("objectName") != "FileCloseSceneAction" or not action.isEnabled():
             return False
         service = _service()
-        if service is None or service.currentProject() is None:
+        if service is None or (service.currentProject() is None and not service._studyOpen()):
             return False
         for _attempt in range(5):
             popup = qt.QApplication.activePopupWidget()
@@ -502,20 +965,34 @@ class _CloseSceneMenuFilter(qt.QObject):
         return True
 
 
+#: The folder (normalized) that openProject is loading right now, None when no project is being opened. The project is only
+#: attached when the scene load has finished, and the load processes timer events, so a second click on the same card (its
+#: release is handled from a 0 ms timer) would otherwise load the whole scene again.
+_openingPath = None
+
+
 def openProject(path, shell=None):
     """Open a project folder: the open project is saved first; in Studio the project is shown in Library (Continue in Draw
-    goes on), and opening the open project again goes to Draw.
+    goes on), and opening the open project again goes to Draw. A request that arrives while a project is being opened (a
+    double click on a card) is ignored: the project loads once.
     """
+    global _openingPath
     service = _service()
     if service is None:
         return False
+    if _openingPath is not None:
+        return os.path.normcase(os.path.realpath(path)) == _openingPath
     shell = shell or _shell()
     if service.currentProject() is not None and os.path.normcase(os.path.realpath(service.currentProject().path)) == os.path.normcase(os.path.realpath(path)):
         if shell is not None:
             shell.switchTo("draw")
         return True
-    with slicer.util.WaitCursor():
-        opened = service.openProject(path)
+    _openingPath = os.path.normcase(os.path.realpath(path))
+    try:
+        with slicer.util.WaitCursor():
+            opened = service.openProject(path)
+    finally:
+        _openingPath = None
     if opened and shell is not None and shell.currentWorkspace() != "library":
         # The project is shown in Library (its Current work card has "Continue in Draw")
         shell.switchTo("library")
@@ -530,7 +1007,7 @@ def openProjectDialog():
     if not path:
         return False
     if projects.sceneFile(path) is None:
-        slicer.util.errorDisplay(_("{folder} is not a project: it has no scene file (.mrml).").format(folder=path))
+        _notice(None, _("Open project"), _("{folder} is not a project: it has no scene file (.mrml).").format(folder=path))
         return False
     return openProject(path)
 
@@ -544,10 +1021,17 @@ def renameDialog(path=None, parent=None):
         path = project.path
     current = project is not None and os.path.normcase(os.path.realpath(project.path)) == os.path.normcase(os.path.realpath(path))
     name = os.path.basename(os.path.normpath(path))
-    newName = qt.QInputDialog.getText(parent or slicer.util.mainWindow(), _("Rename project"), _("Name:"), qt.QLineEdit.Normal, name)
-    if isinstance(newName, tuple):
-        newName = newName[0]
-    newName = projects.sanitizeName(newName) if newName and str(newName).strip() else ""
+    dialog = RenameDialog(name, parent)
+    try:
+        newName = dialog.run()
+    finally:
+        dialog.deleteLater()
+    typed = newName if newName and str(newName).strip() else ""
+    # fallback="": a name of only forbidden characters or dots is refused, not renamed to "Untitled project" (which the user did not type)
+    newName = projects.sanitizeName(typed, fallback="") if typed else ""
+    if typed and not newName:
+        _notice(parent, _("Rename project"), _("These characters cannot be used in a name: / \\ : * ? \" < > |. Type a name with letters or numbers."))
+        return None
     if not newName or newName == name:
         return None
     try:
@@ -557,7 +1041,9 @@ def renameDialog(path=None, parent=None):
             else:
                 newPath = projects.renameFolder(path, newName)
     except (projects.ProjectError, OSError) as error:
-        slicer.util.errorDisplay(str(error))
+        from .autosave import plainOSError
+
+        _notice(parent, _("Rename project"), plainOSError(error) if isinstance(error, OSError) else str(error))
         return None
     projects.notifyChanged()
     message(_("Renamed to {name}").format(name=os.path.basename(newPath)))
@@ -565,18 +1051,48 @@ def renameDialog(path=None, parent=None):
 
 
 def duplicate(path):
+    """Duplicate: copy the project folder ``path`` to "<name> copy". The open project is saved first (as Rename, Open
+    project and Save a copy as… do), so the copy holds what the user sees, not the last autosave. Return the new folder,
+    or None if the open project could not be saved (nothing is copied then).
+    """
+    project = projects.currentProject()
+    service = _service()
+    if (service is not None and project is not None
+            and os.path.normcase(os.path.realpath(project.path)) == os.path.normcase(os.path.realpath(path))):
+        if not service.saveNow("duplicate", progress=True):
+            reason = service._projectPausedReason or _("see the error log")
+            message(_("Not duplicated: the project could not be saved first ({reason})").format(reason=reason), level="warning",
+                    action=lambda: duplicate(path), actionText=_("Retry"), ms=8000)
+            return None
+        from . import autosave_io
+
+        # The copy starts from the project files just written (as Rename does)
+        autosave_io.backgroundWriter().drain(10.0)
+
     def done(newPath):
         projects.notifyChanged()
         message(_("Duplicated as {name}").format(name=os.path.basename(newPath)))
 
     def failed(error):
-        message(_("The project could not be duplicated: {error}").format(error=error), level="warning", ms=8000)
+        projects.notifyChanged()
+        if isinstance(error, projects.ProjectError):
+            text = str(error)  # in plain words, without paths
+        else:
+            logging.error(f"Slicer Studio: Duplicate of {path} failed: {error!r}")
+            reason = getattr(error, "strerror", None) or _("see the error log")
+            text = _("The project could not be duplicated: {reason}").format(reason=reason)
+        message(text, level="warning", ms=8000)
 
-    projects.duplicateFolder(path, onDone=done, onError=failed)
+    return projects.duplicateFolder(path, onDone=done, onError=failed)
 
 
 def moveToTrash(path, parent=None):
     name = os.path.basename(os.path.normpath(path))
+    # The open project and one open in another Slicer Studio cannot be moved: say so before asking, not after the answer
+    refusal = projects.trashRefusal(path)
+    if refusal:
+        _notice(parent, _("Move to Trash"), refusal)
+        return False
     if _question(parent, _("Move to Trash"), _("Move the project {name} to the Trash?").format(name=name), [_("Move to Trash"), _("Cancel")]) != 0:
         return False
 
@@ -587,7 +1103,7 @@ def moveToTrash(path, parent=None):
     try:
         gone = projects.trashFolder(path, confirmDelete)
     except (projects.ProjectError, OSError) as error:
-        slicer.util.errorDisplay(str(error))
+        _notice(parent, _("Move to Trash"), str(error))
         return False
     if gone:
         projects.notifyChanged()
@@ -639,51 +1155,129 @@ def _studyOpen():
 
 
 def changeRootDialog(parent=None):
-    """Change… of Settings › Saving: choose another folder; offer to move the projects and studies there."""  # noqa: RUF002
+    """Change… of Settings › Saving: choose another folder; offer to move the projects, studies and templates there."""  # noqa: RUF002
     if projects.isRootFromEnvironment():
-        slicer.util.errorDisplay(_("The folder is set by the {variable} environment variable.").format(variable=projects.ROOT_ENVIRONMENT))
+        _notice(parent, _("Change the Slicer Studio folder"),
+                _("The folder is set by the {variable} environment variable.").format(variable=projects.ROOT_ENVIRONMENT))
         return None
     oldRoot = projects.root()
-    dialog = FolderChooserDialog(parent, proposal=oldRoot)
+    dialog = FolderChooserDialog(parent, proposal=oldRoot, cancellable=True)
     dialog.setWindowTitle(_("Change the Slicer Studio folder"))
     dialog.continueButton.setText(_("Use this folder"))
     dialog.choose()
     run = getattr(dialog, "exec", None) or dialog.exec_
     run()
     newRoot = dialog.path
+    cancelled = getattr(dialog, "cancelled", False) is True
     dialog.deleteLater()
+    if cancelled:
+        return None
     if os.path.normcase(os.path.realpath(newRoot)) == os.path.normcase(os.path.realpath(oldRoot)):
+        if projects.isRootMissing():
+            # The folder that cannot be found, chosen again: the user wants it here (created again, empty)
+            try:
+                projects.ensureRoot(oldRoot, recreate=True)
+            except OSError as error:
+                _notice(parent, _("Change the Slicer Studio folder"), _("The folder {path} cannot be used: {reason}").format(
+                    path=oldRoot, reason=(getattr(error, "strerror", None) or str(error)).strip()))
+                return None
+            projects.notifyChanged()
+            return oldRoot
         return None
     move = False
-    if projects.hasContent(oldRoot):
+    hasContent = projects.hasContent(oldRoot)
+    if hasContent:
+        try:
+            projects.checkMoveTarget(oldRoot, newRoot)
+        except OSError as error:
+            _notice(parent, _("Change the Slicer Studio folder"), str(error))
+            return None
         if _studyOpen():
-            slicer.util.infoDisplay(_("Close the open study first: its files are in the Slicer Studio folder."),
-                                    windowTitle=_("Change the Slicer Studio folder"))
+            _notice(parent, _("Change the Slicer Studio folder"),
+                    _("Close the open study first: its files are in the Slicer Studio folder."))
+            return None
+        try:
+            # A project or study open in another Slicer Studio would move away from under it (and drop out of its Library)
+            projects.checkNotOpenElsewhere(oldRoot)
+            # A running job that writes into the folder (a connectome download into LNM/Connectomes) would fail and re-create it
+            projects.checkNoJobsUsing(oldRoot)
+        except OSError as error:
+            _notice(parent, _("Change the Slicer Studio folder"), str(error))
+            return None
+        # The new folder is made and checked before the question and before anything moves or the setting changes, as the
+        # first-start chooser does: a folder that cannot be written (a read-only drive) is refused right away
+        existed = _rootTraces(newRoot)
+        if not _usableOrNotice(parent, newRoot):
+            _undoRootTraces(newRoot, existed)
             return None
         answer = _question(parent, _("Change the Slicer Studio folder"),
-                           _("Move your projects and studies to the new folder?\n\n{old}\n→ {new}").format(old=oldRoot, new=newRoot),
+                           _("Move your projects, studies and templates to the new folder?\n\n{old}\n→ {new}").format(old=oldRoot, new=newRoot),
                            [_("Move"), _("Keep them where they are"), _("Cancel")])
         if answer in (-1, 2):
+            # Cancel leaves everything as it was: the folder and its About file made just for the question go again
+            _undoRootTraces(newRoot, existed)
             return None
         move = answer == 0
+    elif not _usableOrNotice(parent, newRoot):
+        return None
     service = _service()
+    renamed = {}
     try:
         if service is not None:
             moved = service.moveRoot(newRoot, moveContent=move,
                                      run=lambda function: _runWithProgress(function, _("Moving your projects and studies…"), parent))
+            renamed = dict(getattr(service, "lastMoveRenamed", None) or {})
         else:
-            moved = _runWithProgress(lambda: projects.moveContent(oldRoot, newRoot), _("Moving your projects and studies…"), parent) if move else []
+            renamedIds = {}
+            moved = _runWithProgress(lambda: projects.moveContent(oldRoot, newRoot, renamed=renamed, renamedIds=renamedIds),
+                                     _("Moving your projects and studies…"), parent) if move else []
+            if moved:
+                # Paths kept in the settings follow what moved, as moveRoot does (recent studies, registered connectomes...)
+                from . import autosave, templates
+
+                autosave._updateRecentStudies(oldRoot, newRoot, renamed)
+                autosave._updateMovedPathSettings(oldRoot, newRoot, moved, renamed)
+                templates.followRenamedIds(renamedIds)
             projects.setRoot(newRoot)
-        projects.ensureRoot(newRoot)
+        projects.ensureRoot(newRoot, recreate=True)
+    except projects.OpenElsewhereError as error:
+        # Refused before anything was moved (opened elsewhere after the check above)
+        _notice(parent, _("Change the Slicer Studio folder"), str(error))
+        projects.notifyChanged()
+        return None
     except OSError as error:
-        slicer.util.errorDisplay(_("Your projects could not all be moved: {error}\nWhat was moved is in the new folder; the folder setting is "
-                                   "unchanged.").format(error=error))
+        _notice(parent, _("Change the Slicer Studio folder"),
+                _("Your projects could not all be moved: {error}\nWhat was moved is in the new folder; the folder setting is "
+                  "unchanged.").format(error=error))
         projects.notifyChanged()
         return None
     projects.notifyChanged()
-    if moved:
+    partial = projects.partialMove()
+    if partial is not None:
+        # What an earlier move that failed partway put in another folder stays there (``projects.setRoot``)
+        text = _("Some of your projects and studies are still in {folder}: Library lists them. To bring them together, "
+                 "choose that folder in Settings › Saving and move.").format(folder=projects.shortPath(partial[1]))  # noqa: RUF001
+        if moved:
+            text = _("Moved to {folder}.").format(folder=projects.shortPath(newRoot)) + " " + text
+        message(text, "warning", toolTip=partial[1], ms=8000)
+    elif moved and renamed:
+        # Items whose names the new folder already had: the user's names (and notes) now mean the items there
+        text = _("Moved to {folder}.").format(folder=projects.shortPath(newRoot)) + " " + _movedUnderOtherNamesText(renamed)
+        message(text, "warning", toolTip=newRoot, ms=10000, sticky=True)
+    elif moved:
         message(_("Moved to {folder}").format(folder=projects.shortPath(newRoot)), toolTip=newRoot)
     return newRoot
+
+
+def _movedUnderOtherNamesText(renamed, limit=4):
+    """The message naming the items that a move put under another name because the new folder had theirs (``renamed``:
+    ``{relative old path: relative new path}``, as ``projects.moveContent`` fills it): "“LNM” is now “LNM 3”".
+    """
+    pairs = sorted((os.path.basename(os.path.normpath(old)), os.path.basename(os.path.normpath(new))) for old, new in renamed.items())
+    items = [_("“{old}” is now “{new}”").format(old=old, new=new) for old, new in pairs[:limit]]
+    if len(pairs) > limit:
+        items.append(_("{count} more").format(count=len(pairs) - limit))
+    return _("The new folder already had these names, so they were renamed: {items}.").format(items=", ".join(items))
 
 
 #
@@ -691,7 +1285,28 @@ def changeRootDialog(parent=None):
 #
 
 
-class _ClickFilter(qt.QObject):
+class _DoubleClickGuard:
+    """A double click on a card opens it once: Qt reports the second press as MouseButtonDblClick, and the release that
+    follows it must not open the card again. A real double click is handled in an idle event loop only after the first
+    click's open has loaded the project, so the release of the second click would otherwise queue a second open that runs
+    after whatever the user did meanwhile (Ctrl+N: New project closes the project, and the second open then reopens it).
+    """
+
+    _secondReleaseDue = False
+
+    def isSecondClickRelease(self, eventType, event):
+        """True for the left release that ends a double click; the press and double click events set and clear the state."""
+        if eventType == qt.QEvent.MouseButtonDblClick and event.button() == qt.Qt.LeftButton:
+            self._secondReleaseDue = True
+        elif eventType == qt.QEvent.MouseButtonPress:
+            self._secondReleaseDue = False
+        elif eventType == qt.QEvent.MouseButtonRelease and event.button() == qt.Qt.LeftButton and self._secondReleaseDue:
+            self._secondReleaseDue = False
+            return True
+        return False
+
+
+class _ClickFilter(_DoubleClickGuard, qt.QObject):
     """Left click opens a project card; the context menu shows its actions. A resized card elides its texts, and a
     resized section lays its cards out again (the number of columns follows the width).
     """
@@ -702,12 +1317,18 @@ class _ClickFilter(qt.QObject):
 
     def eventFilter(self, obj, event):
         eventType = event.type()
+        if eventType == qt.QEvent.Show and obj == self.section.widget:
+            self.section.onShown()
+            return False
         if eventType == qt.QEvent.Resize:
             if obj == self.section.widget:
                 self.section.updateColumns()
             else:
                 self.section.elideCard(obj)
             return False
+        if self.isSecondClickRelease(eventType, event):
+            # The release that ends a double click: the first click opened the card
+            return bool(obj.property("studioProjectPath"))
         if eventType == qt.QEvent.MouseButtonRelease and event.button() == qt.Qt.LeftButton:
             path = obj.property("studioProjectPath")
             if path:
@@ -721,7 +1342,8 @@ class _ClickFilter(qt.QObject):
         return False
 
 
-#: Project cards (VISUAL 4.2): a 128 px black thumbnail and a 52 px body; 4 columns from 1000 px, else 3 (2 when narrow)
+#: Project cards (VISUAL 4.2): a 128 px black thumbnail and a 52 px body (at the 14 px default application font: the body
+#: grows with the text when the application font is larger, USABILITY 9.4); 4 columns from 1000 px, else 3 (2 when narrow)
 CARD_THUMBNAIL_HEIGHT = 128
 CARD_BODY_HEIGHT = 54
 CARD_SPACING = 16
@@ -739,6 +1361,11 @@ SORT_KEY = "Studio/Library/ProjectSort"
 VIEW_KEY = "Studio/Library/ProjectView"
 SORT_ORDERS = (("modified", "Last edited"), ("name", "Name"), ("created", "Created"))
 VIEWS = ("grid", "list")
+
+
+def _emptyText():
+    """The Projects section without a project."""
+    return _("Open a scan or start on the template: your work is saved here as a project.")
 
 
 def projectColumns(width):
@@ -865,7 +1492,7 @@ class ProjectsSection(qt.QObject):
         self.grid.setVerticalSpacing(CARD_SPACING)
         layout.addLayout(self.grid)
         self.listLayout = self.grid
-        self.emptyLabel = qt.QLabel(_("Open a scan or start on the template: your work is saved here as a project."))
+        self.emptyLabel = qt.QLabel(_emptyText())
         self.emptyLabel.setObjectName("studioProjectsEmpty")
         self.emptyLabel.setWordWrap(True)
         ui.setText(self.emptyLabel, "caption")
@@ -873,8 +1500,18 @@ class ProjectsSection(qt.QObject):
         self._showAll = False
         self._signature = None
         self._cards = []
+        #: The key of each card in ``_cards`` (what the card shows): a refresh keeps the cards whose key is unchanged
+        self._cardKeys = []
         self._columns = 0
         self._infos = []
+        #: Set by the Library canvas: a scheduled refresh (a project was saved, the folder changed) waits while the section
+        #: is not on screen, and runs when it is shown (listing and rebuilding the cards of a Library of many projects
+        #: stalls the application, for example while drawing)
+        self.deferWhenHidden = False
+        self._stale = False
+        #: Called (no arguments) each time the projects were listed again: the Library canvas shows the open project on its
+        #: Continue card, which must follow the project that a load creates or a listener change renames
+        self.onRefreshed = None
         self._clickFilter = _ClickFilter(self)
         self.widget.installEventFilter(self._clickFilter)
         # The Python event filter must be gone before the interpreter is finalized (the section may outlive the shell, a
@@ -886,8 +1523,14 @@ class ProjectsSection(qt.QObject):
         self._timer.setInterval(REFRESH_DELAY_MS)
         self._timer.connect("timeout()", self.refresh)
         projects.addListener(self.scheduleRefresh)
+        # Projects that another window (or a file manager, a sync service) creates, renames or removes in the folder
+        self._watcher = qt.QFileSystemWatcher()
+        self._watcher.connect("directoryChanged(QString)", self._folderChanged)
+        self._watchedFolder = None
         ui.bindStyleSheet(self.widget, self._styleSheet)
         ui.addPaletteListener(self._refreshIcons)
+        # Listeners run after the fonts of the Studio widgets followed the application font
+        ui.addPaletteListener(self._fitCards)
         self._refreshIcons()
         self._updateSortText()
         self.refresh()
@@ -914,11 +1557,15 @@ class ProjectsSection(qt.QObject):
             f"QFrame#studioProjectCard:hover {{ border-color: {t['text3']}; }}"
             f"QFrame#studioProjectCard:focus {{ border: 2px solid {t['accent-fg']}; }}"
             f"QFrame#studioProjectCard[studioCurrent=\"true\"] {{ border: 2px solid {t['accent']}; }}"
+            # The open project's card keeps its accent border, so the focus ring needs another colour: the text colour (the
+            # accent and accent-fg are too alike in the light theme). These rules come after the studioCurrent ones.
+            f"QFrame#studioProjectCard[studioCurrent=\"true\"]:focus {{ border: 2px solid {t['text']}; }}"
             # List rows: 44 px, a hairline between them, the hover fill; the open project in the accent
             f'QFrame#studioProjectCard[studioProjectView="list"] {{ border: none; border-radius: 8px; background-color: transparent; }}'
             f'QFrame#studioProjectCard[studioProjectView="list"]:hover {{ background-color: {t["control-hover"]}; }}'
             f'QFrame#studioProjectCard[studioProjectView="list"]:focus {{ border: 2px solid {t["accent-fg"]}; }}'
             f'QFrame#studioProjectCard[studioProjectView="list"][studioCurrent="true"] {{ border: 1px solid {t["accent"]}; }}'
+            f'QFrame#studioProjectCard[studioProjectView="list"][studioCurrent="true"]:focus {{ border: 2px solid {t["text"]}; }}'
             f"QLabel#studioProjectCardName {{ color: {t['text']}; background: transparent; border: none; }}"
             f"QLabel#studioProjectCardMeta {{ color: {t['text3']}; background: transparent; border: none; }}"
             "QLabel#studioProjectCardThumbnail { background-color: #000000; border: none; border-top-left-radius: 11px; border-top-right-radius: 11px; }"
@@ -964,9 +1611,44 @@ class ProjectsSection(qt.QObject):
         self._signature = None
         self.refresh()
 
+    def _isOnHold(self):
+        """True while the section is deferring its scheduled refreshes and is not on screen (its parent is not visible)."""
+        if not self.deferWhenHidden:
+            return False
+        parent = self.widget.parentWidget()
+        return parent is not None and not parent.isVisible()
+
     def scheduleRefresh(self):
-        if _isAlive(self.widget):
-            self._timer.start()
+        if not _isAlive(self.widget):
+            return
+        if self._isOnHold():
+            # Listed again when the section is shown (or by the Library, which refreshes when it is entered)
+            self._timer.stop()
+            self._stale = True
+            return
+        self._timer.start()
+
+    def onShown(self):
+        """The section is on screen: list the projects again if something changed while it was hidden."""
+        if self._stale:
+            self.scheduleRefresh()
+
+    def _folderChanged(self, *_args):
+        self.scheduleRefresh()
+
+    def _watchFolder(self):
+        """Watch the Projects folder (the Slicer Studio folder while Projects/ does not exist yet)."""
+        folder = projects.projectsFolder()
+        if not os.path.isdir(folder):
+            folder = projects.root()
+        if folder == self._watchedFolder and list(self._watcher.directories()):
+            return
+        old = list(self._watcher.directories())
+        if old:
+            self._watcher.removePaths(old)
+        self._watchedFolder = folder
+        if os.path.isdir(folder):
+            self._watcher.addPath(folder)
 
     def toggleAll(self):
         self._showAll = not self._showAll
@@ -975,11 +1657,26 @@ class ProjectsSection(qt.QObject):
 
     def captionText(self):
         root = projects.root()
+        if projects.isRootMissing():
+            return _("Autosave paused: {folder} cannot be found").format(folder=projects.shortPath(root))
+        service = _service()
+        if service is not None and service.rootUnwritable():
+            return _("Autosave paused: {folder} cannot be written").format(folder=projects.shortPath(root))
         return _("Saved automatically in {folder}").format(folder=projects.shortPath(root))
 
     def currentInfo(self):
-        """The ``projects.ProjectInfo`` of the open project among the listed ones, or None."""
-        return next((info for info in self._infos if info.isCurrent()), None)
+        """The ``projects.ProjectInfo`` of the open project among the listed ones, or None.
+
+        An open project that is not in the listed folder (a Change folder > Move that failed partway: the project was followed
+        into the new folder while the setting still points at the old one) is read from where it is.
+        """
+        listed = next((info for info in self._infos if info.isCurrent()), None)
+        if listed is not None:
+            return listed
+        current = projects.currentProject()
+        if current is not None and os.path.isdir(current.path):
+            return projects.ProjectInfo(current.path)
+        return None
 
     def _shownCount(self, total):
         if self._showAll:
@@ -997,31 +1694,60 @@ class ProjectsSection(qt.QObject):
         self.widget.setVisible(enabled)
         if not enabled:
             return
+        self._stale = False
+        self._timer.stop()
         self.caption.setText(self.captionText())
         self.caption.setToolTip(projects.root())
+        self._watchFolder()
         infos = sortProjects(projects.listProjects(), self.sortOrder)
         self._infos = infos
+        if self.onRefreshed is not None:
+            try:
+                self.onRefreshed()
+            except Exception:
+                logging.error(f"Studio Projects: the refresh callback failed:\n{traceback.format_exc()}")
         shown = infos[:self._shownCount(len(infos))]
-        signature = (self.viewMode, tuple((info.path, info.modified, info.isCurrent(), tuple(sorted(info.views.items())),
-                                           tuple(sorted(info.counts.items()))) for info in shown))
+        keys = [self._cardKey(info) for info in shown]
+        signature = (self.viewMode, tuple(keys))
         self.countLabel.setText(str(len(infos)) if infos else "")
         self.showAllButton.setVisible(len(infos) > len(shown) or self._showAll)
         self.showAllButton.setText(_("Show fewer") if self._showAll else _("Show all ({count})").format(count=len(infos)))
+        # A chosen folder that cannot be found (its drive is not connected) lists no project: say so, not "nothing yet"
+        self.emptyLabel.setText(projects.rootMissingText() if projects.isRootMissing() else _emptyText())
         self.emptyLabel.setVisible(not infos)
         self.sortButton.setVisible(len(infos) > 1)
         self.viewToggle.setVisible(bool(infos))
         if signature == self._signature:
             return
         self._signature = signature
-        for card in self._cards:
-            self.grid.removeWidget(card)
-            card.hide()
-            card.setObjectName("")
-            card.deleteLater()
-        self._cards = []
-        for info in shown:
-            self._cards.append(self._row(info) if self.viewMode == "list" else self._card(info))
+        # Only the cards of projects that changed are built again (saving the open project changes its card only)
+        kept = {key: card for key, card in zip(self._cardKeys, self._cards, strict=False) if _isAlive(card)}
+        cards = [kept.pop(key, None) for key in keys]
+        for card in kept.values():
+            self._discard(card)
+        for card in cards:
+            if card is not None:
+                self.grid.removeWidget(card)
+        for index, (info, card) in enumerate(zip(shown, cards, strict=True)):
+            if card is None:
+                cards[index] = self._row(info) if self.viewMode == "list" else self._card(info)
+        self._cards = cards
+        self._cardKeys = keys
         self._placeCards(force=True)
+
+    def _cardKey(self, info):
+        """What a card shows (the view, the path, the last edit and how long ago that was, whether the project is open, its
+        views and counts). The relative time is part of the key: it changes with the clock, not with the project, and a
+        card kept while the app runs for hours would otherwise say "just now" for ever.
+        """
+        return (self.viewMode, info.path, info.modified, _relativeTime(info.modified) if info.modified else "", info.isCurrent(),
+                tuple(sorted(info.views.items())), tuple(sorted(info.counts.items())))
+
+    def _discard(self, card):
+        self.grid.removeWidget(card)
+        card.hide()
+        card.setObjectName("")
+        card.deleteLater()
 
     def updateColumns(self):
         """Lay the cards out again when the width calls for another number of columns."""
@@ -1041,6 +1767,9 @@ class ProjectsSection(qt.QObject):
         for column in range(4):
             self.grid.setColumnStretch(column, 1 if column < columns else 0)
         self.grid.setVerticalSpacing(2 if self.viewMode == "list" else CARD_SPACING)
+        # Qt's focus chain is the creation order of the widgets, and a refresh keeps cards and builds only the changed ones
+        # (the card of the saved project is the last widget created, and is shown first): Tab follows the cards as shown
+        ui.arrangeTabOrder(self.widget)
 
     def _thumbnail(self, info):
         return _scaledThumbnail(info.thumbnail, 4 * CARD_THUMBNAIL_HEIGHT // 3, CARD_THUMBNAIL_HEIGHT - 2, self._pixmaps)
@@ -1084,7 +1813,6 @@ class ProjectsSection(qt.QObject):
 
     def _card(self, info):
         card = self._newCard(info, "grid")
-        card.setFixedHeight(CARD_THUMBNAIL_HEIGHT + CARD_BODY_HEIGHT)
         card.setMinimumWidth(CARD_MIN_WIDTH)
         card.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
         layout = qt.QVBoxLayout(card)
@@ -1118,7 +1846,30 @@ class ProjectsSection(qt.QObject):
         layout.addWidget(body)
         for widget in (thumbnail, body, name, metaLabel):
             widget.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
+        self.fitCardHeight(card)
         return card
+
+    @staticmethod
+    def fitCardHeight(card):
+        """Give a grid card the height of its thumbnail and its body (128 + 54 px at the default application font).
+
+        The body (the name and the meta line) follows the application font (USABILITY 9.4): a fixed 54 px body squeezed
+        the body layout at a larger font, so the name slid under the thumbnail. The card grows by what the body needs
+        beyond 54 px.
+        """
+        body = card.findChild("QWidget", "studioProjectCardBody")
+        if body is None:
+            return
+        extra = max(0, body.sizeHint.height() - CARD_BODY_HEIGHT)
+        height = CARD_THUMBNAIL_HEIGHT + CARD_BODY_HEIGHT + extra
+        if card.minimumHeight != height or card.maximumHeight != height:
+            card.setFixedHeight(height)
+
+    def _fitCards(self):
+        """After an application font change: the cards follow the size of their texts."""
+        for card in self.cards():
+            if card.property("studioProjectView") == "grid":
+                self.fitCardHeight(card)
 
     def _row(self, info):
         """A 44 px row of the list view: a 40 x 30 thumbnail, the name, the meta line and an "Open" chip."""
@@ -1157,14 +1908,29 @@ class ProjectsSection(qt.QObject):
             widget.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
         return card
 
+    @staticmethod
+    def _gridTextWidth(card):
+        """The room of the texts of a grid card, from the card's width (its label is laid out after the resize event): the
+        card's contents rectangle (inside the border), minus the margins of the card's layout and of the body's layout.
+        """
+        width = card.contentsRect().width()
+        for widget in (card, card.findChild("QWidget", "studioProjectCardBody")):
+            layout = widget.layout() if widget is not None else None
+            if layout is not None:
+                margins = layout.contentsMargins()
+                width -= margins.left() + margins.right()
+        return width
+
     def elideCard(self, card):
         """Elide the name and the meta line of a card to its width (the full texts are the ``fullText`` properties)."""
         for label in card.findChildren("QLabel"):
             text = label.property("fullText")
             if text is None:
                 continue
-            width = max(0, (label.width if card.property("studioProjectView") == "list" else card.width - 26))
-            elided = qt.QFontMetrics(label.font).elidedText(str(text), qt.Qt.ElideRight, width)
+            width = max(0, (label.width if card.property("studioProjectView") == "list" else self._gridTextWidth(card)))
+            # The name is elided in the middle so that a ' copy' / ' copy 2' / ' 2' suffix stays visible.
+            mode = qt.Qt.ElideMiddle if label.objectName == "studioProjectCardName" else qt.Qt.ElideRight
+            elided = qt.QFontMetrics(label.font).elidedText(str(text), mode, width)
             if label.text != elided:
                 label.setText(elided)
 
@@ -1216,6 +1982,11 @@ class ProjectsSection(qt.QObject):
         projects.removeListener(self.scheduleRefresh)
         ui.removePaletteListener(self._refreshIcons)
         self._timer.stop()
+        try:
+            self._watcher.disconnect("directoryChanged(QString)", self._folderChanged)
+            self._watcher.removePaths(list(self._watcher.directories()))
+        except Exception:
+            pass
         try:
             slicer.app.disconnect("aboutToQuit()", self._removeEventFilters)
         except Exception:
@@ -1358,8 +2129,27 @@ class StudiesSection(qt.QObject):
         self._signature = None
         self._clickFilter = _StudyClickFilter(self)
         slicer.app.connect("aboutToQuit()", self._removeEventFilters)
+        # The folder of the studies changes with Change folder > Move (or Use the folder), which notifies the listeners: the
+        # list follows it at once instead of when the Library is entered again (BB-1). Debounced: saves notify as well.
+        self._timer = qt.QTimer()
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(REFRESH_DELAY_MS)
+        self._timer.connect("timeout()", self.refresh)
+        projects.addListener(self.scheduleRefresh)
+        # Closing or opening a study notifies only study_ui's listeners, not the projects ones: follow them too, so the
+        # study just closed is listed at once (it is then in the recent studies) instead of after leaving the Library.
+        self._studyUi = None
+        try:
+            from . import study_ui
+            self._studyUi = study_ui
+            study_ui.addListener(self._onStudyChanged)
+        except Exception:
+            logging.error(f"Studio: the studies list cannot follow the study:\n{traceback.format_exc()}")
         ui.bindStyleSheet(self.widget, self._styleSheet)
         self.refresh()
+
+    def _onStudyChanged(self, _session=None):
+        self.scheduleRefresh()
 
     @staticmethod
     def _styleSheet():
@@ -1377,12 +2167,18 @@ class StudiesSection(qt.QObject):
     def cards(self):
         return [card for card in self._cards if _isAlive(card)]
 
+    def scheduleRefresh(self):
+        if _isAlive(self.widget):
+            self._timer.start()
+
     def refresh(self):
         if not _isAlive(self.widget):
             return
         folders = studyFolders()
         summaries = [(folder, studySummary(folder)) for folder in folders]
-        signature = tuple((folder, tuple(sorted(summary.items()))) for folder, summary in summaries)
+        # The relative time ("Edited 3 h ago") follows the clock, so it is part of what a card shows
+        signature = tuple((folder, tuple(sorted(summary.items())), _relativeTime(summary["modified"]) if summary["modified"] else "")
+                          for folder, summary in summaries)
         self.widget.setVisible(bool(summaries))
         if signature == self._signature:
             return
@@ -1445,7 +2241,7 @@ class StudiesSection(qt.QObject):
         when = _relativeTime(summary["modified"]) if summary["modified"] else ""
         parts = [_("Edited {when}").format(when=when) if when else ""]
         if summary["review"]:
-            parts.append(_("{count} need review").format(count=summary["review"]))
+            parts.append(_("1 needs review") if summary["review"] == 1 else _("{count} need review").format(count=summary["review"]))
         elif subjects and traced >= subjects:
             parts.append(_("All traced"))
         meta = ui.label(" · ".join(part for part in parts if part), "caption", "text3", "studioStudyMeta")
@@ -1465,6 +2261,10 @@ class StudiesSection(qt.QObject):
                 card.removeEventFilter(self._clickFilter)
 
     def dispose(self):
+        projects.removeListener(self.scheduleRefresh)
+        if self._studyUi is not None:
+            self._studyUi.removeListener(self._onStudyChanged)
+        self._timer.stop()
         try:
             slicer.app.disconnect("aboutToQuit()", self._removeEventFilters)
         except Exception:
@@ -1474,7 +2274,7 @@ class StudiesSection(qt.QObject):
             ui.bindStyleSheet(self.widget, None)
 
 
-class _StudyClickFilter(qt.QObject):
+class _StudyClickFilter(_DoubleClickGuard, qt.QObject):
     """A click, Enter or Space on a study card opens the study; a resized card elides its name."""
 
     def __init__(self, section):
@@ -1489,6 +2289,8 @@ class _StudyClickFilter(qt.QObject):
                 text = str(label.property("fullText") or "")
                 label.setText(qt.QFontMetrics(label.font).elidedText(text, qt.Qt.ElideRight, max(0, label.width)))
             return False
+        if self.isSecondClickRelease(eventType, event):
+            return bool(path)
         if path and ((eventType == qt.QEvent.MouseButtonRelease and event.button() == qt.Qt.LeftButton)
                      or (eventType == qt.QEvent.KeyPress and event.key() in (qt.Qt.Key_Return, qt.Qt.Key_Enter, qt.Qt.Key_Space))):
             qt.QTimer.singleShot(0, lambda path=path: self.section.open(path))
@@ -1531,7 +2333,7 @@ class CrashCard:
         for info in self.infos[:3]:
             row = qt.QHBoxLayout()
             saved = projects.parseTime(info.data.get("savedAt")) or info.modified
-            text = qt.QLabel(_("Your project {name} was saved at {time}.").format(name=info.name, time=_clock(saved) or _("an earlier time")))
+            text = qt.QLabel(_("Your project {name} was saved at {time}.").format(name=info.name, time=_savedTime(saved) or _("an earlier time")))
             text.setObjectName("StudioProjectCrashCardText")
             text.setWordWrap(True)
             row.addWidget(text, 1)
@@ -1554,6 +2356,12 @@ class CrashCard:
 _crashBox = None
 
 
+def _recoveryPath(path):
+    """Where the project of a crash offer is now (Change folder > Move moved it since the offer was made)."""
+    service = _service()
+    return service.recoveryPath(path) if service is not None and hasattr(service, "recoveryPath") else path
+
+
 def showCrashOfferDialog(infos):
     """The crash offer outside Studio: a non-modal message box with "Open project" (Classic)."""
     global _crashBox
@@ -1565,7 +2373,7 @@ def showCrashOfferDialog(infos):
     box.setObjectName("StudioProjectCrashDialog")
     box.setWindowTitle(_("Slicer Studio closed unexpectedly"))
     box.setIcon(qt.QMessageBox.Information)
-    box.setText(_("Slicer Studio closed unexpectedly. Your project {name} was saved at {time}.").format(name=info.name, time=_clock(saved)))
+    box.setText(_("Slicer Studio closed unexpectedly. Your project {name} was saved at {time}.").format(name=info.name, time=_savedTime(saved)))
     openButton = box.addButton(_("Open project"), qt.QMessageBox.AcceptRole)
     box.addButton(_("Close"), qt.QMessageBox.RejectRole)
     box.setWindowModality(qt.Qt.NonModal)
@@ -1573,7 +2381,7 @@ def showCrashOfferDialog(infos):
 
     def clicked(button):
         if button == openButton:
-            openProject(info.path)
+            openProject(_recoveryPath(info.path))
 
     box.connect("buttonClicked(QAbstractButton*)", clicked)
     box.show()
@@ -1643,7 +2451,8 @@ def paletteItems(shell=None):
         {"id": "projects.changeFolder", "title": _("Change Slicer Studio folder…"), "category": "File", "callback": showSavingSettings,
          "synonyms": ["folder", "location", "where", "root", "documents", "move projects", "saving"]},
         {"id": "projects.saveCopy", "title": _("Save a copy as…"), "category": "File", "callback": saveCopyAs,
-         "synonyms": ["export", "mrb", "save as", "copy", "bundle", "share"]},
+         # no "export": that query is the gate of "Save lesion as NIfTI…" (SPEC 2.12), which a command synonym here would outrank
+         "synonyms": ["mrb", "save as", "copy", "bundle", "share"]},
     ]
     if project is not None:
         items.insert(1, {"id": "projects.rename", "title": _("Rename project"), "category": "File", "callback": renameDialog,
@@ -1740,27 +2549,124 @@ def attachService(service):
     registerPaletteProvider()
 
 
+CREATED_WAIT_MS = 1000
+CREATED_MAX_WAITS = 300
+
+
+def _announceCreated(text, toolTip, waits=0):
+    """Say that a new project was created ("Saving to Projects/x · Rename").
+
+    The load that created the project may have shown a consequence that stays until the next input ("a slice is
+    missing or the slice spacing is uneven", USABILITY 6.3): this message (it carries an action) would replace it at
+    once, so it waits until that consequence is gone (and is dropped if the project was closed meanwhile).
+    """
+    if waits:
+        service = _service()
+        current = service.currentProject() if service is not None else None
+        if current is None or current.path != toolTip:
+            return
+    shell = _shell()
+    visible = getattr(shell, "consequenceVisible", None) if shell is not None else None
+    if callable(visible) and visible() and waits < CREATED_MAX_WAITS:
+        qt.QTimer.singleShot(CREATED_WAIT_MS, lambda: _announceCreated(text, toolTip, waits + 1))
+        return
+    message(text, action=lambda *_args: renameDialog(), actionText=_("Rename"), ms=6000, toolTip=toolTip)
+
+
 def announce(event, project, **info):
     """Messages of the project engine (``AutosaveService.setProjectAnnouncer``)."""
     name = project.relativeName() if project is not None else ""
     if event == "created":
-        message(_("Saving to {project}").format(project=name), action=lambda *_args: renameDialog(), actionText=_("Rename"), ms=6000,
-                toolTip=project.path if project is not None else None)
+        _announceCreated(_("Saving to {project}").format(project=name), project.path if project is not None else None)
     elif event == "copy":
         message(_("Opened a copy in {project}. The original is not changed.").format(project=name), level="consequence",
                 action=lambda *_args: renameDialog(), actionText=_("Rename"), toolTip=project.path if project is not None else None)
+    elif event == "copy-incomplete":
+        unread = info.get("unread") or []
+        # sticky: the "Loaded x" that ends the drop would replace it at once, and the missing data would go unnoticed
+        message(_("Some data could not be loaded ({names}): {project} holds the rest. The original is not changed.").format(
+                project=name, names=", ".join(unread)), level="warning", action=lambda *_args: renameDialog(), actionText=_("Rename"),
+                toolTip=project.path if project is not None else None, sticky=True)
     elif event == "opened":
-        message(_("Continuing {project}").format(project=name), ms=2500)
+        unread = info.get("unread") or []
+        if unread:
+            message(_("Some data of {project} could not be loaded ({names}): their files are missing or damaged. The rest is open.").format(
+                    project=name, names=", ".join(unread)), level="warning", action=showProjectFolder, actionText=_("Show"),
+                    toolTip=project.path if project is not None else None, sticky=True)
+        else:
+            message(_("Continuing {project}").format(project=name), ms=2500)
+    elif event == "locked" and info.get("opened") is False:
+        # Open project refused (nothing was loaded): say who has it. A lock that another computer left (it crashed there,
+        # or the folder was copied while it was open) can be taken over: the user knows whether it is still open there.
+        holder = info.get("holder") or {}
+        projectName = project.name if project else ""
+        if holder.get("otherComputer") and project is not None:
+            path = project.path
+
+            def openHere(*_args):
+                if projects.takeOverLock(path):
+                    openProject(path)
+                else:
+                    message(projects.lockedText(path), level="warning", ms=8000)
+
+            host = holder.get("host") or _("another computer")
+            message(_("{name} was not opened: it was open on {host} and was not closed there. If it is not open there any "
+                      "more, choose Open here; to keep it as it is, Duplicate it and open the copy.").format(name=projectName, host=host),
+                    level="warning", ms=15000, sticky=True, action=openHere, actionText=_("Open here"))
+        else:
+            message(_("{name} was not opened: it is open in another Slicer Studio. Close it there, or Duplicate it and open "
+                      "the copy.").format(name=projectName), level="warning", ms=8000, sticky=True)
     elif event == "locked":
+        # Shown once per project, and edits are then autosaved only privately: it stays until the next input (sticky), so
+        # the "Loaded scan.mrml" of the same load does not replace it before it is read
         message(_("{name} is open in another Slicer Studio: changes made here are not saved to it.").format(name=project.name if project else ""),
-                level="warning", ms=8000)
+                level="warning", ms=8000, sticky=True)
+    elif event == "read-only":
+        # The folder of the project cannot be written (a read-only share or medium): not "open in another Slicer Studio"
+        original = project.name if project else ""
+        copy = info.get("copy")
+        unread = info.get("unread") or []
+        if copy is None:
+            message(_("{name} cannot be saved: its folder is read-only. Changes made here are not saved to it.").format(name=original),
+                    level="warning", ms=8000)
+        elif unread:
+            message(_("{name} is read-only: opened a copy in {project}, without data that could not be loaded ({names}). "
+                      "The original is not changed.").format(name=original, project=copy.relativeName(), names=", ".join(unread)),
+                    level="warning", action=lambda *_args: renameDialog(), actionText=_("Rename"), toolTip=copy.path)
+        else:
+            message(_("{name} is read-only: opened a copy in {project}. The original is not changed.").format(
+                    name=original, project=copy.relativeName()), level="consequence", action=lambda *_args: renameDialog(),
+                    actionText=_("Rename"), toolTip=copy.path)
     elif event == "conflict":
         conflicts = info.get("conflicts") or []
         for theirs, ours in conflicts[:3]:
             message(_("Another program changed {theirs}: Slicer Studio saved its version as {ours}.").format(theirs=theirs, ours=ours),
                     level="consequence", action=showProjectFolder, actionText=_("Show"))
+    elif event == "root-failed":
+        # No project could be created: the Slicer Studio folder cannot be written (a read-only share or medium), or the
+        # chosen one cannot be found (``missing``: a drive that is not connected). Once per folder; Retry (Save) would open
+        # the official Save Scene dialog, so the action changes the folder instead
+        change = None if projects.isRootFromEnvironment() else (lambda *_args: changeRootDialog())
+        if info.get("missing"):
+            text = _("Autosave paused: the Slicer Studio folder {folder} cannot be found. Connect the drive that holds it, or choose "
+                     "another folder. Changes made now are not saved in it.").format(folder=projects.shortPath(projects.root()))
+        else:
+            text = _("Autosave paused: the Slicer Studio folder cannot be written ({reason}). Changes made now are not saved in it.").format(
+                reason=info.get("reason") or "")
+        message(text, level="warning", action=change, actionText=_("Change folder…") if change else None, ms=8000, toolTip=projects.root())
     elif event == "failed":
         message(_("Not saved: {reason}").format(reason=info.get("reason") or ""), level="warning", action=saveNow, actionText=_("Retry"), ms=8000)
+    elif event == "not-opened":
+        # A project that could not be opened (not a failed save: no Retry that saves the open scene). A damaged scene file:
+        # Show opens its folder (its data files are there)
+        folder = info.get("path") if info.get("damaged") else None
+        if folder:
+            message(info.get("reason") or "", level="warning", ms=12000, action=lambda *_args: projects.showInFileManager(folder),
+                    actionText=_("Show"), toolTip=folder, sticky=True)
+        else:
+            message(info.get("reason") or "", level="warning", ms=8000)
+        if info.get("missing"):
+            projects.notifyChanged()  # the Library lists the folder again
 
 
 #
@@ -1849,6 +2755,7 @@ class ProjectsUi:
 
         self.closeCrashOffer()
         self.crashCard = CrashCard(infos, self)
+        projects.addListener(self._closeOfferIfOpened)
         library.showNotice(CRASH_NOTICE_KEY, self.crashCard.widget)
         if self.shell.currentWorkspace() != "library":
             self.crashNotice = ui.noticeLine(_("Slicer Studio closed unexpectedly: your project {name} was saved").format(name=infos[0].name),
@@ -1863,11 +2770,22 @@ class ProjectsUi:
 
     def openCrashed(self, path):
         self.closeCrashOffer()
-        openProject(path, self.shell)
+        openProject(_recoveryPath(path), self.shell)
+
+    def _closeOfferIfOpened(self):
+        """The offered project was opened another way (its card, Recent, Ctrl+O, Search): the offer is done."""
+        card = self.crashCard
+        current = projects.currentProject()
+        if card is None or current is None:
+            return
+        here = os.path.normcase(os.path.realpath(current.path))
+        if any(os.path.normcase(os.path.realpath(_recoveryPath(info.path))) == here for info in card.infos):
+            self.closeCrashOffer()
 
     def closeCrashOffer(self):
         from . import library
 
+        projects.removeListener(self._closeOfferIfOpened)
         self.shell.clearInspectorNotice(CRASH_NOTICE_KEY)
         if self.crashNotice is not None:
             if _isAlive(self.crashNotice):

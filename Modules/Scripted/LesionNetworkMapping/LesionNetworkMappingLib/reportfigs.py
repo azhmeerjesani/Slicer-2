@@ -13,6 +13,10 @@ report within its time budget.
 
 Orientation: neurological by default (the left hemisphere on the image left, decision D-A25) with L/R stamps on
 every axial and coronal tile; ``convention="radiological"`` mirrors the tiles and swaps the stamps (L-23).
+
+Watermark: a canvas made with ``watermark`` ("TUTORIAL DATA" for tutorial studies, "SYNTHETIC" for synthetic
+connectomes: :func:`figures.watermark_for`) burns it into every figure it renders, drawn like the L-23 figure
+watermark (centred, grey, 25 % opacity), and records it in the figure's ``meta``.
 """
 
 import base64
@@ -139,9 +143,11 @@ class Canvas:
     :param template: template path (or Volume), or None for a black background.
     :param reference: volume(s) that set the grid when there is no template.
     :param convention: "neurological" (default, D-A25) or "radiological".
+    :param watermark: text burnt into every figure (:func:`figures.watermark_for`), or None.
     """
 
-    def __init__(self, template=None, reference=None, convention=None):
+    def __init__(self, template=None, reference=None, convention=None, watermark=None):
+        self.watermark = figures.WATERMARKS.get(str(watermark).lower(), str(watermark)) if watermark else None
         self.convention = convention or figures.DEFAULT_CONVENTION
         if self.convention not in figures.CONVENTIONS:
             raise ValueError(f"convention must be neurological or radiological, got {self.convention!r}")
@@ -272,6 +278,21 @@ class Canvas:
         if top_right:
             draw.text((width - pad, pad), self.fonts.text(top_right), fill=INK, font=small, anchor="rt")
 
+    def finish(self, image, alt, meta):
+        """The :class:`ReportFigure` of a sheet, with the canvas watermark burnt in (as L-23 draws it: centred,
+        :data:`figures.WATERMARK_COLOR` at :data:`figures.WATERMARK_OPACITY`, bold, sized to the sheet) and recorded in ``meta["watermark"]``.
+        """
+        meta["watermark"] = self.watermark
+        if self.watermark:
+            from PIL import Image, ImageDraw
+
+            width, height = image.size
+            size = min(width / max(len(self.watermark), 1) * 1.2, height * 0.3)
+            overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+            ImageDraw.Draw(overlay).text((width / 2, height / 2), self.fonts.text(self.watermark), font=self.fonts.get(size, bold=True), fill=figures._rgba(figures.WATERMARK_COLOR, figures.WATERMARK_OPACITY), anchor="mm")
+            image = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+        return ReportFigure(image, alt, meta)
+
     # Layers
 
     def layers(self, kind, values, threshold=None, window=None, sign="both", vmax=None, color=None, mode="hard"):
@@ -324,7 +345,7 @@ class Canvas:
                 companion_tiles.append(self.tile([layer], "axial", index, top_left=f"z={_signed(z)}", top_right="unthr."))
         image = _sheet(rows, [companion_tiles] if companion_tiles else [])
         meta = {"kind": kind, "window": window, "threshold": threshold, "sign": sign, "slices": [z for z, _ in planes], "companion": bool(companion_tiles), "vmax": vmax, "convention": self.convention, "display_scale": MONTAGE_DISPLAY_SCALE}
-        return ReportFigure(image, alt or f"Axial montage of {volume.name}", meta)
+        return self.finish(image, alt or f"Axial montage of {volume.name}", meta)
 
     def ortho(self, map, point, kind="binary", threshold=None, sign="both", window=None, color=None, vmax=None, alt=""):  # noqa: A002
         """Sagittal, coronal and axial tiles through ``point`` (world mm) with a 1 px crosshair (L-23)."""
@@ -342,7 +363,7 @@ class Canvas:
             layer = self.layers(kind, self.on_plane(volume, plane, index, order), threshold, window, sign, vmax, color)
             tiles.append(self.tile([layer], plane, index, top_left=label, crosshair=point))
         meta = {"kind": kind, "point": list(point), "window": window, "threshold": threshold, "convention": self.convention, "display_scale": MONTAGE_DISPLAY_SCALE}
-        return ReportFigure(_sheet([tiles]), alt or f"Orthogonal views of {volume.name} through ({', '.join(_signed(c) for c in point)}) mm", meta)
+        return self.finish(_sheet([tiles]), alt or f"Orthogonal views of {volume.name} through ({', '.join(_signed(c) for c in point)}) mm", meta)
 
     def gallery_strip(self, lesion, t_map, threshold, window, label="", binarize_at=0.5):
         """Three tiles of one lesion (one pixel per display-grid voxel): the lesion fill on the axial slice through its centroid;
@@ -371,7 +392,7 @@ class Canvas:
             layer = figures.Layer(projected, "diverging", window, threshold, "hard")
             tiles.append(self.tile([layer], "axial", 0, top_left="max |T|", background=self.projection_background()))
         meta = {"z": z, "centroid": None if centroid is None else [float(c) for c in centroid[:3]], "empty": not voxels.size, "convention": self.convention, "display_scale": STRIP_DISPLAY_SCALE}
-        return ReportFigure(_sheet([tiles]), f"Lesion {label}: lesion at z={_signed(z)} mm, its network map on that slice and the maximum projection", meta)
+        return self.finish(_sheet([tiles]), f"Lesion {label}: lesion at z={_signed(z)} mm, its network map on that slice and the maximum projection", meta)
 
 
 def _hex(rgb):
@@ -520,7 +541,7 @@ def colormap_note():
     return {"negative": colormaps.NEGATIVE_COLORS, "positive": colormaps.POSITIVE_COLORS, "sequential": figures.SEQUENTIAL_COLORS, "lesion": figures.LESION_COLOR}
 
 
-def montage(map, kind, threshold_or_rule=None, template=None, convention=None, slices="auto", **kwargs):  # noqa: A002
+def montage(map, kind, threshold_or_rule=None, template=None, convention=None, slices="auto", watermark=None, **kwargs):  # noqa: A002
     """One montage on its own canvas (see :meth:`Canvas.montage`); ``threshold_or_rule`` is a number or a rule
     dict resolved by :mod:`thresholds` with ``n`` and ``v`` (kwargs) for diverging maps.
     """
@@ -530,13 +551,13 @@ def montage(map, kind, threshold_or_rule=None, template=None, convention=None, s
         from . import thresholds
 
         threshold = thresholds.resolve(threshold_or_rule, int(n), int(v)).value
-    canvas = Canvas(template, reference=map, convention=convention)
+    canvas = Canvas(template, reference=map, convention=convention, watermark=watermark)
     return canvas.montage(map, kind, threshold=threshold, slices=None if slices == "auto" else slices, **kwargs)
 
 
-def ortho(map, world_xyz, template=None, convention=None, **kwargs):  # noqa: A002
-    return Canvas(template, reference=map, convention=convention).ortho(map, world_xyz, **kwargs)
+def ortho(map, world_xyz, template=None, convention=None, watermark=None, **kwargs):  # noqa: A002
+    return Canvas(template, reference=map, convention=convention, watermark=watermark).ortho(map, world_xyz, **kwargs)
 
 
-def gallery_strip(lesion_path_or_occupancy, t_map, threshold, window, template=None, convention=None, label=""):
-    return Canvas(template, reference=lesion_path_or_occupancy, convention=convention).gallery_strip(lesion_path_or_occupancy, t_map, threshold, window, label)
+def gallery_strip(lesion_path_or_occupancy, t_map, threshold, window, template=None, convention=None, label="", watermark=None):
+    return Canvas(template, reference=lesion_path_or_occupancy, convention=convention, watermark=watermark).gallery_strip(lesion_path_or_occupancy, t_map, threshold, window, label)

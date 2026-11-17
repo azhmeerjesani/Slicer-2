@@ -1,6 +1,6 @@
 """Compare card of the Map module (order 130; L-52, SPEC_LNM_ADDENDUM §3.6, §3.7, §4.4 and §7.1).
 
-Checks whether a network repeats across conditions (van den Heuvel et al. 2026b) with honest statistics:
+Checks whether a network repeats across conditions (van den Heuvel et al. 2026) with honest statistics:
 
 - **Maps to compare** (tick any): this result, the cohort's group maps, per-lesion maps, group maps of other
   connectomes or subsets of the same study (resampled onto this grid), the connectome's μC_r and PC1, maps built here
@@ -41,6 +41,7 @@ JOB_MODULE = "LesionNetworkMappingLib.refmaps"
 TERMS_MODULE = "LesionNetworkMappingLib.leaddbs"
 ROW_HEIGHT = 22
 TABLE_FONT_PX = 11
+PAIR_NAME_MAX_PX = 120  # the widest a map-name column of the pairs table grows
 HEATMAP_MAX_PX = 380
 DEFAULT_PERMUTATIONS = 1000
 MAX_LESION_ROWS = 400
@@ -137,6 +138,41 @@ class MapSource:
         self.vector = vector
 
 
+def neurovaultArgs(value):
+    """``--image ID``, ``--collection ID`` or ``--collection ID --file NAME`` for the text of the NeuroVault field.
+
+    A download link (``/media/images/<collection>/<file>``) names the collection and the file, not the image: its
+    number is the collection id, so it is never read as an image id.
+    """
+    text = str(value or "").strip()
+    # "c457", "c 457", "coll 457", "Collection: 457", "collection #457": all name a collection.
+    match = re.match(r"^(?:c|coll(?:ections?)?)\s*[:#-]?\s*(\d+)$", text, re.IGNORECASE)
+    if match:
+        return ["--collection", match.group(1)]
+    match = re.match(r"^#?(\d+)$", text)
+    if match:
+        return ["--image", match.group(1)]
+    match = re.search(r"(?:^|/)media/images/(\d+)/([^/?#]+)", text, re.IGNORECASE)
+    if match:
+        from urllib.parse import unquote
+
+        return ["--collection", match.group(1), "--file", unquote(match.group(2))]
+    match = re.search(r"(?:^|(?<!media)/)images/(\d+)(?:[/?#]|$)", text, re.IGNORECASE)
+    if match:
+        return ["--image", match.group(1)]
+    match = re.search(r"(?:^|/)collections/(\d+)(?:[/?#]|$)", text, re.IGNORECASE)
+    if match:
+        return ["--collection", match.group(1)]
+    # Last, a short label such as "image 3128" or "id: 3128"; text that mentions a collection is never read as an image id.
+    mentionsCollection = re.search(r"coll", text, re.IGNORECASE) or re.match(r"^c\W*\d", text, re.IGNORECASE)
+    if "/" not in text and "neurovault" not in text.lower() and not mentionsCollection:
+        match = re.search(r"(\d+)", text)
+        if match:
+            return ["--image", match.group(1)]
+    raise ValueError(_("Give a NeuroVault image id (12345), c<id> for a collection, or the link of an image or collection page "
+                       "(neurovault.org/images/12345/)"))
+
+
 class CompareCard:
     """Controller of the Compare card (``widget`` is a collapsible card)."""
 
@@ -149,10 +185,11 @@ class CompareCard:
         self.tests = {}
         self.top = []
         self.lastExport = None
+        self.lastRunId = None
         self.job = None
         self.notice = ""
         self._raw = None  # (key, matrix, participant ids)
-        self._reference = None  # (bundle path, Reference or None)
+        self._reference = None  # ((bundle path, reference fingerprint), Reference or None)
         self._vectors = {}
         self._cleanedUp = False
         self.widget = widgets.card(_("Compare"), objectName="LNMCompareCard", collapsed=True)
@@ -175,7 +212,7 @@ class CompareCard:
         self.lesionCheck = qt.QCheckBox(_("List per-lesion maps"))
         self.lesionCheck.setObjectName("LNMCompareLesionCheck")
         self.lesionCheck.connect("toggled(bool)", lambda *args: self.refreshSources())
-        optionsRow.addWidget(self.lesionCheck)
+        # The check box has a row of its own: with the two buttons it is wider than the inspector
         optionsRow.addStretch(1)
         self.addMapButton = qt.QToolButton()
         self.addMapButton.setObjectName("LNMCompareAddMapButton")
@@ -209,7 +246,8 @@ class CompareCard:
         self.libraryButton.setMenu(menu)
         self.libraryMenu = menu
         optionsRow.addWidget(self.libraryButton)
-        layout.addLayout(optionsRow)
+        layout.addWidget(self.lesionCheck)
+        widgets.addWrapRow(layout, optionsRow)
 
         form = qt.QFormLayout()
         form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
@@ -240,7 +278,7 @@ class CompareCard:
         self.permButton.connect("clicked()", self.permute)
         buttons.addWidget(self.permButton)
         buttons.addStretch(1)
-        layout.addLayout(buttons)
+        widgets.addWrapRow(layout, buttons)
         self.stateLabel = label("", "LNMCompareState", "secondaryText")
         layout.addWidget(self.stateLabel)
         self.noticeLabel = label("", "LNMCompareNotice")
@@ -257,7 +295,16 @@ class CompareCard:
         self.heatmap.setObjectName("LNMCompareHeatmap")
         self.heatmap.setAlignment(qt.Qt.AlignLeft | qt.Qt.AlignTop)
         self.heatmap.setToolTip(_("Pearson r below the diagonal, partial r given μC_r and PC1 above it; the numbers are the maps' order"))
-        results.addWidget(self.heatmap)
+        # The picture is as wide as HEATMAP_MAX_PX; in a scroll area it never widens the inspector (a wider picture scrolls).
+        self.heatmapScroll = qt.QScrollArea()
+        self.heatmapScroll.setObjectName("LNMCompareHeatmapScroll")
+        self.heatmapScroll.setFrameShape(qt.QFrame.NoFrame)
+        self.heatmapScroll.setWidgetResizable(False)
+        self.heatmapScroll.setVerticalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        self.heatmapScroll.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
+        self.heatmapScroll.setWidget(self.heatmap)
+        self.heatmapScroll.setFixedHeight(0)
+        results.addWidget(self.heatmapScroll)
         self.legendLabel = label("", "LNMCompareLegend", "secondaryText")
         results.addWidget(self.legendLabel)
         self.pairsTable = widgets.tableView([title for title, _tip in PAIR_COLUMNS])
@@ -268,8 +315,14 @@ class CompareCard:
                 item.setToolTip(tip)
         self.pairsTable.verticalHeader().setDefaultSectionSize(ROW_HEIGHT)
         header = self.pairsTable.horizontalHeader()
-        for column in range(2, len(PAIR_COLUMNS)):
+        # Every column fits its contents. With the numbers at their content width the two Stretch columns got 35 to 48 px each:
+        # "μC…", "P…", "m…", and the headers "Map A" / "Map B" were clipped. The names keep their width (a long one
+        # elides in the middle, the tooltip has it whole) and a narrow inspector scrolls the table sideways instead
+        for column in range(len(PAIR_COLUMNS)):
             header.setSectionResizeMode(column, qt.QHeaderView.ResizeToContents)
+        header.setMaximumSectionSize(PAIR_NAME_MAX_PX)
+        self.pairsTable.setTextElideMode(qt.Qt.ElideMiddle)
+        self.pairsTable.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAsNeeded)
         widgets._font(self.pairsTable, TABLE_FONT_PX)
         results.addWidget(self.pairsTable)
         self.topTitle = self._title(_("Most similar to the first map"))
@@ -281,7 +334,7 @@ class CompareCard:
         results.addWidget(self.noteLabel)
         self.licenceLabel = label("", "LNMCompareLicences", "secondaryText")
         self.licenceLabel.setTextFormat(qt.Qt.RichText)
-        self.licenceLabel.setOpenExternalLinks(True)
+        widgets.routeLinks(self.licenceLabel)
         self.licenceLabel.setTextInteractionFlags(qt.Qt.TextBrowserInteraction)
         results.addWidget(self.licenceLabel)
         actions = qt.QHBoxLayout()
@@ -290,6 +343,10 @@ class CompareCard:
         self.exportButton.setProperty("slicerRole", "ghost")
         self.exportButton.connect("clicked()", self.export)
         actions.addWidget(self.exportButton)
+        actions.addStretch(1)
+        results.addLayout(actions)
+        # Two rows: the three buttons side by side are wider than the inspector
+        actions = qt.QHBoxLayout()
         self.folderButton = qt.QPushButton(_("Show folder"))
         self.folderButton.setObjectName("LNMCompareFolderButton")
         self.folderButton.setProperty("slicerRole", "ghost")
@@ -386,15 +443,20 @@ class CompareCard:
         bundle = self.ctx.bundle
         if bundle is None:
             return None
-        if self._reference is None or self._reference[0] != bundle.path:
-            try:
-                from LesionNetworkMappingLib import reference
+        from LesionNetworkMappingLib import reference
 
+        # Keyed on the files on disk too, so that a build or rebuild (QA card, command line) is picked up.
+        try:
+            key = (bundle.path, reference.reference_fingerprint(bundle))
+        except Exception:
+            key = (bundle.path, None)
+        if self._reference is None or self._reference[0] != key:
+            try:
                 loaded = reference.load_reference(bundle, verify=False)
             except Exception:
                 logging.exception("Lesion network mapping: the reference maps could not be loaded")
                 loaded = None
-            self._reference = (bundle.path, loaded)
+            self._reference = (key, loaded)
         return self._reference[1]
 
     def mapsTsv(self):
@@ -487,7 +549,8 @@ class CompareCard:
                                      info=
                                      {"kind": entry.get("kind") or "reference", "id": entry.get("id"), "title": entry.get("title"), "source": entry.get("source"),
                                       "licence": licence, "licence_note": entry.get("licence_note"), "citation": entry.get("citation"),
-                                      "condition": condition, "sha256": entry.get("sha256"), "redistribute": bool(entry.get("redistribute"))}, tooltip=tip))
+                                      "condition": condition, "sha256": entry.get("sha256"), "redistribute": bool(entry.get("redistribute")),
+                                      "space": entry.get("space"), "family": entry.get("family")}, tooltip=tip))
         if self.lesionCheck.checked and mapsTsv:
             from LesionNetworkMappingLib import cohortmaps
 
@@ -726,6 +789,25 @@ class CompareCard:
     # Compare
     #
 
+    def _fileStamp(self, source):
+        """Cache stamp of a source's file: its mtime and size, or None when it has no file or the file is gone.
+
+        Reference-library sources have no ``path``; their copied file in the library is stamped instead, so that
+        a deleted or replaced library file is noticed (and reported as missing) rather than served from the cache.
+        """
+        from LesionNetworkMappingLib import refmaps
+
+        path = source.path
+        if not path and source.group == "reference" and source.vector is None:
+            try:
+                path = refmaps.entry_path(refmaps.get_entry((source.info or {}).get("id"), registryRoot()), registryRoot())
+            except refmaps.RefmapsError:
+                return None
+        if path and os.path.isfile(path):
+            stat = os.stat(path)
+            return (stat.st_mtime, stat.st_size)
+        return None
+
     def vector(self, source):
         """A source's map on the connectome voxels ((V,) float64; NaN where not covered)."""
         import numpy as np
@@ -733,7 +815,7 @@ class CompareCard:
         from LesionNetworkMappingLib import refmaps
 
         bundle = self.ctx.bundle
-        cacheKey = (source.key, bundle.path, os.path.getmtime(source.path) if source.path and os.path.isfile(source.path) else None)
+        cacheKey = (source.key, bundle.path, self._fileStamp(source), (source.info or {}).get("reference_sha256"))
         if source.group != "instudy" and cacheKey in self._vectors:
             return self._vectors[cacheKey]
         if source.vector is not None:
@@ -768,11 +850,18 @@ class CompareCard:
                 try:
                     values = self.vector(source)
                 except Exception as exc:
-                    logging.exception(f"Lesion network mapping: the map {source.label} could not be loaded")
-                    problems.append(f"{source.label}: {exc}")
+                    if isinstance(exc, refmaps.RefmapsError):
+                        logging.warning(f"Lesion network mapping: the map {source.label} could not be loaded: {exc}")
+                    else:
+                        logging.exception(f"Lesion network mapping: the map {source.label} could not be loaded")
+                    problems.append(f"{source.name}: {str(exc).rstrip('. ')}.")
                     continue
                 if np.count_nonzero(np.isfinite(values)) < 3:
-                    problems.append(_("{label}: does not cover this connectome's voxels").format(label=source.label))
+                    problems.append(_("{label} does not cover this connectome's voxels.").format(label=source.name))
+                    continue
+                finite = values[np.isfinite(values)]
+                if not float(np.ptp(finite)) > 0:
+                    problems.append(_("{label} has no variance over this connectome's voxels (every value is the same).").format(label=source.name))
                     continue
                 name = source.name
                 while name in maps:
@@ -810,6 +899,9 @@ class CompareCard:
         try:
             from LesionNetworkMappingLib import geometry
 
+            declared = (getattr(bundle, "metadata", None) or {}).get("space")
+            if declared and geometry.space_family(declared) not in ("native", "unknown"):
+                return str(declared)  # the connectome's declared space (as connectomeSpaceName), also on a non-standard grid
             return geometry.detect_space(bundle.shape, bundle.affine)
         except Exception:
             return None
@@ -821,6 +913,14 @@ class CompareCard:
         if len(names) < 2:
             return []
         condition = str(self.conditionEdit.text or "").strip() or None
+        anchor = used[0]
+        anchorKind = "connectome" if anchor.group == "connectome" else anchor.info.get("kind") or "map"
+        anchorName = None
+        if anchorKind in ("connectome", "degree"):
+            condition = None  # a connectome axis (μC_r, PC1, degree) has no clinical condition: no 'unrelated condition' notes
+            anchorName = names[0]
+        elif anchor.group not in ("result", "group", "instudy", "lesion", "other"):
+            condition = anchor.info.get("condition") or None  # a reference map of its own condition
         candidates = []
         for name, source in zip(names[1:], used[1:], strict=True):
             sourceCondition = source.info.get("condition")
@@ -829,7 +929,7 @@ class CompareCard:
             kind = "connectome" if source.group == "connectome" else source.info.get("kind") or "map"
             candidates.append({"name": name, "values": maps[name], "condition": sourceCondition, "kind": kind})
         try:
-            return refmaps.top_similar(maps[names[0]], candidates, k=refmaps.TOP_K, condition=condition, reference=reference)
+            return refmaps.top_similar(maps[names[0]], candidates, k=refmaps.TOP_K, condition=condition, reference=reference, anchor_name=anchorName)
         except Exception:
             logging.exception("Lesion network mapping: the most similar maps could not be ranked")
             return []
@@ -848,11 +948,15 @@ class CompareCard:
         from LesionNetworkMappingLib import refmaps
 
         comparison = self.comparison
+        drawn = False
         try:
             self.heatmap.setPixmap(self._heatmapPixmap())
+            drawn = True
         except Exception:
             logging.exception("Lesion network mapping: the heat map could not be drawn")
             self.heatmap.clear()
+        self.heatmap.adjustSize()
+        self.heatmapScroll.setFixedHeight(self.heatmap.height + 20 if drawn else 0)
         self.legendLabel.setText("  ".join(f"{index + 1} {name}" for index, name in enumerate(comparison.names)))
         rows = refmaps.pairs_rows(comparison, self.tests, {name: source.spec for name, source in zip(comparison.names, self.comparedSources, strict=True)})
         self.pairsTable.setRowCount(0)
@@ -870,7 +974,7 @@ class CompareCard:
                 elif column < 2:
                     item.setToolTip(text)
                 self.pairsTable.setItem(row, column, item)
-        self.pairsTable.setFixedHeight(ROW_HEIGHT * (min(len(rows), 10) + 1) + 8)
+        self.pairsTable.setFixedHeight(ROW_HEIGHT * (min(len(rows), 10) + 1) + 8 + 16)  # 16: room for the sideways scroll bar
         self._showTop()
         self._showLicences()
         self.results.show()
@@ -984,13 +1088,35 @@ class CompareCard:
             self._setNotice(_("The comparison could not be exported: {error}").format(error=exc))
             return None
         self.lastExport = out
+        self._registerRun(out, infos, reference)
         self.folderButton.setEnabled(True)
         self._setNotice(_("Exported to {folder}").format(folder=os.path.join(refmaps.COMPARE_DIR, stamp)))
         return written["json"] and out
 
+    def registryRunsRoot(self):
+        """The root of the run registry (``<root>/derivatives/lnm/runs.jsonl``): the study folder, else the default run root."""
+        study = getattr(self.ctx, "study", None)
+        path = getattr(study, "path", None) if study is not None else None
+        return os.fspath(path) if path else self.outputRoot()
+
+    def _registerRun(self, out, infos, reference):
+        """Record the exported comparison as a done run of kind "comparison" (checklist item G10 reads it)."""
+        from LesionNetworkMappingLib import runs
+
+        references = [info for info in infos.values() if info.get("id")]  # the library's reference maps (the others carry no library id)
+        params = {"maps": list(self.comparison.names), "covariates": list(self.comparison.covariates),
+                  "references": [{"id": info.get("id"), "sha256": info.get("sha256"), "condition": info.get("condition")} for info in references],
+                  "reference_sha256": reference.sha256 if reference is not None else None}
+        summary = {"n_maps": len(self.comparison.names), "n_reference_maps": len(references), "n_tests": len(self.tests or {})}
+        self.lastRunId = None
+        try:
+            self.lastRunId = runs.register(self.registryRunsRoot(), "comparison", out, params=params, status="done", summary=summary)
+        except Exception:
+            logging.exception("Lesion network mapping: the comparison could not be recorded in the run registry")
+
     def showFolder(self):
         if self.lastExport:
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(self.lastExport))
+            widgets.showInFileManager(self.lastExport)
 
     def testDifferences(self):
         """Open the Cohort card's Contrast tab (differences are tested there, by label permutation)."""
@@ -1010,7 +1136,7 @@ class CompareCard:
     def openLibraryFolder(self):
         root = registryRoot()
         os.makedirs(root, exist_ok=True)
-        qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(root))
+        widgets.showInFileManager(root)
 
     def removeSelectedReference(self):
         from LesionNetworkMappingLib import refmaps
@@ -1059,15 +1185,7 @@ class CompareCard:
         if values.get("condition"):
             args += ["--condition", values["condition"]]
         if kind == "neurovault":
-            text = str(values.get("id") or "").strip().lower()
-            match = re.match(r"^(?:c|collection[: ]?)(\d+)$", text) or re.search(r"collections/(\d+)", text)
-            if match:
-                args += ["--collection", match.group(1)]
-            else:
-                match = re.search(r"(\d+)", text)
-                if not match:
-                    raise ValueError(_("Give a NeuroVault image id (or c<id> for a collection)"))
-                args += ["--image", match.group(1)]
+            args += neurovaultArgs(values.get("id"))
         elif kind == "url":
             args += ["--url", values["url"]]
         elif kind == "vdh":
@@ -1109,11 +1227,18 @@ class CompareCard:
     def _onAdditionDone(self, job):
         if self._cleanedUp:
             return
-        if job.state != "done":
+        if job.state == "cancelled":
+            self._setNotice(_("The download was stopped; nothing was added. The partial file is kept and resumes next time."))
+        elif job.state != "done":
             self._setNotice(_("The reference map was not added: {reason}").format(reason=job.failureReason or job.state))
         else:
             added = [event.get("entry") or {} for event in job.results if event.get("kind") == "refmap"]
-            self._setNotice(_("Added {titles} to the reference library.").format(titles=", ".join(str(entry.get("title")) for entry in added)))
+            text = _("Added {titles} to the reference library.").format(titles=", ".join(str(entry.get("title")) for entry in added))
+            for event in job.results:
+                if event.get("kind") == "refmap_limit":
+                    text = _("Only the first {listed} of {total} images of the collection were added (NeuroVault lists at most {listed}). "
+                             "Paste an image's page link to add another.").format(listed=event.get("listed"), total=event.get("total")) + " " + text
+            self._setNotice(text)
             self.refreshSources()
             self.setChecked([*self.checkedKeys(), *(f"reference:{entry.get('id')}" for entry in added)])
         self.updateState()
@@ -1174,10 +1299,16 @@ class AddReferenceDialog(qt.QDialog):
                                    "LNMCompareVdhTermsIntro", "secondaryText"))
             self.termsView = qt.QTextBrowser()
             self.termsView.setObjectName("LNMCompareVdhTerms")
-            self.termsView.setOpenExternalLinks(True)
+            widgets.routeLinks(self.termsView)
             self.termsView.setMinimumHeight(90)
             self.termsView.setMaximumHeight(160)
             layout.addWidget(self.termsView)
+            self.retryButton = qt.QPushButton(_("Try again"))
+            self.retryButton.setObjectName("LNMCompareVdhTermsRetry")
+            self.retryButton.setToolTip(_("Fetch the GSP data use terms again"))
+            self.retryButton.connect("clicked()", self.loadTerms)
+            self.retryButton.setVisible(False)
+            layout.addWidget(self.retryButton)
             self.acceptCheck = qt.QCheckBox(_("I accept these data use terms"))
             self.acceptCheck.setObjectName("LNMCompareVdhAccept")
             self.acceptCheck.setEnabled(False)
@@ -1198,7 +1329,7 @@ class AddReferenceDialog(qt.QDialog):
             self.loadTerms()
 
     def _browse(self):
-        path = qt.QFileDialog.getOpenFileName(self, _("Reference map"), "", _("NIfTI (*.nii *.nii.gz)"))
+        path = qt.QFileDialog.getOpenFileName(self, _("Reference map"), widgets.dialogStartFolder(), _("NIfTI (*.nii *.nii.gz)"))
         if path:
             self.fileEdit.setText(path)
             if not self.titleEdit.text:
@@ -1208,6 +1339,7 @@ class AddReferenceDialog(qt.QDialog):
         """Fetch the live GSP terms text in a light job (never on the main thread)."""
         from . import jobrunner
 
+        self.retryButton.setVisible(False)
         self.termsView.setPlainText(_("Fetching the GSP data use terms from Harvard Dataverse…"))
         spec = jobrunner.JobSpec(TERMS_MODULE, ["terms"], title=_("Data use terms"), heavy=False, kind="leaddbs-terms", name="leaddbs-terms",
                                  runRoot=jobrunner.defaultRunRoot(), onDone=self._onTermsDone)
@@ -1221,8 +1353,13 @@ class AddReferenceDialog(qt.QDialog):
             return
         event = next((event for event in job.results if event.get("kind") == "terms"), None)
         if event is None:
-            self.termsView.setPlainText(_("The data use terms could not be fetched ({reason}). They must be shown before anything is downloaded: "
-                                          "check the connection and try again.").format(reason=job.failureReason or job.state))
+            # The failure reason is a sentence that already says what to check ("... Check the network and try again.").
+            reason = str(job.failureReason or job.state).strip()
+            if not reason.endswith((".", "!", "?")):
+                reason += "."
+            self.termsView.setPlainText(_("The GSP data use terms could not be fetched: {reason} They must be shown before the map is downloaded.")
+                                        .format(reason=reason))
+            self.retryButton.setVisible(True)
             return
         self.setTermsText(event.get("text") or "", event.get("url"))
 

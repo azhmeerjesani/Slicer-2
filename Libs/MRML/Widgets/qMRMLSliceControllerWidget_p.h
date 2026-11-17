@@ -278,6 +278,9 @@ public:
   int CompactReadoutWidth{ 0 };
   /// Show the readout text of the current form in the label, with its reserved width.
   void updateReadoutLabel();
+  /// Set FullReadoutWidth and CompactReadoutWidth from the font of the readout label. With \a fromScratch the widths
+  /// may shrink (the font changed), otherwise they only grow.
+  void measureReadoutWidths(bool fromScratch);
   /// Classic size policies of the widgets whose size hint the flat bar ignores
   QSizePolicy ClassicFitSizePolicy;
   QSizePolicy ClassicSliderSizePolicy;

@@ -225,6 +225,38 @@ class ImportTest(_TempCase):
             leaddbs.import_leaddbs_maps(relabel, study, connectome_label="Native")
         self.assertEqual(caught.exception.code, "exists")
 
+    def test_second_import_keeps_earlier_participants(self):
+        # A second batch into the same folder adds to the first (bug bash: the first batch was silently deleted)
+        first, second = self.path("batch1"), self.path("batch2")
+        self.make_outputs(first, ["A1", "A2"])
+        self.make_outputs(second, ["B1", "A2"])
+        out = self.path("merged")
+        leaddbs.import_leaddbs_maps(first, out_dir=out)
+        events = []
+        record = leaddbs.import_leaddbs_maps(second, out_dir=out, emit=lambda event, **fields: events.append((event, fields)))
+        rows = cohortmaps.read_maps_tsv(record["maps_tsv"])
+        self.assertEqual([row["participant_id"] for row in rows], ["sub-A1", "sub-A2", "sub-B1"])
+        for row in rows:
+            for key in ("AvgR", "AvgFz", "T"):
+                self.assertTrue(os.path.isfile(row[key]), row[key])
+        self.assertTrue(os.path.isfile(os.path.join(out, "sub-A1_conn-GSP1000v2xFullSet_lnm.json")))
+        self.assertEqual((record["lesions"]["mapped"], record["lesions"]["kept"], record["lesions"]["total"]), (2, 1, 3))
+        self.assertEqual(set(record["participants"]), {"sub-A1", "sub-A2", "sub-B1"})
+        warnings = [fields for event, fields in events if event == "warning"]
+        self.assertEqual([(fields["code"], fields["participants"]) for fields in warnings], [("kept_earlier", ["sub-A1"])])
+        self.assertIn("maps.tsv lists 3 participants", warnings[0]["message"])
+        with open(record["maps_tsv"], encoding="utf-8") as f:
+            self.assertNotIn(self.tmp, f.read())
+        # Maps that do not pool with the new ones (another N) are removed, with a warning
+        third = self.path("batch3")
+        self.make_outputs(third, ["C1"])
+        events.clear()
+        record = leaddbs.import_leaddbs_maps(third, out_dir=out, n=500, emit=lambda event, **fields: events.append((event, fields)))
+        self.assertEqual([row["participant_id"] for row in cohortmaps.read_maps_tsv(record["maps_tsv"])], ["sub-C1"])
+        self.assertEqual([(fields["code"], fields["participants"]) for event, fields in events if event == "warning"],
+                         [("replaced_earlier", ["sub-A1", "sub-A2", "sub-B1"])])
+        self.assertFalse([name for name in os.listdir(out) if name.startswith(("sub-A", "sub-B"))])
+
     def test_import_errors_and_cli(self):
         folder = self.path("mixed")
         self.make_outputs(folder, ["A1", "A2"], label="GSP1000v2xFullSet", fz=False)
@@ -376,6 +408,28 @@ class ParityRunTest(_TempCase):
         code, events = _run_job(leaddbs.main, ["parity", "--bundle", self.bundle.path, "--out", self.path("cli")], "leaddbs")
         self.assertEqual(code, jobs.EXIT_USAGE)
         self.assertEqual(events[-1]["code"], "terms")
+
+    def test_offline_terms_reason_is_short(self):
+        """An unreachable provider gives one short reason (host only), not the urllib3 retry dump."""
+        import requests
+
+        class Session:
+            def get(self, url, **kwargs):
+                raise requests.exceptions.ProxyError(
+                    f"HTTPSConnectionPool(host='dataverse.harvard.edu', port=443): Max retries exceeded with url: {url} "
+                    "(Caused by ProxyError('Unable to connect to proxy', NewConnectionError('[Errno 111] Connection refused')))")
+
+        saved = os.environ.pop(fetch.OFFLINE_ENV, None)  # the module switches the network off; this test passes its own session
+        try:
+            with self.assertRaises(fetch.OfflineError) as caught:
+                leaddbs.fetch_live_terms(session=Session())
+        finally:
+            if saved is not None:
+                os.environ[fetch.OFFLINE_ENV] = saved
+        reason = str(caught.exception)
+        self.assertEqual(reason, "No connection to dataverse.harvard.edu: the proxy server cannot be reached. Check the network and try again.")
+        for raw in ("HTTPSConnectionPool", "Max retries", "Errno", "persistentId", "could not be fetched"):
+            self.assertNotIn(raw, reason)
 
     def test_parity_run(self):
         catalog = self.adopt_all()

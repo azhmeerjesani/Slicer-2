@@ -17,11 +17,13 @@ into the set's own cache, and linked to any number of studies without copying a 
 
 The registry folder follows ``Studio/LNM/DataDirectory`` (only read; fork-only, D-S1): it is set on
 ``Study.controlset_root`` and in the environment variable ``SLICER_STUDIO_CONTROLSETS`` (inherited by jobs) whenever the
-card refreshes. Nothing else is written to the settings. Works in Classic (the Studio module panel hosts the same cards).
+card refreshes and whenever the Slicer Studio folder changes (Change folder). Nothing else is written to the settings. Works in Classic (the Studio module panel hosts the same cards).
 """
 
 import logging
+import math
 import os
+import re
 import sys
 import traceback
 import types
@@ -137,6 +139,10 @@ def connectomes():
 #
 
 
+def controlsets_unreadable():
+    return _lnm("controlsets").SKIPPED_UNREADABLE
+
+
 def setSummary(entry):
     """"490 lesions · MNI152NLin6Asym · 12 2D"."""
     parts = [(_("{n} lesion") if entry["n"] == 1 else _("{n} lesions")).format(n=entry["n"]), str(entry.get("space") or "")]
@@ -152,8 +158,42 @@ def licenceText(entry):
 
 
 def itemText(entry):
-    """The list row of a set: name and summary, then its licence note."""
+    """The list row of a set: name and summary, then its licence note (a linked set that is not registered: what is wrong)."""
+    if entry.get("missing"):
+        return f"{entry['name']} · {_('not registered on this computer')}\n{missingText(entry)}"
     return f"{entry['name']} · {setSummary(entry)}\n{licenceText(entry)}"
+
+
+def missingText(entry):
+    """What a linked set that is not registered means for its rows: "8 linked control rows: lesion files not found"."""
+    n = int(entry.get("n") or 0)
+    return (_("{n} linked control row: lesion file not found") if n == 1 else _("{n} linked control rows: lesion files not found")).format(n=n)
+
+
+def unregisteredLinkedSets(study, registered):
+    """Placeholder entries ``{"name", "n", "missing": True}`` of the sets a study links (study.json ``control_sets`` or
+    ``controlset:<name>/`` rows) that the registry does not hold: removed, renamed away, or the study was opened on another
+    computer. ``registered`` is the list of registry entries. Their rows' lesion files cannot be found, so the card lists
+    them to be unlinked or registered again (BB-1).
+    """
+    controlsets = _lnm("controlsets")
+    known = {entry["name"] for entry in registered}
+    names = [str(item.get("name") or "") for item in study.control_sets]
+    for row in controlsets.linked_rows(study):
+        name = controlsets.parse_path(row.get("lesion"))[0]
+        if name not in names:
+            names.append(name)
+    out = []
+    for name in names:
+        if not name or name in known:
+            continue
+        try:
+            controlsets.load(name, registryRoot())
+            continue  # resolves (a renamed folder that records the name)
+        except (OSError, ValueError):
+            pass
+        out.append({"name": name, "n": len(controlsets.linked_rows(study, name)), "missing": True})
+    return out
 
 
 def mismatchLines(report, flag=SMD_FLAG):
@@ -164,13 +204,13 @@ def mismatchLines(report, flag=SMD_FLAG):
         if value is None:
             lines.append((_("{label}: not known (Check the lesion set fills it in)").format(label=_(item["label"])), "text2"))
             continue
-        text = _("{label}: SMD {smd}").format(label=_(item["label"]), smd=f"{value:+.2f}")
+        text = _("{label}: SMD {smd}").format(label=_(item["label"]), smd=("+∞" if value > 0 else "-∞") if math.isinf(value) else f"{value:+.2f}")
         lines.append((text, "warning" if abs(value) > flag else "text2"))
     family = report["family"]
     if family.get("differ"):
         lines.append((_("Template family differs: set {setSpace}, study {studySpace}").format(setSpace=family["set_space"], studySpace=family["study_space"]), "warning"))
     elif family.get("study_space"):
-        lines.append((_("Same template family ({family})").format(family=family["set"]), "text2"))
+        lines.append((_("Same template family ({family})").format(family=_lnm("geometry").family_name(family["set"])), "text2"))
     return lines
 
 
@@ -269,6 +309,7 @@ class AddControlSetDialog:
         layout.addWidget(self.linkCheck)
         self.progressLabel = qt.QLabel()
         self.progressLabel.setObjectName("StudioControlSetProgress")
+        self.progressLabel.setWordWrap(True)
         layout.addWidget(self.progressLabel)
         buttons = qt.QHBoxLayout()
         buttons.addStretch(1)
@@ -290,7 +331,7 @@ class AddControlSetDialog:
         self._updateButtons()
 
     def browse(self):
-        folder = qt.QFileDialog.getExistingDirectory(self.dialog, _("Folder of control lesions"), str(self.folderEdit.text) or os.path.expanduser("~"))
+        folder = qt.QFileDialog.getExistingDirectory(self.dialog, _("Folder of control lesions"), str(self.folderEdit.text) or library._importer().dialogStartFolder(os.path.expanduser("~")))
         if folder:
             self.setFolder(str(folder))
 
@@ -316,9 +357,16 @@ class AddControlSetDialog:
         if grids:
             text += " · " + _("grids: {grids}").format(grids=grids)
         if self.scan["skipped"]:
-            text += " · " + _("{n} files skipped").format(n=len(self.scan["skipped"]))
+            nSkipped = len(self.scan["skipped"])
+            text += " · " + (_("{n} file skipped") if nSkipped == 1 else _("{n} files skipped")).format(n=nSkipped)
         if controlsets.NO_GRID in self.scan["grids"]:
-            text += "\n" + _("Lesions that are not on a standard template grid are left out.")
+            if len(self.scan["grids"]) == 1:
+                text += "\n" + _("No lesion is on a standard template grid, so none can be registered.")
+            else:
+                text += "\n" + _("Lesions that are not on a standard template grid are left out.")
+        mixed = controlsets.scan_mixed_families(self.scan)
+        if mixed:
+            text += "\n" + mixed
         self.questions = controlsets.questions(self.scan)
         if self.questions:
             text += "\n" + _("Several templates share this grid: choose the one the lesions were drawn on.")
@@ -332,8 +380,11 @@ class AddControlSetDialog:
             combo.addItem(_("Choose the template…"))
             for candidate in question["candidates"]:
                 combo.addItem(candidate)
-            combo.setToolTip(_("{n} lesions are on the {grid} grid, which several templates share. Which template were they drawn on?").format(
-                n=question["n"], grid=question["grid_id"]))
+            if question["n"] == 1:
+                tip = _("{n} lesion is on the {grid} grid, which several templates share. Which template was it drawn on?")
+            else:
+                tip = _("{n} lesions are on the {grid} grid, which several templates share. Which template were they drawn on?")
+            combo.setToolTip(tip.format(n=question["n"], grid=question["grid_id"]))
             combo.connect("currentIndexChanged(int)", lambda _index: self._updateButtons())
             self.questionsLayout.addRow(_("Template of {grid}").format(grid=question["grid_id"]), combo)
             self.spaceCombos.append(combo)
@@ -347,8 +398,31 @@ class AddControlSetDialog:
                 out[question["grid_id"]] = question["candidates"][combo.currentIndex - 1]
         return out
 
+    def _hasUsableLesions(self):
+        """True when at least one lesion sits on a template grid (an unanswered question counts as usable) and the lesions
+        that will be used are of one template family, which is what ``controlsets.register_folder`` requires.
+        """
+        controlsets = _lnm("controlsets")
+        space_family = _lnm("geometry").space_family
+
+        answers = self.answers()
+        families, nUsable = set(), 0
+        for gridId, grid in self.scan["grids"].items():
+            if gridId == controlsets.NO_GRID or not grid.get("n"):
+                continue
+            nUsable += 1
+            if gridId in answers:
+                family = space_family(answers[gridId])
+            elif grid.get("family"):
+                family = grid["family"]
+            else:
+                family = space_family(grid["candidates"][0]) if grid.get("candidates") else None
+            if family:
+                families.add(family)
+        return nUsable > 0 and len(families) <= 1
+
     def _updateButtons(self):
-        ready = bool(self.scan and self.scan["lesions"]) and bool(str(self.nameEdit.text).strip()) and len(self.answers()) == len(self.questions)
+        ready = bool(self.scan and self.scan["lesions"] and self._hasUsableLesions()) and bool(str(self.nameEdit.text).strip()) and len(self.answers()) == len(self.questions)
         self.registerButton.setEnabled(ready and not self.worker.isBusy())
 
     def register(self):
@@ -362,7 +436,7 @@ class AddControlSetDialog:
             self.progressLabel.setText(str(e))
             return False
         root = registryRoot()
-        if os.path.exists(os.path.join(root, name, controlsets.CONTROLSET_JSON)):
+        if os.path.exists(os.path.join(root, name, controlsets.CONTROLSET_JSON)) or controlsets.case_twin(name, root) is not None:
             self.progressLabel.setText(_("A control set named {name} is already registered.").format(name=name))
             return False
         _importForWorker()
@@ -378,17 +452,30 @@ class AddControlSetDialog:
         stage, done, total = progress
         self.progressLabel.setText(f"{stage} {done}/{total}" if total else stage)
 
+    def _plainError(self, error):
+        """The worker error as a plain sentence: no Python exception class and no absolute folder path."""
+        text = re.sub(r"^[A-Za-z_][\w.]*(Error|Exception):\s*", "", str(error))
+        folder = str((self.scan or {}).get("folder") or "")
+        if folder:
+            text = re.sub(r"\s+in\s+" + re.escape(folder), "", text).replace(folder, _("the folder"))
+        return text.rstrip(". ") + "."
+
     def _onDone(self, entry, error):
         self.cancelButton.setText(_("Cancel"))
         if error:
-            self.progressLabel.setText(_("Stopped.") if error == "cancelled" else _("Not registered: {error}").format(error=error))
+            self.progressLabel.setText(_("Stopped.") if error == "cancelled" else _("Not registered: {error}").format(error=self._plainError(error)))
             self._updateButtons()
             return
         self.entry = entry
         session = _session()
         if self.linkCheck.isChecked() and session is not None:
             linkSet(session, entry)
-        _toast(_("Control set {name} registered: {summary}").format(name=entry["name"], summary=setSummary(entry)), 4000)
+        message = _("Control set {name} registered: {summary}").format(name=entry["name"], summary=setSummary(entry))
+        damaged = [item for item in entry.get("skipped") or [] if str(item.get("reason", "")).startswith(controlsets_unreadable())]
+        if damaged:
+            names = ", ".join(os.path.basename(str(item["rel"])) for item in damaged[:3]) + (" …" if len(damaged) > 3 else "")
+            message += "\n" + (_("{n} file could not be read and was left out: {names}") if len(damaged) == 1 else _("{n} files could not be read and were left out: {names}")).format(n=len(damaged), names=names)
+        _toast(message, 8000 if damaged else 4000)
         refreshCards(entry["name"])
         self.dialog.accept()
 
@@ -406,9 +493,13 @@ class AddControlSetDialog:
 _dialogs = []  # open dialogs (tests)
 
 
-def addControlSet(folder=None, modal=True):
-    """IMPORT: the "Add control set…" dialog. With ``modal=False`` the dialog is shown and returned (tests)."""
+def addControlSet(folder=None, modal=True, name=None):
+    """IMPORT: the "Add control set…" dialog. With ``modal=False`` the dialog is shown and returned (tests). ``name``
+    fills in the name (registering again a set the open study links).
+    """
     dialog = AddControlSetDialog(folder=folder)
+    if name:
+        dialog.nameEdit.setText(name)
     _dialogs.append(dialog)
     if not modal:
         dialog.dialog.show()
@@ -439,7 +530,15 @@ def linkSet(session, entry, ids=None):
     session.flush()
     _notify(session)
     added, updated, removed = len(report["added"]), len(report["updated"]), len(report.get("removed") or [])
-    text = _("{n} control lesions linked (no files copied)").format(n=added) if added else _("{n} control rows updated").format(n=updated)
+    if not (added or updated or removed) and report["skipped"]:
+        # Nothing was linked: say why (the first reason), not "0 control rows updated"
+        text = _("Nothing linked: {n} skipped").format(n=len(report["skipped"])) + " · " + str(report["skipped"][0].get("reason", ""))
+        _toast(text, 6000)
+        return report
+    if added:
+        text = (_("{n} control lesion linked (no files copied)") if added == 1 else _("{n} control lesions linked (no files copied)")).format(n=added)
+    else:
+        text = (_("{n} control row updated") if updated == 1 else _("{n} control rows updated")).format(n=updated)
     if removed:
         text += " · " + (_("{n} row no longer in the set removed") if removed == 1 else _("{n} rows no longer in the set removed")).format(n=removed)
     if report["skipped"]:
@@ -452,7 +551,8 @@ def unlinkSet(session, name):
     removed = session.study.unlink_control_set(name)
     session.flush()
     _notify(session)
-    _toast(_("{n} control rows removed from the study (the control set is kept)").format(n=len(removed)), 4000)
+    text = _("{n} control row removed from the study (the control set is kept)") if len(removed) == 1 else _("{n} control rows removed from the study (the control set is kept)")
+    _toast(text.format(n=len(removed)), 4000)
     return removed
 
 
@@ -491,6 +591,8 @@ class ControlSetsCard:
         self.list.setAccessibleName(_("Control sets"))
         self.list.setWordWrap(False)  # two elided lines per set (the tool tip has the whole text): a stable row height
         self.list.setTextElideMode(qt.Qt.ElideRight)
+        # a row is as wide as its text, so with a horizontal bar the item is wider than the viewport and is cut with no ellipsis
+        self.list.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
         self.list.setVerticalScrollMode(qt.QAbstractItemView.ScrollPerPixel)
         self.list.connect("currentRowChanged(int)", lambda _row: self._renderSelection())
         layout.addWidget(self.list)
@@ -520,7 +622,7 @@ class ControlSetsCard:
         self.mismatchLayout = qt.QVBoxLayout()
         self.mismatchLayout.setSpacing(2)
         detailLayout.addLayout(self.mismatchLayout)
-        mapRow = library._buttonRow()
+        self.mapRow = mapRow = library._buttonRow()
         self.connectomeCombo = qt.QComboBox()
         self.connectomeCombo.setObjectName("StudioControlSetsConnectome")
         self.connectomeCombo.setAccessibleName(_("Connectome"))
@@ -547,12 +649,22 @@ class ControlSetsCard:
             return
         self.session = session
         current = select or self.selectedName()
-        self.entries = registeredSets()
+        registered = registeredSets()
+        try:
+            missing = unregisteredLinkedSets(session.study, registered)
+        except Exception:
+            logging.debug(f"Studio control sets: the linked sets could not be read:\n{traceback.format_exc()}")
+            missing = []
+        self.entries = missing + registered  # the sets to fix first
         self.list.blockSignals(True)
         self.list.clear()
         for entry in self.entries:
             item = qt.QListWidgetItem(itemText(entry))
-            item.setToolTip(f"{entry['name']}\n{entry.get('source') or ''}\n{licenceText(entry)}".strip())
+            if entry.get("missing"):
+                item.setToolTip(f"{entry['name']}\n{_('Linked to this study but not registered on this computer')}\n{missingText(entry)}")
+                item.setForeground(qt.QBrush(qt.QColor(ui.token("warning"))))
+            else:
+                item.setToolTip(f"{entry['name']}\n{entry.get('source') or ''}\n{licenceText(entry)}".strip())
             self.list.addItem(item)
         names = [entry["name"] for entry in self.entries]
         self.list.setCurrentRow(names.index(current) if current in names else (0 if names else -1))
@@ -560,10 +672,14 @@ class ControlSetsCard:
         rowsHeight = sum(max(self.list.sizeHintForRow(row), ui.fontPx(36)) for row in range(min(len(names), LIST_ROWS)))
         self.list.setFixedHeight(rowsHeight + 2 * self.list.frameWidth + 2)
         linked = {item["name"] for item in session.study.control_sets}
+        registeredNames = {entry["name"] for entry in registered}
         if not self.entries:
             self.statusLabel.setText(_("No control sets yet. Add one in Import (Add control set…)."))
         else:
-            self.statusLabel.setText(_("{n} registered · {k} linked to this study").format(n=len(self.entries), k=len(linked & set(names))))
+            text = _("{n} registered · {k} linked to this study").format(n=len(registered), k=len(linked & registeredNames) + len(missing))
+            if missing:
+                text += " · " + (_("{n} linked set is not registered on this computer") if len(missing) == 1 else _("{n} linked sets are not registered on this computer")).format(n=len(missing))
+            self.statusLabel.setText(text)
         self.list.setVisible(bool(self.entries))
         self._connectomes = None
         self._renderSelection()
@@ -581,6 +697,12 @@ class ControlSetsCard:
         self.details.setVisible(entry is not None)
         if entry is None or self.session is None:
             return
+        if entry.get("missing"):
+            self._renderMissing(entry)
+            return
+        self.licenceLabel.setVisible(True)
+        self.mapRow.setVisible(True)
+        self.mapLabel.setVisible(True)
         controlsets = _lnm("controlsets")
         study = self.session.study
         self.sourceLabel.setText(_("Source: {source}").format(source=entry.get("source") or _("not recorded")))
@@ -588,7 +710,7 @@ class ControlSetsCard:
         rows = controlsets.linked_rows(study, entry["name"])
         record = next((item for item in study.control_sets if item["name"] == entry["name"]), None)
         if rows:
-            text = _("Linked: {n} control rows").format(n=len(rows))
+            text = (_("Linked: {n} control row") if len(rows) == 1 else _("Linked: {n} control rows")).format(n=len(rows))
             if record and record.get("sha256") and record["sha256"] != entry.get("content_sha256"):
                 text += " · " + _("the set changed since it was linked: link again")
             self.linkLabel.setText(text)
@@ -609,6 +731,22 @@ class ControlSetsCard:
             self.report = None
         self._renderMismatch()
         self._renderConnectomes()
+
+    def _renderMissing(self, entry):
+        """A set the study links that is not registered on this computer: say so, offer Unlink and Register again…."""
+        self.report = None
+        self.sourceLabel.setText(_("{name} is linked to this study but is not registered on this computer (removed, or the study "
+                                   "was opened on another computer), so its control lesions cannot be found.").format(name=entry["name"]))
+        self.licenceLabel.setVisible(False)
+        self.linkLabel.setText(_("{text}. Unlink it, or register its folder again under the name {name}.").format(text=missingText(entry), name=entry["name"]))
+        self.linkButton.setText(_("Register again…"))
+        self.unlinkButton.setVisible(True)
+        for label in self.mismatchLabels:
+            label.setParent(None)
+        self.mismatchLabels = []
+        self.mismatchTitle.setVisible(False)
+        self.mapRow.setVisible(False)
+        self.mapLabel.setVisible(False)
 
     def _readCaseFiles(self, paths):
         """Read the case lesion files whose values the table lacks in the worker thread (one run at a time)."""
@@ -672,6 +810,8 @@ class ControlSetsCard:
     def _renderMap(self):
         connectome = self.selectedConnectome()
         entry = self.selectedEntry()
+        if entry is not None and entry.get("missing"):
+            return
         busy = self.mapJob is not None and not self.mapJob.isFinished()
         self.connectomeCombo.setVisible(bool(self._connectomes))
         if connectome is None:
@@ -707,9 +847,20 @@ class ControlSetsCard:
         entry, session = self.selectedEntry(), _session()
         if entry is None or session is None:
             return None
+        if entry.get("missing"):
+            return self.registerAgain()
         report = library._runAction(lambda: linkSet(session, entry), _("The control set could not be linked."))
         self.refresh(select=entry["name"])
         return report
+
+    def registerAgain(self, modal=True):
+        """A linked set that is not registered: "Add control set…" with its name filled in and "Link to this study" ticked,
+        so its rows follow the set again. With ``modal=False`` the dialog is returned (tests).
+        """
+        entry = self.selectedEntry()
+        if entry is None or not entry.get("missing"):
+            return None
+        return addControlSet(modal=modal, name=entry["name"])
 
     def unlink(self):
         entry, session = self.selectedEntry(), _session()
@@ -722,7 +873,7 @@ class ControlSetsCard:
     def mapControls(self):
         """Run the cohortmaps job of the selected set into its cache. Return True when it was submitted."""
         entry, connectome = self.selectedEntry(), self.selectedConnectome()
-        if entry is None or connectome is None or (self.mapJob is not None and not self.mapJob.isFinished()):
+        if entry is None or entry.get("missing") or connectome is None or (self.mapJob is not None and not self.mapJob.isFinished()):
             return False
         try:
             from LesionNetworkMappingUI import jobrunner
@@ -832,8 +983,27 @@ PALETTE_ACTIONS = [
      "callback": showControlSetsAction, "enabled": _paletteEnabled, "description": "Link control sets, check their mismatch with the cases and map them"},
 ]
 
+def _onProjectsChanged():
+    """The Slicer Studio folder changed (Change folder > Move or Keep, a new root): the registry folder follows it.
+
+    ``Study.controlset_root`` and the environment value (read first by ``controlsets.registry_root()`` and inherited by
+    jobs) would otherwise keep naming the old folder until the Control sets card renders again, so linked control lesions
+    would resolve in a folder that a move has deleted and drop out of the cohort (BB-1).
+    """
+    try:
+        registryRoot()
+    except Exception:
+        logging.debug(f"Studio control sets: the registry folder is not set:\n{traceback.format_exc()}")
+
+
+def _listenToProjects():
+    try:
+        from . import projects
+    except ImportError:
+        return
+    projects.addListener(_onProjectsChanged)
+
+
 _ensureImportCard()
-try:
-    registryRoot()
-except Exception:
-    logging.debug(f"Studio control sets: the registry folder is not set:\n{traceback.format_exc()}")
+_onProjectsChanged()
+_listenToProjects()

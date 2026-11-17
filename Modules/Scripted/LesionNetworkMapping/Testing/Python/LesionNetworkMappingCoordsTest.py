@@ -73,6 +73,16 @@ class ParserTest(CoordsTestCase):
         self.assertEqual(foci[1].radius_mm, 6.0)
         self.assertEqual(list(coords.group_by_study(foci)), ["A", "B"])
 
+    def test_numeric_columns_reads_every_missing_token(self):
+        head = "x,y,z,outcome\n"
+        for token in ("NA", "n/a", "nan", "NaN", ""):
+            path = self.write("stim.csv", head + f"1,2,3,40\n4,5,6,{token}\n7,8,9,25\n")
+            self.assertEqual(coords.numeric_columns(path), ["outcome"], token)
+        path = self.write("stim.csv", head + "1,2,3,40\n4,5,6,high\n")
+        self.assertEqual(coords.numeric_columns(path), [])
+        path = self.write("stim.csv", head + "1,2,3,NA\n4,5,6,\n")
+        self.assertEqual(coords.numeric_columns(path), [])
+
     def test_csv_headerless_and_tsv(self):
         foci = coords.read_csv(self.write("plain.txt", "1 2 3\n4 5 6\n"))
         self.assertEqual([f.xyz for f in foci], [(1.0, 2.0, 3.0), (4.0, 5.0, 6.0)])
@@ -83,10 +93,55 @@ class ParserTest(CoordsTestCase):
     def test_csv_errors(self):
         with self.assertRaisesRegex(ValueError, "radius and a diameter"):
             coords.read_csv(self.write("both.csv", "x,y,z,radius,diameter\n1,2,3,4,8\n"))
+        with self.assertRaisesRegex(ValueError, "header_only.csv holds no coordinates"):
+            coords.read_foci(self.write("header_only.csv", "x,y,z\n"))
+        with self.assertRaisesRegex(ValueError, "header_nonl.csv holds no coordinates"):
+            coords.read_csv(self.write("header_nonl.csv", "x,y,z"))
         with self.assertRaisesRegex(ValueError, "no z column"):
             coords.read_csv(self.write("noz.csv", "x,y\n1,2\n"))
         with self.assertRaisesRegex(ValueError, "Unknown coordinate space"):
             coords.read_csv(self.write("bad.csv", "x,y,z,space\n1,2,3,Colin\n"))
+
+    def test_csv_radius_out_of_range_names_file_and_row(self):
+        with self.assertRaisesRegex(ValueError, r"radius_zero_neg\.csv, row 2: .*\(0, 30\] mm.*0 mm"):
+            coords.read_csv(self.write("radius_zero_neg.csv", "x,y,z,radius,study\n-33,-57,11,0,A\n34,-55,12,-3,B\n"))
+        with self.assertRaisesRegex(ValueError, r"neg\.csv, row 3: .*-3 mm"):
+            coords.read_csv(self.write("neg.csv", "x,y,z,radius\n1,2,3,4\n34,-55,12,-3\n"))
+        with self.assertRaisesRegex(ValueError, r"dia\.csv, row 2: "):
+            coords.read_csv(self.write("dia.csv", "x,y,z,diameter\n1,2,3,0\n"))
+        with self.assertRaisesRegex(ValueError, r"big\.csv, row 2: "):
+            coords.read_csv(self.write("big.csv", "x,y,z,radius\n1,2,3,31\n"))
+        self.assertEqual(coords.read_csv(self.write("ok.csv", "x,y,z,radius\n1,2,3,30\n"))[0].radius_mm, 30.0)
+
+    def test_csv_error_row_is_the_file_line(self):
+        # Blank and comment lines are dropped before parsing and a headerless table has no header line: the message
+        # must still name the line the user sees in the file (it said "row 3" for all of these).
+        with self.assertRaisesRegex(ValueError, "badrow.csv, row 4: "):
+            coords.read_csv(self.write("badrow.csv", "x,y,z\n1,2,3\n\n4,abc,6\n"))
+        with self.assertRaisesRegex(ValueError, "comment_bad.csv, row 4: "):
+            coords.read_csv(self.write("comment_bad.csv", "x,y,z\n1,2,3\n# note\n4,abc,6\n"))
+        with self.assertRaisesRegex(ValueError, "headerless_bad.txt, row 2: "):
+            coords.read_csv(self.write("headerless_bad.txt", "1 2 3\n4 abc 6\n"))
+        with self.assertRaisesRegex(ValueError, "plain_bad.csv, row 3: "):
+            coords.read_csv(self.write("plain_bad.csv", "x,y,z\n1,2,3\n4,abc,6\n"))
+        with self.assertRaisesRegex(ValueError, "wide.csv, row 5 has 4 values for 3 columns"):
+            coords.read_csv(self.write("wide.csv", "# c\nx,y,z\n\n1,2,3\n4,5,6,7\n"))
+
+    def test_csv_row_with_more_fields_than_header(self):
+        # Decimal commas split each number in two: the row must not be cut to the header and read as other numbers
+        # (it was read as (-33, 5, -57), and with a radius column the 25 became the sphere radius).
+        with self.assertRaisesRegex(ValueError, r"row 2 has 7 values for 4 columns.*Decimal commas"):
+            coords.read_foci(self.write("de.csv", "study,x,y,z\nMüller 2020,-33,5,-57,25,11,75\n"))
+        with self.assertRaisesRegex(ValueError, "row 3 has 7 values for 4 columns"):
+            coords.read_csv(self.write("de_r.csv", "x,y,z,radius\n1,2,3,4\n-33,5,-57,25,11,75,4\n"))
+        with self.assertRaisesRegex(ValueError, "row 2 has 5 values for 4 columns"):
+            coords.read_csv(self.write("extra.csv", "study,x,y,z\nA,10,20,30,99\n"))
+        with self.assertRaisesRegex(ValueError, "row 2 has 4 values for 3 columns"):
+            coords.read_csv(self.write("plain_extra.txt", "1 2 3\n4 5 6 7\n"))  # header-less: row 1 sets the columns
+        # Trailing empty fields (a spreadsheet's "1,2,3,") and short rows stay accepted.
+        foci = coords.read_csv(self.write("trailing.csv", "study,x,y,z\nA,-33.5,-57.25,11.75,,\nB,1,2,3\n"))
+        self.assertEqual([f.xyz for f in foci], [(-33.5, -57.25, 11.75), (1.0, 2.0, 3.0)])
+        self.assertEqual(coords.read_csv(self.write("short.csv", "x,y,z,radius\n1,2,3\n"))[0].radius_mm, None)
 
     def test_sleuth(self):
         text = ("// Reference=Talairach\n// Smith et al., 2001: Delusions\n// Subjects=12\n-44 31 27\n20\t-32\t14\n\n"
@@ -104,6 +159,13 @@ class ParserTest(CoordsTestCase):
         # "// Subjects=N" before the experiment's name line belongs to that experiment
         first = coords.read_sleuth(self.write("first.txt", "// Reference=MNI\n// Subjects=12\n// A\n1 2 3\n\n// Subjects=20\n// B\n4 5 6\n\n// C\n7 8 9\n"))
         self.assertEqual([(f.study, f.subjects) for f in first], [("A", 12), ("B", 20), ("C", None)])
+        # Decimal commas or extra numbers are refused, never cut to the first 3 numbers ("-30,5 -55,2 10,1" is not (-30, 5, -55))
+        for name, coordinate in (("tabs", "-30,5\t-55,2\t10,1"), ("spaces", "-30,5 -55,2 10,1")):
+            with self.subTest(name), self.assertRaisesRegex(ValueError, r"line 3 has 6 numbers, expected 3 .*Decimal commas\?"):
+                coords.read_sleuth(self.write(f"comma_{name}.txt", f"// Reference=MNI\n// Rossi 2019\n{coordinate}\n"))
+        with self.assertRaisesRegex(ValueError, "line 3 has 4 numbers, expected 3") as raised:
+            coords.read_sleuth(self.write("four.txt", "// Reference=MNI\n// Kim 2021\n-30.5 -55.2 10.1 4.2\n"))
+        self.assertNotIn("Decimal commas", str(raised.exception))
 
     def test_nimare_json(self):
         dataset = {"pain": {"contrasts": {"1": {"coords": {"space": "MNI", "x": [1, 2], "y": [3, 4], "z": [5, 6]}, "metadata": {"sample_sizes": [20]}}}},
@@ -113,6 +175,46 @@ class ParserTest(CoordsTestCase):
         self.assertEqual([f.study for f in foci], ["pain-1", "pain-1", "itch-a"])
         self.assertEqual([f.space for f in foci], ["MNI", "MNI", "TAL"])
         self.assertEqual(foci[0].subjects, 20)
+
+
+    def test_nimare_json_bom_and_wrong_shapes(self):
+        good = {"s1": {"contrasts": {"c1": {"coords": {"space": "MNI", "x": [1], "y": [2], "z": [3]}}}}}
+        path = os.path.join(self.tmp, "bom.json")
+        with open(path, "w", encoding="utf-8-sig") as f:
+            json.dump(good, f)
+        self.assertEqual(len(coords.read_foci(path)), 1)
+        bad = [
+            {"s1": [1, 2]},
+            {"s1": {"contrasts": [1]}},
+            {"s1": {"contrasts": {"c": 5}}},
+            {"s1": {"contrasts": {"c": {"coords": {"x": 1, "y": [2], "z": [3]}}}}},
+            {"s1": {"contrasts": {"c": {"coords": {"x": ["a"], "y": [2], "z": [3]}}}}},
+        ]
+        for i, data in enumerate(bad):
+            path = os.path.join(self.tmp, f"bad{i}.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            with self.assertRaises(ValueError, msg=str(data)) as ctx:
+                coords.read_foci(path)
+            self.assertIn("NiMARE", str(ctx.exception))
+
+    def test_nimare_json_sample_size_shapes(self):
+        def one(metadata):
+            contrast = {"coords": {"space": "MNI", "x": [1], "y": [2], "z": [3]}}
+            if metadata is not None:
+                contrast["metadata"] = metadata
+            path = os.path.join(self.tmp, "sizes.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"s1": {"contrasts": {"c": contrast}}}, f)
+            return coords.read_foci(path)
+
+        self.assertEqual(one({"sample_sizes": 15})[0].subjects, 15)
+        self.assertEqual(one({"sample_sizes": [12, 3]})[0].subjects, 12)
+        self.assertIsNone(one({"sample_sizes": float("nan")})[0].subjects)
+        self.assertIsNone(one({"sample_sizes": [float("nan")]})[0].subjects)
+        for metadata in (["x"], {"sample_sizes": "15"}, 7):
+            with self.assertRaisesRegex(ValueError, "sizes.json is not a NiMARE dataset"):
+                one(metadata)
 
 
 class TalairachTest(unittest.TestCase):
@@ -183,6 +285,13 @@ class SphereTest(unittest.TestCase):
         large, _ = coords.spheres([coords.Focus(0, 0, 0)], GRID_2MM, radius_mm=6)
         self.assertLess(small.sum(), large.sum())
         self.assertEqual(record["per_focus_radii_mm"], [2.0])
+
+    def test_zero_focus_radius_is_refused(self):
+        for bad in (0, 0.0, -3):
+            with self.assertRaisesRegex(ValueError, "radius must be in"):
+                coords.spheres([coords.Focus(0, 0, 0, radius_mm=bad)], GRID_2MM, radius_mm=6)
+            with self.assertRaisesRegex(ValueError, "radius must be in"):
+                coords.focus_radii([coords.Focus(0, 0, 0, radius_mm=bad)], radius_mm=6)
 
     def test_study_union_seeds(self):
         groups = {"A": [coords.Focus(-10, 0, 0, "A"), coords.Focus(-10, 1, 0, "A")], "B": [coords.Focus(10, 0, 0, "B")]}
@@ -340,6 +449,65 @@ class StimulationTest(CoordsTestCase):
         self.assertAlmostEqual(probabilistic.sum() * 8.0, vta.sum(), delta=1e-3)  # the volume is conserved
         self.assertTrue(set(np.unique(binary)) <= {0.0, 1.0})
 
+    def test_image_space_is_checked_recorded_and_announced(self):
+        """Stimulation images are used as MNI world mm. One not known to be in MNI space (a SimNIBS subject-space
+        magnE on an oblique scanner grid) is told apart from an MNI one (a known template grid, or a NIfTI header
+        marked MNI-152 on its own small grid, as Lead-DBS VTAs are), recorded per seed in seeds.json and named
+        in the notice shown before mapping (it used to be mapped silently, with no space anywhere).
+        """
+        def blob(shape, affine, width):
+            world = np.indices(shape).reshape(3, -1).T @ affine[:3, :3].T + affine[:3, 3]
+            return np.exp(-np.linalg.norm(world, axis=1) ** 2 / width).reshape(shape).astype(np.float32)
+
+        angle = np.deg2rad(15.0)
+        oblique = np.eye(4)
+        oblique[:3, :3] = [[1, 0, 0], [0, np.cos(angle), -np.sin(angle)], [0, np.sin(angle), np.cos(angle)]]
+        oblique[:3, 3] = (oblique[:3, :3] @ -np.array([20.0, 24.0, 20.0]))  # centred on (0, 0, 0)
+        native = os.path.join(self.tmp, "sub-01_magnE.nii.gz")
+        nifti.write_nifti(native, blob((40, 48, 40), oblique, 50.0) * 120, oblique, dtype=np.float32, sform_code=1, qform_code=1)
+        small = np.array([[0.5, 0, 0, -10.0], [0, 0.5, 0, -10.0], [0, 0, 0.5, -10.0], [0, 0, 0, 1.0]])
+        header_mni = os.path.join(self.tmp, "sub-02_vta.nii.gz")
+        nifti.write_nifti(header_mni, blob((41, 41, 41), small, 50.0), small, dtype=np.float32, sform_code=4, qform_code=4)
+        nlin6 = np.array([[-2.0, 0, 0, 90.0], [0, 2.0, 0, -126.0], [0, 0, 2.0, -72.0], [0, 0, 0, 1.0]])
+        template = os.path.join(self.tmp, "sub-03_magnE_MNI.nii.gz")
+        nifti.write_nifti(template, blob((91, 109, 91), nlin6, 50.0) * 120, nlin6, dtype=np.float32, sform_code=2, qform_code=2)
+
+        space = coords.stimulation_image_space(native)
+        self.assertEqual(space, {"mni": False, "space": None, "basis": None, "oblique": True})
+        self.assertEqual(coords.stimulation_image_space(header_mni), {"mni": True, "space": "MNI152 (NIfTI header)", "basis": "header", "oblique": False})
+        space = coords.stimulation_image_space(template)
+        self.assertTrue(space["mni"])
+        self.assertEqual((space["basis"], space["space"]), ("grid", "MNI152NLin6Asym"))
+        # An (array, affine) image has no header: only its grid can tell
+        self.assertEqual(coords.stimulation_image_space((np.zeros((41, 41, 41)), small))["mni"], False)
+
+        # The record of each seed keeps it; the seed set names the unconfirmed ones (file names only)
+        _seed, record = coords.stimulation_seed("efield", GRID_2MM, image=native)
+        self.assertFalse(record["space"]["mni"])
+        table = self.write("efields.csv", "participant_id,file\nsub-01,sub-01_magnE.nii.gz\nsub-02,sub-02_vta.nii.gz\nsub-03,sub-03_magnE_MNI.nii.gz\n")
+        out = os.path.join(self.tmp, "stim spaces")
+        coords.prepare_stimulation(out, coords.read_stimulation_table(table, "efield"), GRID_2MM, "efield")
+        seeds = coords.read_seed_record(out)
+        self.assertEqual([seed["stimulation"]["space"]["mni"] for seed in seeds["seeds"]], [False, True, True])
+        self.assertEqual(seeds["stimulation"]["space_unconfirmed"], ["sub-01"])
+        self.assertIn("Not confirmed as MNI space: sub-01", seeds["stimulation"]["placement"])
+        self.assertEqual(_absolute_strings(seeds), [])
+
+        # The notice shown before mapping names the file and says it is on an oblique (scanner-like) grid
+        notice = coords.stimulation_space_notice([("sub-01_magnE.nii.gz", coords.stimulation_image_space(native)),
+                                                  ("sub-03_magnE_MNI.nii.gz", coords.stimulation_image_space(template))])
+        self.assertIn("Not confirmed as MNI space: sub-01_magnE.nii.gz", notice)
+        self.assertNotIn("sub-03", notice)
+        self.assertIn("*_MNI", notice)
+        self.assertIn("It is on an oblique grid", notice)
+        several = coords.stimulation_space_notice([("a.nii.gz", coords.stimulation_image_space(native)), ("b.nii.gz", {"mni": False, "oblique": False})])
+        self.assertIn("Not confirmed as MNI space: a.nii.gz, b.nii.gz", several)
+        self.assertIn("1 of 2 are on an oblique grid", several)
+        self.assertEqual(coords.stimulation_space_notice([("sub-02_vta.nii.gz", coords.stimulation_image_space(header_mni))]), "")
+        points = coords.read_stimulation_table(self.write("points.csv", "participant_id,x,y,z\np1,0,0,0\n"), "points")
+        coords.prepare_stimulation(os.path.join(self.tmp, "stim points"), points, GRID_2MM, "points", radius_mm=6)
+        self.assertIn("MNI coordinates", coords.read_seed_record(os.path.join(self.tmp, "stim points"))["stimulation"]["placement"])
+
     def test_rmap_helpers(self):
         rng = np.random.default_rng(3)
         outcome = rng.normal(size=12)
@@ -369,6 +537,48 @@ class StimulationTest(CoordsTestCase):
         self.assertEqual(record["kind"], "stimulation")
         self.assertEqual(record["seeds"][1]["stimulation"]["points"], 2)  # two rows of p2 make one seed
         self.assertEqual(_absolute_strings(record), [])
+
+    def test_stimulation_rows_of_one_participant_with_different_outcomes_refused(self):
+        # Rows of one participant make one seed: two different outcomes are refused in either row order, never last-row-wins
+        for name, body in (("dup_a.csv", "participant_id,x,y,z,outcome\nsub-01,-12,-14,-6,40\nsub-01,12,-14,-6,80\nsub-02,10,10,10,30\n"),
+                           ("dup_b.csv", "participant_id,x,y,z,outcome\nsub-01,12,-14,-6,80\nsub-01,-12,-14,-6,40\nsub-02,10,10,10,30\n")):
+            items = coords.read_stimulation_table(self.write(name, body), "points", "outcome")
+            self.assertEqual(list(coords.outcome_conflicts(items)), ["sub-01"])
+            out = os.path.join(self.tmp, "stim " + name)
+            with self.assertRaisesRegex(ValueError, "sub-01 has two different outcomes"):
+                coords.prepare_stimulation(out, items, GRID_2MM, "points", radius_mm=6)
+            self.assertFalse(os.path.exists(os.path.join(out, coords.OUTCOMES_TSV)))
+        # Equal values ("40" and "40.0") and a missing value on one row agree: one outcome, in either row order
+        for body in ("participant_id,x,y,z,outcome\nsub-01,-12,-14,-6,40\nsub-01,12,-14,-6,40.0\nsub-01,0,-14,-6,n/a\nsub-02,10,10,10,30\n",
+                     "participant_id,x,y,z,outcome\nsub-01,0,-14,-6,n/a\nsub-01,-12,-14,-6,40\nsub-02,10,10,10,30\n"):
+            items = coords.read_stimulation_table(self.write("agree.csv", body), "points", "outcome")
+            self.assertEqual(coords.outcome_conflicts(items), {})
+            out = os.path.join(self.tmp, "stim agree")
+            shutil.rmtree(out, ignore_errors=True)
+            coords.prepare_stimulation(out, items, GRID_2MM, "points", radius_mm=6)
+            _columns, outcomes = read_tsv(os.path.join(out, coords.OUTCOMES_TSV))
+            self.assertEqual([(row["participant_id"], row["outcome"]) for row in outcomes], [("sub-01", "40.0"), ("sub-02", "30.0")])
+
+    def test_stimulation_talairach_sites_converted_and_recorded(self):
+        # A "space" column of Talairach is converted to MNI (Lancaster 2007) as in the Coordinates mode, never mapped as MNI mm
+        table = self.write("stim_tal.csv", "participant_id,x,y,z,space\nsub-01,-10,-12,6,Talairach\nsub-02,-10,-12,6,MNI\n")
+        items = coords.read_stimulation_table(table, "points")
+        self.assertEqual([item["points"][0].space for item in items], ["TAL", "MNI"])
+        tal_out = os.path.join(self.tmp, "stim tal")
+        tal_rows = read_tsv(coords.prepare_stimulation(tal_out, items[:1], GRID_2MM, "points", radius_mm=6))[1]
+        mni_out = os.path.join(self.tmp, "stim mni")
+        mni_rows = read_tsv(coords.prepare_stimulation(mni_out, [{"participant_id": "sub-01", "points": [coords.Focus(*coords.tal2mni((-10, -12, 6)))]}],
+                                                       GRID_2MM, "points", radius_mm=6))[1]
+        np.testing.assert_allclose(nifti.read_nifti(os.path.join(tal_out, tal_rows[0]["lesion"]))[0], nifti.read_nifti(os.path.join(mni_out, mni_rows[0]["lesion"]))[0])
+        raw = read_tsv(coords.prepare_stimulation(os.path.join(self.tmp, "stim raw"), items[1:], GRID_2MM, "points", radius_mm=6))[1]
+        self.assertFalse(np.allclose(nifti.read_nifti(os.path.join(tal_out, tal_rows[0]["lesion"]))[0],
+                                     nifti.read_nifti(os.path.join(self.tmp, "stim raw", raw[0]["lesion"]))[0]))  # not the Talairach mm used as MNI
+        both = os.path.join(self.tmp, "stim both")
+        coords.prepare_stimulation(both, items, GRID_2MM, "points", radius_mm=6)
+        conversion = coords.read_seed_record(both)["stimulation"]["conversion"]
+        self.assertEqual((conversion["converted"], conversion["total"], conversion["from"], conversion["studies"]), (1, 2, "Talairach", ["sub-01"]))
+        self.assertIn("1 of 2 foci converted from Talairach to MNI", coords.read_seed_record(both)["stimulation"]["conversion_text"])
+        self.assertEqual(coords.read_seed_record(mni_out)["stimulation"]["conversion"]["converted"], 0)
 
 
 class SeedSetTest(CoordsTestCase):
@@ -416,6 +626,119 @@ class SeedSetTest(CoordsTestCase):
         mask = self.bundle.mask
         self.assertGreater(np.corrcoef(np.asarray(t1)[mask], np.asarray(t3)[mask])[0, 1], 0.5)  # A and A2 share a network
 
+    def test_study_seed_run_reaches_the_report_methods(self):
+        """Coordinate seeds mapped inside a study are recorded in the study's run registry, and the Report card's methods and
+        checklist describe them (spheres, diameter, Talairach conversion), not "no network-mapping run".
+        """
+        from LesionNetworkMappingLib import checklist, methods, runs
+        from LesionNetworkMappingLib.study import Study
+
+        study = os.path.join(self.tmp, "CoordStudy")
+        Study.create(study, name="CoordStudy")
+        out = os.path.join(study, "derivatives", "lnm", "runs", "20261111-000000_coordinates")
+        source = self.foci_file()
+        tsv = coords.prepare_coordinates(out, coords.read_foci(source), self.bundle.grid, diameter_mm=6, source=source, grid_space="MNI152NLin2009cAsym")
+        args = coords.cohortmaps_arguments(tsv, self.bundle.path, out, run_root=study)
+        self.assertEqual(args[args.index("--run-root") + 1], study)
+        self.assertNotIn("--run-root", coords.cohortmaps_arguments(tsv, self.bundle.path, out))  # outside a study: unchanged
+        process = subprocess.run([sys.executable, "-m", "LesionNetworkMappingLib.cohortmaps", *args], check=False, cwd=MODULE_DIR, env=_env(), capture_output=True, text=True, timeout=600)
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertTrue(os.path.isfile(os.path.join(study, "derivatives", "lnm", "runs.jsonl")))
+        self.assertFalse(os.path.exists(os.path.join(out, "derivatives")))  # no registry nested in the run folder
+        self.assertEqual([record["kind"] for record in runs.load(study).values()], ["cohortmaps"])
+        records = methods.Records(study)
+        text = "\n".join(str(section) for section in methods.methods_sections(study, records=records))
+        self.assertNotIn("no network-mapping run", text)
+        self.assertIn("study-level union of spheres", text)
+        self.assertIn("3 mm radius (6 mm diameter, given as the diameter)", text)
+        self.assertIn("1 of 3 foci converted from Talairach to MNI", text)
+        self.assertNotIn("probabilistic lesions", text)
+        items = {item["id"]: item for item in checklist.evaluate(study, records=records)}
+        self.assertNotEqual(items["B4"]["status"], checklist.NOT_RUN)
+        self.assertEqual(items["C5"]["status"], checklist.DONE)
+        self.assertIn("coordinates seeds", items["C5"]["value"])
+        # The Map widget passes the open study as the run root of a seed-set run
+        with open(os.path.join(MODULE_DIR, "LesionNetworkMapping.py"), encoding="utf-8") as f:
+            widget = f.read()
+        call = widget[widget.index("coords.cohortmaps_arguments(lesionsTsv"):]
+        self.assertIn("run_root=", call[: call.index("\n")])
+
+    def test_seed_outside_the_mask_is_refused_by_name(self):
+        """A seed with no weight in the connectome's brain mask is refused before anything is written, named by its
+        participant id or study (its all-zero map would otherwise fail the whole seed-set run under a cache name).
+        """
+        a = self.meta["blobs"]["A"]["center_world"]
+        corner = (np.asarray(self.bundle.affine) @ np.array([1.0, 1.0, 1.0, 1.0]))[:3]  # on the grid, outside the ellipsoid mask
+        items = [{"participant_id": "sub-01", "points": [tuple(a)]}, {"participant_id": "sub-03", "points": [tuple(corner)]},
+                 {"participant_id": "sub-02", "points": [tuple(a)]}]
+        out = os.path.join(self.tmp, "stim outside")
+        with self.assertRaises(coords.OutsideMaskError) as caught:
+            coords.prepare_stimulation(out, items, self.bundle.grid, "points", radius_mm=3, mask_indices=self.bundle.mask_indices)
+        self.assertIsInstance(caught.exception, ValueError)  # the UI's "The seeds cannot be made" path
+        self.assertEqual(caught.exception.labels, ["sub-03"])
+        self.assertIn("sub-03 lies outside the connectome's brain mask", str(caught.exception))
+        self.assertFalse(os.path.exists(os.path.join(out, coords.LESIONS_TSV)))
+        self.assertFalse(os.path.exists(os.path.join(out, coords.SEED_FOLDER)))
+        # The seeds inside the mask are made as before; without a mask nothing is checked (the library's earlier contract)
+        tsv = coords.prepare_stimulation(out, [items[0], items[2]], self.bundle.grid, "points", radius_mm=3, mask_indices=self.bundle.mask_indices)
+        self.assertEqual([row["participant_id"] for row in read_tsv(tsv)[1]], ["sub-01", "sub-02"])
+        coords.prepare_stimulation(os.path.join(self.tmp, "stim unchecked"), items, self.bundle.grid, "points", radius_mm=3)
+        # Coordinates: the study is named; several are all named
+        foci = [coords.Focus(*a, study="Smith 2020"), coords.Focus(*corner, study="Out 2021"), coords.Focus(*corner, study="Far 2022")]
+        with self.assertRaises(coords.OutsideMaskError) as caught:
+            coords.prepare_coordinates(os.path.join(self.tmp, "coords outside"), foci, self.bundle.grid, radius_mm=3, mask_indices=self.bundle.mask_indices)
+        self.assertEqual(caught.exception.labels, ["Out 2021", "Far 2022"])
+        self.assertIn("Out 2021, Far 2022 lie outside", str(caught.exception))
+        # The command line refuses the same way, naming the study
+        source = self.write("outside.csv", "study,x,y,z,space\n" + f"Smith 2020,{a[0]},{a[1]},{a[2]},MNI\nOut 2021,{corner[0]},{corner[1]},{corner[2]},MNI\n")
+        process = subprocess.run([sys.executable, "-m", "LesionNetworkMappingLib.coords", "seeds", "--foci", source, "--bundle", self.bundle.path,
+                                  "--out", os.path.join(self.tmp, "cli outside"), "--radius", "3"],
+                                 check=False, cwd=MODULE_DIR, env=_env(), capture_output=True, text=True, timeout=300)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn("Out 2021 lies outside the connectome's brain mask", process.stdout + process.stderr)
+
+    def test_focus_that_adds_nothing_is_refused_by_name(self):
+        """A focus off the connectome grid (a typo such as z=110), outside its brain mask or not finite is refused by
+        name before anything is written, even when its study has another, valid focus: it was counted in the foci
+        totals (seeds.json foci, n_foci) but silently added nothing to the seed.
+        """
+        a = self.meta["blobs"]["A"]["center_world"]
+        corner = (np.asarray(self.bundle.affine) @ np.array([1.0, 1.0, 1.0, 1.0]))[:3]  # on the grid, outside the ellipsoid mask
+        above = (a[0], a[1], a[2] + 500.0)  # far above the grid
+        source = self.write("mixed.csv", "study,x,y,z\n" + f"Smith 2010,{a[0]},{a[1]},{a[2]}\nSmith 2010,{above[0]},{above[1]},{above[2]}\nJones 2012,{a[0]},{a[1]},{a[2]}\n")
+        foci = coords.read_foci(source)
+        out = os.path.join(self.tmp, "mixed")
+        for mask in (self.bundle.mask_indices, None):
+            with self.assertRaises(coords.OutsideMaskError) as caught:
+                coords.prepare_coordinates(out, foci, self.bundle.grid, radius_mm=3, mask_indices=mask)
+            self.assertEqual(caught.exception.labels, [coords.focus_text(foci[1])])
+            self.assertIn(f"Smith 2010 focus ({a[0]:g}, {a[1]:g}, {above[2]:g}) lies outside", str(caught.exception))
+            self.assertFalse(os.path.exists(os.path.join(out, coords.LESIONS_TSV)))
+        # In the grid but outside the brain mask: refused when the mask is checked, named with any wholly outside study
+        foci = [coords.Focus(*a, study="Smith 2010"), coords.Focus(*corner, study="Smith 2010"), coords.Focus(*corner, study="Out 2021")]
+        with self.assertRaises(coords.OutsideMaskError) as caught:
+            coords.prepare_coordinates(out, foci, self.bundle.grid, radius_mm=3, mask_indices=self.bundle.mask_indices)
+        self.assertEqual(caught.exception.labels, [coords.focus_text(foci[1]), "Out 2021"])
+        # A non-finite focus never reaches a seed: the parsers refuse it, and its sphere is empty (without a numpy warning)
+        with self.assertRaisesRegex(ValueError, r"inf.csv, row 3: not a finite number: 'inf'"):
+            coords.read_foci(self.write("inf.csv", f"study,x,y,z\nSmith 2010,{a[0]},{a[1]},{a[2]}\nSmith 2010,inf,1,2\n"))
+        with self.assertRaisesRegex(ValueError, "row 2: not a finite number"):
+            coords.read_foci(self.write("neginf.csv", "x,y,z,radius\n1,2,3,-inf\n"))
+        with self.assertRaisesRegex(ValueError, "line 3: not a coordinate"):
+            coords.read_foci(self.write("inf.txt", "// Reference=MNI\n// Smith 2010\n1 2 -inf\n"))
+        with self.assertRaisesRegex(ValueError, "must be lists of numbers"):
+            coords.read_foci(self.write("inf.json", '{"s": {"contrasts": {"1": {"coords": {"space": "MNI", "x": [1], "y": [2], "z": [Infinity]}}}}}'))
+        with np.errstate(all="raise"):
+            self.assertFalse(np.any(coords.sphere_occupancy((math.inf, 1.0, 2.0), 3.0, self.bundle.grid)))
+        foci = [coords.Focus(*a, study="Smith 2010"), coords.Focus(math.inf, 1.0, 2.0, study="Smith 2010")]
+        with self.assertRaises(coords.OutsideMaskError) as caught:
+            coords.prepare_coordinates(out, foci, self.bundle.grid, radius_mm=3, mask_indices=self.bundle.mask_indices)
+        self.assertEqual(caught.exception.labels, ["Smith 2010 focus (inf, 1, 2)"])
+        # The valid foci alone are mapped, and the recorded counts are the foci that make the seeds
+        tsv = coords.prepare_coordinates(out, [foci[0], coords.Focus(*a, study="Jones 2012")], self.bundle.grid, radius_mm=3, mask_indices=self.bundle.mask_indices)
+        record = coords.read_seed_record(os.path.dirname(tsv))
+        self.assertEqual((record["foci"], [seed["n_foci"] for seed in record["seeds"]]), (2, [1, 1]))
+
     def test_atrophy_prepare(self):
         w = np.zeros(self.bundle.shape, dtype=np.float32)
         w[self.bundle.mask] = 0.5
@@ -459,6 +782,103 @@ class SeedSetTest(CoordsTestCase):
             self.assertTrue(os.path.isfile(os.path.join(null_dir, name)), name)
         _stack, _a, header = nifti.read_nifti(os.path.join(null_dir, record["outputs"]["coordNullMaps"]))
         self.assertEqual(tuple(header["shape"])[3], 4)
+
+
+class CardSeedModeDocsTest(unittest.TestCase):
+    """The docs say which seed modes show which Map card (each card's ``modes`` in its ``card_*.py``)."""
+
+    def test_card_table_matches_card_modes(self):
+        import re
+
+        root = os.path.dirname(os.path.dirname(os.path.dirname(MODULE_DIR)))
+        page_path = os.path.join(root, "Docs", "user_guide", "modules", "lesionnetworkmapping.md")
+        studio_path = os.path.join(root, "Docs", "user_guide", "modules", "studio.md")
+        if not os.path.isfile(page_path) or not os.path.isfile(studio_path):
+            self.skipTest("no source tree")
+        with open(page_path, encoding="utf-8") as f:
+            rows = {}
+            for line in f:
+                cells = [c.strip() for c in line.strip().strip("|").split("|")]
+                if line.startswith("|") and len(cells) == 3:
+                    rows[cells[0]] = cells[2]
+        self.assertEqual(rows.get("Export"), "Lesion")
+        ui = os.path.join(MODULE_DIR, "LesionNetworkMappingUI")
+        for name in sorted(os.listdir(ui)):
+            if not (name.startswith("card_") and name.endswith(".py")):
+                continue
+            with open(os.path.join(ui, name), encoding="utf-8") as f:
+                text = f.read()
+            modes = re.search(r'^    "modes": \(([^)]*)\),', text, re.M)
+            title = re.search(r'^    "title": "([^"]+)",', text[text.rfind("\nCARD = {"):], re.M)
+            if modes is None or title is None or title.group(1) not in rows:
+                continue
+            shown = [m.strip().strip('"') for m in modes.group(1).split(",") if m.strip()]
+            cell = rows[title.group(1)].split(";")[0]
+            for mode in ("lesion", "cohort", "coordinates", "stimulation"):
+                self.assertEqual(mode.capitalize() in cell, mode in shown, f"{title.group(1)}: {mode} in {cell!r}")
+        with open(studio_path, encoding="utf-8") as f:
+            studio = " ".join(f.read().split())
+        self.assertNotIn("with the seed set to **Cohort** it also shows Preflight", studio)
+        self.assertIn("(no Normalize to MNI, Result or Export", studio)
+
+
+class AtrophyDocsTest(unittest.TestCase):
+    """Atrophy seeds exist only as ``coords atrophy`` on the command line: the README and the module page say so."""
+
+    @staticmethod
+    def _read(*parts):
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(MODULE_DIR))), *parts)
+        if not os.path.isfile(path):
+            return None  # not run from a source tree
+        with open(path, encoding="utf-8") as f:
+            return " ".join(f.read().split())
+
+    def test_readme_does_not_claim_an_atrophy_seed_mode(self):
+        readme = self._read("README.md")
+        if readme is None:
+            self.skipTest("no source tree")
+        self.assertIn("Coordinate, atrophy and stimulation seeds.", readme)
+        self.assertNotIn("foci (Talairach is converted to MNI; radius or diameter is explicit), atrophy maps", readme)
+        self.assertIn("atrophy seeds on the command line", readme)
+        self.assertIn("command-line feature, not a seed mode of the Map workspace", readme)
+
+    def test_excel_and_odd_coordinate_files_get_plain_messages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            def write(name, data):
+                path = os.path.join(tmp, name)
+                with open(path, "wb") as f:
+                    f.write(data)
+                return path
+
+            # Excel "CSV (semicolon separated)" in a German locale: cp1252 bytes read as text
+            foci = coords.read_foci(write("de.csv", "x;y;z;study\nA;1;2;Müller\n".replace("A;", "1;").encode("cp1252")))
+            self.assertEqual(foci[0].study, "Müller")
+            # decimal commas in a semicolon table: the message names the file and the fix
+            with self.assertRaises(ValueError) as cm:
+                coords.read_foci(write("dc.csv", b"x;y;z\n-33,5;-57;11\n"))
+            self.assertIn("dc.csv", str(cm.exception))
+            self.assertIn("Decimal commas", str(cm.exception))
+            # an empty or broken .json
+            for name, data in (("zero.json", b""), ("bad.json", b"{oops")):
+                with self.assertRaises(ValueError) as cm:
+                    coords.read_foci(write(name, data))
+                self.assertIn(name, str(cm.exception))
+                self.assertNotIn("Expecting value", str(cm.exception))
+            # bytes that are neither: never a raw codec message
+            with self.assertRaises(ValueError) as cm:
+                coords.read_foci(write("junk.csv", b"x,y,z\n\x81,\x8d,\x90\n"))
+            self.assertIn("junk.csv", str(cm.exception))
+            self.assertNotIn("codec", str(cm.exception))
+
+    def test_module_page_documents_the_atrophy_command(self):
+        page = self._read("Docs", "user_guide", "modules", "lesionnetworkmapping.md")
+        if page is None:
+            self.skipTest("no source tree")
+        self.assertIn("### Atrophy seeds (command line)", page)
+        self.assertIn("-m LesionNetworkMappingLib.coords atrophy", page)
+        for rule in coords.ATROPHY_RULES:
+            self.assertIn(rule, page)
+        self.assertIn("does not check the space of a w-map", page)
 
 
 if __name__ == "__main__":

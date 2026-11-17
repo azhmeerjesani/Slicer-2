@@ -481,6 +481,43 @@ class DataverseBuildTest(TutorialsTestBase):
         report = self.build(catalog, "joutsa_like")  # an empty existing folder is fine
         self.assertEqual(report["subjects"], 5)
 
+    def test_unwritable_or_full_target_is_a_sentence_before_any_download(self):
+        import errno
+        from unittest import mock
+
+        catalog = self.dataverse_catalog()
+        real_mkdir = os.mkdir
+        for number, words in ((errno.EPERM, "cannot be written"), (errno.EROFS, "cannot be written"), (errno.ENOSPC, "is full")):
+
+            def failing(path, *args, number=number, **kwargs):
+                if ".write-test-" in os.fspath(path):
+                    raise OSError(number, os.strerror(number), os.fspath(path))
+                return real_mkdir(path, *args, **kwargs)
+
+            self.server.log.clear()
+            with mock.patch("os.mkdir", failing), self.assertRaises(tutorials.TutorialError) as caught:
+                self.build(catalog, "joutsa_like")
+            message = caught.exception.message
+            self.assertIn(words, message)
+            self.assertIn(os.path.dirname(self.dest), message)
+            self.assertNotIn("Errno", message)
+            self.assertNotIn(".building", message)
+            self.assertEqual(caught.exception.code, "dest_not_writable")
+            self.assertEqual([path for path in self.server.log if "/api/access/datafile/" in path], [])
+        # a disk that fills up while the study is written
+        real_replace = os.replace
+
+        def full(source, *args, **kwargs):
+            if ".building-" in os.fspath(source):
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real_replace(source, *args, **kwargs)
+
+        with mock.patch("os.replace", full), self.assertRaises(tutorials.TutorialError) as caught:
+            self.build(catalog, "joutsa_like")
+        self.assertIn("is full", caught.exception.message)
+        self.assertNotIn("Errno", caught.exception.message)
+        self.assertNoPartialBuild()
+
     def test_checksum_mismatch_stops_the_build(self):
         catalog = self.dataverse_catalog(md5_wrong="1" * 32)
         with self.assertRaises(fetch.ChecksumError):
@@ -532,7 +569,7 @@ class S3BuildTest(TutorialsTestBase):
         report = self.build(catalog, "arc_like")
         self.assertEqual(report["subjects"], 6)
         self.assertTrue(report["native"])
-        self.assertEqual(report["next"], "normalize first (A-03)")
+        self.assertEqual(report["next"], "normalize first (Library > Normalization)")
         self.assertEqual(report["scans"], 0)
         self.assertEqual(report["without_mask"], 1)  # sub-M2099 has a table row and no mask
         self.assertEqual(report["score_columns"], ["wab_aq"])
@@ -570,9 +607,18 @@ class S3BuildTest(TutorialsTestBase):
         self.assertTrue(dictionary["wab_aq"]["SlicerStudio"]["confirmed"])
         self.assertEqual(dictionary["wab_days"]["SlicerStudio"]["role"], "covariate")
         readme = read_text(os.path.join(self.dest, "README.md"))
-        self.assertIn("normalize first (A-03)", readme)
+        self.assertIn("normalize first (Library > Normalization)", readme)
         self.assertIn("volume effect", readme)
         self.assertEqual(tutorials.tutorial_info(self.dest)["guidance"], "Aphasia severity is largely a volume effect: keep volume_ml.")
+
+    def test_readme_lists_build_notes_and_has_no_work_package_code(self):
+        entry = {"study": {"name": "X"}, "title": "X", "summary": "s", "licence": "L", "terms_url": "u", "source": {}, "citation": "c", "steps": ["a"], "native": True}
+        report = {"subjects": 3, "scans": 2, "warnings": ["sub-N03: the scan could not be downloaded (HTTP 404)."]}
+        text = tutorials._readme(entry, report)
+        self.assertNotIn("A-03", text)
+        self.assertIn("## Build notes", text)
+        self.assertIn("- sub-N03: the scan could not be downloaded (HTTP 404).", text)
+        self.assertNotIn("## Build notes", tutorials._readme(entry, dict(report, warnings=[])))
 
     def test_limit_prefers_subjects_with_a_score(self):
         catalog = self.s3_catalog(scans=False)
@@ -626,6 +672,21 @@ class S3BuildTest(TutorialsTestBase):
         self.assertEqual(len(candidates), 6)
         self.assertTrue(all(item["resource"]["checksum"] == fetch.RECORD_ON_FIRST_DOWNLOAD for item in candidates))
         self.assertEqual(self.build(catalog, "arc_like")["subjects"], 6)
+
+    def test_s3_resource_titles_are_plain_file_names(self):
+        catalog = self.s3_catalog(scans=True)
+        entry = catalog["entries"][0]
+        candidates, _warnings = tutorials.s3_candidates(entry, self.cache, None, None)
+        self.assertTrue(candidates)
+        for item in candidates:
+            self.assertEqual(item["resource"]["title"], item["name"])
+            self.assertIn(item["resource"]["id"].split(":", 1)[1].split(":")[0], ("mask",))
+            if item["scan"]:
+                self.assertEqual(item["scan"]["resource"]["title"], item["scan"]["rel"].rsplit("/", 1)[-1])
+        table = tutorials.table_resource(entry)
+        self.assertEqual(table["title"], entry["source"]["table"].rsplit("/", 1)[-1])
+        for resource in [item["resource"] for item in candidates] + [table]:
+            self.assertNotRegex(resource["title"], r"^(mask|scan|table):")
 
     def test_changed_source_is_reported(self):
         catalog = self.s3_catalog(scans=False)
@@ -695,6 +756,48 @@ class FolderBuildTest(TutorialsTestBase):
         # the user's folder is never modified
         self.assertEqual(sorted(os.listdir(os.path.join(folder, "extdata"))), ["behavior.csv", "colin_template.nii.gz", "lesions"])
         self.assertEqual(self.server.log, [])  # nothing is downloaded for a folder source
+
+
+    def lesymap_folder(self, values, count=4):
+        """A folder in the layout of the LESYMAP package: inst/extdata/lesions/Subject_NNN.nii.gz and behavior/behavior.txt (one number per line, no header)."""
+        folder = self.local("LESYMAP")
+        extdata = os.path.join(folder, "inst", "extdata")
+        os.makedirs(os.path.join(extdata, "lesions"))
+        for index in range(count):
+            blob(os.path.join(extdata, "lesions", f"Subject_{index + 1:03d}.nii.gz"), COLIN_GRID, (60 + index * 8, 100, 80), radius=4)
+        os.makedirs(os.path.join(extdata, "template"))
+        blob(os.path.join(extdata, "template", "ch2.nii.gz"), COLIN_GRID, (90, 100, 90), radius=30)
+        if values is not None:
+            os.makedirs(os.path.join(extdata, "behavior"))
+            with open(os.path.join(extdata, "behavior", "behavior.txt"), "w", encoding="utf-8") as f:
+                f.write("".join(f"{value}\n" for value in values))
+        return folder
+
+    def test_lesymap_behavior_txt_gives_the_score(self):
+        # The shipped recipe on the real package layout: behavior.txt has no header and no ids (read.table(header=FALSE)$V1)
+        folder = self.lesymap_folder(["0.25", "1.5", "-2", "3.75"])
+        report = tutorials.build_tutorial("lesymap_groundtruth", self.dest, cache=self.cache, source_dir=folder)
+        self.assertEqual(report["subjects"], 4)
+        built = study.Study.open(self.dest)
+        self.assertEqual(built.subject_ids, ["sub-001", "sub-002", "sub-003", "sub-004"])
+        self.assertEqual(built.score_columns(), [("behavior", True)])
+        self.assertEqual(report["score_columns"], ["behavior"])
+        self.assertEqual([built.value(sid, "behavior", float) for sid in built.subject_ids], [0.25, 1.5, -2.0, 3.75])
+        self.assertEqual(report["warnings"], [])
+
+    def test_lesymap_without_a_usable_score_says_so(self):
+        # no score file at all
+        folder = self.lesymap_folder(None)
+        report = tutorials.build_tutorial("lesymap_groundtruth", self.dest, cache=self.cache, source_dir=folder)
+        self.assertEqual(report["score_columns"], [])
+        self.assertTrue(any("no score" in text for text in report["warnings"]), report["warnings"])
+        # a list without ids that does not have one value per mask is not matched by order
+        shutil.rmtree(self.dest)
+        shutil.rmtree(folder)
+        folder = self.lesymap_folder(["1", "2", "3"])
+        report = tutorials.build_tutorial("lesymap_groundtruth", self.dest, cache=self.cache, source_dir=folder)
+        self.assertEqual(report["score_columns"], [])
+        self.assertTrue(any("has 3 scores but the folder has 4 lesion masks" in text for text in report["warnings"]), report["warnings"])
 
 
 class CommandLineTest(TutorialsTestBase):

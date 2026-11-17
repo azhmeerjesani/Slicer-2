@@ -8,6 +8,8 @@ binary mask of the voxels that pass the threshold and a sidecar. With an open st
 early is exported as a partial run (N = its last snapshot). L-30 and later work packages extend it.
 """
 
+import json
+import logging
 import os
 
 import qt
@@ -110,6 +112,8 @@ class ExportCard:
         job = getattr(run, "job", None)
         if job is not None and not job.isFinished():
             return None
+        if job is not None and getattr(job, "state", None) == "failed" and getattr(job, "doneEvent", None) is not None:
+            return None  # the engine finished but its maps failed the post-run checks (a constant map...): nothing to export
         return run
 
     def _studyPath(self):
@@ -159,7 +163,7 @@ class ExportCard:
         destination = self.studyDestination()
         if not destination:
             settings = qt.QSettings()
-            start = str(settings.value(LAST_FOLDER_SETTING) or "")
+            start = str(settings.value(LAST_FOLDER_SETTING) or "") or widgets.dialogStartFolder()
             folder = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Export the network map into…"), start)
             if not folder:
                 return None
@@ -170,10 +174,69 @@ class ExportCard:
             run = self._run()
             n = run.n if run.n and bundle is not None and run.n != bundle.n_subjects else None
             destination = os.path.join(folder, export.run_dir_name(bundle.name, n)) if bundle is not None else folder
+            destination = self._unusedDestination(destination)
+            if not destination:
+                return None
+        else:
+            foreign = self.foreignLesions(destination)
+            if foreign and self.askReplace(destination, foreign, None) != "replace":
+                return None  # the study's folder has a fixed name: replace the other lesion's maps, or cancel
         try:
             return self.exportTo(destination)
         except Exception:
             return None  # shown in the card ("Export failed: …") and logged by exportTo
+
+    def foreignLesions(self, destination):
+        """Names of the run's lesions whose maps in ``destination`` are those of another lesion (``export.foreign_lesions``)."""
+        from LesionNetworkMappingLib import export
+
+        run = self._run()
+        try:
+            with open(os.path.join(run.runDir, "run.json"), encoding="utf-8") as f:
+                return export.foreign_lesions(destination, json.load(f))
+        except (OSError, ValueError, TypeError, AttributeError):
+            logging.exception("Lesion network mapping: the export folder could not be checked")
+            return []
+
+    def _unusedDestination(self, destination):
+        """``destination``, or after asking, another folder when it holds the maps of another lesion of the same name; None to cancel.
+
+        Exporting replaces files of the same name: two lesions both named "Lesion" (or loaded from files of the same name)
+        exported into one folder would otherwise silently replace the first lesion's maps and sidecar.
+        """
+        names = self.foreignLesions(destination)
+        if not names:
+            return destination
+        counter = 2
+        while True:
+            other = f"{destination}-{counter}"
+            if not os.path.exists(other) or not self.foreignLesions(other):
+                break
+            counter += 1
+        answer = self.askReplace(destination, names, other)
+        if answer == "replace":
+            return destination
+        if answer == "new":
+            return other
+        return None
+
+    def askReplace(self, destination, names, otherDestination):
+        """Ask before replacing the maps of another lesion; return "replace", "new" (export into ``otherDestination``) or None."""
+        text = _("{folder} already holds the network maps of another lesion named {names}. Exporting there replaces them.").format(
+            folder=destination, names=", ".join(f"“{name}”" for name in names))
+        box = qt.QMessageBox(qt.QMessageBox.Warning, _("Replace the maps of another lesion?"), text, qt.QMessageBox.NoButton, slicer.util.mainWindow())
+        box.setObjectName("LNMExportReplaceQuestion")
+        newButton = box.addButton(_("Export into {name}").format(name=os.path.basename(otherDestination)), qt.QMessageBox.AcceptRole) if otherDestination else None
+        replaceButton = box.addButton(_("Replace"), qt.QMessageBox.DestructiveRole)
+        cancelButton = box.addButton(qt.QMessageBox.Cancel)
+        box.setDefaultButton(newButton or cancelButton)
+        box.setEscapeButton(cancelButton)
+        run = getattr(box, "exec_", None) or box.exec  # Qt 5 PythonQt: exec_, Qt 6: exec
+        run()
+        clicked = box.clickedButton()
+        if newButton is not None and clicked == newButton:
+            return "new"
+        return "replace" if clicked == replaceButton else None
 
     def exportTo(self, destination):
         """Export the current run into ``destination`` (created when needed); return ``export.write_run``'s files."""
@@ -186,14 +249,34 @@ class ExportCard:
         resolved = getattr(widget, "resolved", None) if widget is not None else None
         if rule is None and widget is not None:
             rule = widget.currentRule()
+        sign = None
+        if widget is not None and resolved is not None and (rule or {}).get("kind") != "top_pct":
+            # One tail shown and binarized: the provenance states that tail and its share of in-mask voxels
+            shown = widget._sign()
+            if shown in ("pos", "neg"):
+                sign = shown
+                try:
+                    import dataclasses
+
+                    from LesionNetworkMappingLib import thresholds
+
+                    values = widget._mapValues(widget._ruleStatistic(thresholds.normalize_rule(rule)))
+                    if values is not None:
+                        resolved = dataclasses.replace(resolved, fraction=thresholds.fraction_connected(values, resolved, shown))
+                except Exception:
+                    pass
         try:
             with slicer.util.WaitCursor():
-                result = logic.exportRun(run.runDir, destination, rule=rule, resolved=resolved, partial=run.partial)
+                result = logic.exportRun(run.runDir, destination, rule=rule, resolved=resolved, partial=run.partial, sign=sign)
         except Exception as exc:
             import logging
 
-            logging.exception("Lesion network mapping: the export failed")
-            self.resultLabel.setText(_("Export failed: {error}").format(error=exc))
+            plain = widgets.unwritableMessage(exc)
+            if plain:  # expected (a folder the user cannot write): one line, no traceback, no errno or hidden file name
+                logging.warning("Lesion network mapping: the export failed: %s", plain)
+            else:
+                logging.exception("Lesion network mapping: the export failed")
+            self.resultLabel.setText(plain or _("Export failed: {error}").format(error=exc))
             self.resultLabel.show()
             raise
         self.lastResult = result
@@ -221,7 +304,7 @@ class ExportCard:
     def showFolder(self):
         path = getattr(self, "lastDestination", None)
         if path and os.path.isdir(path):
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(path))
+            widgets.showInFileManager(path)
 
 
 CARD = {

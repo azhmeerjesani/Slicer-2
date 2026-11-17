@@ -9,7 +9,9 @@ Map is the Lesion Network Mapping module in the inspector (SPEC D2); these hooks
   else the bundled MNI152NLin2009cAsym 2 mm brain; never a download), foreground = the result (opacity 0.8, the module's
   colour table), no label layer, the lesion as a white outline. ``leave`` puts the saved layers back exactly, also when
   another page (Draw's review views, A-03b) changed them before Map was entered. The module calls ``captureLayers()``
-  before it changes a layer, so the layers seen before Map are the ones that come back.
+  before it changes a layer, so the layers seen before Map are the ones that come back. A volume shown to draw on while
+  Map is shown (Start on template, an opened scan: ``importer.setViewLayers``) replaces the saved background
+  (``setCapturedBackground``), so the views show what the Segment Editor draws on when Draw opens.
 - **Context.** The Draw segment (the current "Lesion" segment of the Segment Editor) becomes the seed of a lesion run,
   and the open study (``shell.studySession``) the cohort of the Cohort seed.
 - **Keys.** ``Ctrl+Enter`` is the inspector's primary button (Map network: the preflight checks, then compute; with
@@ -29,6 +31,7 @@ per subject. Network maps are never shown in Draw.
 """
 
 import logging
+import math
 import os
 import re
 import traceback
@@ -112,6 +115,22 @@ def captureLayers():
 
 def layersCaptured():
     return _state["layers"] is not None
+
+
+def setCapturedBackground(volumeId, compositeNodeIds=None):
+    """While Map holds the saved layers, make ``volumeId`` the background that leaving Map puts back (in the views of
+    ``compositeNodeIds``, else in all); return whether there were saved layers.
+
+    A page that shows a volume to draw on from Map (Start on template, open a scan) then switches away: the views keep
+    that volume instead of the layers seen before Map. The other saved layers (foreground, label, opacities) come back.
+    """
+    saved = _state["layers"]
+    if saved is None:
+        return False
+    for nodeId, layers in list(saved.items()):
+        if compositeNodeIds is None or nodeId in compositeNodeIds:
+            saved[nodeId] = (volumeId,) + tuple(layers[1:])
+    return True
 
 
 def restoreLayers():
@@ -314,13 +333,26 @@ def _adoptDrawSeed(widget):
     widget.updateGUIFromParameterNode()
 
 
+def shortcutDescriptions():
+    """``[(key sequence, description)]`` of the keys of Map (also listed by the keyboard shortcut sheet)."""
+    return [
+        (EXPORT_SHORTCUT, _("Export the maps")),
+        (PREVIOUS_MAP_SHORTCUT, _("Previous map")),
+        (NEXT_MAP_SHORTCUT, _("Next map")),
+    ]
+
+
 def _installShortcuts(shell):
     if _state["shortcutsShell"] is shell:
         return
     _state["shortcutsShell"] = shell
-    shell.addWorkspaceShortcut("map", EXPORT_SHORTCUT, exportCurrent, _("Export the maps"))
-    shell.addWorkspaceShortcut("map", PREVIOUS_MAP_SHORTCUT, lambda: browseStep(-1), _("Previous map"))
-    shell.addWorkspaceShortcut("map", NEXT_MAP_SHORTCUT, lambda: browseStep(1), _("Next map"))
+    callbacks = {
+        EXPORT_SHORTCUT: exportCurrent,
+        PREVIOUS_MAP_SHORTCUT: lambda: browseStep(-1),
+        NEXT_MAP_SHORTCUT: lambda: browseStep(1),
+    }
+    for key, description in shortcutDescriptions():
+        shell.addWorkspaceShortcut("map", key, callbacks[key], description)
 
 
 def _takeActionShortcuts(shell):
@@ -358,13 +390,52 @@ def _restoreActionShortcuts():
 
 #: Size of the legend card and the margin from the edges of the view
 LEGEND_WIDTH = 220
+#: Gap (px) between the statistic and the threshold text in the top row of the legend
+LEGEND_ROW_SPACING = 8
+#: Size (px) of the lesion-coloured outline swatch on the "Lesion outline" chip
+LESION_SWATCH_SIZE = 10
 OVERLAY_MARGIN = 10
 #: Height of the colour bar of the legend
 LEGEND_BAR_HEIGHT = 8
-#: The view under the overlays: the large view of the Studio layouts
+#: The view under the overlays: the large view of the Studio layouts (another slice view takes over while it is hidden)
 OVERLAY_VIEW = "Red"
 #: Height reserved at the bottom of the view for its corner text (the image name) under the layer chips
 CORNER_TEXT_HEIGHT = 22
+
+
+def _textWidth(font, text):
+    metrics = qt.QFontMetrics(font)
+    return metrics.horizontalAdvance(text) if hasattr(metrics, "horizontalAdvance") else metrics.width(text)
+
+
+def _elideRule(text, font, width):
+    """``text`` shortened to fit ``width`` px: when it does not fit, the rule name before the last " · " is elided (ellipsis at
+    its end) and the value after it is kept; a text without that separator, or a value that alone is too wide, is elided in the
+    middle.
+    """
+    if _textWidth(font, text) <= width:
+        return text
+    metrics = qt.QFontMetrics(font)
+    head, separator, tail = text.rpartition(" · ")
+    if separator:
+        tail = separator + tail
+        room = width - _textWidth(font, tail)
+        if room >= _textWidth(font, "…") * 3:
+            return str(metrics.elidedText(head, qt.Qt.ElideRight, room)) + tail
+    return str(metrics.elidedText(text, qt.Qt.ElideMiddle, width))
+
+
+class _ThresholdFilter(qt.QObject):
+    """Fits the threshold text of the legend to the width the layout really gives its label (``MapOverlay._fitThreshold``)."""
+
+    def __init__(self, overlay):
+        qt.QObject.__init__(self)
+        self.overlay = overlay
+
+    def eventFilter(self, obj, event):
+        if event.type() == qt.QEvent.Resize:
+            self.overlay._fitThreshold()
+        return False
 
 
 class _OverlayFilter(qt.QObject):
@@ -391,9 +462,10 @@ class MapOverlay:
     """
 
     def __init__(self, shell):
-        from . import ui
+        from . import hud, ui
 
         self.ui = ui
+        self.hud = hud
         self.shell = shell
         parent = shell.mainWindow.centralWidget()
         self.parent = parent
@@ -405,14 +477,20 @@ class MapOverlay:
         layout.setContentsMargins(12, 9, 12, 8)
         layout.setSpacing(6)
         top = qt.QHBoxLayout()
-        top.setSpacing(8)
+        top.setSpacing(LEGEND_ROW_SPACING)
         self.statisticLabel = ui.label("T", "caption", "text", "StudioMapLegendStatistic")
         ui.setText(self.statisticLabel, "label")
         top.addWidget(self.statisticLabel)
-        top.addStretch(1)
         self.thresholdLabel = ui.label("", "caption", "text2", "StudioMapLegendThreshold")
         ui.tabular(self.thresholdLabel)
-        top.addWidget(self.thresholdLabel)
+        # The text is elided by hand (``_showThreshold``) so that it never clips: let the layout give it what is left, and
+        # fit the text again to that width whenever it changes (the label's resize events)
+        self.thresholdLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        self.thresholdLabel.setAlignment(qt.Qt.AlignRight | qt.Qt.AlignVCenter)
+        self._thresholdText = ""
+        self._thresholdFilter = _ThresholdFilter(self)
+        self.thresholdLabel.installEventFilter(self._thresholdFilter)
+        top.addWidget(self.thresholdLabel, 1)
         layout.addLayout(top)
         self.bar = qt.QLabel()
         self.bar.setObjectName("StudioMapLegendBar")
@@ -421,7 +499,9 @@ class MapOverlay:
         ticks = qt.QHBoxLayout()
         self.tickLabels = []
         for index, alignment in enumerate((qt.Qt.AlignLeft, qt.Qt.AlignHCenter, qt.Qt.AlignRight)):
-            tick = ui.label("", "caption", "text3", f"StudioMapLegendTick{index}")
+            # text2, not text3: the legend fill is the Window colour at 86% over the black view (#dbdbdb in the light
+            # theme), where text3 is only 3.8:1
+            tick = ui.label("", "caption", "text2", f"StudioMapLegendTick{index}")
             ui.tabular(tick)
             tick.setAlignment(alignment | qt.Qt.AlignVCenter)
             ticks.addWidget(tick, 1)
@@ -441,12 +521,15 @@ class MapOverlay:
             ui.setText(chip, "caption")
             chipsLayout.addWidget(chip)
             self.chipLabels[key] = chip
+        self.lesionSwatch = self._makeLesionSwatch(self.chipLabels["lesion"])
         for widget in (self.legend, self.chips):
             widget.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
             ui.bindStyleSheet(widget, self._styleSheet)
             widget.hide()
         self._state = None
-        self._view = None
+        self._views = []
+        # A toast keeps above the legend and the chips (the overlay slots never overlap, USABILITY 6.3)
+        self.hud.addFloatingCardProvider(self.floatingRects)
         self._filter = _OverlayFilter(self)
         self._placeTimer = qt.QTimer()
         self._placeTimer.setSingleShot(True)
@@ -458,6 +541,41 @@ class MapOverlay:
         if self._layoutManager is not None:
             self._layoutManager.connect("layoutChanged(int)", self._onLayoutChanged)
 
+    def _makeLesionSwatch(self, chip):
+        """The lesion-coloured outline square at the left of the "Lesion outline" chip (a painted swatch, not a text
+        glyph, so that it keeps the line-icon look of the other icons); the chip's text indent leaves room for it.
+        """
+        swatch = qt.QLabel(chip)
+        swatch.setObjectName("StudioMapLayerChipSwatch")
+        swatch.setFixedSize(LESION_SWATCH_SIZE, LESION_SWATCH_SIZE)
+        swatch.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
+        chipLayout = qt.QHBoxLayout(chip)
+        chipLayout.setContentsMargins(0, 0, 0, 0)  # the chip's own padding (8 px) is the left margin
+        chip.setIndent(LESION_SWATCH_SIZE + 5)
+        chipLayout.addWidget(swatch, 0, qt.Qt.AlignLeft | qt.Qt.AlignVCenter)
+        self._paintLesionSwatch(swatch)
+        return swatch
+
+    def _paintLesionSwatch(self, swatch=None):
+        """Draw the swatch: a 1.75 px rounded outline square in the lesion colour (VISUAL 3, Lucide stroke)."""
+        swatch = swatch if swatch is not None else self.lesionSwatch
+        size = LESION_SWATCH_SIZE
+        ratio = swatch.devicePixelRatioF() if hasattr(swatch, "devicePixelRatioF") else 1.0
+        pixmap = qt.QPixmap(int(size * ratio), int(size * ratio))
+        pixmap.setDevicePixelRatio(ratio)
+        pixmap.fill(qt.Qt.transparent)
+        pen = qt.QPen(qt.QColor(self.ui.token("lesion")))
+        pen.setWidthF(1.75)
+        painter = qt.QPainter(pixmap)
+        try:
+            painter.setRenderHint(qt.QPainter.Antialiasing, True)
+            painter.setPen(pen)
+            inset = 1.75 / 2 + 0.5
+            painter.drawRoundedRect(qt.QRectF(inset, inset, size - 2 * inset, size - 2 * inset), 2.0, 2.0)
+        finally:
+            painter.end()
+        swatch.setPixmap(pixmap)
+
     def _styleSheet(self):
         ui = self.ui
         window = qt.QColor(ui.token("window"))
@@ -468,20 +586,25 @@ class MapOverlay:
                 f" border: 1px solid {border.name()}; border-radius: 6px; padding: 2px 8px; }}")
 
     def _sliceWidget(self):
-        """The main slice view widget, shown or not: it stays watched while a layout hides it, so that its Show event
-        puts the overlays back.
+        """The main slice view widget: the large view of the Studio layouts (Red) while it is shown; when a layout or a
+        maximized view hides it (a one-up Sagittal or Coronal view), the visible slice view that shows the map (else the
+        first visible one). Hidden views stay watched, so that their Show event puts the overlays back.
         """
-        layoutManager = slicer.app.layoutManager()
-        return layoutManager.sliceWidget(OVERLAY_VIEW) if layoutManager is not None else None
+        return _mainSliceWidget()
 
-    def _watch(self, sliceWidget):
-        if sliceWidget is self._view:
+    def _watch(self, sliceWidgets):
+        if sliceWidgets is None:
+            sliceWidgets = []
+        elif not isinstance(sliceWidgets, (list, tuple)):
+            sliceWidgets = [sliceWidgets]
+        if len(sliceWidgets) == len(self._views) and all(a is b for a, b in zip(sliceWidgets, self._views, strict=True)):
             return
-        if self._view is not None and self.ui._isAlive(self._view):
-            self._view.removeEventFilter(self._filter)
-        self._view = sliceWidget
-        if sliceWidget is not None:
-            sliceWidget.installEventFilter(self._filter)
+        for view in self._views:
+            if self.ui._isAlive(view):
+                view.removeEventFilter(self._filter)
+        self._views = list(sliceWidgets)
+        for view in self._views:
+            view.installEventFilter(self._filter)
 
     def refresh(self):
         """Show what the Map module shows now (``LesionNetworkMappingWidget.legendState()``), or hide."""
@@ -496,21 +619,59 @@ class MapOverlay:
             return
         statistic = str(state["statistic"])
         self.statisticLabel.setText(statistic)
-        self.thresholdLabel.setText(str(state["thresholdText"]))
+        self._showThreshold(str(state["thresholdText"]))
         window = float(state["window"] or 0.0)
         level = float(state.get("level") or 0.0)
         for tick, value in zip(self.tickLabels, (level - window, level, level + window), strict=True):
-            tick.setText(_tickText(value))
+            tick.setText(_tickText(value, window))
         self._paintBar()
         opacity = round(100 * float(state["opacity"]))
         self.chipLabels["network"].setText(_("Network {statistic} · {pct}%").format(statistic=statistic, pct=opacity))
-        templateName = _templateChipText()
-        self.chipLabels["template"].setText(templateName)
-        self.chipLabels["template"].setVisible(bool(templateName))
+        self._updateTemplateChip(_mainSliceWidget())
         lesion = self.chipLabels["lesion"]
-        lesion.setText("\u25a1 " + _("Lesion outline"))
+        lesion.setText(_("Lesion outline"))
+        self._paintLesionSwatch()
         lesion.setVisible(bool(state["outline"]))
         self.place()
+
+    def _showThreshold(self, text):
+        """The threshold text in the 220 px legend, never clipped: a text that does not fit next to the statistic is shortened
+        with an ellipsis in its rule name (the part before the last " · ") so that the value stays readable, and the label's
+        tooltip holds the whole text. A text that fits is shown whole.
+        """
+        self._thresholdText = str(text)
+        label = self.thresholdLabel
+        # The style sheet sets the fonts and the card's border: measure polished, also before the legend was first shown
+        for widget in (self.legend, self.statisticLabel, label):
+            widget.ensurePolished()
+        # What the layout will leave to the label (the statistic keeps its size hint, the gap is the row's spacing, the card's
+        # border and margins are off the contents rect) with no slack, so a text that fits is shown whole; the label's resize
+        # fits the text again to the width it really gets (``_fitThreshold``)
+        from . import ui
+
+        margins = ui.layoutContentsMargins(self.legend.layout())
+        available = (self.legend.contentsRect().width() - margins.left() - margins.right()
+                     - self.statisticLabel.sizeHint.width() - LEGEND_ROW_SPACING)
+        self._fitThreshold(available)
+
+    def _fitThreshold(self, width=None):
+        """Show the threshold text elided to ``width`` px (by default the width the layout gave the label)."""
+        label = self.thresholdLabel
+        if not self.ui._isAlive(label):
+            return
+        if width is None:
+            width = label.contentsRect().width()
+        text = self._thresholdText
+        shown = _elideRule(text, label.font, max(0, width))
+        if str(label.text) != shown:
+            label.setText(shown)
+        label.setToolTip(text if shown != text else "")
+
+    def _updateTemplateChip(self, sliceWidget):
+        """The template chip names the image under the map in the main view."""
+        templateName = _templateChipText(sliceWidget)
+        self.chipLabels["template"].setText(templateName)
+        self.chipLabels["template"].setVisible(bool(templateName))
 
     def _paintBar(self):
         """The colour bar: the LNM diverging colours from -window to +window."""
@@ -547,11 +708,13 @@ class MapOverlay:
         if not self.ui._isAlive(self.legend):
             return
         sliceWidget = self._sliceWidget()
-        self._watch(sliceWidget)
+        self._watch(_sliceWidgets())
         if self._state is None or sliceWidget is None or not sliceWidget.isVisible():
             self.legend.hide()
             self.chips.hide()
+            self._moveToasts()
             return
+        self._updateTemplateChip(sliceWidget)
         view = sliceWidget.sliceView()
         topLeft = self.parent.mapFromGlobal(view.mapToGlobal(qt.QPoint(0, 0)))
         rect = qt.QRect(topLeft.x(), topLeft.y(), view.width, view.height)
@@ -569,8 +732,24 @@ class MapOverlay:
         for widget in (self.legend, self.chips):
             if widget.isVisible():
                 widget.raise_()
+        self._moveToasts()
+
+    def floatingRects(self, parentWidget):
+        """The rectangles of the visible legend and chips in the coordinates of ``parentWidget`` (the central widget)."""
+        if parentWidget != self.parent or not self.ui._isAlive(self.legend):
+            return []
+        return [widget.geometry for widget in (self.legend, self.chips) if widget.isVisible()]
+
+    def _moveToasts(self):
+        """The toast on screen is placed again: it keeps above the legend and the chips that just moved or appeared."""
+        shell = self.shell
+        for name in ("_toast", "_stickyToast"):
+            toast = getattr(shell, name, None)
+            if toast is not None and toast.isVisible():
+                toast.updatePosition()
 
     def dispose(self):
+        self.hud.removeFloatingCardProvider(self.floatingRects)
         self.ui.removePaletteListener(self.refresh)
         self._placeTimer.stop()
         if self._layoutManager is not None and self.ui._isAlive(self._layoutManager):
@@ -585,20 +764,61 @@ class MapOverlay:
                 self.ui.bindStyleSheet(widget, None)
                 widget.hide()
                 widget.deleteLater()
+        self._moveToasts()
 
 
-def _tickText(value):
-    """A tick of the legend: "-12", "0", "12" (one decimal below 10)."""
+def _tickText(value, scale=None):
+    """A tick of the legend: "-12", "0", "12".
+
+    The decimals come from `scale` (the window of the map, default the value itself) so that all ticks
+    of one legend read alike: none from 10 up, one from 1 up, below 1 two significant digits of the scale
+    (a window of 0.0389 gives "-0.039", "0", "0.039").
+    """
     if abs(value) < 1e-9:
         return "0"
-    text = f"{value:.0f}" if abs(value) >= 10 else f"{value:.1f}"
-    return text.replace("-", "\u2212")
+    reference = abs(scale) if scale else abs(value)
+    if reference >= 10:
+        decimals = 0
+    elif reference >= 1:
+        decimals = 1
+    else:
+        decimals = min(6, math.ceil(-math.log10(reference)) + 1)
+    return f"{value:.{decimals}f}".replace("-", "\u2212")
 
 
-def _templateChipText():
-    """The short name of the image under the map in the main view ("MNI152NLin2009cAsym"), or ""."""
+def _sliceWidgets():
+    """All the slice view widgets of the layout manager, the large view of the Studio layouts first."""
     layoutManager = slicer.app.layoutManager()
-    sliceWidget = layoutManager.sliceWidget(OVERLAY_VIEW) if layoutManager is not None else None
+    if layoutManager is None:
+        return []
+    names = [str(name) for name in layoutManager.sliceViewNames()]
+    if OVERLAY_VIEW in names:
+        names.remove(OVERLAY_VIEW)
+        names.insert(0, OVERLAY_VIEW)
+    widgets = (layoutManager.sliceWidget(name) for name in names)
+    return [widget for widget in widgets if widget is not None]
+
+
+def _mainSliceWidget():
+    """The slice view the overlays follow: the large view (``OVERLAY_VIEW``) while it is shown; otherwise the shown view
+    that has a map (a foreground volume), else the first shown one; else the large view (hidden), or None.
+    """
+    widgets = _sliceWidgets()
+    if not widgets:
+        return None
+    shown = [widget for widget in widgets if widget.isVisible()]
+    if not shown or shown[0] is widgets[0]:
+        return widgets[0]
+    for widget in shown:
+        if widget.mrmlSliceCompositeNode().GetForegroundVolumeID():
+            return widget
+    return shown[0]
+
+
+def _templateChipText(sliceWidget=None):
+    """The short name of the image under the map in the main view ("MNI152NLin2009cAsym"), or ""."""
+    if sliceWidget is None:
+        sliceWidget = _mainSliceWidget()
     compositeNode = sliceWidget.mrmlSliceCompositeNode() if sliceWidget is not None else None
     node = slicer.mrmlScene.GetNodeByID(compositeNode.GetBackgroundVolumeID()) if compositeNode is not None and compositeNode.GetBackgroundVolumeID() else None
     if node is None:
@@ -681,9 +901,55 @@ def moreMenuActions(shell):
     return items
 
 
+def _windowLevelManagers():
+    """The scalar bar displayable manager of every slice view (it owns the view's window/level widget)."""
+    managers = []
+    for widget in _sliceWidgets():
+        try:
+            manager = widget.sliceView().displayableManagerByClassName("vtkMRMLScalarBarDisplayableManager")
+        except Exception:
+            manager = None
+        if manager is not None and hasattr(manager, "SetAdjustForegroundWindowLevelEnabled"):
+            managers.append(manager)
+    return managers
+
+
+def _lockMapWindowLevel(*args):
+    """While Studio shows Map, a window/level drag in a view (Studio's left-drag, or the Adjust window/level mouse mode)
+    adjusts the template, never the map: the map's colour table encodes the threshold rule over a symmetric window
+    (SPEC 4.12), so a changed window or level would show other voxels than the legend names. Also applied to the views
+    of a new layout. ``_unlockMapWindowLevel`` puts the previous setting back.
+    """
+    saved = _state.setdefault("foregroundWindowLevel", [])
+    for manager in _windowLevelManagers():
+        if any(known is manager for known, _previous in saved):
+            continue
+        saved.append((manager, bool(manager.GetAdjustForegroundWindowLevelEnabled())))
+        manager.SetAdjustForegroundWindowLevelEnabled(False)
+    layoutManager = slicer.app.layoutManager()
+    if layoutManager is not None and _state.get("windowLevelLayoutManager") is None:
+        layoutManager.connect("layoutChanged(int)", _lockMapWindowLevel)
+        _state["windowLevelLayoutManager"] = layoutManager
+
+
+def _unlockMapWindowLevel():
+    layoutManager = _state.pop("windowLevelLayoutManager", None)
+    if layoutManager is not None:
+        try:
+            layoutManager.disconnect("layoutChanged(int)", _lockMapWindowLevel)
+        except Exception:
+            pass
+    for manager, previous in _state.pop("foregroundWindowLevel", []):
+        try:
+            manager.SetAdjustForegroundWindowLevelEnabled(previous)
+        except Exception:
+            logging.error(f"Studio Map: cannot restore the window/level setting of a view:\n{traceback.format_exc()}")
+
+
 def enter(shell):
     _state["shell"] = shell
     captureLayers()
+    _lockMapWindowLevel()
     widget = moduleWidget()
     if widget is None:
         return
@@ -709,6 +975,7 @@ def enter(shell):
 
 def leave(shell):
     _removeOverlay()
+    _unlockMapWindowLevel()
     _restoreActionShortcuts()
     _browser.removeLesion()
     widget = moduleWidget(create=False)
@@ -1043,5 +1310,7 @@ def _showCurrent():
         return None
     _browser.showLesion()
     if shell is not None and len(_browser.items) > 1:
-        shell.toast(_("{label} · {index} of {count} · Alt+← / Alt+→").format(label=item[0], index=_browser.index + 1, count=len(_browser.items)))
+        from . import ui
+
+        shell.toast(_("{label} · {index} of {count} · {previous} / {next}").format(label=item[0], index=_browser.index + 1, count=len(_browser.items), previous=ui.keyText("Alt+Left"), next=ui.keyText("Alt+Right")))
     return item

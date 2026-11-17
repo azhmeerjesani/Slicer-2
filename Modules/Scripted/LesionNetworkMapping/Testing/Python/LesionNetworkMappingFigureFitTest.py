@@ -78,6 +78,39 @@ class FitTest(unittest.TestCase):
             line = np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0], [3.0, 3.0]])
             figurefit.affine_2d(line, line)
 
+    def test_repeated_pair_is_not_an_extra_pair(self):
+        """A pair placed again on the same figure point must not get round the 4-pair affine rule (BB-1)."""
+        # 3 inconsistent pairs: no exact similarity, so the honest residual is large
+        src = FIG_PX[[0, 2, 3]]
+        dst = figurefit.apply_2d(AFFINE, src) + [[0.0, 0.0], [9.0, -6.0], [-7.0, 8.0]]
+        for repeat in (src[2], src[2] + [0.6, 0.0]):  # exact repeat, and a re-click 0.6 px off
+            with self.assertRaisesRegex(ValueError, "distinct"):
+                figurefit.affine_2d(np.vstack([src, repeat]), np.vstack([dst, dst[2:]]))
+            with self.assertRaisesRegex(ValueError, "distinct"):
+                figurefit.fit_2d("affine", np.vstack([src, repeat]), np.vstack([dst, dst[2:]]))
+        self.assertEqual(figurefit.distinct_count(np.vstack([src, src[2] + [0.6, 0.0]])), 3)
+        self.assertEqual(figurefit.distinct_count(FIG_PX), len(FIG_PX))
+        self.assertEqual(figurefit.distinct_count([[5.0, 5.0]] * 3), 1)
+        self.assertEqual(figurefit.distinct_count(np.zeros((0, 2))), 0)
+        # 4 distinct points still fit
+        figurefit.affine_2d(FIG_PX[:4], figurefit.apply_2d(AFFINE, FIG_PX[:4]))
+        # A similarity of 2 points and a repeat is exact with no LOO RMS: never shown green
+        sim_src = np.vstack([src[:2], src[1:2]])
+        sim_dst = np.vstack([dst[:2], dst[1:2]])
+        fit = figurefit.umeyama_similarity(sim_src, sim_dst)
+        rms = figurefit.rms(fit, sim_src, sim_dst)
+        loo = figurefit.loo_rms("similarity", sim_src, sim_dst)
+        self.assertLess(rms, 1e-9)
+        self.assertIsNone(loo)
+        text, level = figurefit.residual_chip(rms, loo, 3)
+        self.assertEqual(text, "RMS 0.0 mm · LOO n/a (3 pairs)")
+        self.assertEqual(level.level, "none")
+        self.assertIn("no leave-one-out RMS", level.text)
+        self.assertIn("measures landmark consistency, not lesion accuracy", level.text)
+        # a large RMS without LOO still shows its level
+        self.assertEqual(figurefit.residual_chip(5.0, None, 2)[1].level, "red")
+        self.assertEqual(figurefit.residual_chip(3.0, None, 2)[1].level, "amber")
+
     def test_bad_input(self):
         with self.assertRaises(ValueError):
             figurefit.umeyama_similarity(FIG_PX[:1], FIG_PX[:1])
@@ -113,6 +146,20 @@ class FitTest(unittest.TestCase):
         # reflected folds give no LOO RMS
         self.assertIsNone(figurefit.loo_rms("affine", FIG_PX, dst))
 
+    def test_degenerate_template_landmarks_not_blamed_on_convention(self):
+        same = np.tile([[10.0, 20.0]], (len(FIG_PX), 1))
+        with self.assertRaisesRegex(ValueError, "template landmarks coincide"):
+            figurefit.umeyama_similarity(FIG_PX, same)
+        with self.assertRaisesRegex(ValueError, "template landmarks coincide"):
+            figurefit.affine_2d(FIG_PX, same)
+        line = np.column_stack([np.zeros(len(FIG_PX)), np.arange(len(FIG_PX), dtype=float) * 7.0])
+        with self.assertRaisesRegex(ValueError, "template landmarks lie on one line"):
+            figurefit.affine_2d(FIG_PX, line)
+        # a genuine mirror still names the convention
+        mirrored = figurefit.apply_2d(AFFINE @ np.diag([-1.0, 1.0, 1.0]), FIG_PX)
+        with self.assertRaisesRegex(ValueError, "L/R convention"):
+            figurefit.affine_2d(FIG_PX, mirrored)
+
     def test_noise_loo_above_rms(self):
         rng = np.random.default_rng(22)
         for kind, truth in (("similarity", similarity_matrix(0.5, -4.0, [-75.0, -85.0])), ("affine", AFFINE)):
@@ -144,6 +191,10 @@ class FitTest(unittest.TestCase):
         text, level = figurefit.residual_chip(1.6, 2.3, 5)
         self.assertEqual(text, "RMS 1.6 mm · LOO 2.3 mm (5 pairs)")
         self.assertEqual(level.level, "amber")  # follows the larger LOO RMS
+        self.assertTrue(level.text.startswith("LOO 2.3 mm — "), level.text)  # the tooltip names the value it grades
+        self.assertTrue(figurefit.residual_chip(7.1, 21.7, 3)[1].text.startswith("LOO 21.7 mm — "))
+        self.assertTrue(figurefit.residual_chip(3.0, 1.0, 3)[1].text.startswith("RMS 3.0 mm — "))
+        self.assertTrue(figurefit.residual_chip(3.0, None, 2)[1].text.startswith("RMS 3.0 mm — "))
         self.assertEqual(figurefit.residual_chip(0.5, None, 2)[0], "RMS 0.5 mm · LOO n/a (2 pairs)")
 
     def test_initial_pixel_size(self):

@@ -132,6 +132,7 @@ set(expected_defined_vars
   Slicer_VERSION
   Slicer_VERSION_FULL
   Slicer_REVISION
+  Slicer_EXTENSIONS_SERVER_REVISION
   Slicer_WC_REVISION
   Slicer_WC_REVISION_HASH
   Slicer_WC_URL

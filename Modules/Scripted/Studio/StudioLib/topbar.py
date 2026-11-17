@@ -43,6 +43,11 @@ BREADCRUMB_SEPARATOR = " \u203a "
 UNAVAILABLE_OPACITY = 0.55
 #: Horizontal padding and frame of the breadcrumb button (its stylesheet), which the elided text must leave free
 _BREADCRUMB_PADDING = 16
+#: Widest the status chip gets (a longer text, such as the reason of a failed run, is elided at its end and shown
+#: whole in its tooltip), and the narrowest it gets when the window is narrow: the chip never widens the window
+STATUS_CHIP_MAX_WIDTH = 280
+STATUS_CHIP_COMPACT_MAX_WIDTH = 160
+STATUS_CHIP_MIN_WIDTH = 72
 ICON_SIZE = 18
 UNDO_REDO_POLL_INTERVAL_MS = 250
 #: Autosave status (A-01b): icon size, and the window widths below which it shows its icon only (the text stays in
@@ -79,6 +84,12 @@ _DICOM_FIRST_RUN_SQL_LINES = re.compile(r"^(?:SQL failed:.*|Error:\s*|Driver not
 _DICOM_FIRST_RUN_ROWS = 8
 #: At most this many of those SQL errors per notice (CTK logs three): a longer burst is counted
 _DICOM_FIRST_RUN_MAX_SQL_ERRORS = 4
+#: DCMTK's read messages for a file that is not DICOM (a NIfTI or a report next to the series: the indexer tries every
+#: file of the folder). The row must start with a DCMTK "W: Dcm..." or "E: Dcm..." line and hold only such lines.
+_DCMTK_FIRST_LINE = re.compile(r"^[WE]: Dcm\w+: ")
+_DCMTK_NOT_DICOM_LINES = re.compile(
+    r"^(?:[WEIF]: Dcm\w+: .*|Could not load\s+\".*\"\s*|DCMTK says:.*|Could not read DICOM file:.*|\s*)$",
+)
 
 #: Description of each workspace in its tooltip
 _WORKSPACE_DESCRIPTIONS = {
@@ -92,6 +103,8 @@ def _toolButton(objectName, iconName, toolTip, role="ghost"):
     button = qt.QToolButton()
     button.setObjectName(objectName)
     button.setToolTip(toolTip)
+    # Icon only: the name a screen reader announces comes from the accessible name, not the tooltip
+    button.setAccessibleName(ui.nameOfToolTip(toolTip))
     button.setAutoRaise(True)
     button.setIconSize(qt.QSize(ICON_SIZE, ICON_SIZE))
     button.setFixedSize(30, 30)
@@ -270,7 +283,10 @@ class TopBar:
         self.statusChip = ui.chip("")
         self.statusChip.setObjectName("StudioStatusChip")
         self.statusChip.hide()
+        self._statusChipText = None
         rightLayout.addWidget(self.statusChip)
+        self._rightResizeFilter = _ResizeFilter(self._elideStatusChip)
+        self.rightContainer.installEventFilter(self._rightResizeFilter)
         # Autosave status (A-01b): "Autosaved · 2 min ago" and its menu, hidden until something was autosaved
         self.saveStatusButton = qt.QToolButton()
         self.saveStatusButton.setObjectName("StudioSaveStatus")
@@ -296,7 +312,7 @@ class TopBar:
         self.undoButton = _toolButton("StudioUndoButton", "undo-2", ui.tooltip(_("Undo"), "Ctrl+Z", _("Undo the last lesion edit")))
         self.undoButton.connect("clicked()", self._onUndo)
         rightLayout.addWidget(self.undoButton)
-        self.redoButton = _toolButton("StudioRedoButton", "redo-2", ui.tooltip(_("Redo"), "Ctrl+Y or Ctrl+Shift+Z", _("Redo the last undone edit")))
+        self.redoButton = _toolButton("StudioRedoButton", "redo-2", ui.tooltip(_("Redo"), ui.keyText("Ctrl+Y") + " " + _("or") + " " + ui.keyText("Ctrl+Shift+Z"), _("Redo the last undone edit")))
         self.redoButton.connect("clicked()", self._onRedo)
         rightLayout.addWidget(self.redoButton)
         self.undoRedoTimer = qt.QTimer(self.toolBar)
@@ -373,6 +389,7 @@ class TopBar:
         pill.setFocusPolicy(qt.Qt.TabFocus)
         pill.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
         pill.setToolTip(ui.tooltip(_("Search"), "Ctrl+K", _("modules, tools, actions, views, files")))
+        pill.setAccessibleName(_("Search"))
         self.pillLayout = qt.QHBoxLayout(pill)
         self.pillLayout.setContentsMargins(10, 0, 8, 0)
         self.pillLayout.setSpacing(6)
@@ -396,9 +413,26 @@ class TopBar:
         for child in (self.searchIcon, self.searchPlaceholder, self.searchKey):
             child.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
         ui.bindStyleSheet(pill, self._searchPillStyleSheet)
+        pill.ensurePolished()
+        self.searchPlaceholder.ensurePolished()
+        self.searchKey.ensurePolished()
         ui.installButtonKeys(pill)
         pill.connect("clicked()", self.shell.openPalette)
         return pill
+
+    def _searchPillMinimumWidth(self):
+        """The pill's minimum width: at least SEARCH_PILL_MIN_WIDTH, and enough for the icon, the short placeholder and
+        the key chip at the current font size (the fixed minimum alone let "Search" run under "Ctrl+K" at 125% font).
+        """
+        font = qt.QFont(self.searchPlaceholder.font)
+        font.setPixelSize(ui.fontPx(13))
+        textWidth = qt.QFontMetrics(font).horizontalAdvance(self._searchPlaceholderTexts[1])
+        needed = (10 + 8 + 16 + 2 * self.pillLayout.spacing + textWidth + self.searchKey.sizeHint.width() + 2)
+        return max(SEARCH_PILL_MIN_WIDTH, needed)
+
+    def _applySearchPillMinimum(self):
+        if not self._compact and getattr(self, "searchPill", None) is not None:
+            self.searchPill.setMinimumWidth(self._searchPillMinimumWidth())
 
     def _fitSearchPlaceholder(self):
         """The long placeholder ("Search actions, tools and data") when the pill has room for it, else "Search"."""
@@ -504,6 +538,7 @@ class TopBar:
         Called whenever a side changes (breadcrumb text, status chip shown or hidden, compact mode): the switcher stays
         centred, and the columns still give way when the window is narrow.
         """
+        self._applySearchPillMinimum()
         minimum = max(self.leftContainer.minimumSizeHint.width(), self.rightContainer.minimumSizeHint.width())
         self.grid.setColumnMinimumWidth(0, minimum)
         self.grid.setColumnMinimumWidth(2, minimum)
@@ -530,13 +565,14 @@ class TopBar:
         else:
             self.pillLayout.setContentsMargins(10, 0, 8, 0)
             self.searchIcon.setAlignment(qt.Qt.AlignLeft | qt.Qt.AlignVCenter)
-            self.searchPill.setMinimumWidth(SEARCH_PILL_MIN_WIDTH)
             self.searchPill.setMaximumWidth(SEARCH_PILL_WIDTH)
+            self._applySearchPillMinimum()
         style = qt.Qt.ToolButtonIconOnly if compact else qt.Qt.ToolButtonTextBesideIcon
         for button in self.workspaceButtons.values():
             button.setToolButtonStyle(style)
         self.breadcrumbButton.setMaximumWidth(BREADCRUMB_COMPACT_MAX_WIDTH if compact else BREADCRUMB_MAX_WIDTH)
         self._elideBreadcrumb()
+        self._elideStatusChip()
         self.updateSaveStatusCompact()
         self.updateColumnMinimums()
 
@@ -606,10 +642,13 @@ class TopBar:
             if not key:
                 workspacesController = getattr(self.shell, "workspaces", None)
                 parentKey = getattr(self.shell, "_transientOrigin", None) or getattr(workspacesController, "last", None)
+        # The tabs share one Tab stop, as the tabs of a tab bar do (the arrow keys move between them, ``_SwitcherKeys``).
+        # Qt keeps one stop in a group of checkable buttons anyway, but it is always the first tab: make it the
+        # current tab (or, in a transient module, the tab it was opened from) so that Space or Enter on arrival
+        # does not leave the workspace.
+        stopKey = key if button is not None else (parentKey or next(iter(self.workspaceButtons), None))
         for workspaceKey, workspaceButton in self.workspaceButtons.items():
-            # Qt keeps one Tab stop in a group of checkable buttons (the one that had the focus last): give them all
-            # back, so that Tab reaches every tab again (the arrow keys move between them, ``_SwitcherKeys``)
-            workspaceButton.setFocusPolicy(qt.Qt.TabFocus)
+            workspaceButton.setFocusPolicy(qt.Qt.TabFocus if workspaceKey == stopKey else qt.Qt.NoFocus)
             isParent = workspaceKey == parentKey
             if bool(workspaceButton.property("studioParent")) != isParent:
                 workspaceButton.setProperty("studioParent", isParent)
@@ -687,7 +726,9 @@ class TopBar:
             qt.QApplication.clipboard().setText(self.libraryCommand())
             self.shell.toast(_("Command copied"))
         elif link == "readme":
-            qt.QDesktopServices.openUrl(self.readmeUrl())
+            from . import projects
+
+            projects.openLink(self.readmeUrl())
         if popover is not None:
             popover.close()
 
@@ -805,6 +846,11 @@ class TopBar:
         project = self._currentProject()
         if project is not None:
             self._showBreadcrumb(os.path.basename(os.path.normpath(project.path)), None, BREADCRUMB_SEPARATOR, clickable=True)
+            self._updateProjectMenuButton()
+            return
+        if getattr(self.shell, "studySession", None) is not None:
+            # A study is open without a subject (Library's list): no scan of the project that was just released
+            self._showBreadcrumb("", None, BREADCRUMB_SEPARATOR, clickable=False)
             self._updateProjectMenuButton()
             return
         volume = self._sourceVolume()
@@ -930,14 +976,53 @@ class TopBar:
         self._breadcrumbTimer.start()
 
     def setStatusChip(self, text=None, level="neutral"):
+        """Show ``text`` in the status chip (None hides it). A text longer than the chip's room is elided at its end, and
+        the whole text is in the tooltip and in ``statusChipText()``: the chip never widens the window.
+        """
         if not text:
+            self._statusChipText = None
             self.statusChip.hide()
+            self.statusChip.setToolTip("")
         else:
-            self.statusChip.setText(text)
+            text = str(text)
+            self._statusChipText = text
             ui.setChipLevel(self.statusChip, level)
+            # The chip asks for its whole text when it has room, and for at most its minimum width otherwise, so that
+            # the side columns (both get the larger minimum) stay narrow
+            self.statusChip.setMinimumWidth(0)
+            self.statusChip.setText(text)
+            whole = self.statusChip.sizeHint.width()
+            self.statusChip.setMinimumWidth(min(whole, STATUS_CHIP_MIN_WIDTH))
             self.statusChip.show()
+            self._elideStatusChip()
         self.updateSaveStatusCompact()
         self.updateColumnMinimums()
+
+    def statusChipText(self):
+        """The whole (not elided) text of the status chip, or None when it is hidden."""
+        return self._statusChipText
+
+    def _elideStatusChip(self):
+        """Elide the status chip text (at its end) to the room that the right column leaves, at most STATUS_CHIP_MAX_WIDTH."""
+        text = self._statusChipText
+        chip = self.statusChip
+        if not text:
+            return
+        metrics = qt.QFontMetrics(chip.font)
+        # Padding and frame of the chip (its stylesheet): what its size hint adds to the text
+        padding = max(0, chip.sizeHint.width() - metrics.horizontalAdvance(str(chip.text)))
+        room = STATUS_CHIP_COMPACT_MAX_WIDTH if self._compact else STATUS_CHIP_MAX_WIDTH
+        if self.rightContainer.width > 0 and not chip.isHidden():
+            # What the column has beyond the minimum of its contents is the chip's to take (the search pill gives way)
+            spare = self.rightContainer.width - self.rightContainer.minimumSizeHint.width()
+            room = min(room, chip.minimumWidth + max(0, spare))
+        room = max(room, chip.minimumWidth)
+        elided = metrics.elidedText(text, qt.Qt.ElideRight, max(0, room - padding))
+        if str(chip.text) != elided:
+            chip.setText(elided)
+        toolTip = text if elided != text else ""
+        if str(chip.toolTip) != toolTip:
+            chip.setToolTip(toolTip)
 
     #
     # Autosave status (A-01b)
@@ -1076,6 +1161,7 @@ class TopBar:
         if layoutManager is None:
             return
         wasMaximized = layouts.isMaximized()
+        focusBefore = qt.QApplication.focusWidget()
         self._userLayoutRequests += 1
         try:
             layouts.applyPickerEntry(key, self.shell.hoverTracker)
@@ -1085,6 +1171,49 @@ class TopBar:
             self._announceLibraryLayout(layouts.PICKER_ENTRIES[1][1])
         if key != "single" and wasMaximized and not layouts.isMaximized() and self.shell.canvas() is not None:
             self._announceLibraryLayout(layouts.layoutName(layoutManager.layout))
+        # Once the new layout has its geometry, the view under the pointer takes the keys
+        qt.QTimer.singleShot(0, lambda focusBefore=focusBefore: self._focusHoveredViewAfterLayout(focusBefore))
+
+    def runLayoutChange(self, callback):
+        """Run ``callback`` (it changes the layout, e.g. triggers a layout action of the View menu) and, once the new
+        layout settled, give the keys to the view under the pointer (see ``_focusHoveredViewAfterLayout``).
+        """
+        focusBefore = qt.QApplication.focusWidget()
+        callback()
+        qt.QTimer.singleShot(0, lambda focusBefore=focusBefore: self._focusHoveredViewAfterLayout(focusBefore))
+
+    def _focusHoveredViewAfterLayout(self, focusBefore):
+        """Give the keys to the slice view under the pointer after a layout key (Alt+1..5) or a Search entry.
+
+        Focus follows the mouse only when the pointer enters a view, and the pointer stays still here. The new layout
+        hid or moved the view that had the focus (Alt+2 over a view enlarges it), so Qt gave the focus to the next
+        widget, an inspector button, and the arrow keys, Home and End were lost; or another view is now under the
+        pointer (Alt+3 over Red) and the keys went to the old one. The view under the pointer takes the focus, as if
+        the pointer had just entered it. A widget outside the views that the user gave the focus to (Tab) keeps it.
+        """
+        from . import shell as shellModule
+
+        focusNow = qt.QApplication.focusWidget()
+        if focusBefore is not None and focusNow == focusBefore and not shellModule._isInView(focusNow):
+            return
+        if self.shell.focusHoveredView():
+            return
+        # No view is under the pointer (keyboard-only use, the pointer rests on the top bar): the view that had the
+        # keys (F6, Tab) and is still shown keeps them, instead of the next widget in the inspector.
+        if (
+            focusBefore is not None
+            and focusNow != focusBefore
+            and shellModule._isInView(focusBefore)
+            and not shellModule._isInView(focusNow)
+            and not shellModule._isTextInput(focusNow)
+            and qt.QApplication.activePopupWidget() is None
+            and qt.QApplication.activeModalWidget() is None
+        ):
+            try:
+                if focusBefore.isVisible() and focusBefore.focusPolicy != qt.Qt.NoFocus:
+                    focusBefore.setFocus(qt.Qt.OtherFocusReason)
+            except (RuntimeError, ValueError):
+                pass
 
     def _updateLayoutPicker(self):
         layoutManager = slicer.app.layoutManager()
@@ -1162,11 +1291,14 @@ class TopBar:
             return
         if layouts.isStudioLayout(layoutId):
             layouts.register()
+        focusBefore = qt.QApplication.focusWidget()
         self._userLayoutRequests += 1
         try:
             layoutManager.setLayout(layoutId)
         finally:
             self._userLayoutRequests -= 1
+        # The pointer has not moved: the view under it takes the keys once the new layout has its geometry
+        qt.QTimer.singleShot(0, lambda focusBefore=focusBefore: self._focusHoveredViewAfterLayout(focusBefore))
 
     def _updateMoreLayoutsMenu(self):
         self._moreLayoutsMenuOpen = True
@@ -1246,6 +1378,7 @@ class TopBar:
         self._seenErrorRows = 0
         self._dicomFirstRunRow = None
         self._dicomFirstRunSqlErrors = 0
+        self._plannedRefusalRows = set()
         self._errorCountTimer = qt.QTimer(self.toolBar)
         self._errorCountTimer.setSingleShot(True)
         self._errorCountTimer.setInterval(100)
@@ -1265,16 +1398,50 @@ class TopBar:
         if rowCount < self._scannedRows:
             self._rescanErrors()
             return
+        scanned = self._scannedRows
         for row in range(self._scannedRows, rowCount):
             isError = model.index(row, _LEVEL_COLUMN).data() in _ERROR_LEVEL_NAMES
-            if not self._isExpectedFirstRunMessage(row, isError) and isError:
+            if row in self._plannedRefusalRows:
+                pass  # the reader text of a refusal that was explained in plain words
+            elif isError and self._isBlankMessage(row):
+                if row == rowCount - 1:
+                    # The log groups consecutive entries of a level in the last row: a later line can still join this one
+                    break
+            elif not self._isExpectedFirstRunMessage(row, isError) and isError:
                 self._errorRows += 1
-        self._scannedRows = rowCount
+            scanned = row + 1
+        self._scannedRows = scanned
         self._updateErrorBadge()
+
+    def logRowMark(self):
+        """The number of log rows now (after counting the pending ones), to pass to ``ignoreErrorRowsSince``."""
+        self._scanErrors()
+        return self.errorLogModel.rowCount()
+
+    def ignoreErrorRowsSince(self, mark):
+        """Do not count the Error rows logged since ``mark`` (``logRowMark``): the raw reader text of a planned refusal
+        (for example "too large for the memory") that the user was already told about in plain words.
+        """
+        slicer.app.processEvents()
+        model = self.errorLogModel
+        for row in range(mark, model.rowCount()):
+            self._plannedRefusalRows.add(row)
+        self._scannedRows = min(self._scannedRows, mark)
+        self._rescanErrors(keepIgnored=True)
+
+    def _isBlankMessage(self, row):
+        """True for a log row without text. CTK's stderr reader logs a stray newline as an empty Critical "FD" entry
+        (a startup race of ``ctkFDHandler``, also in official Slicer): it tells nothing, so it is not counted.
+        """
+        return not (self.errorLogModel.index(row, _DESCRIPTION_COLUMN).data() or "").strip()
 
     def _isExpectedFirstRunMessage(self, row, isError):
         """True for the messages of the first DICOM use of a profile (``_DICOM_FIRST_RUN_NOTICE``), not counted."""
         description = self.errorLogModel.index(row, _DESCRIPTION_COLUMN).data() or ""
+        if isError:
+            lines = description.splitlines()
+            if lines and _DCMTK_FIRST_LINE.match(lines[0]) and all(_DCMTK_NOT_DICOM_LINES.match(line) for line in lines):
+                return True  # a file in the DICOM folder that is not DICOM: skipped by the indexer, the series loads
         if description.startswith(_DICOM_FIRST_RUN_NOTICE):
             self._dicomFirstRunRow = row
             self._dicomFirstRunSqlErrors = 0
@@ -1290,8 +1457,10 @@ class TopBar:
             return True
         return False
 
-    def _rescanErrors(self, *args):
+    def _rescanErrors(self, *args, keepIgnored=False):
         # The log was cleared or filtered
+        if not keepIgnored:
+            self._plannedRefusalRows = set()
         self._scannedRows = 0
         self._errorRows = 0
         self._dicomFirstRunRow = None

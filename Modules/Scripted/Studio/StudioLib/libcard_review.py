@@ -7,7 +7,8 @@
 - **STUDY card** "Review": the counts, **Review N →** (the review state of Draw, Studio only), **Resume review**, and
   the study settings *Require review before analyses* (``review_required``) and *Blind tracing* (``blind_tracing``),
   each change audited in ``.studio/audit.jsonl``. With blind tracing, the group column of the subject list is hidden
-  (the grid cards already hide the blinded columns).
+  (the grid cards, the SUBJECT card and its Case section hide the blinded columns, and Cohort diagnostics the case/control
+  split, through ``library._hiddenColumns``).
 - **SUBJECT section** "Review" (Studio Library and the Classic Studio module panel): the state, who traced and who
   reviewed, the comment, the chips, **Review in Draw** (Studio), and the same three decisions as Draw's review footer:
   Approve, Request changes… and Reject… (inline forms); **Reopen review** for a decided lesion.
@@ -73,6 +74,18 @@ def changesRequested(row):
 
 def autoUnreviewed(row):
     return _rules().is_auto_unreviewed(row)
+
+
+def changes_text(n):
+    """"1 change requested" / "{n} changes requested" (the Review card's summary line)."""
+    return _("1 change requested") if n == 1 else _("{n} changes requested").format(n=n)
+
+
+def gate_text(n):
+    """The line under the Require review box: how many lesions the analyses leave out."""
+    if n == 1:
+        return _("Analyses leave out 1 lesion that review has not approved (preflight lists it; Include anyway is recorded).")
+    return _("Analyses leave out {n} lesions that review has not approved (preflight lists them; Include anyway is recorded).").format(n=n)
 
 
 def counts(studyObject):
@@ -231,7 +244,8 @@ class ReviewCard:
         self.blindCheck.setToolTip(_("Tracers and reviewers do not see the group, score and symptom columns, and network maps are never shown "
                                      "while tracing or reviewing. Recorded in the provenance."))
         self.blindCheck.connect("toggled(bool)", lambda checked: self._setSetting("blind_tracing", checked))
-        layout.addWidget(self.blindCheck)
+        # A long text: it wraps (a check box shows it on one line and would widen the inspector)
+        layout.addWidget(library.ui.wrapCheckBox(self.blindCheck))
         self.gateLabel = library._cardLabel("StudioReviewGateLabel", 12, "text2")
         layout.addWidget(self.gateLabel)
 
@@ -244,7 +258,7 @@ class ReviewCard:
         numbers = counts(studyObject)
         rules = _rules()
         summary = rules.gate_summary(studyObject)
-        parts = [_("{n} to review").format(n=numbers[review.QUEUE_NEEDS_REVIEW]), _("{n} changes requested").format(n=numbers[review.QUEUE_CHANGES])]
+        parts = [_("{n} to review").format(n=numbers[review.QUEUE_NEEDS_REVIEW]), changes_text(numbers[review.QUEUE_CHANGES])]
         if numbers[review.QUEUE_AUTO]:
             parts.append(_("{n} automatic not approved").format(n=numbers[review.QUEUE_AUTO]))
         parts.append(_("{n} approved").format(n=summary["approved"]))
@@ -268,7 +282,7 @@ class ReviewCard:
             self._setting = False
         gated = sum(len(sids) for sids in summary["excluded"].values())
         if gated:
-            self.gateLabel.setText(_("Analyses leave out {n} lesion(s) that review has not approved (preflight lists them; Include anyway is recorded).").format(n=gated))
+            self.gateLabel.setText(gate_text(gated))
         else:
             self.gateLabel.setText(_("Analyses use every included lesion.") if not summary["required"] else _("Analyses use approved lesions only."))
         _scheduleBlinding(session)

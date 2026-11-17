@@ -12,6 +12,7 @@ Run without Slicer's GUI:
     PythonSlicer -m unittest Testing/Python/LesionNetworkMappingFastmapTest.py -v
 """
 
+import argparse
 import json
 import os
 import shutil
@@ -330,6 +331,95 @@ class FastmapTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             fastmap.load_index(copy)
 
+    def test_damaged_index_is_reported_in_plain_words_with_rebuild_advice(self):
+        """A changed index file gives a sentence without an exception class name that says to rebuild, also on the command line."""
+        copy = os.path.join(self.tmp, "index-damaged")
+        shutil.copytree(self.index_dir, copy)
+        path = os.path.join(copy, fastmap.P_NAME)
+        with open(path, "r+b") as f:
+            f.seek(-1, os.SEEK_END)
+            last = f.read(1)
+            f.seek(-1, os.SEEK_END)
+            f.write(bytes([last[0] ^ 0xFF]))
+        with self.assertRaisesRegex(ValueError, "damaged.*rebuild it"):
+            fastmap.load_index(copy)
+        with self.assertRaises(ValueError) as caught:  # a sentence of its own: callers append further sentences to it
+            fastmap.load_index(copy)
+        self.assertTrue(str(caught.exception).endswith("rebuild it."), str(caught.exception))
+        code, events, stderr = self._run("apply", "--index", copy, "--lesion", os.path.join(self.tmp, "none.nii.gz"), "--out", os.path.join(self.tmp, "damaged-out"))
+        self.assertEqual(code, 1, stderr)
+        self.assertEqual(events[-1]["code"], "input")
+        self.assertIn("rebuild it", events[-1]["message"])
+        self.assertNotIn("ValueError", events[-1]["message"])
+
+    def test_damaged_index_json_is_reported_with_rebuild_advice(self):
+        """An index.json that is not JSON, or not an object, names index.json and says to rebuild, also on the command line."""
+        for n, text in enumerate(["{garbage", "", "[]", "null"]):
+            copy = os.path.join(self.tmp, f"index-badjson-{n}")
+            shutil.copytree(self.index_dir, copy)
+            with open(os.path.join(copy, fastmap.INDEX_JSON), "w", encoding="utf-8") as f:
+                f.write(text)
+            with self.assertRaisesRegex(ValueError, r"index\.json.*rebuild it"):
+                fastmap.load_index(copy)
+            code, events, stderr = self._run("apply", "--index", copy, "--lesion", os.path.join(self.tmp, "none.nii.gz"), "--out", os.path.join(self.tmp, f"badjson-out-{n}"))
+            self.assertEqual(code, 1, stderr)
+            self.assertEqual(events[-1]["code"], "input")
+            self.assertIn("rebuild it", events[-1]["message"])
+            self.assertNotIn("JSONDecodeError", events[-1]["message"])
+            self.assertNotIn("AttributeError", events[-1]["message"])
+
+    def test_index_of_a_bundle_converted_again_from_other_data_is_stale(self):
+        """Converting other time series with the same subject ids and mask into the same folder (``--overwrite``) must
+        change connectome.json (the manifest sha256 that keys the cohort maps cache) and make the fast index stale.
+        Before the fix the manifest was byte-identical and the old index was found and accepted.
+        """
+        path = os.path.join(self.tmp, "Reconverted.lnmc")
+        connectome.make_synthetic(path, shape=(14, 16, 14), n_subjects=3, runs=(20,), seed=1)
+        first = connectome.ConnectomeBundle.open(path)
+        manifest = os.path.join(path, connectome.MANIFEST_NAME)
+        with open(manifest, "rb") as f:
+            first_manifest = f.read()
+        self.assertEqual(connectome.norms_fingerprint(first.metadata), reference.subjects_data_sha256(first, first.subject_ids))
+        tiling = fastmap.build_tiling(first, atlas_entries=[], cell_mm=6.0)
+        index = fastmap.build_index(first, tiling, emit=_quiet, register=False)
+        self.assertEqual(fastmap.load_index(index.path, first).path, index.path)
+        from LesionNetworkMappingLib import nulls
+
+        self.assertEqual(nulls.find_fast_index(first, verify=True), index.path)
+        first.close()
+
+        connectome.make_synthetic(path, shape=(14, 16, 14), n_subjects=3, runs=(20,), seed=2, overwrite=True)
+        second = connectome.ConnectomeBundle.open(path)
+        self.assertEqual(second.subject_ids, first.subject_ids)
+        self.assertEqual(second.mask_sha256, first.mask_sha256)
+        with open(manifest, "rb") as f:
+            self.assertNotEqual(f.read(), first_manifest, "other data must give another connectome.json (manifest sha256)")
+        self.assertTrue(os.path.isdir(index.path), "the old index is still in derived/")
+        self.assertIsNone(nulls.find_fast_index(second))
+        self.assertIsNone(nulls.find_fast_index(second, verify=True))
+        with self.assertRaisesRegex(ValueError, "converted again"):
+            fastmap.load_index(index.path, second)
+        # A bundle written before the fingerprint key (or downloaded): only verify, which hashes the norms files, can tell
+        with open(manifest, encoding="utf-8") as f:
+            metadata = json.load(f)
+        del metadata[connectome.NORMS_SHA256_KEY]
+        with open(manifest, "w", encoding="utf-8") as f:
+            json.dump(metadata, f)
+        legacy = connectome.ConnectomeBundle.open(path)
+        self.assertEqual(nulls.find_fast_index(legacy), index.path)
+        self.assertIsNone(nulls.find_fast_index(legacy, verify=True))
+        with self.assertRaises(ValueError):
+            fastmap.load_index(index.path, legacy, verify=True)
+        second.close()
+        legacy.close()
+        # The same data converted again gives the same connectome.json, and the index is current again
+        connectome.make_synthetic(path, shape=(14, 16, 14), n_subjects=3, runs=(20,), seed=1, overwrite=True)
+        with open(manifest, "rb") as f:
+            self.assertEqual(f.read(), first_manifest)
+        again = connectome.ConnectomeBundle.open(path)
+        self.assertEqual(nulls.find_fast_index(again, verify=True), index.path)
+        again.close()
+
     def test_resume_after_stop(self):
         out = os.path.join(self.tmp, "index-resume")
         calls = {"n": 0}
@@ -513,6 +603,11 @@ class FastmapTest(unittest.TestCase):
         self.assertTrue(result["strata"]["cortical"]["passed"])
         self.assertEqual(result["strata"]["brainstem"]["reason"], "median partial r 0.50 < 0.80")
         self.assertIn("at least 3", result["strata"]["subcortical"]["reason"])
+        # Bug fast-gate-reason-rounds-to-equal: a failing median is never shown rounded up to the constant
+        near = fastmap.gate({"lesions": [lesion(f"n{i}", "cortical", 0.7962, 0.7) for i in range(5)], "reference": {}})
+        self.assertEqual(near["strata"]["cortical"]["reason"], "median partial r 0.796 < 0.80")
+        self.assertEqual(fastmap.format_below(0.5996, 0.60), "0.5996")
+        self.assertEqual(fastmap.format_below(0.50, 0.80), "0.50")
         excluded = {item["name"]: item["message"] for item in result["excluded"]}
         self.assertEqual(sorted(excluded), ["b0", "b1", "b2", "b3", "s0", "s1", "w0"])
         self.assertIn("brainstem stratum failed the parity gate", excluded["b0"])
@@ -543,6 +638,24 @@ class FastmapTest(unittest.TestCase):
         allowed, message = fastmap.lesion_allowed(report, "cortical", None)
         self.assertFalse(allowed)
         self.assertIn("volume is unknown", message)
+
+    def test_gate_texts_name_size_bins_like_the_parity_table(self):
+        def lesion(name, size):
+            return {"name": name, "stratum": "cortical", "size_bin": size, "volume_ml": 2.0, "r": 0.9, "partial_r": 0.9, "top10_dice": 0.7}
+
+        lesions = [lesion("tiny", "lt1ml")] + [lesion(f"c{i}", "1to10ml") for i in range(11)]
+        result = fastmap.gate({"lesions": lesions, "reference": {}})
+        texts = list(result["messages"]) + [item["message"] for item in result["excluded"]]
+        _, allowed_message = fastmap.lesion_allowed({"gate": result}, "cortical", size="lt1ml")
+        texts.append(allowed_message)
+        self.assertIn("Fast mode is not allowed for lesions of size < 1 mL: ", allowed_message)
+        self.assertTrue(any("the < 1 mL size bin failed the parity gate" in text for text in texts))
+        self.assertTrue(any(text.startswith("Fast mode is not allowed for lesions of size < 1 mL: ") for text in result["messages"]))
+        for text in texts:
+            for raw in fastmap.SIZE_BIN_NAMES:
+                self.assertNotIn(raw, text, "the internal size-bin id must not reach user-visible text")
+        self.assertEqual(fastmap.size_bin_text("ge50ml"), "≥ 50 mL")  # noqa: RUF001
+        self.assertEqual(fastmap.size_bin_text("other"), "other")
 
     def test_gate_without_lesion_volumes_is_per_stratum(self):
         rng = np.random.default_rng(8)
@@ -638,6 +751,30 @@ class FastmapTest(unittest.TestCase):
         events = [json.loads(line) for line in process.stdout.splitlines() if line.startswith("{")]
         return process.returncode, events, process.stderr
 
+    def test_command_line_missing_input_is_plain_sentence(self):
+        """A missing tiling folder, index folder, lesion or external map is a sentence naming the path and the option, never FileNotFoundError / [Errno 2]."""
+        root = os.path.join(self.tmp, "cli-missing")
+        os.makedirs(root, exist_ok=True)
+        calls = (
+            (("build", "--bundle", self.bundle.path, "--tiling", os.path.join(root, "missing-tiling"), "--out", os.path.join(root, "i")), "--tiling"),
+            (("apply", "--index", os.path.join(root, "noindex"), "--lesion", os.path.join(root, "l.nii.gz"), "--out", os.path.join(root, "o")), "--index"),
+            (("apply", "--index", self.index_dir, "--lesion", os.path.join(root, "missing.nii.gz"), "--out", os.path.join(root, "o")), "--lesion"),
+        )
+        for argv, option in calls:
+            code, events, _ = self._run(*argv)
+            self.assertEqual(code, 1, argv)
+            self.assertEqual(events[-1]["code"], "input")
+            message = events[-1]["message"]
+            for raw in ("FileNotFoundError", "Errno", "No such file"):
+                self.assertNotIn(raw, message)
+            self.assertIn("does not exist", message)
+            self.assertIn(option, message)
+        # The shared wording, also used by the reference command line (compare --external)
+        args = argparse.Namespace(external=os.path.join(root, "missing.nii.gz"))
+        message = jobs.input_message(FileNotFoundError(2, "No such file or directory", args.external), args)
+        self.assertEqual(message, f"The file or folder {args.external} does not exist (--external)")
+        self.assertEqual(jobs.input_message(ValueError("plain")), "plain")
+
     def test_command_line(self):
         root = os.path.join(self.tmp, "cli")
         tiling_dir = os.path.join(root, "tiling")
@@ -705,6 +842,18 @@ class FastmapTest(unittest.TestCase):
         expected = fastmap.approximate_maps(weights, index)[0]
         np.testing.assert_allclose(data.reshape(-1)[self.bundle.mask_indices], expected, rtol=1e-6, atol=1e-6)
         self.assertTrue(record["lesions"][0]["map"].endswith("_desc-FastApproxFz_funcmap.nii.gz"))
+        # --parity that is not a parity report: a plain input error before anything is written
+        for number, content in enumerate(([1], {"index": {"sha256": None}}, {"gate": []})):
+            bad = os.path.join(root, f"notreport{number}.json")
+            with open(bad, "w", encoding="utf-8") as f:
+                json.dump(content, f)
+            bad_dir = os.path.join(root, f"fast-bad{number}")
+            code, events, stderr = self._run("apply", "--index", out, "--lesion", lesion_paths[0], "--out", bad_dir, "--parity", bad)
+            self.assertEqual(code, 1, stderr)
+            self.assertEqual(events[-1]["code"], "input")
+            self.assertIn("is not a parity report", events[-1]["message"])
+            self.assertNotIn("traceback", events[-1])
+            self.assertFalse(os.path.exists(bad_dir))
         # Usage errors and atlases that are not cached
         code, events, _ = self._run("build")
         self.assertEqual(code, jobs.EXIT_USAGE)

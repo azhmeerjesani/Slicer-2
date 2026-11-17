@@ -21,6 +21,11 @@ and Hedges g maps are then listed (one shown at a time in the Cohort card's grou
 the module colour table), with glm.json's warnings, the smallest attainable p, the FDR floor and the limitations.
 No parametric p is ever shown: every p-value comes from permutations.
 
+After the analysis plan is locked (Recipe header, card_recipe.py), the permutations, covariates, input, FDR and TFCE
+of this tab (and the permutations and covariates of the Symptom tab) are compared with the plan
+(``recipes.analysis_pending``): a change is shown in the header's reason row and Run waits until its reason is
+recorded as a deviation ("contrast.n_perm"), or until "Use the plan's settings" sets the tab back.
+
 "Export for PALM…" writes the design and the maps with ``palm.export_palm`` into ``<study>/derivatives/lnm/palm/<run>``
 and validates the files with ``palm.validate_palm_export``; it runs as a job of this module (below), because loading
 the n maps and writing the 4D image would block the application. "Import PALM results…" reads PALM's outputs back
@@ -179,6 +184,7 @@ from . import widgets
 ORDER_CONTRAST = 20
 #: Node attribute of the Cohort card's group map volume (card_cohort.GROUP_VOLUME_ATTRIBUTE)
 GROUP_VOLUME_ATTRIBUTE = "LNM.GroupMapVolume"
+CONNECTOME_SPACE = object()  # showGroupFile's space: the cohort's connectome's template space
 #: Delay of the design rebuild after a control changed (several changes give one rebuild)
 DESIGN_DELAY_MS = 150
 #: Delay between loading the template and showing it under a map (two short GUI passes instead of one long one)
@@ -361,7 +367,19 @@ class DesignPreview:
         self.frame.setObjectName(objectName)
         self.frame.setFrameShape(qt.QFrame.StyledPanel)
         self.frame.setFixedWidth(400)
-        layout = qt.QVBoxLayout(self.frame)
+        # The content sits in a scroll area: showAt sizes the popup to the whole content, and it scrolls only when the
+        # content is taller than the screen (a 1366x768 screen, a larger font). QWidget.adjustSize would cap the
+        # popup at about two thirds of the screen height and squeeze the heat map and the facts table instead.
+        outer = qt.QVBoxLayout(self.frame)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.scroll = qt.QScrollArea()
+        self.scroll.setObjectName(f"{objectName}Scroll")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(qt.QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        self.content = qt.QWidget()
+        self.content.setObjectName(f"{objectName}Content")
+        layout = qt.QVBoxLayout(self.content)
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(6)
         self.title = label(_("Design preview"), f"{objectName}Title")
@@ -388,6 +406,10 @@ class DesignPreview:
         layout.addWidget(self.noteLabel)
         for widget in (self.title, self.typeLabel, self.columnsLabel, self.factsLabel, self.checksLabel, self.limitationsLabel, self.noteLabel):
             widget.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Preferred)  # a fixed-width popup: heights follow the wrapped text
+        self.scroll.setWidget(self.content)
+        self.scroll.viewport().setAutoFillBackground(False)  # the popup's own background shows through
+        self.content.setAutoFillBackground(False)
+        outer.addWidget(self.scroll)
 
     def setDesign(self, design, note="", error=None, title=None):
         """Show a ``design.Design`` (or the error that kept it from being built)."""
@@ -437,15 +459,33 @@ class DesignPreview:
         rows.append((_("Permutation"), html.escape(design.permute_reason)))
         return "<table cellspacing=2>" + "".join(f"<tr><td><b>{html.escape(name)}</b>&nbsp;</td><td>{value}</td></tr>" for name, value in rows) + "</table>"
 
+    def contentHeight(self):
+        """The height that shows the whole content at the popup's fixed width (labels wrap, so height follows width)."""
+        layout = self.content.layout()
+        layout.activate()
+        border = self.frame.frameWidth
+        height = self.content.heightForWidth(self.frame.width - 2 * border)
+        if height < 0:
+            height = self.content.sizeHint.height()
+        return height + 2 * border
+
     def showAt(self, anchor):
-        self.frame.adjustSize()
         point = anchor.mapToGlobal(qt.QPoint(0, anchor.height))
         screen = qt.QGuiApplication.screenAt(point) if hasattr(qt.QGuiApplication, "screenAt") else None
+        if screen is None:  # the anchor is scrolled out of view: keep the popup on the primary (first) screen
+            screens = qt.QGuiApplication.screens()  # QGuiApplication.primaryScreen is not a live screen in PythonQt
+            screen = screens[0] if screens else None
+        height = self.contentHeight()
         if screen is not None:
             area = screen.availableGeometry  # a property in PythonQt
             area = area() if callable(area) else area
-            x = min(max(point.x(), area.left()), area.right() - self.frame.width)
-            y = point.y() if point.y() + self.frame.height <= area.bottom() else max(area.top(), point.y() - anchor.height - self.frame.height)
+            height = min(height, area.height())  # taller than the screen: the content scrolls
+        # resize, not adjustSize: adjustSize bounds a window to a share of the screen and would crop the content
+        self.frame.resize(self.frame.width, height)
+        if screen is not None:
+            x = min(max(point.x(), area.left()), area.right() + 1 - self.frame.width)
+            y = point.y() if point.y() + height <= area.bottom() + 1 else point.y() - anchor.height - height
+            y = max(area.top(), min(y, area.bottom() + 1 - height))
             point = qt.QPoint(x, y)
         self.frame.move(point)
         self.frame.show()
@@ -468,6 +508,9 @@ class CohortTab:
 
     PREFIX = "LNMCohortTab"
     TITLE = "Analysis"
+    #: recipes.ANALYSIS_SCOPES key of the analysis whose settings (``planValues``) follow the locked analysis plan: a
+    #: change from the plan is shown in the Recipe header and Run waits for its reason (L-39); None: no plan parameters
+    PLAN_SCOPE = None
 
     def __init__(self, ctx):
         self.ctx = ctx
@@ -475,6 +518,7 @@ class CohortTab:
         self.mapsJob = None  # the cohort maps job a Run waits for
         self.jobFolder = None  # the output folder of the analysis job (its logs go to the parent folder's logs/)
         self._jobFolder = None
+        self.jobScope = None  # (connectomeDir(), study path, study name) when the analysis job started: its result belongs there
         self.design = None
         self.designError = None
         self.designNote = ""
@@ -484,6 +528,7 @@ class CohortTab:
         self.result = None  # (folder, record) of the shown analysis
         self._resultScope = None
         self._cleanedUp = False
+        self._planShown = []  # the plan changes the Recipe header was last asked to show
         self.widget = qt.QWidget()
         self.widget.setObjectName(f"{self.PREFIX}Tab")
         self.layout = qt.QVBoxLayout(self.widget)
@@ -623,7 +668,7 @@ class CohortTab:
         if path:
             return os.path.dirname(os.path.dirname(path))
         widget = _mapWidget()
-        cohortDir = widget.cohortOutputDir() if widget is not None and hasattr(widget, "cohortOutputDir") else None
+        cohortDir = widget.cohortOutputDir(ownOnly=True) if widget is not None and hasattr(widget, "cohortOutputDir") else None
         return os.path.dirname(cohortDir) if cohortDir else None
 
     def participantsPath(self):
@@ -738,8 +783,13 @@ class CohortTab:
             return False, _("Choose a connectome in the Connectome card.")
         if self.running():
             return False, _("Mapping the lesions first…") if self.job is None or self.job.isFinished() else _("{title} running…").format(title=self.TITLE)
+        pending = self.planPending()
+        if pending:
+            return False, _("Changed after the analysis plan was locked: {changes}. Give the reason in the Recipe header (top of Map), or use the plan's settings.").format(
+                changes="; ".join(change["description"] for change in pending))
         if self.design is None:
-            return False, self.designError or _("No design.")
+            # the error itself is the red line under the controls (showDesignState): say it once
+            return False, _("Blocked by the design checks (in red above).") if self.designError else _("No design.")
         settings = self.blockingSettings()
         if settings:
             return False, settings[0]
@@ -770,6 +820,9 @@ class CohortTab:
             self.result, self.outputs = None, []
             self.results.hide()
             self.onScopeChanged()
+            card = self.card()
+            if card is not None and hasattr(card, "hideGroupMapOfOtherScope"):
+                card.hideGroupMapOfOtherScope()  # the map of the previous scope leaves the views (as its result left the tab)
         self.rebuildDesign()
         self.showDesignState()
         self.showState()
@@ -794,6 +847,7 @@ class CohortTab:
 
     def showState(self):
         enabled, reason = self.runState()
+        self.showPlanPending()
         self.runButton.setText(self.runText())
         self.runButton.setEnabled(enabled)
         self.reasonLabel.setText(reason)
@@ -808,6 +862,44 @@ class CohortTab:
         self.showDesignState()
         self.preview.setDesign(self.design, self.designNote, self.designError, self.previewTitle())
         self.preview.showAt(self.previewButton)
+
+    #
+    # Analysis plan (L-39): after the lock, a change of this analysis's plan parameters waits for its reason
+    #
+
+    def planValues(self):
+        """{recipes.ANALYSIS_FIELDS field: value} of the plan parameters this analysis holds (none by default)."""
+        return {}
+
+    def studyPath(self):
+        study = self.ctx.study
+        return os.fspath(study.path) if study is not None and getattr(study, "path", None) else None
+
+    def planPending(self):
+        """Changes of this analysis's settings from the locked plan that wait for a reason (recipes.analysis_pending)."""
+        from LesionNetworkMappingLib import recipes
+
+        path = self.studyPath()
+        if self.PLAN_SCOPE is None or not path:
+            return []
+        try:
+            return recipes.analysis_pending(path, self.PLAN_SCOPE, self.planValues())
+        except (recipes.RecipeError, TypeError, ValueError, OSError):
+            logging.exception("Lesion network mapping: the settings could not be compared with the locked analysis plan")
+            return []
+
+    def showPlanPending(self):
+        """Let the Recipe header show (or stop showing) this analysis's changes from the locked plan."""
+        pending = [change["description"] for change in self.planPending()]
+        if pending == self._planShown:
+            return
+        self._planShown = pending
+        header = self.ctx.card("recipe")
+        if header is not None and hasattr(header, "refresh"):
+            header.refresh()
+
+    def applyPlanValues(self, values):
+        """Set the controls of the plan parameters this analysis holds to ``values`` (recipes.analysis_parameters)."""
 
     #
     # Run
@@ -851,6 +943,8 @@ class CohortTab:
         if not isinstance(spec, jobrunner.JobSpec):
             return None
         self.jobFolder = self._jobFolder
+        study = self.ctx.study
+        self.jobScope = (self.connectomeDir(), self.studyPath(), getattr(study, "name", None) if study is not None else None)
         self.job = self.ctx.submit(spec)
         self.progress.setJob(self.job)
         self.progress.widget.show()
@@ -890,10 +984,27 @@ class CohortTab:
 
     def onDone(self, job):
         self._updateProgress(force=True)
+        self.showState()
+        scope, studyPath, studyName = self.jobScope or (None, None, None)
+        if self.jobScope is not None and scope != self.connectomeDir():
+            # Another study or connectome was opened while the job ran: its result stays in its own folder (shown when
+            # that study is opened again) and is not shown, or its map loaded, as a result of the one open now
+            self.onScopeChanged()
+            if job.succeeded():
+                shell = self.ctx.shell()
+                if shell is not None:
+                    if studyPath and studyPath == self.studyPath():
+                        text = _("{title} done for another connectome: choose it again to see the maps")
+                    elif studyName:
+                        text = _("{title} of study “{study}” done: open that study to see the maps")
+                    else:
+                        text = _("{title} of another study done: open that study to see the maps")
+                    shell.toast(text.format(title=self.TITLE, study=studyName), 3000)
+            return
         if job.state == "failed":
+            # After showState(), which writes the run reason (empty once the job is over) and would hide this label
             self.reasonLabel.setText(_("{title} failed: {reason}").format(title=self.TITLE, reason=job.failureReason))
             self.reasonLabel.show()
-        self.showState()
         if job.succeeded():
             folder = self.jobFolder
             self.loadResult(folder, show=True)
@@ -920,7 +1031,10 @@ class CohortTab:
 
     def _showFirstMap(self):
         if not self._cleanedUp and self.outputs:
-            self.showMap(0)
+            self.showMap(0, onLayers=self.afterFirstMapLayers)
+
+    def afterFirstMapLayers(self):
+        """Called when the layers of the first map of a finished run are final (nothing by default)."""
 
     def readResult(self, folder):
         raise NotImplementedError
@@ -936,6 +1050,10 @@ class CohortTab:
                     best = (stamp or (0,), folder)
         if best is not None:
             self.loadResult(best[1])
+            self.restoreDesign(best[1])
+
+    def restoreDesign(self, folder):
+        """Put the controls back to the design of the result shown from ``folder`` (none by default; see ContrastTab)."""
 
     def setOutputs(self, outputs):
         """[(desc, label, path)] of the maps table."""
@@ -952,20 +1070,28 @@ class CohortTab:
     def onMapClicked(self, row, column):
         self.showMap(row)
 
-    def showMap(self, index):
+    def showMap(self, index, onLayers=None):
         """Show one output map in the Cohort card's group map volume; return the volume."""
         if not 0 <= index < len(self.outputs):
             return None
         desc, text, path = self.outputs[index]
-        volume = showGroupFile(self.ctx, path, desc, f"{self.TITLE}: {text}")
+        volume = showGroupFile(self.ctx, path, desc, f"{self.TITLE}: {text}", scopeOf=self.connectomeDir, space=self.mapSpace(),
+                               onLayers=onLayers)
         if volume is not None:
             self.mapsTable.selectRow(index)
         return volume
 
+    def mapSpace(self):
+        """Template space of this tab's maps (``Studio.Space`` of the shown map): the cohort's connectome's by default
+        (``CONNECTOME_SPACE``); a tab whose maps are not on the connectome's grid returns their own space, or None (the
+        grid is then recognised from the file).
+        """
+        return CONNECTOME_SPACE
+
     def showFolder(self):
         folder = self.result[0] if self.result else None
         if folder and os.path.isdir(folder) and not slicer.app.testingEnabled():
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(folder))
+            widgets.showInFileManager(folder)
 
     def message(self, text, ms=3000):
         """A consequence message: a toast in Studio, the reason line in Classic."""
@@ -1011,16 +1137,26 @@ def groupVolume(ctx):
     return None
 
 
-def showGroupFile(ctx, path, desc, name):
+def showGroupFile(ctx, path, desc, name, scopeOf=None, space=CONNECTOME_SPACE, onLayers=None):
     """Show a group map file in the group map volume with its own colour table copy (``display.applyGroupMapDisplay``),
-    over the template; return the volume, or None.
+    over the template; return the volume, or None. ``scopeOf()`` gives the folder of the results the map belongs to (the
+    tab's ``connectomeDir``): when it changes (another study or connectome), the map leaves the slice views.
+    ``space`` is the map's template space (``Studio.Space``): ``CONNECTOME_SPACE`` (default) for the cohort's connectome's, None
+    for none (the attribute is removed and the grid is recognised from the file).
+    ``onLayers()`` is called once the slice layers are final: at once, or after the deferred template step (which re-fits
+    the views), so that a view jump made by the caller is not undone.
     """
     from LesionNetworkMappingLib import display
 
     widget = _mapWidget()
     if widget is None or not path or not os.path.isfile(path):
         return None
-    attributes = {GROUP_VOLUME_ATTRIBUTE: "1", "Studio.Role": "statmap", display.GROUP_MAP_ATTRIBUTE: desc}
+    if space is CONNECTOME_SPACE:
+        # The cohort's connectome grid and template space (declared in connectome.json, also on a grid that is not standard)
+        bundle = ctx.bundle if ctx.bundle is not None else getattr(widget, "bundle", None)
+        space = widget.logic.connectomeSpaceName(bundle)
+    attributes = {GROUP_VOLUME_ATTRIBUTE: "1", "Studio.Role": "statmap", display.GROUP_MAP_ATTRIBUTE: desc,
+                  "Studio.Space": space}
     try:
         volume = widget.logic.loadMap(path, name, groupVolume(ctx), saveWithScene=True, attributes=attributes)
     except Exception as exc:
@@ -1032,10 +1168,13 @@ def showGroupFile(ctx, path, desc, name):
     card = ctx.card("cohort")
     if card is not None and hasattr(card, "groupVolumeId"):
         card.groupVolumeId = volume.GetID()
+        if hasattr(card, "setGroupScope"):
+            card.setGroupScope(scopeOf)
     display.applyGroupMapDisplay(volume, desc)
     node = ctx.parameterNode
     opacity = getattr(node, "opacity", 0.8) if node is not None else 0.8
     mappage = None
+    deferred = False
     if ctx.shell() is not None:
         try:
             from StudioLib import mappage
@@ -1043,6 +1182,11 @@ def showGroupFile(ctx, path, desc, name):
             mappage = None
     if mappage is not None:
         mappage.captureLayers()
+        # A map finished while another workspace (Library) is shown: entering Map puts the layers back, so Map draws it
+        # again when entered (showMapLayers); in Map itself nothing waits
+        shell = ctx.shell()
+        away = shell is not None and shell.currentWorkspace() != "map"
+        widget._pendingGroupVolumeId = volume.GetID() if away else None
         template = mappage.templateVolume(ctx.bundle, load=False)
         if template is None:
             # Loading the template file takes about as long as showing the map: the map is shown now, the template in
@@ -1054,13 +1198,18 @@ def showGroupFile(ctx, path, desc, name):
                     shown = slicer.mrmlScene.GetNodeByID(volumeId)
                     if shown is not None and loaded is not None and loaded.GetScene() is not None:
                         display.showLayers(loaded, shown, opacity)
+                    if onLayers is not None:
+                        onLayers()
 
                 qt.QTimer.singleShot(TEMPLATE_LAYER_DELAY_MS, layers)
 
             qt.QTimer.singleShot(0, showTemplate)
+            deferred = True
     else:
         template = widget.logic.templateVolume()
     display.showLayers(template, volume, opacity)
+    if onLayers is not None and not deferred:
+        onLayers()
     return volume
 
 
@@ -1127,6 +1276,7 @@ class ContrastTab(CohortTab):
 
     PREFIX = "LNMContrast"
     TITLE = "GLM"
+    PLAN_SCOPE = "contrast"
 
     def __init__(self, ctx):
         self.palmJob = None
@@ -1150,6 +1300,7 @@ class ContrastTab(CohortTab):
         from LesionNetworkMappingLib import design as designlib
 
         form = qt.QFormLayout()
+        form.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
         self.groupCombo = qt.QComboBox()
         self.groupCombo.setObjectName("LNMContrastGroupColumn")
@@ -1200,11 +1351,14 @@ class ContrastTab(CohortTab):
             self.permuteCombo.addItem(_(text), mode)
         self.permuteCombo.setToolTip(_("Override the automatic exchangeability decision"))
         self.permuteCombo.connect("currentIndexChanged(int)", lambda index: self.onSettingsChanged())
+        # Ignored: the combos share the row and never make the inspector wider
+        self.permuteCombo.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
         permute.addWidget(self.permuteCombo, 1)
         self.blockCombo = qt.QComboBox()
         self.blockCombo.setObjectName("LNMContrastBlockColumn")
         self.blockCombo.setToolTip(_("Exchangeability blocks: dataset, else source_type (a column with the role block)"))
         self.blockCombo.connect("currentIndexChanged(int)", lambda index: self.onSettingsChanged())
+        self.blockCombo.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
         permute.addWidget(self.blockCombo, 1)
         layout.addLayout(permute)
         self.permuteLabel = label("", "LNMContrastPermuteReason", "secondaryText")
@@ -1213,8 +1367,10 @@ class ContrastTab(CohortTab):
         self.restrictCheckBox = qt.QCheckBox(_("Only the blocks that hold both levels (within-cohort design)"))
         self.restrictCheckBox.setObjectName("LNMContrastRestrictBlocks")
         self.restrictCheckBox.connect("toggled(bool)", lambda checked: self.onSettingsChanged())
-        self.restrictCheckBox.hide()
-        layout.addWidget(self.restrictCheckBox)
+        # A long text: it wraps (a check box shows it on one line and would widen the inspector)
+        self.restrictRow = widgets.wrapCheckBox(self.restrictCheckBox)
+        self.restrictRow.hide()
+        layout.addWidget(self.restrictRow)
         self.varianceCheckBox = qt.QCheckBox(_("Unequal variances (Aspin–Welch v)"))  # noqa: RUF001
         self.varianceCheckBox.setObjectName("LNMContrastVarianceGroups")
         self.varianceCheckBox.setToolTip(_("Use the groups as variance groups (two-group tests; suggested when the variance ratio is above 4)"))
@@ -1222,6 +1378,7 @@ class ContrastTab(CohortTab):
         layout.addWidget(self.varianceCheckBox)
 
         options = qt.QFormLayout()
+        options.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         self.inputFrame, self.inputGroup = segmented(["Fz", "T"], "LNMContrastInput", _("Per-lesion maps tested: mean Fisher z (AvgFz, default; independent of the connectome N) or T"))
         self.inputGroup.connect(_idClickedSignal(self.inputGroup), lambda index: self.onSettingsChanged())
         options.addRow(_("Input"), self.inputFrame)
@@ -1317,6 +1474,69 @@ class ContrastTab(CohortTab):
     def nPerm(self):
         return int(self.permSpinBox.value)
 
+    def planValues(self):
+        return {"n_perm": self.nPerm(), "design.covariates": self.covariates.checked(), "design.tfce": bool(self.tfceCheckBox.checked),
+                "fdr": bool(self.fdrCheckBox.checked), "statistic": self.input()}
+
+    def applyPlanValues(self, values):
+        if values.get("n_perm") is not None:
+            self.permSpinBox.setValue(int(values["n_perm"]))
+        if values.get("design.covariates") is not None:
+            for name, button in self.covariates.buttons.items():
+                button.setChecked(name in values["design.covariates"])
+        if values.get("design.tfce") is not None:
+            self.tfceCheckBox.setChecked(bool(values["design.tfce"]))
+        if values.get("fdr") is not None:
+            self.fdrCheckBox.setChecked(bool(values["fdr"]))
+        if values.get("statistic") in INPUTS:
+            self.inputGroup.button(INPUTS.index(values["statistic"])).setChecked(True)
+        self.onSettingsChanged()
+
+    def restoreDesign(self, folder):
+        """Set the controls to the design.json of ``folder``, the result shown again after a restart.
+
+        Without it the controls fall back to their defaults and differ from the design of the result on screen (the
+        Calibrate card then compares its calibration with the wrong design). Unreadable or unfit files change nothing.
+        """
+        from LesionNetworkMappingLib import design as designlib
+
+        try:
+            spec = designlib.DesignSpec.load(folder)
+        except Exception:
+            logging.debug("Lesion network mapping: the design of the shown result could not be read", exc_info=True)
+            return
+        groups = [self.groupCombo.itemText(i) for i in range(self.groupCombo.count)]
+        if spec.test not in ("two_group", "anova") or spec.group_column not in groups:
+            return
+        if spec.group_column != self.groupColumn():
+            self.groupCombo.setCurrentIndex(groups.index(spec.group_column))
+        if spec.levels and len(spec.levels) >= 2:
+            for combo, level in ((self.levelACombo, spec.levels[0]), (self.levelBCombo, spec.levels[1])):
+                index = combo.findText(level)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+        if spec.contrast in CONTRASTS:
+            self.contrastGroup.button(CONTRASTS.index(spec.contrast)).setChecked(True)
+        for name, button in self.covariates.buttons.items():
+            button.setChecked(name in spec.covariates)
+        self.logVolumeCheckBox.setChecked(spec.transforms.get(designlib.VOLUME_COLUMN) == "log")
+        self.volumeReasonEdit.setText(spec.volume_off_reason or "")
+        index = self.permuteCombo.findData(spec.permute)
+        if index >= 0:
+            self.permuteCombo.setCurrentIndex(index)
+        index = self.blockCombo.findData(spec.block_column or "")
+        if index >= 0:
+            self.blockCombo.setCurrentIndex(index)
+        if spec.input in INPUTS:
+            self.inputGroup.button(INPUTS.index(spec.input)).setChecked(True)
+        self.fdrCheckBox.setChecked(bool(spec.inference.get("fdr")))
+        self.tfceCheckBox.setChecked(bool(spec.inference.get("tfce")))
+        if spec.inference.get("n_perm"):
+            self.permSpinBox.setValue(int(spec.inference["n_perm"]))
+        self.varianceCheckBox.setChecked(bool(spec.variance_groups))
+        self.restrictCheckBox.setChecked(bool(spec.restrict_to_mixed_blocks))
+        self.onSettingsChanged()
+
     def spec(self):
         """The ``design.DesignSpec`` of the current settings (n_perm at least the design minimum; ``nPerm()`` is run)."""
         from LesionNetworkMappingLib import design as designlib
@@ -1358,8 +1578,14 @@ class ContrastTab(CohortTab):
         self.volumeReasonEdit.setVisible(not volumeOn)
         self.logVolumeCheckBox.setVisible(volumeOn and designlib.VOLUME_COLUMN in self.covariates.buttons)
         twoGroup = self.contrast() != "F"
-        self.levelACombo.setEnabled(twoGroup)
-        self.levelBCombo.setEnabled(twoGroup)
+        pair = len(self._levels) >= 2  # a one-sided contrast compares two different levels of the group column
+        self.levelACombo.setEnabled(twoGroup and pair)
+        self.levelBCombo.setEnabled(twoGroup and pair)
+        for index in (0, 1):
+            self.contrastGroup.button(index).setEnabled(pair)
+        tip = "" if pair else _("The group column has fewer than two levels among the subjects: there is nothing to contrast")
+        self.levelACombo.setToolTip(tip or _("Level A"))
+        self.levelBCombo.setToolTip(tip or _("Level B"))
         self.varianceCheckBox.setEnabled(twoGroup)
         self.showTfceEta()
         self.scheduleRefresh()
@@ -1369,7 +1595,7 @@ class ContrastTab(CohortTab):
         self.onSettingsChanged()
 
     def onLevelsChanged(self):
-        a, b = self.levelACombo.currentText or "A", self.levelBCombo.currentText or "B"
+        a, b = (self.levelACombo.currentText or "A", self.levelBCombo.currentText or "B") if len(self._levels) >= 2 else ("A", "B")
         for index, text in enumerate([f"{a} > {b}", f"{b} > {a}"]):
             self.contrastGroup.button(index).setText(text)
         self.onSettingsChanged()
@@ -1415,7 +1641,7 @@ class ContrastTab(CohortTab):
         a = a if a in levels else (levels[0] if levels else "")
         b = b if b in levels and b != a else next((level for level in levels if level != a), "")
         _fill(self.levelACombo, [(level, level) for level in levels], a)
-        _fill(self.levelBCombo, [(level, level) for level in levels], b)
+        _fill(self.levelBCombo, [(level, level) for level in levels] if len(levels) >= 2 else [], b)  # one level: no "A vs A"
         self.onLevelsChanged()
 
     #
@@ -1453,7 +1679,7 @@ class ContrastTab(CohortTab):
         design = self.design
         nested = next((check for check in design.checks if check.code == "nested"), None) if design is not None else None
         mixed = (nested.detail or {}).get("mixed_blocks") if nested is not None and isinstance(nested.detail, dict) else None
-        self.restrictCheckBox.setVisible(bool(mixed) or self.restrictCheckBox.checked)
+        self.restrictRow.setVisible(bool(mixed) or self.restrictCheckBox.checked)
         if design is None:
             self.permuteLabel.setText("")
             self.permuteLabel.hide()

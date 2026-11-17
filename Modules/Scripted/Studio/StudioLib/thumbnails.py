@@ -277,9 +277,17 @@ def decodePngSize(data):
 def _writeAtomic(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temporary = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
-    with open(temporary, "wb") as f:
-        f.write(data)
-    os.replace(temporary, path)
+    try:
+        with open(temporary, "wb") as f:
+            f.write(data)
+        os.replace(temporary, path)
+    except BaseException:
+        # A full disk: no partial file is left behind
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+        raise
 
 
 _STALE_MIDDLE = re.compile(r"\d+(-[0-9a-f]{12})?\Z")
@@ -306,6 +314,14 @@ class Request(collections.namedtuple("Request", "key sid lesion background cache
 
     ``key`` (the PNG name), participant id, lesion and background files (absolute or None), the PNG cache file (None: keep
     in memory only) and the side in pixels. Nothing else (blind tracing).
+    """
+
+
+class LesionUnreadableError(Exception):
+    """The lesion file of a thumbnail request exists but cannot be read (damaged, truncated or not a NIfTI image).
+
+    An expected error with user data: the service reports it as one line (no traceback) and the card names the file as
+    unreadable. The reason is kept as ``__cause__``.
     """
 
 
@@ -338,7 +354,10 @@ class Renderer:
             frame, grey = self.background(request.background, request.size)
         mask = None
         if request.lesion and os.path.isfile(request.lesion):
-            data, affine = _volume(request.lesion)
+            try:
+                data, affine = _volume(request.lesion)
+            except (OSError, EOFError, ValueError, zlib.error) as exc:  # bad gzip, truncated stream, bad header, not 3D
+                raise LesionUnreadableError(f"{type(exc).__name__}: {exc}") from exc
             if frame is None:
                 voxels = np.argwhere(np.nan_to_num(np.asarray(data, dtype=np.float32)) > 0)
                 if voxels.size:
@@ -449,6 +468,7 @@ class ThumbnailService:
         self._renderer = Renderer()
         self._pixmaps = collections.OrderedDict()
         self._failed = {}
+        self._unreadable = set()  # keys whose lesion file could not be read
         self.listeners = []
         self.stats = {"computed": 0, "cached": 0, "failed": 0, "tickMs": collections.deque(maxlen=2000), "workerMs": collections.deque(maxlen=2000)}
         self._timer = qt.QTimer()
@@ -481,6 +501,10 @@ class ThumbnailService:
     def failed(self, key):
         """The error text of a thumbnail that could not be made, else None."""
         return self._failed.get(key)
+
+    def lesionUnreadable(self, key):
+        """True if the thumbnail could not be made because its lesion file exists but cannot be read."""
+        return key in self._unreadable
 
     def request(self, request, front=False):
         """Queue a thumbnail unless it is ready, failed or queued (``front`` moves a queued one ahead, once)."""
@@ -562,6 +586,8 @@ class ThumbnailService:
                 try:
                     data, cached = self._renderer.produce(request)
                     result = (request.key, "cached" if cached else "computed", data)
+                except LesionUnreadableError as exc:
+                    result = (request.key, "unreadable", str(exc) if request.lesion in str(exc) else f"{exc} ({request.lesion})")
                 except Exception:
                     result = (request.key, "error", traceback.format_exc())
                 elapsed = (time.perf_counter() - start) * 1000.0
@@ -586,7 +612,14 @@ class ThumbnailService:
             with self._condition:
                 self._queued.discard(key)
                 self._promoted.discard(key)
-            if kind == "error":
+            if kind == "unreadable":
+                self.stats["failed"] += 1
+                self._failed[key] = payload
+                self._unreadable.add(key)
+                import logging
+
+                logging.warning(f"Studio Library: no thumbnail for {key}: the lesion file cannot be read ({payload})")
+            elif kind == "error":
                 self.stats["failed"] += 1
                 self._failed[key] = payload.strip().splitlines()[-1] if payload else "error"
                 import logging
@@ -713,7 +746,8 @@ def _isBackgroundCandidate(node):
     if node.GetAttribute("LNM.Result") == "1":
         return False
     dimensions = node.GetImageData().GetDimensions()
-    return min(dimensions) > 1
+    # A single-slice (2D) scan is a scan; only a line or a point has nothing to show
+    return min(dimensions) >= 1 and sum(1 for size in dimensions if size > 1) >= 2
 
 
 def _segmentationLayers(segmentationNode):
@@ -733,11 +767,19 @@ def _segmentationLayers(segmentationNode):
     return layers
 
 
+def _shownInSliceViews(segmentationNode):
+    """False for a segmentation that the slice views hide (for example a lesion of another subject, which the importer
+    hides): the thumbnail shows what the views show.
+    """
+    displayNode = segmentationNode.GetDisplayNode()
+    return displayNode is None or bool(displayNode.GetVisibility() and displayNode.GetVisibility2D())
+
+
 def projectThumbnailSource(scene=None):
     """The images of a project thumbnail (main thread, well under a millisecond), or None when the scene has no image.
 
     The background is the reference image of the lesion, else the image shown in the Red view, else the first image;
-    never a figure, a statistic map or a network map. The lesion is the first segmentation with a label map (its
+    never a figure, a statistic map or a network map. The lesion is the first segmentation that the slice views show and that has a label map (its
     segments, at most 8). ``source.key`` changes when the images, the lesion or the window/level change, so that a save
     that changed nothing visible makes no new thumbnail.
     """
@@ -746,7 +788,11 @@ def projectThumbnailSource(scene=None):
     import slicer
 
     scene = scene or slicer.mrmlScene
-    segmentations = [node for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode", scene) if _segmentationLayers(node)]
+    segmentations = [
+        node
+        for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode", scene)
+        if _shownInSliceViews(node) and _segmentationLayers(node)
+    ]
     segmentationNode = segmentations[0] if segmentations else None
     background = None
     if segmentationNode is not None:

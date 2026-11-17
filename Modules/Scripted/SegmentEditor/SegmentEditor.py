@@ -70,10 +70,18 @@ STUDIO_PROPERTIES = {
 #: Properties shown again by "Show all controls" (the classic controls inside the studio presentation)
 SHOW_ALL_CONTROLS_PROPERTIES = ("segmentationNodeSelectorVisible", "sourceVolumeNodeSelectorVisible", "addRemoveSegmentButtonsVisible",
                                 "show3DButtonVisible", "switchToSegmentationsButtonVisible")
+#: Properties whose getter returns ``isVisible()`` of a widget (False while the module panel is hidden, whatever was set),
+#: not the stored value: they are always written, else hiding a control while the panel is hidden (the Studio shell
+#: leaves Classic for another module) would be skipped as "already False" and the classic control would stay shown
+EFFECTIVE_VISIBILITY_PROPERTIES = ("segmentationNodeSelectorVisible", "sourceVolumeNodeSelectorVisible", "addRemoveSegmentButtonsVisible",
+                                   "show3DButtonVisible", "switchToSegmentationsButtonVisible")
 #: Effect parameters of each presentation: {(effect name, parameter): value}. Set only when the effect defines the
-#: parameter (Outline: lasso on release; Fill gaps: the selected segment only).
-CLASSIC_EFFECT_PARAMETERS = {("Draw", "ApplyOnRelease"): 0, ("Fill between slices", "SelectedSegmentOnly"): 0}
-STUDIO_EFFECT_PARAMETERS = {("Draw", "ApplyOnRelease"): 1, ("Fill between slices", "SelectedSegmentOnly"): 1}
+#: parameter (Outline: lasso on release; Fill gaps: the selected segment only, and the gaps between parts that are
+#: several slices thick along the Red view's slicing axis; Classic gives the result of official 3D Slicer).
+CLASSIC_EFFECT_PARAMETERS = {("Draw", "ApplyOnRelease"): 0, ("Fill between slices", "SelectedSegmentOnly"): 0,
+                             ("Fill between slices", "FillGapsBetweenThickParts"): 0}
+STUDIO_EFFECT_PARAMETERS = {("Draw", "ApplyOnRelease"): 1, ("Fill between slices", "SelectedSegmentOnly"): 1,
+                            ("Fill between slices", "FillGapsBetweenThickParts"): 1}
 
 #: Widgets of the editor hidden in the studio presentation (the top bar and z/y undo; the hint line and the "?" help)
 STUDIO_HIDDEN_WIDGETS = ("UndoRedoGroupBox", "EffectHelpBrowser")
@@ -85,11 +93,22 @@ STUDIO_TERMINOLOGY_SETTINGS_KEY = "Studio/Draw/UseTerminologySelector"
 
 #: Effect tiles of the studio presentation: preferred 62 x 60 px (style), a 20 px icon, at least 56 px wide so that a
 #: narrow inspector shrinks the tiles instead of widening; five columns when the inspector viewport (the width of the
-#: module widget) is at least 5 x 62 + 4 x 4 px, else four
+#: module widget) is at least ``FIVE_COLUMNS_WIDTH``, else four
 TILE_MINIMUM_SIZE = (56, 60)
 TILE_ICON_SIZE = 20
 TILE_SPACING = 4
-FIVE_COLUMNS_WIDTH = 5 * 62 + 4 * TILE_SPACING
+#: Pixels of a tile's width that its label cannot use (the style elides a text wider than the tile minus this in the middle of the
+#: word: "Thr...old"); measured with Qt 5.15, a 59 px tile shows the 57 px "Threshold" and a 58 px one does not
+TILE_TEXT_MARGIN = 2
+#: Pixels that a label which can be broken at a space keeps free beyond ``TILE_TEXT_MARGIN`` (2 px on each side of the text): a
+#: two-word label that would run edge to edge in its tile ("Fill gaps" in a 58 px tile at a 125% font) is broken instead
+TILE_LABEL_PADDING = 4
+#: Padding of the inspector in the studio presentation (VISUAL 2.7): the tiles start and end this far from its edges, on
+#: the edges of the section labels and cards. The tile grid has no frame there; ``_updateTileGridInset()`` makes up what the
+#: margins of the editor (they follow the density of the style) leave of it.
+STUDIO_INSPECTOR_PADDING = 16
+#: Inspector viewport width from which a tile is at least ``TILE_MINIMUM_SIZE[0]`` wide in five columns
+FIVE_COLUMNS_WIDTH = 5 * TILE_MINIMUM_SIZE[0] + 4 * TILE_SPACING + 2 * STUDIO_INSPECTOR_PADDING
 
 #: Mnemonics of the studio presentation: (key, effect name or action, description)
 STUDIO_MNEMONICS = (
@@ -117,15 +136,44 @@ def positionalKeyText(layoutIndex):
     return ""
 
 
+def _layoutContentsMargins(layout):
+    """The contents margins of ``layout`` (a QMargins) with Qt 5 and Qt 6: Qt 6 declares the ``contentsMargins`` property
+    on QLayout, and PythonQt then gives the property value instead of the getter method.
+    """
+    margins = layout.contentsMargins
+    return margins() if callable(margins) else margins
+
+
+def tileLabelText(text, metrics, width, padding=0):
+    """The label of a tool tile ``width`` px wide: ``text`` if it fits on one line, else broken in two lines at the space that
+    makes the wider line shortest, so that the style does not elide it in the middle of a word ("Aut...ine"). A line that is
+    still too wide (a long word, an extension's long title) is shortened at its end ("Thresh…"); ``metrics`` is the
+    ``QFontMetrics`` of the tile. A label with a space that fits but leaves less than ``padding`` px free is broken too.
+    """
+    available = max(1, width - TILE_TEXT_MARGIN)
+    text = " ".join(str(text).split())
+    advance = metrics.horizontalAdvance(text)
+    if advance <= available and (advance <= available - padding or " " not in text):
+        return text
+    words = text.split(" ")
+    candidates = [(" ".join(words[:index]), " ".join(words[index:])) for index in range(1, len(words))]
+    lines = min(candidates, key=lambda pair: max(metrics.horizontalAdvance(line) for line in pair)) if candidates else (text,)
+    return "\n".join(line if metrics.horizontalAdvance(line) <= available else metrics.elidedText(line, qt.Qt.ElideRight, available)
+                     for line in lines)
+
+
 def isEditableSourceVolume(node):
     """True if ``node`` may be a source volume of the studio presentation: a scalar volume that is not a
-    reference image (Studio.Role figure or statmap), not a colour (vector) image and not a single slice.
+    reference image (Studio.Role figure or statmap), not a computed network map (LNM.Result / LNM.Statistic, which
+    carries no Studio.Role), not a colour (vector) image and not a single slice.
     """
     if node is None or not node.IsA("vtkMRMLScalarVolumeNode") or node.IsA("vtkMRMLLabelMapVolumeNode"):
         return False
     if node.IsA("vtkMRMLVectorVolumeNode"):
         return False
     if node.GetAttribute("Studio.Role") in ("figure", "statmap"):
+        return False
+    if node.GetAttribute("LNM.Result") == "1" or node.GetAttribute("LNM.Statistic"):
         return False
     imageData = node.GetImageData()
     return imageData is None or 1 not in imageData.GetDimensions()
@@ -348,8 +396,14 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if not hasattr(self.editor, propertyName):
                 # A qMRMLSegmentEditorWidget without this property (older build)
                 continue
-            if getattr(self.editor, propertyName) != value:
+            if propertyName in EFFECTIVE_VISIBILITY_PROPERTIES or getattr(self.editor, propertyName) != value:
                 setattr(self.editor, propertyName, value)
+
+    def _applyPresentationEffectParameters(self):
+        """Set the effect parameters of the applied presentation again (after a parameter node change or a scene import)."""
+        if self.editor is None or self._appliedPresentation not in ("classic", "studio"):
+            return
+        self._setEffectParameters(CLASSIC_EFFECT_PARAMETERS if self._appliedPresentation == "classic" else STUDIO_EFFECT_PARAMETERS)
 
     def _setEffectParameters(self, parameters):
         for (effectName, parameterName), value in parameters.items():
@@ -394,6 +448,7 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 optionsWidget.setMinimumWidth(0)
         effectsGroupBox = self._child("QFrame", "EffectsGroupBox")
         if effectsGroupBox is not None:
+            effectsGroupBox.setFrameShape(qt.QFrame.StyledPanel)
             effectsGroupBox.layout().setContentsMargins(-1, -1, -1, -1)
             effectsGroupBox.layout().setSpacing(-1)
         tableView = self._segmentsTableView()
@@ -410,7 +465,12 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             button.setMinimumSize(0, 0)
             button.setSizePolicy(qt.QSizePolicy.Minimum, qt.QSizePolicy.Preferred)
             button.setProperty("slicerRole", None)
+            button.setProperty("studioTileText", None)
+            button.setAccessibleName("")
             self._repolish(button)
+        effectsLayout = effectsGroupBox.layout() if effectsGroupBox is not None else None
+        for column in range(effectsLayout.columnCount() if effectsLayout is not None else 0):
+            effectsLayout.setColumnStretch(column, 0)
         self._removeTileOutlines()
         # Tooltips of the classic presentation (the editor writes them when its effect list is rebuilt)
         self.editor.updateEffectList()
@@ -449,7 +509,9 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 optionsWidget.setMinimumWidth(1)
         effectsGroupBox = self._child("QFrame", "EffectsGroupBox")
         if effectsGroupBox is not None:
-            effectsGroupBox.layout().setContentsMargins(0, 0, 0, 0)
+            # No box around the tiles (VISUAL 4.4): they sit on the inspector padding, like the labels and cards
+            effectsGroupBox.setFrameShape(qt.QFrame.NoFrame)
+            self._updateTileGridInset()
             effectsGroupBox.layout().setSpacing(TILE_SPACING)
         tableView = self._segmentsTableView()
         if tableView is not None:
@@ -506,6 +568,168 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 continue
             if layout.direction() != direction:
                 layout.setDirection(direction)
+        self._stackRadioGrids(optionsFrame, stacked)
+        self._wrapOptionRows(optionsFrame, stacked)
+
+    #: Dynamic properties of what ``_wrapOptionRows()`` changed: the row wrap policy of a form layout, and the word wrap of a label
+    _WRAPPED_FORM_PROPERTY = "studioFormWrapPolicy"
+    _WRAPPED_LABEL_PROPERTY = "studioWrappedLabel"
+    _STACKED_ROW_PROPERTY = "studioStackedRowDirection"
+    #: Width of the tool options in the 340 px studio inspector (the padding and the scroll bar are not part of it)
+    _OPTIONS_ROW_WIDTH = 290
+
+    def _wrapOptionRows(self, optionsFrame, stacked):
+        """Studio presentation: the rows of the tool options (a label and its field in a form layout: Smoothing, Margin, Hollow,
+        Combine, Islands, Mask volume) put the label above its field, so that the narrow inspector shows each row whole (instead of
+        squeezing the label to no width and cutting the field), a text beside a field (the size in pixels) wraps over lines, and a
+        row of widgets with a check box that is wider than the options is stacked (Combine: the operation, Apply and "Bypass
+        masking"). The options never widen the inspector, ``_applyStudio()``. The classic presentation puts everything back.
+        """
+        # rowWrapPolicy is a property of QFormLayout (the PythonQt attribute shadows the getter): property()/setProperty()
+        wrapAllRows = qt.QFormLayout.WrapAllRows
+        for layout in optionsFrame.findChildren("QFormLayout"):
+            saved = layout.property(self._WRAPPED_FORM_PROPERTY)
+            if not stacked:
+                if saved is not None:
+                    layout.setProperty("rowWrapPolicy", int(saved))
+                    layout.setProperty(self._WRAPPED_FORM_PROPERTY, None)
+                continue
+            if saved is None:
+                layout.setProperty(self._WRAPPED_FORM_PROPERTY, int(layout.property("rowWrapPolicy")))
+                layout.setProperty("rowWrapPolicy", int(wrapAllRows))
+        for layout in optionsFrame.findChildren("QHBoxLayout"):
+            savedDirection = layout.property(self._STACKED_ROW_PROPERTY)
+            if not stacked:
+                if savedDirection is not None:
+                    layout.setDirection(int(savedDirection))
+                    layout.setProperty(self._STACKED_ROW_PROPERTY, None)
+            elif savedDirection is None and self._rowIsTooWide(layout):
+                layout.setProperty(self._STACKED_ROW_PROPERTY, int(layout.direction()))
+                layout.setDirection(qt.QBoxLayout.TopToBottom)
+        for label in optionsFrame.findChildren("QLabel"):
+            if label.property(self._WRAPPED_LABEL_PROPERTY):
+                if not stacked:
+                    label.wordWrap = False
+                    label.setProperty(self._WRAPPED_LABEL_PROPERTY, None)
+        if not stacked:
+            return
+        for layout in optionsFrame.findChildren("QFormLayout"):
+            for row in range(layout.rowCount()):
+                item = layout.itemAt(row, qt.QFormLayout.FieldRole)
+                for label in self._fieldLabels(item):
+                    if not label.wordWrap:
+                        label.wordWrap = True
+                        label.setProperty(self._WRAPPED_LABEL_PROPERTY, True)
+
+    @classmethod
+    def _rowIsTooWide(cls, layout):
+        """True for a row of widgets with a check box (Combine: the operation, Apply and "Bypass masking") that cannot be made
+        narrower than the options of the studio inspector, so that the check box would lose the end of its text.
+        """
+        widgets = [layout.itemAt(index).widget() for index in range(layout.count())]
+        if len(widgets) < 2 or any(widget is None for widget in widgets):
+            return False
+        # Rows of check boxes only are stacked by _stackCheckBoxRows()
+        if all(widget.inherits("QCheckBox") for widget in widgets) or not any(widget.inherits("QCheckBox") for widget in widgets):
+            return False
+        spacing = layout.spacing if layout.spacing >= 0 else 6
+        return sum(widget.minimumSizeHint.width() for widget in widgets) + spacing * (len(widgets) - 1) > cls._OPTIONS_ROW_WIDTH
+
+    @classmethod
+    def _fieldLabels(cls, item):
+        """The labels in the field of a row of a form layout: the field itself, or in the box layout that holds the field."""
+        if item is None:
+            return []
+        widget = item.widget()
+        if widget is not None:
+            return [widget] if widget.inherits("QLabel") else []
+        layout = item.layout()
+        if layout is None or layout.inherits("QFormLayout") or layout.inherits("QGridLayout"):
+            return []
+        return [label for index in range(layout.count()) for label in cls._fieldLabels(layout.itemAt(index))]
+
+    #: Dynamic property of a grid layout that the studio presentation stacked: the cells ("row,column;...") of its widgets, in
+    #: the order in which they were put back into the layout
+    _STACKED_GRID_PROPERTY = "studioStackedGridCells"
+
+    def _stackRadioGrids(self, optionsFrame, stacked):
+        """Studio presentation: the tool options laid out as columns of radio buttons (Islands, Scissors, Mask volume) become
+        one column, so that the narrow inspector does not cut the labels of the buttons (the options never widen the inspector,
+        ``_applyStudio()``). The classic presentation puts every widget back in its cell.
+        """
+        for layout in optionsFrame.findChildren("QGridLayout"):
+            saved = layout.property(self._STACKED_GRID_PROPERTY)
+            if not stacked:
+                if saved:
+                    positions = [[int(number) for number in cell.split(",")] for cell in str(saved).split(";")]
+                    self._setGridCells(layout, [(widget, row, column) for widget, (row, column) in zip(self._gridWidgets(layout), positions, strict=True)])
+                    layout.setProperty(self._STACKED_GRID_PROPERTY, None)
+                continue
+            if saved:
+                continue
+            cells = self._radioGridCells(layout)
+            if cells is None:
+                continue
+            stackedCells = self._stackedCells(cells)
+            layout.setProperty(self._STACKED_GRID_PROPERTY, ";".join(f"{row},{column}" for _widget, row, column, _newRow, _newColumn in stackedCells))
+            self._setGridCells(layout, [(widget, newRow, newColumn) for widget, _row, _column, newRow, newColumn in stackedCells])
+
+    @staticmethod
+    def _stackedCells(cells):
+        """(widget, row, column, new row, new column) for the cells of a grid in one column: the first column of the grid first
+        (Scissors: the operation, then the shape). A label with a check box on its right at the end of its column (Scissors:
+        "Apply to visible segments:") stays one row, below the columns.
+        """
+        indexAt = {(row, column): index for index, (_widget, row, column) in enumerate(cells)}
+        pairs = []
+        for index, (widget, row, column) in enumerate(cells):
+            other = indexAt.get((row, column + 1))
+            lowest = not any(rowBelow > row and columnBelow == column for rowBelow, columnBelow in indexAt)
+            if widget.inherits("QLabel") and other is not None and cells[other][0].inherits("QCheckBox") and lowest:
+                pairs.append((index, other))
+        paired = {index for pair in pairs for index in pair}
+        order = sorted((index for index in range(len(cells)) if index not in paired), key=lambda index: (cells[index][2], cells[index][1]))
+        stackedCells = []
+        for index in order:
+            stackedCells.append((*cells[index], len(stackedCells), 0))
+        for label, checkBox in pairs:
+            stackedCells.append((*cells[label], len(stackedCells), 0))
+            stackedCells.append((*cells[checkBox], stackedCells[-1][3], 1))
+        return stackedCells
+
+    @staticmethod
+    def _gridWidgets(layout):
+        return [layout.itemAt(index).widget() for index in range(layout.count())]
+
+    @staticmethod
+    def _setGridCells(layout, cells):
+        """Put the widgets of ``layout`` in the given (widget, row, column) cells."""
+        while layout.count():
+            layout.takeAt(0)
+        for widget, row, column in cells:
+            layout.addWidget(widget, row, column)
+        layout.invalidate()
+
+    @staticmethod
+    def _radioGridCells(layout):
+        """The (widget, row, column) cells of a grid of labels, check boxes, spin boxes and at least two radio buttons in two or
+        more columns, or None for any other grid (spans, layouts in cells, other widgets).
+        """
+        cells = []
+        for row in range(layout.rowCount()):
+            for column in range(layout.columnCount()):
+                item = layout.itemAtPosition(row, column)
+                if item is None:
+                    continue
+                widget = item.widget()
+                if widget is None or any(widget is known for known, _row, _column in cells):
+                    return None
+                if not any(widget.inherits(className) for className in ("QRadioButton", "QCheckBox", "QLabel", "QAbstractSpinBox", "ctkDoubleSpinBox")):
+                    return None
+                cells.append((widget, row, column))
+        radioColumns = {column for widget, _row, column in cells if widget.inherits("QRadioButton")}
+        radioCount = sum(1 for widget, _row, _column in cells if widget.inherits("QRadioButton"))
+        return cells if radioCount >= 2 and len(radioColumns) >= 2 else None
 
     def _setModuleWidthPolicy(self, policy):
         """Horizontal size policy of the module widget. The module panel gives it Minimum (qSlicerModulePanel.cxx:163),
@@ -526,7 +750,13 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         return [name for name in order if name in available]
 
     def _moreToolsShown(self):
-        return self._moreToolsButton is not None and bool(self._moreToolsButton.checked)
+        if self._moreToolsButton is None:
+            return False
+        try:
+            return bool(self._moreToolsButton.checked)
+        except ValueError:
+            # The button was destroyed (application exit): nothing is shown any more
+            return False
 
     def setMoreToolsShown(self, shown):
         """Studio presentation: show every tool ("More tools") or only the five tiles."""
@@ -726,20 +956,53 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if button.property("segmentEditorEffectIcon") is None:
                 # The effect's own icon, for the classic presentation if the effect does not give it to Python
                 button.setProperty("segmentEditorEffectIcon", button.icon)
-            button.setText(text or effect.title)
+            button.setProperty("studioTileText", text or effect.title)
+            button.setAccessibleName(text or effect.title)
             if icon is not None and not icon.isNull():
                 button.setIcon(icon)
             button.setIconSize(qt.QSize(TILE_ICON_SIZE, TILE_ICON_SIZE))
             button.setMinimumSize(*TILE_MINIMUM_SIZE)
-            button.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Fixed)
+            # Equal columns: the width of a tile does not depend on its label, which is wrapped to the width (_updateTileLabel)
+            button.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
             if button.property("slicerRole") != "toolTile":
                 button.setProperty("slicerRole", "toolTile")
                 self._repolish(button)
+            # After the role: the label is wrapped to the tile with the font of the role
+            self._updateTileLabel(button, equalize=False)
             toolTip = self._callExtension(self._extension, "effectToolTip", effect.name, positionalKeyText(index))
             if toolTip:
                 button.setToolTip(toolTip)
+        for column in range(max(layout.columnCount(), columns)):
+            layout.setColumnStretch(column, 1 if column < columns else 0)
+        self._equalizeTileHeights()
         for effectName in list(self._tileOutlines):
             self._updateTileOutline(effectName)
+
+    def _updateTileLabel(self, button, equalize=True):
+        """The label of a tile of the studio presentation, wrapped at a space to the width of the tile; the text of the
+        tile is set only when it changes (a resize of the tile calls this), and then the tiles get one height again.
+        """
+        plainText = button.property("studioTileText")
+        if not plainText or button.property("slicerRole") != "toolTile":
+            return
+        text = tileLabelText(plainText, qt.QFontMetrics(button.font), button.width, TILE_LABEL_PADDING)
+        if button.text != text:
+            button.setText(text)
+            if equalize:
+                self._equalizeTileHeights()
+
+    def _equalizeTileHeights(self):
+        """Every tile of the grid is as tall as the tallest one: with a larger application font a label that wraps in two lines
+        makes its tile taller than the others (the style sizes a tile from its contents), and the grid centres the shorter
+        ones, so the icons and labels of a row would not share a line. At the default font all tiles stay 60 px.
+        """
+        tiles = [button for button in self._effectButtons()[1:] if button.property("slicerRole") == "toolTile"]
+        if not tiles:
+            return
+        height = max([TILE_MINIMUM_SIZE[1]] + [button.sizeHint.height() for button in tiles])
+        for button in tiles:
+            if button.minimumHeight != height:
+                button.setMinimumHeight(height)
 
     def _installTileFilter(self):
         if self._tileFilter is None:
@@ -760,6 +1023,7 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if obj == self._child("QFrame", "EffectsGroupBox"):
             self._scheduleColumnUpdate()
         else:
+            self._updateTileLabel(obj)
             self._updateTileOutlines()
 
     def _scheduleColumnUpdate(self):
@@ -774,11 +1038,28 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """Columns of the tile grid: 5 when the inspector viewport is at least ``FIVE_COLUMNS_WIDTH`` px wide, else 4."""
         return 5 if viewportWidth >= FIVE_COLUMNS_WIDTH else 4
 
+    def _updateTileGridInset(self):
+        """Studio presentation: the tile grid starts and ends ``STUDIO_INSPECTOR_PADDING`` from the edges of the module widget
+        (the margins of the module widget and of the editor are part of it).
+        """
+        effectsGroupBox = self._child("QFrame", "EffectsGroupBox")
+        if effectsGroupBox is None:
+            return
+        outer = _layoutContentsMargins(self.layout)
+        inner = _layoutContentsMargins(self.editor.layout())
+        left = max(0, STUDIO_INSPECTOR_PADDING - outer.left() - inner.left())
+        right = max(0, STUDIO_INSPECTOR_PADDING - outer.right() - inner.right())
+        gridLayout = effectsGroupBox.layout()
+        margins = _layoutContentsMargins(gridLayout)
+        if (margins.left(), margins.top(), margins.right(), margins.bottom()) != (left, 0, right, 0):
+            gridLayout.setContentsMargins(left, 0, right, 0)
+
     def _updateColumnCount(self):
         if self._appliedPresentation != "studio" or self.editor is None:
             return
         if self._child("QFrame", "EffectsGroupBox") is None or not self.parent.isVisible():
             return
+        self._updateTileGridInset()
         # The module widget fills the viewport of the module panel's scroll area
         columns = self.studioColumnCount(self.parent.width)
         if self.editor.effectColumnCount != columns:
@@ -1020,7 +1301,11 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.activateEffect(target)
 
     def activateEffect(self, effectName):
-        """Activate an effect as a click on its tile does (the first segment is created or selected when needed)."""
+        """Activate an effect as a click on its tile does (the first segment is created or selected when needed). Nothing
+        happens while the editor is read-only (its tiles are disabled too).
+        """
+        if getattr(self.editor, "readOnly", False):
+            return
         button = next((button for button in self._effectButtons(allButtons=True) if button.objectName == effectName), None)
         if button is not None and button.isEnabled():
             button.click()
@@ -1051,6 +1336,8 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         self.parameterSetNode = segmentEditorNode
         self.editor.setMRMLSegmentEditorNode(self.parameterSetNode)
+        # A new node (after a scene close) starts from the effect defaults
+        self._applyPresentationEffectParameters()
 
     def getDefaultSourceVolumeNodeID(self):
         layoutManager = slicer.app.layoutManager()
@@ -1136,10 +1423,17 @@ class SegmentEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def onSceneEndImport(self, caller, event):
         if self.parent.isEntered:
             self.selectParameterNode()
+        # The imported singleton parameter node has the effect parameters of the scene, saved by another presentation
+        # or by official 3D Slicer: the presentation decides them (Classic Fill between slices gives the result of
+        # official 3D Slicer, Studio Fill gaps fills the selected segment only)
+        self._applyPresentationEffectParameters()
+        if self.parent.isEntered:
             self.editor.updateWidgetFromMRML()
 
     def cleanup(self):
         self._removePresentationShortcuts()
+        # The masking observer reads the "More tools" button: a node change while the application shuts down must not reach it
+        self._observeMasking(False)
         self.removeObservers()
         if self._columnTimer is not None:
             self._columnTimer.stop()
@@ -1170,6 +1464,10 @@ class SegmentEditorTest(ScriptedLoadableModuleTest):
     def test_SegmentEditorPresentation(self):
         """The studio presentation and back restores every property of the classic table (SPEC 5.1)."""
         self.delayDisplay("Segment Editor presentations")
+        # The *Visible getters of the editor use isVisible(), which is False until the widget has been shown, so the
+        # module is entered first (a self-test run on its own, as ctest does, never shows it).
+        slicer.util.selectModule("SegmentEditor")
+        slicer.app.processEvents()
         widget = slicer.modules.segmenteditor.widgetRepresentation().self()
         editor = widget.editor
         self.assertEqual(widget.presentation(), "classic")

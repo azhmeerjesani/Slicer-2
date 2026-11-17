@@ -68,11 +68,13 @@ if __name__ == "__main__":
     set_blas_threads(sys.argv[1:])  # before numpy is imported: BLAS reads these variables once
 
 import dataclasses
+import hashlib
 import itertools
 import json
 import math
 import re
 import time
+import unicodedata
 
 import numpy as np
 from scipy import linalg as scipy_linalg
@@ -113,6 +115,12 @@ CHUNK_VOXELS = 32768
 #: two-group design, the all -1 sign flip) still counts when the effect is strong.
 TIE_RTOL = {np.dtype(np.float32): 1e-5, np.dtype(np.float64): 1e-9}
 TIE_ATOL = {np.dtype(np.float32): 1e-6, np.dtype(np.float64): 1e-12}
+#: Largest relative tie tolerance, however large kappa is. kappa is at most 1 / SSE_RTOL (the SSE floor),
+#: where float64 rounding of the null SSE (unit roundoff times kappa times the length of the sums) stays
+#: far below it; float32 runs never get near it (KAPPA_MAX_FLOAT32). Without the cap a voxel fitted almost
+#: exactly (a lesion present in every case and in no control) had a tolerance of 1000 times its
+#: statistic, so every null counted as an exceedance and the strongest voxel got p = 1.
+TIE_RTOL_MAX = 0.1
 #: Largest kappa a float32 run accepts: beyond it (tie tolerance above 1%; |t| above about
 #: 30 sqrt(df)) the permutations are computed in float64 instead
 KAPPA_MAX_FLOAT32 = 1e3
@@ -333,6 +341,28 @@ class FreedmanLane:
             denominator += ek / (w1 * dk + w2 * (1.0 - dk))
         return self.psi_scale * u[..., 0, :] / np.sqrt(np.maximum(denominator, _TINY))
 
+    def _v_kappa(self, ss, sse, sse1, floor):
+        """Conditioning of v: ||Yr||² times the relative change of its denominator D per unit of group SSE error.
+
+        The group SSEs of a null are known to an absolute error of about eps * ||Yr||², so D (v = psi / sqrt(D))
+        is known to a relative error eps * kappa with kappa = ||Yr||² (|dD/dsse1| + |dD/dsse2|) / D. A group
+        with no residual variance (a lesion in no control, or in every case) has sse1 -> 0, but D keeps a
+        finite limit and so does kappa; ||Yr||² / min(sse1, sse2) (about 1 / SSE_RTOL there) overstated it and
+        widened the tie tolerance to TIE_RTOL_MAX, inflating p.
+        """
+        sse1 = np.maximum(sse1, floor)
+        sse2 = np.maximum(sse - sse1, floor)
+        w1 = self.v_trace[0] / sse1
+        w2 = self.v_trace[1] / sse2
+        D = np.zeros_like(ss)
+        slope = np.zeros_like(ss)
+        for dk, ek in zip(self.v_d, self.v_e2, strict=True):
+            den = w1 * dk + w2 * (1.0 - dk)
+            den = np.maximum(den, _TINY)
+            D += ek / den
+            slope += ek * (w1 * dk / sse1 + w2 * (1.0 - dk) / sse2) / (den * den)
+        return np.maximum(ss * slope / np.maximum(D, _TINY), 1.0)
+
     def prepare(self, Y, chunk=CHUNK_VOXELS):
         """Residualize the data once: Yr = Rz Y (compute precision), ||Yr||², and the observed fit (float64).
 
@@ -369,12 +399,11 @@ class FreedmanLane:
                 extra = (self.v_mask @ (yr * yr), (self.Q * self.v_mask[:, None]).T @ yr)
             stat[part] = self._statistic(u, ss, floor, extra)
             sse_out[part] = np.maximum(ss - np.einsum("pv,pv->v", u, u), floor)
-            smallest = sse_out[part]
             if self.stat == "v":  # the group SSEs are also differences of ||Yr||²-sized terms
                 residual = yr - self.Q @ u
-                sse1 = self.v_mask @ (residual * residual)
-                smallest = np.maximum(np.minimum(sse1, smallest - sse1), floor)
-            kappa[part] = np.maximum(ss / np.maximum(smallest, _TINY), 1.0)
+                kappa[part] = self._v_kappa(ss, sse_out[part], self.v_mask @ (residual * residual), floor)
+            else:
+                kappa[part] = np.maximum(ss / np.maximum(sse_out[part], _TINY), 1.0)
             if psi is not None:
                 psi[part] = self.psi_scale * u[0]
             yy[part] = ss
@@ -560,11 +589,18 @@ def _threshold(observed, dtype, two_sided, kappa=None):
 
     :param kappa: per-voxel conditioning of the null SSE (:attr:`Prepared.kappa`) that scales the
       relative tolerance (default 1).
+
+    A null statistic that ties the observed one has its SSE known to a relative error r = TIE_RTOL * kappa
+    (at most :data:`TIE_RTOL_MAX`), so it is at least observed / (1 + r) (t and v scale with SSE^-1/2,
+    F with SSE^-1). The threshold therefore stays above 0 for a positive observed value, also for a voxel
+    fitted almost exactly (kappa about 1 / SSE_RTOL, for example a lesion present in every case and in no
+    control), which has the smallest p instead of p = 1. For small r it equals observed * (1 - r) to
+    first order. A negative one-sided observed value moves away from 0 by the factor 1 + r.
     """
     magnitude = _magnitude(observed, two_sided)
     dtype = np.dtype(dtype)
-    rtol = TIE_RTOL[dtype] if kappa is None else TIE_RTOL[dtype] * np.maximum(np.asarray(kappa, dtype=np.float64), 1.0)
-    return magnitude - (rtol * np.abs(magnitude) + TIE_ATOL[dtype])
+    rtol = TIE_RTOL[dtype] if kappa is None else np.minimum(TIE_RTOL[dtype] * np.maximum(np.asarray(kappa, dtype=np.float64), 1.0), TIE_RTOL_MAX)
+    return np.where(magnitude >= 0, magnitude / (1.0 + rtol), magnitude * (1.0 + rtol)) - TIE_ATOL[dtype]
 
 
 def fdr_bh(p):
@@ -857,8 +893,25 @@ def effect_size(kind, result):
     return out * hedges_correction(df)
 
 
+def _unicode_tag(text):
+    """A stable tag ("u" + 8 hex digits) of a name with letters or digits outside ASCII, else "".
+
+    Output labels keep only ASCII letters and digits (BIDS), so names such as "失語スコア" and "運動スコア"
+    would otherwise all get the same label (and share one output folder or file name).
+    """
+    text = unicodedata.normalize("NFC", str(text))
+    if not any(char.isalnum() and not char.isascii() for char in text):
+        return ""
+    return "u" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
+
+
 def _camel(text):
-    words = [word for word in re.split(r"[^A-Za-z0-9]+", str(text)) if word]
+    """camelCase of the ASCII letters and digits of a name, plus :func:`_unicode_tag` when it has other letters."""
+    text = unicodedata.normalize("NFC", str(text))
+    words = [word for word in re.split(r"[^A-Za-z0-9]+", text) if word]
+    tag = _unicode_tag(text)
+    if tag:
+        words.append(tag)
     if not words:
         return ""
     return words[0] + "".join(word[:1].upper() + word[1:] for word in words[1:])
@@ -1049,6 +1102,16 @@ def write_maps(glm_result, mask_path, out_dir, label, desc=None, fwe=True, fdr=T
     return paths
 
 
+def passes_alpha(p, alpha=FWE_ALPHA):
+    """Boolean array: p <= alpha, the one significance rule of the cohort pipeline (card, glm.json, maps, conjunction, clusters, report).
+
+    A permutation p such as 50/1000 equals alpha exactly, and a p map written as float32 reads back as 0.0500000007; the
+    relative tolerance of 1e-6 keeps both the float64 and the float32 value on the same side. NaN never passes.
+    """
+    p = np.asarray(p, dtype=np.float64)
+    return np.isfinite(p) & (p <= float(alpha) * (1.0 + 1e-6))
+
+
 def summary(glm_result, alpha=FWE_ALPHA):
     """JSON-compatible numbers of a :class:`GlmResult` for glm.json (inference, discreteness and effect sizes)."""
     result = glm_result.result
@@ -1068,7 +1131,7 @@ def summary(glm_result, alpha=FWE_ALPHA):
         "stat_range": [float(finite.min()), float(finite.max())] if finite.size else None,
         "fwe": {
             "alpha": alpha,
-            "n_significant": int(np.count_nonzero(result.p_fwe <= alpha)),
+            "n_significant": int(np.count_nonzero(passes_alpha(result.p_fwe, alpha))),
             "min_p": float(result.p_fwe.min()) if result.p_fwe.size else None,
             "critical_value": float(np.quantile(result.max_null, 1.0 - alpha)) if result.max_null.size else None,
         },
@@ -1078,9 +1141,9 @@ def summary(glm_result, alpha=FWE_ALPHA):
             "voxels_at_floor": at_floor,
             "min_attainable_q": float(result.min_p),
             "min_q": float(result.q_fdr.min()) if result.q_fdr.size else None,
-            "n_significant": int(np.count_nonzero(result.q_fdr <= result.fdr_alpha)),
+            "n_significant": int(np.count_nonzero(passes_alpha(result.q_fdr, result.fdr_alpha))),
             "note": (
-                f"The smallest attainable p is 1/(K+1) = {result.min_p:.3g} (K = {K}); BH-FDR reaches q <= {result.fdr_alpha:g} only when at least "
+                f"The smallest attainable p is 1/(K+1) = {result.min_p:.3g} (K = {K}); BH-FDR reaches q ≤ {result.fdr_alpha:g} only when at least "
                 f"{result.fdr_floor_voxels} voxels reach it. Use 10,000 permutations, or Export for PALM (tail acceleration), for smaller p-values."
             ),
         },
@@ -1097,7 +1160,7 @@ def summary(glm_result, alpha=FWE_ALPHA):
         },
     }
     if result.tfce_p_fwe is not None:
-        out["tfce_fwe"] = {"n_significant": int(np.count_nonzero(result.tfce_p_fwe <= alpha)), "min_p": float(result.tfce_p_fwe.min()) if result.tfce_p_fwe.size else None}
+        out["tfce_fwe"] = {"n_significant": int(np.count_nonzero(passes_alpha(result.tfce_p_fwe, alpha))), "min_p": float(result.tfce_p_fwe.min()) if result.tfce_p_fwe.size else None}
     return out
 
 
@@ -1317,6 +1380,7 @@ def main(argv=None):
         raise jobs.JobError(f"--seed must not be negative, got {args.seed}", code="usage", exit_code=jobs.EXIT_USAGE)
     if args.desc is not None and not re.fullmatch(r"[A-Za-z0-9]+", args.desc):
         raise jobs.JobError(f"--desc must contain only letters and digits, got {args.desc!r}", code="usage", exit_code=jobs.EXIT_USAGE)
+    jobs.check_input_files(args, "maps", "participants", "mask")
     return _run_cli(args, argv)
 
 
@@ -1563,6 +1627,10 @@ def _run_cli(args, argv):
             "design_type": design.design_type,
             "contrast": {"label": desc, "spec": spec.contrast, "names": list(design.contrast_names), "matrix": design.C.tolist(), "columns": list(design.columns)},
             "n": design.n,
+            # what the design tests (calibrate.tested_columns: a calibration of another factor or score is not of this analysis)
+            "group_column": spec.group_column if spec.test in designlib.GROUP_TESTS else None,
+            "levels": [str(level) for level in design.levels] if spec.test in designlib.GROUP_TESTS and design.levels is not None else None,
+            "score_column": spec.score_column if spec.test == "continuous" else None,
             "n_per_level": dict(design.n_per_level),
             "n_voxels": n_voxels,
             "excluded": {reason: list(sids) for reason, sids in design.excluded.items()},

@@ -16,6 +16,9 @@ cancel file, exit code 3 when cancelled). The runner:
   worker process (the pid of its start event, else the launcher's child processes) is terminated, then
   killed, then the PythonSlicer launcher; a job that still has not ended is detached (cancelled). Stop is
   a button, never the Esc key;
+- stops its jobs with the application, a crash included: every job gets ``SLICER_LNM_PARENT_PID`` (this
+  application's pid), whose watchdog in ``jobs.run_job`` cancels the job when the application is gone, so
+  that no job keeps computing unseen and holding its output lock after a crash;
 - shows the running job in the Studio status chip ("Mapping 34% · 2 min left", "Done",
   "Run failed: <reason>"); without the Studio shell (Classic, tests, no main window) nothing is shown;
 - never reports a silent success: a job succeeds only when it exits with 0 after a ``done`` event, every
@@ -41,7 +44,9 @@ import time
 import qt
 import slicer
 
+from LesionNetworkMappingLib import fetch as _fetch  # the download cache folder (standard library only at import)
 from LesionNetworkMappingLib import jobs as _jobs  # the job protocol (standard library only)
+from LesionNetworkMappingLib import controlsets as _controlsets  # the control-set registry folder (standard library only at import)
 
 #: Fork-only setting (SPEC Appendix B, D-S1): the maximum number of threads of a heavy job
 MAX_THREADS_SETTING = "Studio/LNM/MaxJobThreads"
@@ -673,15 +678,29 @@ class Job:
     def _errorText(self):
         """The reason of a failed process: its error event, else the last output line, else the exit code."""
         if self.errorEvent:
+            if self.errorEvent.get("code") == "locked":
+                # The library's message names the absolute path of an internal lock file and a process id: say what it means
+                return "another run of this analysis is still writing its results (in this or another Slicer window); try again when it has finished"
             message = str(self.errorEvent.get("message") or "").strip()
             if message:
                 return message
         if self.exitCode == _jobs.EXIT_LOCKED:
-            return "the output folder is locked by another job"
+            return "another run of this analysis is still writing its results (in this or another Slicer window); try again when it has finished"
         for line in reversed(self.logTail):
-            if line.strip():
-                return line.strip()
+            text = line.strip()
+            if not text:
+                continue
+            if "exit abnormally" in text:
+                # The launcher's own line for a worker that was killed (out of memory, a system monitor): it holds a
+                # local path and "Report the problem", so say what happened in plain words instead
+                return ("the process stopped unexpectedly (it was probably killed by the system, for example when memory ran out). "
+                        "What was done so far is kept; Resume continues")
+            return text
         return f"exit code {self.exitCode}"
+
+    def isPartial(self):
+        """Whether a failed job reported a partial result (an error event with ``partial``: some of its items were done)."""
+        return self.state == FAILED and bool(self.errorEvent) and bool(self.errorEvent.get("partial")) and bool(self.failures)
 
     def _onCompleted(self, returnCode):
         """Main thread: the process ended (every output line was delivered before)."""
@@ -714,7 +733,7 @@ class Job:
         self._closeLog()
         _removeFile(self.cancelPath)
         if state == FAILED:
-            logging.warning(f"Lesion network mapping: {self.title} failed: {'; '.join(self.failures)}" + (f" (log: {self.logPath})" if self.logPath else ""))
+            logging.warning(f"Lesion network mapping: {self.title} {'finished with failures' if self.isPartial() else 'failed'}: {'; '.join(self.failures)}" + (f" (log: {self.logPath})" if self.logPath else ""))
         self.runner._jobFinished(self)
         if callable(self.spec.onDone):
             _callSafely(self.spec.onDone, self, what=f"onDone of {self.title}")
@@ -813,8 +832,24 @@ class JobRunner:
             env[name] = str(threads)
         env[_jobs.MAX_THREADS_ENV] = str(threads)  # jobs.budget_threads() of nested workers
         env.setdefault("PYTHONUNBUFFERED", "1")
+        env[_jobs.APP_JOB_ENV] = "1"  # the hints of the job name the app's controls
+        # The job stops when this application is gone, a crash included (the PythonSlicer launcher outlives a crash, so the
+        # job's orphan watchdog does not notice it): otherwise it keeps computing unseen and holds its output lock
+        env[_jobs.PARENT_PID_ENV] = str(os.getpid())
+        # A job that reads the download cache without --cache (cached atlases of the pipeline) uses the application's
+        # cache, where the cards download, not the library's default folder
+        if not os.environ.get(_fetch.CACHE_ENV):
+            env.setdefault(_fetch.CACHE_ENV, _fetch.app_cache_dir())
+        # Linked control lesions ("controlset:<set>/<rel>") resolve in the job through the app's control-set registry
+        if not os.environ.get(_controlsets.ENV_ROOT):
+            try:
+                env.setdefault(_controlsets.ENV_ROOT, _controlsets.registry_root())
+            except Exception:
+                pass
         # The reader decodes with the locale encoding: make the job write the same, replacing what it cannot hold
         env.setdefault("PYTHONIOENCODING", f"{locale.getpreferredencoding(False) or 'utf-8'}:replace")
+        # Under the C/POSIX locale the PythonSlicer launcher drops non-ASCII letters from the job's paths
+        env.update(_jobs.utf8_locale_env({**os.environ, **env}))
         return env
 
     def _start(self, job):
@@ -840,6 +875,12 @@ class JobRunner:
             job.proc = slicer.util.launchConsoleProcess(
                 job.args, useStartupEnvironment=False, updateEnvironment=env, cwd=moduleDir(), blocking=False,
                 logCallback=job._onLine, completedCallback=job._onCompleted)
+        except OSError as exc:  # e.g. a read-only study folder: a plain sentence, not a traceback
+            logging.warning(f"Lesion network mapping: could not start {job.title}: {exc.strerror or exc}")
+            reason = f"could not start: {exc.strerror or type(exc).__name__} (is the study folder read-only?)"
+            qt.QTimer.singleShot(0, lambda: job.isRunning() and job._finish(FAILED, [reason]))
+            self._updateStatus()
+            return
         except Exception as exc:
             logging.exception(f"Lesion network mapping: could not start {job.title}")
             reason = f"could not start: {exc}"
@@ -972,10 +1013,13 @@ class JobRunner:
         """Hide the status chip unless other code has shown its own text since (for example "Done · N=1000")."""
         self._statusShown = False
         shell = self._shell(job)
-        chip = getattr(getattr(shell, "topBar", None), "statusChip", None) if shell is not None else None
+        topBar = getattr(shell, "topBar", None) if shell is not None else None
+        chip = getattr(topBar, "statusChip", None)
         if chip is not None:
             try:
-                if chip.isHidden() or str(chip.text) != str(self._chipText):
+                # The whole text: the chip shows a long text elided
+                shown = topBar.statusChipText() if hasattr(topBar, "statusChipText") else chip.text
+                if chip.isHidden() or str(shown) != str(self._chipText):
                     self._chipText = None  # already hidden, or showing someone else's text
                     return
             except Exception:
@@ -996,7 +1040,7 @@ class JobRunner:
             if len(reason) > CHIP_REASON_CHARS:
                 reason = reason[: CHIP_REASON_CHARS - 1] + "…"
             self._statusShown = True
-            self._setChip(finished, f"Run failed: {reason}", "warn")  # stays until the next job: never a silent failure
+            self._setChip(finished, reason if finished.isPartial() else f"Run failed: {reason}", "warn")  # stays until the next job: never a silent failure
             return
         self._statusShown = True
         self._setChip(finished, "Done" if finished.state == DONE else "Stopped", "ok" if finished.state == DONE else "neutral")

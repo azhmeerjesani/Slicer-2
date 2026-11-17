@@ -11,6 +11,10 @@
   and **Adjudicate N →** (Draw states, Studio only), **Compute agreement** (writes ``derivatives/qc/interrater.tsv``, read
   by the methods text), the Dice threshold of adjudication (audited) and **Assign second tracing…** (a seeded random
   fraction; inline form).
+- **Compute agreement** reads the masks and computes the metrics in a worker thread (``agreement.compute_summary``: files and
+  numpy only, D19), with its progress and **Stop** on the card, as Cohort diagnostics does; the main thread takes what it
+  reads from the study before (``agreement.prepare_summary``) and writes interrater.tsv and the rows after it
+  (``agreement.summary(computed=...)``).
 - **BATCH card** "Assign second tracing…" for the selected subjects (the same inline form; a companion module, as the
   libcard contract has one CARD per module).
 
@@ -21,7 +25,10 @@ states need Studio).
 
 import contextlib
 import logging
+import queue
 import sys
+import threading
+import time
 import traceback
 import types
 
@@ -39,6 +46,10 @@ DOT = "●"
 METRICS_LINES = 4
 MODE_ITEMS = (("inter", "Inter-rater (another rater)"), ("intra", "Intra-rater (same rater, ≥ 7 days later)"))
 LEVEL_ITEMS = (("trace_only", "Trace only (reuse the figure fit)"), ("full", "Full (own figure crop and fit)"))
+#: The worker's result is handed over every PUMP_MS; the main thread sleeps PUMP_SLEEP_S in between so that the worker runs
+#: (as the Cohort diagnostics card)
+PUMP_MS = 15
+PUMP_SLEEP_S = 0.008
 
 
 def _rules():
@@ -84,6 +95,33 @@ def agreementCell(row):
     return f"{DOT} " + _("To do"), "warn"
 
 
+def pairs_text(n):
+    """"1 pair" / "{n} pairs"."""
+    return _("1 pair") if n == 1 else _("{n} pairs").format(n=n)
+
+
+def assigned_text(n):
+    """The toast after Assign: "1 second tracing assigned" / "{n} second tracings assigned"."""
+    return _("1 second tracing assigned") if n == 1 else _("{n} second tracings assigned").format(n=n)
+
+
+def written_text(n):
+    """The toast after Compute agreement."""
+    if n == 1:
+        return _("Agreement of 1 pair written to derivatives/qc/interrater.tsv")
+    return _("Agreement of {n} pairs written to derivatives/qc/interrater.tsv").format(n=n)
+
+
+def progress_text(progress):
+    """The progress line of Compute agreement: "Computing agreement 3/21…", "Between-lesion baseline…"."""
+    stage, done, total = progress or ("pairs", None, None)
+    if stage == "baseline":
+        return _("Between-lesion baseline…")
+    if done is not None and total:
+        return _("Computing agreement {done}/{total}…").format(done=done, total=total)
+    return _("Computing agreement…")
+
+
 def counts(studyObject):
     rules = _rules()
     rows = studyObject.subjects
@@ -104,8 +142,10 @@ def counts(studyObject):
 class AssignForm:
     """Inline form of "Assign second tracing…" (nothing modal). ``selected()`` gives the BATCH subjects (None: a fraction)."""
 
-    def __init__(self, prefix, selected=None):
+    def __init__(self, prefix, selected=None, onClosed=None):
         self.selected = selected
+        #: Called after the form closed (Assign, Cancel, Escape): the card shows its "Assign second tracing…" row again
+        self.onClosed = onClosed
         self.widget = qt.QFrame()
         self.widget.setObjectName(f"{prefix}AssignForm")
         layout = qt.QFormLayout(self.widget)
@@ -185,6 +225,9 @@ class AssignForm:
         if shell is not None and hasattr(shell, "unregisterEscapeOverlay"):
             with contextlib.suppress(Exception):
                 shell.unregisterEscapeOverlay(self.widget)
+        # A refresh while the form was open (assign() saves and refreshes the card first) left the row hidden
+        if self.onClosed is not None:
+            self.onClosed()
 
     def isOpen(self):
         return not self.widget.isHidden()
@@ -209,7 +252,7 @@ class AssignForm:
         session.flush()
         self.hide()
         n = len(record["sids"])
-        text = _("{n} second tracing(s) assigned").format(n=n)
+        text = assigned_text(n)
         if record.get("seed") is not None:
             text += " · " + _("seed {seed}").format(seed=record["seed"])
         if record.get("skipped"):
@@ -238,7 +281,7 @@ def _metricsText(data):
         _("Median Dice {dice} · HD95 {hd} · volume ratio {ratio}").format(dice=number(median.get("dice")), hd=number(median.get("hd95_mm"), 1, " mm"),
                                                                           ratio=number(median.get("volume_ratio"))),
         _("Centroids {centroid} apart vs {baseline} between lesions").format(centroid=number(median.get("centroid_mm"), 1, " mm"), baseline=number(baseline, 1, " mm")),
-        _("2 mm grid: Dice {dice} · {n} pairs").format(dice=number(coarse.get("dice")), n=data["n_pairs"]),
+        _("2 mm grid: Dice {dice} · {pairs}").format(dice=number(coarse.get("dice")), pairs=pairs_text(data["n_pairs"])),
     ]
     return "\n".join(lines)
 
@@ -278,6 +321,19 @@ class AgreementCard:
         self.computeButton.setToolTip(_("Dice, centroid distance, volume ratio and HD95 of every pair, on the tracing grid and on the 2 mm grid; "
                                         "writes derivatives/qc/interrater.tsv for the methods text"))
         layout.addWidget(self.computeRow)
+        progressLayout = qt.QHBoxLayout()
+        progressLayout.setContentsMargins(0, 0, 0, 0)
+        progressLayout.setSpacing(8)
+        self.progressLabel = library._cardLabel("StudioAgreementProgress", 12, "accent")
+        progressLayout.addWidget(self.progressLabel, 1)
+        self.stopLink = library._linkButton(_("Stop"), "StudioAgreementStopButton", stopAgreement)
+        self.stopLink.setToolTip(_("Stop computing the agreement (the last interrater.tsv stays)"))
+        progressLayout.addWidget(self.stopLink)
+        self.progressRow = qt.QWidget()
+        self.progressRow.setObjectName("StudioAgreementProgressRow")
+        self.progressRow.setLayout(progressLayout)
+        self.progressRow.hide()
+        layout.addWidget(self.progressRow)
         thresholdRow = qt.QHBoxLayout()
         thresholdRow.setSpacing(6)
         thresholdLabel = qt.QLabel(_("Adjudicate below Dice"))
@@ -295,7 +351,7 @@ class AgreementCard:
         self.assignRow, self.assignButton = library._rowButton(_("Assign second tracing…"), "StudioAgreementAssignButton", self._showForm)
         self.assignButton.setToolTip(_("A seeded random share of the traced subjects is traced a second time, blind (the seed is recorded)"))
         layout.addWidget(self.assignRow)
-        self.form = AssignForm("StudioAgreement")
+        self.form = AssignForm("StudioAgreement", onClosed=self._formClosed)
         layout.addWidget(self.form.widget)
 
     def refresh(self, selectedIds=None):
@@ -306,7 +362,7 @@ class AgreementCard:
         studyObject = session.study
         rules = _rules()
         numbers = counts(studyObject)
-        parts = [_("{n} to trace twice").format(n=numbers["todo"]), _("{n} pairs").format(n=numbers["pairs"])]
+        parts = [_("{n} to trace twice").format(n=numbers["todo"]), pairs_text(numbers["pairs"])]
         if numbers["adjudicate"]:
             parts.append(_("{n} to adjudicate").format(n=numbers["adjudicate"]))
         if numbers["consensus"]:
@@ -319,13 +375,20 @@ class AgreementCard:
         if numbers["pairs"] and (not data or computed != numbers["pairs"] or _stale(studyObject, data)):
             text = (text + "\n" if text else "") + _("Not up to date: Compute agreement")
         elif not numbers["pairs"]:
-            text = _("No lesion is traced twice yet: assign second tracings to a share of the subjects")
+            if numbers["todo"]:
+                text = _("Not traced twice yet: do the second tracings")
+            else:
+                text = _("No lesion is traced twice yet: assign second tracings to a share of the subjects")
         if str(self.metrics.text) != text:
             self.metrics.setText(text)
         shell = library._shell()
         inStudio = shell is not None
         idle = adjudicate.state() is None
-        rows = (self.secondRow, self.adjudicateRow, self.computeRow, self.assignRow)
+        computation = _computation
+        computing = computation is not None and computation.isBusy()
+        if computing and computation.studyPath != studyObject.path:
+            computation.cancel()  # another study was opened: the result would not belong to it
+        rows = (self.secondRow, self.adjudicateRow, self.computeRow, self.progressRow, self.assignRow)
         before = [not row.isHidden() for row in rows]
         # A state in Draw disables the rows rather than hiding them: the card keeps its height (stable layout)
         self.secondRow.setVisible(inStudio and numbers["todo"] > 0)
@@ -335,6 +398,10 @@ class AgreementCard:
         self.adjudicateButton.setEnabled(idle)
         self.adjudicateButton.setText(_("Adjudicate {n} →").format(n=numbers["adjudicate"]))
         self.computeRow.setVisible(numbers["pairs"] > 0)
+        self.computeButton.setEnabled(not computing)
+        self.progressRow.setVisible(computing)
+        if computing:
+            self.showProgress(computation.progress)
         self.assignRow.setVisible(not self.form.isOpen())
         self._setting = True
         try:
@@ -379,6 +446,13 @@ class AgreementCard:
         self.relayout()
         qt.QTimer.singleShot(0, self.relayout)
 
+    def _formClosed(self):
+        if not library._isAlive(self.widget):
+            return
+        self.assignRow.setVisible(True)
+        self.relayout()
+        qt.QTimer.singleShot(0, self.relayout)
+
     def _setThreshold(self):
         if self._setting:
             return
@@ -396,6 +470,11 @@ class AgreementCard:
 
     def compute(self):
         return computeAgreement()
+
+    def showProgress(self, progress):
+        text = progress_text(progress)
+        if str(self.progressLabel.text) != text:
+            self.progressLabel.setText(text)
 
     def startSecond(self):
         adjudicate.startSecondTracing()
@@ -419,28 +498,187 @@ def _stale(studyObject, data):
     return False
 
 
+class _Computation:
+    """Compute agreement in a worker thread: ``agreement.compute_summary`` reads the masks and computes the metrics (files and
+    numpy only, nothing of Qt, VTK, MRML or the study object); ``finished(studyPath, result, error)`` is called on the main
+    thread. Python threads only run while the main thread lends them the interpreter: while a run is going, a PUMP_MS timer
+    hands the result over and sleeps PUMP_SLEEP_S (the pattern of the Cohort diagnostics card).
+    """
+
+    def __init__(self, finished):
+        self.finished = finished
+        self.studyPath = None
+        self.progress = None
+        self._shown = None
+        self._queue = queue.Queue()
+        self._thread = None
+        self._cancel = threading.Event()
+        self._timer = qt.QTimer()
+        self._timer.setInterval(PUMP_MS)
+        self._timer.connect("timeout()", self._pump)
+
+    def isBusy(self):
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self, studyPath, prepared):
+        if self.isBusy():
+            return False
+        rules = _rules()
+        cancelled = _importForWorker(rules)
+        self._cancel.clear()
+        self.studyPath = studyPath
+        self.progress, self._shown = ("pairs", 0, len(prepared["jobs"])), None
+        self._thread = threading.Thread(target=self._work, args=(rules, prepared, cancelled), name="studio-agreement", daemon=True)
+        self._thread.start()
+        self._timer.start()
+        return True
+
+    def cancel(self):
+        self._cancel.set()
+
+    def _setProgress(self, stage, done=None, total=None):
+        self.progress = (stage, done, total)
+
+    def _work(self, rules, prepared, cancelled):
+        try:
+            self._queue.put((rules.compute_summary(prepared, progress=self._setProgress, cancel=self._cancel.is_set), None))
+        except cancelled:
+            self._queue.put((None, "cancelled"))
+        except Exception as e:
+            logging.debug(f"Studio Library: agreement: the computation failed:\n{traceback.format_exc()}")
+            self._queue.put((None, f"{type(e).__name__}: {e}"))
+
+    def _pump(self):
+        if self.progress != self._shown:
+            self._shown = self.progress
+            _safe(_showProgress, self.progress)
+        while True:
+            try:
+                result, error = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            _safe(self.finished, self.studyPath, result, error)
+        if self.isBusy():
+            time.sleep(PUMP_SLEEP_S)  # lends the interpreter to the worker
+        elif self._queue.empty():
+            self._timer.stop()
+
+    def waitForIdle(self, timeoutS=60.0):
+        """Process events until the run has ended and its result is written (tests). True when it ended."""
+        import slicer
+
+        deadline = time.monotonic() + timeoutS
+        while (self.isBusy() or not self._queue.empty()) and time.monotonic() < deadline:
+            slicer.app.processEvents()
+            time.sleep(0.005)
+        self._pump()
+        return not self.isBusy()
+
+
+_computation = None
+
+
+def _importForWorker(rules):
+    """Import on the main thread what the worker uses (no module is first imported off the main thread); return ``jobs.Cancelled``."""
+    import importlib
+
+    with contextlib.suppress(ImportError):
+        importlib.import_module("scipy.ndimage")
+    return importlib.import_module(rules.__name__.rsplit(".", 1)[0] + ".jobs").Cancelled
+
+
+def isComputing():
+    """True while Compute agreement runs."""
+    return _computation is not None and _computation.isBusy()
+
+
+def stopAgreement():
+    """Stop Compute agreement (the last interrater.tsv stays)."""
+    if _computation is not None:
+        _computation.cancel()
+
+
+def waitForAgreement(timeoutS=60.0):
+    """Process events until Compute agreement has finished and written its files (tests). True when it finished."""
+    return True if _computation is None else _computation.waitForIdle(timeoutS)
+
+
+def _refreshCards():
+    for widget, card in list(_cards.items()):
+        if library._isAlive(widget):
+            _safe(card.refresh)
+
+
+def _showProgress(progress):
+    for widget, card in list(_cards.items()):
+        if library._isAlive(widget):
+            card.showProgress(progress)
+
+
 def computeAgreement():
-    """Compute the agreement of every pair and write interrater.tsv / .json (Search, the card). Return the summary."""
+    """Compute the agreement of every pair (Search, the card) in a worker thread; interrater.tsv / .json and the rows are
+    written on the main thread when it has finished. Return True when the computation started.
+    """
+    global _computation
     session = _session()
     if session is None:
         review._toast(_("Open a study first"))
         return None
-    qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+    if isComputing():
+        review._toast(_("The agreement is being computed"))
+        return None
     try:
-        data = _rules().summary(session.study)
+        # A read-only study cannot take interrater.tsv / .json: refuse before any work, with the plain message
+        require = getattr(session, "_requireWritable", None)
+        if require is not None:
+            require(_("The agreement was not computed."))
+        prepared = _rules().prepare_summary(session.study)
+        if _computation is None:
+            _computation = _Computation(_computed)
+        started = _computation.start(session.study.path, prepared)
     except Exception as e:
-        logging.error(f"Studio Library: the agreement could not be computed:\n{traceback.format_exc()}")
+        if getattr(e, "user_problem", False):
+            logging.warning(f"Studio Library: the agreement was not computed: {e}")
+        else:
+            logging.error(f"Studio Library: the agreement could not be computed:\n{traceback.format_exc()}")
         review._toast(str(e), ms=5000, level="warning")
         return None
+    _refreshCards()
+    return started
+
+
+def _computed(studyPath, result, error):
+    """The end of Compute agreement (main thread): write interrater.tsv / .json and the rows of the study it was started for."""
+    try:
+        session = _session()
+        if session is None or session.study.path != studyPath:
+            return  # the study was closed or another one opened meanwhile
+        if error == "cancelled":
+            review._toast(_("Agreement not computed: stopped"), ms=3000)
+            return
+        if error:
+            review._toast(error, ms=5000, level="warning")
+            return
+        try:
+            data = _rules().summary(session.study, computed=result)
+        except PermissionError:
+            # The study became read-only while the agreement was computed: no errno, no traceback
+            if hasattr(session, "_markReadOnly"):
+                session._markReadOnly()
+            review._toast(_("The agreement was not computed: the study folder is read-only"), ms=5000, level="warning")
+            return
+        except Exception as e:
+            logging.error(f"Studio Library: the agreement could not be computed:\n{traceback.format_exc()}")
+            review._toast(str(e), ms=5000, level="warning")
+            return
+        session.setValues([], {})
+        session.flush()
+        if data["n_pairs"]:
+            review._toast(written_text(data["n_pairs"]), ms=3500)
+        else:
+            review._toast(_("No lesion is traced twice yet"), ms=3000)
     finally:
-        qt.QApplication.restoreOverrideCursor()
-    session.setValues([], {})
-    session.flush()
-    if data["n_pairs"]:
-        review._toast(_("Agreement of {n} pairs written to derivatives/qc/interrater.tsv").format(n=data["n_pairs"]), ms=3500)
-    else:
-        review._toast(_("No lesion is traced twice yet"), ms=3000)
-    return data
+        _refreshCards()
 
 
 _cards = {}
@@ -484,7 +722,7 @@ class BatchSection:
         self.row, self.button = library._rowButton(_("Assign second tracing…"), "StudioAgreementBatchAssignButton", self._showForm)
         self.button.setToolTip(_("The selected subjects are traced a second time, blind"))
         layout.addWidget(self.row)
-        self.form = AssignForm("StudioAgreementBatch", selected=lambda: list(self.sids))
+        self.form = AssignForm("StudioAgreementBatch", selected=lambda: list(self.sids), onClosed=self._formClosed)
         layout.addWidget(self.form.widget)
 
     def refresh(self, sids):
@@ -496,6 +734,10 @@ class BatchSection:
     def _showForm(self):
         self.row.hide()
         self.form.show()
+
+    def _formClosed(self):
+        if library._isAlive(self.widget):
+            self.row.setVisible(True)
 
 
 _batches = {}
@@ -555,7 +797,7 @@ def _paletteActions(shell=None):
          "description": "Both tracings as outlines: choose A, B, Union, Intersection or Edit"},
         {"id": "lnm.agreement-compute", "title": "Compute tracing agreement", "category": "Library",
          "synonyms": ["dice", "hd95", "hausdorff", "inter-rater agreement", "interrater.tsv", "reliability"],
-         "callback": computeAgreement, "enabled": lambda: _waiting("pairs") > 0,
+         "callback": computeAgreement, "enabled": lambda: _waiting("pairs") > 0 and not isComputing(),
          "description": "Mask-level agreement of the lesions traced twice, against the between-lesion baseline"},
         {"id": "lnm.agreement-exit", "title": "Exit second tracing or adjudication", "category": "Draw", "synonyms": ["stop second tracing", "end adjudication"],
          "callback": adjudicate.exitState, "enabled": lambda: adjudicate.state() is not None, "description": "Back to the Library (what was saved is kept)"},

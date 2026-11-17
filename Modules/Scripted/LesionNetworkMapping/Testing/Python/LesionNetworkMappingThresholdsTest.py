@@ -19,7 +19,7 @@ if MODULE_DIR not in sys.path:
 
 import numpy as np
 
-from LesionNetworkMappingLib import robustness, thresholds
+from LesionNetworkMappingLib import nulls, robustness, thresholds
 from LesionNetworkMappingLib.geometry import Grid
 
 
@@ -99,7 +99,14 @@ class TopPercentRuleTest(unittest.TestCase):
                         rule = {"kind": "top_pct", "value": x, "statistic": statistic, "sign": sign}
                         resolved = thresholds.resolve(rule, 312, finite.size, values=self.values)
                         self.assertEqual(resolved.statistic, statistic)
-                        self.assertEqual(resolved.value, float(np.percentile(scores, 100.0 - x)))
+                        percentile = float(np.percentile(scores, 100.0 - x))
+                        if percentile <= 0.0:
+                            # Fewer than x% of the voxels have this sign (x = 50 here): the cut never goes below 0
+                            self.assertEqual(resolved.value, float(scores[scores > 0].min()))
+                            self.assertEqual(len(resolved.notes), 1)
+                            self.assertAlmostEqual(resolved.fraction, float((scores > 0).mean()))
+                            continue
+                        self.assertEqual(resolved.value, percentile)
                         self.assertIsNone(resolved.p_unc)
                         self.assertIsNone(resolved.p_fwe)
                         self.assertTrue(resolved.allowed)
@@ -108,6 +115,45 @@ class TopPercentRuleTest(unittest.TestCase):
                         kept = int((scores >= resolved.value).sum())
                         self.assertLessEqual(abs(kept - x / 100.0 * finite.size), 1.0)
                         self.assertAlmostEqual(resolved.fraction, kept / finite.size)
+
+    def test_one_sign_cut_never_takes_the_other_sign(self):
+        # Regression (BB-1 toppct-negative-cut-binarize-outside-brain): T, sign +, top 80% when only about
+        # half of the in-mask voxels are positive resolved to a negative cut (T >= -0.88), so the count took
+        # negative voxels the views do not show, Binarize marked the zeros outside the brain and the NIfTI
+        # export mask (|cut|) was yet another set of voxels.
+        rng = np.random.default_rng(11)
+        inside = rng.standard_normal(2000)
+        positive, negative = int((inside > 0).sum()), int((inside < 0).sum())
+        box = np.zeros(5000)  # the map's box: 0 outside the brain mask
+        box[:inside.size] = inside
+        for sign, count, word in (("pos", positive, "positive"), ("neg", negative, "negative")):
+            for x in (80.0, 95.0):
+                with self.subTest(sign=sign, x=x):
+                    rule = {"kind": "top_pct", "value": x, "statistic": "T", "sign": sign}
+                    resolved = thresholds.resolve(rule, 120, inside.size, values=inside)
+                    self.assertTrue(resolved.allowed)
+                    self.assertGreater(resolved.value, 0.0)
+                    # The count (fraction) is the voxels of that sign: what the colour table shows
+                    self.assertAlmostEqual(resolved.fraction, count / inside.size)
+                    share = f"{100.0 * count / inside.size:.0f}%"
+                    self.assertIn(f"Only {share} of the in-mask voxels are {word}", " ".join(resolved.notes))
+                    self.assertIn(f"{share} of in-mask voxels", thresholds.describe(resolved, resolved.fraction))
+                    # Binarize over the whole box (and the NIfTI export mask, which uses |cut| = cut): the same voxels, none outside the brain
+                    passing = box >= resolved.value if sign == "pos" else box <= -resolved.value
+                    self.assertEqual(int(passing.sum()), count)
+                    self.assertFalse(passing[inside.size:].any())
+                    # The null fast path gives the same cut (cohort maps, nulls)
+                    self.assertEqual(float(nulls.rule_values(inside[None, :], rule, 120, inside.size)[0]), resolved.value)
+
+        # A sign with no voxel at all: nothing passes, the rule is not applied
+        none = thresholds.resolve({"kind": "top_pct", "value": 10, "statistic": "Fz", "sign": "neg"}, 120, 3, values=[0.0, 1.0, 2.0])
+        self.assertFalse(none.allowed)
+        self.assertTrue(math.isnan(none.value))
+        self.assertIn("no negative values", none.banner)
+        # x below the share of that sign: unchanged percentile cut, no note
+        top = thresholds.resolve({"kind": "top_pct", "value": 30, "statistic": "T", "sign": "pos"}, 120, inside.size, values=inside)
+        self.assertEqual(top.value, float(np.percentile(inside, 70.0)))
+        self.assertEqual(top.notes, ())
 
     def test_n_independent(self):
         rule = {"kind": "top_pct", "value": 10}
@@ -134,6 +180,23 @@ class TopPercentRuleTest(unittest.TestCase):
             resolved = thresholds.resolve({"kind": kind}, 1000, 292_019, values=self.values)
             self.assertEqual(resolved.statistic, "T")
             self.assertNotIn("Fz", thresholds.describe(resolved, fraction=resolved.fraction))
+
+
+class UnknownRuleKeyTest(unittest.TestCase):
+    """A misspelled key is refused (it used to be ignored, leaving the default threshold in place)."""
+
+    def test_unknown_keys_are_refused_naming_the_expected_keys(self):
+        for text in ('{"kind":"top_pct","pct":5}', '{"kind":"fwe_bonferroni","alpha":0.01,"aplha":0.5}', '{"kind":"fz_abs","statistic":"Fz"}'):
+            with self.subTest(rule=text), self.assertRaisesRegex(ValueError, "Unknown key.*expected: "):
+                thresholds.rule_from_json(text)
+        with self.assertRaisesRegex(ValueError, "'pct'.*expected: kind, override, reference_n, sign, statistic, value"):
+            thresholds.normalize_rule({"kind": "top_pct", "pct": 5})
+
+    def test_every_documented_key_is_still_accepted(self):
+        self.assertEqual(thresholds.normalize_rule({"kind": "top_pct", "value": 5, "statistic": "T", "sign": "pos"})["value"], 5.0)
+        self.assertEqual(thresholds.normalize_rule({"kind": "t_convention", "value": 6, "reference_n": 800, "override": True})["override"], True)
+        for kind in thresholds.KINDS:
+            self.assertEqual(thresholds.normalize_rule(thresholds.normalize_rule({"kind": kind}))["kind"], kind)
 
 
 class GsrAndReadoutTest(unittest.TestCase):
@@ -197,6 +260,38 @@ class GsrAndReadoutTest(unittest.TestCase):
         self.assertEqual(thresholds.describe(fz, fraction=0.25), "⇒ |Fz| ≥ 0.05 at N=312, V=292,019 · effect size (no p-value) · 25% of in-mask voxels")
         top = thresholds.resolve({"kind": "top_pct", "value": 10, "statistic": "T", "sign": "pos"}, 312, 4, values=[1.0, 2.0, 3.0, 4.0])
         self.assertEqual(thresholds.describe(top, fraction=top.fraction), "⇒ top 10% of T (≥ 3.7) at N=312, V=4 · rank rule (no p-value) · 25% of in-mask voxels")
+
+    def test_describe_one_tail_follows_the_display_sign(self):
+        """With + or - shown, the derived line states that tail (like the legend), not |T|, and its share."""
+        values = np.concatenate([np.zeros(900), np.full(60, 6.0), np.full(30, -6.0), np.full(10, 0.5)])
+        fwe = thresholds.resolve({"kind": "fwe_bonferroni"}, 120, values.size, values=values)
+        both, pos, neg = (thresholds.fraction_connected(values, fwe, s) for s in ("both", "pos", "neg"))
+        self.assertEqual((both, pos, neg), (0.09, 0.06, 0.03))
+        cut = thresholds.format_value(fwe)
+        self.assertIn(f"⇒ |T| ≥ {cut} at", thresholds.describe(fwe, both, "both"))
+        self.assertIn(f"⇒ T ≥ {cut} at", thresholds.describe(fwe, pos, "pos"))
+        self.assertTrue(thresholds.describe(fwe, pos, "pos").endswith(" · 6.0% of in-mask voxels"))
+        self.assertIn(f"⇒ T ≤ -{cut} at", thresholds.describe(fwe, neg, "neg"))
+        self.assertTrue(thresholds.describe(fwe, neg, "neg").endswith(" · 3.0% of in-mask voxels"))
+        top = thresholds.resolve({"kind": "top_pct", "value": 10, "statistic": "T", "sign": "pos"}, 120, values.size, values=values)
+        self.assertEqual(thresholds.describe(top, top.fraction, "neg"), thresholds.describe(top, top.fraction))
+
+
+class FormatValueTest(unittest.TestCase):
+    """The threshold value as the derived line, the Map legend and the sidecar Rule write it (BB-1: never one decimal)."""
+
+    def test_format_value(self):
+        self.assertEqual(thresholds.format_value(thresholds.resolve({"kind": "fz_abs", "value": 0.05}, 120, 6360)), "0.05")
+        self.assertEqual(thresholds.format_value(thresholds.resolve({"kind": "fz_abs", "value": 0.12}, 120, 6360)), "0.12")
+        self.assertEqual(thresholds.format_value(thresholds.resolve({"kind": "fz_abs", "value": 0.3}, 120, 6360)), "0.3")
+        fwe = thresholds.resolve({"kind": "fwe_bonferroni"}, 1000, 292_019)
+        self.assertEqual(thresholds.format_value(fwe), "5.27")
+        top = thresholds.resolve({"kind": "top_pct", "value": 10, "statistic": "Fz", "sign": "both"}, 120, 4, values=[0.01, 0.02, 0.0304, 0.0305])
+        self.assertEqual(thresholds.format_value(top), f"{top.value:.3g}")
+        self.assertNotEqual(float(thresholds.format_value(top)), 0.0)
+        # The derived line writes the same text
+        for resolved in (fwe, top, thresholds.resolve({"kind": "fz_abs", "value": 0.05}, 120, 6360)):
+            self.assertIn(f"≥ {thresholds.format_value(resolved)}", thresholds.describe(resolved))
 
 
 class ResolvedCompatibilityTest(unittest.TestCase):

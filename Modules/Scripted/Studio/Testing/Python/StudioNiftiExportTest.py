@@ -240,6 +240,42 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertEqual(len(result.images), 1)
         np.testing.assert_allclose(self._markerRas(result.images[0]), (-40.0, -20.0, 10.0), atol=1e-4)
 
+    def test_02a_extent_not_starting_at_zero_keeps_voxels_in_place(self):
+        """An image whose extent does not start at 0 (vtkImageClip in a script) is written where the views show it, as
+        3D Slicer's own writer writes it: scan, label map and map with its threshold mask (a right voxel stays right).
+        """
+        ijkToRas = np.array([[2.0, 0, 0, -10], [0, 2.0, 0, -20], [0, 0, 2.0, -30], [0, 0, 0, 1]])
+        expected = (4.0, -14.0, -22.0)  # IJK (7, 3, 4): the subject's right
+        for className, name in (("vtkMRMLScalarVolumeNode", "cropped scan"), ("vtkMRMLLabelMapVolumeNode", "cropped labels"),
+                                ("vtkMRMLScalarVolumeNode", "cropped_T")):
+            array = np.zeros((15, 20, 40), np.int16)
+            array[4, 3, 7] = 1000 if name != "cropped labels" else 1
+            node = self._volume(name, array, ijkToRas, className)
+            clip = vtk.vtkImageClip()
+            clip.SetInputData(node.GetImageData())
+            clip.SetOutputWholeExtent(5, 24, 2, 19, 1, 14)
+            clip.ClipDataOn()
+            clip.Update()
+            cropped = vtk.vtkImageData()
+            cropped.DeepCopy(clip.GetOutput())
+            node.SetAndObserveImageData(cropped)
+            self.assertEqual(node.GetImageData().GetExtent(), (5, 24, 2, 19, 1, 14))
+            threshold = None
+            if name == "cropped_T":
+                node.SetAttribute("LNM.Statistic", "T")
+                threshold = 500.0
+            safe = name.replace(" ", "_")
+            path = os.path.join(self.out, f"{safe}.nii.gz")
+            result = self.export.exportVolume(node, path, threshold=threshold)
+            self.assertEqual(result.errors, [])
+            np.testing.assert_allclose(self._markerRas(path), expected, atol=1e-4, err_msg=name)
+            if threshold is not None:
+                np.testing.assert_allclose(self._markerRas(self.export.mapMaskPath(path)), expected, atol=1e-4, err_msg="mask")
+            # 3D Slicer's own writer places it at the same position
+            slicerPath = os.path.join(self.out, f"{safe}_slicer.nii.gz")
+            self.assertTrue(slicer.util.saveNode(node, slicerPath))
+            np.testing.assert_allclose(self._markerRas(slicerPath), expected, atol=1e-4, err_msg=f"{name} (Slicer writer)")
+
     def test_03_oblique_and_dicom_derived(self):
         """An oblique, DICOM-derived volume keeps its full direction matrix (no resampling); its name comes from the series."""
         transform = vtk.vtkTransform()
@@ -365,6 +401,26 @@ class StudioNiftiExportTest(unittest.TestCase):
             else:
                 settings.remove(settingsKey)
 
+    def test_03b_lesion_of_dicom_scan_shares_the_scan_name(self):
+        """A project export names the lesion of a DICOM scan after the scan ("003_T1_axial_label-Lesion_mask"), so that a
+        study made from the folder pairs both files as one subject.
+        """
+        ijkToRas = np.eye(4)
+        scan = self._volume("3: T1 axial", np.zeros((6, 6, 6), np.int16), ijkToRas)
+        scan.SetAttribute("DICOM.instanceUIDs", "1.2.3.4.5")
+        values = {"0008,103e": "T1 axial", "0020,0011": "3"}
+        original = self.export._dicomValue
+        self.export._dicomValue = lambda uid, tag: values.get(tag, "")
+        try:
+            segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions (3: T1 axial)")
+            other = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions (unknown scan)")
+            self.assertEqual(self.export.defaultBaseName(scan, bids=True), "003_T1_axial")
+            self.assertEqual(self.export.defaultBaseName(segmentation, bids=True), "003_T1_axial")
+            self.assertEqual(self.export.defaultBaseName(other, bids=True), self.export.safeName("Lesions (unknown scan)"))
+            self.assertEqual(self.export.maskBaseName("003_T1_axial", "Lesion"), "003_T1_axial_label-Lesion_mask")
+        finally:
+            self.export._dicomValue = original
+
     def test_04_label_map_and_segmentation(self):
         """Label maps keep their values; segmentations as one label map (1..N, .tsv and ITK-SNAP tables) or one mask per
         segment; empty segments are skipped with a note.
@@ -433,6 +489,158 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertEqual(data.shape, (32, 28, 24))
         self.assertEqual(int(data.sum()), int(first.sum()) * 8)
         self.assertIn("Resampled", self._sidecar(result.images[0]))
+        self._assertNoAbsolutePaths(self.out)
+
+    def test_04b_segment_lost_on_chosen_grid(self):
+        """A segment with no voxel left on the chosen (coarser) grid is reported, never written as a silent all-zero mask."""
+        scan = self._volume("scan 1 mm", np.zeros((60, 60, 60), np.int16), np.diag([-1.0, -1.0, 1.0, 1.0]))
+        reference = self._volume("FLAIR 3 mm", np.zeros((20, 20, 20), np.int16),
+                                 np.array([[-3.0, 0, 0, 28.5], [0, -3.0, 0, 28.5], [0, 0, 3.0, -28.5], [0, 0, 0, 1]]))
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "lesion")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        thin = segmentation.GetSegmentation().AddEmptySegment("", "Thin")
+        big = segmentation.GetSegmentation().AddEmptySegment("", "Big")
+        thinArray = np.zeros((60, 60, 60), np.uint8)
+        thinArray[30, 25:35, 15:19] = 1  # 1 mm thick, between two 3 mm slices
+        bigArray = np.zeros((60, 60, 60), np.uint8)
+        bigArray[10:40, 10:40, 10:40] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(thinArray, segmentation, thin, scan)
+        slicer.util.updateSegmentBinaryLabelmapFromArray(bigArray, segmentation, big, scan)
+
+        masks = self.export.exportSegmentation(segmentation, os.path.join(self.out, "masks.nii.gz"), mode=self.export.SEGMENTATION_MASKS,
+                                               reference=reference)
+        self.assertEqual(masks.errors, [])
+        self.assertEqual(len(masks.images), 1, masks.images)
+        self.assertIn("Big", masks.images[0])
+        self.assertGreater(int(self._read(masks.images[0])[0].sum()), 0)
+        self.assertTrue(any("Thin" in note and "chosen grid" in note for note in masks.notes), masks.notes)
+
+        labelmap = self.export.exportSegmentation(segmentation, os.path.join(self.out, "labels.nii.gz"), reference=reference)
+        self.assertEqual(labelmap.errors, [])
+        counts = {entry["Name"]: entry["VoxelCount"] for entry in self._sidecar(labelmap.images[0])["Labels"]}
+        self.assertEqual(counts["Thin"], 0)
+        self.assertGreater(counts["Big"], 0)
+        self.assertTrue(any("Thin" in note and "chosen grid" in note for note in labelmap.notes), labelmap.notes)
+        self.assertFalse(any("Big" in note for note in masks.notes + labelmap.notes), masks.notes + labelmap.notes)
+
+    def test_04ba_segment_hidden_by_a_later_segment_is_not_blamed_on_the_grid(self):
+        """A segment entirely covered by a later one is missing from the label map because of the overlap: the note says so."""
+        scan = self._volume("scan overlap", np.zeros((20, 20, 20), np.int16), np.diag([-1.0, -1.0, 1.0, 1.0]))
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "lesions")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        core = segmentation.GetSegmentation().AddEmptySegment("", "Core")
+        penumbra = segmentation.GetSegmentation().AddEmptySegment("", "Penumbra")
+        coreArray = np.zeros((20, 20, 20), np.uint8)
+        coreArray[8:12, 8:12, 2:6] = 1
+        penumbraArray = np.zeros((20, 20, 20), np.uint8)
+        penumbraArray[7:13, 7:13, 1:7] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(coreArray, segmentation, core, scan)
+        slicer.util.updateSegmentBinaryLabelmapFromArray(penumbraArray, segmentation, penumbra, scan)
+
+        result = self.export.exportSegmentation(segmentation, os.path.join(self.out, "overlap.nii.gz"))
+        self.assertEqual(result.errors, [])
+        counts = {entry["Name"]: entry["VoxelCount"] for entry in self._sidecar(result.images[0])["Labels"]}
+        self.assertEqual(counts, {"Core": 0, "Penumbra": 216})
+        self.assertFalse(any("chosen grid" in note for note in result.notes), result.notes)
+        covered = [note for note in result.notes if "Core" in note]
+        self.assertEqual(len(covered), 1, result.notes)
+        self.assertIn("covered by a later segment", covered[0])
+        self.assertIn("One mask per segment", covered[0])
+        self.assertFalse(any("Penumbra" in note for note in result.notes), result.notes)
+
+    def test_04c_transform_note_with_a_reference_grid(self):
+        """On a reference grid the sidecar names the lesion's own transform, and the reference's one separately."""
+        scan = self._volume("scan", np.zeros((40, 40, 40), np.int16), np.array([[1.0, 0, 0, -20], [0, 1.0, 0, -20], [0, 0, 1.0, -20], [0, 0, 0, 1]]))
+        shifted = np.array([[1.0, 0, 0, -30], [0, 1.0, 0, -20], [0, 0, 1.0, -20], [0, 0, 0, 1]])
+        reference = self._volume("reference", np.zeros((40, 40, 40), np.int16), shifted)
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "lesion")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        segmentId = segmentation.GetSegmentation().AddEmptySegment("", "Lesion")
+        array = np.zeros((40, 40, 40), np.uint8)
+        array[19:22, 19:22, 4:7] = 1  # world x = -15
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, scan)
+        transformNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", "move10")
+        move = np.eye(4)
+        move[0, 3] = 10.0
+        transformNode.SetMatrixTransformToParent(_matrix(move))
+
+        def exported(name):
+            result = self.export.exportSegmentation(segmentation, os.path.join(self.out, name + ".nii.gz"), mode=self.export.SEGMENTATION_MASKS,
+                                                    reference=reference if name.startswith("b") else scan, overwrite=True)
+            self.assertEqual(result.errors, [])
+            data, affine, header = self._read(result.images[0])
+            centre = (affine @ np.append(np.argwhere(data > 0).mean(0), 1.0))[0]
+            return self._sidecar(result.images[0]), result.notes, header["sform_code"], centre
+
+        # A) the lesion is transformed, the reference is not: the transform moves the mask and the sidecar says so
+        segmentation.SetAndObserveTransformNodeID(transformNode.GetID())
+        sidecar, notes, code, centre = exported("a_lesion_transformed")
+        self.assertAlmostEqual(centre, -5.0, delta=1.0)
+        self.assertEqual(sidecar["TransformApplied"]["Name"], "move10")
+        self.assertEqual(sidecar["Space"], "aligned")
+        self.assertEqual(code, 2)
+        self.assertNotIn("ReferenceTransformApplied", sidecar)
+        self.assertTrue(any("its transform was applied" in note for note in notes), notes)
+        # B) only the reference is transformed: the lesion's transform is not claimed, the reference's one is named apart
+        segmentation.SetAndObserveTransformNodeID(None)
+        reference.SetAndObserveTransformNodeID(transformNode.GetID())
+        sidecar, notes, code, centre = exported("b_reference_transformed")
+        self.assertAlmostEqual(centre, -15.0, delta=1.0)
+        self.assertNotIn("TransformApplied", sidecar)
+        self.assertEqual(sidecar["ReferenceTransformApplied"]["Name"], "move10")
+        self.assertEqual(code, 2)
+        self.assertFalse(any("its transform was applied" in note for note in notes), notes)
+        # C) both share the transform: it is applied once, to the affine
+        segmentation.SetAndObserveTransformNodeID(transformNode.GetID())
+        sidecar, notes, code, centre = exported("b_both_transformed")
+        self.assertEqual(sidecar["TransformApplied"]["Name"], "move10")
+        self.assertNotIn("ReferenceTransformApplied", sidecar)
+        self.assertEqual(code, 2)
+
+    def test_04d_resampled_lesion_keeps_its_own_space(self):
+        """Resampling a lesion onto another image's grid is not a normalization: the space comes from the lesion, not the grid."""
+        mniGrid = np.array([[-2.0, 0, 0, 90], [0, 2.0, 0, -126], [0, 0, 2.0, -72], [0, 0, 0, 1]])
+        scanGrid = np.array([[1.0, 0, 0, -20], [0, 1.0, 0, -20], [0, 0, 1.0, -20], [0, 0, 0, 1]])
+        scan = self._volume("scan", np.zeros((40, 40, 40), np.int16), scanGrid)
+        template = self._volume("mni", np.zeros((91, 109, 91), np.int16), mniGrid)
+
+        def lesion(name, volume, block, tag=None):
+            segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", name)
+            segmentation.CreateDefaultDisplayNodes()
+            segmentation.SetReferenceImageGeometryParameterFromVolumeNode(volume)
+            segmentId = segmentation.GetSegmentation().AddEmptySegment("", "Lesion")
+            array = np.zeros(slicer.util.arrayFromVolume(volume).shape, np.uint8)
+            array[block] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, volume)
+            if tag:
+                segmentation.SetAttribute("Studio.Space", tag)
+            return segmentation
+
+        def exported(segmentation, name, reference=None):
+            result = self.export.exportSegmentation(segmentation, os.path.join(self.out, name + ".nii.gz"), mode=self.export.SEGMENTATION_MASKS,
+                                                    reference=reference, overwrite=True)
+            self.assertEqual(result.errors, [])
+            _data, _affine, header = self._read(result.images[0])
+            return self._sidecar(result.images[0]), (header["sform_code"], header["qform_code"])
+
+        # A native lesion (untagged, or tagged native) on the MNI grid is still in scanner space
+        for tag in (None, "native"):
+            native = lesion("native " + str(tag), scan, (slice(15, 25), slice(15, 25), slice(15, 25)), tag)
+            sidecar, codes = exported(native, "native_own_" + str(tag))
+            self.assertEqual((sidecar["Space"], codes), ("scanner", (1, 1)))
+            sidecar, codes = exported(native, "native_on_mni_" + str(tag), reference=template)
+            self.assertIn("Resampled", sidecar)
+            self.assertEqual((sidecar["Space"], codes), ("scanner", (1, 1)), tag)
+            self.assertNotIn("Template", sidecar)
+        # An MNI lesion on a scan grid is still MNI (tagged or recognised by its grid)
+        for tag in (None, "MNI152NLin6Asym"):
+            mni = lesion("mni " + str(tag), template, (slice(35, 45), slice(60, 70), slice(40, 50)), tag)
+            sidecar, codes = exported(mni, "mni_on_scan_" + str(tag), reference=scan)
+            self.assertIn("Resampled", sidecar)
+            self.assertEqual((sidecar["Space"], codes), ("MNI152NLin6Asym", (4, 4)), tag)
         self._assertNoAbsolutePaths(self.out)
 
     def test_05_template_codes(self):
@@ -548,6 +756,170 @@ class StudioNiftiExportTest(unittest.TestCase):
         result = self.export.exportVolume(labels, os.path.join(self.out, "labels_warped.nii.gz"))
         self.assertIn("nearest neighbour", self._sidecar(result.images[0])["TransformApplied"]["Description"])
 
+    def test_06aa_sheared_linear_transform_is_resampled(self):
+        """A linear transform with shear (a 12-DOF affine registration with non-uniform scaling) cannot be folded into a
+        NIfTI affine: its qform (rotation and zooms only) would differ from its sform, and 3D Slicer (qform) would place the
+        voxels several mm away from FSL and nibabel (sform). The copy is resampled instead: sform equals qform, and both put
+        the marker where the views show it. Scans, label maps and segmentations alike.
+        """
+        angle = np.deg2rad(30.0)
+        rotation = np.eye(4)
+        rotation[:2, :2] = [[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]]
+        sheared = np.diag([2.0, 1.0, 1.0, 1.0]) @ rotation
+        sheared[:3, 3] = (1.5, -2.0, 0.5)
+        self.assertTrue(self.export.hasShear(sheared))
+        self.assertFalse(self.export.hasShear(rotation))
+        self.assertFalse(self.export.hasShear(np.diag([2.0, 1.0, 3.0, 1.0])), "a non-uniform scale alone has no shear")
+        transformNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", "affine")
+        transformNode.SetMatrixTransformToParent(_matrix(sheared))
+        ijkToRas = np.array([[-1.0, 0, 0, 10], [0, -1.0, 0, 10], [0, 0, 1.0, -10], [0, 0, 0, 1]])
+        marker = np.array([-6.0, 2.0, 4.0, 1.0])
+        shown = (sheared @ marker)[:3]
+
+        def assertWhereShown(path, sidecarInterpolation):
+            from LesionNetworkMappingLib import nifti
+
+            _data, affine, header = self._read(path)
+            # Every reader agrees: the qform (what 3D Slicer and ITK read) equals the sform (FSL, nibabel)
+            self.assertFalse(self.export.hasShear(affine), "the written affine has no shear")
+            np.testing.assert_allclose(header["qform"], header["sform"], atol=1e-5)
+            self.assertLess(nifti.xform_disagreement(header), 1e-3)
+            self.assertEqual((header["sform_code"], header["qform_code"]), (2, 2))
+            np.testing.assert_allclose(self._markerRas(path), shown, atol=1.0)
+            # 3D Slicer reopens the file with the marker where the views showed it
+            reopened = slicer.util.loadVolume(path)
+            array = slicer.util.arrayFromVolume(reopened)
+            k, j, i = np.unravel_index(int(np.argmax(array)), array.shape)
+            np.testing.assert_allclose((_ijkToRas(reopened) @ [i, j, k, 1.0])[:3], shown, atol=1.0)
+            slicer.mrmlScene.RemoveNode(reopened)
+            transformApplied = self._sidecar(path)["TransformApplied"]
+            self.assertTrue(transformApplied["Linear"])
+            self.assertIn(f"resampled, {sidecarInterpolation}", transformApplied["Description"])
+
+        scan = self._phantom("sheared scan", ijkToRas, markerRas=marker[:3])
+        scan.SetAndObserveTransformNodeID(transformNode.GetID())
+        nodesBefore = slicer.mrmlScene.GetNumberOfNodes()
+        result = self.export.exportVolume(scan, os.path.join(self.out, "sheared.nii.gz"))
+        self.assertEqual(result.errors, [])
+        assertWhereShown(result.images[0], "linear interpolation")
+        # The scene is unchanged and no temporary node is left
+        self.assertEqual(slicer.mrmlScene.GetNumberOfNodes(), nodesBefore)
+        np.testing.assert_allclose(_ijkToRas(scan), ijkToRas)
+        self.assertIs(scan.GetParentTransformNode(), transformNode)
+
+        labels = np.zeros((21, 21, 21), np.uint8)
+        i, j, k = (round(value) for value in np.linalg.solve(ijkToRas, marker)[:3])
+        labels[k, j, i] = 5
+        labelmap = self._volume("sheared labels", labels, ijkToRas, className="vtkMRMLLabelMapVolumeNode")
+        labelmap.SetAndObserveTransformNodeID(transformNode.GetID())
+        result = self.export.exportVolume(labelmap, os.path.join(self.out, "sheared_labels.nii.gz"))
+        assertWhereShown(result.images[0], "nearest neighbour")
+        self.assertEqual(set(np.unique(self._read(result.images[0])[0]).tolist()), {0, 5}, "label values are kept")
+
+        # A segmentation is exported on its own cropped extent: a block lesion fills it to the corners, and the voxels
+        # outside the moved block must stay 0 (the resampled mask is not its whole bounding box)
+        grid = self._volume("grid", np.zeros((21, 21, 21), np.int16), ijkToRas)
+        block = np.zeros((21, 21, 21), np.uint8)
+        block[k - 1 : k + 2, j - 1 : j + 2, i - 1 : i + 2] = 1
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions (sheared scan)")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(grid)
+        segmentId = segmentation.GetSegmentation().AddEmptySegment("", "Lesion")
+        slicer.util.updateSegmentBinaryLabelmapFromArray(block, segmentation, segmentId, grid)
+        segmentation.SetAndObserveTransformNodeID(transformNode.GetID())
+        result = self.export.exportSegmentation(segmentation, os.path.join(self.out, "sheared_lesion.nii.gz"), mode=self.export.SEGMENTATION_MASKS)
+        self.assertEqual(result.errors, [])
+        data, affine, _header = self._read(result.images[0])
+        self.assertFalse(self.export.hasShear(affine))
+        # The transform doubles the volume: 27 voxels of 1 mm become about 54 (nearest neighbour)
+        self.assertTrue(40 <= int(data.sum()) <= 70, int(data.sum()))
+        centre = (affine @ np.array([*np.argwhere(data > 0).mean(axis=0), 1.0]))[:3]
+        np.testing.assert_allclose(centre, shown, atol=0.75)
+        self.assertIn("resampled, nearest neighbour", self._sidecar(result.images[0])["TransformApplied"]["Description"])
+
+    def test_06ab_hardened_sheared_grid_is_resampled(self):
+        """Harden transform of a 12-DOF affine (non-uniform scale along rotated axes) leaves the volume's OWN IJK to RAS
+        matrix sheared, with no parent transform. It is resampled like a sheared parent transform: sform equals qform, and
+        FSL/nibabel and 3D Slicer all read the marker where the views show it. Codes stay 1 (no transform is applied), the
+        sidecar says the copy was resampled. Scans, label maps, and lesions drawn on the hardened scan (masks and label map).
+        """
+        angle = np.deg2rad(20.0)
+        rotation = np.eye(4)
+        rotation[:2, :2] = [[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]]
+        sheared = rotation @ np.diag([1.10, 0.92, 1.0, 1.0]) @ rotation.T
+        sheared[:3, 3] = (2.0, -1.0, 0.5)
+        ijkToRas = np.array([[-1.0, 0, 0, 10], [0, -1.0, 0, 10], [0, 0, 1.0, -10], [0, 0, 0, 1]])
+        marker = np.array([-6.0, 2.0, 4.0, 1.0])
+        shown = (sheared @ marker)[:3]
+        transformNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", "affine registration")
+        transformNode.SetMatrixTransformToParent(_matrix(sheared))
+
+        def hardened(node):
+            node.SetAndObserveTransformNodeID(transformNode.GetID())
+            slicer.vtkSlicerTransformLogic().hardenTransform(node)
+            self.assertIsNone(node.GetParentTransformNode())
+            self.assertTrue(self.export.hasShear(_ijkToRas(node)), "hardening keeps the shear in the volume's own grid")
+            return node
+
+        def assertConsistent(path, interpolation):
+            from LesionNetworkMappingLib import nifti
+
+            _data, affine, header = self._read(path)
+            self.assertFalse(self.export.hasShear(affine), "the written affine has no shear")
+            np.testing.assert_allclose(header["qform"], header["sform"], atol=1e-5)
+            self.assertLess(nifti.xform_disagreement(header), 1e-3)
+            self.assertEqual((header["sform_code"], header["qform_code"]), (1, 1), "no transform is applied: scanner")
+            sidecar = self._sidecar(path)
+            self.assertNotIn("TransformApplied", sidecar)
+            self.assertEqual(sidecar["GridResampled"]["Interpolation"], interpolation)
+
+        def assertReopenedWhereShown(path):
+            reopened = slicer.util.loadVolume(path)
+            array = slicer.util.arrayFromVolume(reopened)
+            k, j, i = np.unravel_index(int(np.argmax(array)), array.shape)
+            np.testing.assert_allclose((_ijkToRas(reopened) @ [i, j, k, 1.0])[:3], shown, atol=1.0)
+            slicer.mrmlScene.RemoveNode(reopened)
+
+        scan = hardened(self._phantom("hardened scan", ijkToRas, markerRas=marker[:3]))
+        scanGrid = _ijkToRas(scan)
+        nodesBefore = slicer.mrmlScene.GetNumberOfNodes()
+        result = self.export.exportVolume(scan, os.path.join(self.out, "hardened.nii.gz"))
+        self.assertEqual(result.errors, [])
+        assertConsistent(result.images[0], "linear interpolation")
+        np.testing.assert_allclose(self._markerRas(result.images[0]), shown, atol=1.0)
+        assertReopenedWhereShown(result.images[0])
+        self.assertTrue(any("resampled" in note for note in result.notes), result.notes)
+        # The scene is unchanged and no temporary node is left
+        self.assertEqual(slicer.mrmlScene.GetNumberOfNodes(), nodesBefore)
+        np.testing.assert_allclose(_ijkToRas(scan), scanGrid)
+
+        labels = np.zeros((21, 21, 21), np.uint8)
+        i, j, k = (round(value) for value in np.linalg.solve(ijkToRas, marker)[:3])
+        labels[k, j, i] = 5
+        labelmap = hardened(self._volume("hardened labels", labels, ijkToRas, className="vtkMRMLLabelMapVolumeNode"))
+        result = self.export.exportVolume(labelmap, os.path.join(self.out, "hardened_labels.nii.gz"))
+        assertConsistent(result.images[0], "nearest neighbour")
+        np.testing.assert_allclose(self._markerRas(result.images[0]), shown, atol=1.0)
+        self.assertEqual(set(np.unique(self._read(result.images[0])[0]).tolist()), {0, 5}, "label values are kept")
+
+        # A lesion drawn on the hardened scan (its reference grid is the sheared one)
+        block = np.zeros((21, 21, 21), np.uint8)
+        block[k - 1 : k + 2, j - 1 : j + 2, i - 1 : i + 2] = 1
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions (hardened scan)")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        segmentId = segmentation.GetSegmentation().AddEmptySegment("", "Lesion")
+        slicer.util.updateSegmentBinaryLabelmapFromArray(block, segmentation, segmentId, scan)
+        for mode, name in ((self.export.SEGMENTATION_MASKS, "hardened_lesion_masks.nii.gz"), (self.export.SEGMENTATION_LABELMAP, "hardened_lesion.nii.gz")):
+            result = self.export.exportSegmentation(segmentation, os.path.join(self.out, name), mode=mode)
+            self.assertEqual(result.errors, [])
+            assertConsistent(result.images[0], "nearest neighbour")
+            data, affine, _header = self._read(result.images[0])
+            self.assertTrue(15 <= int(np.count_nonzero(data)) <= 40, int(np.count_nonzero(data)))
+            centre = (affine @ np.array([*np.argwhere(data > 0).mean(axis=0), 1.0]))[:3]
+            np.testing.assert_allclose(centre, shown, atol=0.75)
+            self.assertTrue(any("resampled" in note for note in result.notes), result.notes)
+
     def test_06b_fallback_writer_keeps_the_scene(self):
         """3D Slicer's writer (the fallback without LesionNetworkMappingLib) does not re-point the node's storage node."""
         node = self._phantom("fallback", np.array([[1.0, 0, 0, -10], [0, 1.0, 0, -10], [0, 0, 1.0, -10], [0, 0, 0, 1]]))
@@ -561,10 +933,186 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertEqual(node.GetStorageNodeID(), storageNodeId)
         self.assertEqual(slicer.mrmlScene.GetNumberOfNodes(), nodesBefore)
 
+    def test_06bb_lesion_saved_under_a_mixed_case_extension(self):
+        """``UPPER.NII.GZ`` / ``Mixed.Nii.Gz`` are accepted (the writer wants a lower-case extension) and leave no TempWrite folder (BB-1)."""
+        from StudioLib import draw
+
+        self.assertEqual(draw._withNiftiExtension("/a/UPPER.NII.GZ"), "/a/UPPER.nii.gz")
+        self.assertEqual(draw._withNiftiExtension("/a/Mixed.Nii"), "/a/Mixed.nii")
+        self.assertEqual(draw._withNiftiExtension("/a/noext"), "/a/noext.nii.gz")
+        volume = slicer.util.addVolumeFromArray(np.zeros((10, 10, 10), np.uint8))
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "S")
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(volume)
+        segmentation.GetSegmentation().AddEmptySegment("a")
+        mask = np.zeros((10, 10, 10), np.uint8)
+        mask[3:6, 3:6, 3:6] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(mask, segmentation, segmentation.GetSegmentation().GetNthSegmentID(0), volume)
+        for name in ("UPPER.NII.GZ", "Mixed.Nii.Gz"):
+            written = draw.saveLesion(os.path.join(self.out, name), segmentation)
+            self.assertTrue(written.endswith(".nii.gz"), written)
+            self.assertTrue(os.path.isfile(written), written)
+        self.assertEqual(sorted(os.listdir(self.out)), ["Mixed.nii.gz", "UPPER.nii.gz"])
+
     def test_06c_mask_names_keep_bids_entity_order(self):
         """``desc`` stays the last entity of a mask name (BIDS); other names just add ``_label-<segment>_mask``."""
         self.assertEqual(self.export.maskBaseName("sub-01_desc-lesion", "Lesion"), "sub-01_label-Lesion_desc-lesion_mask")
         self.assertEqual(self.export.maskBaseName("lesions", "Left"), "lesions_label-Left_mask")
+
+    def test_06ca_second_lesion_masks_keep_desc_last(self):
+        """Two lesions of one subject: the second gets ``desc-lesion2``, not ``_2`` in the middle of the entities."""
+        scan = self._volume("scan", np.zeros((30, 30, 30), np.int16), np.eye(4))
+        nodes = []
+        for name in ("rater1", "rater2"):
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", name)
+            node.CreateDefaultDisplayNodes()
+            node.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+            segmentId = node.GetSegmentation().AddEmptySegment("", "Lesion")
+            data = np.zeros((30, 30, 30), np.uint8)
+            data[5, 5, 5] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(data, node, segmentId, scan)
+            nodes.append(node)
+        names = {node.GetID(): "sub-07_desc-lesion" for node in nodes}
+        jobs = self.export.planExport(nodes, self.out, segmentationMode=self.export.SEGMENTATION_MASKS, names=names)
+        masks = sorted(os.path.basename(path) for job in jobs for path in job.images())
+        self.assertEqual(masks, ["sub-07_label-Lesion_desc-lesion2_mask.nii.gz", "sub-07_label-Lesion_desc-lesion_mask.nii.gz"])
+
+    def test_06d_mask_names_never_equal_another_segments_name(self):
+        """Names that differ only by punctuation or case: a suffix never makes a file name that is another segment's name."""
+        scan = self._volume("scan", np.zeros((30, 30, 30), np.int16), np.eye(4))
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        names = ("Lesion 1", "Lesion-1", "Lesion 12", "Cyst", "cyst", "Cyst2")
+        for index, name in enumerate(names):
+            segmentId = segmentation.GetSegmentation().AddEmptySegment("", name)
+            data = np.zeros((30, 30, 30), np.uint8)
+            data[3 + 4 * index, 5, 5] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(data, segmentation, segmentId, scan)
+        result = self.export.exportSegmentation(segmentation, os.path.join(self.out, "Lesions.nii.gz"), mode=self.export.SEGMENTATION_MASKS)
+        self.assertEqual(result.errors, [])
+        found = {os.path.basename(path): self._sidecar(path)["Segment"] for path in result.images}
+        self.assertEqual(found, {
+            "Lesions_label-Lesion1_mask.nii.gz": "Lesion 1",
+            "Lesions_label-Lesion1dup2_mask.nii.gz": "Lesion-1",
+            "Lesions_label-Lesion12_mask.nii.gz": "Lesion 12",
+            "Lesions_label-Cyst_mask.nii.gz": "Cyst",
+            "Lesions_label-cystdup2_mask.nii.gz": "cyst",
+            "Lesions_label-Cyst2_mask.nii.gz": "Cyst2",
+        })
+
+    def test_06dc_node_named_like_a_file_keeps_one_extension(self):
+        """A volume named "brain.nii.gz" is exported as ``brain.nii.gz``, not ``brain.nii.gz.nii.gz``."""
+        for name, extension, expected in (("brain.nii.gz", ".nii.gz", "brain.nii.gz"), ("brain.nii.gz", ".nii", "brain.nii"),
+                                          ("Brain.NII", ".nii.gz", "Brain.nii.gz"), ("brain", ".nii.gz", "brain.nii.gz")):
+            node = self._volume(name, np.zeros((4, 4, 4), np.int16), np.eye(4))
+            jobs = self.export.planExport([node], self.out, extension=extension)
+            self.assertEqual(os.path.basename(jobs[0].path), expected)
+
+    def test_06da_accented_letters_are_transliterated_in_names(self):
+        """Non-ASCII letters are not deleted from file names: "Ödem rechts" -> ``Odemrechts``; CJK names use the segment number."""
+        export = self.export
+        self.assertEqual(export.entityValue("Ödem rechts"), "Odemrechts")
+        self.assertEqual(export.entityValue("Lésion"), "Lesion")
+        self.assertEqual(export.entityValue("Ĉerbo"), "Cerbo")
+        self.assertEqual(export.entityValue("Straße Øre"), "StrasseOre")
+        self.assertEqual(export.safeName("Läsionen"), "Lasionen")
+        self.assertEqual(export.safeName("Ĉerbo"), "Cerbo")
+        self.assertEqual(export.safeName("Läsionen"), export.entityValue("Läsionen"))
+        self.assertEqual(export.safeName("扫描"), "image")
+        scan = self._volume("scan", np.zeros((30, 30, 30), np.int16), np.eye(4))
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Läsionen")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        names = ("Ödem rechts", "Lésion", "病变", "水肿", "Odem rechts")
+        for index, name in enumerate(names):
+            segmentId = segmentation.GetSegmentation().AddEmptySegment("", name)
+            data = np.zeros((30, 30, 30), np.uint8)
+            data[3 + 4 * index, 5, 5] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(data, segmentation, segmentId, scan)
+        result = self.export.exportSegmentation(segmentation, os.path.join(self.out, "Lasionen.nii.gz"), mode=self.export.SEGMENTATION_MASKS)
+        self.assertEqual(result.errors, [])
+        found = {os.path.basename(path): self._sidecar(path)["Segment"] for path in result.images}
+        self.assertEqual(found, {
+            "Lasionen_label-Odemrechts_mask.nii.gz": "Ödem rechts",
+            "Lasionen_label-Lesion_mask.nii.gz": "Lésion",
+            "Lasionen_label-segment3_mask.nii.gz": "病变",
+            "Lasionen_label-segment4_mask.nii.gz": "水肿",
+            "Lasionen_label-Odemrechtsdup2_mask.nii.gz": "Odem rechts",
+        })
+
+    def test_06db_long_names_are_cut_to_what_the_file_system_accepts(self):
+        """A 300-letter image name or segment name is cut (255 bytes per file name, suffixes included) and the export succeeds."""
+        export = self.export
+        scan = self._volume("Patient scan " + "a" * 300, np.zeros((10, 10, 10), np.int16), np.eye(4))
+        twin = self._volume("Patient scan " + "a" * 301, np.zeros((10, 10, 10), np.int16), np.eye(4))
+        result = export.exportNodes([scan, twin], os.path.join(self.out, "long"))
+        self.assertEqual(result.errors, [])
+        self.assertEqual(len(result.images), 2)
+        self.assertEqual(len({path.lower() for path in result.images}), 2)
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesion " + "y" * 300)
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        for name in ("Infarct " + "x" * 260, "Infarct " + "x" * 261):
+            segmentId = segmentation.GetSegmentation().AddEmptySegment("", name)
+            data = np.zeros((10, 10, 10), np.uint8)
+            data[3 + len(name) % 2, 5, 5] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(data, segmentation, segmentId, scan)
+        masks = export.exportNodes([segmentation], os.path.join(self.out, "long"), segmentationMode=export.SEGMENTATION_MASKS)
+        self.assertEqual(masks.errors, [])
+        self.assertEqual(len(masks.images), 2)
+        for folder in (os.path.join(self.out, "long"),):
+            for name in os.listdir(folder):
+                self.assertLessEqual(len(name.encode()), 255, name)
+
+    def test_06e_4d_image_is_written_whole(self):
+        """A 4D image (fMRI) opened as a sequence is written with every time point and its TR, not only the one on screen."""
+        from LesionNetworkMappingLib import nifti
+        from StudioLib import autosave_io, importer, niftiexport_ui
+
+        shape, count = (9, 11, 7), 6
+        series = np.zeros((*shape, count), np.int16)
+        for t in range(count):
+            series[1, 5, 3, t] = 10 * (t + 1)
+            series[..., t] += np.int16(t)
+        affine = np.array([[2.0, 0, 0, -9], [0, 2.0, 0, -11], [0, 0, 2.0, -7], [0, 0, 0, 1]])
+        source = os.path.join(self.tempDir, "sub-07_task-motor_bold.nii.gz")
+        nifti.write_nifti(source, series, affine, sform_code=1, qform_code=1, time_step=2.0)
+        proxy = importer.loadSequence(source)
+        # The views show time point 3: the export still writes all of them
+        slicer.modules.sequences.logic().GetFirstBrowserNodeForProxyNode(proxy).SetSelectedItemNumber(3)
+        result = self.export.exportNodes([proxy], self.out)
+        self.assertEqual(result.errors, [])
+        self.assertEqual([os.path.basename(path) for path in result.images], ["sub-07_task-motor_bold.nii.gz"])
+        data, written, header = self._read(result.images[0])
+        self.assertEqual(data.shape, (*shape, count))
+        np.testing.assert_array_equal(data, series)
+        np.testing.assert_allclose(written, affine, atol=1e-6)
+        self.assertEqual(header["dim"][0], 4)
+        self.assertAlmostEqual(float(header["pixdim"][4]), 2.0)
+        sidecar = self._sidecar(result.images[0])
+        self.assertEqual(sidecar["Shape"], [*shape, count])
+        self.assertEqual(sidecar["TimePoints"], count)
+        self.assertAlmostEqual(sidecar["RepetitionTime"], 2.0)
+        self.assertEqual(sidecar["SourceFile"], "sub-07_task-motor_bold.nii.gz")
+        sequenceNode = self.export.sequenceOf(proxy)
+        self.assertIsNotNone(sequenceNode)
+        self.assertEqual(self.export.timePoints(proxy), count)
+        self.assertAlmostEqual(self.export.timeStep(sequenceNode), 2.0)
+        # A linear transform of the shown volume applies to every time point (folded into the affine)
+        transformNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", "shift")
+        shift = np.eye(4)
+        shift[:3, 3] = (-5.0, 0.0, 0.0)
+        transformNode.SetMatrixTransformToParent(_matrix(shift))
+        proxy.SetAndObserveTransformNodeID(transformNode.GetID())
+        result = self.export.exportVolume(proxy, os.path.join(self.out, "moved_bold.nii.gz"))
+        self.assertEqual(result.errors, [])
+        data, written, _header = self._read(result.images[0])
+        np.testing.assert_array_equal(data, series)
+        np.testing.assert_allclose(written, shift @ affine, atol=1e-6)
+        # The dialog says the image has 6 time points
+        dialog = niftiexport_ui.exportNodesDialog([proxy], show=False, executor=autosave_io.InlineExecutor())
+        self.assertIn("6 time points", dialog.list.item(0).text())
+        dialog.close()
 
     def test_07_map_with_threshold_mask(self):
         """A map is written as float32 with a thresholded binary mask (|T| >= t, or one sign) and the threshold in the sidecar."""
@@ -590,6 +1138,152 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertEqual(self._sidecar(self.export.mapMaskPath(result.images[0]))["Kind"], "mask")
         positive = self.export.thresholdMask(values.transpose(2, 1, 0), 4.5, "pos")
         self.assertEqual(int(positive.sum()), 1)
+
+    def test_07a_derived_file_names_never_collide_across_jobs(self):
+        """A map's threshold mask and a segment's mask never get the name of another job's file (scans named like them)."""
+        ijkToRas = np.array([[-2.0, 0, 0, 20], [0, 2.0, 0, -20], [0, 0, 2.0, -20], [0, 0, 0, 1]])
+        scan1 = self._volume("Lesions_label-Lesion_mask", np.full((10, 10, 10), 5, np.int16), ijkToRas)
+        scan2 = self._volume("T_desc-thresholded_mask", np.full((10, 10, 10), 6, np.int16), ijkToRas)
+        values = np.zeros((10, 10, 10), np.float32)
+        values[5, 5, 5] = 9
+        tmap = self._volume("T", values, ijkToRas)
+        tmap.SetAttribute("LNM.Statistic", "T")
+        tmap.SetAttribute("LNM.Result", "1")
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions")
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan1)
+        segmentId = segmentation.GetSegmentation().AddEmptySegment("", "Lesion")
+        mask = np.zeros((10, 10, 10), np.uint8)
+        mask[3, 3, 3] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(mask, segmentation, segmentId, scan1)
+        jobs = self.export.planExport(self.export.exportableNodes(), self.out, segmentationMode=self.export.SEGMENTATION_MASKS,
+                                      mapOptions={tmap.GetID(): {"threshold": 3.0, "sign": "both"}})
+        planned = [os.path.normcase(path).lower() for path in self.export.plannedFiles(jobs)]
+        self.assertEqual(len(planned), len(set(planned)), "every planned file has its own path")
+        result = self.export.runJobs(jobs)
+        written = sorted(name for name in os.listdir(self.out) if name.endswith(".nii.gz"))
+        self.assertEqual(len(written), len(result.images), "one file on disk per image reported")
+        data, _affine, _header = self._read(os.path.join(self.out, "Lesions_label-Lesion_mask.nii.gz"))
+        self.assertTrue((data == 5).all(), "the scan is not overwritten by the segment mask")
+
+    def test_07a_nodes_dialog_brings_the_map_threshold_like_the_other_entry_points(self):
+        """Library's "Export as NIfTI…" and Search use exportNodesDialog: a map thresholded in Map gets its mask there too."""
+        from StudioLib import autosave_io, niftiexport_ui
+
+        values = np.zeros((10, 10, 10), np.float32)
+        values[5, 5, 5] = 9
+        tmap = self._volume("T", values, np.eye(4))
+        tmap.SetAttribute("LNM.Statistic", "T")
+        tmap.SetAttribute("LNM.Result", "1")
+        options = {tmap.GetID(): {"threshold": 3.0, "sign": "both", "rule": "|T| >= 3"}}
+        original = self.export.mapOptionsFromMapModule
+        self.export.mapOptionsFromMapModule = lambda: options
+        try:
+            dialog = niftiexport_ui.exportNodesDialog([tmap], show=False, executor=autosave_io.InlineExecutor())
+            self.assertEqual(dialog.mapOptions, options)
+            explicit = niftiexport_ui.exportNodesDialog([tmap], show=False, mapOptions={}, executor=autosave_io.InlineExecutor())
+            self.assertEqual(explicit.mapOptions, {}, "an explicit mapOptions is kept")
+        finally:
+            self.export.mapOptionsFromMapModule = original
+        jobs = self.export.planExport([tmap], self.out, mapOptions=options)
+        names = [os.path.basename(path) for path in self.export.plannedFiles(jobs)]
+        self.assertTrue(any(name.endswith("_desc-thresholded_mask.nii.gz") for name in names), names)
+
+    def test_07b_map_on_a_declared_connectome_space_is_mni(self):
+        """A Map result of a connectome on a grid that is not a built-in one (the demo, the user's conversions) is in the
+        connectome's declared space: code 4 and that space in the sidecar, as the engine's own file of the map.
+        """
+        import LesionNetworkMapping as lnm
+        from LesionNetworkMappingLib import connectome, nifti
+
+        logic = lnm.LesionNetworkMappingLogic()
+        demoPath = os.path.join(self.tempDir, "demo.lnmc")
+        lnm.writeDemoConnectome(demoPath, nSubjects=2, shape=(8, 9, 8), runs=(12,))
+        demo = connectome.ConnectomeBundle.open(demoPath)
+        self.assertEqual(logic.connectomeSpaceName(demo), lnm.DEMO_SPACE)
+        nativePath = os.path.join(self.tempDir, "native.lnmc")
+        native = connectome.ConnectomeBundle.open(connectome.make_synthetic(nativePath, shape=(8, 9, 8), n_subjects=2, runs=(12,))["path"])
+        self.assertIsNone(logic.connectomeSpaceName(native))
+        self.assertIsNone(logic.connectomeSpaceName(None))
+
+        values = np.zeros(tuple(demo.shape), np.float32)
+        values[3, 4, 3] = 6.0
+        enginePath = os.path.join(self.tempDir, "lesion_conn-Demo_desc-T_funcmap.nii.gz")
+        nifti.write_nifti(enginePath, values, demo.affine)
+        self.assertEqual(nifti.read_nifti_header(enginePath)["sform_code"], 4)
+        volume = logic.loadMap(enginePath, "Lesion T", None, attributes={"LNM.Statistic": "T", "LNM.N": 2,
+                                                                         "Studio.Space": logic.connectomeSpaceName(demo)})
+        self.assertEqual(self.export.kindOf(volume), self.export.KIND_MAP)
+        result = self.export.exportVolume(volume, os.path.join(self.tempDir, "mapout", "map.nii.gz"), threshold=4.0)
+        self.assertEqual(len(result.images), 2)
+        for path in result.images:
+            _data, _affine, header = self._read(path)
+            self.assertEqual((header["sform_code"], header["qform_code"]), (4, 4), path)
+            self.assertEqual(self._sidecar(path)["Space"], lnm.DEMO_SPACE)
+        # A later map with a connectome without a space removes the attribute (no stale space)
+        logic.loadMap(enginePath, "Lesion T", volume, attributes={"Studio.Space": logic.connectomeSpaceName(native)})
+        self.assertIsNone(volume.GetAttribute("Studio.Space"))
+        # A map file opened from disk takes the space of its sidecar
+        sidecar = os.path.join(self.tempDir, "lesion_conn-Demo_lnm.json")
+        with open(sidecar, "w", encoding="utf-8") as f:
+            json.dump({"N": 2, "connectome": {"space": lnm.DEMO_SPACE}}, f)
+        self.assertEqual(logic.mapFileInfo(enginePath)["space"], lnm.DEMO_SPACE)
+
+    def test_07c_map_of_an_earlier_scene_gets_its_connectome_space(self):
+        """A Map result saved by a version that did not tag maps with their space has it once the scene opens: it is
+        exported as the connectome's template space (code 4), not as scanner space; a map shown from a file, one on another
+        grid and one of a connectome that is not here are left as they are.
+        """
+        import LesionNetworkMapping as lnm
+        from LesionNetworkMappingLib import connectome, nifti
+
+        lnm.installSceneMigration()
+        logic = lnm.LesionNetworkMappingLogic()
+        demoPath = os.path.join(self.tempDir, "demo2.lnmc")
+        lnm.writeDemoConnectome(demoPath, nSubjects=2, shape=(8, 9, 8), runs=(12,))
+        demo = connectome.ConnectomeBundle.open(demoPath)
+        identifier = logic.rememberConnectome(demo)
+        values = np.zeros(tuple(demo.shape), np.float32)
+        values[3, 4, 3] = 6.0
+        mapPath = os.path.join(self.tempDir, "old_conn-Demo_desc-T_funcmap.nii.gz")
+        nifti.write_nifti(mapPath, values, demo.affine)
+        # The earlier version's scene: the project's connectome in the parameter node, maps without Studio.Space
+        parameterNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScriptedModuleNode", "LesionNetworkMapping")
+        parameterNode.SetAttribute("ModuleName", "LesionNetworkMapping")
+        parameterNode.SetParameter("connectome", identifier)
+        result = logic.loadMap(mapPath, "Old map", None, attributes={"LNM.Statistic": "T", "LNM.N": 2})
+        fromFile = logic.loadMap(mapPath, "Shown from a file", None, attributes={lnm.LOADED_MAP_ATTRIBUTE: "map.nii.gz"})
+        otherGrid = logic.loadMap(mapPath, "Other grid", None)
+        matrix = vtk.vtkMatrix4x4()
+        otherGrid.GetIJKToRASMatrix(matrix)
+        matrix.SetElement(0, 3, matrix.GetElement(0, 3) + 5.0)
+        otherGrid.SetIJKToRASMatrix(matrix)
+        scenePath = os.path.join(self.tempDir, "scene", "old.mrml")
+        os.makedirs(os.path.dirname(scenePath))
+        for node in (result, fromFile, otherGrid):
+            node.SetSaveWithScene(True)
+            # saved with the scene, as a project's maps are
+            self.assertTrue(slicer.util.saveNode(node, os.path.join(os.path.dirname(scenePath), node.GetName().replace(" ", "_") + ".nrrd")))
+            self.assertIsNone(node.GetAttribute("Studio.Space"))
+        self.assertIsNone(self.export.spaceInfo(result, None)[0], "an untagged map on the demo grid has no space")
+        self.assertTrue(slicer.util.saveScene(scenePath))
+        slicer.mrmlScene.Clear(0)
+        self.assertTrue(slicer.util.loadScene(scenePath))
+        reopened = slicer.util.getNode("Old map")
+        self.assertEqual(reopened.GetAttribute("Studio.Space"), lnm.DEMO_SPACE)
+        self.assertEqual(self.export.spaceInfo(reopened, None)[0], lnm.DEMO_SPACE)
+        self.assertIsNone(slicer.util.getNode("Shown from a file").GetAttribute("Studio.Space"))
+        self.assertIsNone(slicer.util.getNode("Other grid").GetAttribute("Studio.Space"))
+        exported = self.export.exportVolume(reopened, os.path.join(self.tempDir, "reopened", "map.nii.gz"))
+        for path in exported.images:
+            _data, _affine, header = self._read(path)
+            self.assertEqual((header["sform_code"], header["qform_code"]), (4, 4), path)
+            self.assertEqual(self._sidecar(path)["Space"], lnm.DEMO_SPACE)
+        # The connectome of the project is not on this computer: nothing is guessed
+        reopened.RemoveAttribute("Studio.Space")
+        slicer.util.getNode("LesionNetworkMapping").SetParameter("connectome", "Elsewhere#0123456789abcdef")
+        self.assertEqual(lnm.migrateMapSpace(), 0)
+        self.assertIsNone(reopened.GetAttribute("Studio.Space"))
+        lnm.LesionNetworkMappingLogic._knownConnectomes.pop(identifier, None)
 
     def test_08_dialog_multi_select_and_overwrite(self):
         """The dialog exports several images at once, asks before replacing files and remembers only Studio/* keys."""
@@ -649,6 +1343,10 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertIn("Lesions_label-Lesion_mask.nii", dialog.summaryLabel.text)
         dialog.segmentationGroup.button(0).click()
         self.assertIn("Lesions_dseg.nii", dialog.summaryLabel.text)
+        self.assertIn("plus 1 sidecar and 1 label table", dialog.summaryLabel.text)
+        dialog.segmentationGroup.button(1).click()
+        self.assertIn("plus 1 sidecar", dialog.summaryLabel.text)
+        self.assertNotIn("label", dialog.summaryLabel.text.replace("label-Lesion", ""))
         # With more images than rows, the chosen one is scrolled into view
         extra = [self._volume(f"extra {index}", np.zeros((3, 3, 3), np.int16), np.eye(4)) for index in range(8)]
         dialog = niftiexport_ui.exportNodesDialog([segmentation], show=False, executor=autosave_io.InlineExecutor())
@@ -663,6 +1361,474 @@ class StudioNiftiExportTest(unittest.TestCase):
         for node in extra:
             slicer.mrmlScene.RemoveNode(node)
         self._assertNoAbsolutePaths(self.out)
+
+    def test_08_summary_counts_sidecars_and_names_label_tables_only_when_written(self):
+        """"plus 1 sidecar" / "plus 3 sidecars": no "label files" for plain images (only a label map writes label tables)."""
+        from StudioLib import autosave_io, niftiexport_ui
+
+        scans = [self._volume(f"count scan {index}", np.zeros((3, 3, 3), np.int16), np.eye(4)) for index in range(3)]
+        for chosen, expected in ((scans[:1], "1 image: count_scan_0.nii.gz · plus 1 sidecar"), (scans, "plus 3 sidecars")):
+            dialog = niftiexport_ui.exportNodesDialog(chosen, show=False, executor=autosave_io.InlineExecutor())
+            dialog.setFolder(self.out)
+            self.assertIn(expected, dialog.summaryLabel.text)
+            self.assertNotIn("label", dialog.summaryLabel.text)
+            self.assertNotIn(" and ", dialog.summaryLabel.text.split("plus", 1)[1])
+            dialog.close()
+
+    def test_08_list_title_is_sentence_case(self):
+        """The list title reads "Images", not an ALL-CAPS overline (VISUAL 2.4: overlines only for CONTINUE and group headers)."""
+        from StudioLib import autosave_io, niftiexport_ui
+
+        node = self._volume("caps check", np.zeros((3, 3, 3), np.int16), np.eye(4))
+        dialog = niftiexport_ui.exportNodesDialog([node], show=False, executor=autosave_io.InlineExecutor())
+        title = dialog.findChild(qt.QLabel, "StudioNiftiExportListTitle")
+        self.assertIsNotNone(title)
+        self.assertEqual(title.text, "Images")
+        self.assertNotEqual(title.font.capitalization(), qt.QFont.AllUppercase)
+        dialog.close()
+        slicer.mrmlScene.RemoveNode(node)
+
+    def test_08a_replace_question_defaults_to_keeping_the_files(self):
+        """In the "Replace existing files?" question the default (Enter) and Escape button is Cancel, never Replace."""
+        from StudioLib import autosave_io, niftiexport_ui
+
+        node = self._volume("keep scan", np.zeros((3, 3, 3), np.int16), np.eye(4))
+        dialog = niftiexport_ui.exportNodesDialog([node], show=False, executor=autosave_io.InlineExecutor())
+        dialog.setFolder(self.out)
+        seen = {}
+
+        def answer():
+            for widget in qt.QApplication.topLevelWidgets():
+                if widget.isVisible() and widget.objectName == "StudioNiftiExportReplaceQuestion":
+                    default, escape = widget.defaultButton(), widget.escapeButton()
+                    seen["default"] = default.text if default is not None else None
+                    seen["escape"] = escape.text if escape is not None else None
+                    if default is not None:
+                        default.click()  # what Enter does
+                    else:
+                        widget.reject()
+                    return
+            qt.QTimer.singleShot(50, answer)
+
+        qt.QTimer.singleShot(50, answer)
+        self.assertFalse(dialog.confirmOverwrite([os.path.join(self.out, "keep_scan.nii.gz")]))
+        self.assertEqual(seen, {"default": "Cancel", "escape": "Cancel"})
+        dialog.close()
+        slicer.mrmlScene.RemoveNode(node)
+
+    def test_08ad_write_failure_is_plain_and_keeps_the_dialog_open(self):
+        """A folder that does not accept files: a plain message (no errno, no temporary file name), a warning in the log (no
+        error badge), and the dialog stays open so that another folder can be chosen.
+        """
+        import logging
+
+        from StudioLib import autosave_io, niftiexport_ui
+
+        class Failing(autosave_io.InlineExecutor):
+            def submit(self, function, *args, onDone=None, onError=None):
+                onError(PermissionError(13, "Permission denied", os.path.join(self.folder, "sub-01.nii.gz.4242.tmp")))
+
+        records = []
+
+        class Handler(logging.Handler):
+            def emit(self, record):
+                records.append((record.levelno, record.getMessage()))
+
+        handler = Handler()
+        logging.getLogger().addHandler(handler)
+        toasts = []
+        original = niftiexport_ui.message
+        niftiexport_ui.message = lambda text, **kwargs: toasts.append(text)
+        node = self._volume("unwritable scan", np.zeros((3, 3, 3), np.int16), np.eye(4))
+        try:
+            executor = Failing()
+            executor.folder = self.out
+            dialog = niftiexport_ui.exportNodesDialog([node], show=False, executor=executor)
+            dialog.show()
+            dialog.setFolder(self.out)
+            runner = dialog.export()
+            self.assertTrue(runner.wait(30))
+            self.assertEqual(len(toasts), 1)
+            self.assertIn("could not be written", toasts[0])
+            self.assertIn("Permission denied", toasts[0])
+            for raw in (".tmp", "Errno", "4242", "Nothing was exported"):
+                self.assertNotIn(raw, toasts[0])
+            self.assertEqual(runner.result.errors, ["unwritable scan: Permission denied"])
+            self.assertFalse([text for level, text in records if level >= logging.ERROR and "NIfTI export" in text], "expected failures are not errors")
+            self.assertTrue([text for level, text in records if level == logging.WARNING and "NIfTI export" in text])
+            # Still open and usable: another folder can be chosen and exported to
+            self.assertTrue(dialog.isVisible())
+            self.assertIsNone(dialog.runner)
+            self.assertTrue(dialog.exportButton.isEnabled())
+            self.assertTrue(dialog.list.isEnabled())
+            self.assertTrue(dialog.changeButton.isEnabled())
+            dialog.executor = autosave_io.InlineExecutor()
+            runner = dialog.export()
+            self.assertTrue(runner.wait(30))
+            self.assertEqual([os.path.basename(path) for path in runner.result.images], ["unwritable_scan.nii.gz"])
+            self.assertFalse(dialog.isVisible())
+        finally:
+            niftiexport_ui.message = original
+            logging.getLogger().removeHandler(handler)
+            slicer.mrmlScene.RemoveNode(node)
+
+    def test_08ada_uncreatable_folder_is_a_plain_warning(self):
+        """A folder that cannot be created (read-only parent): a warning toast with the reason, no error box, no raw errno, no
+        ERROR in the log, and the dialog stays open.
+        """
+        import logging
+
+        from StudioLib import niftiexport_ui
+
+        records = []
+
+        class Handler(logging.Handler):
+            def emit(self, record):
+                records.append((record.levelno, record.getMessage()))
+
+        handler = Handler()
+        logging.getLogger().addHandler(handler)
+        toasts = []
+        boxes = []
+        originalMessage = niftiexport_ui.message
+        originalError = slicer.util.errorDisplay
+        originalMakedirs = os.makedirs
+        niftiexport_ui.message = lambda text, **kwargs: toasts.append((text, kwargs.get("level")))
+        slicer.util.errorDisplay = lambda *args, **kwargs: boxes.append(args)
+        node = self._volume("nowhere scan", np.zeros((3, 3, 3), np.int16), np.eye(4))
+        target = os.path.join(self.out, "new-folder")
+
+        def refuse(path, *args, **kwargs):
+            if os.path.abspath(path) == os.path.abspath(target):
+                raise PermissionError(13, "Permission denied", path)
+            return originalMakedirs(path, *args, **kwargs)
+
+        try:
+            dialog = niftiexport_ui.exportNodesDialog([node], show=False)
+            dialog.show()
+            dialog.setFolder(target)
+            os.makedirs = refuse
+            self.assertIsNone(dialog.export())
+            self.assertEqual(boxes, [])
+            self.assertEqual(len(toasts), 1)
+            text, level = toasts[0]
+            self.assertEqual(level, "warning")
+            self.assertIn("cannot be created", text)
+            self.assertIn("Permission denied", text)
+            self.assertNotIn("Errno", text)
+            self.assertFalse([t for lv, t in records if lv >= logging.ERROR], "expected failures are not errors")
+            self.assertFalse([t for lv, t in records if "Errno" in t], "no raw errno in the log")
+            self.assertTrue(dialog.isVisible())
+            self.assertTrue(dialog.exportButton.isEnabled())
+        finally:
+            os.makedirs = originalMakedirs
+            niftiexport_ui.message = originalMessage
+            slicer.util.errorDisplay = originalError
+            logging.getLogger().removeHandler(handler)
+            slicer.mrmlScene.RemoveNode(node)
+
+    def test_08ae_partial_failure_names_the_image_and_the_reason(self):
+        """Some images are written and one fails: the message says which image and why, not only "1 failed"."""
+        from StudioLib import autosave_io, niftiexport_ui
+
+        class FailsOne(autosave_io.InlineExecutor):
+            def submit(self, function, *args, onDone=None, onError=None):
+                if "bad_scan" in str(getattr(args[0], "path", "")):
+                    return onError(OSError(36, "File name too long"))
+                return super().submit(function, *args, onDone=onDone, onError=onError)
+
+        toasts = []
+        original = niftiexport_ui.message
+        niftiexport_ui.message = lambda text, **kwargs: toasts.append(text)
+        good = self._volume("good scan", np.zeros((3, 3, 3), np.int16), np.eye(4))
+        bad = self._volume("bad_scan", np.zeros((3, 3, 3), np.int16), np.eye(4))
+        try:
+            dialog = niftiexport_ui.exportNodesDialog([good, bad], show=False, executor=FailsOne())
+            dialog.show()
+            dialog.setFolder(self.out)
+            runner = dialog.export()
+            self.assertTrue(runner.wait(30))
+            self.assertEqual(len(runner.result.images), 1)
+            exported = [text for text in toasts if "Exported" in text]
+            self.assertEqual(len(exported), 1, toasts)
+            self.assertIn("Exported 1 NIfTI image", exported[0])
+            self.assertIn("1 failed", exported[0])
+            self.assertIn("bad_scan", exported[0])
+            self.assertIn("File name too long", exported[0])
+            self.assertNotIn("Errno", exported[0])
+        finally:
+            niftiexport_ui.message = original
+            slicer.mrmlScene.RemoveNode(good)
+            slicer.mrmlScene.RemoveNode(bad)
+
+    def test_08af_many_masks_are_written_one_at_a_time(self):
+        """One segmentation with many segments written as masks (a TotalSegmentator-like atlas, all in one layer): each mask is
+        prepared only after the previous one was written and its array released (memory of one mask, not of all), the
+        event loop runs between two masks, the progress bar counts masks, and Esc stops after the current mask.
+        """
+        from StudioLib import niftiexport_ui
+
+        count = 8
+        scan = self._volume("scan", np.zeros((10, 12, 40), np.int16), np.eye(4))
+        atlas = np.zeros((10, 12, 40), np.uint8)
+        for value in range(1, count + 1):
+            atlas[2:8, 3:9, 5 * value - 4:5 * value - 1] = value
+        labelmap = self._volume("atlas labels", atlas, np.eye(4), "vtkMRMLLabelMapVolumeNode")
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Atlas")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(labelmap, segmentation)
+        slicer.mrmlScene.RemoveNode(labelmap)
+        self.assertEqual(segmentation.GetSegmentation().GetNumberOfSegments(), count)
+
+        class Deferred:
+            """A background writer that writes from the event loop and records what was handed over and not written yet."""
+
+            def __init__(self):
+                self.queue = []
+                self.submitted = []
+                self.mostPending = 0
+                self.heldArrays = []
+
+            def submit(self, function, *args, onDone=None, onError=None):
+                self.queue.append((function, args, onDone, onError))
+                self.mostPending = max(self.mostPending, len(self.queue))
+                # Arrays of the masks handed over earlier that are still held (by anyone: the runner, the job, the writer)
+                self.heldArrays.append(sum(1 for task in self.submitted if task.data is not None))
+                # The image handed over: the WriteTask the job is written from
+                self.submitted.append(args[0] if args else function.__self__)
+                qt.QTimer.singleShot(0, self._writeOne)
+
+            def _writeOne(self):
+                function, args, onDone, onError = self.queue.pop(0)
+                try:
+                    result = function(*args)
+                except Exception as error:
+                    onError(error)
+                    return
+                onDone(result)
+
+        progress = []
+        jobs = self.export.planExport([segmentation], self.out, segmentationMode=self.export.SEGMENTATION_MASKS)
+        executor = Deferred()
+        runner = niftiexport_ui.ExportRunner(jobs, executor=executor, onProgress=lambda done, total, title: progress.append((done, total)))
+        runner.start()
+        self.assertTrue(runner.wait(60))
+        self.assertEqual(runner.result.errors, [])
+        self.assertEqual(len(runner.result.images), count)
+        self.assertEqual(executor.mostPending, 1, "the next mask is prepared only after the previous one was written")
+        self.assertEqual(executor.heldArrays, [0] * count, "a written mask's array is released before the next mask is prepared")
+        self.assertEqual({total for _done, total in progress}, {count}, "the progress counts masks, not jobs")
+        self.assertEqual(sorted({done for done, _total in progress}), list(range(count + 1)))
+        for path in runner.result.images:
+            self.assertEqual(int(self._read(path)[0].sum()), 6 * 6 * 3)
+
+        # Esc in the dialog: the export stops after the current mask
+        out = os.path.join(self.out, "stopped")
+        dialog = niftiexport_ui.exportNodesDialog([segmentation], show=False, executor=Deferred())
+        dialog.show()
+        dialog.setSegmentationMode(self.export.SEGMENTATION_MASKS)
+        dialog.setFolder(out)
+        runner = dialog.export()
+        qt.QTimer.singleShot(0, dialog.reject)
+        self.assertTrue(runner.wait(60))
+        self.assertTrue(runner.cancelled)
+        self.assertGreaterEqual(len(runner.result.images), 1)
+        self.assertLessEqual(len(runner.result.images), 2, "Esc stops after the current mask")
+        self.assertEqual(len([name for name in os.listdir(out) if name.endswith(".nii.gz")]), len(runner.result.images))
+        self.assertEqual(dialog.progress.maximum, count)
+
+    def test_08ag_web_build_without_a_project_proposes_the_data_folder(self):
+        """Web build, no project open (projects off, or a study): the export proposes the folder its file dialogs start in
+        (Studio/LastOpenDirectory, /data), which the host sees, and Change... starts there; never the container HOME.
+        """
+        from StudioLib import autosave_io, importer, niftiexport_ui, projects
+
+        settings = qt.QSettings()
+        savedOpen = settings.value("Studio/LastOpenDirectory")
+        savedWeb = os.environ.get("SLICER_STUDIO_WEB")
+        savedGiven = importer._webStartFolderGiven
+        realGetExistingDirectory = qt.QFileDialog.getExistingDirectory
+        data = os.path.join(self.tempDir, "data")
+        os.makedirs(data, exist_ok=True)
+        starts = []
+        try:
+            projects.setCurrentProject(None)
+            settings.remove(self.export.LAST_FOLDER_KEY)
+            settings.setValue("Studio/LastOpenDirectory", data)
+            os.environ["SLICER_STUDIO_WEB"] = "1"
+            # Another dialog was opened first: the export still proposes the data folder
+            importer._webStartFolderGiven = False
+            self.assertEqual(importer.dialogStartFolder("~"), data)
+            self.assertEqual(os.path.normpath(niftiexport_ui.defaultFolder()), os.path.normpath(data))
+            scan = self._phantom("scan", np.array([[1.0, 0, 0, -10], [0, 1.0, 0, -10], [0, 0, 1.0, -10], [0, 0, 0, 1]]))
+            dialog = niftiexport_ui.exportNodesDialog([scan], show=False, executor=autosave_io.InlineExecutor())
+            self.assertEqual(os.path.normpath(dialog.folder), os.path.normpath(data))
+            qt.QFileDialog.getExistingDirectory = lambda parent, caption, start, *args: starts.append(str(start)) or ""
+            dialog.chooseFolder()
+            self.assertEqual([os.path.normpath(start) for start in starts], [os.path.normpath(data)])
+            runner = dialog.export(confirm=lambda existing: self.fail(f"{existing} exist"))
+            self.assertTrue(runner.wait(60))
+            self.assertEqual(runner.result.errors, [])
+            self.assertEqual([os.path.dirname(path) for path in runner.result.images], [data])
+            dialog.close()
+            # A folder chosen for an earlier export is still proposed first
+            settings.setValue(self.export.LAST_FOLDER_KEY, self.out)
+            self.assertEqual(os.path.normpath(niftiexport_ui.defaultFolder()), os.path.normpath(self.out))
+            # The desktop build is unchanged: no data folder is proposed
+            if not os.path.exists("/.dockerenv"):
+                settings.remove(self.export.LAST_FOLDER_KEY)
+                os.environ.pop("SLICER_STUDIO_WEB", None)
+                self.assertNotEqual(os.path.normpath(niftiexport_ui.defaultFolder()), os.path.normpath(data))
+        finally:
+            qt.QFileDialog.getExistingDirectory = realGetExistingDirectory
+            importer._webStartFolderGiven = savedGiven
+            if savedWeb is None:
+                os.environ.pop("SLICER_STUDIO_WEB", None)
+            else:
+                os.environ["SLICER_STUDIO_WEB"] = savedWeb
+            if savedOpen is None:
+                settings.remove("Studio/LastOpenDirectory")
+            else:
+                settings.setValue("Studio/LastOpenDirectory", savedOpen)
+
+    def test_08aa_dialog_grows_when_the_summary_wraps(self):
+        """Select all makes the summary wrap onto more lines: the dialog grows and the image list stays above the folder card."""
+        from StudioLib import autosave_io, niftiexport_ui
+
+        nodes = []
+        for index in range(12):
+            name = f"scan {index:02d}" if index != 3 else "sub-03_ses-preoperative_acq-highresolution_run-01_T1w_with_a_really_long_descriptive_name"
+            nodes.append(self._volume(name, np.zeros((3, 3, 3), np.int16), np.eye(4)))
+        dialog = niftiexport_ui.exportNodesDialog([nodes[0]], show=False, executor=autosave_io.InlineExecutor())
+        dialog.setFolder(self.out)
+        dialog.show()
+        for _ in range(5):
+            slicer.app.processEvents()
+        card = dialog.findChild(qt.QWidget, "StudioNiftiExportFolderCard")
+        heightBefore = dialog.height
+        summaryBefore = dialog.summaryLabel.height
+        dialog.selectAll()
+        for _ in range(5):
+            slicer.app.processEvents()
+        self.assertGreater(dialog.summaryLabel.height, summaryBefore, "the summary wraps onto more lines")
+        self.assertGreater(dialog.height, heightBefore, "the dialog grows with the summary")
+        listBottom = dialog.list.geometry.y() + dialog.list.geometry.height()
+        self.assertLessEqual(listBottom, card.geometry.y(), "the image list is not drawn under the folder card")
+        self.assertEqual(dialog.list.height, dialog.list.maximumHeight, "with room, the list shows all its rows")
+        dialog.close()
+
+    def test_08ac_dialog_opens_at_the_height_its_content_needs(self):
+        """With a segmentation listed (the tall layout) the first show is not capped at 2/3 of the screen height (Qt's adjustSize
+        limit, 512 px at 1366x768): the list stays above the folder card and the segmented controls keep their size.
+        """
+        from StudioLib import autosave_io, niftiexport_ui, ui
+
+        first = self._volume("scan", np.ones((3, 3, 3), np.int16), np.eye(4))
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions (sub-03_ses-01_acq-highres_T1w_with_a_rather_long_descriptive_name)")
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(first)
+        segmentId = segmentation.GetSegmentation().AddEmptySegment("Lesion", "Lesion")
+        slicer.util.updateSegmentBinaryLabelmapFromArray(np.ones((3, 3, 3), np.uint8), segmentation, segmentId, first)
+        others = [self._volume(f"sub-03_{name}_resampled_onto_a_coarse_grid_for_the_test", np.ones((3, 3, 3), np.int16), np.eye(4)) for name in ("FLAIR", "T2w")]
+        dialog = niftiexport_ui.exportNodesDialog([segmentation] + others, show=False, executor=autosave_io.InlineExecutor())
+        dialog.setFolder(self.out)
+        dialog.show()
+        for _ in range(5):
+            slicer.app.processEvents()
+        layout = dialog.layout()
+        screenHeight = ui.screenOf(dialog).availableGeometry.height()
+        needed = layout.totalHeightForWidth(dialog.width) if layout.hasHeightForWidth() else layout.totalSizeHint().height()
+        self.assertGreaterEqual(dialog.height, min(needed, screenHeight - 40), "the dialog opens at the height its content needs")
+        card = dialog.findChild(qt.QWidget, "StudioNiftiExportFolderCard")
+        listBottom = dialog.list.geometry.y() + dialog.list.geometry.height()
+        self.assertLessEqual(listBottom, card.geometry.y(), "the image list is not drawn under the folder card")
+        for name in ("StudioNiftiExportFormat",):
+            control = dialog.findChild(qt.QWidget, name)
+            self.assertGreaterEqual(control.height, control.sizeHint.height(), f"{name} is not clipped")
+        dialog.close()
+
+    def test_08ae_short_screen_shrinks_the_list_instead_of_drawing_it_under_the_folder_card(self):
+        """On a screen too short for the whole dialog (1366x768 at a 125 % app font) the dialog is capped to the screen: the image
+        list gives up rows and scrolls, it is not drawn under the folder card (BB-1 nifti-export).
+        """
+        from types import SimpleNamespace
+
+        from StudioLib import autosave_io, niftiexport_ui, ui
+
+        nodes = [self._volume(f"sub-{index:02d}_ses-baseline_acq-mprage_run-{index}_T1w", np.ones((3, 3, 3), np.int16), np.eye(4)) for index in range(8)]
+        original = ui.screenOf
+        # A screen whose usable height is 500 px: less than the dialog needs with 6 list rows
+        ui.screenOf = lambda widget: SimpleNamespace(availableGeometry=SimpleNamespace(height=lambda: 500))
+        dialog = None
+        try:
+            dialog = niftiexport_ui.exportNodesDialog(nodes, show=False, executor=autosave_io.InlineExecutor())
+            dialog.setFolder(self.out)
+            dialog.selectAll()
+            dialog.show()
+            for _ in range(5):
+                slicer.app.processEvents()
+            layout = dialog.layout()
+            self.assertLess(dialog.height, layout.totalHeightForWidth(dialog.width) if layout.hasHeightForWidth() else layout.totalSizeHint().height(),
+                            "the dialog is capped by the screen (the test needs a squeezed layout)")
+            card = dialog.findChild(qt.QWidget, "StudioNiftiExportFolderCard")
+            listBottom = dialog.list.geometry.y() + dialog.list.geometry.height()
+            self.assertLessEqual(listBottom, card.geometry.y(), "the image list is not drawn under the folder card")
+            self.assertLess(dialog.list.height, dialog.list.maximumHeight, "the list gave up rows")
+            self.assertGreaterEqual(dialog.list.height, dialog.list.minimumHeight)
+            self.assertGreater(dialog.list.verticalScrollBar().maximum, 0, "the list scrolls")
+        finally:
+            ui.screenOf = original
+            if dialog is not None:
+                dialog.close()
+
+    def test_08ab_long_folder_path_is_elided_and_keeps_the_end(self):
+        """A destination path wider than the folder card is elided with an ellipsis that keeps 'Exports/nifti'; the tooltip has it all."""
+        from StudioLib import autosave_io, niftiexport_ui
+
+        node = self._volume("sub-07_T1w", np.zeros((3, 3, 3), np.int16), np.eye(4))
+        dialog = niftiexport_ui.exportNodesDialog([node], show=False, executor=autosave_io.InlineExecutor())
+        folder = os.path.join(self.out, "Projects", "sub-07 T1w and a rather long project name for this scan", "Exports", "nifti")
+        dialog.setFolder(folder)
+        dialog.show()
+        for _ in range(5):
+            slicer.app.processEvents()
+        label = dialog.folderLabel
+        metrics = qt.QFontMetrics(label.font)
+        shown = str(label.text)
+        self.assertLessEqual(metrics.horizontalAdvance(shown), label.width, "the path fits the label")
+        self.assertIn("\u2026", shown, "the path is elided with an ellipsis")
+        self.assertTrue(shown.endswith("Exports/nifti"), shown)
+        self.assertIn(folder, label.toolTip, "the whole path is the tooltip")
+        # Resizing keeps the path elided to the new width and the tooltip complete
+        dialog.resize(dialog.width + 300, dialog.height)
+        for _ in range(5):
+            slicer.app.processEvents()
+        self.assertLessEqual(metrics.horizontalAdvance(str(label.text)), label.width)
+        self.assertIn(folder, label.toolTip)
+        dialog.close()
+
+    def test_08b_message_names_the_skipped_segments_and_other_notes(self):
+        """The message after an export carries the notes (empty segments skipped, empty threshold mask, transform), not only the log."""
+        from StudioLib import niftiexport_ui
+
+        result = self.export.Result(self.out)
+        result.images = [os.path.join(self.out, "Lesions_label-Lesion_mask.nii.gz")]
+        result.notes = ["Lesions: empty segments were skipped: Edema"]
+        shown = []
+        original = niftiexport_ui.message
+        niftiexport_ui.message = lambda text, **kwargs: shown.append(text)
+        try:
+            niftiexport_ui.announce(result)
+            result.notes += ["No voxel of T passes the threshold: the mask is empty", "T: its transform was applied to the exported copy"]
+            niftiexport_ui.announce(result)
+        finally:
+            niftiexport_ui.message = original
+        self.assertIn("Exported 1 NIfTI image", shown[0])
+        self.assertIn("Edema", shown[0])
+        self.assertIn("empty segments were skipped", shown[0])
+        self.assertIn("Edema", shown[1])
+        self.assertIn("No voxel of T passes", shown[1])
+        self.assertIn("1 more note", shown[1])
 
     def test_09_project_export(self):
         """Export project as NIfTI: images, lesions as masks and maps into <project>/Exports/nifti with BIDS-like names and a README."""
@@ -687,10 +1853,13 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertEqual(os.path.normpath(dialog.folder), os.path.normpath(folder))
         self.assertEqual(dialog.segmentationMode(), self.export.SEGMENTATION_MASKS)
         self.assertNotIn(template.GetID(), [node.GetID() for node in dialog.checkedNodes()])
+        announced = int(dialog.folderMeta.text.split()[0])
         runner = dialog.export(confirm=lambda existing: self.fail(f"{existing} exist"))
         self.assertTrue(runner.wait(60))
         self.assertEqual(runner.result.errors, [])
         names = sorted(os.path.basename(path) for path in _allFiles(folder))
+        # The folder card counts every file written, README.txt included
+        self.assertEqual(announced, len(names))
         for expected in ("README.txt", "sub-07_T1w.nii.gz", "sub-07_T1w.json", "sub-07_label-Lesion_desc-lesion_mask.nii.gz",
                          "sub-07_stat-T_statmap.nii.gz"):
             self.assertIn(expected, names)
@@ -708,6 +1877,309 @@ class StudioNiftiExportTest(unittest.TestCase):
         self.assertIn("nifti", actions)
         self.assertEqual(actions["nifti"].objectName, "StudioSaveStatusExportNiftiAction")
         menu.deleteLater()
+
+    def test_09a_project_reexport_removes_earlier_files(self):
+        """Export project as NIfTI again: the masks of renamed, deleted or erased segments of the earlier export are named in
+        the question and removed, so that Exports/nifti matches the project; a file the user put there stays and the README names it.
+        """
+        from StudioLib import autosave_io, niftiexport_ui, projects
+
+        project = projects.createProject("NIfTI re-export")
+        projects.setCurrentProject(project)
+        folder = self.export.projectExportFolder(create=True)
+        ijkToRas = np.array([[-1.0, 0, 0, 10], [0, -1.0, 0, 10], [0, 0, 1.0, -10], [0, 0, 0, 1]])
+        scan = self._phantom("sub-03_T1w", ijkToRas)
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions (sub-03_T1w)")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        mask = (slicer.util.arrayFromVolume(scan) > 0).astype(np.uint8)
+        for name in ("Core", "Rim"):
+            segmentId = segmentation.GetSegmentation().AddEmptySegment(name, name)
+            slicer.util.updateSegmentBinaryLabelmapFromArray(mask, segmentation, segmentId, scan)
+        # A file the user put into the folder (no Studio sidecar, never listed by a README) is never removed
+        manual = os.path.join(folder, "manual_mask.nii.gz")
+        with open(manual, "wb") as f:
+            f.write(b"not a Studio file")
+
+        def export(answer):
+            asked = []
+
+            dialog = niftiexport_ui.exportProjectDialog(show=False, executor=autosave_io.InlineExecutor(), mapOptions={})
+
+            def confirm(files):
+                # The files that would be replaced, then those of the earlier export that would be removed (named in the question)
+                self.assertEqual(files, dialog._existing + dialog._stale)
+                asked.append((sorted(os.path.basename(path) for path in dialog._existing), sorted(os.path.basename(path) for path in dialog._stale)))
+                return answer
+
+            notice = dialog.existingNotice.findChild("QLabel", "StudioNoticeBoxText").text if dialog.existingNotice.isVisibleTo(dialog) else ""
+            shown = []
+            original = niftiexport_ui.message
+            niftiexport_ui.message = lambda text, **kwargs: shown.append(text)
+            try:
+                runner = dialog.export(confirm=confirm)
+                if runner is not None:
+                    self.assertTrue(runner.wait(60))
+                    self.assertEqual(runner.result.errors, [])
+            finally:
+                niftiexport_ui.message = original
+                dialog.close()
+            return runner, asked, notice, shown
+
+        runner, asked, _notice, _shown = export(True)
+        self.assertEqual(asked, [])
+        names = sorted(os.listdir(folder))
+        for expected in ("sub-03_label-Core_desc-lesion_mask.nii.gz", "sub-03_label-Rim_desc-lesion_mask.json"):
+            self.assertIn(expected, names)
+        # Rename Rim, delete Core: the second export names the four files of the earlier export in its question
+        segments = segmentation.GetSegmentation()
+        segments.GetSegment("Rim").SetName("Penumbra")
+        segments.RemoveSegment("Core")
+        runner, asked, notice, _shown = export(False)
+        self.assertIsNone(runner)
+        stale = ["sub-03_label-Core_desc-lesion_mask.json", "sub-03_label-Core_desc-lesion_mask.nii.gz",
+                 "sub-03_label-Rim_desc-lesion_mask.json", "sub-03_label-Rim_desc-lesion_mask.nii.gz"]
+        self.assertEqual(asked[0][1], stale)
+        self.assertNotIn("manual_mask.nii.gz", asked[0][1])
+        self.assertIn("4 files of an earlier export that are not part of this one will be removed", notice)
+        self.assertIn("3 files already exist and will be replaced, and 4 files of an earlier export", notice)
+        self.assertTrue(all(os.path.exists(os.path.join(folder, name)) for name in stale), "Cancel removes nothing")
+        # The real question names them apart from the files it replaces
+        dialog = niftiexport_ui.exportProjectDialog(show=False, executor=autosave_io.InlineExecutor(), mapOptions={})
+        seen = {}
+
+        def answer():
+            for widget in qt.QApplication.topLevelWidgets():
+                if widget.isVisible() and widget.objectName == "StudioNiftiExportReplaceQuestion":
+                    seen["text"] = widget.text
+                    widget.defaultButton().click()
+                    return
+            qt.QTimer.singleShot(50, answer)
+
+        qt.QTimer.singleShot(50, answer)
+        self.assertFalse(dialog.confirmOverwrite(dialog._existing, dialog._stale))
+        dialog.close()
+        self.assertIn("4 files of an earlier export in nifti are not part of this one and will be removed:", seen["text"])
+        self.assertIn("sub-03_label-Core_desc-lesion_mask.nii.gz", seen["text"])
+        runner, asked, _notice, shown = export(True)
+        self.assertEqual(asked[0][1], stale)
+        names = sorted(os.listdir(folder))
+        for name in stale:
+            self.assertNotIn(name, names)
+        self.assertIn("sub-03_label-Penumbra_desc-lesion_mask.nii.gz", names)
+        self.assertIn("manual_mask.nii.gz", names)
+        self.assertEqual(sorted(os.path.basename(path) for path in runner.result.removed), stale)
+        self.assertIn("removed 4 files of an earlier export", shown[0])
+        with open(os.path.join(folder, "README.txt"), encoding="utf-8") as f:
+            readme = f.read()
+        self.assertNotIn("label-Core", readme)
+        self.assertNotIn("label-Rim", readme)
+        self.assertIn("Also in this folder, not written by this export:\n- manual_mask.nii.gz", readme)
+        self.assertEqual(self.export.readmeImages(os.path.join(folder, "README.txt")),
+                         ["sub-03_T1w.nii.gz", "sub-03_label-Penumbra_desc-lesion_mask.nii.gz"])
+        # A segment erased to empty is skipped, and its earlier mask goes too
+        segmentId = segments.GetSegmentIdBySegmentName("Penumbra")
+        slicer.util.updateSegmentBinaryLabelmapFromArray(np.zeros_like(mask), segmentation, segmentId, scan)
+        segments.AddEmptySegment("Edge", "Edge")
+        slicer.util.updateSegmentBinaryLabelmapFromArray(mask, segmentation, segments.GetSegmentIdBySegmentName("Edge"), scan)
+        runner, asked, _notice, shown = export(True)
+        self.assertEqual(asked[0][1], ["sub-03_label-Penumbra_desc-lesion_mask.json", "sub-03_label-Penumbra_desc-lesion_mask.nii.gz"])
+        self.assertFalse(any("Penumbra" in name for name in os.listdir(folder)))
+        self.assertIn("Edge", " ".join(os.listdir(folder)))
+        # The script API asks too (FileExistsError) and removes them with overwrite=True
+        segments.RemoveSegment(segments.GetSegmentIdBySegmentName("Edge"))
+        readme = (os.path.join(folder, "README.txt"), "NIfTI export")
+        jobs = self.export.planProject()
+        with self.assertRaises(FileExistsError):
+            self.export.runJobs(jobs, readme=readme)
+        result = self.export.runJobs(self.export.planProject(), overwrite=True, readme=readme)
+        self.assertEqual(sorted(os.path.basename(path) for path in result.removed),
+                         ["sub-03_label-Edge_desc-lesion_mask.json", "sub-03_label-Edge_desc-lesion_mask.nii.gz"])
+        self.assertEqual(sorted(name for name in os.listdir(folder) if "_mask" in name), ["manual_mask.nii.gz"])
+        self._assertNoAbsolutePaths(project.path)
+
+    def test_09aa_reexport_notice_uses_the_singular_for_one_file(self):
+        """Renaming the only scan leaves just README.txt to replace: the notice says '1 file already exists', not '1 files'."""
+        from StudioLib import autosave_io, niftiexport_ui, projects
+
+        project = projects.createProject("NIfTI notice")
+        projects.setCurrentProject(project)
+        folder = self.export.projectExportFolder(create=True)
+        scan = self._phantom("sub-04_T1w", np.array([[-1.0, 0, 0, 10], [0, -1.0, 0, 10], [0, 0, 1.0, -10], [0, 0, 0, 1]]))
+        dialog = niftiexport_ui.exportProjectDialog(show=False, executor=autosave_io.InlineExecutor(), mapOptions={})
+        runner = dialog.export(confirm=lambda files: True)
+        self.assertTrue(runner.wait(60))
+        dialog.close()
+        scan.SetName("sub-05_T1w")
+        dialog = niftiexport_ui.exportProjectDialog(show=False, executor=autosave_io.InlineExecutor(), mapOptions={})
+        try:
+            self.assertEqual([os.path.basename(path) for path in dialog._existing], ["README.txt"])
+            notice = dialog.existingNotice.findChild("QLabel", "StudioNoticeBoxText").text
+        finally:
+            dialog.close()
+        self.assertIn("1 file already exists and will be replaced, and 2 files of an earlier export", notice)
+        self.assertNotIn("1 files", notice)
+        self.assertTrue(os.path.isdir(folder))
+
+    def test_09ad_project_export_keeps_the_users_own_files_and_readme(self):
+        """A project export into a folder of the user's (Change…) that holds their own images and a README.txt they wrote in
+        the "- name.nii.gz: description" form never takes those images for files of an earlier export: nothing is offered
+        for removal or removed, and their README.txt is kept (Slicer Studio's list goes to README_SlicerStudio.txt).
+        """
+        from StudioLib import autosave_io, niftiexport_ui, projects
+
+        project = projects.createProject("NIfTI own folder")
+        projects.setCurrentProject(project)
+        self._phantom("sub-01_T1w", np.array([[-1.0, 0, 0, 10], [0, -1.0, 0, 10], [0, 0, 1.0, -10], [0, 0, 0, 1]]))
+        folder = os.path.join(self.out, "My analysis")
+        os.makedirs(folder)
+        own = {"brain.nii.gz": b"brain", "lesion_final.nii.gz": b"lesion", "lesion_final.json": b'{"Rater": 2}'}
+        for name, content in own.items():
+            with open(os.path.join(folder, name), "wb") as f:
+                f.write(content)
+        userReadme = "My analysis\n===========\n\nFiles:\n- brain.nii.gz: skull-stripped T1 (BET)\n- lesion_final.nii.gz: lesion traced by rater 2\n"
+        readmePath = os.path.join(folder, "README.txt")
+        with open(readmePath, "w", encoding="utf-8") as f:
+            f.write(userReadme)
+        self.assertFalse(self.export.isStudioReadme(readmePath))
+        self.assertEqual(self.export.readmeImages(readmePath), [])
+        dialog = niftiexport_ui.exportProjectDialog(show=False, executor=autosave_io.InlineExecutor(), mapOptions={})
+        try:
+            dialog.setFolder(folder)
+            self.assertEqual(dialog._stale, [])
+            self.assertEqual(dialog._existing, [])
+            self.assertEqual(os.path.basename(dialog.readme()[0]), "README_SlicerStudio.txt")
+            runner = dialog.export(confirm=lambda *args: True)
+            self.assertTrue(runner.wait(60))
+        finally:
+            dialog.close()
+        self.assertEqual(runner.result.removed, [])
+        for name, content in own.items():
+            with open(os.path.join(folder, name), "rb") as f:
+                self.assertEqual(f.read(), content, name)
+        with open(readmePath, encoding="utf-8") as f:
+            self.assertEqual(f.read(), userReadme)
+        studioReadme = os.path.join(folder, "README_SlicerStudio.txt")
+        self.assertTrue(self.export.isStudioReadme(studioReadme))
+        self.assertEqual(self.export.readmeImages(studioReadme), ["sub-01_T1w.nii.gz"])
+        with open(studioReadme, encoding="utf-8") as f:
+            self.assertIn("Also in this folder, not written by this export:\n- brain.nii.gz\n- lesion_final.nii.gz", f.read())
+        # Exporting again finds Slicer Studio's own list, and still keeps the user's files
+        self.assertEqual(self.export.readmePath(folder), studioReadme)
+        result = self.export.runJobs(self.export.planExport(self.export.projectNodes(), folder, bids=True), overwrite=True,
+                                     readme=(studioReadme, "NIfTI export"))
+        self.assertEqual(result.removed, [])
+        self.assertTrue(all(os.path.exists(os.path.join(folder, name)) for name in own))
+        # An image the user put there with no sidecar, even when a Studio README names it, is not Studio's
+        os.remove(os.path.join(folder, "lesion_final.json"))
+        with open(studioReadme, "a", encoding="utf-8") as f:
+            f.write("- lesion_final.nii.gz: added by hand\n")
+        self.assertEqual(self.export.earlierExportFiles(self.export.planExport(self.export.projectNodes(), folder, bids=True), studioReadme), [])
+
+    def test_09ac_reexport_removes_label_tables_of_an_earlier_label_map(self):
+        """A label map export writes _dseg .nii.gz, .json, .tsv and .txt; a later export without it removes all four."""
+        from StudioLib import projects
+
+        project = projects.createProject("NIfTI label tables")
+        projects.setCurrentProject(project)
+        folder = self.export.projectExportFolder(create=True)
+        scan = self._phantom("sub-03_T1w", np.array([[-1.0, 0, 0, 10], [0, -1.0, 0, 10], [0, 0, 1.0, -10], [0, 0, 0, 1]]))
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions (sub-03_T1w)")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        segmentId = segmentation.GetSegmentation().AddEmptySegment("Core", "Core")
+        slicer.util.updateSegmentBinaryLabelmapFromArray((slicer.util.arrayFromVolume(scan) > 0).astype(np.uint8), segmentation, segmentId, scan)
+        readme = (os.path.join(folder, "README.txt"), "NIfTI export")
+        nodes = [scan, segmentation]
+        jobs = self.export.planExport(nodes, folder, segmentationMode=self.export.SEGMENTATION_LABELMAP, bids=True)
+        self.export.runJobs(jobs, readme=readme)
+        dseg = sorted(name for name in os.listdir(folder) if "_dseg" in name)
+        self.assertEqual(len(dseg), 4, dseg)
+        jobs = self.export.planExport(nodes, folder, segmentationMode=self.export.SEGMENTATION_MASKS, bids=True)
+        earlier = sorted(os.path.basename(path) for path in self.export.earlierExportFiles(jobs, readme[0]))
+        self.assertEqual(earlier, dseg)
+        self.export.runJobs(jobs, overwrite=True, readme=readme)
+        self.assertEqual([name for name in os.listdir(folder) if "_dseg" in name], [])
+
+    def test_09ab_stopped_reexport_keeps_earlier_masks_removable(self):
+        """A project export that is stopped after the scan keeps the masks of the earlier export listed as Studio files, so
+        that a later export still removes the mask of a segment deleted in between (Exports/nifti matches the project).
+        """
+        from StudioLib import autosave_io, niftiexport_ui, projects
+
+        project = projects.createProject("NIfTI stopped re-export")
+        projects.setCurrentProject(project)
+        folder = self.export.projectExportFolder(create=True)
+        scan = self._phantom("sub-06_T1w", np.array([[-1.0, 0, 0, 10], [0, -1.0, 0, 10], [0, 0, 1.0, -10], [0, 0, 0, 1]]))
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions (sub-06_T1w)")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+        mask = (slicer.util.arrayFromVolume(scan) > 0).astype(np.uint8)
+        for name in ("Lesion", "Edema", "Core"):
+            segmentId = segmentation.GetSegmentation().AddEmptySegment(name, name)
+            slicer.util.updateSegmentBinaryLabelmapFromArray(mask, segmentation, segmentId, scan)
+        edema = ["sub-06_label-Edema_desc-lesion_mask.json", "sub-06_label-Edema_desc-lesion_mask.nii.gz"]
+
+        def export(stop=False):
+            dialog = niftiexport_ui.exportProjectDialog(show=False, executor=autosave_io.InlineExecutor(), mapOptions={})
+            try:
+                stale = sorted(os.path.basename(path) for path in dialog._stale)
+                runner = dialog.export(confirm=lambda files: True)
+                if stop:
+                    runner.cancel()
+                self.assertTrue(runner.wait(60))
+            finally:
+                dialog.close()
+            return runner, stale
+
+        export()
+        self.assertTrue(all(os.path.exists(os.path.join(folder, name)) for name in edema))
+        runner, _stale = export(stop=True)
+        self.assertTrue(runner.cancelled)
+        self.assertEqual([os.path.basename(path) for path in runner.result.images], ["sub-06_T1w.nii.gz"])
+        readmePath = os.path.join(folder, "README.txt")
+        with open(readmePath, encoding="utf-8") as f:
+            readme = f.read()
+        self.assertNotIn("not written by this export", readme, "the masks of the earlier export are not files the user put there")
+        self.assertIn("sub-06_label-Edema_desc-lesion_mask.nii.gz", self.export.readmeImages(readmePath))
+        # Delete Edema: the next export names its mask among the files of an earlier export and removes it
+        segmentation.GetSegmentation().RemoveSegment(segmentation.GetSegmentation().GetSegmentIdBySegmentName("Edema"))
+        runner, stale = export()
+        self.assertEqual(stale, edema)
+        self.assertEqual(sorted(os.path.basename(path) for path in runner.result.removed), edema)
+        names = os.listdir(folder)
+        self.assertFalse(any("Edema" in name for name in names))
+        self.assertIn("sub-06_label-Core_desc-lesion_mask.nii.gz", names)
+        self._assertNoAbsolutePaths(project.path)
+
+    def test_09ac_stopped_export_is_reported_as_stopped(self):
+        """An export stopped before it was done says so in the message and in the README (not 'Exported 2 NIfTI images')."""
+        from StudioLib import autosave_io, niftiexport_ui, projects
+
+        project = projects.createProject("NIfTI stopped report")
+        projects.setCurrentProject(project)
+        folder = self.export.projectExportFolder(create=True)
+        for name in ("sub-01_T1w", "sub-02_T1w", "sub-03_T1w"):
+            self._phantom(name, np.array([[-1.0, 0, 0, 10], [0, -1.0, 0, 10], [0, 0, 1.0, -10], [0, 0, 0, 1]]))
+        dialog = niftiexport_ui.exportProjectDialog(show=False, executor=autosave_io.InlineExecutor(), mapOptions={})
+        try:
+            runner = dialog.export(confirm=lambda files: True)
+            runner.cancel()
+            self.assertTrue(runner.wait(60))
+        finally:
+            dialog.close()
+        result = runner.result
+        self.assertTrue(runner.cancelled)
+        self.assertEqual(result.stopped, (len(result.images), 3))
+        self.assertLess(len(result.images), 3)
+        text = niftiexport_ui.resultText(result)
+        self.assertIn("Stopped", text)
+        self.assertIn(f"{len(result.images)} of 3", text)
+        self.assertNotIn("Exported", text)
+        if result.images:
+            with open(os.path.join(folder, "README.txt"), encoding="utf-8") as f:
+                self.assertIn(f"stopped before it was done: {len(result.images)} of 3 images", f.read())
+        self._assertNoAbsolutePaths(project.path)
 
     def test_10_entry_points(self):
         """Library's Open now ⋯, Draw's lesion ⋯ and Search list the exports; a figure is not exportable."""

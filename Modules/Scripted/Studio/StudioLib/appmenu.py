@@ -114,7 +114,7 @@ class AppMenu:
         # Exclusive (drawn as radio items); none is checked while a transient module is shown
         self.workspaceGroup = qt.QActionGroup(self.menu)
         for index, ws in enumerate(workspaces.WORKSPACES):
-            action = self.menu.addAction(_menuText(ws.title, f"Ctrl+Alt+{index + 1}"))
+            action = self.menu.addAction(_menuText(ws.title, _keyText(f"Ctrl+Alt+{index + 1}")))
             action.setObjectName(f"Studio{ws.title}WorkspaceAction")
             action.setCheckable(True)
             self.workspaceGroup.addAction(action)
@@ -192,20 +192,20 @@ class AppMenu:
             self.densityActions[density] = action
 
         self.menu.addSeparator()
-        self._addMainWindowAction(_("Settings…"), "Ctrl+2", mainWindow.findChild("QAction", "EditApplicationSettingsAction"), "settings")
+        self._addMainWindowAction(_("Settings…"), _keyText("Ctrl+2"), mainWindow.findChild("QAction", "EditApplicationSettingsAction"), "settings")
         # In-app updates (A-08): "Update to X…" when an update is known, else "Check for updates…"
         self.updatesAction = self.menu.addAction(_("Check for updates…"))
         self.updatesAction.setObjectName("StudioAppMenuUpdatesAction")
         self.updatesAction.setProperty("studioIcon", "download")
         self.updatesAction.connect("triggered()", self._onUpdatesTriggered)
-        self._addMainWindowAction(_("Python console"), "Ctrl+3", self._pythonConsoleAction(), "terminal")
-        self._addMainWindowAction(_("Error log"), "Ctrl+0", mainWindow.errorLogDockWidget().toggleViewAction(), "circle-alert")
-        shortcuts = self.menu.addAction(_menuText(_("Keyboard shortcuts"), "Ctrl+/"))
+        self._addMainWindowAction(_("Python console"), _keyText("Ctrl+3"), self._pythonConsoleAction(), "terminal")
+        self._addMainWindowAction(_("Error log"), _keyText("Ctrl+0"), mainWindow.errorLogDockWidget().toggleViewAction(), "circle-alert")
+        shortcuts = self.menu.addAction(_menuText(_("Keyboard shortcuts"), _keyText("Ctrl+/")))
         shortcuts.setObjectName("StudioShortcutsAction")
         shortcuts.setProperty("studioIcon", "keyboard")
         shortcuts.connect("triggered()", self.shell.toggleCheatSheet)
         self.menu.addSeparator()
-        classic = self.menu.addAction(_menuText(_("Classic interface"), "Ctrl+Alt+0"))
+        classic = self.menu.addAction(_menuText(_("Classic interface"), _keyText("Ctrl+Alt+0")))
         classic.setObjectName("StudioClassicInterfaceAction")
         classic.connect("triggered()", self.shell.classic)
 

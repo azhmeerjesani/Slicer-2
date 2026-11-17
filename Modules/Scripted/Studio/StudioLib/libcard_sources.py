@@ -6,7 +6,8 @@ paper:
 
 - **Table** of the records (record, title, year, stage, cases). Keys act on the table only (no window-wide shortcut, so
   they never reach the views): **P** include / advance one stage (identified, screened, full text, included), **X** exclude
-  with a reason (a small popover; Enter confirms, Esc closes it), **U** undo the last stage change, **Enter** open the
+  with a reason (a small popover; Enter confirms, Esc closes it), **U** undo the last stage change (the record P or X just
+  changed, although the selection moved on to the next row; otherwise the selected record's last change), **Enter** open the
   record's attachments folder (``sources/<record_id>/``, never exported), **/** filter the table (Esc clears it).
 - **Import…** (inline form): a RIS, PubMed (nbib / MEDLINE), BibTeX or CSV file, or pasted DOIs and PMIDs, with the database
   and the query for the search log (``study.json`` ``search``). Exact DOI / PMID duplicates are merged; records with
@@ -22,6 +23,9 @@ Works in Classic (the Studio module panel hosts the same cards).
 import contextlib
 import logging
 import os
+import queue
+import threading
+import time
 import traceback
 
 import qt
@@ -32,6 +36,9 @@ from . import library, ui
 CARD_ORDER = 45
 #: Rows of the table before it scrolls
 TABLE_ROWS = 6
+#: The record id is only a key (the tooltip has the details); the title is what P/X screening judges
+RECORD_COLUMN_WIDTH = 60
+TITLE_MIN_WIDTH = 120
 STAGE_LABELS = (("identified", "Identified"), ("screened", "Screened"), ("fulltext", "Full text"), ("included", "Included"), ("excluded", "Excluded"))
 STAGE_LEVELS = {"identified": "text2", "screened": "text", "fulltext": "text", "included": "success", "excluded": "danger"}
 COMMON_REASONS = ("Not a case report", "No usable lesion imaging", "Lesion cannot be localised", "Not the studied symptom", "Duplicate patient report", "No full text")
@@ -43,7 +50,17 @@ TABLE_KEYS = (
     ("Return", "Sources table: open the record's attachments folder"),
     ("/", "Sources table: filter"),
 )
+#: The lookup's result is handed over every LOOKUP_POLL_MS; the main thread then sleeps LOOKUP_SLEEP_S so that the lookup thread
+#: runs (Python threads only run while the main thread runs Python, as in the cohort card)
+LOOKUP_POLL_MS = 15
+LOOKUP_SLEEP_S = 0.008
 FILE_FILTER = "Reference files (*.ris *.nbib *.bib *.bibtex *.txt *.csv *.tsv *.medline);;All files (*)"
+
+
+def _projects():
+    from . import projects
+
+    return projects
 
 
 def _sources():
@@ -63,6 +80,15 @@ def _toast(text, ms=3000, **kwargs):
         shell.toast(text, ms, **kwargs)
     else:
         logging.info(f"Studio sources: {text}")
+
+
+def _casesText(n):
+    """'1 case' / '5 cases' for a record's ``n_cases`` text (also used for the table tooltip)."""
+    try:
+        single = int(str(n).strip()) == 1
+    except ValueError:
+        single = False
+    return (_("{n} case") if single else _("{n} cases")).format(n=n)
 
 
 def stageText(stage):
@@ -152,11 +178,44 @@ class _ReasonPopover:
         self.card.exclude(recordId, text)
 
 
+class _LookupJob:
+    """One metadata lookup in a helper thread (the request can wait for seconds on a bad network).
+
+    The thread touches no Qt or MRML object and no record: it only calls ``sources.lookup`` and puts ``("ok", draft)`` or
+    ``("error", text)`` in ``queue``. The card applies the result on the main thread. A cancelled job is abandoned: its thread
+    ends with the request (the timeout) and the late result is never read.
+    """
+
+    def __init__(self, sources, recordId, records, studyPath, doi, pmid, get=None):
+        self.recordId = recordId
+        self.records = records
+        self.studyPath = studyPath
+        self.queue = queue.Queue()
+        self.thread = threading.Thread(target=self._run, args=(sources, doi, pmid, get), name="StudioSourcesLookup", daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def _run(self, sources, doi, pmid, get):
+        try:
+            self.queue.put(("ok", sources.lookup(doi, pmid, get=get)))
+        except sources.SourcesError as e:
+            self.queue.put(("error", str(e)))
+        except Exception as e:
+            logging.debug(f"Studio sources: the lookup failed:\n{traceback.format_exc()}")
+            self.queue.put(("error", f"The lookup failed ({type(e).__name__})"))
+
+
 class SourcesCard:
     """The 'Sources' part of the STUDY card."""
 
     def __init__(self, session):
         self.session = session
+        self._lookup = None  # the _LookupJob that runs, if any
+        self._lookupGet = None  # tests: a stub for the HTTP request of sources.lookup
+        self._lookupTimer = qt.QTimer()
+        self._lookupTimer.setInterval(LOOKUP_POLL_MS)
+        self._lookupTimer.connect("timeout()", self._pumpLookup)
         self.records = None
         self._studyPath = None
         self._signature = None
@@ -165,16 +224,19 @@ class SourcesCard:
         self._offersKey = None
         self._dismissed = set()
         self._rows = []
+        # (record P or X just changed, record the selection then moved to), so that U undoes that change; cleared when the
+        # user selects another row
+        self._lastChange = None
         self.shortcuts = []
         self.widget = qt.QWidget()
         self.widget.setObjectName("StudioSourcesLibraryCard")
         layout = qt.QVBoxLayout(self.widget)
         layout.setContentsMargins(0, 4, 0, 0)
         layout.setSpacing(8)
-        title = qt.QLabel(_("Sources").upper())
+        title = qt.QLabel(_("Sources"))
         title.setObjectName("StudioSourcesLibraryTitle")
         title.setProperty("slicerRole", "sectionHeader")
-        library._setFont(title, 11, qt.QFont.DemiBold, 0.6)
+        library._setFont(title, 12, qt.QFont.DemiBold)
         layout.addWidget(title)
         self.summary = library._cardLabel("StudioSourcesSummary", 12, "text")
         layout.addWidget(self.summary)
@@ -184,7 +246,7 @@ class SourcesCard:
         self.filter = qt.QLineEdit()
         self.filter.setObjectName("StudioSourcesFilter")
         self.filter.setPlaceholderText(_("Filter the records (/)"))
-        self.filter.setClearButtonEnabled(True)
+        ui.setClearButton(self.filter)
         self.filter.setToolTip(_("Filter by record, title, author, DOI, PMID or stage. Esc clears the filter."))
         self.filter.connect("textChanged(QString)", self._applyFilter)
         library._installEventFilter(self.filter, self._escapeFilter())
@@ -197,6 +259,7 @@ class SourcesCard:
         self.table.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(qt.QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
+        self.table.setTabKeyNavigation(False)  # Tab leaves the table, arrows move (SPEC 2.9)
         self.table.setShowGrid(False)
         self.table.setWordWrap(False)
         self.table.setAlternatingRowColors(False)
@@ -207,7 +270,10 @@ class SourcesCard:
         header.setSectionResizeMode(1, qt.QHeaderView.Stretch)
         header.setSectionResizeMode(2, qt.QHeaderView.ResizeToContents)
         header.setMinimumSectionSize(40)
-        self.table.setColumnWidth(0, 104)
+        self.table.setColumnWidth(0, RECORD_COLUMN_WIDTH)
+        # The width follows the application font: a fixed 60 px cut the "Record" header at a 125% font
+        library._installEventFilter(self.table, self._recordColumnFilter())
+        self._fitRecordColumn()
         # The title is what is being judged: it keeps room, and nothing scrolls sideways
         self.table.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
         self.table.setFocusPolicy(qt.Qt.StrongFocus)
@@ -216,6 +282,7 @@ class SourcesCard:
             _("P: include or advance · X: exclude with a reason · U: undo · Enter: open the attachments folder · /: filter"),
         )
         self.table.connect("itemSelectionChanged()", self._updateButtons)
+        self.table.connect("itemSelectionChanged()", self._forgetLastChange)
         self.table.connect("cellDoubleClicked(int,int)", lambda *args: self.openFolder())
         layout.addWidget(self.table)
         ui.bindStyleSheet(self.table, self._tableStyleSheet)
@@ -292,6 +359,27 @@ class SourcesCard:
         self._escape = _Escape(self.filter)
         return self._escape
 
+    def _recordColumnFilter(self):
+        card = self
+
+        class _Fit(qt.QObject):
+            def eventFilter(self, watched, event):
+                if event.type() in (qt.QEvent.FontChange, qt.QEvent.StyleChange, qt.QEvent.Show, qt.QEvent.PolishRequest):
+                    card._fitRecordColumn()
+                return False
+
+        self._recordFit = _Fit(self.table)
+        return self._recordFit
+
+    def _fitRecordColumn(self):
+        """Make the Record column wide enough for its header text plus the header padding (6 px each side)."""
+        metrics = self.table.horizontalHeader().fontMetrics()
+        text = _("Record")
+        needed = (metrics.horizontalAdvance(text) if hasattr(metrics, "horizontalAdvance") else metrics.width(text)) + 12 + 2
+        width = max(RECORD_COLUMN_WIDTH, needed)
+        if self.table.columnWidth(0) < width:
+            self.table.setColumnWidth(0, width)
+
     def _addShortcut(self, key, callback, name, description):
         shortcut = qt.QShortcut(qt.QKeySequence(key), self.table)
         shortcut.setObjectName("Studio" + name + "Shortcut")
@@ -360,7 +448,8 @@ class SourcesCard:
         self.caseCount.setObjectName("StudioSourcesCaseCount")
         self.caseCount.setRange(1, 999)
         self.caseCount.setValue(1)
-        self.caseCount.setSuffix(" " + _("cases"))
+        self.caseCount.setSuffix(" " + _("case"))
+        self.caseCount.connect("valueChanged(int)", self._caseCountSuffix)
         layout.addWidget(self.caseCount)
         self.addCasesGo = qt.QPushButton(_("Add"))
         self.addCasesGo.setObjectName("StudioSourcesAddCasesGo")
@@ -405,31 +494,39 @@ class SourcesCard:
             self.records = None
             return None
         sources = _sources()
-        path = os.path.join(studyObject.path, *sources.RECORDS_TSV)
-        try:
-            stat = os.stat(path)
-            signature = (studyObject.path, stat.st_mtime_ns, stat.st_size)
-        except OSError:
-            signature = (studyObject.path, None, None)
+        signature = self._fileSignature(studyObject)
         if force or self.records is None or signature != self._signature:
+            wasUnreadable = getattr(self.records, "unreadable", None)
             try:
                 self.records = sources.Records.open(studyObject)
+                if wasUnreadable:
+                    self._showError("")  # the file was fixed: its message goes
             except sources.SourcesError as e:
+                # An empty stand-in that refuses to save: the unreadable file is never written over
                 self.records = sources.Records(studyObject.path)
-                self._showError(str(e))
+                self.records.unreadable = str(e)
+                self._showError("")
             self._signature = signature
+            self._lastChange = None
         return self.records
+
+    @staticmethod
+    def _fileSignature(studyObject):
+        """What tells a changed sources/records.tsv or stage_log.tsv on disk (a fixed file is then read again)."""
+        sources = _sources()
+        signature = [studyObject.path]
+        for parts in (sources.RECORDS_TSV, sources.STAGE_LOG_TSV):
+            try:
+                stat = os.stat(os.path.join(studyObject.path, *parts))
+                signature += [stat.st_mtime_ns, stat.st_size]
+            except OSError:
+                signature += [None, None]
+        return tuple(signature)
 
     def _save(self):
         """Write the records and the study (the search log, new cases)."""
-        sources = _sources()
         self.records.save()
-        studyObject = self._study()
-        try:
-            stat = os.stat(os.path.join(studyObject.path, *sources.RECORDS_TSV))
-            self._signature = (studyObject.path, stat.st_mtime_ns, stat.st_size)
-        except OSError:
-            self._signature = None
+        self._signature = self._fileSignature(self._study())
         session = _session()
         if session is not None:
             session.setValues([], {})
@@ -442,6 +539,10 @@ class SourcesCard:
         return self._rows[row]
 
     def _showError(self, text):
+        # While records.tsv or stage_log.tsv cannot be read, its message stays visible above any other one
+        unreadable = getattr(self.records, "unreadable", None)
+        if unreadable:
+            text = unreadable if not text or text == unreadable else f"{unreadable}\n{text}"
         self.errorLabel.setText(text)
         self.errorLabel.setVisible(bool(text))
 
@@ -466,14 +567,15 @@ class SourcesCard:
             self._rows = [row["record_id"] for row in records.rows]
             for index, row in enumerate(records.rows):
                 cells = (row["record_id"], row["title"] or row["doi"] or row["pmid"] or "—", stageText(row["stage"]))
-                details = [row["year"], row["journal"], _("{n} cases").format(n=row["n_cases"]) if row["n_cases"] else ""]
+                details = [row["year"], row["journal"], _casesText(row["n_cases"]) if row["n_cases"] else ""]
                 for column, text in enumerate(cells):
                     item = self.table.item(index, column)
                     if item is None:
                         item = qt.QTableWidgetItem()
                         self.table.setItem(index, column, item)
                     item.setText(text)
-                    tip = row["title"] if column == 1 else " · ".join(part for part in details if part) if column == 0 else ""
+                    # The Record column is narrow (ids are elided), so its tooltip leads with the full id.
+                    tip = row["title"] if column == 1 else " · ".join(part for part in [row["record_id"]] + details if part) if column == 0 else ""
                     if column == 2 and row["stage"] == "excluded" and row["exclusion_reason"]:
                         tip = _("Excluded: {reason}").format(reason=row["exclusion_reason"])
                     item.setToolTip(tip)
@@ -507,10 +609,17 @@ class SourcesCard:
         if has and self.records is not None:
             with contextlib.suppress(KeyError):
                 record = self.records.get(selected)
-        self.fetchButton.setEnabled(record is not None and bool(record["doi"] or record["pmid"]))
+        self.fetchButton.setEnabled(self._lookup is not None or (record is not None and bool(record["doi"] or record["pmid"])))
         if record is not None and not (record["doi"] or record["pmid"]):
             self.fetchButton.setToolTip(_("The record has no DOI or PMID to look up"))
-        self.prismaButton.setEnabled(self.records is not None and len(self.records) > 0)
+        studyObject = self._study()
+        readOnly = studyObject is not None and not os.access(studyObject.path, os.W_OK | os.X_OK)
+        self.prismaButton.setEnabled(self.records is not None and len(self.records) > 0 and not readOnly)
+        self.prismaButton.setToolTip(
+            _("The study is read-only: ask for write access, or open a copy of the study folder.")
+            if readOnly
+            else _("Write derivatives/prisma/prisma_counts.json and prisma_flow.svg from the records"),
+        )
 
     def _refreshOffers(self):
         records = self.records
@@ -518,16 +627,25 @@ class SourcesCard:
             offers = []
         else:
             # Offers depend on the ids, titles and years only: P, X and U do not recompute them
-            key = hash(tuple((row["record_id"], row["title"], row["year"]) for row in records.rows))
+            key = hash(tuple((row["record_id"], row["title"], row["year"], row["doi"], row["pmid"]) for row in records.rows))
             if key != self._offersKey:
                 self._offersAll = records.merge_offers()
                 self._offersKey = key
             offers = self._offersAll
-        self._offers = [offer for offer in offers if offer[:2] not in self._dismissed]
+        # "Keep both" is remembered per study: record ids (first author and year) repeat between studies
+        path = self._study().path if self._study() is not None else None
+        self._offers = [
+            offer
+            for offer in offers
+            if (path,) + tuple(offer[:2]) not in self._dismissed and not (records is not None and records.is_kept(offer[0], offer[1]))
+        ]
         self.offerRow.setVisible(bool(self._offers))
         if self._offers:
             keep, drop, ratio = self._offers[0]
-            self.offerLabel.setText(_("Possible duplicate: {drop} looks like {keep} ({percent}% the same title)").format(drop=drop, keep=keep, percent=round(100 * ratio)))
+            if records.same_identifier(keep, drop):
+                self.offerLabel.setText(_("Possible duplicate: {drop} has the same DOI or PMID as {keep}").format(drop=drop, keep=keep))
+            else:
+                self.offerLabel.setText(_("Possible duplicate: {drop} looks like {keep} ({percent}% the same title)").format(drop=drop, keep=keep, percent=round(100 * ratio)))
             self.mergeButton.setToolTip(_("Merge {drop} into {keep}; it then counts as a removed duplicate").format(drop=drop, keep=keep))
 
     # Table actions
@@ -542,6 +660,9 @@ class SourcesCard:
             return function()
         except (ValueError, KeyError) as e:
             self._showError(str(e).strip("'\""))
+        except PermissionError:
+            logging.warning("Studio sources: the study is read-only")
+            self._showError(_("The study is read-only: ask for write access, or open a copy of the study folder."))
         except Exception as e:
             logging.error(f"Studio sources: {traceback.format_exc()}")
             self._showError(str(e))
@@ -554,13 +675,30 @@ class SourcesCard:
             return None
 
         def work():
+            logged = len(records.log)
             stage = records.advance(recordId)
             self._save()
             self.refresh(select=recordId)
             self._moveNext(recordId)
+            self._rememberChange(recordId, len(records.log) != logged)
             return stage
 
         return self._run(work)
+
+    def _rememberChange(self, recordId, changed):
+        """After P or X: U then undoes this change, also from the next row the selection moved to."""
+        self._lastChange = (recordId, self.selectedId()) if changed else None
+
+    def _forgetLastChange(self, *_args):
+        if self._lastChange is not None and self.selectedId() != self._lastChange[1]:
+            self._lastChange = None
+
+    def _undoTarget(self):
+        """The record U acts on: the one P or X just changed while the selection is still where it moved to, else the selected one."""
+        selected = self.selectedId()
+        if self._lastChange is not None and selected == self._lastChange[1] and self._lastChange[0] in self._rows:
+            return self._lastChange[0]
+        return selected
 
     def _moveNext(self, recordId):
         """Select the next visible record, so that P, P, P goes down the list."""
@@ -586,28 +724,33 @@ class SourcesCard:
             return None
 
         def work():
+            logged = len(records.log)
             records.exclude(recordId, reason)
             self._save()
             self.refresh(select=recordId)
             self._moveNext(recordId)
+            self._rememberChange(recordId, len(records.log) != logged)
             self.table.setFocus()
             return True
 
         return self._run(work)
 
     def undoSelected(self):
-        recordId = self.selectedId()
+        """U: undo the last stage change (see :meth:`_undoTarget`), select that record and say what was undone."""
         records = self.load()
+        recordId = self._undoTarget()
         if recordId is None or records is None:
             return None
 
         def work():
             stage = records.undo(recordId)
+            self._lastChange = None
             if stage is None:
                 _toast(_("Nothing to undo for {record}").format(record=recordId))
                 return None
             self._save()
             self.refresh(select=recordId)
+            _toast(_("Undo · {record} back to {stage}").format(record=recordId, stage=stageText(stage)))
             return stage
 
         return self._run(work)
@@ -629,7 +772,7 @@ class SourcesCard:
         else:
             folder = self._run(lambda: self.attachmentsFolder(recordId))
         if folder:
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(folder))
+            _projects().showInFileManager(folder)
         return folder
 
     # Duplicates
@@ -642,7 +785,7 @@ class SourcesCard:
         def work():
             studyObject = self._study()
             self.records.merge(keep, drop)
-            _sources().relink_cases(studyObject, keep, drop)
+            _sources().relink_cases(studyObject, keep, drop, self.records)
             self._save()
             self.refresh(select=keep)
             _toast(_("Merged {drop} into {keep}").format(drop=drop, keep=keep))
@@ -651,7 +794,14 @@ class SourcesCard:
 
     def keepOffer(self):
         if self._offers:
-            self._dismissed.add(self._offers[0][:2])
+            studyObject = self._study()
+            pair = tuple(self._offers[0][:2])
+            self._dismissed.add((studyObject.path if studyObject is not None else None,) + pair)
+            if self.records is not None and not self.records.unreadable:
+                try:
+                    self.records.keep_both(*pair)  # stays in the study: the offer does not return after a restart
+                except OSError:
+                    pass  # read-only study: remembered for this session only
             self._refreshOffers()
 
     # Import
@@ -669,7 +819,7 @@ class SourcesCard:
         self.paste.clear()
 
     def chooseFile(self):
-        path = qt.QFileDialog.getOpenFileName(self.widget, _("Import records"), "", FILE_FILTER)
+        path = qt.QFileDialog.getOpenFileName(self.widget, _("Import records"), library._importer().dialogStartFolder(), FILE_FILTER)
         if path:
             self._importPath = str(path)
             self.fileButton.setText(os.path.basename(self._importPath))
@@ -689,10 +839,12 @@ class SourcesCard:
             return None
         report = None
         self._showError("")
+        if records.unreadable:
+            self._showError(_("Nothing was imported: fix the file named above (save it as UTF-8 text) or move it away first."))
+            return None
         try:
             if path:
-                with open(path, encoding="utf-8-sig", errors="replace") as f:
-                    text = f.read()
+                text = sources.read_text(path)
             elif not text.strip():
                 raise sources.SourcesError(_("Choose a file or paste DOIs or PMIDs"))
             report = sources.import_text(studyObject, records, text, path or "", origin=origin, database=database, query=query)
@@ -704,35 +856,109 @@ class SourcesCard:
         self.refresh()
         message = _("{added} added").format(added=len(report["added"]))
         if report["merged"]:
-            message += " · " + _("{n} duplicates merged").format(n=len(report["merged"]))
+            merged = len(report["merged"])
+            message += " · " + (_("{n} duplicate merged") if merged == 1 else _("{n} duplicates merged")).format(n=merged)
+        skipped = report.get("skipped", 0)
+        if skipped:
+            message += " · " + (_("{n} entry could not be read") if skipped == 1 else _("{n} entries could not be read")).format(n=skipped)
         _toast(message)
         return report
 
     # Metadata and cases
 
     def fetchMetadata(self):
+        """Look up the selected record in the background (the views stay usable). A click while it runs cancels it.
+
+        :return: True when the lookup started (the result is applied when it arrives), else None.
+        """
+        if self._lookup is not None:
+            self.cancelLookup()
+            return None
         recordId = self.selectedId()
         records = self.load()
         if recordId is None or records is None:
             return None
         sources = _sources()
-        self._showError("")
-        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
-            filled = sources.fetch_metadata(records, recordId)
-        except sources.SourcesError as e:
-            self._showError(str(e))
+            row = records.get(recordId)
+        except KeyError:
             return None
-        finally:
-            qt.QApplication.restoreOverrideCursor()
-        self._save()
-        self.refresh(select=recordId)
+        self._showError("")
+        job = _LookupJob(sources, recordId, records, self._study().path, row["doi"], row["pmid"], get=self._lookupGet)
+        self._lookup = job
+        self._setLookupBusy(True)
+        job.start()
+        self._lookupTimer.start()
+        return True
+
+    def lookupBusy(self):
+        return self._lookup is not None
+
+    def cancelLookup(self):
+        """Stop waiting for the running lookup (its late answer is ignored)."""
+        if self._lookup is None:
+            return False
+        self._lookup = None
+        self._lookupTimer.stop()
+        self._setLookupBusy(False)
+        _toast(_("Lookup cancelled"))
+        return True
+
+    def _setLookupBusy(self, busy):
+        if not library._isAlive(self.widget):
+            return
+        self.fetchButton.setText(_("Cancel lookup") if busy else _("Fetch metadata"))
+        self.fetchButton.setToolTip(
+            _("Stop waiting for the lookup")
+            if busy
+            else _("Look up title, authors, year and journal of the selected record online (Crossref or PubMed). Only its DOI or PMID is sent."),
+        )
+        self._updateButtons()
+
+    def _pumpLookup(self):
+        job = self._lookup
+        if job is None:
+            self._lookupTimer.stop()
+            return
+        try:
+            kind, value = job.queue.get_nowait()
+        except queue.Empty:
+            if job.thread.is_alive():
+                time.sleep(LOOKUP_SLEEP_S)  # lends the interpreter to the lookup thread
+            return
+        self._lookup = None
+        self._lookupTimer.stop()
+        if not library._isAlive(self.widget):
+            return
+        self._setLookupBusy(False)
+        self._run(lambda: self._applyLookup(job, kind, value))
+
+    def _applyLookup(self, job, kind, value):
+        """Show the result of a lookup on the main thread (the single writer of the records)."""
+        sources = _sources()
+        if kind == "error":
+            self._showError(value)
+            return None
+        records = self.load()
+        studyObject = self._study()
+        if records is None or studyObject is None or studyObject.path != job.studyPath:
+            return None  # another study is open now
+        try:
+            filled = sources.fill_from_lookup(records, job.recordId, value)
+        except KeyError:
+            return None  # the record was merged or removed meanwhile
+        if filled:
+            self._save()
+        self.refresh(select=job.recordId)
         _toast(_("Filled {fields}").format(fields=", ".join(filled)) if filled else _("Nothing new to fill"))
         return filled
 
     def showAddCases(self):
         self.addCasesForm.show()
         self.caseCount.setFocus()
+
+    def _caseCountSuffix(self, value):
+        self.caseCount.setSuffix(" " + (_("case") if value == 1 else _("cases")))
 
     def addCasesNow(self):
         return self.addCases(self.selectedId(), int(self.caseCount.value))
@@ -761,11 +987,16 @@ class SourcesCard:
         studyObject = self._study()
         if records is None or studyObject is None:
             return None
+        if records.unreadable:
+            # As Import does: the empty stand-in of an unreadable file never replaces an earlier export
+            self._showError(_("Nothing was written: fix the file named above (save it as UTF-8 text) or move it away first."))
+            _toast(_("The PRISMA flow diagram was not written: {reason}").format(reason=records.unreadable), ms=5000, level="warning")
+            return None
 
         def work():
             _counts, paths = _sources().export_prisma(studyObject, records)
             _toast(_("PRISMA counts and flow diagram written to derivatives/prisma"), ms=4000)
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(os.path.dirname(paths[0])))
+            _projects().showInFileManager(os.path.dirname(paths[0]))
             return paths
 
         return self._run(work)
@@ -803,7 +1034,12 @@ def _exportPrisma():
         _toast(_("Open a study first"))
         return None
     sources = _sources()
-    _counts, paths = sources.export_prisma(session.study)
+    try:
+        _counts, paths = sources.export_prisma(session.study)
+    except sources.SourcesError as e:
+        # records.tsv or stage_log.tsv cannot be read: say why, as the card does, rather than a traceback
+        _toast(_("The PRISMA flow diagram was not written: {reason}").format(reason=e), ms=5000, level="warning")
+        return None
     _toast(_("PRISMA counts and flow diagram written to derivatives/prisma"), ms=4000)
     return paths
 

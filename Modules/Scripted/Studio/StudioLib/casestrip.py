@@ -87,6 +87,12 @@ def _shell():
     return shell.instance()
 
 
+def _openLink(url):
+    from . import projects
+
+    projects.openLink(url)
+
+
 def _draw():
     try:
         from . import draw
@@ -376,7 +382,7 @@ class CaseStrip:
         font.setWeight(qt.QFont.DemiBold)
         self.fieldButtons["case"].setFont(font)
         font = qt.QFont(self.editorTitle.font)
-        font.setPixelSize(ui.fontPx(11))
+        font.setPixelSize(ui.fontPx(12))
         font.setWeight(qt.QFont.DemiBold)
         self.editorTitle.setFont(font)
 
@@ -435,7 +441,7 @@ class CaseStrip:
         shortLabel = spec["label"] if spec is not None else _("All")
         self.queueButton.setText(f"{shortLabel} · {positionText} ▾")
         self.queueButton.setToolTip(ui.tooltip(_("Trace queue: {queue}").format(queue=label), None,
-                                               _("case {position} of {count}; Done → next and Alt+←/→ follow it").format(position=position or "—", count=count)))
+                                               _("case {position} of {count}; Done → next and {keys} follow it").format(position=position or "—", count=count, keys=ui.keyText("Alt+Left") + "/" + ui.keyText("Alt+Right"))))
         self.queueButton.setAccessibleName(_("Trace queue {queue}, case {position} of {count}").format(queue=label, position=position or "—", count=count))
         # Fields
         for key, columns, title in FIELDS:
@@ -573,7 +579,7 @@ class CaseStrip:
         allAction = self.queueMenu.addAction(_("All subjects (table order) · {n}").format(n=len(session.study)))
         allAction.setCheckable(True)
         allAction.setChecked(activeKey is None)
-        allAction.setToolTip(_("Done → next opens the next untraced subject; Alt+←/→ step in table order"))
+        allAction.setToolTip(_("Done → next opens the next untraced subject; {keys} step in table order").format(keys=ui.keyText("Alt+Left") + "/" + ui.keyText("Alt+Right")))
         group.addAction(allAction)
         allAction.connect("triggered()", lambda: self._setQueue(None))
         self.queueMenu.addSeparator()
@@ -614,7 +620,7 @@ class CaseStrip:
             _studyUi().showSubjectSwitcher(_shell())
             return
         if key == "doi" and text:
-            qt.QDesktopServices.openUrl(qt.QUrl("https://doi.org/" + text))
+            _openLink("https://doi.org/" + text)
             return
         self.startEdit(key)
 
@@ -625,7 +631,7 @@ class CaseStrip:
         menu.setObjectName("StudioCaseStripFieldMenu")
         text = fieldText(key, self._row)
         if key == "doi" and text:
-            menu.addAction(_("Open in the browser")).connect("triggered()", lambda: qt.QDesktopServices.openUrl(qt.QUrl("https://doi.org/" + text)))
+            menu.addAction(_("Open in the browser")).connect("triggered()", lambda: _openLink("https://doi.org/" + text))
         if key != "case":
             menu.addAction(_("Edit…") if key != "review" else _("Read")).connect("triggered()", lambda: self.startEdit(key))
         if text:
@@ -668,7 +674,7 @@ class CaseStrip:
         self._editing, self._editSid, self._confirmed = key, self._sid, None
         self._inputs = {}
         titles = {k: t for k, _c, t in FIELDS}
-        self.editorTitle.setText(titles[key].upper())
+        self.editorTitle.setText(titles[key])
         self.messageLabel.hide()
         readOnly = key == "review"
         if readOnly:
@@ -724,7 +730,7 @@ class CaseStrip:
         edit.setObjectName("StudioCaseStripEditorInput")
         edit.setProperty("caseColumn", column)
         edit.setPlaceholderText(placeholder)
-        edit.setClearButtonEnabled(True)
+        ui.setClearButton(edit)
         if width:
             edit.setFixedWidth(width)
         edit.installEventFilter(self._keys)
@@ -861,7 +867,9 @@ class CaseStrip:
         shell = _shell()
         if not others or shell is None:
             return
-        shell.toast(_("Changed for {sid}. The paper has {n} other cases with the old value").format(sid=sid, n=len(others)), ms=8000,
+        message = (_("Changed for {sid}. The paper has 1 other case with the old value") if len(others) == 1
+                   else _("Changed for {sid}. The paper has {n} other cases with the old value")).format(sid=sid, n=len(others))
+        shell.toast(message, ms=8000,
                     action=lambda: session.setValues(others, paperChanges), actionText=_("Apply to {n}").format(n=len(others)), level="consequence")
 
     def cancelEdit(self):
@@ -870,6 +878,11 @@ class CaseStrip:
 
     def _close(self):
         if self._editing is None:
+            return
+        if not _isAlive(self.editor):
+            # The application is quitting and Qt has already deleted the editor with its widgets: nothing is left to close
+            self._editing = self._editSid = self._confirmed = None
+            self._inputs = {}
             return
         focus = slicer.app.focusWidget()
         hadFocus = focus is not None and self.editor.isAncestorOf(focus)
@@ -893,10 +906,12 @@ class CaseStrip:
 
     def removeEventFilters(self):
         """Python event filters must not run while Python is finalized (the application quits)."""
-        self._close()
-        self._pin.detach()
-        if _isAlive(self.lines):
-            self.lines.removeEventFilter(self._linesFilter)
+        try:
+            self._close()
+        finally:
+            self._pin.detach()
+            if _isAlive(self.lines):
+                self.lines.removeEventFilter(self._linesFilter)
 
     def dispose(self):
         self.removeEventFilters()
@@ -938,8 +953,8 @@ def _ensureCard():
         return False
     try:
         extension = draw.extension()
-        if extension._header is None:
-            return False
+        if extension._header is None or not _isAlive(extension._cardsBefore):
+            return False  # no panel yet, or its widgets are destroyed (the application is quitting)
         if _strip is None or not _isAlive(_strip.widget):
             _strip = CaseStrip()
         if extension._cards.get(CARD_KEY, (None,))[0] is not _strip.widget:

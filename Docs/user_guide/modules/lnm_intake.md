@@ -36,9 +36,10 @@ residual of a figure as symptom scores).
 
 ## Bringing lesions in
 
-- **Space.** Each lesion is identified as being in MNI152NLin2009cAsym or MNI152NLin6Asym space (from its grid, 1 mm or
-  2 mm), or in the scan's own **native** space. Studio never guesses: a lesion on an unknown grid is treated as native, and
-  a grid that does not name its space (the TemplateFlow 2009 grids hold 2009c and 2009a images) is asked once.
+- **Space.** Each lesion's space comes from its grid: MNI152NLin2009cAsym or MNI152NLin6Asym (1 mm or 2 mm), the
+  other known template grids (ATLAS v2.0's MNI152NLin2009aSym, SPM's MNI152Lin, your own registered MNI templates), or
+  the scan's own **native** space. Studio never guesses: a lesion on an unknown grid is treated as native, and a grid
+  that does not name its space (the TemplateFlow 2009 grids hold 2009c and 2009a images) gets its default and is asked once.
   The Seed card says "Native space: normalize to MNI first" and links to the Normalize card.
 - **Draw** traces lesions on the MNI template, or on the patient's own scan. **Done → next** saves the
   lesion, writes the study row and opens the next case of the queue; the queues (untraced, needs review, changes
@@ -57,6 +58,8 @@ it with landmarks. Only a crop of the figure is kept, and no lesion is extracted
 3. **Convention.** "Patient's right is on the Left | Right of this figure". Radiological (patient's right on the left of the
    picture) is assumed until you confirm it, once per source record, and an unconfirmed convention blocks **Done**.
    Studio shows R/L letters and a side tag on the figure views so that a left-right flip is never silent.
+   A sagittal figure does not show the patient's right, so a sagittal panel asks "Anterior is on the Left | Right of the
+   figure" for that panel alone (it starts from the paper's answer): answering it never changes the other panels.
 4. **Landmarks.** Place pairs of points on the figure and on the template (names are suggested). A similarity fit is the
    default; an affine fit needs at least 4 pairs.
 5. **Fit.** A residual chip reads "RMS 1.6 mm · LOO 2.3 mm (5 pairs)" in green, amber or red. It measures the consistency
@@ -72,10 +75,12 @@ often copyrighted, is never kept or exported), and `trace_method` records "figur
 
 When a lesion was traced on one slice (2D), the Lesion card asks how to turn it into a volume, once per study:
 
-- **Keep as drawn** (a single slice).
-- **Extrude to a total thickness** (default 2 mm) with fractional edge slices, written as `desc-lesionProb` and mapped with
-  the engine's probabilistic option; or
-- **Extrude as a binary mask** by a whole number of voxels on each side.
+- **Keep single-slice**: map the one slice only.
+- **Extrude to N mm total** (a thickness box sets N, default 2 mm): the lesion is extruded to that exact total thickness,
+  centred on the drawn plane, with fractional edge slices; it is written as `desc-lesionProb` and mapped with the engine's
+  probabilistic option.
+- **Extrude ±N/2 mm, binary** (for the default 2 mm, "Extrude ±1 mm, binary"): the lesion is extruded by a whole number
+  of voxels on each side of the drawn plane and stays a binary mask.
 
 The study stores the choice and its semantics ("total, centred on the drawn plane"), and the methods text reports it.
 Several single-slice drawings on different planes are "multi2D". The traced mask is never modified: the extruded file is
@@ -98,6 +103,12 @@ labels:
 **One-click fixes** (mirror left to right, binarize, clip to the brain, mark as duplicate, "not a duplicate") are undoable,
 keep the original file, and are recorded in the study (an audit line each). The mirror is a mirror of the world x axis and
 is labelled **approximate**. The Library shows a **Flags** column and the filters "Has flags" and "2D".
+
+A lesion file with fractional values (a probabilistic mask such as `desc-lesionProb`) opens with every voxel above 0 as the
+lesion; the file itself is not changed. In a study, the Mask hygiene chip then offers **Binarize at 0.5**. Map maps a
+`desc-lesionProb` file with its values as weights, as a cohort and the command line do (the Seed line shows the weighted
+volume); once the lesion is edited, or for a fractional file with another name, it is mapped as the binary mask shown, and
+the Seed card says so.
 
 ## Review, blinding and agreement
 
@@ -124,7 +135,12 @@ Papers say that lesions "were checked by an expert" and rarely show it. The modu
   `derivatives/qc/interrater.tsv` (rater labels only, no paths) and `.json`. Two tracings give network maps that correlate
   highly even when the masks barely overlap, so network similarity overstates tracing agreement.
 - **Adjudicate tracings** resolves a disagreement: keep A, keep B, the union, the intersection or an edit. The consensus
-  becomes the lesion, the first tracing is kept as `desc-preadjudication`, and each decision can be undone.
+  becomes the lesion, the first tracing is kept as `desc-preadjudication`, and each decision can be undone. The two
+  tracings are read-only (no tool is armed on them); **Edit…** adds a green Consensus segment, the union, to correct with
+  the Draw tools (Esc only deselects the tool and keeps the edit), and **Cancel edit** makes them read-only again.
+- **Saving in these states.** While Draw reviews, traces a second time or adjudicates, **Save lesion** (Ctrl+Shift+S) and
+  **Save lesion as…** are off: the footer (Ctrl+Enter) writes the state's own files, so the first tracer's file is never
+  replaced.
 
 ## Normalize native-space lesions to MNI
 
@@ -188,13 +204,14 @@ applies a finished run's transform to another image.
 The **Sources** card (Library > Study) keeps the records that a study of published case reports screened, so that the
 counts of the flow diagram and the paper behind each case are never retyped.
 
-- **Import** a file (PubMed `.nbib`/MEDLINE, RIS, BibTeX, or a CSV with DOI or PMID columns) or paste identifiers; nothing
-  touches the network. Each import records the database, the query and the date in the search log (`study.json`).
+- **Import** a file (PubMed `.nbib`/MEDLINE, RIS, BibTeX, a CSV or TSV with DOI or PMID columns, or a Web of Science
+  tab-delimited export `savedrecs.txt`) or paste identifiers; nothing touches the network. Each import records the database, the query and the date in the search log (`study.json`).
 - **Duplicates.** An identical DOI or PMID merges into the record already there (empty fields are filled). A title and
   year that match closely are only **offered** for merging (Merge or Keep both).
 - **Screening.** Select a record and press **P** to pass it to the next stage (identified, screened, full text, included),
   **X** to exclude it with a reason, **U** to undo. **Fetch metadata** (Crossref or NCBI, sending only the identifier) runs
-  only when you click it, and offline it changes nothing.
+  only when you click it, in the background (the views stay usable; click the button again, now **Cancel lookup**, to stop
+  waiting), and offline it changes nothing.
 - **Add cases…** creates the rows `sub-<record><nn>` of a record, with its DOI, PMID and citation.
 - **Export PRISMA flow diagram** writes `derivatives/prisma/prisma_counts.json` and `prisma_flow.svg` (a fixed template:
   no scripts, no paths). Records hold citation fields only; the attachment folder `sources/<record>/` (figures, PDFs) is
@@ -210,7 +227,9 @@ chooses each file by name and never walks the study folder.
   `aux_file`, `db_name`, header extensions); voxels and geometry are unchanged.
 - **Chosen by you:** the columns of `participants.tsv` (free text, tracer names and dates are off by default); the lesion
   masks (template space only; optional fMRIPrep and lacuna aliases); unthresholded group maps; a NeuroVault-ready folder
-  (nothing is uploaded); a zip.
+  (nothing is uploaded); a zip; for a study drawn on a template you added, the template file (off by default; copied
+  unchanged so its checksum matches; its licence is yours to check). The template's id, name, space and checksum are
+  always written in `dataset_description.json` (`SlicerStudio.template`) and the README.
 - **Pseudonyms.** Ids can be replaced by `sub-P001`, … in a random order; the key stays in the study's `.studio/share/` and
   is never in the export.
 - **Licence is always an explicit choice.** CC0 is suggested for your own masks. GSP-derived maps carry
@@ -221,7 +240,9 @@ chooses each file by name and never walks the study folder.
   verifies the written files again before it moves them into place.
 
 The result is a BIDS-derivatives dataset (`dataset_description.json`, `participants.tsv/.json`, `sub-<id>/anat/…`,
-`group/…`, `sources/records.tsv`, a README, `CITATION.cff` and a `LICENSE`) that passes a local validator.
+`group/…`, `sources/records.tsv`, a README, `CITATION.cff` and a `LICENSE`) that passes the official BIDS validator.
+The extra folders are listed in `.bidsignore` by their bare names (the validator does not honour `group/`), and so is
+`participants.tsv` when no lesion masks are exported, because the validator expects a `sub-<id>` folder for the table.
 
 ## Command lines of this page
 

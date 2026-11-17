@@ -10,7 +10,8 @@ reads the cohort's per-lesion maps, the ``maps.tsv`` of the cohort maps job (Com
 - each lesion's map is thresholded with the Result card's rule (re-resolved for the maps' N), with the chosen sign;
 - the overlap count and percent and the sensitivity map (at least k % of the lesions, slider 50-100, default 90;
   over the cases when the study has case/control groups), labelled as the classic map: "see Nulls for a
-  null-referenced version" (it is never the only output once the Nulls card exists);
+  null-referenced version" (it is never the only output once the Nulls card exists); the sign and the sensitivity
+  show those of the listed group maps (cohort.json) again when a project or study is opened;
 - optionally the legacy two-group maps (Welch t of the mean Fz maps, Liebermeister p of the binarized maps; "legacy
   two-group, no covariates", descriptive) and their conjunction with the sensitivity map.
 
@@ -30,16 +31,49 @@ from slicer.i18n import tr as _
 
 from . import ORDER_COHORT, discoverCohortTabs, widgets
 
+
+def _keyText(key):
+    """``key`` as Studio shows it (⌘ and ⌥ on macOS); as given when Studio is not there (the module also runs in Classic)."""
+    try:
+        from StudioLib import ui
+
+        return ui.keyText(key)
+    except ImportError:
+        return key
+
+
 #: Node attribute of the volume that shows the group maps (one volume, reused)
 GROUP_VOLUME_ATTRIBUTE = "LNM.GroupMapVolume"
 SIGNS = ("both", "pos", "neg")
 SIGN_LABELS = {"both": "±", "pos": "+", "neg": "−"}  # noqa: RUF001
 #: Order of the Overlap tab among the cohort_*.py tabs
 OVERLAP_ORDER = 10
+#: Top and bottom margin of a cohort tab page (px); the pages have no side margins, see CohortCard
+TAB_PAGE_MARGIN = 8
 
 
 def _mapWidget():
     return getattr(slicer.modules, "LesionNetworkMappingWidget", None)
+
+
+def _seedSetMode():
+    """True when the current seed mode is Coords or Stim: the maps are of study seeds, not of traced lesions."""
+    widget = _mapWidget()
+    try:
+        return widget is not None and widget.seedMode() in ("coordinates", "stimulation")
+    except Exception:
+        return False
+
+
+def cohortMapsStatusText(mapped, label, subjects, hits, seeds=False):
+    """"Lesion maps: 3 lesions · conn-X · N=120 (0 from the cache)", with "1 lesion" for one; "Seed maps: 3 seeds ..." for seed sets."""
+    if seeds:
+        if mapped == 1:
+            return _("Seed maps: 1 seed · conn-{label} · N={subjects} ({hits} from the cache)").format(label=label, subjects=subjects, hits=hits)
+        return _("Seed maps: {n} seeds · conn-{label} · N={subjects} ({hits} from the cache)").format(n=mapped, label=label, subjects=subjects, hits=hits)
+    if mapped == 1:
+        return _("Lesion maps: 1 lesion · conn-{label} · N={subjects} ({hits} from the cache)").format(label=label, subjects=subjects, hits=hits)
+    return _("Lesion maps: {n} lesions · conn-{label} · N={subjects} ({hits} from the cache)").format(n=mapped, label=label, subjects=subjects, hits=hits)
 
 
 def _updateProgress(progressRow, force=False):
@@ -77,6 +111,10 @@ class OverlapTab:
         self.job = None
         self.outputs = {}
         self.peaks = []
+        #: cohort.json (path, mtime, size) whose sign and sensitivity the controls show (``_restoreSettings``)
+        self._settingsKey = None
+        #: (sign, sensitivity) submitted with the running group maps job
+        self._submittedSettings = None
         self.widget = qt.QWidget()
         self.widget.setObjectName("LNMOverlapTab")
         layout = qt.QVBoxLayout(self.widget)
@@ -87,10 +125,22 @@ class OverlapTab:
         self.signFrame, self.signGroup = widgets.segmented([SIGN_LABELS[sign] for sign in SIGNS])
         self.signFrame.setObjectName("LNMOverlapSign")
         self.signFrame.setToolTip(_("Sign · ± both (sign-specific sensitivity), + positive, − negative"))  # noqa: RUF001
+        widgets.nameSegmentedButtons(
+            self.signGroup,
+            [
+                (_("Both tails"), _("Sign-specific sensitivity")),
+                (_("Positive tail"), _("Only positive values")),
+                (_("Negative tail"), _("Only negative values")),
+            ],
+        )
+        for index in range(len(SIGNS)):
+            # the Robust card's primary uses this sign too (its "Primary (fixed)" line and its analyses)
+            self.signGroup.button(index).connect("toggled(bool)", lambda checked: self.ctx.notifyOverlapChanged() if checked else None)
         row.addWidget(self.signFrame)
         row.addStretch(1)
         layout.addLayout(row)
         form = qt.QFormLayout()
+        form.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         import ctk
 
         self.sensitivitySlider = ctk.ctkSliderWidget()
@@ -104,6 +154,8 @@ class OverlapTab:
         self.sensitivitySlider.value = 90
         self.sensitivitySlider.setToolTip(_("Sensitivity: the voxels where at least this percent of the lesions' maps pass the rule"))
         form.addRow(_("Sensitivity"), self.sensitivitySlider)
+        # the Robust card's "Primary (fixed)" line reads the sensitivity from here
+        self.sensitivitySlider.connect("valueChanged(double)", lambda value: self.ctx.notifyOverlapChanged())
         layout.addLayout(form)
         # Short labels: the inspector stays 340 px wide (the details are in the tooltips)
         self.legacyCheckBox = qt.QCheckBox(_("Legacy two-group maps"))
@@ -160,6 +212,8 @@ class OverlapTab:
         folderRow.addWidget(self.showFolderButton)
         folderRow.addStretch(1)
         layout.addLayout(folderRow)
+        # the tab pages take the height of the tallest tab: spare height goes below the rows, not between them
+        layout.addStretch(1)
 
     @staticmethod
     def _label(text, objectName, role=None):
@@ -203,11 +257,11 @@ class OverlapTab:
             try:
                 resolved = thresholds.resolve(rule, int(n), bundle.n_voxels, gsr=(meta.get("bundle") or {}).get("gsr"))
                 line = thresholds.describe(resolved)
-                self.ruleLabel.setText(_("Each lesion's {statistic} map: {rule} {line}").format(statistic=statistic, rule=thresholds.rule_label(rule), line=line))
+                self.ruleLabel.setText((_("Each seed's {statistic} map: {rule} {line}") if _seedSetMode() else _("Each lesion's {statistic} map: {rule} {line}")).format(statistic=statistic, rule=thresholds.rule_label(rule), line=line))
             except Exception as exc:
                 self.ruleLabel.setText(str(exc))
         else:
-            self.ruleLabel.setText(_("Each lesion's map is thresholded with the Result card's rule: {rule}.").format(rule=thresholds.rule_label(rule)))
+            self.ruleLabel.setText((_("Each seed's map is thresholded with the Result card's rule: {rule}.") if _seedSetMode() else _("Each lesion's map is thresholded with the Result card's rule: {rule}.")).format(rule=thresholds.rule_label(rule)))
         groups = self._groups()
         twoGroups = groups.get("case", 0) >= 2 and groups.get("control", 0) >= 2
         self.legacyCheckBox.setEnabled(twoGroups)
@@ -265,6 +319,7 @@ class OverlapTab:
             return None
         spec = jobrunner.JobSpec("LesionNetworkMappingLib.cohort", self.arguments(mapsTsv), title=_("Group maps"), heavy=True, kind="cohort", name="cohort",
                                  runRoot=os.path.dirname(mapsTsv), onEvent=self._onEvent, onDone=self._onDone)
+        self._submittedSettings = self._settings()
         self.job = self.ctx.submit(spec)
         self.progress.setJob(self.job)
         self.progress.widget.show()
@@ -276,6 +331,10 @@ class OverlapTab:
 
     def _onDone(self, job):
         _updateProgress(self.progress, force=True)
+        if self._submittedSettings is not None and self._submittedSettings != self._settings():
+            # the user changed the sign or sensitivity while the job ran: keep that, do not show the job's
+            self._settingsKey = self._recordKey(self.card.folder())
+        self._submittedSettings = None
         if job.state == "failed":
             self.reasonLabel.setText(_("The group maps failed: {reason}").format(reason=job.failureReason))
             self.reasonLabel.show()
@@ -284,9 +343,56 @@ class OverlapTab:
             first = "overlapPct" if "overlapPct" in self.outputs else next(iter(self.outputs))
             self.card.showGroupMap(first)
 
+    def _settings(self):
+        return (self.sign(), round(float(self.sensitivitySlider.value)))
+
+    @staticmethod
+    def _recordKey(folder):
+        """(path, mtime, size) of the cohort.json in ``folder``, or None."""
+        if not folder:
+            return None
+        path = os.path.join(folder, "cohort.json")
+        try:
+            info = os.stat(path)
+        except OSError:
+            return None
+        return (path, info.st_mtime_ns, info.st_size)
+
+    def _restoreSettings(self, record, folder):
+        """Show the sign and sensitivity of the group maps the tab lists (their cohort.json), once per record.
+
+        The two controls are saved nowhere else, so after a project or study is opened they showed the defaults (±, 90 %)
+        next to a result computed with others, and the Robust and Nulls cards (which read them as the primary overlap
+        criterion) and the next Compute group maps silently used the defaults. A record is applied only when it is new to
+        the tab (another folder, or the file was rewritten): a setting the user changes afterwards stays.
+        """
+        key = self._recordKey(folder) if record is not None else None
+        if key == self._settingsKey:
+            return
+        self._settingsKey = key
+        if key is None:
+            return
+        before = self._settings()
+        sign = record.get("sign")
+        if sign in SIGNS:
+            self.setSign(sign)
+        try:
+            pct = float(record.get("sensitivity_pct"))
+        except (TypeError, ValueError):
+            pct = None
+        if pct is not None and self.sensitivitySlider.minimum <= pct <= self.sensitivitySlider.maximum:
+            self.sensitivitySlider.value = pct
+        if self._settings() != before:
+            for cardId in ("robust", "nulls"):  # their primary overlap criterion is shown from these controls
+                cardController = self.ctx.card(cardId) if hasattr(self.ctx, "card") else None
+                scheduleRefresh = getattr(cardController, "scheduleRefresh", None)
+                if callable(scheduleRefresh):
+                    scheduleRefresh()
+
     def _showOutputs(self):
         record = self.card.groupRecord()
         folder = self.card.folder()
+        self._restoreSettings(record, folder)
         self.outputs = {}
         if record is not None and folder:
             for desc, name in (record.get("outputs") or {}).items():
@@ -348,6 +454,8 @@ class CohortCard:
     def __init__(self, ctx):
         self.ctx = ctx
         self.groupVolumeId = None
+        self.groupScope = None  # scope (results folder) of the map shown in the group map volume when it was shown, or None
+        self._groupScopeOf = None  # the function that gives that scope now (of the card or of the tab that showed the map)
         self.widget = widgets.card(_("Cohort"), objectName="LNMCohortCard")
         layout = qt.QVBoxLayout(self.widget)
         self.statusLabel = qt.QLabel("")
@@ -364,7 +472,7 @@ class CohortCard:
         self.browseButton = qt.QPushButton(_("Browse lesion maps"))
         self.browseButton.setObjectName("LNMCohortBrowseButton")
         self.browseButton.setProperty("slicerRole", "ghost")
-        self.browseButton.setToolTip(_("Show the lesions' maps one at a time with the lesion outline (Alt+← / Alt+→ in Studio)"))
+        self.browseButton.setToolTip(_("Show the lesions' maps one at a time with the lesion outline ({previous} / {next} in Studio)").format(previous=_keyText("Alt+Left"), next=_keyText("Alt+Right")))
         self.browseButton.connect("clicked()", self.browseMaps)
         row.addWidget(self.browseButton)
         row.addStretch(1)
@@ -397,6 +505,11 @@ class CohortCard:
             entries.append((spec["order"], spec["id"], str(spec.get("title", spec["id"])), tabWidget))
         entries.sort(key=lambda entry: (entry[0], entry[1]))
         for _order, tabId, title, tabWidget in entries:
+            # The tab pages have no side margins: the card has its own, and 22 more px would make the inspector wider than
+            # its stored width (the segmented controls of the tabs are about 290 px wide)
+            pageLayout = tabWidget.layout() if hasattr(tabWidget, "layout") else None
+            if pageLayout is not None and hasattr(pageLayout, "setContentsMargins"):
+                pageLayout.setContentsMargins(0, TAB_PAGE_MARGIN, 0, TAB_PAGE_MARGIN)
             index = self.tabs.addTab(tabWidget, title)
             self.tabs.setTabToolTip(index, title)
         for name in ("studyChanged", "bundleChanged", "ruleChanged", "computeEnabledChanged"):
@@ -424,6 +537,46 @@ class CohortCard:
         path = self.currentMapsTsv()
         return os.path.dirname(path) if path else None
 
+    def connectomeScope(self):
+        """``<study>/derivatives/lnm/conn-<label>[_n-N]`` of the open study and connectome (the folder of the cohort maps and
+        of the group maps and analyses made from them), or None.
+        """
+        folder = self.folder()
+        if folder:
+            return os.path.dirname(folder)
+        widget = _mapWidget()
+        cohortDir = widget.cohortOutputDir(ownOnly=True) if widget is not None and hasattr(widget, "cohortOutputDir") else None
+        return os.path.dirname(cohortDir) if cohortDir else None
+
+    def setGroupScope(self, scopeOf=None):
+        """The group map volume now shows a map of the open study (and connectome): ``scopeOf()`` (default
+        ``connectomeScope``) gives the folder of the results it belongs to (a tab's ``connectomeDir``).
+        """
+        self._groupScopeOf = scopeOf or self.connectomeScope
+        try:
+            self.groupScope = self._groupScopeOf()
+        except Exception:
+            logging.exception("Lesion network mapping: the scope of the group map could not be read")
+            self.groupScope, self._groupScopeOf = None, None
+
+    def hideGroupMapOfOtherScope(self):
+        """Another study or connectome is open: take the group map of the previous one out of the slice views (its tab
+        no longer shows that result either), so that it is not read as a result of the one open now; return whether it was.
+        """
+        if self.groupScope is None or self._groupScopeOf is None:
+            return False
+        try:
+            scope = self._groupScopeOf()
+        except Exception:
+            logging.exception("Lesion network mapping: the scope of the group map could not be read")
+            return False
+        if scope == self.groupScope:
+            return False
+        from LesionNetworkMappingLib import display
+
+        self.groupScope, self._groupScopeOf = None, None
+        return display.hideForeground(self.groupVolume())
+
     def groupRecord(self):
         """cohort.json of the group maps next to the current maps.tsv, or None."""
         folder = self.folder()
@@ -440,16 +593,20 @@ class CohortCard:
         record = self.cohortMapsRecord() or {}
         if mapsTsv:
             lesions = record.get("lesions") or {}
-            self.statusLabel.setText(_("Lesion maps: {n} lesions · conn-{label} · N={subjects} ({hits} from the cache)").format(
-                n=lesions.get("mapped", "?"), label=(record.get("bundle") or {}).get("label", "?"), subjects=record.get("n", "?"), hits=lesions.get("cache_hits", 0)))
+            self.statusLabel.setText(cohortMapsStatusText(
+                lesions.get("mapped", "?"), (record.get("bundle") or {}).get("label", "?"), record.get("n", "?"), lesions.get("cache_hits", 0), seeds=_seedSetMode()))
+        elif info and info.get("n") and _seedSetMode():
+            self.statusLabel.setText((_("The seed of the study is not mapped with this connectome yet.") if info["n"] == 1 else _("The {n} seeds of the study are not mapped with this connectome yet.")).format(n=info["n"]))
         elif info and info.get("n"):
             self.statusLabel.setText((_("The lesion of the study is not mapped with this connectome yet.") if info["n"] == 1 else _("The {n} lesions of the study are not mapped with this connectome yet.")).format(n=info["n"]))
         else:
             self.statusLabel.setText(_("Open a study with traced lesions in the Seed card."))
+        self.browseButton.setText(_("Browse seed maps") if _seedSetMode() else _("Browse lesion maps"))
         running = widget is not None and widget.cohortJob is not None and not widget.cohortJob.isFinished()
         self.mapButton.setVisible(not mapsTsv)
         self.mapButton.setEnabled(widget is not None and widget.cohortComputeState()[0] and not running)
         self.browseButton.setEnabled(bool(mapsTsv))
+        self.hideGroupMapOfOtherScope()
         self.overlap.refresh()
 
     #
@@ -510,9 +667,14 @@ class CohortCard:
             return None
         record = self.groupRecord() or {}
         name = f"Cohort {desc} ({record.get('n_maps', '?')} lesions)"
-        attributes = {GROUP_VOLUME_ATTRIBUTE: "1", "Studio.Role": "statmap", display.GROUP_MAP_ATTRIBUTE: desc}
+        # The group maps are on the cohort's connectome grid, in its template space (declared in connectome.json, also on
+        # a grid that is not standard, such as the demo's): the Clusters and Networks cards label them as the result map
+        bundle = self.ctx.bundle if self.ctx.bundle is not None else getattr(widget, "bundle", None)
+        attributes = {GROUP_VOLUME_ATTRIBUTE: "1", "Studio.Role": "statmap", display.GROUP_MAP_ATTRIBUTE: desc,
+                      "Studio.Space": widget.logic.connectomeSpaceName(bundle)}
         volume = widget.logic.loadMap(path, name, self.groupVolume(), saveWithScene=True, attributes=attributes)
         self.groupVolumeId = volume.GetID()
+        self.setGroupScope()
         display.applyGroupMapDisplay(volume, desc)
         try:
             from StudioLib import mappage
@@ -562,7 +724,7 @@ class CohortCard:
     def showFolder(self):
         folder = self.folder()
         if folder and os.path.isdir(folder) and not slicer.app.testingEnabled():
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(folder))
+            widgets.showInFileManager(folder)
 
 
 CARD = {

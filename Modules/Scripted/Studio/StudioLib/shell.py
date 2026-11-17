@@ -128,6 +128,9 @@ MAX_WORKSPACE_PANEL_WIDTH = 600
 #: does not widen again when a tool is chosen: "Studio/WorkspacePanelWidths/<module name>" holds
 #: "<width>@<layout signature>" (see ``Shell._layoutSignature()``)
 _WORKSPACE_PANEL_WIDTHS_GROUP = "Studio/WorkspacePanelWidths"
+#: Version of what the stored widths measure (part of the layout signature). 2: the widths are layout minimum size hints; before, a
+#: module widget with the Minimum policy measured its size hint, and a study widened the inspector to 409-433 px for good
+_WORKSPACE_PANEL_WIDTHS_VERSION = 2
 
 #: Part of the available screen area given to the main window when Slicer did not restore its geometry
 FIRST_RUN_WINDOW_FRACTION = 0.9
@@ -290,6 +293,20 @@ def associatedWidgets(action):
     return [obj for obj in action.associatedObjects() if obj.isWidgetType()]
 
 
+def actionMenu(action):
+    """The submenu of ``action``, or None (Qt 5 has QAction.menu(); in Qt 6 it is a template that PythonQt does not wrap).
+
+    Without menu(), the submenu is found as the menu that owns ``action`` as its menuAction(): QMenu.addMenu(),
+    menu.menuAction() and Designer menus all give that action, whose parent is the submenu.
+    """
+    if hasattr(action, "menu"):
+        return action.menu()
+    parent = action.parent()
+    if parent is not None and parent.inherits("QMenu") and action == parent.menuAction():
+        return parent
+    return None
+
+
 def onStartupCompleted(startTime=None):
     """Apply Studio after the application started (connected by the Studio module).
 
@@ -303,6 +320,9 @@ def onStartupCompleted(startTime=None):
     if mainWindow is None:
         return
     installCloseGuard(mainWindow)
+    from . import projects
+
+    projects.installWebLinkHandler()
     if os.environ.get("SLICER_CLASSIC_UI") == "1":
         return
     if not _settingsBool("Studio/Enabled", True):
@@ -365,6 +385,38 @@ class _LabelTextToolTipFilter(qt.QObject):
             text = obj.text
             if text and obj.toolTip != text:
                 obj.toolTip = text
+        return False
+
+
+class _NoticeSlotHeightFilter(qt.QObject):
+    """Keep the inspector notice slot exactly as tall as its height-for-width (never taller).
+
+    A Preferred vertical policy lets the dock layout hand the slot spare height (a tall empty box); Maximum
+    caps it at the width-independent sizeHint, which cuts off the last wrapped line. So the cap follows
+    heightForWidth(width) instead.
+    """
+
+    def __init__(self, slot):
+        super().__init__(slot)
+        self._slot = slot
+        slot.installEventFilter(self)
+
+    def update(self):
+        slot = self._slot
+        layout = slot.layout()
+        if layout is None or slot.width <= 0:
+            return
+        needed = layout.heightForWidth(slot.width)
+        if needed > 0 and slot.maximumHeight != needed:
+            slot.setMaximumHeight(needed)
+        # The cap resizes the slot. While the slot is being shown (its pending Resize event is what brought us
+        # here, Classic and back) Qt sends no Resize event for that, and the layout would keep the notice as
+        # tall as the uncapped slot: an empty box cut off by the slot. No-op when the layout is up to date
+        layout.setGeometry(slot.contentsRect())
+
+    def eventFilter(self, obj, event):
+        if event.type() in (qt.QEvent.Resize, qt.QEvent.LayoutRequest, qt.QEvent.Show):
+            self.update()
         return False
 
 
@@ -546,6 +598,8 @@ class PanelHeader:
         button = qt.QToolButton()
         button.setObjectName(objectName)
         button.setToolTip(toolTip)
+        # Icon only: the accessible name is what a screen reader announces
+        button.setAccessibleName(ui.nameOfToolTip(toolTip))
         button.setAutoRaise(True)
         # Reachable with Tab (not by a click: the focus stays where the user works)
         button.setFocusPolicy(qt.Qt.TabFocus)
@@ -573,6 +627,7 @@ class PanelHeader:
         self.closeButton.setVisible(transient)
         if closeToolTip:
             self.closeButton.setToolTip(closeToolTip)
+            self.closeButton.setAccessibleName(ui.nameOfToolTip(closeToolTip))
         captionText = f"· {caption}" if caption and not transient else ""
         self.captionLabel.setText(captionText)
         self.captionLabel.setVisible(bool(captionText))
@@ -589,7 +644,7 @@ class PanelHeader:
         # Items of the workspace hooks, above the panel items
         for action in self._hookActions:
             self.moreMenu.removeAction(action)
-            submenu = action.menu()
+            submenu = actionMenu(action)
             (submenu if submenu is not None else action).deleteLater()
         self._hookActions = []
         items = workspaces.callHook(self._currentHooksWorkspace(), "moreMenuActions", self.shell) or []
@@ -737,7 +792,9 @@ class PanelHeader:
         if url.toString().startswith("#"):
             browser.scrollToAnchor(url.fragment())
             return
-        qt.QDesktopServices.openUrl(url)
+        from . import projects
+
+        projects.openLink(url)
 
     def helpPopoverPosition(self):
         """Global position of the help popover: the bottom left corner of the header."""
@@ -862,6 +919,9 @@ class SettingsDialogLook:
             f"QTreeWidget#SettingsTreeWidget::item {{ height: 32px; border-radius: 8px; padding-left: 6px; color: {t['text2']}; }}"
             f"QTreeWidget#SettingsTreeWidget::item:hover {{ background-color: {t['control-hover']}; color: {t['text']}; }}"
             f"QTreeWidget#SettingsTreeWidget::item:selected {{ background-color: {t['selected']}; color: {t['text']}; }}"
+            # Keyboard focus (USABILITY 9.2): the current row gets the 2 px ring while the list has the focus (outline: 0 above
+            # removes the dotted rectangle), the padding is reduced by the ring so that the row does not change size
+            f"QTreeWidget#SettingsTreeWidget::item:focus {{ border: 2px solid {t['accent-fg']}; padding-left: 4px; }}"
             "QTreeWidget#SettingsTreeWidget::branch { image: none; border: none; background: transparent; }")
 
     def apply(self):
@@ -871,7 +931,8 @@ class SettingsDialogLook:
         tree = self._tree()
         if tree is not None:
             if not self.applied:
-                self._saved["tree"] = (tree.styleSheet, tree.indentation, tree.iconSize, tree.minimumWidth)
+                self._saved["tree"] = (tree.styleSheet, tree.indentation, tree.iconSize, tree.minimumWidth,
+                                       tree.horizontalScrollBarPolicy)
             for item in self._items(tree):
                 original = item.data(0, _SETTINGS_TEXT_ROLE)
                 if original is None or original == "":
@@ -879,11 +940,26 @@ class SettingsDialogLook:
                     item.setData(0, _SETTINGS_TEXT_ROLE, original)
                     self._saved.setdefault("icons", {})[original] = item.icon(0)
                 item.setText(0, sentenceCase(original))
-                item.setIcon(0, ui.icon(SETTINGS_PANEL_ICONS.get(str(original), SETTINGS_PANEL_ICON), 16))
+            self._applyPanelIcons(tree)
             tree.setIndentation(0)
             tree.setIconSize(qt.QSize(16, 16))
-            tree.setMinimumWidth(200)
             ui.bindStyleSheet(tree, self._treeStyleSheet)
+            # The column is at least 200 px wide, and wide enough for the longest panel name at the application font (the
+            # name, the icon and the padding grow with it, so a larger font gave the list a horizontal scroll bar); the
+            # vertical scroll bar and the frame are added to it. A name wider than a very narrow list is elided, never scrolled
+            frame = 2 * tree.frameWidth + tree.style().pixelMetric(qt.QStyle.PM_ScrollBarExtent) + 8
+            tree.setMinimumWidth(max(200, tree.sizeHintForColumn(0) + frame))
+            tree.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+            # The panel shown at opening is the current item but is not selected (the list has no selection until a key moves
+            # it): select it, so that the list marks the panel that is shown
+            current = tree.currentItem()
+            if current is not None and not tree.selectedItems():
+                current.setSelected(True)
+            # The icons are pixmaps tinted for the palette of this moment, and the dialog stays open while the theme is
+            # switched on the Appearance page (no Show event), so they are redrawn when the palette changes
+            if getattr(self, "_paletteCallback", None) is None:
+                self._paletteCallback = self._onPaletteChanged
+                ui.addPaletteListener(self._paletteCallback)
         box = self._buttonBox()
         if box is not None:
             roles = ((qt.QDialogButtonBox.Ok, "primary", None), (qt.QDialogButtonBox.Cancel, "secondary", None),
@@ -904,17 +980,49 @@ class SettingsDialogLook:
         layout = dialog.layout()
         if layout is not None:
             if "margins" not in self._saved:
-                margins = layout.contentsMargins()
+                margins = _propertyValue(layout, "contentsMargins")
                 self._saved["margins"] = (margins.left(), margins.top(), margins.right(), margins.bottom(), _propertyValue(layout, "horizontalSpacing"),
                                           _propertyValue(layout, "verticalSpacing"))
             layout.setContentsMargins(16, 16, 16, 16)
             layout.setHorizontalSpacing(20)
             layout.setVerticalSpacing(12)
         self.applied = True
+        # A panel selected while the dialog was hidden (Check for updates opens Settings at Updates) is not scrolled to by the
+        # tree; the rows have their final size only after the show event, so scroll once the dialog has been laid out
+        qt.QTimer.singleShot(0, self._scrollToCurrentPanel)
+
+    def _applyPanelIcons(self, tree):
+        """The Lucide icons of the panel list, tinted for the current palette (``ui.icon`` caches them per palette)."""
+        for item in self._items(tree):
+            original = item.data(0, _SETTINGS_TEXT_ROLE)
+            if original:
+                item.setIcon(0, ui.icon(SETTINGS_PANEL_ICONS.get(str(original), SETTINGS_PANEL_ICON), 16))
+
+    def _onPaletteChanged(self):
+        if not ui._isAlive(self.dialog):
+            ui.removePaletteListener(self._paletteCallback)
+            self._paletteCallback = None
+            return
+        if not self.applied:
+            return
+        tree = self._tree()
+        if tree is not None:
+            self._applyPanelIcons(tree)
+
+    def _scrollToCurrentPanel(self):
+        """Scroll the panel list so that the selected panel's entry is fully visible."""
+        if not ui._isAlive(self.dialog) or not self.dialog.isVisible():
+            return
+        tree = self._tree()
+        item = tree.currentItem() if tree is not None else None
+        if item is not None:
+            tree.scrollToItem(item)
 
     #: Labels of the Appearance panel (``qSlicerSettingsStylesPanel``) and its check boxes, drawn as switches in Studio
     APPEARANCE_LABELS = ("ThemeLabel", "AccentColorLabel", "DensityLabel", "FontLabel", "ShowToolTipsLabel", "ShowToolButtonTextLabel", "RestoreUILabel")
     APPEARANCE_CHECKBOXES = ("ShowToolTipsCheckBox", "ShowToolButtonTextCheckBox", "RestoreUICheckBox")
+    #: Controls that keep their natural height; the form row centres them vertically on the 44 px label instead
+    APPEARANCE_CENTRED = ("ThemeComboBox", "DensityComboBox", "FontButton")
 
     def _appearancePanel(self):
         return self.dialog.findChild("QWidget", "qSlicerSettingsStylesPanel")
@@ -927,8 +1035,8 @@ class SettingsDialogLook:
         form = panel.layout() if panel is not None else None
         if form is None or "appearance" in self._saved:
             return
-        saved = {"labels": {}, "margins": None, "spacing": _propertyValue(form, "verticalSpacing"), "header": None}
-        margins = form.contentsMargins()
+        saved = {"labels": {}, "boxes": {}, "margins": None, "spacing": _propertyValue(form, "verticalSpacing"), "header": None}
+        margins = _propertyValue(form, "contentsMargins")
         saved["margins"] = (margins.left(), margins.top(), margins.right(), margins.bottom())
         for name in self.APPEARANCE_LABELS:
             label = panel.findChild("QLabel", name)
@@ -940,9 +1048,24 @@ class SettingsDialogLook:
         for name in self.APPEARANCE_CHECKBOXES:
             box = panel.findChild("QCheckBox", name)
             if box is not None:
+                # The same 44 px row as the label, so that the form row centres the switch on its label
+                saved["boxes"][name] = box.minimumHeight
+                box.setMinimumHeight(ui.SETTINGS_ROW_HEIGHT)
                 box.setProperty("slicerRole", "switch")
                 box.style().unpolish(box)
                 box.style().polish(box)
+                ui.refreshCheckBoxHint(box)
+        # A form row puts a control that is lower than the row at the top of it; the label rows are 44 px high
+        saved["centred"] = {}
+        for name in self.APPEARANCE_CENTRED:
+            control = panel.findChild("QWidget", name)
+            if control is not None:
+                policy = control.sizePolicy
+                saved["centred"][name] = policy.horizontalPolicy()
+                if policy.horizontalPolicy() == qt.QSizePolicy.Minimum:
+                    # With a Minimum width the form row keeps the font button at the top of the row whatever its alignment
+                    control.setSizePolicy(qt.QSizePolicy.Preferred, policy.verticalPolicy())
+                form.setAlignment(control, qt.Qt.AlignVCenter)
         header = qt.QWidget()
         header.setObjectName("StudioAppearancePageHeader")
         headerLayout = qt.QVBoxLayout(header)
@@ -966,12 +1089,20 @@ class SettingsDialogLook:
             if label is not None:
                 label.setText(text)
                 label.setMinimumHeight(minimumHeight)
+        for name, horizontal in saved["centred"].items():
+            control = panel.findChild("QWidget", name)
+            if control is not None:
+                form.setAlignment(control, qt.Qt.Alignment(0))
+                control.setSizePolicy(horizontal, control.sizePolicy.verticalPolicy())
         for name in self.APPEARANCE_CHECKBOXES:
             box = panel.findChild("QCheckBox", name)
             if box is not None:
+                if name in saved["boxes"]:
+                    box.setMinimumHeight(saved["boxes"][name])
                 box.setProperty("slicerRole", "")
                 box.style().unpolish(box)
                 box.style().polish(box)
+                ui.refreshCheckBoxHint(box)
         if saved["header"] is not None and ui._isAlive(saved["header"]):
             form.removeRow(saved["header"])
         form.setContentsMargins(*saved["margins"])
@@ -979,6 +1110,9 @@ class SettingsDialogLook:
 
     def restore(self):
         """The official look again (Classic)."""
+        if getattr(self, "_paletteCallback", None) is not None:
+            ui.removePaletteListener(self._paletteCallback)
+            self._paletteCallback = None
         dialog = self.dialog
         if not ui._isAlive(dialog):
             return
@@ -996,11 +1130,13 @@ class SettingsDialogLook:
                         item.setIcon(0, icons[original])
                     item.setData(0, _SETTINGS_TEXT_ROLE, "")
             ui.bindStyleSheet(tree, None)
-            styleSheet, indentation, iconSize, minimumWidth = self._saved.get("tree", ("", 20, qt.QSize(16, 16), 0))
+            styleSheet, indentation, iconSize, minimumWidth, hPolicy = self._saved.get(
+                "tree", ("", 20, qt.QSize(16, 16), 0, qt.Qt.ScrollBarAsNeeded))
             tree.setStyleSheet(styleSheet)
             tree.setIndentation(indentation)
             tree.setIconSize(iconSize)
             tree.setMinimumWidth(minimumWidth)
+            tree.setHorizontalScrollBarPolicy(hPolicy)
         box = self._buttonBox()
         if box is not None:
             for standard in (qt.QDialogButtonBox.Ok, qt.QDialogButtonBox.Cancel, qt.QDialogButtonBox.RestoreDefaults, qt.QDialogButtonBox.Reset):
@@ -1350,12 +1486,16 @@ class Shell:
         self.hoverTracker = None
         #: Scroll area of the module panel (PageUp and PageDown over a slice view go to the view)
         self._panelScrollArea = None
+        self._panelScrollAreaFocusPolicy = None
         self._forwardingSliceKey = False
         self.workspaces = None
         self.topBar = None
         self.panelHeader = None
         self._active = False
         self._classicState = None
+        self._classicModule = None
+        self._classicLayout = None
+        self._moduleOnEntry = None
         self._classicSwitchAction = None
         self._classicSwitchSeparator = None
         self._canvas = None
@@ -1382,6 +1522,8 @@ class Shell:
         #: The Studio look of the settings dialog (``SettingsDialogLook``), while Studio is applied
         self._settingsLook = None
         self._focusModeHidden = None
+        #: Whether the "Show panels" pill and toast for hidden panels were last shown (see _updateFocusModeIndicators)
+        self._focusModeIndicated = False
         self._focusModePill = None
         self._panelWidthTimer = None
         self._panelUpdateTimer = None
@@ -1405,6 +1547,8 @@ class Shell:
         self._sessionAllowedToolBars = []
         #: Classic minimum width of the module panel and policy of its horizontal scroll bar
         self._classicModulePanelState = None
+        #: Module widgets whose horizontal size policy Studio changed from Minimum to Preferred (``_relaxModuleWidgetPolicy()``)
+        self._relaxedModuleWidgets = []
         #: ctkFittedTextBrowser widgets given an explicit minimum width in Studio
         self._fittedTextBrowsers = []
         #: True from an Esc shortcut override that the Esc stack handled to the matching key press
@@ -1418,6 +1562,7 @@ class Shell:
         self._inspectorHandle = None
         #: Inspector notice slot (above the module panel) and its notice: [widget, key, workspace key]
         self._noticeSlot = None
+        self._noticeSlotFilter = None
         self._notice = None
         #: Last toast messages: (time.time(), text, level)
         self._recentMessages = collections.deque(maxlen=RECENT_MESSAGES_COUNT)
@@ -1518,7 +1663,7 @@ class Shell:
         action.setCheckable(True)
         action.setChecked(self._active)
         action.setShortcut(qt.QKeySequence("Ctrl+Alt+0"))
-        action.setToolTip(_("Switch between the Studio and the Classic interface (Ctrl+Alt+0)"))
+        action.setToolTip(ui.tooltip(_("Switch between the Studio and the Classic interface"), "Ctrl+Alt+0"))
         action.setProperty("studioDescription", _("Classic ⇄ Studio interface"))
         action.connect("triggered(bool)", self._onClassicSwitchTriggered)
         viewMenu = self.mainWindow.findChild("QMenu", "ViewMenu")
@@ -1590,8 +1735,10 @@ class Shell:
         # The layout may change in Classic, where _onLayoutChanged is not connected
         self._viewTabStops = None
         self._uninstallPlugins()
+        self._reattachSegmentEditorNode()
         self._setSegmentEditorPresentation("classic")
         self._setMapPresentation(False)
+        self._setSliceAnnotationsPresentation(False)
         self._active = False
         self._pauseLesionQc()
         self._disconnectAll()
@@ -1717,6 +1864,39 @@ class Shell:
         sequences = getattr(slicer.modules, "sequences", None)
         if sequences is not None and self._classicVisibility.get("sequencesAutoShowToolBar") is not None:
             sequences.autoShowToolBar = self._classicVisibility["sequencesAutoShowToolBar"]
+        self._restoreClassicLayout()
+        self._restoreClassicModule()
+
+    def _restoreClassicLayout(self):
+        """Classic shows the view layout it had before Studio was applied (USABILITY P4, P11)."""
+        layout = self._classicLayout
+        self._classicLayout = None
+        if layout is None:
+            return
+        try:
+            layoutManager = slicer.app.layoutManager()
+            if layoutManager is not None and layoutManager.layout != layout:
+                layoutManager.setLayout(layout)
+        except Exception:
+            logging.error(f"Studio: showing the Classic layout again failed:\n{traceback.format_exc()}")
+
+    def _restoreClassicModule(self):
+        """Classic shows the module it had before Studio was applied (USABILITY P4: navigation never destroys state).
+
+        Only while Studio is still on the module that apply() selected or on the Library page: a module that the
+        user opened on purpose in Studio (Draw for the Segment Editor) stays.
+        """
+        module, onEntry = self._classicModule, self._moduleOnEntry
+        self._classicModule = None
+        self._moduleOnEntry = None
+        if not module:
+            return
+        try:
+            current = str(self.currentModuleName())
+            if current in ("Studio", onEntry) and current != module and slicer.app.moduleManager().module(module) is not None:
+                slicer.util.selectModule(module)
+        except Exception:
+            logging.error(f"Studio: showing the Classic module again failed:\n{traceback.format_exc()}")
 
     #
     # Apply
@@ -1746,6 +1926,19 @@ class Shell:
         self._updateClassicSwitchAction()
         self.applyDurationMs = (time.perf_counter() - startTime) * 1000.0
         logging.debug(f"Studio applied in {self.applyDurationMs:.1f} ms")
+        if midSession:
+            self._announceUpdate()
+
+    def _announceUpdate(self):
+        """After a switch from Classic: an optional update found meanwhile is announced in Studio (A-08)."""
+        try:
+            from StudioLib import updates
+
+            service = updates.instance()
+            if service is not None:
+                service.studioEntered()
+        except Exception:
+            logging.error(f"Studio: announcing the update failed:\n{traceback.format_exc()}")
 
     def _apply(self, midSession=False):
         mainWindow = self.mainWindow
@@ -1762,6 +1955,13 @@ class Shell:
             mainWindow.resizeDocks([dock], [width], qt.Qt.Horizontal)
         self._classicState = mainWindow.saveState()
         settings.setValue("Studio/ClassicWindowState", self._classicState)
+        # The module that Classic showed (not part of the window state): Classic shows it again after a round trip
+        self._classicModule = str(self.currentModuleName()) if midSession else None
+        # The view layout that Classic showed (a Studio workspace replaces it): Classic shows it again after a round trip
+        layoutManager = slicer.app.layoutManager()
+        classicLayout = layoutManager.layout if midSession and layoutManager is not None else None
+        self._classicLayout = None if classicLayout is None or layouts.isStudioLayout(classicLayout) else classicLayout
+        self._moduleOnEntry = None
         self._classicToolBarNames = {toolBar.objectName for toolBar in self._mainWindowToolBars() if toolBar.objectName}
         self._unsavedToolBars = []
         self._classicTitleBar = dock.titleBarWidget()
@@ -1877,7 +2077,15 @@ class Shell:
         layouts.register()
 
         self._connect(mainWindow.moduleSelector(), "moduleSelected(QString)", self.workspaces.onModuleSelected)
+        if hasattr(mainWindow, "setFocusMode"):
+            # F11 and Ctrl+6 (the Hide panels action of the main window) do not pass through setFocusMode() here
+            self._connect(mainWindow, "focusModeChanged(bool)", self._onMainWindowFocusModeChanged)
         self._connect(modulePanel, "moduleAdded(QString)", self._onModuleAdded)
+        # View > Appearance > Reset to default restores the window state of the start of the session, which
+        # has the inspector on the left: dock it on the right again (this slot runs after the main window's)
+        resetAction = mainWindow.findChild("QAction", "WindowToolbarsResetToDefaultAction")
+        if resetAction is not None:
+            self._connect(resetAction, "triggered()", self._onWindowStateReset)
         layoutManager = slicer.app.layoutManager()
         if layoutManager is not None:
             self.workspaces.resetLayoutChoice()
@@ -1904,11 +2112,17 @@ class Shell:
         self._panelScrollArea = dock.findChild("QScrollArea", "ScrollArea")
         if self._panelScrollArea is not None:
             self._panelScrollArea.installEventFilter(self._eventFilter)
+            # The scroll area draws no focus ring: it is not a Tab or F6 stop (its controls are; USABILITY 9.1). Classic
+            # gets its policy back in ``_removeEventFilters()``.
+            if self._panelScrollAreaFocusPolicy is None:
+                self._panelScrollAreaFocusPolicy = self._panelScrollArea.focusPolicy
+            self._panelScrollArea.setFocusPolicy(qt.Qt.NoFocus)
 
         # 7. Draw presentation of the Segment Editor and the Studio look of Map, if they exist already. The folder of the
         # Save dialog (Ctrl+S).
         self._setSegmentEditorPresentation("studio")
         self._setMapPresentation(True)
+        self._setSliceAnnotationsPresentation(True)
         self._fixSceneRootDirectory()
         self._sceneCloseObservation = slicer.mrmlScene.AddObserver(slicer.vtkMRMLScene.EndCloseEvent, self._onSceneEndClose)
         self._sceneImportObservation = slicer.mrmlScene.AddObserver(slicer.vtkMRMLScene.EndImportEvent, self._onSceneEndImport)
@@ -1920,6 +2134,13 @@ class Shell:
 
         # 8. Start workspace
         self.switchTo(self._midSessionWorkspace() if midSession else self._startWorkspace())
+        self._moduleOnEntry = str(self.currentModuleName())
+        # The top bar is new: show "study / subject" again for the subject that stays open over Classic
+        if midSession:
+            from StudioLib import study_ui
+            session = study_ui.session()
+            if session is not None:
+                session._showBreadcrumb(self)
 
         # 9. Navigation behaviours of the views that only Studio uses
         self._applyNavigationBehaviours(True)
@@ -2116,14 +2337,17 @@ class Shell:
         layout = contents.layout()
         self._noticeSlot = qt.QWidget()
         self._noticeSlot.setObjectName("StudioInspectorNotice")
-        # Ignored: a notice never sets the minimum width of the inspector (notices are height-for-width)
-        policy = qt.QSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Maximum)
+        # Ignored: a notice never sets the minimum width of the inspector (notices are height-for-width).
+        # Preferred, not Maximum, vertically: Maximum caps the slot at its (width-independent) sizeHint, which is
+        # shorter than heightForWidth() for a notice with wrapped lines, and cuts off its last line
+        policy = qt.QSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
         policy.setHeightForWidth(True)
         self._noticeSlot.setSizePolicy(policy)
         noticeLayout = qt.QVBoxLayout(self._noticeSlot)
         # A rounded notice (VISUAL 4.8) inset like the inspector cards
         noticeLayout.setContentsMargins(12, 8, 12, 4)
         noticeLayout.setSpacing(0)
+        self._noticeSlotFilter = _NoticeSlotHeightFilter(self._noticeSlot)
         self._noticeSlot.hide()
         layout.insertWidget(layout.indexOf(self._modulePanel()), self._noticeSlot)
 
@@ -2136,13 +2360,14 @@ class Shell:
         self._noticeSlot.hide()
         self._noticeSlot.setObjectName("")
         self._noticeSlot.deleteLater()
+        self._noticeSlotFilter = None
         self._noticeSlot = None
 
     def _makeTopBarFocusable(self):
         """The buttons of the top bar take the keyboard focus with Tab (not by a click), and Space and Enter press them."""
         topBar = self.topBar
         buttons = [getattr(topBar, name, None) for name in ("menuButton", "breadcrumbButton", "undoButton", "redoButton", "layoutButton", "errorBadge")]
-        buttons += list(getattr(topBar, "workspaceButtons", {}).values())
+        # The tabs of the workspace switcher are not here: the top bar gives the Tab stop to the current tab only
         for button in buttons:
             if button is None:
                 continue
@@ -2355,6 +2580,17 @@ class Shell:
             self.setFocusMode(False)
         self.setInspectorVisible(True)
 
+    def _onWindowStateReset(self):
+        """Dock the inspector on the right again after the main window restored its startup state."""
+        if not self._active:
+            return
+        dock = self._panelDock()
+        if self.mainWindow.dockWidgetArea(dock) != qt.Qt.RightDockWidgetArea:
+            visible = dock.isVisible()
+            self.mainWindow.addDockWidget(qt.Qt.RightDockWidgetArea, dock)
+            dock.setVisible(visible)
+        self._updatePanelWidth(shrink=True)
+
     def _onModuleAdded(self, moduleName):
         if moduleName == "SegmentEditor":
             self._setSegmentEditorPresentation("studio")
@@ -2388,6 +2624,42 @@ class Shell:
                 widget.setStudioPresentation(bool(studio), refresh=False)
             except Exception:
                 logging.error(f"Studio: cannot set the look of Map:\n{traceback.format_exc()}")
+
+    @staticmethod
+    def _setSliceAnnotationsPresentation(studio):
+        """The Studio corner text of flat slice views (the readable name of the image alone, VISUAL 4.3); ``False`` gives
+        Classic the corner text of official 3D Slicer back ("L:", "F:" and "B:" lines).
+        """
+        try:
+            from DataProbeLib.SliceViewAnnotations import STUDIO_ACTIVE_PROPERTY
+        except ImportError:
+            # The DataProbe module is turned off: no corner text
+            return
+        slicer.app.setProperty(STUDIO_ACTIVE_PROPERTY, bool(studio))
+        dataProbe = getattr(slicer.modules, "DataProbeInstance", None)
+        sliceAnnotations = getattr(getattr(dataProbe, "infoWidget", None), "sliceAnnotations", None)
+        if sliceAnnotations is not None:
+            try:
+                sliceAnnotations.refreshAnnotations()
+            except Exception:
+                logging.error(f"Studio: cannot refresh the corner text of the slice views:\n{traceback.format_exc()}")
+
+    @staticmethod
+    def _reattachSegmentEditorNode():
+        """A scene loaded while Draw was not shown left the Segment Editor without its parameter node (draw.py,
+        ``_onSceneStartImport``): Classic gives it the scene's node back before the presentation changes, else the editor
+        logs "Invalid segment editor parameter set node" (the red badge) while it updates its sections.
+        """
+        widget = getattr(slicer.modules, "SegmentEditorWidget", None)
+        editor = getattr(widget, "editor", None)
+        if editor is None or editor.mrmlSegmentEditorNode() is not None or slicer.mrmlScene is None:
+            return
+        if slicer.mrmlScene.GetSingletonNode("SegmentEditor", "vtkMRMLSegmentEditorNode") is None:
+            return
+        try:
+            widget.selectParameterNode()
+        except Exception:
+            logging.error(f"Studio: cannot restore the Segment Editor parameter node:\n{traceback.format_exc()}")
 
     @staticmethod
     def _setSegmentEditorPresentation(name):
@@ -2485,9 +2757,10 @@ class Shell:
         if cheatsheet is not None and hasattr(cheatsheet, "toggle"):
             cheatsheet.toggle(self)
             return
-        self.toast(_("Ctrl+K search · Ctrl+Alt+1 Library, 2 Draw, 3 Map · Alt+1..4 layouts · {inspector} inspector · {panels} hide panels · "
-                     "F10 menu · F6 regions · Ctrl+Alt+0 Classic").format(
-            inspector=self.inspectorShortcutText(alternate=True), panels=focusModeKeyText()), 6000)
+        self.toast(_("{search} search · {workspaces} Library, 2 Draw, 3 Map · {layouts} layouts · {inspector} inspector · {panels} hide panels · "
+                     "F10 menu · F6 regions · {classic} Classic").format(
+            search=ui.keyText("Ctrl+K"), workspaces=ui.keyText("Ctrl+Alt+1"), classic=ui.keyText("Ctrl+Alt+0"),
+            layouts=ui.keyText("Alt+1") + "..5", inspector=self.inspectorShortcutText(alternate=True), panels=focusModeKeyText()), 6000)
 
     #
     # Keyboard access: menus and focus regions
@@ -2649,6 +2922,12 @@ class Shell:
             target = modulePanel
         if target is not None:
             target.setFocus(qt.Qt.ShortcutFocusReason)
+            # Tab scrolls the inspector to its target (QScrollArea::focusNextPrevChild); setFocus() does not, so the
+            # stop would stay out of view when the inspector is scrolled (SPEC 2.11: the focus ring is visible)
+            scrollArea = self._panelScrollArea
+            if scrollArea is not None and self._isAlive(scrollArea) and scrollArea.widget() is not None \
+                    and scrollArea.isAncestorOf(target):
+                scrollArea.ensureWidgetVisible(target)
 
     @staticmethod
     def _firstTabStop(container, maximumSteps=2000):
@@ -2676,20 +2955,37 @@ class Shell:
         target = self._firstTabStop(canvas)
         (target or canvas).setFocus(qt.Qt.ShortcutFocusReason)
 
-    def _focusView(self):
+    def _viewToFocus(self):
+        """The view that F6 focuses, or None: a shown view only (``sliceViewNames()`` also lists the slice views that a
+        maximized view, a one-up layout or the 3D-only layout hides). The last hovered slice view, else Red, else the
+        first shown slice view, else the first shown 3D view.
+        """
         layoutManager = slicer.app.layoutManager()
         if layoutManager is None:
-            return
-        names = list(layoutManager.sliceViewNames())
+            return None
+        sliceViews = {}
+        for name in layoutManager.sliceViewNames():
+            sliceWidget = layoutManager.sliceWidget(name)
+            if sliceWidget is not None and sliceWidget.isVisible():
+                sliceViews[name] = sliceWidget.sliceView()
         name = self.hoverTracker.lastSliceViewName if self.hoverTracker is not None else None
-        if name not in names:
-            name = "Red" if "Red" in names else (names[0] if names else None)
-        sliceWidget = layoutManager.sliceWidget(name) if name else None
-        if sliceWidget is None:
+        for candidate in (name, "Red"):
+            if candidate in sliceViews:
+                return sliceViews[candidate]
+        if sliceViews:
+            return next(iter(sliceViews.values()))
+        for index in range(layoutManager.threeDViewCount):
+            threeDWidget = layoutManager.threeDWidget(index)
+            if threeDWidget is not None and threeDWidget.isVisible():
+                return threeDWidget.threeDView()
+        return None
+
+    def _focusView(self):
+        view = self._viewToFocus()
+        if view is None:
             return
-        sliceView = sliceWidget.sliceView()
-        vtkWidget = sliceView.VTKWidget() if hasattr(sliceView, "VTKWidget") else None
-        (vtkWidget or sliceView).setFocus(qt.Qt.ShortcutFocusReason)
+        vtkWidget = view.VTKWidget() if hasattr(view, "VTKWidget") else None
+        (vtkWidget or view).setFocus(qt.Qt.ShortcutFocusReason)
 
     @staticmethod
     def _isAlive(widget):
@@ -2759,8 +3055,10 @@ class Shell:
             return
         contents = dock.widget()
         target = self.panelWidth
-        needed = self._modulePanelNeededWidth()
         workspace = self.currentWorkspace()
+        if workspace is not None:
+            self._relaxModuleWidgetPolicy()
+        needed = self._modulePanelNeededWidth()
         known = self._workspacePanelWidths.get(self.currentModuleName()) if workspace is not None else dock.width
         if known is None or needed > known:
             # A wider measurement is kept (a workspace's for good): measure again once the pending layouts (a module
@@ -2783,6 +3081,44 @@ class Shell:
             contents.setMinimumWidth(contentsMinimumWidth)
         if dock.width < target or (shrink and dock.width != target):
             self.mainWindow.resizeDocks([dock], [target], qt.Qt.Horizontal)
+
+    def _relaxModuleWidgetPolicy(self):
+        """Let the layout of the module panel make a workspace module widget as narrow as its minimum size hint.
+
+        The module panel gives the module widget the Minimum horizontal size policy (``qSlicerModulePanel::setModule``), so
+        that a layout never makes it narrower than its size hint: the width of its widest row, for example a form with its
+        labels next to the fields. Rows that wrap when the inspector is narrow then still make the inspector wider than
+        ``Studio/PanelWidth``, and the widest width stays (``_workspacePanelWidth()``). With the Preferred policy the layout
+        minimum is the minimum size hint (rows wrapped) and wider contents scroll (SPEC 2.5).
+        """
+        modulePanel = self._modulePanel()
+        scrollArea = modulePanel.findChild("QScrollArea", "ScrollArea") if modulePanel is not None else None
+        contents = scrollArea.widget() if scrollArea is not None else None
+        layout = contents.layout() if contents is not None else None
+        if layout is None:
+            return
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            widget = item.widget() if item is not None else None
+            if widget is None or widget.objectName == "HelpCollapsibleButton":
+                continue
+            policy = widget.sizePolicy
+            # The module panel sets the Minimum policy again each time the module is selected
+            if policy.horizontalPolicy() == qt.QSizePolicy.Minimum:
+                widget.setSizePolicy(qt.QSizePolicy.Preferred, policy.verticalPolicy())
+                if widget not in self._relaxedModuleWidgets:
+                    self._relaxedModuleWidgets.append(widget)
+
+    def _restoreModuleWidgetPolicy(self):
+        """Give the module widgets that ``_relaxModuleWidgetPolicy()`` changed the Minimum policy again (Classic)."""
+        for widget in self._relaxedModuleWidgets:
+            try:
+                policy = widget.sizePolicy
+                widget.setSizePolicy(qt.QSizePolicy.Minimum, policy.verticalPolicy())
+            except Exception:
+                # Deleted with its module
+                pass
+        self._relaxedModuleWidgets = []
 
     def _modulePanelNeededWidth(self):
         """Width of the inspector at which the module widget is not clipped (its layout minimum).
@@ -2828,7 +3164,7 @@ class Shell:
     def _layoutSignature():
         """What the layout minimum of a module widget depends on: the Slicer build and the application font."""
         font = slicer.app.font()
-        return f"{slicer.app.applicationVersion}-{slicer.app.revision}-{font.family()}-{font.pointSizeF()}-{font.pixelSize()}"
+        return f"{slicer.app.applicationVersion}-{slicer.app.revision}-{font.family()}-{font.pointSizeF()}-{font.pixelSize()}-{_WORKSPACE_PANEL_WIDTHS_VERSION}"
 
     def resetWorkspacePanelWidths(self):
         """Forget the widths needed by the workspace modules (they are measured again as tools are used)."""
@@ -2867,6 +3203,7 @@ class Shell:
             self._fitTextBrowsers()
             return
         self._unfitTextBrowsers()
+        self._restoreModuleWidgetPolicy()
         if self._classicModulePanelState is not None:
             modulePanelMinimumWidth, contentsMinimumWidth, policy = self._classicModulePanelState
             modulePanel.setMinimumWidth(modulePanelMinimumWidth)
@@ -2970,8 +3307,11 @@ class Shell:
         self._inspectorHiddenByUser = True
         self._updateInspectorHandle()
         ws = workspaces.workspace(self.currentWorkspace() or self._transientOrigin)
-        if ws is not None:
+        handleShown = self._inspectorHandleWanted()  # not over the Library canvas: name only controls that exist
+        if ws is not None and handleShown:
             text = _("Inspector hidden · click the {workspace} tab or the {handle} handle to show it").format(workspace=ws.title, handle="\u2039")
+        elif ws is not None:
+            text = _("Inspector hidden · click the {workspace} tab to show it").format(workspace=ws.title)
         else:
             text = _("Inspector hidden · click the {handle} handle to show it").format(handle="\u2039")
         self.toast(text, level="consequence", action=lambda: self.setInspectorVisible(True), actionText=_("Show"),
@@ -3035,6 +3375,13 @@ class Shell:
     def inspectorFooter(self):
         return self._footerWidget
 
+    def arrangeInspectorTabOrder(self):
+        """Make Tab go through the inspector (panel header, notice, module, footer) in reading order, top to bottom."""
+        dock = self._panelDock()
+        contents = dock.widget() if dock is not None else None
+        if contents is not None:
+            ui.arrangeTabOrder(contents)
+
     def setInspectorNotice(self, widget=None, key=None, workspace=None):
         """Show ``widget`` in the inspector notice slot, between the panel header and the module (USABILITY 6.4).
 
@@ -3095,6 +3442,8 @@ class Shell:
                 self._notice = None
                 visible = False
         self._noticeSlot.setVisible(visible)
+        if visible and self._noticeSlotFilter is not None:
+            self._noticeSlotFilter.update()
 
     def setDataProbeVisible(self, visible):
         dataProbe = self._dataProbe()
@@ -3261,6 +3610,22 @@ class Shell:
         self._toast.show(text, ms, level=level)
         self._toast.label.setAccessibleName(str(text))
 
+    def consequenceHeld(self):
+        """True while a consequence toast is still within its minimum time (``STICKY_TOAST_MINIMUM_MS``).
+
+        A plain confirmation shown then would replace it at once: the caller that only confirms ("Loaded x") leaves
+        the consequence on screen instead.
+        """
+        sticky = self._stickyToast
+        return sticky is not None and sticky.isVisible() and sticky.isSticky() and sticky.minimumTimer.isActive()
+
+    def consequenceVisible(self):
+        """True while a consequence toast is on screen (it stays until the next input, so this outlasts the minimum
+        time of ``consequenceHeld()``). A later confirmation that carries an action waits for it to go.
+        """
+        sticky = self._stickyToast
+        return sticky is not None and sticky.isVisible() and sticky.isSticky()
+
     def _hidePlainToast(self):
         toast = self._toast
         if toast is None:
@@ -3407,13 +3772,42 @@ class Shell:
         listWidget.setFocusPolicy(qt.Qt.NoFocus)
         listWidget.setFrameShape(qt.QFrame.NoFrame)
         messages = self.recentMessages()
+        fontMetrics = listWidget.fontMetrics()
+
+        def textWidth(text):
+            return fontMetrics.horizontalAdvance(text) if hasattr(fontMetrics, "horizontalAdvance") else fontMetrics.width(text)
+
+        # The list is as wide as its longest message, at most 80 % of the window (at least 360 px); a longer message is
+        # wrapped at the word boundaries, so every message is readable in full and no horizontal scroll bar is needed.
+        padding = 24
+        windowWidth = self.mainWindow.width if self.mainWindow is not None else 1200
+        maxWidth = max(360, int(windowWidth * 0.8)) - padding
+        lines = []
         for timestamp, text, level in reversed(messages):
-            item = qt.QListWidgetItem(f"{time.strftime('%H:%M:%S', time.localtime(timestamp))}  {text}")
-            listWidget.addItem(item)
+            prefix = f"{time.strftime('%H:%M:%S', time.localtime(timestamp))}  "
+            wrapped, current, wordsOnLine = [], prefix, 0
+            for word in str(text).split():
+                trial = current + (" " if wordsOnLine else "") + word
+                if wordsOnLine and textWidth(trial) > maxWidth:
+                    wrapped.append(current)
+                    current, wordsOnLine = " " * len(prefix) + word, 1
+                else:
+                    current, wordsOnLine = trial, wordsOnLine + 1
+            wrapped.append(current)
+            lines.append("\n".join(wrapped))
         if not messages:
-            listWidget.addItem(_("No messages yet"))
-        listWidget.setMinimumWidth(360)
-        listWidget.setFixedHeight(min(320, max(40, listWidget.sizeHintForRow(0) * max(1, len(messages)) + 8)))
+            lines.append(_("No messages yet"))
+        for line in lines:
+            listWidget.addItem(qt.QListWidgetItem(line))
+        listWidget.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        listWidget.setVerticalScrollBarPolicy(qt.Qt.ScrollBarAsNeeded)
+        widest = max(textWidth(part) for line in lines for part in line.split("\n"))
+        rowsHeight = sum(listWidget.sizeHintForRow(i) for i in range(listWidget.count)) + 8
+        height = min(320, max(40, rowsHeight))
+        scrollBarWidth = listWidget.verticalScrollBar().sizeHint.width() if rowsHeight > height else 0
+        listWidth = max(360, min(maxWidth, widest) + padding) + scrollBarWidth
+        listWidget.setMinimumWidth(listWidth)
+        listWidget.setFixedHeight(height)
         action = qt.QWidgetAction(menu)
         action.setDefaultWidget(listWidget)
         menu.addAction(action)
@@ -3498,8 +3892,18 @@ class Shell:
                 self._focusModeHidden = None
         self._updateFocusModeIndicators(wasFocusMode)
 
-    def _updateFocusModeIndicators(self, wasFocusMode):
+    def _onMainWindowFocusModeChanged(self, enabled):
+        self._updateFocusModeIndicators()
+
+    def _updateFocusModeIndicators(self, wasFocusMode=None):
+        """Show or hide the "Show panels" pill and the consequence toast to match the state of the panels.
+
+        Runs for every route (≡ menu, Esc, the pill, and the F11 / Ctrl+6 keys through ``focusModeChanged``),
+        so the toast is shown once, on the change, whichever route is first.
+        """
+        wasFocusMode = self._focusModeIndicated
         focusMode = self._active and self.focusMode()
+        self._focusModeIndicated = bool(focusMode)
         if self._focusModePill is not None:
             if focusMode:
                 self._focusModePill.show()
@@ -3612,7 +4016,10 @@ class Shell:
         layoutNode = layoutManager.layoutLogic().GetLayoutNode() if layoutManager is not None else None
         if layoutNode is not None and layoutNode.GetNumberOfMaximizedViewNodes() > 0:
             viewNode = layoutNode.GetMaximizedViewNode(layoutNode.GetNumberOfMaximizedViewNodes() - 1)
+            focusBefore = qt.QApplication.focusWidget()
             layoutManager.removeMaximizedViewNode(viewNode)
+            # The pointer has not moved: the view under it takes the keys back once the layout is restored
+            qt.QTimer.singleShot(0, lambda: self._focusHoveredViewAfterLayout(focusBefore))
             return True
         if self.focusMode():
             self.setFocusMode(False)
@@ -3739,6 +4146,53 @@ class Shell:
             self._updateInspectorHandle()
         return False
 
+    @staticmethod
+    def _hoveredSliceView():
+        """(widget under the pointer, the slice view it is in), or (None, None) if the pointer is not over a visible one."""
+        hovered = qt.QApplication.widgetAt(qt.QCursor.pos())
+        view = hovered
+        while view is not None and not view.inherits("qMRMLSliceView"):
+            view = view.parentWidget()
+        if view is None or not hovered.isVisible():
+            return None, None
+        return hovered, view
+
+    def _focusHoveredViewAfterLayout(self, focusBefore):
+        if not self._active:
+            return
+        if self.topBar is not None:
+            self.topBar._focusHoveredViewAfterLayout(focusBefore)
+        else:
+            self.focusHoveredView()
+
+    def focusHoveredView(self):
+        """Give the keyboard focus to the slice view under the pointer. Return True if the view has it afterwards.
+
+        Focus follows the mouse when the pointer enters a view (``qMRMLSliceView::enterEvent``). When Studio moves the
+        focus itself while the pointer stays where it is (a scan was dropped or opened and Draw put the focus on its
+        tool tile), no enter event follows, and Home, End, the arrow keys, f and b went to the tile (the arrows would
+        even have changed the tool). Workspaces call this after their initial focus: the view under the pointer takes
+        it back, as if the pointer had just entered. Nothing changes if the setting is off, the window is not active, a
+        popup or dialog is open, or a text input has the focus.
+        """
+        if not self._active or not slicer.app.property(FOCUS_FOLLOWS_MOUSE_PROPERTY):
+            return False
+        if not self.mainWindow.isActiveWindow:
+            return False
+        if qt.QApplication.activePopupWidget() is not None or qt.QApplication.activeModalWidget() is not None:
+            return False
+        if _isTextInput(qt.QApplication.focusWidget()):
+            return False
+        hovered, view = self._hoveredSliceView()
+        if view is None:
+            return False
+        target = view.VTKWidget() if hasattr(view, "VTKWidget") else None
+        if target is None:
+            target = hovered
+        if qt.QApplication.focusWidget() != target:
+            target.setFocus(qt.Qt.MouseFocusReason)
+        return qt.QApplication.focusWidget() == target
+
     def _forwardSliceKey(self, event):
         """PageUp or PageDown that would scroll the inspector, or that no widget used, step the slice view under the
         pointer, as the keyboard shortcuts say. Focus follows the mouse only when the pointer enters a view: after a
@@ -3759,11 +4213,8 @@ class Shell:
             # A view that has the focus already stepped its slice (it does not accept the key event, so the event
             # comes up to the main window afterwards): forwarding it again would step twice, or step a second view
             return False
-        hovered = qt.QApplication.widgetAt(qt.QCursor.pos())
-        view = hovered
-        while view is not None and not view.inherits("qMRMLSliceView"):
-            view = view.parentWidget()
-        if view is None or not hovered.isVisible():
+        hovered, view = self._hoveredSliceView()
+        if view is None:
             return False
         # The render widget handles the key (the widget under the pointer may be a child drawn over it)
         target = view.VTKWidget() if hasattr(view, "VTKWidget") else None
@@ -3785,10 +4236,13 @@ class Shell:
         if self._panelScrollArea is not None:
             try:
                 self._panelScrollArea.removeEventFilter(self._eventFilter)
+                if self._panelScrollAreaFocusPolicy is not None:
+                    self._panelScrollArea.setFocusPolicy(self._panelScrollAreaFocusPolicy)
             except Exception:
                 # Deleted with the module panel
                 pass
             self._panelScrollArea = None
+            self._panelScrollAreaFocusPolicy = None
         if self._watchedPanelContents is not None:
             try:
                 self._watchedPanelContents.removeEventFilter(self._eventFilter)

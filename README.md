@@ -39,7 +39,7 @@ your own computer; no package has been published yet, so the in-app update check
 > folder (projects that save as you go), your own MNI templates, a redesign of Library, Draw, Map and the slice
 > views, and the research tools of lesion network mapping ([Research tools of wave 5](#research-tools-of-wave-5)):
 > *Get a connectome…*, the Validate, Robust, Nulls, Circuits, Compare, Calibrate and Report cards, analysis recipes
-> with a plan lock, coordinate, atrophy and stimulation seeds, voxelwise lesion-symptom mapping, a review workflow
+> with a plan lock, coordinate and stimulation seeds (atrophy seeds on the command line), voxelwise lesion-symptom mapping, a review workflow
 > with blind second tracing, a case strip and trace queues, literature sources with PRISMA counts, control-lesion
 > sets, a share-safe export, tutorial cohorts and the `slicer-lnm` command. Everything was written and checked on
 > Linux with Qt 5.15; nothing of waves 2 to 5 has been run on macOS (Qt 6) or Windows, and no real connectome has
@@ -70,7 +70,7 @@ What stays the same:
 - **All of 3D Slicer.** Every module, the Python console and API, and extensions. Nothing is removed or
   renamed; modules that the Studio interface does not show are one search away (`Ctrl+K`).
 - **The Classic interface.** `≡ > Classic interface` or `Ctrl+Alt+0` restores the standard Slicer window
-  exactly: menu bar, toolbars, module panel and status bar. `View > Studio interface` or `Ctrl+Alt+0` switches
+  exactly: menu bar, toolbars, module panel and status bar. `View > Switch to Studio interface` or `Ctrl+Alt+0` switches
   back. The choice is remembered. The appearance settings (theme, font, flat view bars) belong to the
   application, so they apply to both interfaces.
 - **Files.** Scenes and data are written in the same formats as official Slicer. Slicer Studio adds no
@@ -184,7 +184,7 @@ Navigation details:
 - **Draw remembers its tool.** Going from Draw to the Library or to another module and back keeps the
   selected segment and the armed tool. Pressing `Esc` to deselect the tool is respected. Place and
   window/level modes put the tool aside and bring it back when they end.
-- **Files that are already open** are not loaded a second time from *Recent*, *Open…* or a drop in
+- **Files that are already open** are not loaded a second time from *Opened from elsewhere*, *Open…* or a drop in
   Studio: the existing scan or lesion becomes current and a message says so. Classic still loads the
   file again, as official Slicer does.
 - **Back to Studio from Classic** returns to the workspace of the module you were in (else the last
@@ -201,7 +201,7 @@ The Classic interface is also used, whatever the last choice, with `--testing`, 
 
 Studio saves your work as you go; there is no Save button to remember. The first start asks one question,
 *Where should Slicer Studio keep your work?*, and proposes a folder called *Slicer Studio* in your Documents
-folder: *Continue* accepts it, *Choose folder…* picks another one, and closing the window accepts the proposal.
+folder: *Continue* accepts it, *Choose…* picks another one, and closing the window accepts the proposal.
 *Settings > Saving* changes the folder later (and offers to move your projects). A folder that a cloud service
 syncs is flagged, because scans can contain patient data. Everything is ordinary files, sorted so that a person
 who never used 3D Slicer can find them in Finder, Explorer or a file manager:
@@ -311,10 +311,11 @@ and the options of the active tool:
 
 - The **lesion card** names the lesion (a menu switches between lesions or makes a new one), has an eye,
   a *center on lesion* button and *follow strokes* (the other views move to each stroke:
-  `Studio/FollowStrokes`), and reads out the lesion as you draw, for example "Left · 2.27 mL · 1 part ·
-  0 gaps". When there are several parts, gap slices or a part outside the brain, a link acts on them
+  `Studio/FollowStrokes`), and shows three stat cells as you draw (*Volume*, *Parts* with the gaps under it, and *Side*:
+  "Left" in MNI space, "Unknown" in scanner space; screen readers hear the same as one line, for example
+  "Left · 2.27 mL · 1 part · 0 gaps"). When there are several parts, gap slices or a part outside the brain, a link acts on them
   (*Keep largest*, *Fill*, *Clip*). It also shows whether the lesion is saved, and the source volume you
-  are tracing on ("on T1 ▾"). *Fill gaps and specks* closes gaps up to 2 mm and removes islands under
+  are tracing on ("on T1 ▾"). *Fill gaps and specks* (an item of the lesion's ⋯ menu) closes gaps up to 2 mm and removes islands under
   10 mm³.
 - **Brush size** chips (1, 3, 6 and 12 mm) set the brush; the diameter is remembered
   (`Studio/BrushDiameterMm`). A small label next to the brush ("Ø 3.0 mm") shows the diameter for about a
@@ -469,7 +470,8 @@ order are kept, a backup is written once to `.studio/participants.orig.tsv`, and
   and `supplementary_lesions.tsv` under `derivatives/lesions`, with the same numbering in all three. These are
   descriptive checks of the lesion set, not tests.
 - **Analysis.** A small *Analysis* card says in one line where the cohort analysis of the study stands ("Never run",
-  "Running · Network maps 34%", "up to date · finished 2 h ago", "3 new or changed lesions", "Stopped" or "Failed")
+  "Running · Network maps 34%", "up to date · finished 2 h ago", "3 new or changed lesions", "design changed since the last run" (a group,
+  include flag, score or covariate changed), "Stopped" or "Failed")
   and has *Open in Map* and *Open report*. When every included subject is traced, a toast points to it once per
   session. It never starts a run by itself (see [Automate a cohort analysis](#automate-a-cohort-analysis)).
 - **One subject at a time** is in the scene. Opening a subject replaces the previous subject's scan and lesion
@@ -535,7 +537,8 @@ order are kept, a backup is written once to `.studio/participants.orig.tsv`, and
   computed from the view's own orientation, so they stay right when you rotate or flip a view. Within
   25 degrees of an anatomical axis one letter is shown; otherwise the letters of the axes involved are
   combined (for example `RA`). The default display is radiological. `Studio/OrientationLetters`
-  (default true) turns them off. A figure is labelled as a figure and gets no patient letters.
+  (default true) turns them off. A figure is labelled as a figure: until its side is answered it shows
+  `Figure · side unknown` and no letters, and once answered it shows only R and L (never A, P, S or I).
 - **Thin sliders and scroll bars.** Sliders have a 4 px groove with an accent-colored fill and a round
   handle (also the range sliders and the slice offset slider), scroll bars are thin, combo and spin boxes are
   flat with working arrows, and progress bars (a 4 px bar with the text beside it), tabs, splitters and header
@@ -768,8 +771,12 @@ data, small fixtures and local test servers (see [Known limitations](#status-and
 **Seeds and plans**
 
 - **Coordinate, atrophy and stimulation seeds.** The seed modes Coords and Stim map spheres from CSV, Sleuth or NiMARE
-  foci (Talairach is converted to MNI; radius or diameter is explicit), atrophy maps and stimulation sites (points,
-  E-field or VTA files) with the same engine as lesions. An optional random-coordinate control compares the observed
+  foci (Talairach is converted to MNI; radius or diameter is explicit) and stimulation sites (points, E-field or VTA
+  files) with the same engine as lesions. Atrophy seeds (a per-patient w-map thresholded with a rule such as
+  `w<-2`) are a command-line feature, not a seed mode of the Map workspace: run
+  `PythonSlicer -m LesionNetworkMappingLib.coords atrophy` (see
+  [Atrophy seeds](Docs/user_guide/modules/lesionnetworkmapping.md#atrophy-seeds-command-line)); the w-maps must
+  already be in the MNI space of the connectome. An optional random-coordinate control compares the observed
   overlap with grey-matter null sets of the same size and radii.
 - **Recipes, plan lock and ROI.** Eight built-in analysis recipes with status tags and citations, lab recipes that record
   their differences from a base recipe, and a *Lock plan* that writes the plan with a checksum; later changes to the
@@ -843,7 +850,7 @@ Save) and the exit prompt keep their meaning. Use *File > Save* to keep your wor
 - **How long.** The last 5 sessions, 2 GB in total and 14 days; the settings below change this.
 - **Privacy.** An autosave may contain copies of patient data. The folder is private to your account
   (mode `0700` on Linux and macOS), has a `README.txt` that says what it is, and is not synchronized by
-  Slicer Studio; choose a private folder if you change it. *Application Settings > Autosave > Delete all
+  Slicer Studio; choose a private folder if you change it. *Application Settings > Saving > Delete all
   autosaves…* removes them all.
 - **Recovery.** If Slicer closed unexpectedly, or you closed it without saving, the next start lists what can
   be recovered, with a thumbnail and a summary: in the Classic interface as a window, in Studio as a card
@@ -854,7 +861,7 @@ Save) and the exit prompt keep their meaning. Use *File > Save* to keep your wor
   disk is nearly full). Nothing is shown while nothing was autosaved. Its tooltip says that autosave is not
   Save ("This is not saving: use File › Save (Ctrl+S) to save your files") and gives the time and size of the
   last autosave. Clicking it opens a menu: the last autosave, *Autosave now*, *Recover autosaved work…*,
-  *Open autosave folder* and *Autosave settings…*. In a window narrower than 1500 px (1700 px while the
+  *Open autosave folder*, *Open project…* and *Saving settings…*. In a window narrower than 1500 px (1700 px while the
   status chip is shown), or when the top bar is compact, it is an icon and the text moves to the tooltip.
   When a study is open, the tooltip also shows when the study's journal was last saved.
 - **Recovery card in Studio.** After a crash, a card at the top of the Library lists the sessions that can be
@@ -864,7 +871,8 @@ Save) and the exit prompt keep their meaning. Use *File > Save* to keep your wor
   Show") points to it. *Recover* puts the scene back and returns to the workspace (Draw or Map) that was
   current at the autosave. Every autosave records the workspace and the open study and subject for this. If
   the autosave was made with a study open, *Recover* reads *Reopen study at sub-012*: it reopens the study at
-  that subject (where the journal offers the lesion, below) instead of loading the scene. Switching to
+  that subject (where the journal offers the lesion, below) instead of loading the subject's scan and lesion
+  from the scene; the scene's other data (point lists, tables, models…) is added to it. Switching to
   Classic removes the status and the card, and Classic's window and status-bar messages take over.
 - **Study journal and scene autosave.** The two work side by side. The scene autosave copies the whole
   scene to the private folder above. The journal of an open study (see
@@ -873,8 +881,8 @@ Save) and the exit prompt keep their meaning. Use *File > Save* to keep your wor
   the study (and holds the patient's lesion). Autosave pauses while a subject is switched.
 - **Official Slicer.** The `Scene.mrml` of an autosave opens in official 3D Slicer 5.12 and 5.13
   (*File > Load Scene*), which the compatibility check tests with `--autosave`.
-- **Off.** `SLICER_STUDIO_AUTOSAVE=0` turns autosave off for a run. The *Autosave the scene* option of
-  the Autosave panel (`Studio/Autosave/Enabled`) stops autosaving but keeps recovery. Autosave never runs
+- **Off.** `SLICER_STUDIO_AUTOSAVE=0` turns autosave off for a run. The *Save automatically* switch of
+  the Saving panel (`Studio/Autosave/Enabled`) stops autosaving but keeps recovery. Autosave never runs
   with `--testing`, `--no-main-window` or `--exit-after-startup`.
 - **Web version.** The autosave folder is in the `slicer-studio-web-home` volume, so it survives
   stopping and starting the container. Stopping the container ends Slicer with a signal and not through the
@@ -916,7 +924,7 @@ classic behavior, so most of these keys have no effect there. The ones you may w
 |---|---|---|
 | `Studio/Enabled` | `true` | `false` starts the Classic interface |
 | `Studio/StartWorkspace` | `Library` | Workspace shown at start (`Last`: the one you left) |
-| `Studio/Autosave/Enabled` | `true` | Autosave on or off (Application Settings > Autosave) |
+| `Studio/Autosave/Enabled` | `true` | Autosave on or off (Application Settings > Saving > Save automatically) |
 | `Studio/Autosave/IntervalMinutes` | `2` | Longest time between autosaves during continuous work |
 | `Studio/Autosave/IdleSeconds` | `10` | Autosave after this many seconds without input |
 | `Studio/Autosave/Directory` | (private folder) | Folder of new autosaves |
@@ -944,7 +952,7 @@ classic behavior, so most of these keys have no effect there. The ones you may w
 | `Appearance/FlatViewBars` | `true` (not under `--testing`) | Flat view bars (Application Settings > Views, restart needed) |
 | `Appearance/Default3DView/*` | follows the theme | 3D view background and box colors |
 | `Studio/Library/StudyView` | `list` | `list` or `grid`: how the Library shows the subjects of a study (the List and Grid buttons) |
-| `Studio/Projects/Root` | `Documents/Slicer Studio` (in the web version `/data/Slicer Studio`) | The Slicer Studio folder (Settings > Saving); `Studio/Projects/RootChosen` records that you chose it. `SLICER_STUDIO_PROJECTS_ROOT` overrides both and skips the question; `SLICER_STUDIO_PROJECTS=0` turns projects off |
+| `Studio/Projects/Root` | `Documents/Slicer Studio` (in the web version `/data/Slicer Studio`) | The Slicer Studio folder (Settings > Saving); `Studio/Projects/RootChosen` records that you chose it, and `Studio/Projects/MovePending` a move of its content that has not finished yet (the next start finishes it). `SLICER_STUDIO_PROJECTS_ROOT` overrides both and skips the question; `SLICER_STUDIO_PROJECTS=0` turns projects off |
 | `Studio/Library/ProjectSort` | `modified` | How the Library sorts the projects: `modified`, `name` or `created` |
 | `Studio/Library/ProjectView` | `grid` | `grid` or `list`: how the Library shows the projects |
 | `Studio/Templates/Default` | (the built-in template) | The MNI template that *Start on template* uses; `Studio/Templates/LastDirectory` is the folder of the last template you added |
@@ -957,11 +965,11 @@ classic behavior, so most of these keys have no effect there. The ones you may w
 | `Studio/LNM/MemoryBudgetGB` | (a quarter of the memory, at most 4 GB) | Memory budget of one pass of *Run everything*. Only read: set it yourself |
 | `Studio/LNM/Pipeline/Options` | (the defaults) | The options of *Run everything* (a JSON text), written when you start a run from the options dialog |
 | `Studio/LNM/Clusters/MinExtentMm3` | `100` | Smallest cluster that the Clusters card lists, in mm³ |
-| `Studio/LNM/Clusters/Atlases` | (the cached atlases) | The atlases that label the clusters (a JSON list of catalog ids) |
+| `Studio/LNM/Clusters/Atlases` | (the cached atlases) | The atlases that label the clusters of a map in the FSL (MNI152NLin6Asym) family (a JSON list of catalog ids); `Studio/LNM/Clusters/Atlases2009` holds those of a map in the MNI152NLin2009cAsym family |
 | `Studio/LNM/Networks/Scheme` | `yeo7` | `yeo7` or `yeo17`, the networks of the Networks card |
 | `Studio/LNM/Networks/RoiMinPercent` | `50` | Share of a region of interest that must be suprathreshold for a lesion to count as connected |
 | `Studio/LNM/Normalize/LastOptions` | (none) | Normalization options (template, quality, modality, margin), written when you tick *Remember these options* |
-| `Studio/LNM/DataDirectory` | `Documents/SlicerStudio` (`/data/SlicerStudio` in the web version) | Where normalization results go when no study is open. Only read: set it yourself |
+| `Studio/LNM/DataDirectory` | the `LNM` folder inside the Slicer Studio folder (`Documents/SlicerStudio` only if it already holds data; `/data/SlicerStudio` in the web version) | Where normalization results go when no study is open. Only read: set it yourself |
 | `Studio/LNM/CohortStudy` | (none) | The study folder of the Cohort seed that you chose with *Open study…* in Map |
 | `Studio/RaterName` | the operating-system user | The name recorded with a normalization review. Only read: set it yourself |
 
@@ -1033,7 +1041,8 @@ A build made on Ubuntu 24.04 (before the Studio changes) started in 2.5–3.3 s,
 the official Linux nightly package on the same idle machine. This comes from Ubuntu's linker default
 (`--as-needed`, which drops unused library dependencies) and from building without the Qt Designer
 plugins (`Slicer_BUILD_QT_DESIGNER_PLUGINS=OFF`, about 0.6 s less first-load work), not from Slicer
-Studio code. Measured again with the Studio changes (fresh settings, machine under some load), the
+Studio code. The Designer plugins are on again since the bug bash, because scripted modules need them
+to load their `.ui` files. Measured again with the Studio changes (fresh settings, machine under some load), the
 build started in 3.3–3.9 s and the official 5.13 nightly in 8.0–8.8 s. Wave 4 added the CMake option
 `Slicer_USE_LINKER_AS_NEEDED` (on by default) so that toolchains that do not link this way by default do too.
 On this build it changed nothing: GCC on Ubuntu already did it (the libraries record the same 2,858 dependencies
@@ -1216,7 +1225,7 @@ cmake -S Slicer -B Slicer-SuperBuild-Release \
   -DBUILD_TESTING:BOOL=OFF \
   -DSlicer_BUILD_DOCUMENTATION:BOOL=OFF \
   -DSlicer_USE_VTK_DEBUG_LEAKS:BOOL=OFF \
-  -DSlicer_BUILD_QT_DESIGNER_PLUGINS:BOOL=OFF
+  -DSlicer_BUILD_QT_DESIGNER_PLUGINS:BOOL=ON
 cmake --build Slicer-SuperBuild-Release --parallel "$(nproc)"
 Slicer-SuperBuild-Release/Slicer-build/Slicer
 ```
@@ -1226,6 +1235,10 @@ Slicer-SuperBuild-Release/Slicer-build/Slicer
   ("TLS initialization failed"), and for example the Extensions Manager cannot download its catalog.
 - `BUILD_TESTING=OFF` shortens the build. The test commands in [Development](#development) do not need
   ctest.
+- Keep the Qt Designer plugins on (`Slicer_BUILD_QT_DESIGNER_PLUGINS=ON`, the default; it needs
+  `qttools5-dev`). `slicer.util.loadUI` creates the CTK and MRML widgets of scripted module `.ui` files
+  with them: without them Line Profile, Surface Toolbox, Vector to Scalar Volume and extensions built from
+  the Extension Wizard template fail to open.
 - To make the Linux package: `cmake --build Slicer-SuperBuild-Release/Slicer-build --target package`.
 - The first build takes hours. Python-only changes need no compilation: run
   `make CopySlicerPythonScriptFiles CopySlicerPythonResourceFiles` in `Slicer-build`.
@@ -1243,15 +1256,16 @@ Slicer-SuperBuild-Release/Slicer-build/Slicer
    - *Open folder…*: a DICOM folder goes to the DICOM module; a folder with several NIfTI files offers
      *Load all* (disabled above 20 files: open one subject's files with *Open…*); any other folder opens
      *Add Data*.
-   - *Start on MNI template* loads the MNI152NLin2009cAsym 2 mm brain that comes with Slicer Studio
-     (no network needed) and creates a "Lesions" segmentation on its grid. After your first stroke, the
+   - *Start on template* loads your default template, by default the MNI152NLin2009cAsym 2 mm brain that comes
+     with Slicer Studio (no network needed), and creates a "Lesions" segmentation on its grid. After your first stroke, the
      inspector offers the 1 mm template: a 13.7 MB download from TemplateFlow with progress, Cancel and a
      checksum check. It never covers the views.
    - Other files: a case-report figure (PNG, JPEG, TIFF) opens large beside the template as a reference
      that cannot be painted into; a statistical map opens as a thresholded overlay; several lesion files
      opened together form a set that you review one lesion at a time (`Alt+Left` and `Alt+Right` in
      Draw). A lesion file without a scan is shown on the template only when it is on an MNI grid.
-   - *Recent* lists the most recent files; `Enter` reopens the first one.
+   - *Opened from elsewhere* lists the files and folders you opened from outside the Slicer Studio folder
+     (*All projects* lists the projects in it); `Enter` reopens the first one.
 3. **Trace the lesion in Draw.** After a scan, a lesion or the template is loaded, Draw opens by itself
    with the "Lesion" segment selected. Use the tool tiles: Brush (`P`), Outline (`D`, with the lasso),
    Smart fill (`M`: click inside the lesion, `Enter` to apply it, then check the result), Erase (`E`) and
@@ -1265,11 +1279,12 @@ Slicer-SuperBuild-Release/Slicer-build/Slicer
    lesion as a NIfTI mask (`.nii.gz`, 0/1 values, `uint8`) on the lesion's own grid, with a small `.json`
    sidecar next to it: a lesion mask that you opened on the FSL MNI152 2 mm grid is saved on that grid, not
    on the grid of the template you drew over. It suggests `sub-XX_lesion.nii.gz` when the scan name has a
-   BIDS subject, and remembers the folder. After the first save, the button and `Ctrl+Shift+S` save again
-   to the same file; *Save lesion as…* always asks. `Ctrl+S` saves the whole scene as a folder or a `.mrb`
-   file, which also opens in official 3D Slicer. An autosave is not a save: only these commands write your
-   files. For other export options, open the Segmentations module (`Ctrl+K`, type "Segmentations") and use
-   *Export to files*.
+   BIDS subject, and proposes the project's `Lesions` folder (without a project, the last folder you used).
+   After the first save, the button and `Ctrl+Shift+S` save again to the same file; *Save lesion as…* always
+   asks. The project itself is saved as you work, and `Ctrl+S` saves it at once; it is a standard scene that
+   also opens in official 3D Slicer (without a project, as in Classic, `Ctrl+S` saves the scene as a folder or
+   a `.mrb` file, and an autosave is not a save). For other export options, open the Segmentations module
+   (`Ctrl+K`, type "Segmentations") and use *Export to files*.
 5. **Map the network (normalize native scans first).** Open Map (`Ctrl+Alt+3`). Choose the lesion and a
    connectome (*Add connectome…* for a `.lnmc` bundle on your computer, or *Use the demo* to try Map with
    synthetic data), accept its data use terms, and click *Map network* (`Ctrl+Enter`). Read the maps, the
@@ -1491,8 +1506,9 @@ every Slicer, as child processes of `PythonSlicer`; there is nothing to install.
   random and uses several threads, so a rerun with `--no-reuse` can differ slightly.
 
 **Where results go.** With a study: `<study>/derivatives/normalization/sub-<id>/`. Without one:
-`Documents/SlicerStudio/normalization/<name>-<hash>`, or the folder in `Studio/LNM/DataDirectory`
-(`/data/SlicerStudio` in the web version). The folder holds the transforms (`.h5`), the lesion and the scan in
+`<Slicer Studio folder>/LNM/normalization/<name>-<hash>`, or the folder in `Studio/LNM/DataDirectory`
+(`Documents/SlicerStudio/normalization/<name>-<hash>` if that older folder already holds data, and
+`/data/SlicerStudio` in the web version). The folder holds the transforms (`.h5`), the lesion and the scan in
 template space, the cost-function mask, `normalization.json` (inputs, fingerprint, tool versions),
 logs, and the QC files `sub-<id>_desc-normqc.png` (a 3×3 mosaic: axial, coronal and sagittal through the lesion,
 patient's left on the image left) and `sub-<id>_desc-normqc.json`.
@@ -2138,7 +2154,10 @@ git merge upstream/main
 
 Most fork code is in new files (the Studio module, the LNM library, the scripts). Edits to upstream files
 add behavior without renaming or removing anything, to keep merges manageable. After a merge, rebuild
-and run the tests, StudioBench and the compatibility check. Fixes that help every Slicer user, such as
+and run the tests, StudioBench and the compatibility check. Set `Slicer_UPSTREAM_REVISION` in
+[CMake/SlicerVersion.cmake](CMake/SlicerVersion.cmake) (and the value in `StudioRegressionTest`) to the revision of
+the official build of the merged upstream commit: the Extensions Manager asks the extensions server for the
+extensions of that build, because the fork's own revision matches no official build. Fixes that help every Slicer user, such as
 commit `7fa9dd9` (merge the default settings after the command-line arguments are parsed), can be
 proposed upstream.
 

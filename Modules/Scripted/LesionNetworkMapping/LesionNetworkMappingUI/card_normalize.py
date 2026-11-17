@@ -67,6 +67,15 @@ def _bundleSpace(bundle):
     return None
 
 
+def _studioTemplatesCall(name, *args):
+    """``StudioLib.templates.<name>(*args)`` when Slicer Studio's templates are available (also in Classic)."""
+    try:
+        from StudioLib import templates
+    except ImportError:
+        return None
+    return getattr(templates, name)(*args)
+
+
 class NormalizeCard:
     """Controller of the Normalize to MNI card (``widget`` is a collapsible card named LNMNormalizeCard)."""
 
@@ -74,6 +83,8 @@ class NormalizeCard:
         self.ctx = ctx
         self.controller = nc.NormalizeController(context=ctx, name="map")
         self.options = self._loadOptions()
+        self._renameListener = self._followRenamedTemplateIds
+        _studioTemplatesCall("addRenameListener", self._renameListener)
         self.roughTransform = None
         self.anatNode = None
         self._seed = (None, None)
@@ -191,6 +202,7 @@ class NormalizeCard:
         self.refreshState()
 
     def cleanup(self):
+        _studioTemplatesCall("removeRenameListener", self._renameListener)
         for name, callback in (("seedChanged", self.refresh), ("bundleChanged", self.refreshState)):
             callbacks = getattr(self.ctx, name, [])
             if callback in callbacks:
@@ -326,7 +338,7 @@ class NormalizeCard:
         templateId = self.templateId()
         if not nc.templateAvailable(templateId):
             if nc.isUserTemplate(templateId):
-                return _("Your template {name} needs an image and a brain mask (Settings › Templates).").format(name=nc.templateName(templateId))  # noqa: RUF001
+                return _("Your template {name} needs an image and a brain mask (Settings > Templates).").format(name=nc.templateName(templateId))  # noqa: RUF001
             return _("The {template} template is not on this computer (Options → download it).").format(template=templateId)
         available = nc.normalizationAvailable()
         if not available:
@@ -351,25 +363,19 @@ class NormalizeCard:
     # Options
     #
 
+    def _followRenamedTemplateIds(self, renamedIds):
+        """Change folder > Move gave the chosen template another id (a template of the new folder had its id): the
+        options follow it, as the remembered ones do, so Normalize keeps registering to the image the user chose.
+        """
+        chosen = self.options.get("templateId")
+        if isinstance(chosen, str) and chosen in renamedIds:
+            self.options["templateId"] = renamedIds[chosen]
+            if not self._widgetGone():
+                self.refreshState()
+
     def _loadOptions(self):
         """Options of the last run when they were remembered (``Studio/LNM/Normalize/LastOptions``, read only here)."""
-        options = {"templateId": None, "quality": "standard", "modality": "auto", "dilateMm": nc.DEFAULT_DILATE_MM, "remember": False}
-        try:
-            stored = json.loads(str(qt.QSettings().value(nc.LAST_OPTIONS_SETTING) or "{}"))
-        except ValueError:
-            stored = {}
-        if isinstance(stored, dict):
-            for key in ("templateId", "quality", "modality", "dilateMm"):
-                if key in stored:
-                    options[key] = stored[key]
-            options["remember"] = bool(stored)
-        if options["quality"] not in nc.QUALITIES:
-            options["quality"] = "standard"
-        try:
-            options["dilateMm"] = min(max(float(options["dilateMm"]), 1.0), 10.0)
-        except (TypeError, ValueError):
-            options["dilateMm"] = nc.DEFAULT_DILATE_MM
-        return options
+        return nc.rememberedOptions()
 
     def rememberOptions(self):
         """Write the options to ``Studio/LNM/Normalize/LastOptions`` (only when "Remember these options" is ticked; unticking forgets them)."""
@@ -394,12 +400,7 @@ class NormalizeCard:
 
         self.templateCombo = qt.QComboBox()
         self.templateCombo.setObjectName("LNMNormalizeTemplate")
-        self.templateCombo.addItem(_("Automatic (the connectome's family)"), "")
-        for templateId in nc.TEMPLATE_IDS:
-            self.templateCombo.addItem(templateId, templateId)
-        # The user's own templates with a brain mask (A-10)
-        for templateId, name in nc.userTemplates():
-            self.templateCombo.addItem(_("{name} (yours)").format(name=name), templateId)
+        self._fillTemplateCombo()
         self.templateCombo.connect("currentIndexChanged(int)", self._onOptionsChanged)
         form.addRow(_("Template"), self.templateCombo)
 
@@ -476,6 +477,24 @@ class NormalizeCard:
         self.optionsPopover = popover
         self._showOptionValues()
 
+    def _fillTemplateCombo(self):
+        """(Re)fill the Template list: Automatic, the standard templates, then the user's templates with a brain mask (A-10).
+
+        The user templates change while the app runs (Settings > Templates), so showOptions() calls this each time
+        the popover opens; the selection is restored afterwards by _showOptionValues().
+        """
+        combo = self.templateCombo
+        wasBlocked = combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem(_("Automatic (the connectome's family)"), "")
+            for templateId in nc.TEMPLATE_IDS:
+                combo.addItem(templateId, templateId)
+            for templateId, name in nc.userTemplates():
+                combo.addItem(_("{name} (yours)").format(name=name), templateId)
+        finally:
+            combo.blockSignals(wasBlocked)
+
     def _showOptionValues(self):
         widgetsToBlock = (self.templateCombo, self.qualityCombo, self.modalityCombo, self.marginSpinBox, self.rememberCheckBox, self.anatSelector)
         blocked = [widget.blockSignals(True) for widget in widgetsToBlock]
@@ -543,6 +562,7 @@ class NormalizeCard:
         if self.optionsPopover is None:
             self._buildOptions()
         else:
+            self._fillTemplateCombo()
             self._showOptionValues()
         popover = self.optionsPopover
         popover.adjustSize()
@@ -671,7 +691,7 @@ class NormalizeCard:
     def openFolder(self):
         outDir = getattr(self.controller, "outDir", None)
         if outDir and os.path.isdir(outDir):
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(outDir))
+            widgets.showInFileManager(outDir)
 
     #
     # Controller callbacks
@@ -689,6 +709,14 @@ class NormalizeCard:
             nc.setRowProgress(self.progress, 1.0, _("Loading the result…"))
         elif state == nc.CANCELLED:
             self._showMessage(_("Normalization stopped. Nothing was changed."), (), level="neutral")
+            result = self.controller.result
+            if result is not None:  # a stopped "Normalize again" gives the previous result back, with its QC
+                self._clearQc()
+                width = max(160, self.widget.width - 40) if self.widget.width > 0 else 280
+                self._qcPanel = self.controller.buildQcWidget(result, width=min(width, 420), onRedo=self.redo, maxHeight=240)
+                self.qcHost.addWidget(self._qcPanel)
+                if self.controller.edited:
+                    self._showEditState()
         elif state == nc.IDLE:  # the scene was closed: its result is gone
             self._clearMessage()
             self._clearQc()
@@ -724,7 +752,7 @@ class NormalizeCard:
         shell = self.ctx.shell()
         if shell is not None:
             try:
-                shell.toast(_("Lesion normalized ({template}) · review the alignment").format(template=result.templateId), 3000)
+                shell.toast(_("Lesion normalized ({template}) · review the alignment").format(template=nc.templateName(result.templateId)), 3000)
             except Exception:
                 pass
         self.refresh()
@@ -741,7 +769,7 @@ class NormalizeCard:
             actions.append((label, lambda: self.downloadTemplate(templateId, ("fixed", "mask"), then=self.start)))
         job = info.get("job")
         if job is not None and getattr(job, "logPath", None):
-            actions.append((_("Show log"), lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(job.logPath))))
+            actions.append((_("Show log"), lambda: widgets.showInFileManager(job.logPath)))
         self._showMessage(text, actions, level="warn")
         self.refreshState()
 

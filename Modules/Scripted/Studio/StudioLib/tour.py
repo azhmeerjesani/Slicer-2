@@ -36,7 +36,7 @@ import qt
 import slicer
 from slicer.i18n import tr as _
 
-from . import ui
+from . import hud, ui
 
 OFFERED_KEY = "Studio/Tour/Offered"
 COMPLETED_KEY = "Studio/Tour/Completed"
@@ -204,7 +204,13 @@ def resolveTarget(target, shell):
                 widget = None
         else:
             widget = _migration().resolveTarget(alternative, shell.mainWindow)
-        if widget is not None and _isAlive(widget) and widget.isWidgetType() and _isShown(widget, shell.mainWindow):
+        if widget is None or not _isAlive(widget) or not widget.isWidgetType():
+            continue
+        if not _isShown(widget, shell.mainWindow) and widget.isVisible():
+            # A control that exists but is scrolled out of its page (the Library below the fold in a small window):
+            # scroll it into view instead of skipping the step
+            _scrollIntoView(widget)
+        if _isShown(widget, shell.mainWindow):
             return widget
     return None
 
@@ -221,9 +227,43 @@ def _isShown(widget, mainWindow):
     return rect.intersects(mainWindow.rect)
 
 
+def _isInside(widget, ancestor):
+    """True if ``widget`` still exists and is ``ancestor`` or one of its descendants. ``QWidget.mapTo()`` needs that: in
+    a release build it walks up past the top of the widget tree and crashes (a workspace switch takes the Draw panel out
+    of the main window while the tour still points at its Lesion card).
+    """
+    if not _isAlive(widget) or not _isAlive(ancestor):
+        return False
+    if ancestor.isAncestorOf(widget):
+        return True
+    # isAncestorOf() stops at windows (a floating dock): mapTo() does not
+    parent = widget
+    while parent is not None:
+        if parent == ancestor:
+            return True
+        parent = parent.parentWidget()
+    return False
+
+
 def _rectIn(widget, mainWindow):
+    """The rectangle of ``widget`` in the coordinates of its ancestor ``mainWindow``, or an empty rectangle when
+    ``widget`` is gone or no longer inside ``mainWindow``.
+    """
+    if not _isInside(widget, mainWindow):
+        return qt.QRect()
     topLeft = widget.mapTo(mainWindow, qt.QPoint(0, 0))
     return qt.QRect(topLeft.x(), topLeft.y(), widget.width, widget.height)
+
+
+def _labelAlignment(label):
+    """The horizontal and vertical alignment flags of the QLabel ``label`` as an int, or None when they cannot be read:
+    with Qt 6 the QFlags property ``alignment`` is an opaque object in PythonQt that int() rejects. Callers then keep the
+    whole label box instead of guessing where the text is painted.
+    """
+    try:
+        return int(label.property("alignment"))
+    except (TypeError, ValueError):
+        return None
 
 
 def _pageContentItems(column, canvas):
@@ -243,16 +283,14 @@ def _pageContentItems(column, canvas):
         rect = _rectIn(widget, canvas)
         if widget.inherits("QLabel"):
             # The text, not the label box: a caption is as wide as the column
-            textWidth = min(widget.width, widget.sizeHint.width())
-            try:
-                alignment = int(widget.property("alignment"))
-            except (TypeError, ValueError):
-                alignment = int(qt.Qt.AlignLeft)
-            if alignment & int(qt.Qt.AlignRight):
-                rect.setLeft(rect.right() - textWidth + 1)
-            elif alignment & int(qt.Qt.AlignHCenter):
-                rect.setLeft(rect.left() + (widget.width - textWidth) // 2)
-            rect.setWidth(textWidth)
+            alignment = _labelAlignment(widget)
+            if alignment is not None:
+                textWidth = min(widget.width, widget.sizeHint.width())
+                if alignment & int(qt.Qt.AlignRight):
+                    rect.setLeft(rect.right() - textWidth + 1)
+                elif alignment & int(qt.Qt.AlignHCenter):
+                    rect.setLeft(rect.left() + (widget.width - textWidth) // 2)
+                rect.setWidth(textWidth)
         elif not (widget.property("slicerRole") or widget.objectName == "StudioDropZoneFrame" or str(widget.objectName).endswith("Card")):
             container = any(child.isWidgetType() and child.isVisible() for child in widget.children())
             if container or widget.className() == "QWidget":
@@ -281,9 +319,21 @@ def _existsAnywhere(target, shell):
     return False
 
 
+def _existsVisible(target, shell):
+    """True if a widget of the target is visible now (a function target counts as there)."""
+    alternatives = target if isinstance(target, (tuple, list)) else (target,)
+    for alternative in alternatives:
+        if callable(alternative) or _migration().resolveTarget(str(alternative), shell.mainWindow) is not None:
+            return True
+    return False
+
+
 def _stepMayShow(step, shell):
-    """Whether a step will probably be shown (for the step counter): its feature is there and its control exists or
-    appears with its workspace.
+    """Whether a step will probably be shown (for the step counter): its feature is there and its control is visible
+    or appears with its workspace.
+
+    A control that exists but is hidden in the workspace that is shown (the Loaded set and Studies cards when there is
+    none) is not counted: the step would be skipped when reached, and the total of the counter would shrink mid-tour.
     """
     if step.when is not None:
         try:
@@ -300,7 +350,10 @@ def _stepMayShow(step, shell):
             return False
         if shell.currentWorkspace() != ws.key:
             return True
-    return _existsAnywhere(step.target, shell)
+    if step.inspector and not shell.isInspectorVisible():
+        # The inspector is shown when the step is reached: its controls are hidden until then
+        return _existsAnywhere(step.target, shell)
+    return _existsVisible(step.target, shell)
 
 
 #
@@ -675,7 +728,7 @@ class _Card:
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(8)
         self.counterLabel = _label("", "StudioTourStepCounter", 11, qt.QFont.DemiBold, wrap=False)
-        ui._font(self.counterLabel, ui.fontPx(11), qt.QFont.DemiBold, 0.6)
+        ui._font(self.counterLabel, ui.fontPx(11), qt.QFont.DemiBold)
         header.addWidget(self.counterLabel)
         header.addStretch(1)
         self.dots = _Dots()
@@ -695,8 +748,8 @@ class _Card:
         slicerLayout = qt.QVBoxLayout(self.slicerBox)
         slicerLayout.setContentsMargins(12, 9, 12, 10)
         slicerLayout.setSpacing(3)
-        self.slicerCaption = _label(_("In 3D Slicer").upper(), "StudioTourInSlicerCaption", 11, qt.QFont.DemiBold, wrap=False)
-        ui._font(self.slicerCaption, ui.fontPx(10.5), qt.QFont.DemiBold, 0.6)
+        self.slicerCaption = _label(_("In 3D Slicer"), "StudioTourInSlicerCaption", 11, qt.QFont.DemiBold, wrap=False)
+        ui._font(self.slicerCaption, ui.fontPx(11), qt.QFont.DemiBold)
         slicerLayout.addWidget(self.slicerCaption)
         self.slicerLabel = _label("", "StudioTourInSlicerText", 12.5)
         slicerLayout.addWidget(self.slicerLabel)
@@ -821,9 +874,9 @@ class _Card:
 
     def setStep(self, step, shell, index, count, first, last, finishText=None, single=False):
         if single:
-            self.counterLabel.setText(_("Where did it go?").upper())
+            self.counterLabel.setText(_("Where did it go?"))
         else:
-            self.counterLabel.setText(_("Step {index} of {count}").format(index=index + 1, count=count).upper())
+            self.counterLabel.setText(_("Step {index} of {count}").format(index=index + 1, count=count))
         self.titleLabel.setText(step.title)
         self.bodyLabel.setText(step.bodyText(shell))
         inSlicer = step.inSlicerText()
@@ -1010,6 +1063,9 @@ class TourPlayer:
         self._lastLayout = None
         #: True while a step is prepared (the events processed then must not move the tour)
         self._busy = False
+        #: True while a Try-it step that Back showed is already done (Draw is the current workspace): it waits for Next
+        #: instead of going on by itself, which would make Back inert on it
+        self._holdDone = False
 
     #
     # Start, stop
@@ -1115,6 +1171,7 @@ class TourPlayer:
                     target = resolveTarget(step.target, self.shell)
                     if target is not None:
                         self.index = index
+                        self._holdDone = direction < 0
                         self._setTarget(target)
                         self._showStep()
                         return True
@@ -1198,6 +1255,10 @@ class TourPlayer:
         if not self.active or self.target is None or (self._busy and not force):
             return
         mainWindow = self.shell.mainWindow
+        if not _isInside(self.target, mainWindow):
+            # The control was deleted or taken out of the window (a key switched the workspace): a layout queued by the
+            # watcher runs before _follow() shows the step again or the next one, so keep the last layout until then
+            return
         spot = self._spotRect()
         windowRect = qt.QRect(mainWindow.rect)
         signature = (spot.x(), spot.y(), spot.width(), spot.height(), windowRect.width(), windowRect.height())
@@ -1228,7 +1289,10 @@ class TourPlayer:
                 done = step.done(self.shell)
             except Exception:
                 done = False
-            if done:
+            if not done:
+                # The user undid it: doing it again goes on
+                self._holdDone = False
+            elif not self._holdDone:
                 self.next()
                 return
         if self.target is None or not _isAlive(self.target) or not _isShown(self.target, self.shell.mainWindow):
@@ -1330,7 +1394,7 @@ class WhereMap:
         self.searchField = qt.QLineEdit()
         self.searchField.setObjectName("StudioWhereSearch")
         self.searchField.setPlaceholderText(_("Search: add data, layout, python, window level…"))
-        self.searchField.setClearButtonEnabled(True)
+        ui.setClearButton(self.searchField)
         self.searchField.setMinimumHeight(30)
         self.searchField.connect("textChanged(QString)", self._filter)
         layout.addWidget(self.searchField)
@@ -1625,8 +1689,10 @@ class _OfferCard:
         canvas.installEventFilter(self._watcher)
         #: Library page widgets watched for content changes (see _watchPage())
         self._watchedPage = []
-        self.frame.setFixedWidth(ui.fontPx(OFFER_CARD_WIDTH))
-        self._fitHeight()
+        self._fitSize()
+        # After an application font change (Settings > Appearance > Font) the texts are resized first (ui._refresh()),
+        # then this listener gives the card the width and the height that its larger or smaller content needs
+        ui.addPaletteListener(self._fitSize)
         self.updatePosition()
         self.frame.show()
         self.frame.raise_()
@@ -1646,6 +1712,21 @@ class _OfferCard:
         if _isAlive(self.frame):
             self.icon.setPixmap(ui.pixmap("compass", 18, "accent-fg"))
 
+    def _fitSize(self):
+        """The width (it follows the application font) and the height that the word-wrapped texts need for it; again
+        after an application font change.
+        """
+        if not _isAlive(self.frame):
+            return
+        width = ui.fontPx(OFFER_CARD_WIDTH)
+        if self.frame.minimumHeight != 0 or self.frame.maximumHeight != 16777215 or self.frame.width != width:
+            # The height was fixed by the previous fit: free it, so that the layout can be measured again
+            self.frame.setMinimumHeight(0)
+            self.frame.setMaximumHeight(16777215)
+        self.frame.setFixedWidth(width)
+        self._fitHeight()
+        self.updatePosition()
+
     def _fitHeight(self):
         """Word-wrapped texts: the height for the fixed width."""
         self.frame.ensurePolished()
@@ -1657,7 +1738,7 @@ class _OfferCard:
         self.frame.setFixedHeight(height)
 
     def updatePosition(self):
-        """Bottom right of the canvas, away from what the Library page shows; always inside the canvas.
+        """Bottom right of the canvas, above the toasts and away from what the Library page shows; always inside the canvas.
 
         The page column is up to 1100 px wide (VISUAL 4.2) and mostly empty on its right side, so the card is kept off
         what the column paints (``_pageContentItems()``), not off the column box. When the bottom right corner covers
@@ -1670,13 +1751,20 @@ class _OfferCard:
         rect = self.canvas.rect
         margin = 24
         right = rect.width() - width - margin
-        bottom = rect.height() - height - margin
+        # Above the band of the toasts (a long toast reaches the card's edge or covers its link; it stays until the next input)
+        bottom = rect.height() - height - hud.toastBandHeight() - 8
         candidates = [(right, bottom)]
         column = self.canvas.findChild("QWidget", "StudioLibraryColumn")
         content = []
         if column is not None and column.isVisible():
             self._watchPage(column)
             content = _pageContentItems(column, self.canvas)
+            # The notices (an update, a required update) are above the column, in their own container, and their buttons
+            # must stay reachable: at a small window the top right corner is on their right end
+            notices = self.canvas.findChild("QWidget", "StudioLibraryNotices")
+            if notices is not None and notices.isVisible():
+                self._watchPage(notices)
+                content += _pageContentItems(notices, self.canvas)
         if content:
             below = max(contentRect.bottom() for contentRect, _interactive in content) + margin
             columnRect = _rectIn(column, self.canvas)
@@ -1710,6 +1798,7 @@ class _OfferCard:
 
     def dispose(self):
         ui.removePaletteListener(self.refreshIcons)
+        ui.removePaletteListener(self._fitSize)
         ui.bindStyleSheet(self.frame, None)
         if _isAlive(self.canvas):
             self.canvas.removeEventFilter(self._watcher)

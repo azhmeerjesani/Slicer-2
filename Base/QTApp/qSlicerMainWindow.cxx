@@ -620,9 +620,20 @@ bool qSlicerMainWindowPrivate::confirmCloseApplication()
   {
     return this->confirmCloseApplicationLesionSaved(closeSummary);
   }
+  // The application asked its own question already (for example about a project that could not be saved)
+  if (closeMode == "cancel")
+  {
+    return false;
+  }
+  if (closeMode == "quit")
+  {
+    return true;
+  }
 
   QString details;
-  bool sceneModified = isSceneContentModifiedSinceRead(details);
+  // "projectSaved": the application saved the project and nothing else is unsaved (the scene's own changes since it
+  // was read, such as the views, are not edits): ask only whether to exit
+  bool sceneModified = closeMode != "projectSaved" && isSceneContentModifiedSinceRead(details);
 
   bool close = false;
   if (sceneModified)
@@ -719,6 +730,22 @@ bool qSlicerMainWindowPrivate::confirmCloseApplicationUnsavedLesion(const QStrin
 bool qSlicerMainWindowPrivate::confirmCloseApplicationLesionSaved(const QString& summary)
 {
   Q_Q(qSlicerMainWindow);
+  // The application may ask the question in its own dialog (see qSlicerMainWindow::closeQuestionRequested())
+  q->setProperty("SlicerStudioCloseAnswer", QVariant());
+  emit q->closeQuestionRequested();
+  const QString answer = q->property("SlicerStudioCloseAnswer").toString();
+  if (answer == "cancel")
+  {
+    return false;
+  }
+  if (answer == "quit")
+  {
+    return true;
+  }
+  if (answer == "save")
+  {
+    return qSlicerApplication::application()->ioManager()->openSaveDataDialog();
+  }
   QMessageBox messageBox(QMessageBox::Question, qSlicerMainWindow::tr("Quit?"), summary, QMessageBox::NoButton, q);
   QPushButton* quitButton = messageBox.addButton(qSlicerMainWindow::tr("Quit"), QMessageBox::AcceptRole);
   QPushButton* saveButton = messageBox.addButton(qSlicerMainWindow::tr("Save session..."), QMessageBox::ActionRole);
@@ -786,6 +813,17 @@ bool qSlicerMainWindowPrivate::isSceneContentModifiedSinceRead(QString& details)
 }
 
 //-----------------------------------------------------------------------------
+bool qSlicerMainWindowPrivate::confirmLoadScene()
+{
+  Q_Q(qSlicerMainWindow);
+  q->setProperty("SlicerStudioLoadSceneAnswer", QVariant());
+  emit q->loadSceneRequested();
+  const bool load = q->property("SlicerStudioLoadSceneAnswer").toString() != "cancel";
+  q->setProperty("SlicerStudioLoadSceneAnswer", QVariant());
+  return load;
+}
+
+//-----------------------------------------------------------------------------
 bool qSlicerMainWindowPrivate::confirmCloseScene()
 {
   Q_Q(qSlicerMainWindow);
@@ -794,6 +832,19 @@ bool qSlicerMainWindowPrivate::confirmCloseScene()
   {
     // no unsaved changes, no need to ask confirmation
     return true;
+  }
+  // The application may have saved the project already (see qSlicerMainWindow::closeSceneSummaryRequested())
+  q->setProperty("SlicerStudioCloseMode", QVariant());
+  emit q->closeSceneSummaryRequested();
+  const QString closeMode = q->property("SlicerStudioCloseMode").toString();
+  if (closeMode == "projectSaved")
+  {
+    return true;
+  }
+  // The application asked its own question already (for example about a project that could not be saved)
+  if (closeMode == "cancel")
+  {
+    return false;
   }
 
   // Allocated on the stack (not with WA_DeleteOnClose) so that clickedButton()
@@ -958,6 +1009,15 @@ void qSlicerMainWindowPrivate::updatePanelWidth()
     this->PanelWidth = dock->width();
     return;
   }
+  // The minimum size of the dock widget is only reliable once the pending layout requests have been handled: a layout
+  // that has just changed (for example the options of a Segment Editor effect, some of them still to be hidden) passes
+  // its new minimum size up to the module panel through one posted layout request per level, and until then the dock
+  // widget reports a stale, often much larger minimum (784 px instead of 581 px for Mask volume)
+  for (int pass = 0; pass < 16; ++pass)
+  {
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::LayoutRequest);
+  }
+
   // Wider only if the module needs it (the dock widget cannot be narrower than its minimum size anyway)
   int width = qMax(this->PanelWidth, dock->minimumSizeHint().width());
   if (dock->width() != width)
@@ -1280,7 +1340,12 @@ void qSlicerMainWindow::on_FileImportSceneAction_triggered()
 //---------------------------------------------------------------------------
 void qSlicerMainWindow::on_FileLoadSceneAction_triggered()
 {
-  qSlicerApplication::application()->ioManager()->openLoadSceneDialog();
+  Q_D(qSlicerMainWindow);
+  if (d->confirmLoadScene())
+  {
+    qSlicerApplication::application()->ioManager()->openLoadSceneDialog();
+  }
+  emit loadSceneFinished();
 }
 
 //---------------------------------------------------------------------------
@@ -1555,8 +1620,19 @@ void qSlicerMainWindow::onFileRecentLoadedActionTriggered()
 
   qSlicerApplication* app = qSlicerApplication::application();
 
+  // A scene loaded with "clear" replaces the scene: the application may keep it (see loadSceneRequested())
+  const bool replacesScene = fileType == QString("SceneFile") && fileProperties.value("clear").toBool();
+  if (replacesScene && !d->confirmLoadScene())
+  {
+    emit loadSceneFinished();
+    return;
+  }
   vtkNew<vtkMRMLMessageCollection> userMessages;
   bool success = app->coreIOManager()->loadNodes(fileType, fileProperties, nullptr, userMessages);
+  if (replacesScene)
+  {
+    emit loadSceneFinished();
+  }
   qSlicerIOManager::showLoadNodesResultDialog(success, userMessages);
 }
 
@@ -2142,6 +2218,14 @@ bool qSlicerMainWindow::eventFilter(QObject* object, QEvent* event)
     if (event->type() == QEvent::Resize)
     {
       d->onPanelResized();
+      if (!(QApplication::mouseButtons() & Qt::LeftButton))
+      {
+        // Not dragged by the user: the contents made the dock widget wider (a module needs more room, or a minimum
+        // size that is stale for a moment, see updatePanelWidth()). A width that the contents asked for and then no
+        // longer need would be kept for the rest of the session (the dock widget does not get narrower by itself
+        // once it has been resized to a given width), so it is measured again when the layouts have settled.
+        d->schedulePanelWidthUpdate();
+      }
     }
     else if (event->type() == QEvent::Show && d->FocusMode && !d->FocusModeChanging)
     {

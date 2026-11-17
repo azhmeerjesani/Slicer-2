@@ -8,7 +8,8 @@ connectome of the Seed and Connectome cards, as one heavy job of the application
   the secondary "Maps only" (D-A26). Nothing else gets a key; Stop is a button, never Esc.
 - **Run.** The job gets ``--parent-pid``, ``--events json``, ``--nice 5``, ``--keep-awake``, ``--software`` and, only when
   ``Studio/LNM/AcceptedTerms/<sha>`` is true, ``--accept-terms``; the options of the dialog (``Studio/LNM/Pipeline/Options``)
-  and ``Studio/LNM/MemoryBudgetGB``. The runner adds ``--cancel-file`` and ``--threads``. The open study session is
+  and ``Studio/LNM/MemoryBudgetGB``; with a chosen recipe (or a locked plan), ``--recipe-record`` (``recipes.pipeline_recipe``:
+  the recipe, the locked plan's sha256 and the recipe steps outside the pipeline, as ``slicer-lnm --recipe`` records them). The runner adds ``--cancel-file`` and ``--threads``. The open study session is
   flushed first (the pipeline reads participants.tsv). The click does no hashing: it reuses the last plan.
 - **Progress.** Every pipeline job of the runner feeds a :class:`PipelineModel` (module level, so a card created later
   re-attaches to a running job); a 100 ms coalescing timer applies it to the card (nine stage rows, the
@@ -19,7 +20,11 @@ connectome of the Seed and Connectome cards, as one heavy job of the application
   STOP file of the output folder is written when the application quits. Completed work is kept: the next run resumes.
 - **Staleness and re-attach.** ``pipeline.plan(…, hash_lesions=True)`` runs in a worker thread (file reads and hashing;
   no MRML or Qt) when the card is shown, the study, connectome, rule or options change; the card then says "3 new or
-  changed lesions · 37 up to date". A run of another process (the command line, a restarted Slicer) is found by the
+  changed lesions · 37 up to date", or "Design changed since the last run" when the analysed subjects, their groups,
+  scores or covariates are not those of the last run (``pipeline.design_fingerprint``; for a run of an earlier build,
+  which records none, the analysed subjects and groups of pipeline.json), or "Settings changed since the last run" when
+  an analysis setting of the next run (``RESULT_SETTING_KEYS``: rule, contrast, permutations, …) is not that of pipeline.json
+  "config" (a recipe or a locked plan that set another contrast after the run, for example). A run of another process (the command line, a restarted Slicer) is found by the
   heartbeat of ``.pipeline/lock.json`` and followed through ``.pipeline/progress.json`` every 2 s.
 - **Results.** Open report and Show folder (the system browser, else an in-app web viewer, else a message with the
   path), Load maps (at most 6 group maps, one per 30 ms tick, over the template), Warnings (a non-modal list).
@@ -51,6 +56,13 @@ from . import ORDER_RUN_EVERYTHING, jobrunner, widgets
 
 #: The job module (A-04's command line)
 PIPELINE_MODULE = "LesionNetworkMappingLib.pipeline"
+
+
+def studyReadOnly(path):
+    """True when this user cannot write the study's results folder (said before the run, not as a failure after it)."""
+    from LesionNetworkMappingLib import pipeline
+
+    return pipeline.study_read_only(path)
 #: Kind of the runner's pipeline jobs (``JobSpec.kind``)
 JOB_KIND = "pipeline"
 #: Fork-only settings (SPEC Appendix B, D-S1): the options of the dialog (JSON, written) and the memory budget (read only)
@@ -87,10 +99,15 @@ DEFAULT_OPTIONS = {
     "specificity": "auto",
     "volume_off_reason": None,
     "perm": 5000,
+    "perm_seed": 0,
+    "alpha": 0.05,
+    "fdr": True,
     "tfce": False,
+    "contrast": "two_sided",
     "scores": "auto",
     "null_relocations": "auto",
     "nulls": "auto",
+    "null_seed": 0,
     "build_references": False,
     "native": "normalize",
     "atlas": "none",
@@ -99,6 +116,9 @@ DEFAULT_OPTIONS = {
 }
 #: Options of the dialog that are also accepted from the stored JSON (tests); others are ignored
 EXTRA_OPTION_KEYS = ("memory_budget_gb",)
+#: Options without a control in the dialog that it keeps as they are: the GLM contrast, the permutation and null seeds,
+#: alpha and the FDR maps are set by a recipe or a locked plan (recipes.pipeline_options)
+KEPT_OPTION_KEYS = ("contrast", "perm_seed", "null_seed", "alpha", "fdr")
 PREVIEW_N = 100
 #: Extra rules offered by the dialog: (key, label, rule)
 EXTRA_RULES = (
@@ -396,8 +416,9 @@ def _atlasPaths(choice, refresh=False):
         from LesionNetworkMappingLib import fetch
 
         resource = fetch.find_resource(SCHAEFER_ID)
-        path = fetch.cached_path(resource)
-        labels = fetch.label_table_path(resource) if path else None
+        cache = fetch.app_cache_dir()
+        path = fetch.cached_path(resource, cache)
+        labels = fetch.label_table_path(resource, cache) if path else None
         result = (path, labels) if path else (None, None)
     except Exception:
         result = (None, None)
@@ -405,11 +426,15 @@ def _atlasPaths(choice, refresh=False):
     return result
 
 
-def configDict(studyPath, bundlePath, options, rule=None, software=None, acceptTerms=False, parentPid=None, recompute=False):
-    """The ``pipeline.PipelineConfig`` fields of a run (also what the staleness plan uses)."""
+def configDict(studyPath, bundlePath, options, rule=None, software=None, acceptTerms=False, parentPid=None, recompute=False, recipe=None):
+    """The ``pipeline.PipelineConfig`` fields of a run (also what the staleness plan uses).
+
+    :param recipe: the pipeline.json "recipe" record of the run (:func:`recipeRecord`); a run key, not an analysis setting.
+    """
     config = {"study": studyPath, "bundle": bundlePath, "rule": rule, "extra_rules": list(options.get("extra_rules") or []),
               "sensitivity": float(options.get("sensitivity", 90.0)), "specificity": options.get("specificity") or "auto",
-              "perm": int(options.get("perm") or 5000), "tfce": bool(options.get("tfce")), "scores": options.get("scores", "auto"),
+              "perm": int(options.get("perm") or 5000), "perm_seed": int(options.get("perm_seed") or 0), "alpha": float(options.get("alpha") or 0.05),
+              "fdr": options.get("fdr", True) is not False, "null_seed": int(options.get("null_seed") or 0), "tfce": bool(options.get("tfce")), "contrast": options.get("contrast") or "two_sided", "scores": options.get("scores", "auto"),
               "null_relocations": options.get("null_relocations", "auto"), "nulls": options.get("nulls") or "auto",
               "build_references": bool(options.get("build_references")), "native": options.get("native") or "normalize",
               "recompute": bool(recompute), "accept_terms": bool(acceptTerms), "nice": NICE,
@@ -437,7 +462,29 @@ def configDict(studyPath, bundlePath, options, rule=None, software=None, acceptT
         config["software"] = dict(software)
     if parentPid:
         config["parent_pid"] = int(parentPid)
+    if recipe:
+        config["recipe"] = dict(recipe)
     return config
+
+
+def recipeRecord(studyPath, recipe=None, folders=()):
+    """pipeline.json "recipe" of a Run everything of the study (``recipes.pipeline_recipe``), or None without a recipe.
+
+    The recipe is the study's choice (its locked plan's recipe first, ``recipes.selected_recipe``), else ``recipe`` (the
+    one chosen in the Recipe header); the record names it, the locked plan's sha256 and the steps outside the pipeline.
+    """
+    from LesionNetworkMappingLib import recipes
+
+    try:
+        chosen = (recipes.selected_recipe(studyPath) or {}).get("id")
+        if chosen and (recipe is None or recipe.id != chosen):
+            recipe = recipes.find_recipe(chosen, study=studyPath, folders=folders)
+        if recipe is None:
+            return None
+        return recipes.pipeline_recipe(recipes.to_pipeline_config(recipe, studyPath))
+    except Exception:
+        logging.exception("Lesion network mapping: the recipe of the cohort analysis could not be recorded")
+        return None
 
 
 def commandArguments(config):
@@ -448,6 +495,8 @@ def commandArguments(config):
     args += ["--nice", str(config.get("nice", NICE)), "--keep-awake", config.get("keep_awake", "auto")]
     if config.get("software"):
         args += ["--software", json.dumps(config["software"], sort_keys=True)]
+    if config.get("recipe"):
+        args += ["--recipe-record", json.dumps(config["recipe"], sort_keys=True)]
     if config.get("accept_terms"):
         args.append("--accept-terms")
     if config.get("rule"):
@@ -457,13 +506,24 @@ def commandArguments(config):
     if config.get("preview_n"):
         args += ["--preview", str(config["preview_n"]), "--preview-seed", str(config.get("preview_seed", 0))]
     args += ["--sensitivity", f"{float(config.get('sensitivity', 90.0)):g}", "--specificity", config.get("specificity", "auto"), "--perm", str(config.get("perm", 5000))]
+    # The seeds, alpha and the FDR maps of a recipe or a locked plan (the pipeline's defaults are not repeated)
+    if int(config.get("perm_seed") or 0):
+        args += ["--perm-seed", str(int(config["perm_seed"]))]
+    if float(config.get("alpha") or 0.05) != 0.05:
+        args += ["--alpha", f"{float(config['alpha']):g}"]
+    if config.get("fdr", True) is False:
+        args.append("--no-fdr")
     if config.get("tfce"):
         args.append("--tfce")
+    if (config.get("contrast") or "two_sided") != "two_sided":
+        args += ["--contrast", config["contrast"]]
     if config.get("volume_off_reason"):
         args += ["--no-volume-covariate", config["volume_off_reason"]]
     scores = config.get("scores", "auto")
     args += ["--scores", ",".join(scores) if isinstance(scores, (list, tuple)) else str(scores or "auto")]
     args += ["--null-relocations", str(config.get("null_relocations", "auto")), "--nulls", config.get("nulls", "auto"), "--native", config.get("native", "normalize")]
+    if int(config.get("null_seed") or 0):
+        args += ["--null-seed", str(int(config["null_seed"]))]
     if config.get("include_unreviewed"):
         args.append("--include-unreviewed")
     if config.get("build_references"):
@@ -481,7 +541,7 @@ def commandArguments(config):
 
 def planKey(config):
     """What the staleness plan depends on (the analysis settings, not the run options)."""
-    ignored = ("accept_terms", "parent_pid", "software", "events", "nice", "keep_awake", "threads", "recompute", "atlas", "atlas_labels")
+    ignored = ("accept_terms", "parent_pid", "software", "events", "nice", "keep_awake", "threads", "recompute", "atlas", "atlas_labels", "recipe")
     return json.dumps({key: value for key, value in config.items() if key not in ignored}, sort_keys=True, default=str)
 
 
@@ -505,9 +565,13 @@ def summarizePlan(result):
     """The plain summary of a ``pipeline.Plan`` that the card shows (built in the worker thread)."""
     pipeline = _pipeline()
     counts = {status: result.count(status) for status in ("compute", "reuse", "normalize", "excluded")}
+    # Native lesions that an earlier run already normalized (or could not) and then left out: a new run changes nothing for them
+    settled = [row for row in result.rows if row["status"] == "normalize" and row.get("settled")]
+    counts["settled"] = len(settled)
+    counts["normalize"] -= len(settled)
     groups = {}
     for row in result.rows:
-        if row["status"] in ("compute", "reuse", "normalize"):
+        if row["status"] in ("compute", "reuse", "normalize") and not row.get("settled"):
             groups[row["group"]] = groups.get(row["group"], 0) + 1
     batch = pipeline.engine_batch_size(result.bundle.n_voxels, result.budget_bytes)
     toMap = counts["compute"] + counts["normalize"]
@@ -516,7 +580,7 @@ def summarizePlan(result):
         "counts": counts,
         "eligible": counts["compute"] + counts["reuse"] + counts["normalize"],
         "groups": groups,
-        "review": sum(1 for row in result.rows if row.get("reason") == pipeline.NORM_NEEDS_REVIEW),
+        "review": sum(1 for row in settled if row["settled"] == pipeline.NORM_NEEDS_REVIEW) + sum(1 for row in result.rows if row.get("reason") == pipeline.NORM_NEEDS_REVIEW),
         "estimate_s": float(result.estimate_s),
         "passes": math.ceil(toMap / batch) if toMap else 0,
         "bundle": result.bundle.name,
@@ -525,8 +589,88 @@ def summarizePlan(result):
         "stages": [dict(stage) for stage in result.stages],
         "exit_code": result.exit_code,
         "scores": list(result.scores),
+        "design_sha256": getattr(result, "design_sha256", "") or "",
+        # The analysed subjects and their groups: compared with the rows of a pipeline.json that has no design_sha256 (designChanged)
+        "design_subjects": sorted([row["participant_id"], row.get("group") or "n/a"] for row in result.rows if row["status"] in pipeline.ANALYSED_STATUSES),
         "elapsed": float(result.elapsed),
     }
+
+
+#: Final row statuses of pipeline.json ("inputs"/"rows") whose subjects the run analysed (mapped now or reused)
+RECORD_ANALYSED_STATUSES = ("computed", "reused")
+
+
+def recordDesignSubjects(record):
+    """Sorted ``[participant_id, group]`` of the subjects the run of pipeline.json ``record`` analysed (its "inputs"/"rows"),
+    or None when the record has no rows to tell.
+    """
+    rows = ((record or {}).get("inputs") or {}).get("rows")
+    if not isinstance(rows, list) or not rows:
+        return None
+    subjects = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("participant_id"):
+            return None
+        if row.get("status") in RECORD_ANALYSED_STATUSES:
+            subjects.append([str(row["participant_id"]), row.get("group") or "n/a"])
+    return sorted(subjects)
+
+
+def designChanged(plan, record):
+    """True when the design of the study (the analysed subjects, their groups, scores and covariates) is not the one the
+    last run analysed: the plan's ``design_sha256`` differs from the one of pipeline.json. A run of an earlier build
+    records no design_sha256: its analysed subjects and their groups (the record's "inputs"/"rows") are then compared
+    with the plan's (its scores and covariates cannot be). False when neither can be compared.
+    """
+    inputs = (record or {}).get("inputs") or {}
+    recorded = inputs.get("design_sha256")
+    current = (plan or {}).get("design_sha256")
+    if recorded:
+        return bool(current and recorded != current)
+    subjects = (plan or {}).get("design_subjects")
+    recordedSubjects = recordDesignSubjects(record)
+    if subjects is None or recordedSubjects is None:
+        return False
+    return sorted([str(sid), group or "n/a"] for sid, group in subjects) != recordedSubjects
+
+
+#: Analysis settings of the Run everything configuration (:func:`configDict`) that change the group results without changing
+#: the analysed subjects or the design (those are :func:`designChanged`): a finished run whose pipeline.json "config" has
+#: other values is not up to date ("Settings changed since the last run").
+RESULT_SETTING_KEYS = ("rule", "extra_rules", "sensitivity", "specificity", "perm", "perm_seed", "alpha", "fdr", "tfce", "contrast", "null_relocations", "nulls", "null_seed")
+
+
+def _sameSetting(a, b):
+    """True when two JSON values are equal, numbers compared by value (90 == 90.0)."""
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a is b if isinstance(a, bool) and isinstance(b, bool) else False
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return float(a) == float(b)
+    if isinstance(a, dict) and isinstance(b, dict):
+        return set(a) == set(b) and all(_sameSetting(a[key], b[key]) for key in a)
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return len(a) == len(b) and all(_sameSetting(x, y) for x, y in zip(a, b, strict=True))
+    return a == b
+
+
+def settingsChanged(config, record):
+    """The :data:`RESULT_SETTING_KEYS` whose value in the configuration of a run now (:func:`configDict`) differs from the one
+    of the last run (pipeline.json ``record`` "config"), as a sorted list ([] when they are the same or cannot be compared).
+
+    pipeline.json leaves out the contrast when it is two-sided (and a run of an earlier build records none): a missing
+    contrast is "two_sided". Other settings that the record does not have are not compared.
+    """
+    recorded = (record or {}).get("config")
+    if not config or not isinstance(recorded, dict):
+        return []
+    pipeline = _pipeline()
+    keys = [key for key in RESULT_SETTING_KEYS if key in recorded or key == "contrast"]
+    try:
+        current = pipeline.PipelineConfig.from_json({key: config[key] for key in keys if key in config})
+        before = pipeline.PipelineConfig.from_json({key: recorded.get(key, "two_sided" if key == "contrast" else None) for key in keys})
+    except (ValueError, TypeError):
+        return []  # a record of another version that this build cannot read: nothing to compare
+    return sorted(key for key in keys if not _sameSetting(getattr(current, key), getattr(before, key)))
 
 
 class PlanWorker:
@@ -626,6 +770,7 @@ class PipelineModel:
         self.queuedFor = None
         self.version = 0
         self.finishedAt = None
+        self._peak = 0.0  # the highest overall percent so far (the bar, the state line and the status chip never go back)
 
     @property
     def out(self):
@@ -673,6 +818,7 @@ class PipelineModel:
             self.cancelledEvent = event
         elif kind == "error":
             self.errorEvent = event
+        self._peak = max(self._peak, self._rawPercent())
         self.version += 1
 
     def finish(self, job):
@@ -696,9 +842,18 @@ class PipelineModel:
             return None
 
     def percent(self):
-        """Estimate-weighted percent of the whole run (0-100)."""
+        """Estimate-weighted percent of the whole run (0-100); it only grows.
+
+        The counter of a progress event restarts inside a stage (maps, then permutations; each null-model sub-step), so the
+        raw estimate would fall back each time a sub-step starts: the highest value seen is kept for the job.
+        """
         if self.state == "done":
             return 100.0
+        self._peak = max(self._peak, self._rawPercent())
+        return self._peak
+
+    def _rawPercent(self):
+        """Estimate-weighted percent of the whole run from the finished stages and the last progress event of the current one."""
         weights = self.weights()
         total = sum(weights.values())
         if not total:
@@ -851,6 +1006,12 @@ def _afterDone(job, model):
             model.inboxApplied = True
         except Exception:
             logging.exception("Lesion network mapping: the study inbox could not be merged")
+    widget = _mapWidget()
+    if widget is not None and hasattr(widget, "_findCohortMaps"):
+        try:  # the run's lesion maps (stages/cohortmaps) are now the maps that the Validate and Nulls cards reuse
+            widget._findCohortMaps()
+        except Exception:
+            logging.exception("Lesion network mapping: the cohort maps could not be looked up after the run")
     report = (model.doneEvent or {}).get("report")
     _toast(_("Cohort analysis finished · report ready") if report else _("Cohort analysis finished"), 4000)
 
@@ -1000,6 +1161,14 @@ def headlineMaps(record, alpha=0.05):
     return chosen[:MAX_LOADED_MAPS]
 
 
+def maskByP(array, pData, alpha):
+    """Set to 0, in place, the voxels of ``array`` that do not pass ``pData <= alpha`` (the one rule of the cohort pipeline, tolerant of float32 p maps)."""
+    from LesionNetworkMappingLib import glm
+
+    array[~glm.passes_alpha(pData, alpha)] = 0
+    return array
+
+
 #
 # The card
 #
@@ -1142,6 +1311,9 @@ class PipelineCard:
         self.stopButton.setToolTip(_("Stop the cohort analysis. Completed work is kept: the next run resumes from it."))
         self.stopButton.hide()
         row.addWidget(self.stopButton, 1)
+        # Zero-stretch spacer: takes the free width only while Run and Stop are hidden
+        # (pinned footer button), so the options button stays right-aligned, not centred.
+        row.addStretch(0)
         self.optionsButton = self._button("⋯", "LNMPipelineOptionsButton", self.showOptions, "ghost", None)
         self.optionsButton.setFixedSize(32, 32)
         self.optionsButton.setToolTip(_("Options of the cohort analysis…"))
@@ -1296,7 +1468,22 @@ class PipelineCard:
             return None
         options = options if options is not None else self.options()
         return configDict(study.path, bundle.path, options, rule=self.rule(), software=self.software() if forRun else None, acceptTerms=forRun and termsAccepted(bundle),
-                          parentPid=os.getpid() if forRun else None, recompute=recompute)
+                          parentPid=os.getpid() if forRun else None, recompute=recompute, recipe=self.recipeRecord(study) if forRun else None)
+
+    def recipeRecord(self, study=None):
+        """pipeline.json "recipe" of a run now (:func:`recipeRecord`: the study's recipe, else the Recipe header's)."""
+        study = study if study is not None else self.study()
+        if study is None:
+            return None
+        header = self.ctx.card("recipe") if hasattr(self.ctx, "card") else None
+        folders = ()
+        try:
+            from LesionNetworkMappingUI import card_recipe
+
+            folders = card_recipe.recipeFolders()
+        except Exception:
+            logging.exception("Lesion network mapping: the recipe folders could not be read")
+        return recipeRecord(os.fspath(study.path), getattr(header, "recipe", None), folders)
 
     def outDir(self, options=None):
         """The output folder of the run: ``<study>/derivatives/lnm/conn-<label>[_n-<N>]`` (the pipeline's default)."""
@@ -1314,11 +1501,21 @@ class PipelineCard:
             return int(self.plan.get("eligible") or 0)
         return int(self.cohortInfo().get("n") or 0)
 
+    def _currentConfig(self):
+        """:meth:`config` (computed once per apply)."""
+        memo = self._memo
+        if memo is not None and "config" in memo:
+            return memo["config"]
+        config = self.config()
+        if memo is not None:
+            memo["config"] = config
+        return config
+
     def _currentPlanKey(self):
         memo = self._memo
         if memo is not None and "planKey" in memo:
             return memo["planKey"]
-        config = self.config()
+        config = self._currentConfig()
         key = planKey(config) if config is not None else None
         if memo is not None:
             memo["planKey"] = key
@@ -1359,8 +1556,15 @@ class PipelineCard:
             return False, _("Open a study with traced lesions (Seed card).")
         if bundle is None:
             return False, _("Choose a connectome (Connectome card).")
+        if studyReadOnly(study.path):
+            return False, _("The study {name} is read-only: ask for write access, or open a copy of the study folder.").format(name=study.name)
         if self.eligibleCount() < 2:
             return False, _("The analysis needs at least 2 lesions that can be mapped.")
+        if self.plan is not None and self.planKey == self._currentPlanKey():
+            # A threshold rule that is refused for the N of the connectome (as the Map card refuses it): the pipeline would block
+            refused = [block for block in self.plan.get("blocks") or [] if block.get("id") == "rule_refused"]
+            if refused:
+                return False, refused[0].get("message") or _("The threshold rule cannot be used for this connectome: use FWE or effect size.")
         if not self._termsAccepted(bundle):
             return False, _("Accept the data use terms in the Connectome card.")
         if self.externalRunning():
@@ -1388,6 +1592,11 @@ class PipelineCard:
 
     def canRun(self):
         return self.runState()[0]
+
+    def primaryReason(self):
+        """Why Run everything cannot run ("" when it can), shown under the primary button."""
+        enabled, reason = self.runState()
+        return "" if enabled else reason
 
     def primaryLabel(self):
         n = self.eligibleCount()
@@ -1431,15 +1640,23 @@ class PipelineCard:
             return _("Failed: {message}").format(message=error.get("message") or _("see pipeline.log")), "danger"
         stale = 0
         upToDate = 0
+        designStale = False
+        settingsStale = []
         if self.plan is not None and self.planKey == self._currentPlanKey():
             stale = int(self.plan["counts"].get("compute", 0)) + int(self.plan["counts"].get("normalize", 0))
             upToDate = int(self.plan["counts"].get("reuse", 0))
+            designStale = designChanged(self.plan, self.record)
+            settingsStale = settingsChanged(self._currentConfig(), self.record)
         if self.record is None and model is None:
             if self.plan is not None and self.plan.get("review"):
                 return self._reviewLine(), "warn"
             return _("Never run"), "text2"
         if stale and status in ("done", "done_with_failures", None):
             return _plural(stale, "{n} new or changed lesion", "{n} new or changed lesions") + " · " + _("{n} up to date").format(n=upToDate), "warn"
+        if designStale and status in ("done", "done_with_failures"):
+            return _("Design changed since the last run"), "warn"
+        if settingsStale and status in ("done", "done_with_failures"):
+            return _("Settings changed since the last run"), "warn"
         if failedStages:
             return _plural(len(failedStages), "Finished with {n} failed stage", "Finished with {n} failed stages"), "warn"
         if self.plan is not None and self.plan.get("review"):
@@ -1463,7 +1680,9 @@ class PipelineCard:
             n, groups = int(info.get("n") or 0), info.get("groups") or {}
         parts = [_plural(n, "{n} lesion", "{n} lesions")]
         if groups.get("case") or groups.get("control"):
-            parts.append(_("{cases} cases / {controls} controls").format(cases=groups.get("case", 0), controls=groups.get("control", 0)))
+            from LesionNetworkMapping import cohortGroupsText
+
+            parts.append(cohortGroupsText(groups))
         scores = self._scores(study)
         if scores:
             parts.append(_("scores: {names}").format(names=", ".join(scores)))
@@ -1642,7 +1861,7 @@ class PipelineCard:
         failed = model is not None and model.state == jobrunner.FAILED
         _setText(self.warningsButton, _("Details (log)") if failed else _("Warnings ({n})").format(n=len(warnings)))
         _setVisible(self.warningsButton, bool(warnings) or failed)
-        primary = (self.primaryLabel(), enabled)
+        primary = (self.primaryLabel(), enabled, "" if enabled else reason)
         if primary != self._publishedPrimary or (running or external) != self._computeBlocked:
             qt.QTimer.singleShot(0, self._publishState)  # the Map widget updates its buttons in its own event
         if external and not self.externalTimer.isActive():
@@ -1664,10 +1883,13 @@ class PipelineCard:
         """The primary action of Seed = Cohort (D-A26): "Run everything · N lesions" (re-published when it changes)."""
         if not hasattr(self.ctx, "setPrimaryOverride"):
             return
-        state = (self.primaryLabel(), self.canRun())
+        enabled, reason = self.runState()
+        state = (self.primaryLabel(), enabled, "" if enabled else reason)
         if state != self._publishedPrimary:
             self._publishedPrimary = state
-            self.ctx.setPrimaryOverride("cohort", state[0], self.run, self.canRun)
+            # The reason goes with the action: in Studio the card's Run button (its tooltip) is hidden, so the Map widget
+            # shows it under the primary button
+            self.ctx.setPrimaryOverride("cohort", state[0], self.run, self.canRun, self.primaryReason)
 
     def _blockCompute(self, blocked):
         """Map network and Maps only are disabled (with the reason) while the pipeline runs."""
@@ -1736,8 +1958,10 @@ class PipelineCard:
     def adoptRunningJob(self):
         """Follow the runner's pipeline job of this output folder (a card created while it runs re-attaches to it)."""
         out = self.outDir()
-        if self.job is not None and self.job.isFinished() and not _samePath(getattr(self.job.spec, "lnmOut", None), out):
-            self.job, self.note = None, ""  # a run of another study, connectome or option set
+        if self.job is not None and not _samePath(getattr(self.job.spec, "lnmOut", None), out):
+            # A run of another study, connectome or option set, finished or not: the card shows (and stops) only runs of its
+            # own output folder. A run that is still going is adopted again below when its folder is shown again
+            self.job, self.note = None, ""
         if out != self.recordOut and not _samePath(out, self.recordOut):
             # Another output folder: forget the last one's record until the re-check reads this one. A re-check already
             # pending reads it too: restarting its timer here (every apply) would postpone it while applies follow each other
@@ -1992,14 +2216,12 @@ class PipelineCard:
         attributes = {"LNM.PipelineMap": desc, "Studio.Role": "statmap"}
         volume = logic.loadMap(path, name, existing, saveWithScene=True, attributes=attributes)
         if mask is not None:
-            import numpy as np
-
             pData, _affine = logic.readMap(mask[0])
             array = slicer.util.arrayFromVolume(volume)
             if pData.shape == array.shape:
-                array[~(np.asarray(pData) < float(mask[1]))] = 0
+                maskByP(array, pData, mask[1])
                 slicer.util.arrayFromVolumeModified(volume)
-                volume.SetAttribute("LNM.MaskedBy", f"{os.path.basename(mask[0])} < {mask[1]:g}")
+                volume.SetAttribute("LNM.MaskedBy", f"{os.path.basename(mask[0])} <= {mask[1]:g}")
         if kind == "stat":
             display.applyResultDisplay(volume, display.ensureLUT(volume.GetScene()))  # the shared "LNM Diverging" table
         else:
@@ -2282,7 +2504,7 @@ class OptionsDialog:
     def load(self, options):
         """Show ``options`` (the stored ones) and the facts of the current study and connectome."""
         card = self.card
-        self.extra = {key: options[key] for key in EXTRA_OPTION_KEYS if key in options}
+        self.extra = {key: options[key] for key in (*EXTRA_OPTION_KEYS, *KEPT_OPTION_KEYS) if key in options}
         preview = options.get("preview_n")
         self.subjectsGroup.button(1 if preview else 0).setChecked(True)
         self.previewSpin.setValue(int(preview or PREVIEW_N))
@@ -2440,17 +2662,19 @@ class OptionsDialog:
         if self.atlasJob is not None and self.atlasJob.get("thread") is not None and self.atlasJob["thread"].is_alive():
             return
         state = {"text": _("Downloading…"), "error": None, "done": False}
+        from LesionNetworkMappingLib import fetch
+
+        cache = fetch.app_cache_dir()  # resolved here: the thread never reads the application settings
+
+        def progress(done, total):
+            state["text"] = _("Downloading… {pct}%").format(pct=int(100 * done / total)) if total else _("Downloading… {mb:.1f} MB").format(mb=done / 1e6)
 
         def work():
             try:
-                from LesionNetworkMappingLib import fetch
-
-                def progress(done, total):
-                    state["text"] = _("Downloading… {pct}%").format(pct=int(100 * done / total)) if total else _("Downloading… {mb:.1f} MB").format(mb=done / 1e6)
-
-                fetch.fetch_set(fetch.find_resource(SCHAEFER_ID), progress=progress)
+                fetch.fetch_set(fetch.find_resource(SCHAEFER_ID), cache=cache, progress=progress)
             except Exception as exc:
-                state["error"] = f"{type(exc).__name__}: {exc}"
+                logging.info(f"Lesion network mapping: the atlas {SCHAEFER_ID} could not be downloaded: {exc!r}")
+                state["error"] = fetch.user_message(exc)  # a sentence, never the exception class
             state["done"] = True
 
         timer = qt.QTimer()

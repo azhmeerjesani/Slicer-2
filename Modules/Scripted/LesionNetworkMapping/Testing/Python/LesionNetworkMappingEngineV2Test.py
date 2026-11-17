@@ -430,7 +430,7 @@ class CommandLineV2Test(_TempDirTestCase):
         self.assertEqual(qa_json["reference"], {"definition": reference.DEFINITION, "sha256": loaded.sha256, "subjects_sha256": loaded.subjects_sha256, "run_subjects": True})
         self.assertEqual(done["reference"], qa_json["reference"])
         values = qa_json["lesions"]["sub-01"]
-        self.assertEqual(set(values), {"degree_r", "degree_rho", "degree_level", "null", "null_level", "reference"})
+        self.assertEqual(set(values), {"degree_r", "degree_rho", "degree_level", "null", "null_level", "reference", "lesion_space", "space_notice"})
         self.assertEqual(set(values["reference"]), REFERENCE_QA_KEYS)
         self.assertEqual((values["reference"]["k"], values["reference"]["null_kind"]), (4, "relocated"))
         # The calibrated similarity uses the null voxel sample (the reference restricted to the null voxels)

@@ -48,6 +48,7 @@
 #include <QStyleOptionGroupBox>
 #include <QStyleOptionSpinBox>
 #include <QTabBar>
+#include <QTimer>
 #include <QToolButton>
 #include <QtMath>
 
@@ -248,13 +249,41 @@ void applyAccentColor(QPalette& palette, bool dark)
 }
 
 //------------------------------------------------------------------------------
+/// Return true if the window brush of \a palette is transparent (no brush or an alpha 0 color). A stylesheet such as
+/// "background: transparent" gives a widget such a brush, which says nothing about the colors behind the widget.
+bool hasTransparentWindow(const QPalette& palette)
+{
+  const QBrush& window = palette.brush(QPalette::Window);
+  if (window.style() == Qt::NoBrush)
+  {
+    return true;
+  }
+  return window.style() == Qt::SolidPattern && window.color().alpha() == 0;
+}
+
+//------------------------------------------------------------------------------
 /// Return true if the palette is dark (window color lightness < 128).
 /// The color of a gradient brush is black, so for a gradient window brush the lightness is the one
 /// that covers most of the widget: the mean lightness of the stops when the gradient is stretched
 /// over the widget (e.g. the classic view bars), otherwise the lightness of the last stop, which pads
 /// the rest of the widget (e.g. the colored stripe of the flat view bars).
-bool isDark(const QPalette& palette)
+/// A transparent window brush (e.g. from the stylesheet "background: transparent" of a parent panel) is
+/// black with lightness 0, which would read as dark in the light theme: it is skipped, and the palette
+/// of the closest ancestor of \a widget with an opaque window brush decides, or the application palette
+/// when there is none.
+bool isDark(const QPalette& palette, const QWidget* widget = nullptr)
 {
+  if (hasTransparentWindow(palette))
+  {
+    for (const QWidget* ancestor = widget ? widget->parentWidget() : nullptr; ancestor; ancestor = ancestor->parentWidget())
+    {
+      if (!hasTransparentWindow(ancestor->palette()))
+      {
+        return isDark(ancestor->palette());
+      }
+    }
+    return isDark(QApplication::palette());
+  }
   const QBrush& window = palette.brush(QPalette::Window);
   const QGradient* gradient = window.gradient();
   if (!gradient || gradient->stops().isEmpty())
@@ -280,9 +309,9 @@ bool isDark(const QPalette& palette)
 
 //------------------------------------------------------------------------------
 /// Return true if the option is drawn with a dark palette (window color lightness < 128)
-bool hasDarkPalette(const QStyleOption* option)
+bool hasDarkPalette(const QStyleOption* option, const QWidget* widget = nullptr)
 {
-  return option && isDark(option->palette);
+  return option && isDark(option->palette, widget);
 }
 
 //------------------------------------------------------------------------------
@@ -686,6 +715,35 @@ bool isInFlatViewBar(const QWidget* widget)
     }
   }
   return false;
+}
+
+//------------------------------------------------------------------------------
+/// Copy into \a fitted a slider or scroll bar option whose integer range (maximum - minimum) does not fit in an int, with
+/// its range, positions and steps halved until it fits. Return false (and leave \a fitted alone) when the range fits.
+///
+/// QStyle::sliderPositionFromValue() computes "max - min" in int arithmetic. When it overflows (a range of 2^31 or more,
+/// for example [INT_MIN, 0], which ctkDoubleSlider sets for a slice offset slider of -6e13 .. 0 mm when a volume has a
+/// voxel size of 1e12 mm), some Qt 5.15 builds (the Linux system Qt among them) take the integer path and divide by zero:
+/// SIGFPE when the slider is painted or hit-tested. Halving the values keeps the handle position (to one part in 2^31).
+bool fitSliderRange(const QStyleOptionComplex* option, QStyleOptionSlider& fitted)
+{
+  const QStyleOptionSlider* slider = qstyleoption_cast<const QStyleOptionSlider*>(option);
+  if (!slider || qint64(slider->maximum) - qint64(slider->minimum) <= qint64(INT_MAX))
+  {
+    return false;
+  }
+  fitted = *slider;
+  // Arithmetic shift: rounds toward minus infinity, so the order of the values is kept
+  auto half = [](int value) { return int(qint64(value) >> 1); };
+  auto halfStep = [](int step) { return step > 0 ? qMax(1, step / 2) : step; };
+  fitted.minimum = half(slider->minimum);
+  fitted.maximum = half(slider->maximum);
+  fitted.sliderPosition = half(slider->sliderPosition);
+  fitted.sliderValue = half(slider->sliderValue);
+  fitted.singleStep = halfStep(slider->singleStep);
+  fitted.pageStep = halfStep(slider->pageStep);
+  fitted.tickInterval = halfStep(slider->tickInterval);
+  return true;
 }
 
 //------------------------------------------------------------------------------
@@ -1243,6 +1301,35 @@ void drawChevron(QStyle::PrimitiveElement element, const QRectF& rect, const QCo
 }
 
 //------------------------------------------------------------------------------
+/// Width (px) reserved at the right of a text tool button for the menu chevron
+const int MenuIndicatorWidth = 10;
+
+//------------------------------------------------------------------------------
+/// Return true if \a toolButton opens its menu on a click (InstantPopup) and has a text label: Qt draws the indicator
+/// of such a button in its bottom-right corner, touching the text like a subscript, so qSlicerStyle reserves a strip
+/// at the right of the label and draws the chevron vertically centered in it. Buttons with an icon only keep the
+/// indicator of the base style.
+bool hasInlineMenuIndicator(const QStyleOptionToolButton* toolButton, const QWidget* widget)
+{
+  const QByteArray role = widgetRole(widget);
+  // The roles with their own menu indicator rules (none for most, see drawComplexControl()) and the compact buttons keep their layout
+  if (role == "ghost" || role == "toolTile" || role == "secondary" || role == "compact" || isSegment(widget))
+  {
+    return false;
+  }
+  if (widget && widget->styleSheet().contains(QLatin1String("menu-indicator")))
+  {
+    // The button styles its own indicator (e.g. "QToolButton::menu-indicator { image: none; }")
+    return false;
+  }
+  return toolButton && (toolButton->features & QStyleOptionToolButton::HasMenu) //
+         && !(toolButton->features & QStyleOptionToolButton::MenuButtonPopup)   //
+         && !(toolButton->features & QStyleOptionToolButton::Arrow)             //
+         && !toolButton->text.isEmpty()                                         //
+         && (toolButton->toolButtonStyle != Qt::ToolButtonIconOnly || toolButton->icon.isNull());
+}
+
+//------------------------------------------------------------------------------
 /// Color of the arrows (chevrons) drawn for \a option
 QColor arrowColor(const QStyleOption* option)
 {
@@ -1451,7 +1538,7 @@ bool isCardCollapsible(const QWidget* widget)
 /// SemiBold, an optional one-line summary in "text3" ("studioStepSummary") and a chevron on the right.
 void drawCardHeader(QPainter* painter, const QRect& headerRect, const QPalette& palette, bool enabled, const QString& text, const QWidget* widget)
 {
-  const bool dark = isDark(palette);
+  const bool dark = isDark(palette, widget);
   auto token = [dark](const char* name) { return qSlicerStyle::tokenColor(QLatin1String(name), dark); };
   painter->save();
   painter->setRenderHint(QPainter::Antialiasing, true);
@@ -1565,6 +1652,8 @@ void drawCollapsibleHeader(const QStyleOption* option, QPainter* painter, const 
   const QStyle::State state = option->state;
   const bool enabled = state & QStyle::State_Enabled;
   const QRectF rect(option->rect);
+  // The header is a Tab stop (Space opens and closes it): its focus ring is shown only for keyboard focus
+  const bool keyboardFocus = enabled && (state & QStyle::State_HasFocus) && (state & QStyle::State_KeyboardFocusChange);
   QColor fill;
   if (enabled && (state & QStyle::State_Sunken))
   {
@@ -1590,6 +1679,11 @@ void drawCollapsibleHeader(const QStyleOption* option, QPainter* painter, const 
       painter->fillPath(header.intersected(row), fill);
       painter->restore();
     }
+    if (keyboardFocus)
+    {
+      // The 2 px keyboard focus ring around the title row, inside the card's border
+      drawFocusRing(painter, rect.adjusted(1., 1., -1., -1.), 9., optionToken(option, "accent-fg"));
+    }
     return;
   }
   if (fill.isValid())
@@ -1602,6 +1696,10 @@ void drawCollapsibleHeader(const QStyleOption* option, QPainter* painter, const 
     painter->setPen(optionToken(option, "hairline"));
     painter->drawLine(option->rect.bottomLeft(), option->rect.bottomRight());
     painter->restore();
+  }
+  if (keyboardFocus)
+  {
+    drawFocusRing(painter, rect.adjusted(1., 1., -1., -1.), 6., optionToken(option, "accent-fg"));
   }
 }
 
@@ -1823,6 +1921,116 @@ QObject* sliderHandlePressFilter()
   return filter;
 }
 
+//------------------------------------------------------------------------------
+/// Dynamic property of the widgets with a role font: the font that polish() set (see followApplicationFont())
+const char* const RoleFontProperty = "_slicerRoleFont";
+
+//------------------------------------------------------------------------------
+/// Set the font of the role of \a widget, scaled from its current (inherited) font. Return true if the role has a font.
+bool applyRoleFont(QWidget* widget, const QByteArray& role)
+{
+  if (role == "sectionHeader")
+  {
+    // Section labels: 12 px (at a 13 px body), SemiBold, sentence case
+    QFont font = scaledFont(widget->font(), 0.92);
+    font.setWeight(QFont::DemiBold);
+    widget->setFont(font);
+  }
+  else if (role == "overline")
+  {
+    // The rare all-caps labels ("CONTINUE", the group headers of Search): 11 px, SemiBold, +4% letter spacing
+    QFont font = scaledFont(widget->font(), 0.85);
+    font.setWeight(QFont::DemiBold);
+    font.setCapitalization(QFont::AllUppercase);
+    font.setLetterSpacing(QFont::PercentageSpacing, 104.);
+    widget->setFont(font);
+  }
+  else if (role == "secondaryText" || role == "caption" || role == "chip")
+  {
+    widget->setFont(scaledFont(widget->font(), 0.92));
+  }
+  else if (role == "kbd")
+  {
+    widget->setFont(scaledFont(widget->font(), 0.85));
+  }
+  else if (role == "toolTile")
+  {
+    // 10.5 px (at a 13 px body): the 57 px "Threshold" is not elided in a 56 px tile (the style elides a text wider than
+    // the tile minus 2 px in the middle of a word)
+    widget->setFont(scaledFont(widget->font(), 0.8));
+  }
+  else
+  {
+    return false;
+  }
+  return true;
+}
+
+//------------------------------------------------------------------------------
+/// Return true if \a a and \a b have the same size, weight, capitalization and letter spacing (the attributes of the role
+/// fonts: the family is inherited, and follows the application font)
+bool sameRoleFontAttributes(const QFont& a, const QFont& b)
+{
+  return a.pixelSize() == b.pixelSize() && qFuzzyCompare(a.pointSizeF() + 1., b.pointSizeF() + 1.) && a.weight() == b.weight() //
+         && a.capitalization() == b.capitalization() && a.letterSpacingType() == b.letterSpacingType()                         //
+         && qFuzzyCompare(a.letterSpacing() + 1., b.letterSpacing() + 1.);
+}
+
+//------------------------------------------------------------------------------
+/// Make the font of the role of \a widget again from its inherited font, unless the application set another font on the
+/// widget since polish() (see followApplicationFont())
+void refreshRoleFont(QWidget* widget)
+{
+  const QVariant roleFont = widget->property(RoleFontProperty);
+  if (!roleFont.isValid() || !sameRoleFontAttributes(widget->font(), roleFont.value<QFont>()))
+  {
+    return;
+  }
+  widget->setFont(QFont());
+  if (applyRoleFont(widget, widgetRole(widget)))
+  {
+    widget->setProperty(RoleFontProperty, widget->font());
+  }
+  else
+  {
+    widget->setProperty(RoleFontProperty, QVariant());
+  }
+}
+
+//------------------------------------------------------------------------------
+/// polish() sets the role font once, and a widget with its own font no longer follows the application font: when the
+/// application font changes, make the role fonts again from the new font. Done once the widgets have the new inherited
+/// font, for all widgets, also those that are not in the window at that time (the panels of the modules that are not
+/// shown). The application sends the font change event to the windows only.
+void followApplicationFont()
+{
+  static bool connected = false;
+  if (connected || !qobject_cast<QGuiApplication*>(QCoreApplication::instance()))
+  {
+    return;
+  }
+  connected = true;
+  QObject::connect(static_cast<QGuiApplication*>(QCoreApplication::instance()),
+                   &QGuiApplication::fontChanged,
+                   QCoreApplication::instance(),
+                   []()
+                   {
+                     QTimer::singleShot(0,
+                                        QCoreApplication::instance(),
+                                        []()
+                                        {
+                                          const QWidgetList widgets = QApplication::allWidgets();
+                                          for (QWidget* widget : widgets)
+                                          {
+                                            if (widget->property(RoleFontProperty).isValid())
+                                            {
+                                              refreshRoleFont(widget);
+                                            }
+                                          }
+                                        });
+                   });
+}
+
 } // namespace
 
 // --------------------------------------------------------------------------
@@ -1887,6 +2095,11 @@ QStyle::SubControl qSlicerStyle::hitTestComplexControl(ComplexControl cc, const 
 //------------------------------------------------------------------------------
 QRect qSlicerStyle::subControlRect(ComplexControl control, const QStyleOptionComplex* option, SubControl subControl, const QWidget* widget) const
 {
+  QStyleOptionSlider fitted;
+  if ((control == QStyle::CC_Slider || control == QStyle::CC_ScrollBar) && fitSliderRange(option, fitted))
+  {
+    option = &fitted;
+  }
   if (control == QStyle::CC_ScrollBar && qSlicerStyle::density() == qSlicerStyle::Comfortable)
   {
     if (const QStyleOptionSlider* scrollBar = qstyleoption_cast<const QStyleOptionSlider*>(option))
@@ -2566,6 +2779,30 @@ void qSlicerStyle::drawControl(ControlElement element, const QStyleOption* optio
           return;
         }
         break;
+      case QStyle::CE_ComboBoxLabel:
+        if (const QStyleOptionComboBox* comboBox = qstyleoption_cast<const QStyleOptionComboBox*>(option))
+        {
+          // The base style draws the current text of a closed combo box clipped at the edge of the field, in the middle of
+          // a word. A text that does not fit keeps its beginning and ends with an ellipsis (the pop-up list has the whole text).
+          if (!comboBox->editable && !comboBox->currentText.isEmpty())
+          {
+            QRect textRect = this->proxy()->subControlRect(QStyle::CC_ComboBox, comboBox, QStyle::SC_ComboBoxEditField, widget);
+            int room = textRect.width() - 2; // the base style draws the text in the field adjusted by 1 px on both sides
+            if (!comboBox->currentIcon.isNull())
+            {
+              room -= comboBox->iconSize.width() + 4;
+            }
+            const QFontMetrics& metrics = comboBox->fontMetrics;
+            if (room > 0 && metrics.horizontalAdvance(comboBox->currentText) > room)
+            {
+              QStyleOptionComboBox elided(*comboBox);
+              elided.currentText = metrics.elidedText(comboBox->currentText, Qt::ElideRight, room);
+              this->Superclass::drawControl(element, &elided, painter, widget);
+              return;
+            }
+          }
+        }
+        break;
       case QStyle::CE_Splitter: drawSplitterHandle(option, painter); return;
       default: break;
     }
@@ -2576,6 +2813,11 @@ void qSlicerStyle::drawControl(ControlElement element, const QStyleOption* optio
 //------------------------------------------------------------------------------
 void qSlicerStyle::drawComplexControl(ComplexControl control, const QStyleOptionComplex* option, QPainter* painter, const QWidget* widget) const
 {
+  QStyleOptionSlider fitted;
+  if ((control == QStyle::CC_Slider || control == QStyle::CC_ScrollBar) && fitSliderRange(option, fitted))
+  {
+    option = &fitted;
+  }
   if (control == QStyle::CC_ToolButton && option)
   {
     const QByteArray role = widgetRole(widget);
@@ -2587,6 +2829,28 @@ void qSlicerStyle::drawComplexControl(ComplexControl control, const QStyleOption
       QStyleOptionToolButton withoutIndicator(*toolButton);
       withoutIndicator.features &= ~QStyleOptionToolButton::HasMenu;
       this->Superclass::drawComplexControl(control, &withoutIndicator, painter, widget);
+      return;
+    }
+    if (painter && widget && hasInlineMenuIndicator(toolButton, widget) //
+        && toolButton->rect.width() >= toolButton->fontMetrics.horizontalAdvance(toolButton->text) + MenuIndicatorWidth + 6)
+    {
+      // The panel without label (and without the base style's corner indicator), then the label in the rect left of
+      // the chevron, then the chevron centered vertically in the strip at the right
+      QStyleOptionToolButton panel(*toolButton);
+      panel.features &= ~QStyleOptionToolButton::HasMenu;
+      panel.text.clear();
+      panel.icon = QIcon();
+      this->Superclass::drawComplexControl(control, &panel, painter, widget);
+      const int frame = this->pixelMetric(QStyle::PM_DefaultFrameWidth, option, widget);
+      QStyleOptionToolButton label(*toolButton);
+      label.features &= ~QStyleOptionToolButton::HasMenu;
+      const QRect inner = toolButton->rect.adjusted(frame, frame, -frame, -frame);
+      label.rect = this->visualRect(toolButton->direction, toolButton->rect, inner.adjusted(0, 0, -MenuIndicatorWidth, 0));
+      this->drawControl(QStyle::CE_ToolButtonLabel, &label, painter, widget);
+      const QRect strip = this->visualRect(toolButton->direction,
+                                           toolButton->rect,
+                                           QRect(toolButton->rect.right() + 1 - MenuIndicatorWidth - frame, toolButton->rect.top(), MenuIndicatorWidth, toolButton->rect.height()));
+      drawChevron(QStyle::PE_IndicatorArrowDown, QRectF(strip), arrowColor(option), painter);
       return;
     }
     const QString key = (role == "toolTile" && widget && painter) ? widget->property("studioKey").toString() : QString();
@@ -2679,7 +2943,7 @@ void qSlicerStyle::drawItemText(QPainter* painter, const QRect& rect, int flags,
     this->Superclass::drawItemText(painter, rect, flags, pal, enabled, text, textRole);
     return;
   }
-  const bool dark = isDark(pal);
+  const bool dark = isDark(pal, widget);
   auto token = [dark](const char* name) { return qSlicerStyle::tokenColor(QLatin1String(name), dark); };
   const QAbstractButton* button = qobject_cast<const QAbstractButton*>(widget);
   // Buttons that are hovered, pressed or checked use the normal text color
@@ -2765,7 +3029,20 @@ QSize qSlicerStyle::sizeFromContents(ContentsType type, const QStyleOption* opti
         size.setHeight(qMax(size.height(), 26));
       }
       break;
+    case QStyle::CT_CheckBox:
+      if (isSwitch(widget))
+      {
+        // Room for what SE_CheckBoxContents reserves: the track and SwitchSpacing (not the spacing of the base style)
+        size.setWidth(contentsSize.width() + SwitchWidth + SwitchSpacing);
+        size.setHeight(qMax(size.height(), SwitchHeight));
+      }
+      break;
     case QStyle::CT_ToolButton:
+      if (hasInlineMenuIndicator(qstyleoption_cast<const QStyleOptionToolButton*>(option), widget))
+      {
+        // The chevron beside the label of an InstantPopup button (see hasInlineMenuIndicator())
+        size.setWidth(size.width() + MenuIndicatorWidth);
+      }
       if (role == "compact")
       {
         // No padding around the icon (QToolButton { padding: 0px; })
@@ -2858,32 +3135,12 @@ void qSlicerStyle::polish(QWidget* widget)
     return;
   }
   // Role fonts, unless the application set a font on the widget
-  if (!widget->testAttribute(Qt::WA_SetFont))
+  if (!widget->testAttribute(Qt::WA_SetFont) && applyRoleFont(widget, role))
   {
-    if (role == "sectionHeader")
-    {
-      // Section labels: 12 px (at a 13 px body), SemiBold, sentence case
-      QFont font = scaledFont(widget->font(), 0.92);
-      font.setWeight(QFont::DemiBold);
-      widget->setFont(font);
-    }
-    else if (role == "overline")
-    {
-      // The rare all-caps labels ("CONTINUE", the group headers of Search): 11 px, SemiBold, +4% letter spacing
-      QFont font = scaledFont(widget->font(), 0.85);
-      font.setWeight(QFont::DemiBold);
-      font.setCapitalization(QFont::AllUppercase);
-      font.setLetterSpacing(QFont::PercentageSpacing, 104.);
-      widget->setFont(font);
-    }
-    else if (role == "secondaryText" || role == "caption" || role == "chip")
-    {
-      widget->setFont(scaledFont(widget->font(), 0.92));
-    }
-    else if (role == "kbd" || role == "toolTile")
-    {
-      widget->setFont(scaledFont(widget->font(), 0.85));
-    }
+    // The font is set once, so the widget would no longer follow the application font: remember it, to size it again
+    // when the application font changes (see followApplicationFont())
+    widget->setProperty(RoleFontProperty, widget->font());
+    followApplicationFont();
   }
   // Horizontal padding of the label roles
   if (QLabel* label = qobject_cast<QLabel*>(widget))

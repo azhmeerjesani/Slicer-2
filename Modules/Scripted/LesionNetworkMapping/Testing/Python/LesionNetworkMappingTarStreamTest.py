@@ -505,13 +505,24 @@ class ConnectomeCatalogTest(unittest.TestCase):
 
         hundred = catalog.disk_plan(ilxiks, 100)
         self.assertEqual(hundred["archives"], ["GSP1000_v2_00.tar", "GSP1000_v2_01.tar"])  # ceil(100 / 1000 * 20)
-        self.assertEqual(hundred["stored_range"], [12_600_000_000, 14_000_000_000])
+        # the converter keeps every subject of the archives read, so the bundle is planned as archives:00-01, not 100/1000
+        self.assertEqual(hundred["stored_range"], two["stored_range"])
+        self.assertEqual(hundred["peak"], two["peak"])
+        self.assertEqual(hundred["subjects"], 100)
         self.assertFalse(hundred["exact"])
         self.assertEqual(catalog.disk_plan(ilxiks, "subjects:100")["download"], hundred["download"])
         kktjqc = self.catalog.get("gsp1000-kktjqc")
         first100 = catalog.disk_plan(kktjqc, "First 100 Subjects")
         self.assertEqual(len(first100["archives"]), 4)  # ceil(100 / 1000 * 35)
         self.assertIsNone(first100["stored"])  # the Lead-DBS mask is known only from dataset_volsurf.mat
+        self.assertIsNone(first100["peak"])
+        self.assertIsNone(plan["peak_min"])  # a known peak needs no lower bound
+        # Unknown bundle size: the float16 bundle still needs at least half of the float32 archive bytes of its subjects
+        kk_archives = sum(f["size"] for f in catalog.archives(kktjqc))
+        kk_others = sum(f["size"] for f in kktjqc["files"] if f["role"] != "archive")
+        self.assertEqual(catalog.disk_plan(kktjqc)["peak_min"], round(kk_archives / 2) + kk_others)
+        self.assertEqual(first100["peak_min"], round(kk_archives * 0.1 / 2) + kk_others)
+        self.assertGreater(catalog.disk_plan(kktjqc, keep_archives=True)["peak_min"], catalog.disk_plan(kktjqc)["peak_min"] + kk_archives - 1)
         for bad in ("archives:20", "archives:03-01", "first fifty", 0):
             with self.assertRaises(ValueError):
                 catalog.disk_plan(ilxiks, bad)
@@ -521,7 +532,7 @@ class ConnectomeCatalogTest(unittest.TestCase):
         ukb = catalog.disk_plan(self.catalog.get("ukb-migp-grouppca"))
         self.assertEqual((ukb["download"], ukb["peak"]), (1_199_307_960, 1_199_307_960 + 700_000_000))
         torpd = catalog.disk_plan(self.catalog.get("leaddbs-torpd"))
-        self.assertEqual((torpd["download"], torpd["peak"]), (25_665_221_855, None))
+        self.assertEqual((torpd["download"], torpd["peak"], torpd["peak_min"]), (25_665_221_855, None, None))
 
     def test_validation_finds_problems(self):
         entry = copy.deepcopy(self.catalog.get("leaddbs-torpd"))

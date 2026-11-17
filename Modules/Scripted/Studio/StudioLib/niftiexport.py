@@ -7,10 +7,16 @@ Every image that Studio shows can be written as a standard single-file NIfTI-1 i
   (sform = qform = IJK to RAS; the qform has qfac = -1 for a left-handed grid). Oblique and DICOM-derived volumes keep
   their full direction matrix: nothing is resampled unless the user asks for a reference image. Voxels are written in
   the volume's own (i, j, k) order, so a voxel at negative RAS x (the subject's left) stays at negative x in every reader.
-- **Transforms.** A linear transform applied to a node is folded into the affine of the exported copy (no resampling);
-  a non-linear one is hardened into a temporary copy (resampled). The scene is never changed; the sidecar says so.
+- **Transforms.** A linear transform applied to a node is folded into the affine of the exported copy (no resampling)
+  when the result is still a rotation times a scale; a non-linear one, or a linear one with shear (a 12-DOF affine
+  registration with non-uniform scaling), is hardened into a temporary copy (resampled), because a NIfTI qform cannot
+  hold shear and readers that use the qform (3D Slicer, ITK) would place the voxels elsewhere than those that use the
+  sform (FSL, nibabel). The scene is never changed; the sidecar says so.
 - **Codes.** sform and qform codes are 4 (MNI152) on a recognised MNI grid or one of the user's templates (A-10),
   2 (aligned) for an image whose transform was applied, 1 (scanner) otherwise; units are mm and seconds.
+- **4D images.** A 4D image opened as a sequence (fMRI, a 4D mask: ``importer.loadSequence``) is written whole, as one 4D
+  file with every time point (``dim[4]``) and the time step of the sequence index in ``pixdim[4]``; not only the time point
+  on screen.
 - **Values.** The data type is kept (uint8, int16, float32...) and window/level is never applied to the data. Maps are
   written as float32 with an optional thresholded binary mask.
 - **Segmentations** are written as one label map (values 1..N in segment order, with ``<name>.tsv`` and an ITK-SNAP
@@ -24,7 +30,9 @@ The product does not depend on nibabel; images are written with ``LesionNetworkM
 3D Slicer's own writer when that library is not part of the build.
 
 Use :func:`planExport` (or :func:`planProject`, :func:`planDicom`) to get the jobs and the files they write, then
-:func:`runJobs` (synchronous) or ``niftiexport_ui.ExportRunner`` (progress, writing in a background thread).
+:func:`runJobs` (synchronous) or ``niftiexport_ui.ExportRunner`` (progress, writing in a background thread). A job gives its
+images one at a time (``Job.iterTasks``), so that a segmentation with many segments written as masks never holds more than
+one full-grid mask in memory and the user interface can run between two masks.
 """
 
 import contextlib
@@ -33,6 +41,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 
 import numpy as np
 import slicer
@@ -68,6 +77,8 @@ XYZT_UNITS_MM_SEC = 10
 PROJECT_EXPORT_FOLDER = "nifti"
 #: Name of the list of files written by a project export
 README_NAME = "README.txt"
+#: Name of that list when the folder already holds a README.txt that Slicer Studio did not write (the user's own is kept)
+STUDIO_README_NAME = "README_SlicerStudio.txt"
 
 #: Fork-only settings (Studio/*): the last folder, format and segmentation mode of the export dialog
 LAST_FOLDER_KEY = "Studio/NiftiExport/LastFolder"
@@ -154,16 +165,50 @@ def sidecarPath(path):
     return splitExtension(path)[0] + ".json"
 
 
+# Letters that Unicode normalisation does not split into a base letter and an accent (sharp s, o with stroke, ligatures...).
+_TRANSLITERATION = {
+    "\u00df": "ss", "\u1e9e": "SS", "\u00f8": "o", "\u00d8": "O",
+    "\u00e6": "ae", "\u00c6": "AE", "\u0153": "oe", "\u0152": "OE",
+    "\u0111": "d", "\u0110": "D", "\u00f0": "d", "\u00d0": "D",
+    "\u00fe": "th", "\u00de": "Th", "\u0142": "l", "\u0141": "L",
+    "\u0131": "i", "\u0127": "h", "\u0126": "H",
+}
+
+
+def asciiText(text):
+    """``text`` with accented letters written as plain ones ("Ödem" -> "Odem", "Lésion" -> "Lesion", "Straße" -> "Strasse").
+
+    Letters of scripts that have no plain form (Chinese, Arabic...) stay as they are, for the caller to filter out.
+    """
+    text = "".join(_TRANSLITERATION.get(character, character) for character in str(text or ""))
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(character for character in decomposed if not unicodedata.combining(character))
+
+
+#: Longest base name of an image (bytes). A file system accepts 255 bytes per name component, and a job adds up to
+#: ``_label-<segment>_mask`` (with the segment value of at most ``MAX_ENTITY_LENGTH``, ``dup<N>``) and ``.nii.gz`` to it,
+#: or ``_desc-thresholded_mask.nii.gz``, plus the ``_<N>`` of the uniqueness bump.
+MAX_BASE_LENGTH = 140
+MAX_ENTITY_LENGTH = 64
+
+
+def limitLength(text, limit=MAX_BASE_LENGTH):
+    """``text`` cut to ``limit`` characters (ASCII file names: one byte each), without a dangling separator."""
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip("._-") or text[:limit]
+
+
 def safeName(text, fallback="image"):
-    """A file name made of ASCII letters, digits, ".", "_" and "-" only (spaces become "_")."""
-    name = re.sub(r"[^A-Za-z0-9._-]+", "_", str(text or "")).strip("._-")
+    """A file name made of ASCII letters, digits, ".", "_" and "-" only (spaces become "_", accents are dropped)."""
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", asciiText(text)).strip("._-")
     name = re.sub(r"_+", "_", name)
     return name or fallback
 
 
 def entityValue(text, fallback="segment"):
-    """A BIDS entity value (letters and digits only): "Left lesion 2" -> "Leftlesion2"."""
-    value = re.sub(r"[^A-Za-z0-9]+", "", str(text or ""))
+    """A BIDS entity value (letters and digits only): "Left lesion 2" -> "Leftlesion2", "Ödem" -> "Odem"."""
+    value = re.sub(r"[^A-Za-z0-9]+", "", asciiText(text))[:MAX_ENTITY_LENGTH]
     return value or fallback
 
 
@@ -221,6 +266,53 @@ def isTemplateNode(node):
 
 def isDicomNode(node):
     return node is not None and node.IsA("vtkMRMLVolumeNode") and bool(node.GetAttribute(DICOM_UIDS_ATTRIBUTE))
+
+
+def sequenceOf(node):
+    """The sequence of a 4D image (fMRI, a 4D mask) whose current time point ``node`` shows, else None.
+
+    A 4D image is loaded as a sequence of 3D volumes and the views show the sequence browser's proxy node; that node is what
+    the Library and the export list name. ``node`` is such a proxy when a browser has it as the proxy of a sequence of two or
+    more scalar volumes.
+    """
+    if node is None or not node.IsA("vtkMRMLScalarVolumeNode") or not hasattr(slicer.modules, "sequences"):
+        return None
+    try:
+        browserNode = slicer.modules.sequences.logic().GetFirstBrowserNodeForProxyNode(node)
+        sequenceNode = browserNode.GetSequenceNode(node) if browserNode is not None else None
+    except Exception:
+        logging.debug("Slicer Studio: the sequence of a volume could not be read", exc_info=True)
+        return None
+    if sequenceNode is None or sequenceNode.GetNumberOfDataNodes() < 2:
+        return None
+    for index in range(sequenceNode.GetNumberOfDataNodes()):
+        dataNode = sequenceNode.GetNthDataNode(index)
+        if dataNode is None or not dataNode.IsA("vtkMRMLScalarVolumeNode") or dataNode.IsA("vtkMRMLVectorVolumeNode"):
+            return None
+    return sequenceNode
+
+
+def timePoints(node):
+    """The number of time points of the image ``node`` shows: the items of its sequence for a 4D image, else 1."""
+    sequenceNode = sequenceOf(node)
+    return sequenceNode.GetNumberOfDataNodes() if sequenceNode is not None else 1
+
+
+def timeStep(sequenceNode):
+    """The time between two items of a sequence in seconds (``pixdim[4]``), or None when the index is not evenly spaced time."""
+    unit = (sequenceNode.GetIndexUnit() or "").strip().lower()
+    scale = {"s": 1.0, "sec": 1.0, "second": 1.0, "seconds": 1.0, "ms": 0.001, "msec": 0.001}.get(unit)
+    count = sequenceNode.GetNumberOfDataNodes()
+    if scale is None or count < 2 or sequenceNode.GetIndexType() != slicer.vtkMRMLSequenceNode.NumericIndex:
+        return None
+    try:
+        values = np.array([float(sequenceNode.GetNthIndexValue(index)) for index in range(count)])
+    except ValueError:
+        return None
+    steps = np.diff(values)
+    if not np.all(np.isfinite(steps)) or steps[0] <= 0 or not np.allclose(steps, steps[0], rtol=1e-3, atol=1e-6):
+        return None
+    return float(steps[0]) * scale
 
 
 def kindOf(node):
@@ -382,8 +474,11 @@ def xformCode(spaceName, transformed=False):
     return XFORM_SCANNER
 
 
-def _cloneVolume(volumeNode):
-    """A temporary copy of a volume with its own image data and the same parent transform (removed by ``_temporaryNodes``)."""
+def _cloneVolume(volumeNode, transformNode=None):
+    """A temporary copy of a volume with its own image data and the same parent transform (removed by ``_temporaryNodes``).
+
+    ``transformNode`` (if given) is the parent transform of the copy instead of the volume's own.
+    """
     scene = slicer.mrmlScene
     clone = scene.AddNewNodeByClass(volumeNode.GetClassName(), scene.GenerateUniqueName("StudioNiftiExport"))
     clone.SetHideFromEditors(True)
@@ -394,26 +489,148 @@ def _cloneVolume(volumeNode):
     matrix = vtk.vtkMatrix4x4()
     volumeNode.GetIJKToRASMatrix(matrix)
     clone.SetIJKToRASMatrix(matrix)
-    transformNode = volumeNode.GetParentTransformNode()
+    if transformNode is None:
+        transformNode = volumeNode.GetParentTransformNode()
     clone.SetAndObserveTransformNodeID(transformNode.GetID() if transformNode is not None else None)
     return clone
+
+
+#: Largest cosine between two axes of an affine that still counts as orthogonal (no shear): 1e-5 moves a voxel 256 mm
+#: from the origin by less than 0.003 mm, while the 12-DOF affines of registrations are far above it
+SHEAR_TOLERANCE = 1e-5
+
+
+def hasShear(affine):
+    """True when the axes of the 4x4 (or 3x3) ``affine`` are not orthogonal: it is not a rotation times a scale.
+
+    A NIfTI qform holds only a rotation, zooms and an offset: the sform of such an affine could not equal its qform, and
+    3D Slicer (which reads the qform) would place the voxels elsewhere than FSL or nibabel (which read the sform).
+    """
+    matrix = np.asarray(affine, dtype=np.float64)[:3, :3]
+    norms = np.linalg.norm(matrix, axis=0)
+    if np.any(norms == 0):
+        return False
+    directions = matrix / norms[np.newaxis, :]
+    cosines = directions.T @ directions - np.eye(3)
+    return bool(np.abs(cosines).max() > SHEAR_TOLERANCE)
+
+
+def _withoutShear(affine):
+    """``affine`` itself when it has no shear, else the closest rotation (polar decomposition) times its axis lengths."""
+    affine = np.asarray(affine, dtype=np.float64)
+    if not hasShear(affine):
+        return affine
+    norms = np.linalg.norm(affine[:3, :3], axis=0)
+    u, _s, vt = np.linalg.svd(affine[:3, :3] / norms[np.newaxis, :])
+    result = affine.copy()
+    result[:3, :3] = (u @ vt) * norms[np.newaxis, :]
+    return result
+
+
+def _withZeroBorder(labelmapNode):
+    """Add one voxel of 0 around the image of a temporary label map whose corners are mostly labelled, in place (its
+    voxels stay where they are).
+
+    Resampling (``vtkMRMLVolumeNode::ApplyNonLinearTransform``) fills the voxels outside the input with the median of the
+    8 corner voxels: for a segment exported on its own cropped extent (a lesion touching the corners) that is the label
+    itself, and the whole bounding box of the moved lesion would be filled. A label map with background corners is left
+    as it is, so that it is resampled onto the same grid as a scan of the same geometry.
+    """
+    imageData = labelmapNode.GetImageData()
+    if imageData is None or imageData.GetNumberOfPoints() == 0:
+        return
+    array = slicer.util.arrayFromVolume(labelmapNode)
+    # The background that vtkMRMLVolumeNode::GetImageBackgroundScalarComponentAsDouble takes (4th smallest corner)
+    corners = sorted(float(array[k, j, i]) for k in (0, -1) for j in (0, -1) for i in (0, -1))
+    if corners[3] == 0.0:
+        return
+    extent = imageData.GetExtent()
+    pad = vtk.vtkImageConstantPad()
+    pad.SetInputData(imageData)
+    pad.SetConstant(0)
+    pad.SetOutputWholeExtent(extent[0] - 1, extent[1] + 1, extent[2] - 1, extent[3] + 1, extent[4] - 1, extent[5] + 1)
+    pad.Update()
+    padded = vtk.vtkImageData()
+    padded.DeepCopy(pad.GetOutput())
+    padded.SetExtent(extent[0], extent[1] + 2, extent[2], extent[3] + 2, extent[4], extent[5] + 2)
+    matrix = vtk.vtkMatrix4x4()
+    labelmapNode.GetIJKToRASMatrix(matrix)
+    ijkToRas = _matrixToArray(matrix)
+    shift = np.eye(4)
+    shift[:3, 3] = -1.0
+    labelmapNode.SetAndObserveImageData(padded)
+    labelmapNode.SetIJKToRASMatrix(_arrayToMatrix(ijkToRas @ shift))
+
+
+def _resampledThroughLinear(volumeNode, toWorld):
+    """A temporary copy of ``volumeNode`` moved by the 4x4 ``toWorld`` (its transform to world), resampled on a grid
+    without shear: the volume's own axes, as when a non-linear transform is hardened (``_temporaryNodes`` removes it).
+    """
+    matrix = vtk.vtkMatrix4x4()
+    volumeNode.GetIJKToRASMatrix(matrix)
+    ijkToRas = _matrixToArray(matrix)
+    grid = _withoutShear(ijkToRas)
+    # The copy is placed on ``grid``; this transform takes it to where the views show the volume (toWorld @ ijkToRas)
+    scene = slicer.mrmlScene
+    gridToWorld = scene.AddNewNodeByClass("vtkMRMLLinearTransformNode", scene.GenerateUniqueName("StudioNiftiExport"))
+    gridToWorld.SetHideFromEditors(True)
+    gridToWorld.SetSaveWithScene(False)
+    gridToWorld.SetMatrixTransformToParent(_arrayToMatrix(toWorld @ ijkToRas @ np.linalg.inv(grid)))
+    clone = _cloneVolume(volumeNode, gridToWorld)
+    clone.SetIJKToRASMatrix(_arrayToMatrix(grid))
+    if clone.IsA("vtkMRMLLabelMapVolumeNode"):
+        _withZeroBorder(clone)
+    transform = vtk.vtkGeneralTransform()
+    gridToWorld.GetTransformToWorld(transform)
+    # ApplyNonLinearTransform resamples (vtkImageReslice) whatever the transform is: hardening a linear transform would
+    # only change the IJK to RAS matrix, which keeps the shear
+    clone.ApplyNonLinearTransform(transform)
+    clone.SetAndObserveTransformNodeID(None)
+    return clone
+
+
+def _gridShearMessage():
+    return _("{name}: its grid has shear (a hardened affine transform), which a NIfTI file cannot hold: the exported copy was "
+             "resampled (the scene is unchanged)")
+
+
+def gridShearNote(volumeNode):
+    """``{"Reason", "Interpolation"}`` when ``volumeData`` resamples ``volumeNode`` because its own grid (IJK to RAS
+    matrix) has shear, else None. A linear parent transform is left out: ``volumeData`` judges the shear of the moved
+    affine instead, and its transform note says whether the copy was resampled.
+    """
+    transformNode = volumeNode.GetParentTransformNode()
+    if transformNode is not None and transformNode.IsTransformToWorldLinear():
+        return None
+    matrix = vtk.vtkMatrix4x4()
+    volumeNode.GetIJKToRASMatrix(matrix)
+    if not hasShear(_matrixToArray(matrix)):
+        return None
+    interpolation = "nearest neighbour" if volumeNode.IsA("vtkMRMLLabelMapVolumeNode") else "linear interpolation"
+    return {"Reason": "The image grid has shear (for example a hardened affine transform), which a NIfTI affine cannot hold: the "
+                      "exported copy was resampled onto the closest grid without shear",
+            "Interpolation": interpolation}
 
 
 def volumeData(volumeNode):
     """``(data_ijk, affine, transformNote)`` of a scalar volume as it is shown in the views.
 
     ``data_ijk`` is a copy of the voxels indexed [i, j, k] (file order), ``affine`` the 4x4 IJK to RAS matrix in world
-    coordinates. A linear parent transform is folded into the affine; a non-linear one is hardened into a temporary copy
-    (resampled). ``transformNote`` describes what was applied (None without a transform). Call it inside
-    ``_temporaryNodes()``. The scene is never changed.
+    coordinates. A linear parent transform is folded into the affine when the result has no shear; a non-linear one, or a
+    linear one that would give the affine shear (``hasShear``: a NIfTI file cannot store it consistently), is hardened
+    into a temporary copy (resampled). A volume whose own IJK to RAS matrix has shear (a hardened affine transform) is
+    resampled onto the closest grid without shear too (``gridShearNote`` describes it). ``transformNote`` describes what
+    was applied (None without a transform). Call it inside ``_temporaryNodes()``. The scene is never changed.
     """
     transformNode = volumeNode.GetParentTransformNode()
     note = None
+    # Label maps (also the temporary ones of segmentations) are resampled nearest neighbour, other volumes linearly
+    interpolation = "nearest neighbour" if volumeNode.IsA("vtkMRMLLabelMapVolumeNode") else "linear interpolation"
     if transformNode is not None and not transformNode.IsTransformToWorldLinear():
         clone = _cloneVolume(volumeNode)
+        if clone.IsA("vtkMRMLLabelMapVolumeNode"):
+            _withZeroBorder(clone)
         slicer.vtkSlicerTransformLogic().hardenTransform(clone)
-        # Label maps (also the temporary ones of segmentations) are resampled nearest neighbour, other volumes linearly
-        interpolation = "nearest neighbour" if volumeNode.IsA("vtkMRMLLabelMapVolumeNode") else "linear interpolation"
         note = {"Name": transformNode.GetName(), "Linear": False,
                 "Description": f"A non-linear transform was applied to the exported copy (resampled, {interpolation})"}
         volumeNode = clone
@@ -421,17 +638,65 @@ def volumeData(volumeNode):
     matrix = vtk.vtkMatrix4x4()
     volumeNode.GetIJKToRASMatrix(matrix)
     affine = _matrixToArray(matrix)
+    if transformNode is None and hasShear(affine):
+        # The image's own grid has shear (a hardened 12-DOF affine transform: hardening a linear transform only multiplies
+        # the IJK to RAS matrix): resampled onto the closest grid without shear, as for a parent transform with shear
+        volumeNode = _resampledThroughLinear(volumeNode, np.eye(4))
+        volumeNode.GetIJKToRASMatrix(matrix)
+        affine = _matrixToArray(matrix)
     if transformNode is not None:
         toWorld = vtk.vtkMatrix4x4()
         transformNode.GetMatrixTransformToWorld(toWorld)
-        affine = _matrixToArray(toWorld) @ affine
-        note = {"Name": transformNode.GetName(), "Linear": True,
-                "Description": "The linear transform was applied to the exported copy's affine (no resampling)"}
+        toWorld = _matrixToArray(toWorld)
+        if hasShear(toWorld @ affine):
+            volumeNode = _resampledThroughLinear(volumeNode, toWorld)
+            volumeNode.GetIJKToRASMatrix(matrix)
+            affine = _matrixToArray(matrix)
+            note = {"Name": transformNode.GetName(), "Linear": True,
+                    "Description": f"The linear transform has shear, which a NIfTI affine cannot hold: it was applied to the exported copy "
+                                   f"(resampled, {interpolation})"}
+        else:
+            affine = toWorld @ affine
+            note = {"Name": transformNode.GetName(), "Linear": True,
+                    "Description": "The linear transform was applied to the exported copy's affine (no resampling)"}
     array = slicer.util.arrayFromVolume(volumeNode)
     if array is None or array.ndim != 3:
         raise ExportError(_("{name} is not a 3D image").format(name=volumeNode.GetName()))
+    # The array starts at the image's extent start, which is not always IJK 0 (a vtkImageClip done in a script): the
+    # file's voxel 0 is IJK (extent[0], extent[2], extent[4]), as 3D Slicer's own writer stores it
+    extent = volumeNode.GetImageData().GetExtent()
+    if extent[0] != 0 or extent[2] != 0 or extent[4] != 0:
+        start = np.eye(4)
+        start[:3, 3] = (extent[0], extent[2], extent[4])
+        affine = affine @ start
     # [k, j, i] (VTK memory order) -> [i, j, k] (file order); the copy keeps the data after temporary nodes are removed
     return np.array(array, copy=True).transpose(2, 1, 0), affine, note
+
+
+def sequenceData(proxyNode, sequenceNode):
+    """``(data_ijkt, affine, transformNote)`` of every time point of a 4D image, as ``volumeData`` gives them for one.
+
+    The time points are the volumes of ``sequenceNode``; the parent transform of ``proxyNode`` (the volume shown) applies to
+    each of them, as the views show it. Raise ``ExportError`` when the time points are not on one grid.
+    """
+    transformNode = proxyNode.GetParentTransformNode()
+    data = affine = note = None
+    count = sequenceNode.GetNumberOfDataNodes()
+    for index in range(count):
+        dataNode = sequenceNode.GetNthDataNode(index)
+        with _temporaryNodes():
+            if transformNode is None and dataNode.GetParentTransformNode() is None:
+                frame, frameAffine, note = volumeData(dataNode)
+            else:
+                frame, frameAffine, note = volumeData(_cloneVolume(dataNode, transformNode))
+        if data is None:
+            data = np.empty(frame.shape + (count,), dtype=frame.dtype)
+            affine = frameAffine
+        elif frame.shape != data.shape[:3] or frame.dtype != data.dtype or not np.allclose(frameAffine, affine, atol=1e-4):
+            raise ExportError(_("The time points of {name} are not on one grid: it cannot be written as one 4D NIfTI image").format(
+                name=proxyNode.GetName()))
+        data[..., index] = frame
+    return data, affine, note
 
 
 #
@@ -442,7 +707,7 @@ def volumeData(volumeNode):
 class WriteTask:
     """One NIfTI image and its side files, ready to be written (all arrays are owned copies: safe in another thread)."""
 
-    def __init__(self, path, data, affine, code, sidecar=None, textFiles=None, dtype=None, node=None):
+    def __init__(self, path, data, affine, code, sidecar=None, textFiles=None, dtype=None, node=None, timeStep=None):
         self.path = path
         self.data = data
         self.affine = np.asarray(affine, dtype=np.float64)
@@ -452,6 +717,8 @@ class WriteTask:
         self.dtype = dtype
         #: Fallback without LesionNetworkMappingLib: the node written by 3D Slicer's writer on the main thread
         self.node = node
+        #: pixdim[4] of a 4D image (seconds), None for a 3D one
+        self.timeStep = timeStep
 
     def files(self):
         return [self.path] + ([sidecarPath(self.path)] if self.sidecar is not None else []) + list(self.textFiles)
@@ -468,7 +735,7 @@ class WriteTask:
         if self.dtype is not None and data.dtype != np.dtype(self.dtype):
             data = data.astype(self.dtype)
         nifti.write_nifti(self.path, data, self.affine, sform_code=self.code, qform_code=self.code, descrip=DESCRIPTION,
-                          xyzt_units=XYZT_UNITS_MM_SEC)
+                          xyzt_units=XYZT_UNITS_MM_SEC, time_step=self.timeStep)
         self._writeSideFiles()
         return self.files()
 
@@ -559,7 +826,9 @@ def _hexColor(rgb):
 
 
 class Job:
-    """The export of one node: ``prepare()`` reads the scene (main thread) and returns ``WriteTask`` objects."""
+    """The export of one node: ``iterTasks()`` reads the scene (main thread) and gives its ``WriteTask`` objects one at a
+    time; ``prepare()`` returns them all at once.
+    """
 
     def __init__(self, node, kind, path, options=None, title=None):
         self.nodeId = node.GetID()
@@ -600,22 +869,46 @@ class Job:
         return files
 
     def _maskPaths(self, node):
-        """``[(segment ID, path)]`` of the masks of a segmentation (non-empty segments, unique names)."""
+        """``[(segment ID, path)]`` of the masks of a segmentation (non-empty segments, unique names).
+
+        The first segment of a name keeps it. A later segment whose name gives the same entity value (the names differ
+        only by case, spaces or punctuation) gets ``dup<N>`` after it, and N skips every value another segment has. So
+        no file name equals the name of another segment: "Lesion 1", "Lesion-1" and "Lesion 12" give ``Lesion1``,
+        ``Lesion1dup2`` and ``Lesion12``.
+        """
         base, extension = splitExtension(self.path)
         segmentation = node.GetSegmentation()
-        result = []
+        allIds = segmentIds(node)
+        entries = [(segmentId, entityValue(segmentation.GetSegment(segmentId).GetName(),
+                                           fallback=f"segment{allIds.index(segmentId) + 1}"))
+                   for segmentId in segmentIds(node, nonEmpty=True)]
+        reserved = {value.lower() for _segmentId, value in entries}
         taken = set()
-        for segmentId in segmentIds(node, nonEmpty=True):
-            value = entityValue(segmentation.GetSegment(segmentId).GetName())
+        result = []
+        for segmentId, value in entries:
             candidate, index = value, 2
             while candidate.lower() in taken:
-                candidate = f"{value}{index}"
+                candidate = f"{value}dup{index}"
                 index += 1
+                while candidate.lower() in reserved:
+                    candidate = f"{value}dup{index}"
+                    index += 1
             taken.add(candidate.lower())
             result.append((segmentId, maskBaseName(base, candidate) + extension))
         return result
 
     def prepare(self):
+        """Every ``WriteTask`` of this job (main thread). Each one holds a full-grid image: prefer ``iterTasks``."""
+        return list(self.iterTasks())
+
+    def iterTasks(self):
+        """The ``WriteTask`` objects of this job, one at a time (main thread; a generator).
+
+        The scene is read when the next task is asked for, and nothing is kept between two tasks (no temporary node, no
+        array but the task's own): a segmentation written as one mask per segment yields one mask at a time, so its
+        memory stays that of one mask and the caller can write it, run the event loop or stop before the next one. The
+        notes (``notes``) are complete once the generator is exhausted.
+        """
         node = self.node()
         if node is None:
             raise ExportError(_("{name} is no longer open").format(name=self.nodeName))
@@ -623,19 +916,28 @@ class Job:
         if reason:
             raise ExportError(f"{self.nodeName}: {reason}")
         if self.kind == KIND_SEGMENTATION:
-            return self._prepareSegmentation(node)
-        return self._prepareVolume(node)
+            yield from self._segmentationTasks(node)
+        else:
+            yield from self._prepareVolume(node)
 
     def _prepareVolume(self, node):
-        with _temporaryNodes():
-            data, affine, transformNote = volumeData(node)
-        grid = (data.shape, affine)
+        # A 4D image (its sequence browser's proxy node) is written whole: every time point, not only the one on screen
+        sequenceNode = sequenceOf(node)
+        if sequenceNode is not None:
+            data, affine, transformNote = sequenceData(node, sequenceNode)
+        else:
+            with _temporaryNodes():
+                data, affine, transformNote = volumeData(node)
+        grid = (data.shape[:3], affine)
         spaceName, resolution, template = spaceInfo(node, grid, transformed=transformNote is not None)
         code = xformCode(spaceName, transformNote is not None)
         dtype = None
         if self.kind == KIND_MAP and data.dtype != np.float32:
             dtype = np.float32
         sidecar = baseSidecar(node, self.kind, spaceName, resolution, template, code, data, affine, transformNote)
+        shearNote = gridShearNote(node)
+        if shearNote is not None:
+            sidecar["GridResampled"] = shearNote
         if dtype is not None:
             sidecar["DataType"] = "float32"
         sidecar["Units"] = {KIND_LABELMAP: "label", KIND_MAP: "statistic"}.get(self.kind, "arbitrary")
@@ -643,6 +945,14 @@ class Job:
             sidecar["Labels"] = _labelmapLabels(node, data)
         if isDicomNode(node):
             sidecar.update(dicomInfo(node))
+        step = None
+        if sequenceNode is not None:
+            step = timeStep(sequenceNode)
+            sidecar["TimePoints"] = int(data.shape[3])
+            if step is not None:
+                sidecar["RepetitionTime"] = step
+            if "SourceFile" not in sidecar and _storageFile(sequenceNode):
+                sidecar["SourceFile"] = os.path.basename(_storageFile(sequenceNode))
         tasks = []
         if self.kind == KIND_MAP:
             statistic = node.GetAttribute("LNM.Statistic") or ""
@@ -664,11 +974,15 @@ class Job:
             else:
                 sidecar["Threshold"] = None
         if _niftiLib() is None:
+            if sequenceNode is not None:
+                raise ExportError(_("This build cannot write 4D NIfTI images (use File > Save Data)"))
             task = WriteTask(self.path, None, affine, XFORM_SCANNER, sidecar, node=node)
         else:
-            task = WriteTask(self.path, data, affine, code, sidecar, dtype=dtype)
+            task = WriteTask(self.path, data, affine, code, sidecar, dtype=dtype, timeStep=step)
         if transformNote is not None:
             self.notes.append(_("{name}: its transform was applied to the exported copy (the scene is unchanged)").format(name=self.nodeName))
+        if shearNote is not None:
+            self.notes.append(_gridShearMessage().format(name=self.nodeName))
         return [task] + tasks
 
     def _referenceVolume(self, node):
@@ -708,13 +1022,51 @@ class Job:
             raise ExportError(_("Failed to export the segments of {name}").format(name=node.GetName()))
         return labelmapNode
 
-    def _segmentationSidecar(self, node, data, affine, transformNote, referenceNode, resampled):
+    def _hasVoxelsOnGrid(self, node, segmentId, referenceNode):
+        """Whether the segment alone has a voxel on the export grid (tells a segment hidden by an overlap from one lost by resampling)."""
+        labelmapNode = self._exportLabelmap(node, [segmentId], referenceNode)
+        data = volumeData(labelmapNode)[0]
+        return bool(np.any(data != 0))
+
+    @staticmethod
+    def _segmentationTransformNotes(node, labelmapNode, labelmapNote, referenceNode):
+        """``(lesion's transform note, reference's transform note)`` of a segmentation exported as ``labelmapNode``.
+
+        Without a reference grid the temporary label map carries the segmentation's own transform (``labelmapNote``). On a
+        reference grid it carries the *reference's* transform instead, and the segmentation's own transform is applied by
+        resampling (so it leaves no trace on the label map): the two are told apart here.
+        """
+        if referenceNode is None:
+            return labelmapNote, None
+        lesionTransform = node.GetParentTransformNode()
+        if lesionTransform is None:
+            return None, labelmapNote
+        if labelmapNote is not None and lesionTransform.GetID() == labelmapNode.GetTransformNodeID():
+            # The lesion and the reference share the transform: it is applied to the affine, once
+            return labelmapNote, None
+        linear = lesionTransform.IsTransformToWorldLinear()
+        description = ("The linear transform was applied to the exported copy (resampled onto the reference grid, nearest neighbour)" if linear
+                       else "A non-linear transform was applied to the exported copy (resampled onto the reference grid, nearest neighbour)")
+        return {"Name": lesionTransform.GetName(), "Linear": bool(linear), "Description": description}, labelmapNote
+
+    def _segmentationSidecar(self, node, data, affine, transformNote, referenceNode, resampled, referenceTransformNote=None):
         grid = (data.shape, affine)
-        spaceName, resolution, template = spaceInfo(node, grid, transformed=transformNote is not None)
-        if spaceName is None and referenceNode is not None and not transformNote:
-            spaceName, resolution, template = spaceInfo(referenceNode, grid)
-        code = xformCode(spaceName, transformNote is not None)
+        transformed = transformNote is not None or referenceTransformNote is not None
+        if resampled:
+            # Nearest-neighbour resampling onto another image's grid is not a normalization: the voxels keep the
+            # coordinates they had, so the space is the lesion's own (its attribute, else its own grid), never the
+            # chosen grid's (a native lesion on the MNI grid is still scanner space, an MNI lesion on a scan is still MNI)
+            spaceName, resolution, template = spaceInfo(node, space.gridOf(node), transformed=transformed)
+        else:
+            spaceName, resolution, template = spaceInfo(node, grid, transformed=transformed)
+            if spaceName is None and referenceNode is not None and not transformed:
+                spaceName, resolution, template = spaceInfo(referenceNode, grid)
+        code = xformCode(spaceName, transformed)
         sidecar = baseSidecar(node, KIND_SEGMENTATION, spaceName, resolution, template, code, data, affine, transformNote)
+        if spaceName is None and transformed:
+            sidecar["Space"] = "aligned"
+        if referenceTransformNote is not None:
+            sidecar["ReferenceTransformApplied"] = referenceTransformNote
         # The fields of a saved lesion (Save lesion's sidecar, D-U3): the scan relative to the sidecar, notes, source reference
         lesion = _lesionFields(node, self.path)
         sidecar.update(lesion)
@@ -722,47 +1074,105 @@ class Job:
             sidecar["Resampled"] = {"Reference": referenceNode.GetName(), "Interpolation": "nearest neighbour"}
         return sidecar, code
 
-    def _prepareSegmentation(self, node):
+    def _maskTask(self, node, segmentId, path):
+        """``(task or None, transform note, shear note)`` of the mask of one segment; None when no voxel of the segment
+        remains on the export grid. Every temporary node is removed before it returns.
+        """
+        segmentation = node.GetSegmentation()
+        with _temporaryNodes():
+            referenceNode, resampled = self._referenceVolume(node)
+            labelmapNode = self._exportLabelmap(node, [segmentId], referenceNode)
+            maskShearNote = gridShearNote(labelmapNode)
+            data, affine, labelmapNote = volumeData(labelmapNode)
+            transformNote, referenceNote = self._segmentationTransformNotes(node, labelmapNode, labelmapNote, referenceNode)
+            data = (data != 0).astype(np.uint8)
+            if not np.any(data):
+                return None, transformNote, maskShearNote
+            sidecar, code = self._segmentationSidecar(node, data, affine, transformNote, referenceNode, resampled, referenceNote)
+        segment = segmentation.GetSegment(segmentId)
+        sidecar.update({"Kind": "mask", "Units": "binary", "Segment": segment.GetName(), "SegmentColor": _hexColor(segment.GetColor()),
+                        "VoxelCount": int(np.count_nonzero(data))})
+        if maskShearNote is not None:
+            sidecar["GridResampled"] = maskShearNote
+        return WriteTask(path, data, affine, code, sidecar), transformNote, maskShearNote
+
+    def _segmentationTasks(self, node):
+        """The ``WriteTask`` objects of a segmentation (a generator): one label map, or one mask per segment, prepared one at
+        a time (``iterTasks``).
+        """
         mode = self.options.get("mode") or SEGMENTATION_LABELMAP
         segmentation = node.GetSegmentation()
         allIds = segmentIds(node)
-        ids = segmentIds(node, nonEmpty=True)
+        if mode == SEGMENTATION_MASKS:
+            maskPaths = self._maskPaths(node)
+            ids = [segmentId for segmentId, _path in maskPaths]
+        else:
+            ids = segmentIds(node, nonEmpty=True)
         empty = [segmentation.GetSegment(segmentId).GetName() for segmentId in allIds if segmentId not in ids]
         if empty:
             self.notes.append(_("{name}: empty segments were skipped: {segments}").format(name=self.nodeName, segments=", ".join(empty)))
-        tasks = []
-        with _temporaryNodes():
-            referenceNode, resampled = self._referenceVolume(node)
-            if mode == SEGMENTATION_MASKS:
-                for segmentId, path in self._maskPaths(node):
-                    labelmapNode = self._exportLabelmap(node, [segmentId], referenceNode)
-                    data, affine, transformNote = volumeData(labelmapNode)
-                    data = (data != 0).astype(np.uint8)
-                    sidecar, code = self._segmentationSidecar(node, data, affine, transformNote, referenceNode, resampled)
-                    segment = segmentation.GetSegment(segmentId)
-                    sidecar.update({"Kind": "mask", "Units": "binary", "Segment": segment.GetName(), "SegmentColor": _hexColor(segment.GetColor()),
-                                    "VoxelCount": int(np.count_nonzero(data))})
-                    tasks.append(WriteTask(path, data, affine, code, sidecar))
-            else:
+        # Segments that have voxels on their own grid but none on the chosen grid (a thin lesion resampled onto a coarser image)
+        lostOnGrid = []
+        # Label map only: segments that have voxels on the chosen grid but all of them are covered by a later segment
+        covered = []
+        transformNote = None
+        shearNote = None
+        if mode == SEGMENTATION_MASKS:
+            for segmentId, path in maskPaths:
+                task, transformNote, maskShearNote = self._maskTask(node, segmentId, path)
+                shearNote = maskShearNote or shearNote
+                if task is None:
+                    # An all-zero mask would be a lesion silently lost: it is skipped, with a note
+                    lostOnGrid.append(segmentation.GetSegment(segmentId).GetName())
+                    continue
+                yield task
+                # The caller owns the mask now: this generator keeps no reference to it while the next one is prepared
+                task = None
+            labelmapTask = None
+        else:
+            with _temporaryNodes():
+                referenceNode, resampled = self._referenceVolume(node)
                 labelmapNode = self._exportLabelmap(node, ids, referenceNode)
-                data, affine, transformNote = volumeData(labelmapNode)
+                shearNote = gridShearNote(labelmapNode)
+                data, affine, labelmapNote = volumeData(labelmapNode)
+                transformNote, referenceNote = self._segmentationTransformNotes(node, labelmapNode, labelmapNote, referenceNode)
                 if data.max(initial=0) <= 255 and data.min(initial=0) >= 0:
                     data = data.astype(np.uint8)
-                sidecar, code = self._segmentationSidecar(node, data, affine, transformNote, referenceNode, resampled)
+                sidecar, code = self._segmentationSidecar(node, data, affine, transformNote, referenceNode, resampled, referenceNote)
+                if shearNote is not None:
+                    sidecar["GridResampled"] = shearNote
                 labels = []
                 counts = np.bincount(data.ravel().astype(np.int64), minlength=len(ids) + 1) if data.size else np.zeros(len(ids) + 1, int)
                 for value, segmentId in enumerate(ids, start=1):
                     segment = segmentation.GetSegment(segmentId)
                     labels.append({"Value": value, "Name": segment.GetName(), "Color": _hexColor(segment.GetColor()), "VoxelCount": int(counts[value])})
+                    if not counts[value]:
+                        if self._hasVoxelsOnGrid(node, segmentId, referenceNode):
+                            covered.append(segment.GetName())
+                        else:
+                            lostOnGrid.append(segment.GetName())
                 sidecar.update({"Kind": "labelmap", "Units": "label", "Labels": labels})
                 if len(ids) > 1:
                     sidecar["Overlap"] = "Where segments overlap, a voxel has the value of the later segment"
                 base = splitExtension(self.path)[0]
-                tasks.append(WriteTask(self.path, data, affine, code, sidecar, textFiles={base + ".tsv": labelTableTsv(labels),
-                                                                                         base + ".txt": labelTableItkSnap(labels)}))
-            if transformNote is not None:
-                self.notes.append(_("{name}: its transform was applied to the exported copy (the scene is unchanged)").format(name=self.nodeName))
-        return tasks
+                labelmapTask = WriteTask(self.path, data, affine, code, sidecar, textFiles={base + ".tsv": labelTableTsv(labels),
+                                                                                           base + ".txt": labelTableItkSnap(labels)})
+        if lostOnGrid:
+            if mode == SEGMENTATION_MASKS:
+                message = _("{name}: no voxel of these segments remains on the chosen grid, so no mask was written: {segments}")
+            else:
+                message = _("{name}: no voxel of these segments remains on the chosen grid (VoxelCount 0): {segments}")
+            self.notes.append(message.format(name=self.nodeName, segments=", ".join(lostOnGrid)))
+        if covered:
+            self.notes.append(_("{name}: these segments are entirely covered by a later segment, so they are missing from the label map "
+                                "(the later segment wins where segments overlap; use One mask per segment to keep them): {segments}")
+                              .format(name=self.nodeName, segments=", ".join(covered)))
+        if transformNote is not None:
+            self.notes.append(_("{name}: its transform was applied to the exported copy (the scene is unchanged)").format(name=self.nodeName))
+        if shearNote is not None:
+            self.notes.append(_gridShearMessage().format(name=self.nodeName))
+        if labelmapTask is not None:
+            yield labelmapTask
 
 
 def _labelmapLabels(node, data):
@@ -919,6 +1329,18 @@ def _modality(text):
     return None
 
 
+def _dicomScanOfLesion(node, kind):
+    """The DICOM-derived volume that a lesion segmentation named "Lesions (<scan name>)" belongs to, else None."""
+    if kind != KIND_SEGMENTATION or node is None or node.GetScene() is None:
+        return None
+    match = re.match(r"^Lesions?\s*\((.+)\)$", node.GetName() or "")
+    if not match:
+        return None
+    scans = [volume for volume in slicer.util.getNodesByClass("vtkMRMLVolumeNode", node.GetScene())
+             if volume.GetName() == match.group(1) and isDicomNode(volume)]
+    return scans[0] if len(scans) == 1 else None
+
+
 def defaultBaseName(node, kind=None, bids=False):
     """The base file name (without extension) proposed for ``node``.
 
@@ -930,6 +1352,10 @@ def defaultBaseName(node, kind=None, bids=False):
     name = node.GetName()
     if isDicomNode(node):
         return dicomFileName(node)
+    scan = _dicomScanOfLesion(node, kind)
+    if scan is not None:
+        # "Lesions (3: T1 axial)" of a DICOM scan: named like the scan ("003_T1_axial"), so that both files share one subject
+        return dicomFileName(scan)
     if not bids:
         return safeName(name)
     subject = bidsSubject(node)
@@ -955,6 +1381,19 @@ def maskBaseName(base, segment):
     if match:
         return f"{match.group(1)}_label-{segment}_{match.group(2)}_mask"
     return f"{base}_label-{segment}_mask"
+
+
+def bumpedBase(base, index, kind=None, segmentationMode=None):
+    """``base`` for the ``index``-th try of a name that is taken (1 = unchanged).
+
+    The number goes into the ``desc`` value of mask names (``sub-01_desc-lesion2``) so that ``desc`` stays the last
+    entity (BIDS) and ``maskBaseName`` still recognises it; other names get ``_2``, ``_3``...
+    """
+    if index == 1:
+        return base
+    if kind == KIND_SEGMENTATION and segmentationMode == SEGMENTATION_MASKS and re.match(r"^.+_desc-[A-Za-z0-9]+$", base):
+        return f"{base}{index}"
+    return f"{base}_{index}"
 
 
 def uniquePath(path, reserved):
@@ -994,16 +1433,28 @@ def planExport(nodes, folder, extension=".nii.gz", segmentationMode=SEGMENTATION
         if node is None or unavailableReason(node):
             continue
         kind = kindOf(node)
-        base = (names or {}).get(node.GetID()) or defaultBaseName(node, kind, bids=bids)
+        base = limitLength((names or {}).get(node.GetID()) or defaultBaseName(node, kind, bids=bids))
+        # A node named like a file ("brain.nii.gz") must not get the extension twice.
+        for suffix in (".nii.gz", ".nii"):
+            if base.lower().endswith(suffix) and len(base) > len(suffix):
+                base = base[: -len(suffix)]
+                break
         if kind == KIND_SEGMENTATION and segmentationMode == SEGMENTATION_LABELMAP:
             base = f"{base}_dseg"
-        path = uniquePath(os.path.join(folder, base + extension), reserved)
         options = {}
         if kind == KIND_SEGMENTATION:
             options = {"mode": segmentationMode, "reference": reference}
         elif kind == KIND_MAP and mapOptions and node.GetID() in mapOptions:
             options = dict(mapOptions[node.GetID()])
-        job = Job(node, kind, path, options)
+        # Every file of the job must be free, not only its main image: also a map's threshold mask and a segmentation's
+        # per-segment masks (an earlier scan may be named like one of them). Bump the base name (_2, _3...) until none is taken.
+        index = 1
+        while True:
+            path = os.path.join(folder, f"{bumpedBase(base, index, kind, segmentationMode)}{extension}")
+            job = Job(node, kind, path, options)
+            if not any(os.path.normcase(other).lower() in reserved for other in job.files()):
+                break
+            index += 1
         for other in job.files():
             reserved.add(os.path.normcase(other).lower())
         jobs.append(job)
@@ -1038,7 +1489,11 @@ def mapOptionsFromMapModule():
     if widget is None or not hasattr(widget, "legendState"):
         return {}
     try:
-        state = widget.legendState()
+        # A reopened project has not restored its map until Map is first entered: the widget does that quietly
+        if hasattr(widget, "restoreSceneResult"):
+            widget.restoreSceneResult()
+        # The threshold of the map itself, also while the views show a descriptive QA map (whose legend has none)
+        state = widget.resultLegendState() if hasattr(widget, "resultLegendState") else widget.legendState()
         node = widget._parameterNode.resultVolume if widget._parameterNode is not None else None
     except Exception:
         logging.debug("Slicer Studio: the Map threshold could not be read", exc_info=True)
@@ -1070,6 +1525,123 @@ def existingFiles(jobs, extra=()):
     return [path for path in [*plannedFiles(jobs), *extra] if os.path.exists(path)]
 
 
+#: An image line under "Files:" in the README of a project export: "- sub-01_T1w.nii.gz: <node> (<kind>, ...)"
+_README_IMAGE_LINE = re.compile(r"^- ([A-Za-z0-9._-]+\.nii(?:\.gz)?): ")
+
+
+def _readmeLines(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().splitlines()
+    except (OSError, ValueError):
+        return None
+
+
+def _isStudioReadmeLines(lines):
+    # writeReadme: "<title>", "=====" (as long as the title), "", "Written by Slicer Studio <version> on <date>."
+    return (len(lines) > 3 and bool(lines[0]) and lines[1] == "=" * len(lines[0]) and not lines[2]
+            and "Slicer Studio " in lines[3])
+
+
+def isStudioReadme(path):
+    """True when ``path`` is the README of a project export written by Slicer Studio (``writeReadme``), not a README
+    that the user wrote: only such a README names files that a later export may replace or remove.
+    """
+    lines = _readmeLines(path)
+    return lines is not None and _isStudioReadmeLines(lines)
+
+
+def readmePath(folder):
+    """The README of a project export into ``folder``: README.txt, unless the folder holds a README.txt that Slicer
+    Studio did not write (the user's own file is kept: README_SlicerStudio.txt is written instead).
+    """
+    path = os.path.join(folder, README_NAME)
+    if not os.path.exists(path) or isStudioReadme(path):
+        return path
+    base, extension = os.path.splitext(STUDIO_README_NAME)
+    path, index = os.path.join(folder, STUDIO_README_NAME), 2
+    while os.path.exists(path) and not isStudioReadme(path):
+        path, index = os.path.join(folder, f"{base}-{index}{extension}"), index + 1
+    return path
+
+
+def readmeImages(path):
+    """The names of the images that the README of a project export (``path``) lists ([] without a README, or when the
+    README was not written by Slicer Studio: a README of the user's own never makes their files look like Studio's).
+    """
+    lines = _readmeLines(path)
+    if lines is None or not _isStudioReadmeLines(lines):
+        return []
+    names = []
+    for line in lines:
+        match = _README_IMAGE_LINE.match(line)
+        if match and os.path.basename(match.group(1)) == match.group(1) and match.group(1) not in names:
+            names.append(match.group(1))
+    return names
+
+
+def _writtenByStudio(sidecar):
+    """True when ``sidecar`` exists and was written by Slicer Studio: an image without one, or with a sidecar of its
+    own, is a file the user put there, and is never removed or replaced as a file of an earlier export.
+    """
+    if not os.path.exists(sidecar):
+        return False
+    try:
+        with open(sidecar, encoding="utf-8") as f:
+            content = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return isinstance(content, dict) and str(content.get("GeneratedBy", "")).startswith("Slicer Studio")
+
+
+def _pathKey(path):
+    return os.path.normcase(os.path.abspath(path))
+
+
+def earlierExportFiles(jobs, readmePath):
+    """The files that an earlier project export wrote next to ``readmePath`` (the images its README lists and their
+    sidecars) and that ``jobs`` do not write again: the masks of segments that were renamed, deleted or erased since,
+    images that were closed, the label tables (.tsv, .txt) of a label map, or the other format (.nii and .nii.gz). A project export removes them (after the user
+    confirms), so that ``<project>/Exports/nifti`` holds the project as it is now and a glob such as ``*_mask.nii.gz``
+    finds no deleted segment.
+    """
+    folder = os.path.dirname(readmePath)
+    planned = {_pathKey(path) for path in plannedFiles(jobs)}
+    found = []
+    for name in readmeImages(readmePath):
+        image = os.path.join(folder, name)
+        if _pathKey(image) in planned or not os.path.isfile(image) or not _writtenByStudio(sidecarPath(image)):
+            continue
+        paths = [image, sidecarPath(image)]
+        base = splitExtension(image)[0]
+        if base.endswith("_dseg"):  # a label map of a segmentation also wrote its label tables
+            paths += [base + ".tsv", base + ".txt"]
+        for path in paths:
+            if os.path.isfile(path) and _pathKey(path) not in planned and path not in found:
+                found.append(path)
+    return found
+
+
+def removeFiles(paths, result=None):
+    """Remove ``paths`` (files of an earlier project export); return the removed ones. A file that cannot be removed is
+    logged and noted in ``result`` (it is then listed in the README among the other files of the folder).
+    """
+    removed = []
+    for path in paths:
+        try:
+            os.remove(path)
+            removed.append(path)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            logging.warning(f"Slicer Studio: {path} from an earlier NIfTI export could not be removed: {e}")
+            if result is not None:
+                result.notes.append(_("{name} from an earlier export could not be removed").format(name=os.path.basename(path)))
+    if result is not None:
+        result.removed += removed
+    return removed
+
+
 #
 # Running
 #
@@ -1084,6 +1656,14 @@ class Result:
         self.images = []
         self.notes = []
         self.errors = []
+        #: Files of an earlier project export that were removed because this export does not write them again
+        self.removed = []
+        #: The plain reason (no error number, no temporary file name) of the first file that could not be written
+        self.writeFailure = None
+        #: ``(image name, plain reason)`` of each image that failed, in order (``errors`` holds the same as "name: reason")
+        self.failures = []
+        #: ``(images written, images planned)`` when the export was stopped before it was done, else ``None``
+        self.stopped = None
 
     def add(self, written):
         self.files += written
@@ -1094,25 +1674,30 @@ def runJobs(jobs, overwrite=False, readme=None, progress=None):
     """Run ``jobs`` now (main thread). Return a ``Result``.
 
     :param overwrite: replace existing files; else ``FileExistsError`` is raised before anything is written.
-    :param readme: ``(path, title)``: also write a README listing the files (project exports).
+    :param readme: ``(path, title)``: also write a README listing the files (project exports), and remove the files of
+        an earlier export into that folder that this one does not write again (``earlierExportFiles``).
     :param progress: ``progress(done, total, title)``, called before each job.
     """
     extra = [readme[0]] if readme else []
+    earlier = earlierExportFiles(jobs, readme[0]) if readme else []
     if not overwrite:
-        existing = existingFiles(jobs, extra)
+        existing = existingFiles(jobs, extra) + earlier
         if existing:
             raise FileExistsError(existing[0])
     result = Result(os.path.dirname(jobs[0].path) if jobs else None)
+    removeFiles(earlier, result)
     for index, job in enumerate(jobs):
         if progress is not None:
             progress(index, len(jobs), job.title)
         try:
-            tasks = job.prepare()
-            for task in tasks:
+            # One image at a time: each is written (and its array released) before the next one is prepared
+            for task in job.iterTasks():
                 result.add(_writeWithSlicer(task) if task.data is None else task.write())
+                task = None
         except Exception as e:
             logging.error(f"Slicer Studio: NIfTI export of {job.nodeName} failed: {e}")
             result.errors.append(f"{job.nodeName}: {e}")
+            result.failures.append((job.nodeName, str(e)))
         result.notes += job.notes
     if readme:
         writeReadme(readme[0], jobs, result, readme[1])
@@ -1146,33 +1731,61 @@ def exportSegmentation(node, path, mode=SEGMENTATION_LABELMAP, reference=None, o
     return runJobs([Job(node, KIND_SEGMENTATION, path, {"mode": mode, "reference": referenceId})], overwrite=overwrite)
 
 
+def _readmeDescription(sidecar):
+    """"<kind>, <space>, code <n>[, segment <name>]" from the .json sidecar of an image ("" without one)."""
+    try:
+        with open(sidecar, encoding="utf-8") as f:
+            content = json.load(f)
+        description = f"{content.get('Kind', '')}, {content.get('Space', '')}, code {content.get('SformCode', '')}"
+        if content.get("Segment"):
+            description += f", segment {content['Segment']}"
+        return description
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
 def writeReadme(path, jobs, result, title):
     """README.txt of a project export: what each file is, its space and codes, and how to use the files."""
     lines = [title, "=" * len(title), "", _("Written by {version} on {date}.").format(version=studioVersion(), date=_nowIso()), "",
              _("Every image is a NIfTI-1 file whose affine (sform = qform) is 3D Slicer's IJK to RAS matrix: FSL, SPM, AFNI, nibabel"),
              _("and official 3D Slicer show left and right as Slicer Studio shows them. Each image has a .json sidecar."),
              _("sform/qform codes: 4 = MNI152 (a template grid), 2 = aligned (a transform was applied), 1 = scanner."), "", _("Files:")]
+    folder = os.path.dirname(path) or "."
+    # Images that the README being replaced lists (written by an earlier export) and that this export did not write
+    # again because it was stopped or failed: they stay listed as files of an export (a line "- <name>: ..."), so that
+    # a later export still removes them when they are no longer part of the project (``earlierExportFiles``)
+    earlierNames = readmeImages(path)
     written = set(result.images)
+    writtenNames = {os.path.basename(image) for image in written}
     for job in jobs:
         for image in job.images():
             if image not in written:
                 continue
-            name = os.path.basename(image)
-            sidecar = sidecarPath(image)
-            description = ""
-            try:
-                with open(sidecar, encoding="utf-8") as f:
-                    content = json.load(f)
-                description = f"{content.get('Kind', '')}, {content.get('Space', '')}, code {content.get('SformCode', '')}"
-                if content.get("Segment"):
-                    description += f", segment {content['Segment']}"
-            except (OSError, ValueError):
-                pass
-            lines.append(f"- {name}: {job.nodeName} ({description})")
+            lines.append(f"- {os.path.basename(image)}: {job.nodeName} ({_readmeDescription(sidecarPath(image))})")
+    carried = [name for name in earlierNames
+               if name not in writtenNames and os.path.isfile(os.path.join(folder, name))
+               and _writtenByStudio(sidecarPath(os.path.join(folder, name)))]
+    if carried:
+        lines += ["", _("Written by an earlier export and not written again by this one:")]
+        lines += [f"- {name}: {_('earlier export')} ({_readmeDescription(sidecarPath(os.path.join(folder, name)))})" for name in carried]
+    stopped = getattr(result, "stopped", None)
+    if stopped:
+        lines += ["", _("This export was stopped before it was done: {count} of {total} images were written, so this folder "
+                        "does not hold the whole project.").format(count=stopped[0], total=stopped[1])]
     if result.notes:
         lines += ["", _("Notes:")] + [f"- {note}" for note in result.notes]
     if result.errors:
         lines += ["", _("Not exported:")] + [f"- {error}" for error in result.errors]
+    # Any other image in the folder (put there by hand) is named, so that the README describes the whole folder; these
+    # lines have no ": ", so a later export does not take them for its own files
+    listed = writtenNames | set(carried)
+    try:
+        others = sorted(name for name in os.listdir(folder)
+                        if splitExtension(name)[1] and name not in listed and os.path.isfile(os.path.join(folder, name)))
+    except OSError:
+        others = []
+    if others:
+        lines += ["", _("Also in this folder, not written by this export:")] + [f"- {name}" for name in others]
     templates = [node.GetName() for node in exportableNodes() if kindOf(node) == KIND_TEMPLATE]
     if templates:
         lines += ["", _("Templates are not copied (they are public files known by name): {names}.").format(names=", ".join(templates))]

@@ -2,8 +2,9 @@
 
 The card puts the secondary analyses next to the fixed primary result, so that a reader can see how far the
 conclusion moves when one of the researcher's degrees of freedom is changed. Every analysis here is secondary:
-none of them replaces the primary map, none selects a "best" setting, and the primary rule and overlap criterion
-(the Result card's rule and the Overlap tab's sensitivity) are shown as fixed text, never as a control.
+none of them replaces the primary map, none selects a "best" setting, and the primary rule, sign and overlap criterion
+(the Result card's rule, the Overlap tab's sign and sensitivity) are shown as fixed text, never as a control. Like the
+Overlap tab's sensitivity map, the primary is over the cases when participants.tsv has a "case" group.
 
 Sections (each one runs ``LesionNetworkMappingLib.robustness`` in the job runner, with Stop):
 
@@ -24,11 +25,14 @@ Sections (each one runs ``LesionNetworkMappingLib.robustness`` in the job runner
 
 Results are written to ``<study>/derivatives/lnm/conn-<label>[_n-N]/robustness/<analysis>/`` (sweep.tsv,
 connectomes.tsv, splithalf.tsv, influence.tsv, seeds.tsv, ...; paths in them are relative) and registered in the run
-registry; the card shows the newest result of each analysis again after a restart. The "Methods sentences" box at
+registry; the card shows the newest result of each analysis again after a restart. A result of the cohort maps
+(thresholds, replicate, split-half, influence) is marked "run again" when the lesions were mapped again since with
+other lesions (maps.tsv), or when a lesion file changed after it was mapped. The "Methods sentences" box at
 the bottom is the robustness text of ``methods.py`` for the study (L-18). The card works in Classic and without the
 Studio shell.
 """
 
+import hashlib
 import logging
 import math
 import os
@@ -72,8 +76,41 @@ RESULT_FILES = {
 FOLDER_NAMES = {"connsplit": "connectome_splithalf"}
 
 
+#: The signs of the primary (the Overlap tab's sign buttons: both, positive and negative)
+SIGN_WORDS = ("both", "pos", "neg")
+
+
+def _signText(sign):
+    return {"pos": _("positive sign"), "neg": _("negative sign")}.get(sign, _("both signs"))
+
+
 def _mapWidget():
     return getattr(slicer.modules, "LesionNetworkMappingWidget", None)
+
+
+def _stretchNames(table):
+    """The first column (the row names) takes the room the others leave; the number columns fit their contents.
+
+    ``widgets.tableView`` gives every column the same width, which elides names such as "Extrusion 2 mm" / "Extrusion 4 mm"
+    until the rows cannot be told apart. A name that still does not fit keeps its end (the middle is elided).
+    """
+    header = table.horizontalHeader()
+    header.setSectionResizeMode(0, qt.QHeaderView.Stretch)
+    for column in range(1, table.columnCount):
+        header.setSectionResizeMode(column, qt.QHeaderView.ResizeToContents)
+    table.setTextElideMode(qt.Qt.ElideMiddle)
+
+
+def _splitMetricName(metric):
+    """The name of a split-half metric for the table's first column (``metric`` is the long name of the TSV).
+
+    "r of the halves' overlap maps" and "r of the halves' GLM t maps" are 190 to 230 px wide and share their first words:
+    elided, the rows cannot be told apart. The section text says "of the halves"; the tooltip has the long name.
+    """
+    from LesionNetworkMappingLib import robustness
+
+    short = {"r_overlap": _("r, overlap maps"), "dice_sensitivity": _("Dice, sensitivity"), "r_glm_t": _("r, GLM t maps")}
+    return next((short[key] for key, text in robustness.METRIC_LABELS.items() if text == metric and key in short), metric)
 
 
 def _readTsv(path):
@@ -122,7 +159,10 @@ def _percent(value):
 
 
 def _safeName(text):
-    return re.sub(r"[^A-Za-z0-9]+", "", str(text)) or "x"
+    """The ASCII letters and digits of a name, plus a tag of it when it has other letters (glm._unicode_tag), so that "失語" and "運動" get different folders."""
+    from LesionNetworkMappingLib import glm
+
+    return (re.sub(r"[^A-Za-z0-9]+", "", str(text)) + glm._unicode_tag(text)) or "x"
 
 
 def _text(editor):
@@ -233,6 +273,9 @@ class RobustCard:
         self.pendingKind = None  # the analysis that starts when the lesions are mapped
         self.notice = ""
         self.results = {}  # kind -> folder of the shown result
+        self.stale = {}  # kind -> why the shown result does not belong to the current cohort maps ("" when it does)
+        self._mapsInfo = (None, None, [])  # (path and stat of maps.tsv, its maps_sha256, its rows with absolute paths)
+        self._lesionHashes = {}  # (lesion path, size, mtime) -> sha256
         self.sections = {}
         self.sweepTilesFor = None
         self.sweepStale = False
@@ -240,8 +283,9 @@ class RobustCard:
         self._scope = None
         self._cleanedUp = False
         self._coordinates = None  # coordinates file of the sphere variants
+        self._coordinatesError = None  # why the file that was chosen is not usable (it is not kept)
         self._engineRun = None  # engine run chosen by the user for the connectome split-half
-        self._bundleInfo = {}  # path -> (name, n, bundle) or None
+        self._bundleInfo = {}  # path -> (connectome.json stamp, (name, n, bundle) or None)
         self._timer = qt.QTimer()
         self._timer.setSingleShot(True)
         self._timer.setInterval(DESIGN_DELAY_MS)
@@ -267,7 +311,7 @@ class RobustCard:
             builder(layout)
         self._buildMethods(layout)
         layout.addStretch(1)
-        for name in ("studyChanged", "bundleChanged", "computeEnabledChanged", "ruleChanged", "runChanged"):
+        for name in ("studyChanged", "bundleChanged", "computeEnabledChanged", "ruleChanged", "runChanged", "overlapChanged"):
             getattr(ctx, name).append(self.scheduleRefresh)
         ctx.runner.jobFinished.append(self._onJobFinished)
         self.refresh()
@@ -305,7 +349,11 @@ class RobustCard:
         holder.setLayout(result)
         holder.hide()
         section["layout"].addWidget(holder)
-        section.update(run=button, reason=reason, result=result, holder=holder)
+        staleLabel = label("", f"LNMRobust{kind.capitalize()}Stale", None)
+        staleLabel.setStyleSheet(f"color: {levelColor('warn')};")
+        staleLabel.hide()
+        result.addWidget(staleLabel)
+        section.update(run=button, reason=reason, result=result, holder=holder, stale=staleLabel)
 
     def _combo(self, objectName, toolTip, callback=None):
         combo = qt.QComboBox()
@@ -334,10 +382,7 @@ class RobustCard:
         section["result"].addWidget(self.tileNote)
         self.sweepTable = widgets.tableView([_("Setting"), "mL", _("Dice"), "r"])
         self.sweepTable.setObjectName("LNMRobustSweepTable")
-        header = self.sweepTable.horizontalHeader()
-        header.setSectionResizeMode(0, qt.QHeaderView.Stretch)
-        for column in (1, 2, 3):
-            header.setSectionResizeMode(column, qt.QHeaderView.ResizeToContents)
+        _stretchNames(self.sweepTable)
         section["result"].addWidget(self.sweepTable)
         self.allSettings = qt.QCheckBox(_("Show every overlap criterion"))
         self.allSettings.setObjectName("LNMRobustAllSettings")
@@ -363,6 +408,7 @@ class RobustCard:
         section["result"].addWidget(self.replicateSummary)
         self.replicateTable = widgets.tableView([_("Map"), "r", _("Dice"), _("Peaks"), _("Flag")])
         self.replicateTable.setObjectName("LNMRobustReplicateTable")
+        _stretchNames(self.replicateTable)
         section["result"].addWidget(self.replicateTable)
         section["result"].addWidget(label(f"{_('Reference')}: {robustness.CROSS_CONNECTOME_REFERENCE}. {robustness.CROSS_CONNECTOME_NOTE}", "LNMRobustReplicateReference", "caption"))
         layout.addWidget(section["card"])
@@ -390,6 +436,7 @@ class RobustCard:
         self._runRow("splithalf", section, _("Run split-half"))
         self.splitTable = widgets.tableView([_("Metric"), _("Median"), _("95% of splits"), _("Range")])
         self.splitTable.setObjectName("LNMRobustSplitTable")
+        _stretchNames(self.splitTable)
         section["result"].addWidget(self.splitTable)
         self.splitLabel = label("", "LNMRobustSplitLabel", "caption")
         section["result"].addWidget(self.splitLabel)
@@ -431,6 +478,9 @@ class RobustCard:
         self._runRow("seeds", section, _("Run variants"))
         self.seedsTable = widgets.tableView([_("Variant"), _("Changed"), _("Median r"), _("Median Dice")])
         self.seedsTable.setObjectName("LNMRobustSeedsTable")
+        _stretchNames(self.seedsTable)
+        for column in (2, 3):
+            self.seedsTable.horizontalHeaderItem(column).setToolTip(_("Median over the lesions the variant changed; the others keep their primary seed"))
         section["result"].addWidget(self.seedsTable)
         self.seedsNote = label("", "LNMRobustSeedsNote", "caption")
         section["result"].addWidget(self.seedsNote)
@@ -510,7 +560,7 @@ class RobustCard:
         if path:
             return os.path.dirname(os.path.dirname(path))
         widget = _mapWidget()
-        cohortDir = widget.cohortOutputDir() if widget is not None and hasattr(widget, "cohortOutputDir") else None
+        cohortDir = widget.cohortOutputDir(ownOnly=True) if widget is not None and hasattr(widget, "cohortOutputDir") else None
         return os.path.dirname(cohortDir) if cohortDir else None
 
     def robustnessRoot(self):
@@ -524,7 +574,13 @@ class RobustCard:
             return None
         if kind == "replicate":
             path = self.replicatePath()
-            return os.path.join(root, f"replicate_{_safeName(self.bundleName(path))}") if path else None
+            name = self.replicateFolderName(path) if path else None
+            if not name:
+                return None
+            folder = os.path.join(root, name)
+            if not os.path.isfile(os.path.join(folder, RESULT_FILES[kind])):
+                folder = self.legacyReplicateFolder(root, path) or folder
+            return folder
         if kind == "consolidate":
             return os.path.join(root, f"consolidate_{self.side()}")
         return os.path.join(root, FOLDER_NAMES.get(kind, kind))
@@ -532,7 +588,15 @@ class RobustCard:
     def rule(self):
         from LesionNetworkMappingLib import thresholds
 
-        return thresholds.normalize_rule(self.ctx.rule)
+        rule = self.ctx.rule
+        if rule is None:
+            widget = _mapWidget()
+            if widget is not None and hasattr(widget, "currentRule"):
+                try:
+                    rule = widget.currentRule()
+                except Exception:
+                    rule = None
+        return thresholds.normalize_rule(rule)
 
     def overlapPct(self):
         """The primary overlap criterion: the Overlap tab's sensitivity (default 90)."""
@@ -543,11 +607,26 @@ class RobustCard:
         except (TypeError, ValueError):
             return float(DEFAULT_SENSITIVITY)
 
+    def sign(self):
+        """The primary sign: the Overlap tab's ("both", "pos" or "neg"; "both" without it), as the Nulls card."""
+        overlap = getattr(self.cohortCard(), "overlap", None)
+        try:
+            sign = overlap.sign()
+        except (AttributeError, TypeError):
+            return "both"
+        return sign if sign in SIGN_WORDS else "both"
+
+    def participantsPath(self):
+        """The study's participants.tsv (its "case" group selects the lesions of the primary overlap), or None."""
+        path = getattr(self.ctx.study, "path", None) if self.ctx.study is not None else None
+        path = os.path.join(path, "participants.tsv") if path else None
+        return path if path and os.path.isfile(path) else None
+
     def primaryKey(self):
-        """(rule label, overlap %) of the primary as it stands now."""
+        """(rule label, overlap %, sign) of the primary as it stands now."""
         from LesionNetworkMappingLib import robustness
 
-        return (robustness.sweep_label(self.rule()), self.overlapPct())
+        return (robustness.sweep_label(self.rule()), self.overlapPct(), self.sign())
 
     def side(self):
         return self.sideCombo.currentData or "L"
@@ -555,22 +634,85 @@ class RobustCard:
     def replicatePath(self):
         return self.replicateCombo.currentData or None
 
+    def replicateFolderName(self, path):
+        """``replicate_<name>_<tag>``: the run folder of replicating on a registered connectome, or None when it cannot be opened.
+
+        The tag (8 hex digits of the connectome's identifier, its name and data fingerprint as ``connectomeIdentifier``) gives
+        each connectome its own folder: two with the same name (a full connectome and a subset of it), or with names that
+        differ only in punctuation ("GSP-1000", "GSP 1000"), no longer share, show or overwrite one result. The same
+        connectome in another folder or on another computer keeps its folder. Two connectomes with the same name, grid
+        and subjects but different data (the time series fingerprint of connectome.json) have their own folders too.
+        """
+        from LesionNetworkMappingLib.export import identity_sha256
+
+        return self._replicateFolderName(path, identity_sha256)
+
+    def _replicateFolderName(self, path, fingerprint):
+        info = self.bundleInfo(path)
+        if info is None:
+            return None
+        identifier = f"{info[0]}#{fingerprint(info[2].metadata)[:16]}"
+        return f"replicate_{_safeName(info[0])}_{hashlib.sha256(identifier.encode('utf-8')).hexdigest()[:8]}"
+
+    def legacyReplicateFolder(self, root, path):
+        """The replicate folder of an earlier version when its result is of this very connectome, else None.
+
+        Earlier versions used ``replicate_<name>`` (no tag) and then a tag without the time series fingerprint. Such a
+        folder could be shared by several connectomes: its result is shown only for the connectome it names (the same
+        connectome.json), not for another one of the same name.
+        """
+        from LesionNetworkMappingLib.export import data_sha256, file_sha256
+
+        info = self.bundleInfo(path)
+        if info is None:
+            return None
+        manifest = os.path.join(info[2].path, "connectome.json")
+        try:
+            manifestSha = file_sha256(manifest)
+        except OSError:
+            return None
+        names = [self._replicateFolderName(path, data_sha256), f"replicate_{_safeName(info[0])}"]
+        for name in names:
+            if not name or name == self.replicateFolderName(path):
+                continue
+            folder = os.path.join(root, name)
+            record = _readJson(os.path.join(folder, RESULT_FILES["replicate"]))
+            used = record.get("connectome_b") if isinstance(record, dict) else None
+            used = used.get("manifest_sha256") if isinstance(used, dict) else None
+            if used and used == manifestSha:
+                return folder
+        return None
+
     def bundleName(self, path):
         info = self.bundleInfo(path)
         return info[0] if info else os.path.basename(str(path))
 
     def bundleInfo(self, path):
-        """(name, n subjects, bundle) of a registered connectome, or None when it cannot be opened (cached)."""
-        if path not in self._bundleInfo:
+        """(name, n subjects, bundle) of a registered connectome, or None when it cannot be opened.
+
+        The result is cached with the stamp (modification time, size) of the connectome's connectome.json: a connectome
+        whose folder was moved, deleted or is on a drive that was unplugged is opened again and shows as unavailable
+        (None) instead of a stale bundle whose files are gone, and a rewritten manifest is read again.
+        """
+        try:
+            info = os.stat(os.path.join(str(path), "connectome.json"))
+            stamp = (info.st_mtime_ns, info.st_size)
+        except (OSError, TypeError, ValueError):
+            stamp = None
+        cached = self._bundleInfo.get(path)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        result = None
+        if stamp is not None:
             try:
                 from LesionNetworkMappingLib.connectome import ConnectomeBundle
 
                 bundle = ConnectomeBundle.open(path)
-                self._bundleInfo[path] = (bundle.name, bundle.n_subjects, bundle)
+                result = (bundle.name, bundle.n_subjects, bundle)
             except Exception:
                 logging.debug("Lesion network mapping: a registered connectome could not be opened for the Robust card", exc_info=True)
-                self._bundleInfo[path] = None
-        return self._bundleInfo[path]
+        self._bundleInfo[path] = (stamp, result)
+        return result
 
     def otherConnectomes(self):
         """[(display text, path)] of the registered connectomes other than the one in use."""
@@ -609,6 +751,33 @@ class RobustCard:
                 return path
         return None
 
+    def engineRunConnectome(self, path=None):
+        """The connectome name recorded in the qa.json of an engine run (the engine run folder by default), or None."""
+        path = path if path is not None else self.engineRunDir()
+        name = (_readJson(os.path.join(path, "qa.json")) or {}).get("bundle") if path else None
+        return name if isinstance(name, str) and name else None
+
+    def engineRunMismatch(self):
+        """(run connectome, current connectome) when the engine run was made on another connectome than the one in use, else None.
+
+        The summary is filed under the current connectome's folder (conn-<label>) and cited in its methods, so a run made on
+        another connectome must not be summarised there.
+        """
+        from LesionNetworkMappingLib import export
+
+        name = self.engineRunConnectome()
+        if name is None:
+            return None
+        bundle = self.ctx.bundle
+        if bundle is not None and getattr(bundle, "name", None) and bundle.name != name:
+            return name, bundle.name
+        connDir = self.connectomeDir()
+        if connDir:
+            folder, expected = os.path.basename(os.path.normpath(connDir)), export.run_dir_name(name)
+            if folder != expected and not folder.startswith(expected + "_n-"):
+                return name, bundle.name if bundle is not None else folder
+        return None
+
     #
     # State
     #
@@ -641,10 +810,15 @@ class RobustCard:
             variants = self.selectedVariants()
             if not variants:
                 return False, _("Tick at least one variant.")
+            if any(variant in COORDINATE_VARIANTS for variant in variants) and self._coordinatesError:
+                return False, self._coordinatesError
             if any(variant in COORDINATE_VARIANTS for variant in variants) and not self._coordinates:
                 return False, _("The sphere variants need a coordinates file (participant_id, x, y, z).")
         if kind == "connsplit" and self.engineRunDir() is None:
             return False, _("No engine run with a split-half: run the engine with --split-half, or choose its folder.")
+        if kind == "connsplit" and self.engineRunMismatch() is not None:
+            other, current = self.engineRunMismatch()
+            return False, _("This engine run was made on {other}, not on {current}: choose an engine run made on {current}.").format(other=other, current=current)
         if kind in ("splithalf", "influence") and self.designCheck.isChecked() and self.designPath() is None:
             return False, _("No GLM design yet: run the Contrast tab first, or untick “With the GLM design”.")
         if kind in MAP_KINDS and self.currentMapsTsv() is None:
@@ -672,6 +846,7 @@ class RobustCard:
         if scope != self._scope:  # another study or connectome: its own results
             self._scope = scope
             self.results = {}
+            self.stale = {}
             self.sweepTilesFor = None
             for section in self.sections.values():
                 section["holder"].hide()
@@ -693,11 +868,16 @@ class RobustCard:
                     section["holder"].hide()
                     if want:
                         self.loadResult(kind, want)
+                elif want and self.staleReason(kind, want) != self.stale.get(kind, ""):
+                    self.loadResult(kind, want)  # the cohort maps or a lesion changed since it was shown
             elif kind == "sweep" and kind in self.results and self._sweepKey != self.primaryKey():
                 self.loadResult(kind, self.results[kind])  # shown again against the primary as it is now
+            elif kind in self.results and self.staleReason(kind, self.results[kind]) != self.stale.get(kind, ""):
+                self.loadResult(kind, self.results[kind])  # the cohort maps or a lesion changed since it was shown
             elif kind not in self.results:
                 self.loadLatest(kind)
         self.statusLabel.setText(self.statusText())
+        self.methodsHeader.setText(_("Methods sentences (some describe runs that must be run again: see the sections above)") if self.staleKinds() else _("Methods sentences"))
 
     def statusText(self):
         if self.ctx.study is None:
@@ -705,22 +885,190 @@ class RobustCard:
         done = [kind for kind in KINDS if kind in self.results]
         if not done:
             return _("No robustness analysis has run for this connectome yet.")
-        return _("{n} of {total} analyses have results for this connectome.").format(n=len(done), total=len(KINDS))
+        text = _("{n} of {total} analyses have results for this connectome.").format(n=len(done), total=len(KINDS))
+        stale = self.staleKinds()
+        if stale:
+            text += " " + _("{n} of them belong to earlier cohort maps or lesions, or to another primary: run them again.").format(n=len(stale))
+        return text
+
+    def staleKinds(self):
+        return [kind for kind in KINDS if kind in self.results and self.stale.get(kind)]
+
+    #
+    # Staleness: a result of the cohort maps belongs to the maps it was computed on
+    #
+
+    def mapsInfo(self):
+        """(``robustness.maps_sha256``, rows with absolute paths) of the current maps.tsv, read again only when the file changes; (None, []) without maps."""
+        path = self.currentMapsTsv()
+        if not path:
+            return None, []
+        stamp = (path, _stat(path))
+        if self._mapsInfo[0] != stamp:
+            from LesionNetworkMappingLib import cohortmaps, robustness
+
+            try:
+                rows = cohortmaps.read_maps_tsv(path)
+                value = robustness.maps_sha256(rows)
+            except (OSError, ValueError, KeyError):
+                rows, value = [], None
+            self._mapsInfo = (stamp, value, rows)
+        return self._mapsInfo[1], self._mapsInfo[2]
+
+    def changedLesions(self):
+        """The participant ids whose lesion file changed after the current cohort maps were made (their bytes no longer have the maps.tsv lesion_sha256).
+
+        Only the files modified after the maps.tsv are hashed (once per size and time), so that an unchanged study costs one stat per lesion.
+        """
+        path = self.currentMapsTsv()
+        if not path:
+            return []
+        from LesionNetworkMappingLib import export
+
+        try:
+            mapsTime = os.stat(path).st_mtime_ns
+        except OSError:
+            return []
+        rows = self.mapsInfo()[1]
+        changed = []
+        for row in rows:
+            lesion, recorded = row.get("lesion"), row.get("lesion_sha256")
+            if not lesion or recorded in (None, "", "n/a"):
+                continue
+            try:
+                info = os.stat(lesion)
+            except OSError:
+                continue  # a removed lesion is the Cohort card's matter; its map is unchanged
+            if info.st_mtime_ns <= mapsTime:
+                continue
+            key = (lesion, info.st_size, info.st_mtime_ns)
+            if key not in self._lesionHashes:
+                try:
+                    self._lesionHashes[key] = export.file_sha256(lesion)
+                except OSError:
+                    continue
+            if self._lesionHashes[key] != recorded:
+                changed.append(row.get("participant_id"))
+        return changed
+
+    def changedSources(self, kind, folder):
+        """The participant ids whose lesion file no longer has the ``source_sha256`` that the manifest of a seeds or consolidate result recorded."""
+        from LesionNetworkMappingLib import export
+
+        record = _readJson(os.path.join(folder, RESULT_FILES[kind])) or {}
+        if kind == "seeds":
+            variants = record.get("variants")
+            groups = [(v or {}).get("lesions") for v in variants.values()] if isinstance(variants, dict) else []
+        else:
+            groups = [record.get("lesions")]
+        changed = []
+        for entries in groups:
+            for entry in entries if isinstance(entries, list) else []:
+                if not isinstance(entry, dict):
+                    continue
+                source, recorded = entry.get("source"), entry.get("source_sha256")
+                if not source or not recorded:
+                    continue
+                path = source if os.path.isabs(source) else os.path.normpath(os.path.join(folder, source))
+                try:
+                    info = os.stat(path)
+                except OSError:
+                    continue  # a removed lesion is the Cohort card's matter
+                key = (path, info.st_size, info.st_mtime_ns)
+                if key not in self._lesionHashes:
+                    try:
+                        self._lesionHashes[key] = export.file_sha256(path)
+                    except OSError:
+                        continue
+                sid = entry.get("participant_id")
+                if self._lesionHashes[key] != recorded and sid not in changed:
+                    changed.append(sid)
+        return changed
+
+    def staleReason(self, kind, folder):
+        """Why the result in ``folder`` does not belong to the current cohort maps or primary (a sentence), or "" when it does.
+
+        A result records the maps it used (``cohort_maps.maps_sha256``); a result written before that was recorded is
+        stale when the maps.tsv is newer than it. The analyses of the cohort maps (``MAP_KINDS``) are checked against the maps;
+        the seed variants and the hemisphere consolidation, which derive files from the lesions, against the lesion bytes they recorded.
+        """
+        if kind in ("seeds", "consolidate") and folder:
+            changed = self.changedSources(kind, folder)
+            if changed:
+                names = ", ".join(changed[:3]) + (" …" if len(changed) > 3 else "")
+                return _("A lesion changed after this was made ({names}): its derived files come from the old lesion. Run it again; until then this is not the current result.").format(names=names)
+            return ""
+        if kind not in MAP_KINDS or not folder:
+            return ""
+        mapsTsv = self.currentMapsTsv()
+        if not mapsTsv:
+            return ""
+        path = os.path.join(folder, RESULT_FILES[kind])
+        record = _readJson(path) or {}
+        used = (record.get("cohort_maps") or {}).get("maps_sha256") if isinstance(record.get("cohort_maps"), dict) else None
+        if used:
+            stale = used != self.mapsInfo()[0]
+        else:
+            stale = (_stat(path) or (0, 0))[0] < (_stat(mapsTsv) or (0, 0))[0]
+        if stale:
+            return _("Computed on the previous cohort maps: the lesions were mapped again since ({n} lesion maps now). Run it again to update; until then this is not the current result.").format(
+                n=len(self.mapsInfo()[1]))
+        changed = self.changedLesions()
+        if changed:
+            names = ", ".join(changed[:3]) + (" …" if len(changed) > 3 else "")
+            return _("A lesion changed after the lesions were mapped ({names}): map the lesions again (Cohort card), then run this again; until then this is not the current result.").format(names=names)
+        return self.otherPrimaryReason(kind, record)
+
+    def recordedPrimary(self, record):
+        """(rule label, overlap %, sign) that a result recorded, each None when the record does not name it (results written before it was recorded)."""
+        from LesionNetworkMappingLib import robustness
+
+        ruleLabel = None
+        if isinstance(record.get("rule"), dict):
+            try:
+                ruleLabel = robustness.sweep_label(record["rule"])
+            except (KeyError, TypeError, ValueError):
+                ruleLabel = None
+        pct = _float(record.get("overlap_pct"))
+        sign = record.get("sign") if record.get("sign") in SIGN_WORDS else None
+        return ruleLabel, pct, sign
+
+    def otherPrimaryReason(self, kind, record):
+        """Why a result of the cohort maps belongs to another primary (rule, sensitivity or sign) than the current one, or "".
+
+        The sweep is compared with the current primary where it is shown (its own line above the table), so it is not checked here.
+        Only what the result recorded is compared: an older record that does not name its sign is not marked for the sign.
+        """
+        if kind == "sweep":
+            return ""
+        ruleLabel, pct, sign = self.recordedPrimary(record)
+        nowLabel, nowPct, nowSign = self.primaryKey()
+        differs = (ruleLabel is not None and ruleLabel != nowLabel) or (pct is not None and abs(pct - float(nowPct)) > 1e-6) or (sign is not None and sign != nowSign)
+        if not differs:
+            return ""
+        old = ", ".join(part for part in (ruleLabel, _signText(sign) if sign is not None else None,
+                                           _("sensitivity ≥ {pct:g}%").format(pct=pct) if pct is not None else None) if part)
+        new = ", ".join((nowLabel, _signText(nowSign), _("sensitivity ≥ {pct:g}%").format(pct=float(nowPct))))
+        return _("Computed for the primary {old}; the primary is now {new}. Run it again to update; until then this is not the current result.").format(old=old, new=new)
 
     def showSettings(self):
         from LesionNetworkMappingLib import robustness
 
-        self.primaryLabel.setText(_("Primary (fixed): {rule}, sensitivity ≥ {pct:g}%. It changes in the Result card and the Overlap tab, not here.").format(rule=robustness.sweep_label(self.rule()), pct=self.overlapPct()))
+        self.primaryLabel.setText(_("Primary (fixed): {rule}, {sign}, sensitivity ≥ {pct:g}%. It changes in the Result card and the Overlap tab, not here.").format(
+            rule=robustness.sweep_label(self.rule()), sign=_signText(self.sign()), pct=self.overlapPct()))
         _fill(self.replicateCombo, self.otherConnectomes() or [(_("No other connectome registered"), None)])
         designPath = self.designPath()
         self.designCheck.setEnabled(designPath is not None)
         if designPath is None:
             self.designCheck.setChecked(False)
         self.coordinatesLabel.setText(os.path.basename(self._coordinates) if self._coordinates else _("none (needed by the spheres)"))
+        self.coordinatesLabel.setToolTip(self._coordinatesError or "")
         for variant in COORDINATE_VARIANTS:
             self.variantChecks[variant].setToolTip(robustness.VARIANTS[variant][1] + ("" if self._coordinates else " " + _("(needs a coordinates file)")))
         engine = self.engineRunDir()
-        self.engineLabel.setText(os.path.basename(engine) if engine else _("none with a split-half"))
+        engineConnectome = self.engineRunConnectome(engine) if engine else None
+        self.engineLabel.setText(_("none with a split-half") if not engine else _("{folder} (on {connectome})").format(folder=os.path.basename(engine), connectome=engineConnectome)
+                                 if engineConnectome else os.path.basename(engine))
 
     #
     # Run
@@ -730,12 +1078,12 @@ class RobustCard:
         """Run one analysis (after the cohort maps job when the lesions are not mapped); return the job, or None."""
         if self.running() or kind not in KINDS:
             return None
-        self.setNotice("")
         enabled, reason = self.runState(kind)
         if not enabled:
             self.sections[kind]["reason"].setText(reason)
             self.sections[kind]["reason"].show()
             return None
+        self.setNotice("")
         if kind in MAP_KINDS and self.currentMapsTsv() is None:
             job = self.mapsRunning()
             if job is None:
@@ -760,17 +1108,22 @@ class RobustCard:
         overlap = f"{self.overlapPct():g}"
         maps = self.currentMapsTsv()
         common = ["--out", folder, "--run-root", study]
+        # the primary is the Overlap tab's: its sign, and its lesions (the cases when participants.tsv has a case group)
+        sign = ["--sign", self.sign()]
+        participants = self.participantsPath()
+        cases = ["--participants", participants] if participants else []
         if kind == "sweep":
-            return ["sweep", "--maps", maps, "--rule", rule, "--overlap", overlap, *common]
+            return ["sweep", "--maps", maps, "--rule", rule, *sign, "--overlap", overlap, *cases, *common]
         if kind == "replicate":
-            return ["replicate", "--maps", maps, "--bundle-b", self.replicatePath(), "--rule", rule, "--overlap", overlap, *common]
+            return ["replicate", "--maps", maps, "--bundle-b", self.replicatePath(), "--rule", rule, *sign, "--overlap", overlap, *cases, *common]
         design = ["--study", study, "--design", self.designPath()] if kind in ("splithalf", "influence") and self.designCheck.isChecked() else []
         if kind == "splithalf":
-            return ["splithalf", "--maps", maps, "--rule", rule, "--overlap", overlap, "--n-splits", str(self.splitsSpin.value), "--seed", str(self.splitSeed.value), *design, *common]
+            return ["splithalf", "--maps", maps, "--rule", rule, *sign, "--overlap", overlap, "--n-splits", str(self.splitsSpin.value), "--seed", str(self.splitSeed.value), *cases, *design,
+                    *common]
         if kind == "influence":
-            return ["influence", "--maps", maps, "--rule", rule, "--overlap", overlap, "--top-k", str(TOP_K), *design, *common]
+            return ["influence", "--maps", maps, "--rule", rule, *sign, "--overlap", overlap, "--top-k", str(TOP_K), *cases, *design, *common]
         if kind == "seeds":
-            args = ["seeds", "--study", study, "--bundle", self.ctx.bundle.path, "--rule", rule, "--overlap", overlap, "--variants", ",".join(self.selectedVariants()), *common]
+            args = ["seeds", "--study", study, "--bundle", self.ctx.bundle.path, "--rule", rule, *sign, "--overlap", overlap, "--variants", ",".join(self.selectedVariants()), *common]
             if self._coordinates:
                 args += ["--coordinates", self._coordinates]
             return args
@@ -816,7 +1169,12 @@ class RobustCard:
         self.mapsJob = None
         self._updateProgress(force=True)
         kind, self.pendingKind = self.pendingKind, None
-        if kind and job.succeeded() and self.currentMapsTsv() is not None and self.runState(kind)[0]:
+        if kind and (job.stopRequested or job.state == "cancelled"):
+            # Stop was clicked while the lesions were being mapped: drop the pending analysis (a stopped job
+            # can still end 'done' when it was past its last cancel check)
+            self.setNotice(_("Analysis stopped: a job that did not finish has no results."))
+            self.refresh()
+        elif kind and job.succeeded() and self.currentMapsTsv() is not None and self.runState(kind)[0]:
             self.start(kind)
         else:
             self.refresh()
@@ -886,6 +1244,7 @@ class RobustCard:
         if not folder or not os.path.isfile(os.path.join(folder, RESULT_FILES[kind])):
             return False
         self.results[kind] = folder
+        self.stale[kind] = self.staleReason(kind, folder)
         section = self.sections[kind]
         show = {"sweep": self.showSweep, "replicate": self.showReplicate, "splithalf": self.showSplitHalf, "influence": self.showInfluence, "seeds": self.showSeeds,
                 "consolidate": self.showConsolidate, "connsplit": self.showConnectome}[kind]
@@ -894,8 +1253,11 @@ class RobustCard:
         except Exception:
             logging.exception(f"Lesion network mapping: the {kind} result could not be shown")
             self.results.pop(kind, None)
+            self.stale.pop(kind, None)
             section["holder"].hide()
             return False
+        section["stale"].setText(self.stale[kind])
+        section["stale"].setVisible(bool(self.stale[kind]))
         section["holder"].show()
         self.showMethods()
         return True
@@ -904,15 +1266,18 @@ class RobustCard:
         if not folder:
             return
         rows = _readTsv(os.path.join(folder, "sweep.tsv"))
-        summary = (_readJson(os.path.join(folder, "sweep.json")) or {}).get("summary") or {}
+        record = _readJson(os.path.join(folder, "sweep.json")) or {}
+        summary = record.get("summary") or {}
         primary = next((row for row in rows if _flag(row.get("primary"))), None)
         primaryPct = _float(primary["overlap_pct"]) if primary else None
+        storedSign = record.get("sign") if record.get("sign") in SIGN_WORDS else "both"  # sweeps made before the sign was passed used both
         self._sweepKey = self.primaryKey()
         storedLabel = primary["setting"].removeprefix("Primary: ") if primary else None
-        stale = primary is not None and (storedLabel != self._sweepKey[0] or primaryPct != self._sweepKey[1])
+        stale = primary is not None and (storedLabel != self._sweepKey[0] or primaryPct != self._sweepKey[1] or storedSign != self._sweepKey[2])
         if stale:
-            self.flipLabel.setText(_("Computed for the primary {old}, sensitivity ≥ {oldPct:g}%; the primary is now {new}, sensitivity ≥ {newPct:g}%. Run the sweep again to compare with the current primary.").format(
-                old=storedLabel, oldPct=primaryPct or 0.0, new=self._sweepKey[0], newPct=self._sweepKey[1]))
+            self.flipLabel.setText(_("Computed for the primary {old}, {oldSign}, sensitivity ≥ {oldPct:g}%; the primary is now {new}, {newSign}, sensitivity ≥ {newPct:g}%. "
+                                     "Run the sweep again to compare with the current primary.").format(
+                old=storedLabel, oldSign=_signText(storedSign), oldPct=primaryPct or 0.0, new=self._sweepKey[0], newSign=_signText(self._sweepKey[2]), newPct=self._sweepKey[1]))
             self.flipLabel.setStyleSheet(f"color: {levelColor('warn')};")
         elif summary.get("conclusion_flips"):
             self.flipLabel.setText(str(summary["conclusion_flips"]))
@@ -924,7 +1289,7 @@ class RobustCard:
             self.flipLabel.setText(_("Conclusion flips could not be checked: the primary has no peak or region of interest to follow."))
             self.flipLabel.setStyleSheet("")
         self.flipLabel.show()
-        self.sweepStale = stale
+        self.sweepStale = stale or bool(self.stale.get("sweep"))
         every = self.allSettings.isChecked()
         shown = [row for row in rows if every or _flag(row.get("primary")) or _float(row.get("overlap_pct")) in (None, primaryPct)]
         self.sweepTable.setRowCount(len(shown))
@@ -958,7 +1323,10 @@ class RobustCard:
         _clear(self.tileGrid)
         self.tileNote.setText("")
         if self.sweepStale:
-            self.tileNote.setText(_("The tiles are not drawn: they would show the current primary, not the one this table was computed for."))
+            if self.stale.get("sweep"):
+                self.tileNote.setText(_("The tiles are not drawn: they would show the current cohort maps, not the ones this table was computed on."))
+            else:
+                self.tileNote.setText(_("The tiles are not drawn: they would show the current primary, not the one this table was computed for."))
             return
         mapsTsv = self.currentMapsTsv()
         if not mapsTsv:
@@ -967,11 +1335,12 @@ class RobustCard:
         try:
             from LesionNetworkMappingLib import robustness
 
-            cohort = robustness.load_cohort(mapsTsv)
+            cohort = robustness.load_cohort(mapsTsv, column=robustness.rule_column(self.rule()))  # the maps the sweep thresholded
             if cohort.maps.nbytes > TILE_MAX_BYTES:
                 self.tileNote.setText(_("The maps are too large to redraw as tiles here; the table is the result."))
                 return
-            settings = sweepSettings(cohort, self.rule(), self.overlapPct())
+            cohort, _leftOut = robustness.case_subset(cohort, self.participantsPath())  # the lesions of the sweep (its --participants)
+            settings = sweepSettings(cohort, self.rule(), self.overlapPct(), self.sign())
             images, z = sweepTileImages(cohort, settings)
         except Exception as exc:
             logging.exception("Lesion network mapping: the sweep tiles could not be drawn")
@@ -1025,17 +1394,26 @@ class RobustCard:
         self.splitTable.setRowCount(len(rows))
         for index, row in enumerate(rows):
             low, high = _float(row["p2_5"]), _float(row["p97_5"])
-            values = [row["metric"], _num(_float(row["median"])), _interval((low, high)) if low is not None and high is not None else "—", f"{_num(_float(row['min']))} to {_num(_float(row['max']))}"]
+            values = [_splitMetricName(row["metric"]), _num(_float(row["median"])), _interval((low, high)) if low is not None and high is not None else "—", f"{_num(_float(row['min']))} to {_num(_float(row['max']))}"]
             for column, text in enumerate(values):
-                self.splitTable.setItem(index, column, _tableItem(text, None, right=column > 0))
+                # The full metric name is the tooltip: the short name is all the first column has room for
+                self.splitTable.setItem(index, column, _tableItem(text, row["metric"] if column == 0 else None, right=column > 0))
         _fitTable(self.splitTable, len(rows))
         first = rows[0] if rows else {}
         self.splitLabel.setText(_("{n} random splits into halves of {half} lesions (seed {seed}). {label}.").format(n=first.get("n_splits", "?"), half=first.get("half_size", "?"), seed=first.get("seed", "?"), label=first.get("label", "")))
 
     def showInfluence(self, folder):
         record = _readJson(os.path.join(folder, "influence.json")) or {}
-        rows = sorted(_readTsv(os.path.join(folder, "influence.tsv")), key=lambda row: _float(row.get("rank")) or 1e9)[:TOP_K]
-        self.influenceLabel.setText(_("The {k} most influential lesions, ranked by {measure}. Influence alone is not a reason to remove a lesion.").format(k=len(rows), measure=record.get("influence", "")))
+        ranked = sorted(_readTsv(os.path.join(folder, "influence.tsv")), key=lambda row: _float(row.get("rank")) or 1e9)
+        influential = [row for row in ranked if str(row.get("top_k", "")).lower() == "true"] if ranked and "top_k" in ranked[0] else ranked[:TOP_K]
+        # Lesions tied with the cut-off are all shown: the table never cuts equally influential lesions by id order
+        rows = ranked[:max(TOP_K, len(influential))]
+        if rows and not influential:
+            self.influenceLabel.setText(_("No single lesion changes the result: removing any one lesion leaves it unchanged, so none is more influential than the others (influence by {measure}).").format(measure=record.get("influence", "")))
+        elif len(influential) > TOP_K:
+            self.influenceLabel.setText(_("{k} lesions share the same influence at the cut-off, so all {k} are listed as most influential, ranked by {measure}. Influence alone is not a reason to remove a lesion.").format(k=len(influential), measure=record.get("influence", "")))
+        else:
+            self.influenceLabel.setText(_("The {k} most influential lesions, ranked by {measure}. Influence alone is not a reason to remove a lesion.").format(k=len(influential), measure=record.get("influence", "")))
         self.influenceTable.setRowCount(len(rows))
         for index, row in enumerate(rows):
             sid = row["participant_id"]
@@ -1054,30 +1432,11 @@ class RobustCard:
         _fitTable(self.influenceTable, len(rows))
 
     def showSubject(self, sid):
-        """Open the Library with a subject selected; return whether it could."""
-        shell = self.ctx.shell()
-        if shell is not None:
-            shell.switchTo("library")
-        elif hasattr(slicer.modules, "studio"):
-            slicer.util.selectModule("Studio")
-        try:
-            from StudioLib import library
-
-            views = list(getattr(library, "_studyViews", []))
-            for view in views:
-                if hasattr(view, "search"):
-                    view.search.setText("")
-                if hasattr(view, "setFilter"):
-                    view.setFilter("all")
-            library._setStudySelection([sid])
-            for view in views:
-                row = view.model.rowOf(sid) if hasattr(view, "model") else -1
-                if row >= 0:
-                    view.table.scrollTo(view.model.index(row, 0))
-        except Exception:
-            logging.exception("Lesion network mapping: the Library could not select the subject")
-            return False
-        return True
+        """Open the Library with a subject of the study selected (the study is opened there when the Library does not
+        have it, as when it was chosen in Map's Seed card); return whether it could.
+        """
+        study = self.ctx.study
+        return widgets.showSubjectsInLibrary(getattr(study, "path", None) if study is not None else None, [sid], self.ctx.shell())
 
     def showSeeds(self, folder):
         from LesionNetworkMappingLib import robustness
@@ -1086,19 +1445,34 @@ class RobustCard:
         order = [variant for variant in VARIANT_ORDER if any(row["variant"] == variant for row in rows)]
         self.seedsTable.setRowCount(len(order))
         notes = []
+        record = _readJson(os.path.join(folder, "variants.json")) or {}
+        variantRecords = record.get("variants") or {}
+        missing = [str(sid) for sid in record.get("coordinates_not_in_study") or []]
+        if missing:
+            notes.append(_("Not in the study, so their coordinates were ignored: {ids}").format(ids=", ".join(missing[:10]) + (" ..." if len(missing) > 10 else "")))
         for index, variant in enumerate(order):
             mine = [row for row in rows if row["variant"] == variant]
             items = [row for row in mine if row.get("kind") == "lesion"]
-            changed = sum(1 for row in items if _flag(row.get("changed")) is True)
+            moved = [row for row in items if _flag(row.get("changed")) is True]
+            changed = len(moved)
+            # Unchanged lesions keep their primary seed (r = Dice = 1 by construction): the medians are over the
+            # lesions the variant changed, else a variant that inverts a few maps reads as 1.00 (files without the flag: all)
+            summarised = moved if moved or any(_flag(row.get("changed")) is False for row in items) else items
             text = robustness.VARIANTS[variant][0]
-            values = [text, f"{changed}/{len(items)}" if items else "0", _num(_median([_float(row["r"]) for row in items])), _num(_median([_float(row["dice"]) for row in items]))]
-            tooltip = "; ".join(sorted({row["note"] for row in mine if row.get("note") not in ("n/a", "", None)})) or None
+            values = [text, f"{changed}/{len(items)}" if items else "0", _num(_median([_float(row["r"]) for row in summarised])), _num(_median([_float(row["dice"]) for row in summarised]))]
+            # Only the variant's own notes (its lesion rows, or the "not applicable" row): the group rows carry the generic
+            # column descriptions of the Compare tables ("mean of the lesion maps ...") that are not about the variant
+            own = {str(row["note"]).strip() for row in mine if row.get("kind") in ("lesion", "variant") and row.get("note") not in ("n/a", "", None)}
+            empty = [str(entry.get("participant_id")) for entry in (variantRecords.get(variant) or {}).get("lesions") or [] if entry.get("warning")]
+            if empty:
+                own.add(_("{ids}: the sphere has no voxel in the connectome, so the primary seed is kept and the lesion is left out of the medians").format(ids=", ".join(empty[:10]) + (" ..." if len(empty) > 10 else "")))
+            tooltip = "; ".join(sorted(own)) or None
             if tooltip:
                 notes.append(f"{text}: {tooltip}")
             for column, cell in enumerate(values):
                 self.seedsTable.setItem(index, column, _tableItem(cell, tooltip, right=column > 0))
         _fitTable(self.seedsTable, len(order))
-        self.seedsNote.setText(_("Derived lesion files are in the run folder (robustness/seeds), never in lesions/. ") + " ".join(notes[:2]))
+        self.seedsNote.setText(" ".join([_("Median r and Dice are over the changed lesions. Derived lesion files are in the run folder (robustness/seeds), never in lesions/. ").strip()] + [f"{note.rstrip('. ')}." for note in notes]))
 
     def showConsolidate(self, folder):
         record = _readJson(os.path.join(folder, "consolidation.json")) or {}
@@ -1109,8 +1483,10 @@ class RobustCard:
 
     def showConnectome(self, folder):
         record = _readJson(os.path.join(folder, "connectome_split_half.json")) or {}
-        text = _("Connectome split-half (odd {odd} / even {even} subjects): median r {median}, minimum {minimum}.").format(
-            odd=record.get("n_odd", "?"), even=record.get("n_even", "?"), median=_num(_float(record.get("median_r")), 3), minimum=_num(_float(record.get("min_r")), 3))
+        connectome = record.get("bundle") if isinstance(record.get("bundle"), str) and record.get("bundle") else None
+        text = (_("Connectome split-half of {connectome} (odd {odd} / even {even} subjects): median r {median}, minimum {minimum}.") if connectome else
+                _("Connectome split-half (odd {odd} / even {even} subjects): median r {median}, minimum {minimum}.")).format(
+            connectome=connectome, odd=record.get("n_odd", "?"), even=record.get("n_even", "?"), median=_num(_float(record.get("median_r")), 3), minimum=_num(_float(record.get("min_r")), 3))
         if record.get("small_halves"):
             text += " " + _("Fewer than 500 subjects per half.")
         self.connLabel.setText(f"{_('Sampling stability, not robustness')}. {text}")
@@ -1139,16 +1515,25 @@ class RobustCard:
     #
 
     def chooseCoordinates(self):
-        path = qt.QFileDialog.getOpenFileName(self.widget, _("Coordinates file"), "", "TSV (*.tsv *.txt);;All files (*)")
+        path = qt.QFileDialog.getOpenFileName(self.widget, _("Coordinates file"), widgets.dialogStartFolder(), "TSV (*.tsv *.txt);;All files (*)")
         if path:
             self.setCoordinates(path)
 
     def setCoordinates(self, path):
-        self._coordinates = path or None
+        """Use ``path`` as the coordinates file of the sphere variants after checking it (a file with a wrong column, row or value is refused, with the reason)."""
+        from LesionNetworkMappingLib import robustness
+
+        self._coordinates, self._coordinatesError = path or None, None
+        if path:
+            try:
+                robustness.read_coordinates(path)
+            except ValueError as exc:
+                self._coordinates, self._coordinatesError = None, str(exc)
+        self.setNotice(self._coordinatesError or "")
         self.scheduleRefresh()
 
     def chooseEngineRun(self):
-        path = qt.QFileDialog.getExistingDirectory(self.widget, _("Engine run folder"))
+        path = qt.QFileDialog.getExistingDirectory(self.widget, _("Engine run folder"), widgets.dialogStartFolder())
         if path:
             self.setEngineRun(path)
 
@@ -1162,10 +1547,14 @@ class RobustCard:
     def onResultChanged(self):
         self.scheduleRefresh()
 
+    def onCohortMapsChanged(self, path=None):
+        """The lesions were mapped (again): the shown results are checked against the new maps."""
+        self.scheduleRefresh()
+
     def cleanup(self):
         self._cleanedUp = True
         self._timer.stop()
-        for name in ("studyChanged", "bundleChanged", "computeEnabledChanged", "ruleChanged", "runChanged"):
+        for name in ("studyChanged", "bundleChanged", "computeEnabledChanged", "ruleChanged", "runChanged", "overlapChanged"):
             callbacks = getattr(self.ctx, name, [])
             if self.scheduleRefresh in callbacks:
                 callbacks.remove(self.scheduleRefresh)

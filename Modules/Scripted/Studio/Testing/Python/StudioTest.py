@@ -423,6 +423,43 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         finally:
             self.layoutManager.disconnect("layoutChanged(int)", onLayoutChanged)
 
+    def test_3b_dicom_module_layout_not_remembered_by_draw(self):
+        """The DICOM module shows its browser layout on enter(), before it is marked as transient: leaving it returns
+        Draw (and Library after it) to the slice views, and a DICOM browser layout already saved is not used.
+        """
+        from StudioLib import layouts
+
+        if not hasattr(slicer.modules, "dicom"):
+            self.skipTest("DICOM module not loaded")
+        settings = qt.QSettings()
+        studioShell = self._applyStudio()
+        try:
+            studioShell.switchTo("draw")
+            self._pump()
+            self.assertEqual(self.layoutManager.layout, layouts.FOCUS_LAYOUT_ID)
+            # Module finder, File > Add DICOM Data or Search route
+            slicer.util.selectModule("DICOM")
+            self._pump()
+            self.assertIsNone(studioShell.currentWorkspace())
+            self.assertEqual(slicer.util.settingsValue("Studio/Draw/Layout", layouts.FOCUS_LAYOUT_ID, converter=int),
+                             layouts.FOCUS_LAYOUT_ID)
+            # The back button
+            studioShell.closeTransientModule()
+            self._pump()
+            self.assertEqual(studioShell.currentWorkspace(), "draw")
+            self.assertEqual(self.layoutManager.layout, layouts.FOCUS_LAYOUT_ID)
+            studioShell.switchTo("library")
+            self._pump()
+            self.assertNotEqual(self.layoutManager.layout, slicer.vtkMRMLLayoutNode.SlicerLayoutDicomBrowserView)
+
+            # A profile that already saved the DICOM browser layout for Draw recovers its default
+            settings.setValue("Studio/Draw/Layout", slicer.vtkMRMLLayoutNode.SlicerLayoutDicomBrowserView)
+            studioShell.switchTo("draw")
+            self._pump()
+            self.assertEqual(self.layoutManager.layout, layouts.FOCUS_LAYOUT_ID)
+        finally:
+            settings.remove("Studio/Draw/Layout")
+
     def test_4_no_key_collisions(self):
         """Studio shortcuts are disjoint from the view and Segment Editor keys, and not ambiguous (SPEC 9.6)."""
         from StudioLib import workspaces
@@ -458,6 +495,26 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 keys.append((classicSwitch.shortcut, "Classic switch"))
             assertNoKeyCollisions(keys)
             self.assertEqual(ambiguousShortcuts(self.mainWindow), {}, f"ambiguous shortcuts in {ws.title}")
+
+    def test_4b_computed_network_map_is_not_a_draw_source(self):
+        """A map that Map computed (LNM.Result, no Studio.Role) is never offered as the scan to draw on."""
+        import numpy as np
+        from StudioLib import draw
+
+        scan = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "scan for source test")
+        slicer.util.updateVolumeFromArray(scan, np.zeros((4, 4, 4), np.float32))
+        networkMap = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "computed map for source test")
+        slicer.util.updateVolumeFromArray(networkMap, np.zeros((4, 4, 4), np.float32))
+        networkMap.SetAttribute("LNM.Result", "1")
+        networkMap.SetAttribute("LNM.Statistic", "T")
+        try:
+            editable = draw._editableVolumes()
+            self.assertIn(scan, editable)
+            self.assertNotIn(networkMap, editable)
+            self.assertFalse(draw._isEditableSource(networkMap))
+        finally:
+            slicer.mrmlScene.RemoveNode(scan)
+            slicer.mrmlScene.RemoveNode(networkMap)
 
     def test_5_layouts(self):
         """The Studio layouts are registered with the canonical XML (SPEC 9.7 rule 3)."""
@@ -670,6 +727,46 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, sourceVolumeNode)
         return int(slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, sourceVolumeNode).sum())
 
+    def _pressSpace(self, editor):
+        """Trigger the Segment Editor's own Space shortcut, as the key does."""
+        shortcuts = [shortcut for shortcut in self.mainWindow.findChildren("QShortcut")
+                     if shortcut.property("effectIndex") == -1 and shortcut.key.toString(qt.QKeySequence.PortableText) == "Space"]
+        self.assertEqual(len(shortcuts), 1, "the Segment Editor installs one Space shortcut while Draw is shown")
+        shortcuts[0].activated()
+        self._pump()
+
+    def test_10a_space_pauses_after_tool_switch(self):
+        """Space pauses the active tool and resumes it, also after a switch of tools (it must not activate the
+        previous tool: a drag meant to adjust contrast would then erase the lesion).
+        """
+        studioShell = self._applyStudio()
+        _path, editor = self._openScanInDraw(studioShell)
+        editor.setActiveEffectByName("Paint")
+        self._pump()
+        self._pressSpace(editor)
+        self.assertIsNone(self._effect(editor))
+        self._pressSpace(editor)
+        self.assertEqual(self._effect(editor), "Paint")
+
+        # After any switch (E, E: Erase and back to Brush; or the tiles) Space still pauses the current tool
+        for previous, current in (("Erase", "Paint"), ("Draw", "Paint"), ("Paint", "Erase")):
+            editor.setActiveEffectByName(previous)
+            self._pump()
+            editor.setActiveEffectByName(current)
+            self._pump()
+            self._pressSpace(editor)
+            self.assertIsNone(self._effect(editor), f"Space after {previous} -> {current} must pause")
+            self._pressSpace(editor)
+            self.assertEqual(self._effect(editor), current, f"Space resumes {current}")
+
+        # Esc, then Space resumes the deselected tool
+        editor.setActiveEffect(None)
+        self._pump()
+        self._pressSpace(editor)
+        self.assertEqual(self._effect(editor), "Erase")
+        editor.setActiveEffect(None)
+        self._pump()
+
     def test_10_draw_round_trips(self):
         """A dropped scan lands unarmed with Brush suggested; the chosen tool and segment survive round trips; Esc is
         respected; a lesion opened to be traced (template, New lesion) arms Brush (NAV-02, NFT-03, D-U2).
@@ -837,7 +934,7 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertEqual(segmentationNode.GetAttribute(draw.SAVED_FILE_ATTRIBUTE), "sub-07_lesion.nii.gz")
             self.assertEqual(draw.lesionSaveState(segmentationNode)[:2], ("saved", written))
             self._pump(4)
-            self.assertTrue(draw.extension().card.saveStateLabel.text.startswith("Saved · sub-07_lesion.nii.gz"))
+            self.assertTrue(str(draw.extension().card.saveStateLabel.property("studioFullText")).startswith("Saved · sub-07_lesion.nii.gz"))
 
             labelmapNode = slicer.util.loadLabelVolume(written, {"show": False})
             try:
@@ -865,7 +962,7 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self._pump(4)
             slicer.app.processEvents()
             self._wait(draw.METRICS_DEBOUNCE_MS + 100)
-            self.assertTrue(draw.extension().card.saveStateLabel.text.startswith("Unsaved changes"))
+            self.assertTrue(str(draw.extension().card.saveStateLabel.property("studioFullText")).startswith("Unsaved changes"))
             # Notes and source just typed in the card (the notes debounce pending, the source field still being
             # edited) reach the sidecar of a save by shortcut
             card = draw.extension().card
@@ -923,6 +1020,56 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         studioShell.switchTo("draw")
         self._pump()
         self.assertIsNotNone(self.mainWindow.findChild("QPushButton", "StudioSaveLesionButton"))
+
+    def test_11b_save_lesion_into_a_folder_that_cannot_be_written(self):
+        """A folder that cannot be written gives its reason, logs no traceback and changes nothing (the old file and
+        its sidecar stay as they were).
+        """
+        import logging
+        import os
+
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        path, editor = self._openScanInDraw(studioShell)
+        self._paintCube(editor)
+        folder = os.path.join(os.path.dirname(path), "readonly_lesions")
+        os.makedirs(folder)
+        target = os.path.join(folder, "les.nii.gz")
+        with open(target, "wb") as f:
+            f.write(b"old")
+        # os.access is patched: the tests may run as a user that can write everywhere
+        originalAccess, shown, records = os.access, [], []
+
+        class _Handler(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = _Handler()
+        logging.getLogger().addHandler(handler)
+        # An unwritable folder is a refusal, not an error: it is reported with warningDisplay
+        originalDisplay, originalError, errors = slicer.util.warningDisplay, slicer.util.errorDisplay, []
+        slicer.util.warningDisplay = lambda text, **kwargs: shown.append((text, kwargs))
+        slicer.util.errorDisplay = lambda text, **kwargs: errors.append((text, kwargs))
+        os.access = lambda p, mode, *a, **k: False if os.path.normpath(str(p)) == os.path.normpath(folder) else originalAccess(p, mode, *a, **k)
+        try:
+            self.assertIsNone(draw.saveLesionDialog(studioShell, path=target))
+        finally:
+            os.access = originalAccess
+            slicer.util.warningDisplay = originalDisplay
+            slicer.util.errorDisplay = originalError
+            logging.getLogger().removeHandler(handler)
+        self.assertEqual(len(shown), 1)
+        self.assertEqual(errors, [])
+        self.assertIn("the folder", shown[0][0])
+        self.assertIn("cannot be written", shown[0][0])
+        self.assertEqual(open(target, "rb").read(), b"old")
+        self.assertFalse(os.path.exists(draw.sidecarPath(target)))
+        for record in records:
+            self.assertIsNone(record.exc_info)
+            self.assertNotIn("Traceback", record.getMessage())
+        self.assertNotIn("cannot save the lesion", " ".join(r.getMessage() for r in records if r.levelno >= logging.ERROR))
+        self.assertEqual(draw.lesionSaveState(editor.segmentationNode())[0], "never")
 
     def test_12_recent_already_open(self):
         """A Recent row or an Open… of a file that is already loaded does not load a duplicate in Studio (NAV-05)."""
@@ -1337,6 +1484,36 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                       [portableKey(key) for key in previousModule.shortcuts()])
         self.assertEqual(widget.parent.sizePolicy.horizontalPolicy(), qt.QSizePolicy.Minimum)
 
+    def test_18b_draw_keeps_studio_controls_after_classic_round_trip(self):
+        """Classic entered from another page than Draw and left again: Draw hides the classic selectors and buttons.
+
+        The panel of the Segment Editor is hidden there, and its visibility getters read False whatever was set; the
+        studio table must still be written (bug: the selectors and the Add/Remove/Show 3D row stayed shown).
+        """
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        studioShell.switchTo("draw")
+        self._pump()
+        widget = slicer.modules.SegmentEditorWidget
+        hiddenNames = ("SegmentationNodeComboBox", "SourceVolumeNodeComboBox", "AddSegmentButton", "RemoveSegmentButton", "Show3DButton")
+        for round_ in range(2):
+            studioShell.switchTo("library")
+            self._pump()
+            studioShell.classic(persist=False)
+            self._pump()
+            self.assertEqual(widget.presentation(), "classic")
+            # Leaving the Segment Editor for another module hides its panel (its visibility getters then read False)
+            slicer.util.selectModule("Data" if round_ == 0 else "Volumes")
+            self._pump()
+            studioShell.studio()
+            self._pump()
+            studioShell.switchTo("draw")
+            self._pump()
+            self.assertEqual(widget.presentation(), "studio")
+            for objectName in hiddenNames:
+                child = editor.findChild("QWidget", objectName)
+                self.assertFalse(child.isVisible(), f"{objectName} shown after classic round trip {round_}")
+
     def test_19_draw_first_click_paints(self):
         """Start on MNI template: Brush armed at 3 mm, and a first drag in the axial view paints into "Lesion" (SPEC 5.3)."""
         from StudioLib import draw
@@ -1359,6 +1536,27 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertAlmostEqual(paint.doubleParameter("BrushAbsoluteDiameter"), 6.0, 3)
         draw.extension().brushChips[3.0].click()
         self._pump()
+
+    def test_19b_draw_brush_size_from_keys_is_shown_and_kept(self):
+        """A brush size changed without the panel ([ ], Shift+wheel, a script: only EffectParameterModified fires, never
+        the node's ModifiedEvent) shows in the Size row (chips and field) and is kept in Studio/BrushDiameterMm (SPEC 5.10).
+        """
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        self.assertEqual(self._effect(editor), "Paint")
+        paint = editor.effectByName("Paint")
+        extension = draw.extension()
+        previous = qt.QSettings().value(draw.BRUSH_DIAMETER_KEY)
+        self.addCleanup(lambda: qt.QSettings().setValue(draw.BRUSH_DIAMETER_KEY, previous) if previous is not None else qt.QSettings().remove(draw.BRUSH_DIAMETER_KEY))
+        for diameter, chip in ((7.5, None), (6.0, 6.0)):
+            paint.setCommonParameter("BrushAbsoluteDiameter", diameter)
+            self._wait(100)
+            self.assertAlmostEqual(extension.brushField.value, diameter, 1)
+            self.assertAlmostEqual(float(qt.QSettings().value(draw.BRUSH_DIAMETER_KEY)), diameter, 3)
+            for size, button in extension.brushChips.items():
+                self.assertEqual(button.checked, size == chip, f"chip {size} with brush {diameter}")
 
     def test_20_draw_smartfill_tile(self):
         """Smart fill has a labelled tile (third), the key M and a "Smart fill · M · 3" tooltip (D-A10)."""
@@ -1431,6 +1629,15 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIn("2 parts", lesioncard.readoutHtml(dict(metrics, parts=2)))
         self.assertEqual(lesioncard.computeLesionMetrics(np.zeros((3, 3, 3)), (1, 1, 1), np.eye(4))["voxels"], 0)
 
+        # The midline column is "both hemispheres" on the FSL and the 2009c 2 mm grids alike; a lesion that stays on one side is not
+        for originX, columns, expected in ((-0.5, [0], True), (0.0, [0], True), (-1.5, [0], False), (1.5, [0], False), (-2.5, [0, 1, 2, 3], True),
+                                           (-0.5 - 4, [0, 1], False)):
+            grid = np.zeros((1, 1, 6), bool)
+            grid[0, 0, columns] = True
+            gridMatrix = np.diag([2.0, 2.0, 2.0, 1.0])
+            gridMatrix[0, 3] = originX
+            self.assertEqual(lesioncard.computeLesionMetrics(grid, None, gridMatrix)["spans_both"], expected, (originX, columns))
+
         # A lesion on a 1 mm MNI-size grid against Segment Statistics
         volumeNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "MetricsGrid")
         slicer.util.updateVolumeFromArray(volumeNode, np.zeros((182, 218, 182), np.int16))
@@ -1461,6 +1668,39 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertLessEqual(sorted(times)[len(times) // 2], 15.0, times)
         # MNI grid, x < 0: the left hemisphere
         self.assertEqual(metrics["sides"], "Left")
+
+    def test_22b_lesion_metrics_memory_stays_small(self):
+        """A large lesion's metrics allocate a few bytes per voxel, not ~100 (a half-scan Threshold OOM-killed the app)."""
+        import tracemalloc
+
+        import numpy as np
+
+        from StudioLib import lesioncard
+
+        mask = np.zeros((70, 256, 256), bool)
+        mask[3:67, 2:250, 1:255] = True
+        mask[10, 10, 10] = False
+        voxels = int(np.count_nonzero(mask))
+        matrix = np.array([[-0.9, 0.1, 0.05, 90.0], [0.1, 1.0, 0.0, -126.0], [0.0, 0.0, 1.0, -72.0], [0.0, 0.0, 0.0, 1.0]])
+        tracemalloc.start()
+        try:
+            metrics = lesioncard.computeLesionMetrics(mask, None, matrix, axis=0)
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(metrics["voxels"], voxels)
+        self.assertEqual(metrics["parts"], 1)
+        # ndimage.label's int32 labels are 4 bytes per voxel of the bounding box; per-voxel index arrays were ~93
+        self.assertLess(peak, 8 * mask[3:67, 2:250, 1:255].size, peak)
+        # The same centroid and x extent as from every voxel centre
+        kk, jj, ii = np.nonzero(mask)
+        indices = np.vstack((ii, jj, kk, np.ones(ii.size)))
+        expectedCentroid = matrix @ indices.mean(axis=1)
+        xs = matrix[0] @ indices
+        for axisIndex in range(3):
+            self.assertAlmostEqual(metrics["centroid_ras"][axisIndex], expectedCentroid[axisIndex], places=6)
+        self.assertAlmostEqual(metrics["x_min"], float(xs.min()), places=6)
+        self.assertAlmostEqual(metrics["x_max"], float(xs.max()), places=6)
 
     def test_23_draw_save_keeps_lesion_grid(self):
         """A 91x109x91 NLin6Asym mask shown on the 2009c template is saved on its own grid with identical voxels (U3)."""
@@ -1527,6 +1767,37 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIsNone(draw.suspendedEffect(studioShell))
         self.assertEqual(draw.drawState(studioShell).effect, "Erase")
 
+    def test_24a_draw_place_started_again_before_the_tool_is_armed(self):
+        """A Place mode that starts again before the suspended tool is armed (a figure pair: the template point right
+        after the figure point) keeps it suspended: arming it would end that Place mode, and the click would paint.
+        """
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        editor.setActiveEffectByName("Paint")
+        self._pump()
+        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+        for armedInBetween in (False, True):
+            interactionNode.SetCurrentInteractionMode(slicer.vtkMRMLInteractionNode.Place)
+            self._pump()
+            self.assertEqual(draw.suspendedEffect(studioShell), "Paint")
+            # The first point is placed (the mode ends), and the second Place mode starts before (or right after) the
+            # tool is armed again
+            interactionNode.SwitchToViewTransformMode()
+            if armedInBetween:
+                self._pump(1)
+            interactionNode.SetCurrentInteractionMode(slicer.vtkMRMLInteractionNode.Place)
+            self._pump(6)
+            self.assertEqual(interactionNode.GetCurrentInteractionMode(), slicer.vtkMRMLInteractionNode.Place, armedInBetween)
+            self.assertIsNone(self._effect(editor), armedInBetween)
+            self.assertEqual(draw.suspendedEffect(studioShell), "Paint", armedInBetween)
+            # The second point is placed: the tool resumes
+            interactionNode.SwitchToViewTransformMode()
+            self._pump(6)
+            self.assertEqual(self._effect(editor), "Paint", armedInBetween)
+            self.assertIsNone(draw.suspendedEffect(studioShell))
+
     def test_25_draw_double_click_guard(self):
         """A double-click with Paint active does not maximize the view; without a tool it still does (U12)."""
         import vtk
@@ -1583,6 +1854,10 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         for name in ("StudioDrawOpenButton", "StudioDrawStartOnTemplateButton", "StudioDrawLibraryButton"):
             self.assertTrue(self.mainWindow.findChild("QPushButton", name).isVisible(), name)
         self.assertFalse(slicer.modules.SegmentEditorWidget.editor.isVisible())
+        # No orphan "Tools" header or "More tools" button without the tool tiles (bug bash: draw-empty-state-orphan-tools-header)
+        toolsRow = self.mainWindow.findChild("QWidget", "StudioDrawToolsRow")
+        self.assertIsNotNone(toolsRow)
+        self.assertFalse(toolsRow.isVisible())
         # A figure (Studio.Role) shown in the views is never the source volume
         studioShell.switchTo("library")
         self._pump()
@@ -1596,6 +1871,7 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIsNone(editor.sourceVolumeNode())
         self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")), 0)
         self.assertTrue(emptyState.isVisible())
+        self.assertFalse(toolsRow.isVisible())
 
     def test_27_draw_follow_and_center(self):
         """After a stroke in Red the other views move to it (Follow); Center on lesion moves every view to the lesion (U9, U10)."""
@@ -1700,6 +1976,347 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._wait(draw.METRICS_DEBOUNCE_MS + 100)
         self.assertTrue(studioShell.toastText().startswith("Smooth removed"), studioShell.toastText())
         editor.setActiveEffect(None)
+
+    def test_29b_draw_fill_gaps_link_says_when_nothing_was_filled(self):
+        """The card's "Fill" link must not do nothing silently: thin strokes that interpolation cannot join give a message."""
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        segmentationNode, segmentId, source = editor.segmentationNode(), editor.currentSegmentID(), editor.sourceVolumeNode()
+
+        def setLesion(planes):
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, source)
+            array[:] = 0
+            for k, j0, j1, i0, i1 in planes:
+                array[k, j0:j1, i0:i1] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, source)
+
+        # Two one-voxel-thin lines three slices apart: the Fill between slices effect adds nothing
+        setLesion([(40, 50, 51, 30, 36), (44, 50, 51, 30, 36)])
+        before = self._voxels(editor)
+        studioShell.toast("")
+        draw.fillGaps(studioShell)
+        self._pump()
+        self.assertEqual(self._voxels(editor), before)
+        self.assertTrue(studioShell.toastText().startswith("Nothing to fill"), studioShell.toastText())
+        # Two wide plates: the slices between are filled and no such message is shown
+        setLesion([(40, 50, 56, 30, 36), (44, 50, 56, 30, 36)])
+        before = self._voxels(editor)
+        studioShell.toast("")
+        draw.fillGaps(studioShell)
+        self._pump()
+        self.assertGreater(self._voxels(editor), before)
+        self.assertFalse(studioShell.toastText().startswith("Nothing to fill"), studioShell.toastText())
+        editor.setActiveEffect(None)
+
+    def test_29c_draw_fill_gaps_closes_gaps_between_thick_parts(self):
+        """The card's "Fill" link and the Fill gaps tile close gaps between parts that are several slices thick."""
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        segmentationNode, segmentId, source = editor.segmentationNode(), editor.currentSegmentID(), editor.sourceVolumeNode()
+
+        def setLesion(slabs):
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, source)
+            array[:] = 0
+            for k0, k1 in slabs:
+                array[k0:k1, 50:58, 30:38] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, source)
+            self._pump()
+
+        def gapCount():
+            return len(draw.lesionMetrics(segmentationNode, compute=True)["gaps"])
+
+        for slabs, gaps in (([(34, 40), (42, 48)], 2), ([(34, 40), (41, 47)], 1), ([(34, 38), (40, 44), (46, 50)], 4)):
+            for viaTile in (False, True):
+                editor.setActiveEffect(None)
+                setLesion(slabs)
+                before = self._voxels(editor)
+                self.assertEqual(gapCount(), gaps, slabs)
+                studioShell.toast("")
+                if viaTile:
+                    editor.setActiveEffectByName("Fill between slices")
+                    self._pump()
+                    editor.activeEffect().self().fillButton.click()
+                else:
+                    draw.fillGaps(studioShell)
+                self._pump()
+                self.assertGreater(self._voxels(editor), before, (slabs, viaTile))
+                self.assertEqual(gapCount(), 0, (slabs, viaTile))
+                self.assertFalse(studioShell.toastText().startswith("Nothing to fill"), studioShell.toastText())
+        # The voxels of the parts themselves are kept
+        setLesion([(34, 40), (42, 48)])
+        before = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, source).copy()
+        draw.fillGaps(studioShell)
+        self._pump()
+        after = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, source)
+        self.assertTrue(((after > 0) | (before == 0)).all())
+        editor.setActiveEffect(None)
+
+    def test_29e_fill_gaps_never_joins_parts_side_by_side_and_classic_is_official(self):
+        """Fill gaps fills only slices that are empty for the lesion along the slicing axis: two parts side by side
+        within the slices are never joined. Classic Fill between slices gives the result of official 3D Slicer (the
+        plain contour interpolation), also for parts that are several slices thick.
+        """
+        import numpy as np
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        segmentationNode, segmentId, source = editor.segmentationNode(), editor.currentSegmentID(), editor.sourceVolumeNode()
+
+        def setLesion(boxes):
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, source)
+            array[:] = 0
+            for k0, k1, j0, j1, i0, i1 in boxes:
+                array[k0:k1, j0:j1, i0:i1] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, source)
+            self._pump()
+            return array.copy()
+
+        def lesion():
+            return slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, source).copy()
+
+        def fillWithTile():
+            editor.setActiveEffectByName("Fill between slices")
+            self._pump()
+            editor.activeEffect().self().fillButton.click()
+            self._pump()
+            editor.setActiveEffect(None)
+
+        sideBySide = [(34, 46, 50, 58, 20, 28), (34, 46, 50, 58, 34, 42)]
+        aboveBelow = [(34, 46, 44, 50, 26, 34), (34, 46, 56, 62, 26, 34)]
+        # Left part with a gap between thick parts, right part on every slice: the lesion has no empty slice
+        gapOnOneSide = [(34, 38, 50, 58, 20, 28), (42, 46, 50, 58, 20, 28), (34, 46, 50, 58, 34, 42)]
+        for boxes in (sideBySide, aboveBelow, gapOnOneSide):
+            for viaTile in (False, True):
+                editor.setActiveEffect(None)
+                before = setLesion(boxes)
+                if viaTile:
+                    fillWithTile()
+                else:
+                    draw.fillGaps(studioShell)
+                    self._pump()
+                    editor.setActiveEffect(None)
+                after = lesion()
+                self.assertEqual(int(np.count_nonzero(after)), int(np.count_nonzero(before)), (boxes, viaTile))
+                self.assertTrue(((after > 0) == (before > 0)).all(), (boxes, viaTile))
+
+        # Classic: the result of the plain interpolation, as in official 3D Slicer
+        import vtk
+        import vtkITK
+        from vtk.util import numpy_support
+
+        studioShell.classic(persist=False)
+        self._pump()
+        self.assertEqual(slicer.modules.SegmentEditorWidget.presentation(), "classic")
+        for boxes in (sideBySide, [(34, 40, 50, 58, 30, 38), (42, 48, 50, 58, 30, 38)]):
+            before = setLesion(boxes)
+            image = vtk.vtkImageData()
+            image.SetDimensions(before.shape[2], before.shape[1], before.shape[0])
+            image.GetPointData().SetScalars(numpy_support.numpy_to_vtk(before.astype(np.uint8).ravel(), deep=True))
+            interpolator = vtkITK.vtkITKMorphologicalContourInterpolator()
+            interpolator.SetInputData(image)
+            interpolator.Update()
+            official = numpy_support.vtk_to_numpy(interpolator.GetOutput().GetPointData().GetScalars()).reshape(before.shape)
+            fillWithTile()
+            after = lesion()
+            self.assertTrue(((after > 0) == ((official > 0) | (before > 0))).all(), boxes)
+        editor.setActiveEffect(None)
+
+    def test_29f_fill_between_slices_parameters_follow_the_presentation_after_scene_load(self):
+        """A scene saved in one presentation carries the Fill between slices parameters of the Segment Editor node.
+        Loaded in the other presentation, the parameters are those of the presentation: Classic gives the result of
+        official 3D Slicer (no gap filling between thick parts), and Studio Fill gaps keeps the selected segment only.
+        """
+        widget = slicer.modules.segmenteditor.widgetRepresentation().self()
+        initialPresentation = widget.presentation()
+        try:
+            self._checkFillParametersAfterSceneLoad(widget)
+        finally:
+            widget.editor.setActiveEffect(None)
+            widget.setPresentation(initialPresentation)
+            self._pump()
+
+    def _checkFillParametersAfterSceneLoad(self, widget):
+        import os
+        import shutil
+        import tempfile
+
+        import numpy as np
+
+        slicer.util.selectModule("SegmentEditor")
+        self._pump()
+        editor = widget.editor
+
+        def parameters():
+            effect = editor.effectByName("Fill between slices")
+            return {name: effect.integerParameter(name) if effect.parameterDefined(name) else None
+                    for name in ("SelectedSegmentOnly", "FillGapsBetweenThickParts")}
+
+        def saveBundle():
+            directory = tempfile.mkdtemp(prefix="StudioTestFillScene", dir=slicer.app.temporaryPath)
+            self.addCleanup(shutil.rmtree, directory, True)
+            self.assertTrue(slicer.app.applicationLogic().SaveSceneToSlicerDataBundleDirectory(directory))
+            return f"{directory}/{os.path.basename(directory)}.mrml"
+
+        def loadBundle(path, entered):
+            editor.setActiveEffect(None)
+            slicer.util.selectModule("SegmentEditor" if entered else "Data")
+            self._pump()
+            slicer.mrmlScene.Clear(0)
+            self._pump()
+            self.assertTrue(slicer.util.loadScene(path))
+            slicer.util.selectModule("SegmentEditor")
+            self._pump()
+
+        # Two parts several slices thick, separated by empty slices along k (what Studio Fill gaps fills)
+        widget.setPresentation("studio")
+        self._pump()
+        volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "FillSceneVolume")
+        slicer.util.updateVolumeFromArray(volume, np.full((30, 40, 40), 100, np.int16))
+        volume.CreateDefaultDisplayNodes()
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "FillSceneSegmentation")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(volume)
+        segmentId = segmentation.GetSegmentation().AddEmptySegment("lesion", "Lesion")
+        lesion = np.zeros((30, 40, 40), np.uint8)
+        lesion[5:11, 10:30, 10:30] = 1
+        lesion[18:25, 10:30, 10:30] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(lesion, segmentation, segmentId, volume)
+        editor.setSegmentationNode(segmentation)
+        editor.setSourceVolumeNode(volume)
+        editor.mrmlSegmentEditorNode().SetSelectedSegmentID(segmentId)
+        self._pump()
+        self.assertEqual(parameters(), {"SelectedSegmentOnly": 1, "FillGapsBetweenThickParts": 1})
+        studioScene = saveBundle()
+
+        # Studio scene in Classic, loaded while the Segment Editor is not shown
+        widget.setPresentation("classic")
+        self._pump()
+        loadBundle(studioScene, entered=False)
+        self.assertEqual(parameters(), {"SelectedSegmentOnly": 0, "FillGapsBetweenThickParts": 0})
+        segmentation = slicer.util.getNode("FillSceneSegmentation")
+        volume = slicer.util.getNode("FillSceneVolume")
+        editor.setSegmentationNode(segmentation)
+        editor.setSourceVolumeNode(volume)
+        segmentId = segmentation.GetSegmentation().GetSegmentIdBySegmentName("Lesion")
+        before = slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, segmentId, volume).copy()
+        self.assertEqual(int(np.count_nonzero(before)), int(np.count_nonzero(lesion)))
+        editor.setActiveEffectByName("Fill between slices")
+        effect = editor.activeEffect().self()
+        effect.onPreview()
+        self._pump()
+        effect.onApply()
+        self._pump()
+        editor.setActiveEffect(None)
+        after = slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, segmentId, volume)
+        # Official 3D Slicer leaves the gap between parts that span several slices open
+        self.assertTrue(((after > 0) == (before > 0)).all())
+
+        # Classic scene in Studio, loaded while the Segment Editor is shown
+        classicScene = saveBundle()
+        widget.setPresentation("studio")
+        self._pump()
+        loadBundle(classicScene, entered=True)
+        self.assertEqual(parameters(), {"SelectedSegmentOnly": 1, "FillGapsBetweenThickParts": 1})
+
+    def test_29d_draw_cleanup_that_changes_nothing_offers_no_undo(self):
+        """A Keep largest part or Fill gaps and specks that changes nothing adds no undo step, so its toast has no
+        Undo: that Undo would undo the user's previous, unrelated stroke.
+        """
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        segmentationNode, segmentId, source = editor.segmentationNode(), editor.currentSegmentID(), editor.sourceVolumeNode()
+        array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, source)
+        array[:] = 0
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, source)
+        # "Stroke 1" then "stroke 2" touching it, each its own undo step: one solid part without gaps or specks
+        editor.saveStateForUndo()
+        array[40:46, 50:56, 30:36] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, source)
+        editor.saveStateForUndo()
+        array[40:46, 50:56, 36:40] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, source)
+        voxels = self._voxels(editor)
+        actionButton = studioShell._stickyToast.actionButton
+        for cleanup in (draw.keepLargestPart, draw.fillGapsAndSpecks):
+            studioShell._stickyToast.hide()
+            result = cleanup(studioShell)
+            self._pump()
+            self.assertEqual(result, (voxels, voxels), cleanup.__name__)
+            self.assertEqual(self._voxels(editor), voxels, cleanup.__name__)
+            self.assertTrue(studioShell.toastText(), cleanup.__name__)
+            if actionButton.isVisible():
+                actionButton.click()
+                self._pump()
+            self.assertEqual(self._voxels(editor), voxels, f"{cleanup.__name__}: the toast's Undo undid an earlier stroke")
+        # A cleanup that changes something is still one undo step with an Undo in its toast
+        array[60, 70, 60] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, source)
+        studioShell._stickyToast.hide()
+        self.assertEqual(draw.keepLargestPart(studioShell), (voxels + 1, voxels))
+        self._pump()
+        self.assertTrue(actionButton.isVisible())
+        actionButton.click()
+        self._pump()
+        self.assertEqual(self._voxels(editor), voxels + 1)
+
+    def test_29g_draw_fill_gaps_and_specks_closes_a_2mm_gap_on_the_2mm_template(self):
+        """Fill gaps and specks closes gaps up to 2 mm on every grid, also the 2 mm grid of Start on MNI template
+        (a 1 mm radius rounded to 0 voxels there, so nothing was closed).
+        """
+        import numpy as np
+        from scipy import ndimage
+        from StudioLib import draw, lesioncard
+
+        # The element closes gaps up to 2 mm: radius 1 voxel on 1 mm and 2 mm grids, 2 voxels on a 0.5 mm grid, and
+        # no closing along an axis whose voxels are thicker than 2 mm
+        self.assertEqual(draw._closingElement(np.array([1.0, 1.0, 1.0]), 2.0).shape, (3, 3, 3))
+        self.assertEqual(draw._closingElement(np.array([2.0, 2.0, 2.0]), 2.0).shape, (3, 3, 3))
+        self.assertEqual(draw._closingElement(np.array([0.5, 0.5, 0.5]), 2.0).shape, (5, 5, 5))
+        self.assertEqual(draw._closingElement(np.array([1.0, 1.0, 3.0]), 2.0).shape, (1, 3, 3))
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        segmentationNode, segmentId, source = editor.segmentationNode(), editor.currentSegmentID(), editor.sourceVolumeNode()
+        self.assertEqual([round(value, 3) for value in source.GetSpacing()], [2.0, 2.0, 2.0])
+
+        def parts(array):
+            return ndimage.label(array > 0, structure=lesioncard.PARTS_STRUCTURE)[1]
+
+        for axis in (0, 2):
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, source)
+            array[:] = 0
+            first, second = [slice(37, 45), slice(50, 58), slice(30, 38)], [slice(37, 45), slice(50, 58), slice(30, 38)]
+            start = first[axis].start
+            first[axis], second[axis] = slice(start, start + 6), slice(start + 7, start + 13)  # one empty 2 mm slice
+            array[tuple(first)] = 1
+            array[tuple(second)] = 1
+            array[60, 70, 60] = 1  # a speck (8 mm³)
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, source)
+            self._pump()
+            before = self._voxels(editor)
+            self.assertEqual(parts(array), 3)
+            result = draw.fillGapsAndSpecks(studioShell)
+            self._pump()
+            after = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, source)
+            self.assertIsNotNone(result)
+            self.assertEqual(int(after[60, 70, 60]), 0, axis)
+            self.assertEqual(parts(after), 1, f"axis {axis}: the 2 mm gap was not closed")
+            gap = [41, 54, 34]
+            gap[axis] = start + 6
+            self.assertEqual(int(after[tuple(gap)]), 1, axis)
+            self.assertGreater(self._voxels(editor), before - 1, axis)
+            blocks = array.copy()
+            blocks[60, 70, 60] = 0
+            self.assertTrue(((after > 0) | (blocks == 0)).all(), f"axis {axis}: voxels of the parts were removed")
+            editor.undo()
+            self.assertEqual(self._voxels(editor), before, axis)
 
     def test_30_draw_extension_points(self):
         """Inspector cards, card rows and ⋯ items of other work packages; network maps leave Draw; assisted counts (LNM addendum)."""
@@ -1871,6 +2488,207 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
     # Trace from a figure (L-29)
     #
 
+    def test_32b_draw_overlay_zero_outline_off_never_nothing(self):
+        """Overlay at 0% plus Outline off never leaves the lesion undrawn, in either order (the card's "never nothing" rule)."""
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        self._drag("Red", [(dx, 0) for dx in range(0, 40, 4)])
+        self.assertGreater(self._voxels(editor), 0)
+        card = draw.extension().displayCard
+        displayNode = editor.segmentationNode().GetDisplayNode()
+        segmentId = editor.currentSegmentID()
+
+        def drawn():
+            return bool((displayNode.GetVisibility2DFill() and displayNode.GetSegmentOpacity2DFill(segmentId) > 0)
+                        or displayNode.GetVisibility2DOutline())
+
+        # Slider to 0% first, then the Outline off: the fill comes back
+        card.opacitySlider.setValue(0)
+        self._pump()
+        self.assertTrue(card.outlineSwitch.checked)
+        card.outlineSwitch.setChecked(False)
+        self._pump()
+        self.assertTrue(drawn())
+        self.assertGreater(displayNode.GetSegmentOpacity2DFill(segmentId), 0)
+        self.assertEqual(card.opacitySlider.value, round(displayNode.GetSegmentOpacity2DFill(segmentId) * 100))
+        # The Outline off first, then the slider to 0%: the outline comes back
+        card.opacitySlider.setValue(60)
+        card.outlineSwitch.setChecked(False)
+        self._pump()
+        self.assertFalse(displayNode.GetVisibility2DOutline())
+        card.opacitySlider.setValue(0)
+        self._pump()
+        self.assertTrue(drawn())
+        self.assertTrue(displayNode.GetVisibility2DOutline())
+        self.assertTrue(card.outlineSwitch.checked)
+
+    def test_32c_draw_tool_options_radio_columns_fit_the_inspector(self):
+        """The radio buttons of Islands and Scissors (columns in Classic) are one column in Draw, so that the narrow inspector
+        does not cut their labels mid-letter; Classic puts them back in their cells.
+        """
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        widget = slicer.modules.SegmentEditorWidget
+        widget.setMoreToolsShown(True)
+        self._pump()
+
+        def radioCells(frame):
+            """{text: (row, column)} of the radio buttons in the grid layouts of the options frame."""
+            found = {}
+            for layout in frame.findChildren("QGridLayout"):
+                for row in range(layout.rowCount()):
+                    for column in range(layout.columnCount()):
+                        item = layout.itemAtPosition(row, column)
+                        if item is not None and item.widget() is not None and item.widget().inherits("QRadioButton"):
+                            found[item.widget().text] = (row, column)
+            return found
+
+        def cutButtons(effectName):
+            editor.setActiveEffectByName(effectName)
+            self._wait(300)
+            frame = editor.activeEffect().optionsFrame()
+            self.assertTrue(frame.isVisible(), effectName)
+            buttons = [button for button in frame.findChildren("QAbstractButton") if button.isVisible() and button.text]
+            self.assertGreaterEqual(len(buttons), 6, effectName)
+            return frame, [(button.text, button.width, button.sizeHint.width()) for button in buttons if button.width < button.sizeHint.width()]
+
+        for effectName in ("Islands", "Scissors"):
+            frame, cut = cutButtons(effectName)
+            self.assertEqual(cut, [], effectName)
+            self.assertEqual({cell[1] for cell in radioCells(frame).values()}, {0}, effectName)
+        # Scissors: the operation, the shape and the slice cut one under the other; "Apply to visible segments" with its check box last
+        editor.setActiveEffectByName("Scissors")
+        self._pump()
+        frame = editor.activeEffect().optionsFrame()
+        tops = {button.text: button.mapTo(frame, qt.QPoint(0, 0)).y() for button in frame.findChildren("QRadioButton") if button.isVisible()}
+        self.assertLess(tops["Erase inside"], tops["Fill outside"])
+        self.assertLess(tops["Fill outside"], tops["Free-form"])
+        self.assertLess(tops["Rectangle"], tops["Unlimited"])
+        editor.setActiveEffectByName("")
+
+        studioShell.classic(persist=False)
+        self._pump()
+        for effectName, cells in (("Islands", {"Keep largest island": (0, 0), "Keep selected island": (0, 1), "Split islands to segments": (2, 0)}),
+                                  ("Scissors", {"Erase inside": (1, 0), "Free-form": (1, 1), "Unlimited": (1, 2)})):
+            editor.setActiveEffectByName(effectName)
+            self._pump()
+            frame = editor.activeEffect().optionsFrame()
+            self.assertEqual([layout for layout in frame.findChildren("QGridLayout") if layout.property("studioStackedGridCells")], [], effectName)
+            found = radioCells(frame)
+            for text, cell in cells.items():
+                self.assertEqual(found.get(text), cell, (effectName, text))
+        editor.setActiveEffectByName("")
+
+    def test_32d_draw_tool_options_text_fits_the_inspector(self):
+        """The options of Margin, Hollow, Smoothing, Combine (Logical operators), Islands and Mask volume wrap in the 340 px
+        inspector: no label is cut mid-text or squeezed to no width, and the fields keep their labels; Classic puts the rows back.
+        """
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        widget = slicer.modules.SegmentEditorWidget
+        widget.setMoreToolsShown(True)
+        self._pump()
+
+        def labelProblems(effectName):
+            editor.setActiveEffectByName(effectName)
+            self._wait(400)
+            frame = editor.activeEffect().optionsFrame()
+            self.assertTrue(frame.isVisible(), effectName)
+            frameRight = frame.mapToGlobal(qt.QPoint(frame.width, 0)).x()
+            problems = []
+            for label in frame.findChildren("QLabel"):
+                if not label.isVisible() or not label.text.strip():
+                    continue
+                if label.mapToGlobal(qt.QPoint(label.width, 0)).x() > frameRight + 1:
+                    problems.append((label.text, "outside the options"))
+                elif label.width <= 1:
+                    problems.append((label.text, "no width"))
+                elif not label.wordWrap and label.width + 1 < label.sizeHint.width():
+                    problems.append((label.text, label.width, label.sizeHint.width()))
+            for box in frame.findChildren("QAbstractButton"):
+                if not box.isVisible() or not box.text:
+                    continue
+                if box.mapToGlobal(qt.QPoint(box.width, 0)).x() > frameRight + 1:
+                    problems.append((box.text, "outside the options"))
+                elif box.width < box.minimumSizeHint.width():
+                    problems.append((box.text, box.width, box.minimumSizeHint.width()))
+            return frame, problems
+
+        for effectName in ("Margin", "Hollow", "Smoothing", "Logical operators", "Islands", "Mask volume"):
+            frame, problems = labelProblems(effectName)
+            self.assertEqual(problems, [], effectName)
+            self.assertTrue(frame.findChildren("QFormLayout"), effectName)
+            self.assertTrue(all(int(layout.property("rowWrapPolicy")) != int(qt.QFormLayout.DontWrapRows) for layout in frame.findChildren("QFormLayout")), effectName)
+        editor.setActiveEffectByName("")
+
+        studioShell.classic(persist=False)
+        self._pump()
+        for effectName in ("Margin", "Logical operators"):
+            editor.setActiveEffectByName(effectName)
+            self._pump()
+            frame = editor.activeEffect().optionsFrame()
+            self.assertEqual([layout for layout in frame.findChildren("QHBoxLayout") if layout.property("studioStackedRowDirection") is not None], [], effectName)
+            self.assertTrue(all(layout.direction() == qt.QBoxLayout.LeftToRight for layout in frame.findChildren("QHBoxLayout")), effectName)
+            self.assertEqual([layout for layout in frame.findChildren("QFormLayout") if layout.property("studioFormWrapPolicy") is not None], [], effectName)
+            self.assertEqual([label.text for label in frame.findChildren("QLabel") if label.wordWrap and label.text.startswith("Actual")], [], effectName)
+        editor.setActiveEffectByName("")
+
+    def test_32e_switch_labels_fit_beside_their_switch(self):
+        """A switch check box (Fill between slices: "Selected segment only") reserves the room its label needs: the content
+        rectangle of the label is as wide as the text, so it is not cut mid-word.
+        """
+        studioShell = self._applyStudio()
+        editor = self._startOnTemplate(studioShell)
+        widget = slicer.modules.SegmentEditorWidget
+        widget.setMoreToolsShown(True)
+        self._pump()
+        for effectName in ("Fill between slices", "Margin", "Smoothing", "Islands", "Mask volume"):
+            editor.setActiveEffectByName(effectName)
+            self._wait(400)
+            frame = editor.activeEffect().optionsFrame()
+            checked = 0
+            for box in frame.findChildren("QCheckBox"):
+                if not box.isVisible() or not box.text:
+                    continue
+                fm = qt.QFontMetrics(box.font)
+                textWidth = fm.horizontalAdvance(box.text) if hasattr(fm, "horizontalAdvance") else fm.width(box.text)
+                option = qt.QStyleOptionButton()
+                option.initFrom(box)
+                option.text = box.text
+                content = box.style().subElementRect(qt.QStyle.SE_CheckBoxContents, option, box)
+                self.assertGreaterEqual(content.width(), textWidth, (effectName, box.text))
+                checked += 1
+            if effectName == "Fill between slices":
+                self.assertGreater(checked, 0)
+        editor.setActiveEffectByName("")
+
+    def test_33b_figure_row_web_build_has_no_paste_hint(self):
+        """The "Trace from a figure" row advertises Ctrl+V and drop only where they work: not in the web build."""
+        if not _hasFigureTracing():
+            self.skipTest("figure tracing is not in this build")
+        from StudioLib import figure
+
+        saved = figure.isWebBuild
+        self.addCleanup(setattr, figure, "isWebBuild", saved)
+        for web in (False, True):
+            figure.isWebBuild = lambda web=web: web
+            card = figure.FigureCard()
+            # A throwaway card, never added to the inspector: delete its parentless slot synchronously. A deleteLater() on
+            # a parentless Python-owned slot crashes Slicer later (at the next shutdown or in a following test)
+            self.addCleanup(card.slot.delete)
+            value = card.row.findChild("QLabel", "StudioListRowValue").text
+            tip = card.row.toolTip
+            if web:
+                self.assertEqual(value, "")
+                self.assertNotIn("Ctrl+V", tip)
+                self.assertNotIn("paste", tip.lower())
+                self.assertIn("Open figure", tip)
+            else:
+                self.assertIn("V", value)
+                self.assertIn("paste", tip.lower())
+
     def test_33_figure_round_trip(self):
         """A synthetic figure and 5 landmark pairs: RMS < 0.5 mm; the crop and fit file are saved; Show source rebuilds the
         overlay in <= 300 ms with the same fit; Ctrl+V follows the clipboard; the trace views are restored on close.
@@ -1930,8 +2748,42 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIsNotNone(panel.fit, panel.fitError)
         self.assertLess(panel.fit.rms_mm, 0.5)
         self.assertIn("(5 pairs)", card.findChild("QLabel", "StudioFigureResidualChip").text)
+        # "Remove last" while a figure point waits for its template point removes only that point, never a complete pair
+        panel.figureLandmarks().AddControlPoint(vtk.vtkVector3d(*panel.localOf((80.0, 60.0))))
+        self.assertEqual(panel.figureLandmarks().GetNumberOfControlPoints(), 6)
+        session.removeLastPair()
+        self.assertEqual(panel.figureLandmarks().GetNumberOfControlPoints(), 5)
+        self.assertEqual(panel.templateLandmarks().GetNumberOfControlPoints(), 5)
+        self.assertEqual(panel.pairCount(), 5)
+        self.assertIsNotNone(panel.fit, panel.fitError)
         # The affine model needs at least 4 pairs
         self.assertTrue(card.findChild("QFrame", "StudioFigureModel").findChildren("QToolButton")[1].enabled)
+        # A refused affine fit (collinear landmarks) keeps the similarity fit: the figure does not jump back, and no "4 of 2"
+        savedFigure = [list(panel.figureLandmarks().GetNthControlPointPosition(i)) for i in range(5)]
+        savedTemplate = [list(panel.templateLandmarks().GetNthControlPointPositionWorld(i)) for i in range(5)]
+        panel.figureLandmarks().RemoveAllControlPoints()
+        panel.templateLandmarks().RemoveAllControlPoints()
+        for index, (v, y) in enumerate(((30, 70.0), (110, 15.0), (190, -40.0), (270, -95.0))):
+            panel.figureLandmarks().AddControlPoint(vtk.vtkVector3d(*panel.localOf((140, v))))
+            panel.templateLandmarks().AddControlPointWorld(vtk.vtkVector3d(0.0, y, 10.0))
+            panel.templateLandmarks().SetNthControlPointLabel(index, f"C{index + 1}")
+        session.updateFit()
+        similarityRas = np.array(panel.ijkToRas())
+        panel.model = "affine"
+        session.updateFit()
+        self.assertTrue(panel.fitError)
+        self.assertIsNotNone(panel.fit)
+        self.assertEqual(panel.fit.model, "similarity")
+        self.assertTrue(np.allclose(panel.ijkToRas(), similarityRas))
+        self.assertNotIn("of 2 pairs", card.findChild("QLabel", "StudioFigureResidualChip").text)
+        panel.model = "similarity"
+        panel.figureLandmarks().RemoveAllControlPoints()
+        panel.templateLandmarks().RemoveAllControlPoints()
+        for index, (figurePosition, templatePosition) in enumerate(zip(savedFigure, savedTemplate, strict=True)):
+            panel.figureLandmarks().AddControlPoint(vtk.vtkVector3d(*figurePosition))
+            panel.templateLandmarks().AddControlPointWorld(vtk.vtkVector3d(*templatePosition))
+            panel.templateLandmarks().SetNthControlPointLabel(index, f"L{index + 1}")
+        session.updateFit()
         # Trace views: layout 7001, template + figure in Red, the figure alone in Green; restored on close
         layoutBefore = layouts.FOCUS_LAYOUT_ID
         session.enterTrace()
@@ -1991,6 +2843,644 @@ class StudioTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         clipboard.setImage(image)
         self._pump(2)
         self.assertTrue(paste[0].enabled)
+
+    def test_33a_figure_card_pair_count_is_singular_for_one_pair(self):
+        """The Figure card's landmark count reads '1 pair', not '1 pairs'."""
+        from StudioLib import figure
+
+        self.assertEqual(figure.pairsText(0), "0 pairs")
+        self.assertEqual(figure.pairsText(1), "1 pair")
+        self.assertEqual(figure.pairsText(2), "2 pairs")
+
+    def test_33b_figure_card_text_fits_the_340_px_inspector(self):
+        """In the default 340 px inspector the Figure card's step labels ('4 Landmarks') get their full width and its
+        word-wrapped notes (the residual note, the mirror warning) the height of all their lines: nothing is cut.
+        """
+        import tempfile
+
+        import vtk
+
+        if not _hasFigureTracing():
+            self.skipTest("figure tracing is not in this build")
+        from StudioLib import figure, importer
+
+        studioShell = self._applyStudio()
+        self._startOnTemplate(studioShell)
+        self.addCleanup(lambda: figure.closeFigure(removeNodes=True))
+        directory = tempfile.mkdtemp(prefix="StudioTestFigureClip", dir=slicer.app.temporaryPath)
+        image = qt.QImage(220, 260, qt.QImage.Format_RGB32)
+        image.fill(qt.QColor(20, 20, 20))
+        path = f"{directory}/case-8_fig1.png"
+        self.assertTrue(image.save(path))
+        importer.handleDrop([path], shell=studioShell)
+        self._pump(10)
+        session = figure.session()
+        panel = session.panel()
+        session.setPlane("axial")
+        session.setCut(z=10.0)
+        # A neurological figure whose convention is not confirmed: the mirror warning shows
+        for pixel in ((30, 40), (190, 40), (110, 230), (60, 150), (170, 180)):
+            panel.figureLandmarks().AddControlPoint(vtk.vtkVector3d(*panel.localOf(pixel)))
+            panel.templateLandmarks().AddControlPoint(vtk.vtkVector3d(-88 + 0.8 * pixel[0], 104 - 0.8 * pixel[1], 10.0))
+        session.updateFit()
+        session.enterTrace()
+        self._pump(6)
+        card = self.mainWindow.findChild("QFrame", "StudioFigureCard")
+        self.assertTrue(card.isVisible())
+        dock = next(widget for widget in self.mainWindow.findChildren("QDockWidget") if widget.isVisible() and widget.isAncestorOf(card))
+        self.mainWindow.resizeDocks([dock], [340], qt.Qt.Horizontal)
+        self._wait(600)
+        warning = card.findChild("QLabel", "StudioFigureFitWarning")
+        note = card.findChild("QLabel", "StudioFigureResidualNote")
+        self.assertTrue(warning.isVisible())
+        self.assertTrue(note.isVisible())
+        problems = []
+        for label in card.findChildren("QLabel"):
+            if not label.isVisible() or not label.text.strip():
+                continue
+            if label.wordWrap:
+                if label.height < label.heightForWidth(label.width):
+                    problems.append((label.text, "height", label.height, label.heightForWidth(label.width)))
+            elif label.width < label.fontMetrics().horizontalAdvance(label.text):
+                problems.append((label.text, "width", label.width))
+        self.assertEqual(problems, [])
+        # While a pair is being placed ("placing “<landmark>”…") nothing is cut either
+        session.addLandmarkPair()
+        self._pump(6)
+        self._wait(500)
+        pairLabel = card.findChild("QLabel", "StudioFigurePairLabel")
+        self.assertIn("placing", pairLabel.text)
+        problems = []
+        for label in card.findChildren("QLabel"):
+            if not label.isVisible() or not label.text.strip():
+                continue
+            if label.wordWrap:
+                if label.height < label.heightForWidth(label.width):
+                    problems.append((label.text, "height", label.height, label.heightForWidth(label.width)))
+            elif label.width < label.fontMetrics().horizontalAdvance(label.text):
+                problems.append((label.text, "width", label.width))
+        self.assertEqual(problems, [])
+
+    def test_33b2_figure_card_warnings_are_not_cut_at_125_percent_font(self):
+        """At 125% font (17 px) the Figure card's word-wrapped fit warning keeps the height of all its lines (the
+        'mirrored figure' line below the 'need a reflection' line was cut off).
+        """
+        import tempfile
+
+        import vtk
+
+        if not _hasFigureTracing():
+            self.skipTest("figure tracing is not in this build")
+        from StudioLib import figure, importer
+
+        studioShell = self._applyStudio()
+        oldFont = qt.QFont(qt.QApplication.font())
+        bigFont = qt.QFont(oldFont)
+        bigFont.setPixelSize(17)
+        slicer.app.setFont(bigFont)
+
+        def restoreFont():
+            slicer.app.setFont(oldFont)
+            self._wait(300)
+
+        self.addCleanup(restoreFont)
+        self._startOnTemplate(studioShell)
+        self.addCleanup(lambda: figure.closeFigure(removeNodes=True))
+        directory = tempfile.mkdtemp(prefix="StudioTestFigureFont", dir=slicer.app.temporaryPath)
+        image = qt.QImage(220, 260, qt.QImage.Format_RGB32)
+        image.fill(qt.QColor(20, 20, 20))
+        path = f"{directory}/case-9_fig1.png"
+        self.assertTrue(image.save(path))
+        importer.handleDrop([path], shell=studioShell)
+        self._pump(10)
+        session = figure.session()
+        panel = session.panel()
+        session.setPlane("axial")
+        session.setCut(z=10.0)
+        for pixel in ((30, 40), (190, 40), (110, 230), (60, 150), (170, 180)):
+            panel.figureLandmarks().AddControlPoint(vtk.vtkVector3d(*panel.localOf(pixel)))
+            panel.templateLandmarks().AddControlPoint(vtk.vtkVector3d(-88 + 0.8 * pixel[0], 104 - 0.8 * pixel[1], 10.0))
+        session.updateFit()
+        session.enterTrace()
+        self._pump(6)
+        card = self.mainWindow.findChild("QFrame", "StudioFigureCard")
+        self.assertTrue(card.isVisible())
+        dock = next(widget for widget in self.mainWindow.findChildren("QDockWidget") if widget.isVisible() and widget.isAncestorOf(card))
+        self.mainWindow.resizeDocks([dock], [340], qt.Qt.Horizontal)
+        self._wait(800)
+        warning = card.findChild("QLabel", "StudioFigureFitWarning")
+        self.assertTrue(warning.isVisible())
+        self.assertGreaterEqual(warning.height, warning.heightForWidth(warning.width), warning.text)
+        problems = [
+            (label.text, label.height, label.heightForWidth(label.width))
+            for label in card.findChildren("QLabel")
+            if label.isVisible() and label.text.strip() and label.wordWrap and label.height < label.heightForWidth(label.width)
+        ]
+        self.assertEqual(problems, [])
+        # The residual chip never widens the card: a text wider than the card ends in "…" (the whole text is in the
+        # tooltip) and is not cut at the card's edge
+        chip = card.findChild("QLabel", "StudioFigureResidualChip")
+        full = "(5 pairs)"
+        self.assertIn(full, chip.toolTip)
+        self.assertTrue(full in chip.text or chip.text.endswith("…"), chip.text)
+        self.assertGreaterEqual(chip.width, chip.fontMetrics().horizontalAdvance(chip.text))
+        steps = chip.parent()
+        self.assertLessEqual(chip.x + chip.width, steps.width)
+
+    def test_33d_figure_landmark_deleted_alone_takes_its_partner(self):
+        """A landmark deleted on its own (the view's "Delete control point") removes its partner in the other list: the
+        later pairs keep their partners and the fit stays good; "Remove last" and a new pair stay paired.
+        """
+        import os
+        import tempfile
+
+        import numpy as np
+        import vtk
+
+        if not _hasFigureTracing():
+            self.skipTest("figure tracing is not in this build")
+        from LesionNetworkMappingLib import figurefit
+        from StudioLib import figure, importer
+
+        studioShell = self._applyStudio()
+        self._startOnTemplate(studioShell)
+        self.addCleanup(lambda: figure.closeFigure(removeNodes=True))
+        directory = tempfile.mkdtemp(prefix="StudioTestFigureDelete", dir=slicer.app.temporaryPath)
+        image = qt.QImage(200, 220, qt.QImage.Format_RGB32)
+        image.fill(qt.QColor(20, 20, 20))
+        path = os.path.join(directory, "case-3_fig1.png")
+        self.assertTrue(image.save(path))
+        importer.handleDrop([path], shell=studioShell)
+        self._pump(10)
+        session = figure.session()
+        panel = session.panel()
+        session.setPlane("axial")
+        session.setCut(z=10.0)
+        session.setConvention("radiological")
+        cut = panel.cut()
+        pixels = np.array([(30, 40), (170, 50), (100, 190), (50, 150), (160, 140), (120, 90)], float)
+        ras = cut.to_ras(((pixels - [100, 110]) @ figurefit.convention_matrix("radiological")[:2, :2].T) * 0.8)
+        figureList, templateList = panel.figureLandmarks(), panel.templateLandmarks()
+
+        def addPair(index):
+            position = figureList.AddControlPoint(vtk.vtkVector3d(*panel.localOf(pixels[index])))
+            figureList.SetNthControlPointLabel(position, f"L{index + 1}")
+            position = templateList.AddControlPointWorld(vtk.vtkVector3d(*ras[index]))
+            templateList.SetNthControlPointLabel(position, f"L{index + 1}")
+
+        def labels(markups):
+            return [markups.GetNthControlPointLabel(index) for index in range(markups.GetNumberOfControlPoints())]
+
+        for index in range(5):
+            addPair(index)
+        session.updateFit()
+        self.assertLess(panel.fit.rms_mm, 0.5)
+        # Figure landmark 2 deleted alone: template landmark 2 goes with it
+        figureList.RemoveNthControlPoint(1)
+        self._wait(400)
+        self.assertEqual(labels(figureList), ["L1", "L3", "L4", "L5"])
+        self.assertEqual(labels(templateList), ["L1", "L3", "L4", "L5"])
+        self.assertEqual(panel.pairs()[0], ["L1", "L3", "L4", "L5"])
+        self.assertIsNotNone(panel.fit, panel.fitError)
+        self.assertLess(panel.fit.rms_mm, 0.5)
+        # Template landmark 3 deleted alone: figure landmark 3 goes with it
+        templateList.RemoveNthControlPoint(2)
+        self._wait(400)
+        self.assertEqual(labels(figureList), ["L1", "L3", "L5"])
+        self.assertEqual(labels(templateList), ["L1", "L3", "L5"])
+        self.assertLess(panel.fit.rms_mm, 0.5)
+        # A new pair after it is paired correctly; "Remove last" removes exactly that pair
+        addPair(5)
+        session.updateFit()
+        self.assertEqual(panel.pairs()[0], ["L1", "L3", "L5", "L6"])
+        self.assertLess(panel.fit.rms_mm, 0.5)
+        session.removeLastPair()
+        self.assertEqual(labels(figureList), ["L1", "L3", "L5"])
+        self.assertEqual(labels(templateList), ["L1", "L3", "L5"])
+        self.assertLess(panel.fit.rms_mm, 0.5)
+        # A list emptied on its own empties its partner
+        figureList.RemoveAllControlPoints()
+        self.assertEqual(templateList.GetNumberOfControlPoints(), 0)
+
+    def test_33d2_figure_sagittal_panel_side_is_its_own(self):
+        """A paper with an axial panel (the patient's right on the image left) and a sagittal panel with anterior on the
+        image right: the sagittal panel asks where anterior is, for itself alone, so both panels fit and answering one
+        never mirrors the other (BB-1 figure-fit-side-confirmed-per-paper).
+        """
+        import os
+        import tempfile
+
+        import numpy as np
+        import vtk
+
+        if not _hasFigureTracing():
+            self.skipTest("figure tracing is not in this build")
+        from LesionNetworkMappingLib import figurefit
+        from StudioLib import figure, importer
+
+        studioShell = self._applyStudio()
+        self._startOnTemplate(studioShell)
+        self.addCleanup(lambda: figure.closeFigure(removeNodes=True))
+        directory = tempfile.mkdtemp(prefix="StudioTestFigureSagittal", dir=slicer.app.temporaryPath)
+        paths = []
+        for name in ("paper_fig2a.png", "paper_fig2b.png"):
+            image = qt.QImage(200, 220, qt.QImage.Format_RGB32)
+            image.fill(qt.QColor(20, 20, 20))
+            paths.append(os.path.join(directory, name))
+            self.assertTrue(image.save(paths[-1]))
+        pixels = np.array([(30, 40), (170, 50), (100, 190), (50, 150), (160, 140)], float)
+
+        def placePairs(panel, convention):
+            ras = panel.cut().to_ras(((pixels - [100, 110]) @ figurefit.convention_matrix(convention)[:2, :2].T) * 0.8)
+            for index in range(len(pixels)):
+                panel.figureLandmarks().AddControlPoint(vtk.vtkVector3d(*panel.localOf(pixels[index])))
+                panel.templateLandmarks().AddControlPointWorld(vtk.vtkVector3d(*ras[index]))
+            figure.session().updateFit(panel)
+
+        # Panel 1: axial, the patient's right on the image left; the paper's side is answered "Left"
+        importer.handleDrop([paths[0]], shell=studioShell)
+        self._pump(10)
+        session = figure.session()
+        axial = session.panel()
+        session.setPlane("axial")
+        session.setCut(z=10.0)
+        card = figure.card()
+        card.conventionGroup.button(0).click()
+        self._pump(2)
+        placePairs(axial, "radiological")
+        self.assertLess(axial.fit.rms_mm, 0.5)
+        self.assertEqual(card.conventionText.text, "Patient's right is on the … of the figure")
+        # Panel 2: sagittal, anterior on the image right (nilearn/SPM style); it starts from the paper's answer
+        session.enterTrace()
+        self._pump(6)
+        importer.handleDrop([paths[1]], shell=studioShell)
+        self._pump(10)
+        self.assertEqual(len(session.panels), 2)
+        sagittal = session.panel()
+        self.assertIsNot(sagittal, axial)
+        session.setPlane("sagittal")
+        session.setCut(z=20.0)
+        placePairs(sagittal, "neurological")
+        self._pump(2)
+        self.assertEqual(card.conventionText.text, "Anterior is on the … of the figure")
+        self.assertEqual(card.conventionState.text, "Taken from the paper's side: check where anterior is")
+        self.assertTrue(sagittal.fit.mirror_suspected)
+        self.assertIn("check which side anterior is on", card.fitWarning.text)
+        # "Right" on the sagittal panel: anterior on the right, for that panel only
+        card.conventionGroup.button(1).click()
+        self._pump(2)
+        self.assertEqual(sagittal.convention, "neurological")
+        self.assertLess(sagittal.fit.rms_mm, 0.5)
+        self.assertFalse(sagittal.fit.mirror_suspected)
+        self.assertEqual(card.conventionState.text, "Confirmed for this panel")
+        self.assertEqual(axial.convention, "radiological")
+        self.assertLess(axial.fit.rms_mm, 0.5)
+        self.assertFalse(axial.fit.mirror_suspected)
+        # The paper's side answered again (on the axial panel) leaves the sagittal panel's own answer alone
+        session.setConvention("radiological", panel=axial)
+        self.assertEqual(sagittal.convention, "neurological")
+        self.assertLess(sagittal.fit.rms_mm, 0.5)
+        self.assertEqual(session.confirmedConvention(), "radiological")
+        self.assertEqual(session.columns()["fig_convention"], "radiological")
+        session.selectPanel(0)
+        self._pump(2)
+        self.assertEqual(card.conventionState.text, "Confirmed for this paper")
+        # A sagittal panel made axial takes the paper's left-right side again (its anterior answer is not one)
+        session.selectPanel(1)
+        session.setPlane("axial")
+        self.assertEqual(sagittal.convention, "radiological")
+        self.assertFalse(sagittal.sideAnswered)
+
+    def test_33d3_figure_sagittal_default_side_is_not_answered_after_a_reopen(self):
+        """A sagittal panel that only took the paper's side still follows it after the tracing is resumed from the scene
+        or rebuilt from a saved state, and still asks where anterior is; one answered for itself stays answered
+        (BB-1 figure-sagittal-default-side-reads-confirmed-for-this-panel-after-reopen).
+        """
+        import os
+        import tempfile
+
+        if not _hasFigureTracing():
+            self.skipTest("figure tracing is not in this build")
+        from StudioLib import figure, importer
+
+        studioShell = self._applyStudio()
+        self._startOnTemplate(studioShell)
+        self.addCleanup(lambda: figure.closeFigure(removeNodes=True))
+        directory = tempfile.mkdtemp(prefix="StudioTestFigureSagittalReopen", dir=slicer.app.temporaryPath)
+        paths = []
+        for name in ("paper_fig3a.png", "paper_fig3b.png", "paper_fig3c.png"):
+            image = qt.QImage(200, 220, qt.QImage.Format_RGB32)
+            image.fill(qt.QColor(20, 20, 20))
+            paths.append(os.path.join(directory, name))
+            self.assertTrue(image.save(paths[-1]))
+        # Panel 1 axial (the paper's side: radiological), panel 2 sagittal with the paper's side only, panel 3 sagittal
+        # answered for itself (anterior on the right)
+        importer.handleDrop([paths[0]], shell=studioShell)
+        self._pump(10)
+        session = figure.session()
+        session.setPlane("axial")
+        session.setConvention("radiological")
+        for path, answer in ((paths[1], None), (paths[2], "neurological")):
+            session.enterTrace()
+            self._pump(6)
+            importer.handleDrop([path], shell=studioShell)
+            self._pump(10)
+            session.setPlane("sagittal")
+            if answer:
+                session.setConvention(answer)
+        self.assertEqual(len(session.panels), 3)
+        axial, inherited, answered = session.panels
+        self.assertEqual((inherited.convention, inherited.sideAnswered), ("radiological", False))
+        self.assertEqual((answered.convention, answered.sideAnswered), ("neurological", True))
+        self.assertIs(inherited.state()["side_answered"], False)
+        self.assertIs(answered.state()["side_answered"], True)
+        for panel in session.panels:
+            panel.storeState(tracing=False)
+        states = [panel.state() for panel in session.panels]
+        cropPath = session._writeCrop(inherited)
+        figure.closeFigure(resumable=True)
+        self.assertEqual(figure.resumeFromScene(shell=studioShell, enterTrace=False), 3)
+        resumed = figure.session()
+        axial, inherited, answered = resumed.panels
+        self.assertEqual((inherited.plane, inherited.convention, inherited.sideAnswered), ("sagittal", "radiological", False))
+        self.assertEqual((answered.plane, answered.convention, answered.sideAnswered), ("sagittal", "neurological", True))
+        resumed.selectPanel(1)
+        self._pump(2)
+        card = figure.card()
+        self.assertEqual(card.conventionState.text, "Taken from the paper's side: check where anterior is")
+        # The paper's side answered again on the axial panel still sets the default side, not an own answer
+        resumed.setConvention("neurological", panel=axial)
+        self.assertEqual((inherited.convention, answered.convention), ("neurological", "neurological"))
+        resumed.setConvention("radiological", panel=axial)
+        self.assertEqual((inherited.convention, answered.convention), ("radiological", "neurological"))
+        # A panel rebuilt from a saved state (a draft or a fit record) keeps it too; an older state without the key is
+        # still read as before (a confirmed sagittal side is its own)
+        rebuilt = resumed.panelFromState(states[1], cropPath, select=False, place=False)
+        self.assertEqual((rebuilt.convention, rebuilt.sideAnswered), ("radiological", False))
+        older = dict(states[1])
+        older.pop("side_answered")
+        self.assertTrue(figure.sideAnswerFromState(rebuilt, older))
+        self.assertTrue(figure.sideAnswerFromState(rebuilt, states[2]))
+
+    def test_33d4_figure_notice_answer_is_the_cards_answer(self):
+        """The inspector question "In this figure, the patient's right is on the …" answers like the Figure card: the
+        paper's side for every panel, the fits recomputed, a sagittal panel's answer its own; it is not asked on a
+        sagittal panel
+        (BB-1 figure-notice-answer-bypasses-card-paper-side-panel-side-and-refit).
+        """
+        import os
+        import tempfile
+
+        import numpy as np
+        import vtk
+
+        if not _hasFigureTracing():
+            self.skipTest("figure tracing is not in this build")
+        from LesionNetworkMappingLib import figurefit
+        from StudioLib import figure, importer
+
+        studioShell = self._applyStudio()
+        self._startOnTemplate(studioShell)
+        self.addCleanup(lambda: figure.closeFigure(removeNodes=True))
+        directory = tempfile.mkdtemp(prefix="StudioTestFigureNotice", dir=slicer.app.temporaryPath)
+        paths = []
+        for name in ("paperN_a.png", "paperN_s.png", "paperN_b.png", "paperN_c.png"):
+            image = qt.QImage(200, 160, qt.QImage.Format_RGB32)
+            image.fill(qt.QColor(20, 20, 20))
+            paths.append(os.path.join(directory, name))
+            self.assertTrue(image.save(paths[-1]))
+
+        def drop(path):
+            importer.handleDrop([path], shell=studioShell)
+            self._pump(10)
+            return figure.session().panels[-1]
+
+        def question():
+            notice = studioShell.inspectorNotice()
+            if notice is None or studioShell.inspectorNoticeKey() != "figure-convention":
+                return None
+            return notice
+
+        axial = drop(paths[0])
+        session = figure.session()
+        self.assertIsNotNone(question())
+        # A sagittal panel: the card asks where anterior is, so the patient's-right question is withdrawn
+        sagittal = drop(paths[1])
+        self.assertIsNotNone(question())
+        session.setPlane("sagittal")
+        self._pump(2)
+        self.assertIsNone(question())
+        # Panel B (axial, the patient's right on the image right): its pairs need a reflection until the side is answered
+        panelB = drop(paths[2])
+        self.assertFalse(session.tracing)
+        cut = figurefit.cut_plane("axial", panelB.z, 0.0, 0.0)
+        truth = np.array([[0.8, 0.0, 100.0], [0.0, 0.8, -80.0], [0.0, 0.0, 1.0]])
+        plane = np.array([[-40.0, -30.0], [40.0, -35.0], [0.0, 45.0], [-25.0, 20.0], [30.0, 10.0], [10.0, -50.0]])
+        pixels = figurefit.apply_2d(figurefit.convention_matrix("neurological"), figurefit.apply_2d(np.linalg.inv(truth), plane))
+        ras = cut.to_ras(plane)
+        for index, (pixel, point) in enumerate(zip(pixels, ras, strict=True)):
+            panelB.figureLandmarks().AddControlPoint(vtk.vtkVector3d(*panelB.localOf(pixel)))
+            panelB.templateLandmarks().AddControlPointWorld(vtk.vtkVector3d(*point))
+            panelB.templateLandmarks().SetNthControlPointLabel(index, f"L{index + 1}")
+        panelB.model = "affine"
+        session.updateFit(panelB)
+        self.assertIsNotNone(panelB.fitError)
+        notice = question()
+        self.assertIsNotNone(notice)
+        right = [button for button in notice.findChildren("QAbstractButton") if button.text == "Right"]
+        self.assertEqual(len(right), 1)
+        right[0].click()
+        self._pump(4)
+        self.assertIsNone(question())
+        # The paper's side: every panel takes it (the sagittal one as its default), and the fit is recomputed
+        self.assertEqual((axial.convention, panelB.convention, sagittal.convention), ("neurological",) * 3)
+        self.assertFalse(sagittal.sideAnswered)
+        self.assertIsNone(panelB.fitError)
+        self.assertLess(panelB.fit.rms_mm, 0.5)
+        session.selectPanel(0)
+        self._pump(2)
+        self.assertEqual(figure.card().conventionState.text, "Confirmed for this paper")
+        # An answer for a sagittal panel (the question of a figure resumed from a scene) is that panel's own side
+        importer.answerFigureConvention("radiological", sagittal.figureId)
+        self.assertEqual((sagittal.convention, sagittal.sideAnswered), ("radiological", True))
+        self.assertEqual((axial.convention, panelB.convention), ("neurological", "neurological"))
+        session.setConvention("radiological", panel=panelB)
+        session.setConvention("neurological", panel=panelB)
+        self.assertEqual(sagittal.convention, "radiological")
+        # A new panel takes the paper's confirmed side; its question, answered, is the paper's answer again
+        panelC = drop(paths[3])
+        self.assertEqual(panelC.convention, "neurological")
+        notice = question()
+        self.assertIsNotNone(notice)
+        next(button for button in notice.findChildren("QAbstractButton") if button.text == "Left").click()
+        self._pump(4)
+        self.assertEqual((axial.convention, panelB.convention, panelC.convention), ("radiological",) * 3)
+        self.assertEqual(sagittal.convention, "radiological")
+        self.assertTrue(sagittal.sideAnswered)
+
+    def test_33e_figure_landmark_list_deleted_from_the_view_menu_is_replaced(self):
+        """A landmark list deleted from the view menu ("Delete Point List") is replaced by an empty one: the fit is
+        reset (the card no longer shows the old pairs) and "Add pair" still starts a placement.
+        """
+        import os
+        import tempfile
+
+        import numpy as np
+        import vtk
+
+        if not _hasFigureTracing():
+            self.skipTest("figure tracing is not in this build")
+        from LesionNetworkMappingLib import figurefit
+        from StudioLib import figure, importer
+
+        studioShell = self._applyStudio()
+        self._startOnTemplate(studioShell)
+        self.addCleanup(lambda: figure.closeFigure(removeNodes=True))
+        directory = tempfile.mkdtemp(prefix="StudioTestFigureDeleteList", dir=slicer.app.temporaryPath)
+        image = qt.QImage(200, 220, qt.QImage.Format_RGB32)
+        image.fill(qt.QColor(20, 20, 20))
+        path = os.path.join(directory, "case-4_fig1.png")
+        self.assertTrue(image.save(path))
+        importer.handleDrop([path], shell=studioShell)
+        self._pump(10)
+        session = figure.session()
+        panel = session.panel()
+        session.setPlane("axial")
+        session.setCut(z=10.0)
+        session.setConvention("radiological")
+        cut = panel.cut()
+        pixels = np.array([(30, 40), (170, 50), (100, 190), (50, 150), (160, 140)], float)
+        ras = cut.to_ras(((pixels - [100, 110]) @ figurefit.convention_matrix("radiological")[:2, :2].T) * 0.8)
+        interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+        selectionNode = slicer.app.applicationLogic().GetSelectionNode()
+        self.addCleanup(lambda: interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform))
+
+        def placeFivePairs():
+            figureList, templateList = panel.figureLandmarks(), panel.templateLandmarks()
+            for index in range(5):
+                figureList.AddControlPoint(vtk.vtkVector3d(*panel.localOf(pixels[index])))
+                templateList.AddControlPointWorld(vtk.vtkVector3d(*ras[index]))
+            session.updateFit()
+            self.assertEqual(panel.pairCount(), 5)
+            self.assertLess(panel.fit.rms_mm, 0.5)
+
+        for deleted in ("template", "figure"):
+            placeFivePairs()
+            figureList, templateList = panel.figureLandmarks(), panel.templateLandmarks()
+            gone, kept = (templateList, figureList) if deleted == "template" else (figureList, templateList)
+            goneId = gone.GetID()
+            # What the view menu's "Delete Point List" does
+            slicer.mrmlScene.RemoveNode(gone)
+            self._wait(200)
+            newList = panel.templateLandmarks() if deleted == "template" else panel.figureLandmarks()
+            self.assertIsNotNone(newList, deleted)
+            self.assertNotEqual(newList.GetID(), goneId)
+            self.assertTrue(slicer.mrmlScene.IsNodePresent(newList))
+            self.assertEqual(newList.GetNumberOfControlPoints(), 0)
+            # Pairs need both lists: the one that stayed is emptied, and the fit is reset
+            self.assertIs(panel.figureLandmarks() if deleted == "template" else panel.templateLandmarks(), kept)
+            self.assertEqual(kept.GetNumberOfControlPoints(), 0)
+            self.assertEqual(panel.pairCount(), 0)
+            self.assertIsNone(panel.fit)
+            role = figure.TEMPLATE_LANDMARKS_REFERENCE if deleted == "template" else figure.FIGURE_LANDMARKS_REFERENCE
+            self.assertEqual(panel.figure().GetNodeReferenceID(role), newList.GetID())
+            if deleted == "figure":
+                self.assertEqual(newList.GetTransformNodeID(), panel.transformId)
+            # "Add pair" starts a placement on the figure list (it raised AttributeError before)
+            session.addLandmarkPair()
+            self.assertIsNotNone(session._placing)
+            self.assertEqual(session._placing[1], "figure")
+            self.assertEqual(selectionNode.GetActivePlaceNodeID(), panel.figureLandmarksId)
+            interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
+            self._wait(200)
+            session._placing = None
+            # The new lists are observed: pairs placed in them are fitted again
+            placeFivePairs()
+            panel.figureLandmarks().RemoveAllControlPoints()
+            self._wait(200)
+            self.assertEqual(panel.templateLandmarks().GetNumberOfControlPoints(), 0)
+            session.updateFit()
+
+    def test_33c_figure_tracing_resumes_after_the_scene_is_opened_again(self):
+        """A figure traced in a scene that is saved, closed and opened again (a project reopened from the Library) is
+        resumed from its saved nodes: the same figure volume, crop, plane, convention, landmarks and fit, and the trace
+        views. Dropping the same figure again reuses it (no second copy); "Close figure" is not undone by Draw.
+        """
+        import os
+        import tempfile
+
+        import vtk
+
+        if not _hasFigureTracing():
+            self.skipTest("figure tracing is not in this build")
+        from StudioLib import figure, importer, layouts
+
+        studioShell = self._applyStudio()
+        self._startOnTemplate(studioShell)
+        self.addCleanup(lambda: figure.closeFigure(removeNodes=True))
+        directory = tempfile.mkdtemp(prefix="StudioTestFigureResume", dir=slicer.app.temporaryPath)
+        image = qt.QImage(200, 160, qt.QImage.Format_RGB32)
+        image.fill(qt.QColor(20, 20, 20))
+        painter = qt.QPainter(image)
+        painter.fillRect(40, 30, 60, 40, qt.QColor(230, 230, 230))
+        painter.end()
+        path = os.path.join(directory, "case-9_fig1.png")
+        self.assertTrue(image.save(path))
+        importer.handleDrop([path], shell=studioShell)
+        self._pump(10)
+        session = figure.session()
+        panel = session.panel()
+        session.applyCrop([10, 10, 180, 140])
+        session.setPlane("axial")
+        session.setCut(z=12.0)
+        session.setConvention("radiological")
+        for pixel, ras in (((20, 20), (-60.0, 60.0, 12.0)), ((160, 20), (60.0, 60.0, 12.0)), ((90, 130), (0.0, -80.0, 12.0)), ((90, 70), (0.0, -5.0, 12.0))):
+            panel.figureLandmarks().AddControlPoint(vtk.vtkVector3d(*panel.localOf(pixel)))
+            panel.templateLandmarks().AddControlPointWorld(vtk.vtkVector3d(*ras))
+        session.updateFit()
+        session.enterTrace()
+        self._pump(6)
+        self.assertIsNotNone(panel.fit, panel.fitError)
+        rms, cropPx = panel.fit.rms_mm, list(panel.cropPx)
+        nodeNames = sorted(node.GetName() for node in figure.figureNodes())
+        scenePath = os.path.join(directory, "traced.mrb")
+        self.assertTrue(slicer.util.saveScene(scenePath))
+        slicer.mrmlScene.Clear(0)
+        self._pump(4)
+        self.assertIsNone(figure.session())
+        # Opened again while Draw is shown: the tracing goes on where it was
+        slicer.util.loadScene(scenePath)
+        self._wait(300)
+        figure._afterDrawShown()
+        self._pump(6)
+        resumed = figure.session()
+        self.assertIsNotNone(resumed, "the figure tracing is resumed from the scene")
+        self.assertEqual(len(resumed.panels), 1)
+        panel = resumed.panel()
+        self.assertEqual(panel.figure().GetName(), "case-9_fig1")
+        self.assertEqual(panel.sourceName, "case-9_fig1.png")
+        self.assertEqual((panel.plane, panel.z, panel.convention, panel.cropPx), ("axial", 12.0, "radiological", cropPx))
+        self.assertEqual(panel.pairCount(), 4)
+        self.assertIsNotNone(panel.fit)
+        self.assertAlmostEqual(panel.fit.rms_mm, rms, places=4)
+        self.assertTrue(resumed.tracing)
+        self.assertEqual(self.layoutManager.layout, layouts.FOCUS_LAYOUT_ID)
+        self.assertEqual(self.layoutManager.sliceWidget("Red").mrmlSliceCompositeNode().GetForegroundVolumeID(), panel.figureId)
+        card = self.mainWindow.findChild("QFrame", "StudioFigureCard")
+        self.assertTrue(card.isVisible())
+        self.assertEqual(sorted(node.GetName() for node in figure.figureNodes()), nodeNames)
+        # The same figure dropped again (outside the trace views) is the resumed one, not a second copy
+        resumed.leaveTrace()
+        self._pump(4)
+        importer.handleDrop([path], shell=studioShell)
+        self._pump(10)
+        self.assertEqual(len(figure.session().panels), 1)
+        self.assertEqual(sorted(node.GetName() for node in figure.figureNodes()), nodeNames)
+        # "Close figure" keeps the nodes but is not undone the next time Draw is shown
+        figure.closeFigure(removeNodes=False)
+        figure._afterDrawShown()
+        self._pump(4)
+        self.assertIsNone(figure.session())
 
 
 def _hasFigureTracing():

@@ -17,6 +17,7 @@ Classic interface. They cover:
 - the close prompt modes (saved lesion and template only, unsaved lesion edits, Save lesion then Cancel).
 """
 
+import itertools
 import os
 
 import qt
@@ -48,6 +49,20 @@ def focusChangeStats(focusedImage, unfocusedImage):
             if ratio >= 3.0:
                 count += 1
     return count, largest
+
+
+def _flagsValue(value):
+    """The int of a QFlags property read, or None when it cannot be converted: with Qt 6 such a read (``widget.<flags>``
+    or ``widget.property("<flags>")``) is an opaque object in PythonQt that int() rejects (Qt 5.15 gives a plain int).
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return int(value.value)
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
@@ -94,6 +109,17 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
         while time.perf_counter() < end:
             slicer.app.processEvents()
             time.sleep(0.005)
+
+    def _waitFor(self, condition, ms):
+        import time
+
+        end = time.perf_counter() + ms / 1000.0
+        while time.perf_counter() < end:
+            slicer.app.processEvents()
+            if condition():
+                return True
+            time.sleep(0.005)
+        return condition()
 
     def _applyStudio(self):
         from StudioLib import shell
@@ -467,6 +493,561 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
         self.assertFalse(topBar.isCompact())
         self.assertFalse(a11y.instance().isNarrow())
 
+    def test_icon_only_buttons_have_accessible_names(self):
+        """A button without text is announced by its accessible name (the tooltip is only the description): the
+        top bar, panel header and every visible icon-only button of the view bars have one.
+        """
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
+        self._wait(200)
+        expected = {
+            "StudioAppMenuButton": "Menu",
+            "StudioLayoutButton": "Layout",
+            "StudioSearchPill": "Search",
+            "StudioUndoButton": "Undo",
+            "StudioRedoButton": "Redo",
+            "StudioPanelHelpButton": "Help and acknowledgment",
+            "StudioPanelMoreButton": "More",
+        }
+        for objectName, name in expected.items():
+            button = self.mainWindow.findChild("QAbstractButton", objectName)
+            self.assertIsNotNone(button, objectName)
+            self.assertEqual(str(button.accessibleName), name, objectName)
+            # The name never carries the key or the description of the tooltip
+            self.assertNotIn(" \u00b7 ", str(button.accessibleName), objectName)
+
+        # Every visible button without text, whatever the view: a name that is not the whole tooltip
+        unnamed = []
+        count = 0
+        for view in ("Red", "Green", "Yellow"):
+            bar = self.layoutManager.sliceWidget(view).sliceController()
+            for objectName in ("MaximizeViewButton", "OptionsButton", "BarLinkButton"):
+                for button in bar.findChildren("QToolButton", objectName):
+                    count += 1
+                    if not str(button.accessibleName).strip():
+                        unnamed.append(f"{view} {objectName}")
+        self.assertGreater(count, 0)
+        self.assertEqual(unnamed, [])
+        threeDBar = self.layoutManager.threeDWidget(0).threeDController()
+        for objectName in ("MaximizeViewButton", "OptionsButton"):
+            for button in threeDBar.findChildren("QToolButton", objectName):
+                self.assertTrue(str(button.accessibleName).strip(), f"3D {objectName}")
+        # The maximize button names the action, without the key or the description of its tooltip
+        maximize = self.layoutManager.sliceWidget("Red").sliceController().findChild("QToolButton", "MaximizeViewButton")
+        self.assertIn(str(maximize.accessibleName), ("Maximize view", "Maximize", "Restore view layout", "Restore layout"))
+
+    def test_settings_icon_only_buttons_have_accessible_names(self):
+        """The Settings buttons without text are named too (BB-1): the accent color swatch of Appearance announces
+        "Accent color" and its value, and the "..." of every template row names its template.
+        """
+        from StudioLib import templates, templates_ui
+
+        self._applyStudio()
+        dialog = slicer.app.settingsDialog()
+        dialog.setCurrentPanel("Appearance")
+        dialog.show()
+        self._wait(200)
+        try:
+            swatch = dialog.findChild("QWidget", "AccentColorPickerButton")
+            self.assertIsNotNone(swatch)
+            self.assertEqual(str(swatch.accessibleName), "Accent color")
+            self.assertTrue(str(swatch.accessibleDescription).strip(), "the current value of the swatch")
+        finally:
+            dialog.hide()
+            self._wait(50)
+
+        panel = templates_ui.TemplatesSettingsPanel()
+        try:
+            panel.refresh()
+            self.assertGreater(len(panel.rows), 0)
+            seenNames = set()
+            for template in templates.listTemplates():
+                row = panel.rowFor(template.id)
+                button = row.findChild("QToolButton", "studioTemplateMoreButton")
+                name = str(button.accessibleName)
+                self.assertIn(template.name, name)
+                self.assertNotIn(" \u00b7 ", name)
+                self.assertTrue(str(button.toolTip).strip())
+                seenNames.add(name)
+            # Every row has its own name: a screen reader user can tell the buttons apart
+            self.assertEqual(len(seenNames), len(panel.rows))
+        finally:
+            panel.deleteLater()
+
+    def test_no_invisible_focus_stops(self):
+        """No Tab or F6 stop draws nothing (USABILITY 9.1): the scroll areas of the inspector and of the Library canvas
+        take no focus (their controls do), F6 to the inspector lands on a control, and the lesion readout line is a
+        stop only while its text has a link. Classic gets the focus policy of the inspector scroll area back.
+        """
+        from StudioLib import lesioncard
+
+        tab = int(qt.Qt.TabFocus)
+        dock = self.mainWindow.findChild("QDockWidget", "PanelDockWidget")
+        panelScrollArea = dock.findChild("QScrollArea", "ScrollArea")
+        classicPolicy = panelScrollArea.focusPolicy
+        self.assertTrue(int(classicPolicy) & tab, "the Classic inspector scroll area keeps its focus policy")
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self._pump(8)
+        self.assertEqual(int(panelScrollArea.focusPolicy), int(qt.Qt.NoFocus))
+        # F6 to the inspector: the focus lands on a widget that is no scroll area
+        self.mainWindow.activateWindow()
+        for _step in range(5):
+            studioShell.cycleFocusRegion(1)
+            if studioShell.focusRegion() == "inspector":
+                break
+        self._pump()
+        if studioShell.focusRegion() != "inspector":
+            self.skipTest("the main window cannot take the keyboard focus here")
+        focused = slicer.app.focusWidget()
+        self.assertIsNotNone(focused)
+        self.assertFalse(focused.inherits("QAbstractScrollArea"), f"F6 stopped on {focused.className()} {focused.objectName}")
+        # Tab never stops on it
+        stops = [widget for widget in dock.findChildren("QWidget") if widget.isVisible() and int(widget.focusPolicy) & tab]
+        self.assertNotIn(panelScrollArea, stops)
+
+        studioShell.switchTo("library")
+        self._pump(8)
+        libraryScroll = studioShell.canvas().findChild("QScrollArea", "StudioLibraryScroll")
+        self.assertIsNotNone(libraryScroll)
+        self.assertEqual(int(libraryScroll.focusPolicy), int(qt.Qt.NoFocus))
+
+        # The readout line of the Lesion card: a keyboard stop only with a link to follow
+        card = lesioncard.LesionCard(lesioncard._NullController())
+        try:
+            readout = card.readoutLabel
+            card._setReadout("Empty lesion", None)
+            interaction = _flagsValue(readout.textInteractionFlags)  # None: an opaque Qt 6 QFlags read; focusPolicy checks
+            if interaction is not None:
+                self.assertEqual(interaction, int(qt.Qt.NoTextInteraction))
+            self.assertFalse(int(readout.focusPolicy) & tab, "a label without a link is no Tab stop")
+            card._setReadout('2 parts <a href="keep">Keep largest</a>', None)
+            interaction = _flagsValue(readout.textInteractionFlags)
+            if interaction is not None:
+                self.assertTrue(interaction & int(qt.Qt.LinksAccessibleByKeyboard))
+            self.assertTrue(int(readout.focusPolicy) & tab, "a link is reachable with Tab")
+            card._setReadout("Left \u00b7 1.00 mL", None)
+            self.assertFalse(int(readout.focusPolicy) & tab)
+        finally:
+            card.widget.deleteLater()
+
+        studioShell.dispose()
+        self._pump(8)
+        self.assertEqual(int(panelScrollArea.focusPolicy), int(classicPolicy), "Classic gets the focus policy back")
+
+    def test_f6_to_a_scrolled_inspector_shows_the_focus(self):
+        """F6 into an inspector that is scrolled down focuses its first stop and scrolls it into view, as Tab does
+        (SPEC 2.11: the focus ring is visible), instead of leaving the focused control above the viewport.
+        """
+        import numpy as np
+
+        slicer.util.addVolumeFromArray(np.arange(8 * 9 * 10, dtype=np.uint8).reshape(8, 9, 10), name="Scan")
+        dock = self.mainWindow.findChild("QDockWidget", "PanelDockWidget")
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self.mainWindow.resize(1366, 520)
+        self._pump(8)
+        scrollArea = dock.findChild("QScrollArea", "ScrollArea")
+        bar = scrollArea.verticalScrollBar()
+        for height in (520, 440, 380, 320):
+            self.mainWindow.resize(1366, height)
+            self._pump(8)
+            if bar.maximum > 0:
+                break
+        if bar.maximum <= 0:
+            self.skipTest("the Draw inspector does not scroll in this window")
+        # The keyboard user went down the inspector (it scrolled), then left it and comes back with F6
+        bar.setValue(bar.maximum)
+        self._pump()
+        self.assertGreater(bar.value, 0)
+        self.mainWindow.activateWindow()
+        studioShell._focusInspector()
+        self._pump()
+        # The focus widget of the window (the application's one is empty while the window is not active)
+        focused = self.mainWindow.focusWidget()
+        self.assertIsNotNone(focused)
+        if not scrollArea.isAncestorOf(focused):
+            self.skipTest("F6 focuses the panel header, which is outside the scroll area")
+        viewport = scrollArea.viewport()
+        rect = qt.QRect(focused.mapTo(viewport, qt.QPoint(0, 0)), focused.size)
+        self.assertTrue(viewport.rect.contains(rect),
+                        f"F6 focused {focused.className()} {focused.objectName} out of view (scroll {bar.value})")
+
+    def test_tab_into_a_scrolled_inspector_shows_the_focus(self):
+        """Tab from outside the inspector (a view, the top bar) into an inspector that is scrolled down scrolls the new
+        focus into view (SPEC 2.11, USABILITY 9.2). Qt scrolls only for a move that starts inside the scroll area.
+        A click on a control and a move inside the inspector do not get the extra scroll from the shell.
+        """
+        import numpy as np
+
+        slicer.util.addVolumeFromArray(np.arange(8 * 9 * 10, dtype=np.uint8).reshape(8, 9, 10), name="Scan")
+        dock = self.mainWindow.findChild("QDockWidget", "PanelDockWidget")
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        scrollArea = dock.findChild("QScrollArea", "ScrollArea")
+        bar = scrollArea.verticalScrollBar()
+        for height in (520, 440, 380, 320):
+            self.mainWindow.resize(1366, height)
+            self._pump(8)
+            if bar.maximum > 0:
+                break
+        if bar.maximum <= 0:
+            self.skipTest("the Draw inspector does not scroll in this window")
+        stops = [w for w in self._tabStops(scrollArea.widget()) if w.isVisible()]
+        outside = self.mainWindow.findChild("QWidget", "StudioSearchPill")
+        self.assertIsNotNone(outside)
+        self.assertFalse(scrollArea.isAncestorOf(outside))
+        viewport = scrollArea.viewport()
+
+        def inView(widget):
+            rect = qt.QRect(widget.mapTo(viewport, qt.QPoint(0, 0)), widget.size)
+            return viewport.rect.contains(rect)
+
+        # The stop that is out of view when the inspector is at the bottom (the first one)
+        bar.setValue(bar.maximum)
+        self._pump()
+        target = stops[0]
+        self.assertFalse(inView(target), "the first stop is out of view when the inspector is scrolled down")
+        self.assertTrue(self._focus(outside, qt.Qt.TabFocusReason))
+        self.assertTrue(self._focus(target, qt.Qt.TabFocusReason))
+        self.assertTrue(inView(target), f"Tab focused {target.className()} {target.objectName} out of view (scroll {bar.value})")
+        self.assertEqual(bar.value, 0)
+
+    def test_opening_notes_scrolls_the_fields_into_view(self):
+        """Opening Notes (the row, or Search > Notes) in an inspector that is scrolled down scrolls the notes and source
+        fields into view, and the focused field is never off screen (SPEC 2.11).
+        """
+        import numpy as np
+
+        from StudioLib import draw, importer
+
+        volume = slicer.util.addVolumeFromArray(np.arange(8 * 9 * 10, dtype=np.uint8).reshape(8, 9, 10), name="Scan")
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        importer.startOnTemplate(shell=studioShell, volumeNode=volume)
+        self._pump(10)
+        ext = draw.extension()
+        card = ext.card
+        self.assertIsNotNone(card)
+        scrollArea = self.mainWindow.findChild("QDockWidget", "PanelDockWidget").findChild("QScrollArea", "ScrollArea")
+        bar = scrollArea.verticalScrollBar()
+        more = self.mainWindow.findChild("QWidget", "SegmentEditorMoreToolsButton")
+        if more is not None:
+            more.click()
+        viewport = scrollArea.viewport()
+
+        def inView(widget):
+            rect = qt.QRect(widget.mapTo(viewport, qt.QPoint(0, 0)), widget.size)
+            return viewport.rect.contains(rect)
+
+        for height in (520, 440, 380, 320):
+            self.mainWindow.resize(1366, height)
+            self._pump(8)
+            card.setNotesVisible(False)
+            self._pump(8)
+            if bar.maximum > 0 and bar.maximum < 300:
+                break
+        if bar.maximum <= 0:
+            self.skipTest("the Draw inspector does not scroll in this window")
+        for name, opener in (("row", ext.notesRow.click), ("focusNotes", lambda: draw.focusNotes(studioShell)),
+                             ("focusSource", lambda: draw.focusNotes(studioShell, "source"))):
+            card.setNotesVisible(False)
+            self._pump(8)
+            bar.setValue(bar.maximum)
+            self._pump(4)
+            opener()
+            self._pump(8)
+            self.assertFalse(card.notesFrame.isHidden(), name)
+            self.assertTrue(inView(card.sourceReferenceEdit if name == "focusSource" else card.notesEdit),
+                            f"{name}: the field is out of view (scroll {bar.value} of {bar.maximum})")
+
+    def _tabStops(self, root):
+        """The widgets under ``root`` that Tab stops on now, in the order of the keyboard focus chain (starting at the
+        stop that is highest on the screen, then left).
+        """
+        tab = int(qt.Qt.TabFocus)
+        first = None
+        stops = []
+        widget = root.nextInFocusChain()
+        while widget is not None and widget != root:
+            if widget.isVisible() and widget.isEnabled() and int(widget.focusPolicy) & tab and root.isAncestorOf(widget):
+                stops.append(widget)
+            widget = widget.nextInFocusChain()
+        self.assertGreater(len(stops), 3, "the widget has Tab stops")
+
+        def position(widget):
+            point = widget.mapTo(root, qt.QPoint(0, 0))
+            return point.y(), point.x()
+
+        # The first stop: the leftmost of the stops on the top row (within the few pixels of the rows' rounding)
+        highest = min(position(widget)[0] for widget in stops)
+        top = min((index for index in range(len(stops)) if position(stops[index])[0] <= highest + 12), key=lambda index: position(stops[index])[1])
+        return stops[top:] + stops[:top]
+
+    def test_tab_order_with_node_selector(self):
+        """A hidden node selector (qMRMLNodeComboBox: its combo box hands its focus to the selector, which takes no Tab
+        focus) between two widgets does not break the Tab order that ui.arrangeTabOrder() makes (Qt ignores
+        setTabOrder() for a widget without a focus policy), and the focus proxy is put back.
+        """
+        from StudioLib import ui
+
+        window = qt.QWidget()
+        window.setObjectName("StudioTabOrderTestWindow")
+        layout = qt.QVBoxLayout(window)
+        # Created in the opposite order of the layout
+        last = qt.QPushButton("Last", window)
+        middle = qt.QPushButton("Middle", window)
+        selector = slicer.qMRMLNodeComboBox(window)
+        selector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
+        first = qt.QPushButton("First", window)
+        for widget in (first, selector, middle, last):
+            layout.addWidget(widget)
+        selector.hide()
+        window.show()
+        try:
+            self._pump(5)
+            combo = [child for child in selector.findChildren("QWidget") if child.focusProxy() is not None and child.focusProxy() == selector]
+            self.assertTrue(combo, "the combo box of the selector has the selector as its focus proxy")
+            combo = combo[0]
+            ui.arrangeTabOrder(window)
+            stops = []
+            widget = first
+            for _ in range(60):
+                if widget.window() == window and int(widget.focusPolicy) & int(qt.Qt.TabFocus):
+                    stops.append(widget)
+                widget = widget.nextInFocusChain()
+                if widget == first:
+                    break
+            order = [widget for widget in stops if widget in (first, combo, middle, last)]
+            self.assertEqual([widget.className() if widget == combo else widget.text for widget in order],
+                             ["First", combo.className(), "Middle", "Last"], "the selector sits between First and Middle")
+            self.assertTrue(combo.focusProxy() == selector, "the focus proxy of the combo box is back")
+        finally:
+            window.deleteLater()
+
+    def _assertReadingOrder(self, stops, direction, what):
+        """Each stop is not above (direction "down") or not left of (direction "right") the one before it, where the two
+        are not on the same row (or column), within the rounding of a few pixels.
+        """
+        for before, after in itertools.pairwise(stops):
+            first = before.mapToGlobal(qt.QPoint(0, 0))
+            second = after.mapToGlobal(qt.QPoint(0, 0))
+            if direction == "down":
+                ok = second.y() + 12 >= first.y() and (abs(second.y() - first.y()) > 12 or second.x() >= first.x())
+            else:
+                ok = second.x() + 2 >= first.x()
+            self.assertTrue(ok, f"{what}: Tab goes from {before.objectName or before.className()} ({first.x()}, {first.y()}) "
+                                f"to {after.objectName or after.className()} ({second.x()}, {second.y()})")
+
+    def test_tab_order_follows_reading_order(self):
+        """Tab follows the reading order: in the Draw inspector top to bottom (the card of "Trace from a figure" above
+        Notes, "Normalize to MNI" above Notes), in each slice view bar left to right (orientation, slider, link, Fit,
+        Options, Maximize), where the keyboard focus chain follows the creation order of the widgets.
+        """
+        import numpy as np
+
+        slicer.util.addVolumeFromArray(np.arange(8 * 9 * 10, dtype=np.uint8).reshape(8, 9, 10), name="Scan")
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        from StudioLib import draw
+
+        # The cards are added over the first moments (the figure card, the case strip) and the order follows each one
+        self._waitFor(lambda: not draw.extension()._tabOrderScheduled and self.mainWindow.findChild("QWidget", "StudioNormalizeDrawRow") is not None
+                      and self.mainWindow.findChild("QWidget", "StudioNormalizeDrawRow").isVisible(), 5000)
+        # The row of "Trace from a figure" is hidden until a figure is used: its place in the order does not depend on that
+        figureSlot = self.mainWindow.findChild("QWidget", "StudioFigureSlot")
+        self.assertIsNotNone(figureSlot)
+        figureSlot.setVisible(True)
+        self._wait(100)
+        dock = self.mainWindow.findChild("QDockWidget", "PanelDockWidget")
+        contents = dock.widget()
+        stops = self._tabStops(contents)
+        names = [widget.objectName for widget in stops]
+        for name in ("StudioDisplayOpacitySlider", "StudioFigureRow", "StudioNormalizeDrawRow", "StudioDrawNotesRow"):
+            self.assertIn(name, names, f"{name} is a Tab stop of the Draw inspector")
+        self.assertLess(names.index("StudioDisplayOpacitySlider"), names.index("StudioNormalizeDrawRow"))
+        self.assertLess(names.index("StudioNormalizeDrawRow"), names.index("StudioFigureRow"))
+        self.assertLess(names.index("StudioFigureRow"), names.index("StudioDrawNotesRow"))
+        if "StudioSaveLesionButton" in names:
+            self.assertLess(names.index("StudioDrawNotesRow"), names.index("StudioSaveLesionButton"), "the footer comes last")
+        self._assertReadingOrder(stops, "down", "Draw inspector")
+
+        # Tab goes on from "More tools" to the next control below it in the inspector (the tool tiles, or the Display card
+        # where no tile is shown), not up to the panel header and out to the top bar (the hidden node selectors of the
+        # segment editor sit between the two in the layout)
+        more = self.mainWindow.findChild("QWidget", "SegmentEditorMoreToolsButton")
+        self.assertIsNotNone(more)
+        following = more.nextInFocusChain()
+        while following is not None and not (following.isVisible() and following.isEnabled() and int(following.focusPolicy) & int(qt.Qt.TabFocus)):
+            following = following.nextInFocusChain()
+        self.assertIsNotNone(following)
+        self.assertTrue(dock.isAncestorOf(following) and following.mapToGlobal(qt.QPoint(0, 0)).y() > more.mapToGlobal(qt.QPoint(0, 0)).y(),
+                        f"Tab goes from More tools to {following.objectName or following.className()}, not on down the inspector")
+
+        # A card that a module adds later takes its place in the order (above the Display card here)
+        late = qt.QPushButton("Late card")
+        late.setObjectName("StudioLateCardButton")
+        draw.addInspectorCard("late-card-test", late, 10)
+        try:
+            self._waitFor(lambda: not draw.extension()._tabOrderScheduled, 2000)
+            names = [widget.objectName for widget in self._tabStops(contents)]
+            self.assertIn("StudioLateCardButton", names)
+            self.assertLess(names.index("StudioLateCardButton"), names.index("StudioNormalizeDrawRow"))
+            self.assertLess(names.index("StudioLateCardButton"), names.index("StudioDisplayOpacitySlider"))
+            self.assertLess(names.index("StudioLateCardButton"), names.index("SegmentEditorMoreToolsButton"), "before the tools")
+            for name in ("StudioLesionMenuButton", "StudioFollowStrokesButton"):
+                if name in names:
+                    self.assertLess(names.index(name), names.index("StudioLateCardButton"), f"after the Lesion card ({name})")
+        finally:
+            draw.extension().removeInspectorCard("late-card-test")
+
+        # The slice view bars (flat in Studio)
+        layoutManager = slicer.app.layoutManager()
+        controllers = [layoutManager.sliceWidget(name).sliceController() for name in layoutManager.sliceViewNames()]
+        flatBefore = [controller.flatStyle for controller in controllers]
+        try:
+            for controller in controllers:
+                controller.setProperty("flatStyle", False)
+            self._pump(8)
+            classicOrders = []
+            for controller in controllers:
+                bar = controller.findChild("QWidget", "BarWidget")
+                classicOrders.append(self._chainStops(bar, shownOnly=False))
+            for controller in controllers:
+                controller.setProperty("flatStyle", True)
+            self._wait(100)
+            checked = 0
+            for controller in controllers:
+                bar = controller.findChild("QWidget", "BarWidget")
+                if not bar.isVisible():
+                    # The layout of the workspace shows some of the views
+                    continue
+                checked += 1
+                barStops = self._chainStops(bar)
+                barNames = [widget.objectName or widget.className() for widget in barStops]
+                self.assertEqual(barNames[0], "OrientationButton", barNames)
+                self.assertEqual(barNames[-1], "MaximizeViewButton", barNames)
+                self.assertIn("BarLinkButton", barNames)
+                self.assertIn("OptionsButton", barNames)
+                # Left to right: the bar is a row
+                self._assertReadingOrder(barStops, "right", "flat slice view bar")
+            self.assertGreater(checked, 0, "a slice view bar is shown")
+            # Back to the classic presentation: its own order again
+            for controller in controllers:
+                controller.setProperty("flatStyle", False)
+            self._pump(8)
+            for controller, classicOrder in zip(controllers, classicOrders, strict=True):
+                bar = controller.findChild("QWidget", "BarWidget")
+                self.assertEqual([widget.objectName or widget.className() for widget in self._chainStops(bar, shownOnly=False)],
+                                 [widget.objectName or widget.className() for widget in classicOrder], "the classic bar keeps its Tab order")
+        finally:
+            for controller, flat in zip(controllers, flatBefore, strict=True):
+                controller.setProperty("flatStyle", flat)
+
+        studioShell.dispose()
+        self._pump(8)
+
+    def test_library_tab_order_follows_reading_order(self):
+        """Tab goes through the Library page as it is shown: the Continue card (built when data is first loaded) comes after
+        the header and before the project cards, the links and the recent files, and the inspector follows the page, its
+        "Open now" rows (rebuilt with the scene) above the project's buttons. The keyboard focus chain follows the creation
+        order of the widgets, which put the Continue card after the Recent rows and the inspector's rows before the cards
+        that were built later.
+        """
+        import shutil
+        import tempfile
+
+        from StudioLib import importer, library, projects
+
+        root = tempfile.mkdtemp(prefix="StudioLibraryTabOrder")
+        previous = os.environ.get(projects.ROOT_ENVIRONMENT)
+        os.environ[projects.ROOT_ENVIRONMENT] = root
+        try:
+            studioShell = self._applyStudio()
+            studioShell.switchTo("library")
+            importer.loadFiles([self._scanFile()], studioShell)
+            self._pump(8)
+            studioShell.switchTo("library")
+            self._waitFor(lambda: not getattr(library, "_tabOrderScheduled", False), 3000)
+            canvas = library.canvas()
+            self.assertTrue(canvas.widget.isVisible())
+            self.assertTrue(canvas.currentWork.widget.isVisible(), "the Continue card is shown")
+            stops = self._tabStops(canvas.widget)
+            names = [widget.objectName for widget in stops]
+            for name in ("StudioCurrentWorkContinueButton", "StudioLibraryNewStudyLink", "StudioLibraryClassicLink"):
+                self.assertIn(name, names)
+            self.assertLess(names.index("StudioLibraryOpenButton"), names.index("StudioCurrentWorkContinueButton"), "Continue after the header")
+            self.assertLess(names.index("StudioCurrentWorkDataLink"), names.index("StudioLibraryNewStudyLink"), "the Continue card before the links")
+            if "studioProjectCard" in names:
+                self.assertLess(names.index("StudioCurrentWorkContinueButton"), names.index("studioProjectCard"), "Continue before the projects")
+            if "StudioRecentRow" in names:
+                self.assertLess(names.index("StudioLibraryClassicLink"), names.index("StudioRecentRow"))
+            self._assertReadingOrder(stops, "down", "Library page")
+
+            # The inspector: after the page, "Open now" top to bottom, then the project's buttons
+            dock = self.mainWindow.findChild("QDockWidget", "PanelDockWidget")
+            self.assertTrue(dock.isVisible())
+
+            def inspectorStops():
+                # The Tab stops of the inspector in the order of the focus chain, from its first stop on the screen
+                contents = dock.widget()
+                found = []
+                widget = contents.nextInFocusChain()
+                while widget is not None and widget != contents and len(found) < 2000:
+                    if widget.isVisible() and widget.isEnabled() and int(widget.focusPolicy) & int(qt.Qt.TabFocus) and contents.isAncestorOf(widget):
+                        found.append(widget)
+                    widget = widget.nextInFocusChain()
+                top = min(range(len(found)), key=lambda index: (found[index].mapToGlobal(qt.QPoint(0, 0)).y(), found[index].mapToGlobal(qt.QPoint(0, 0)).x()))
+                return found[top:] + found[:top]
+
+            inspector = inspectorStops()
+            inspectorNames = [widget.objectName for widget in inspector]
+            self.assertIn("StudioOpenNowMenuButton", inspectorNames)
+            self._assertReadingOrder(inspector, "down", "Library inspector")
+            if "StudioProjectOverviewShowButton" in inspectorNames:
+                self.assertLess(inspectorNames.index("StudioOpenNowMenuButton"), inspectorNames.index("StudioProjectOverviewShowButton"))
+            chain = []
+            widget = canvas.widget
+            for _index in range(1500):
+                widget = widget.nextInFocusChain()
+                if widget == canvas.widget:
+                    break
+                if widget.isVisible() and widget.isEnabled() and int(widget.focusPolicy) & int(qt.Qt.TabFocus):
+                    chain.append(widget)
+            chainNames = [widget.objectName for widget in chain]
+            self.assertLess(chainNames.index("StudioCurrentWorkContinueButton"), chainNames.index("StudioOpenNowMenuButton"),
+                            "the page is reached before the inspector")
+
+            # Rows that are built again (a node was renamed) keep their place
+            node = slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")[0]
+            node.SetName("A scan that was renamed")
+            studioShell.switchTo("library")
+            self._waitFor(lambda: not getattr(library, "_tabOrderScheduled", False), 3000)
+            self._pump(4)
+            self._assertReadingOrder(inspectorStops(), "down", "Library inspector after a rename")
+            self._assertReadingOrder(self._tabStops(canvas.widget), "down", "Library page after a rename")
+        finally:
+            if previous is None:
+                os.environ.pop(projects.ROOT_ENVIRONMENT, None)
+            else:
+                os.environ[projects.ROOT_ENVIRONMENT] = previous
+            self._pump(4)
+            shutil.rmtree(root, ignore_errors=True)
+
+    def _chainStops(self, root, shownOnly=True):
+        """The Tab stops inside ``root`` (the visible, enabled ones, or all), in the order of the focus chain from ``root``."""
+        tab = int(qt.Qt.TabFocus)
+        stops = []
+        widget = root.nextInFocusChain()
+        while widget is not None and widget != root:
+            if ((widget.isVisible() and widget.isEnabled()) or not shownOnly) and int(widget.focusPolicy) & tab and root.isAncestorOf(widget):
+                stops.append(widget)
+            widget = widget.nextInFocusChain()
+        self.assertGreater(len(stops), 2, "the widget has Tab stops")
+        return stops
+
     #
     # First run
     #
@@ -620,3 +1201,93 @@ class StudioAccessibilityTest(ScriptedLoadableModule.ScriptedLoadableModuleTest)
         studioShell.classic(persist=False)
         self._pump()
         self.assertEqual(self._closeProperties(), ("", ""))
+
+    def test_close_question_uses_studio_dialog_chrome(self):
+        """The "lesionSaved" exit question is a Studio dialog (VISUAL 4.7), not a plain message box: the dialog chrome, the
+        icon tile, the title and the summary, Quit as the single primary button, and an answer for the main window.
+        """
+        from StudioLib import firstrun
+
+        if not hasattr(self.mainWindow, "closeQuestionRequested"):
+            self.skipTest("the main window has no close question hook")
+        summary = "Your lesion is saved as sub-01_lesion.nii.gz. The session (scene) is not saved. Quit?"
+        question = firstrun.closeQuestionDialog(summary, self.mainWindow)
+        dialog = question.dialog
+        try:
+            self.assertTrue(dialog.property("studioDialogChrome"))
+            self.assertFalse(isinstance(dialog, qt.QMessageBox))
+            self.assertIsNotNone(dialog.findChild("QLabel", "StudioCloseQuestionIcon"))
+            self.assertEqual(dialog.findChild("QLabel", "StudioCloseQuestionTitle").text, "Quit?")
+            self.assertEqual(dialog.findChild("QLabel", "StudioCloseQuestionBody").text, summary)
+            self.assertTrue(question.quitButton.isDefault())
+            self.assertEqual(question.quitButton.property("slicerRole"), "primary")
+            for answer, button in (("quit", question.quitButton), ("save", question.saveButton), ("cancel", question.cancelButton)):
+                question.answer = ""
+                dialog.show()
+                button.click()
+                self.assertEqual(question.answer, answer)
+        finally:
+            dialog.deleteLater()
+
+    def test_close_summary_study(self):
+        """With a study open, closing writes the current subject first (a study has no Save) and asks only "All changes are
+        saved in study <name>. Quit?": never the no-study "Save lesion…" / "Don't save" prompt, whose "Don't save" the
+        study could not honour (it writes the subject when the application quits).
+        """
+        import shutil
+
+        import numpy as np
+        from LesionNetworkMappingLib import nifti
+        from LesionNetworkMappingLib.study import Study
+
+        from StudioLib import firstrun, study_ui
+
+        if not hasattr(self.mainWindow, "closeSummaryRequested"):
+            self.skipTest("the main window has no close summary hook (W3-03)")
+        studioShell = self._applyStudio()
+        scan = self._scanFile()
+        folder = os.path.join(os.path.dirname(scan), "Close study")
+        study = Study.create(folder, name="Close study")
+        study.add_subject("sub-01", scan=study.relpath(scan), status="untraced", group="case")
+        study.save()
+        try:
+            session = study_ui.openStudy(folder, studioShell, subject="sub-01")
+            self._pump(8)
+            segmentationNode, volumeNode = session.segmentationNode(), session.volumeNode()
+            self.assertIsNotNone(segmentationNode)
+            segmentId = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+
+            def paint(region):
+                array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentationNode, segmentId, volumeNode)
+                array[region] = 1
+                slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentationNode, segmentId, volumeNode)
+                self._pump()
+
+            def voxels():
+                path = session.study.abspath(session.study.subject("sub-01").get("lesion"))
+                if not path or not os.path.isfile(path):
+                    return 0
+                return int((nifti.read_nifti(path)[0] > 0).sum())
+
+            paint((slice(8, 10), slice(10, 12), slice(6, 8)))
+            self.assertTrue(session.isDirty())
+            self.assertEqual(voxels(), 0)
+            # The subject is written when the prompt is described: the question cannot discard it
+            mode, summary = self._closeProperties()
+            self.assertEqual(mode, firstrun.CLOSE_MODE_LESION_SAVED)
+            self.assertEqual(summary, "All changes are saved in study Close study. Quit?")
+            self.assertEqual(voxels(), 8)
+            self.assertFalse(session.isDirty())
+            self.assertEqual(session.current(), "sub-01", "Cancel keeps the subject open")
+            # More edits after Cancel are written the same way
+            paint((slice(2, 4), slice(2, 4), slice(2, 4)))
+            self.assertEqual(self._closeProperties()[0], firstrun.CLOSE_MODE_LESION_SAVED)
+            self.assertEqual(voxels(), 16)
+            # Other unsaved data (not part of the study): the classic prompt, which saves everything
+            other = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "Other")
+            slicer.util.updateVolumeFromArray(other, np.zeros((2, 2, 2), dtype=np.int16))
+            self.assertEqual(self._closeProperties(), ("", ""))
+            slicer.mrmlScene.RemoveNode(other)
+        finally:
+            study_ui.closeStudy()
+            shutil.rmtree(os.path.dirname(scan), ignore_errors=True)

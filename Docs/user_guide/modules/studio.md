@@ -22,9 +22,11 @@ clinical decisions (see [Research use only](lesionnetworkmapping.md#research-use
 
 The Studio window has three parts, and nothing else (no menu bar, toolbars, logo header, Data Probe or status bar):
 
-- **The top bar** (44 px). On the left the **≡ menu** and the breadcrumb (the study and subject, or the name of the
-  scan). In the centre the switcher **Library | Draw | Map**. On the right Undo and Redo (in Draw only), the layout
-  picker, the **Search** field, the autosave status and, only when there are errors, an error badge with a count.
+- **The top bar** (44 px). On the left the **≡ menu**, the breadcrumb (the project name with a ▾ menu, or the study and subject, or the name
+  of the scan) and, after it, the save status: **Saved**, **Saving…** or **Not saved · Retry** in a project, and
+  "Autosaved · 2 min ago" outside a project. In the centre the switcher **Library | Draw | Map**. On the right Undo and
+  Redo (in Draw only), the layout picker, the **Search** field and, only when there are errors, an error badge with a
+  count.
 - **The inspector** on the right (340 px by default; drag its edge to change it). It shows the cards of the current
   workspace, or any other module you open with Search.
 - **The views** on the left: the slice and 3D views, or in Library the canvas.
@@ -109,8 +111,10 @@ go in a notice line between the panel header and the cards, never over the image
 Library is where data comes in and where you choose what to work on. In Studio it replaces Welcome, Add Data,
 Sample Data and, for everyday use, the Data module.
 
-**Empty Library.** A drop zone ("Drop scans, lesion masks or a folder"; NIfTI, NRRD or DICOM folders), the buttons
-**Open…**, **Open folder…** and **Start on MNI template**, and a **Recent** list whose first row has the focus, so
+**Empty Library.** The page is titled **Projects**. It has a drop zone ("Drop scans, DICOM folders or Slicer scenes";
+NIfTI, NRRD, DICOM folders, lesion masks and `.mrb` scenes), the buttons **Start on template ▾** (the arrow lists the
+templates), **Open folder…** and **Open…**, the list **All projects** (the projects of your Slicer Studio folder) and the
+list **Opened from elsewhere** (files and folders opened from outside that folder), whose first row has the focus, so
 Enter reopens the last item. A link "Load sample data" opens the Sample Data module in the inspector.
 
 - Dropping a **scan** (`.nii`, `.nii.gz`, `.nrrd`, `.mha`, `.mhd`) loads it directly. A **lesion mask** is recognised by
@@ -120,8 +124,8 @@ Enter reopens the last item. A link "Load sample data" opens the Sample Data mod
 - A **folder of DICOM** files opens the DICOM module. A folder with several NIfTI files shows a card (for example "40 NIfTI
   files found", with the participants table if the folder has one) that offers **Create study**, or opening one subject at
   a time.
-- **Start on MNI template** loads the bundled MNI152 2009c template (2 mm), creates an empty segmentation named
-  Lesions and opens Draw with the Brush armed. A 1 mm template is offered as an optional download (see
+- **Start on template** loads your default template (the bundled MNI152 2009c template, 2 mm, unless you chose another),
+  creates an empty segmentation named Lesions and opens Draw with the Brush armed. A 1 mm template is offered as an optional download (see
   [Data downloaded on request](lesionnetworkmapping.md#data-downloaded-on-request)).
 
 **With data loaded** the canvas shows the **Current work** card: the scan, the lesion with its side and volume ("Left ·
@@ -131,7 +135,8 @@ scene. The list of what is loaded is called **Open now**. Studio uses one word f
 **Close**; "Delete" stays the word of the Data module, and "Remove from study" never deletes files.
 
 **With a study open** Library shows a 44 px filter row (a search field, filter chips and the sort order), the subject **list** with
-columns ID, Group, Lesion mL, Space, Status and QC, and an optional **grid** of cards with a lesion thumbnail on the
+columns ID, Group, Lesion mL, Space, Status, QC, 2nd tracing, Flags, Norm and Review (the last four come from the
+second-tracing, flag, normalization and review features and show "—" or a neutral state until a subject uses them), and an optional **grid** of cards with a lesion thumbnail on the
 template (switch with the List/Grid buttons; the slider sets the card size). Thumbnails are computed in the background
 and cached in the study's `.studio` folder. Each thumbnail is marked **R** at its left edge and **L** at its right edge: the patient's right is on the screen left.
 
@@ -139,33 +144,46 @@ and cached in the study's `.studio` folder. Each thumbnail is marked **R** at it
 | --------------------------------- | --------- |
 | `↑` `↓` | move between subjects |
 | `Enter`, or double-click | open the subject in Draw |
-| `P` / `X` / `U` | QC pass / QC fail / not reviewed |
+| `P` / `X` / `U` | QC pass / QC fail (left out of every analysis) / not reviewed |
 | `Delete` | remove from the study (files are kept; Undo in the message) |
 | `Ctrl+A` | select all subjects |
 | `/` | search the subjects |
 
-The inspector shows the cards **Study** (name, folder, counts, "All changes saved"), **Subject** (paths, space chip,
-lesion volume, group, scores, notes, **Open in Draw**), **Batch** (set the group or a score of the selected subjects,
-remove from the study) and **Import** (add files or a folder, import a `participants.tsv`). Further cards (QC flags,
-normalization, the analysis line) appear when the study needs them.
+The inspector shows these cards, top to bottom, on every study, also a brand-new one. With no subject selected: **Study**
+(name, folder, counts, "All changes saved"), **Columns** (the role of each participants column), **Review** (counts and the
+review settings), **Sources** (literature records and PRISMA counts), **Agreement** (second tracing and adjudication),
+**Cohort diagnostics** (the properties of the lesion set), **Control sets**, **Analysis** (one line about the cohort analysis,
+for example "Cohort analysis: never run"), **Share** (export for sharing) and **Import** (add files or a folder, import a
+`participants.tsv`). Selecting one subject adds **Subject** (paths, space chip, lesion volume, group, scores, notes,
+**Open in Draw**) and **Case** (the registry fields); selecting several subjects adds **Batch** (set the group or a score of the
+selected subjects, remove from the study).
 
 ### Draw
 
 Draw is the [Segment Editor](segmenteditor.md) module in its Studio presentation. Its inspector has, top to bottom:
 
-1. The **Lesion card**: colour, name (click to rename), visibility, a live line "2.41 mL · 1 part · 0 gaps", and
-   **Clean up**. In MNI space the line starts with the side ("Left · 2.27 mL"); in scan space no side word is shown,
-   because x = 0 is not the midline there. Parts and gaps turn amber when they are more than 1 or 0, with a link to fix
-   them (**Keep largest**, **Fill**).
+1. The **Lesion card**: colour, name (click to rename), visibility, and three stat cells that follow the drawing:
+   **Volume** ("2.41 mL"), **Parts** with the gaps under it ("1 part · 0 gaps") and **Side**. In MNI space the Side cell
+   says "Left", "Right" or "Both hemispheres"; in scan space it says "Unknown" with "scanner space" under it, because
+   x = 0 is not the midline there. Parts and gaps turn amber when they are more than 1 or 0, with a link to fix
+   them (**Keep largest**, **Fill**). The same numbers are also read as one line by screen readers ("Left · 2.41 mL ·
+   1 part · 0 gaps"). **Fill gaps and specks** is an item of the lesion's **⋯** menu, together with **Rename lesion**,
+   **Keep largest part** and **Save lesion as…**.
 2. **Tools**: **Brush** (P), **Outline** (D), **Smart fill** (M), **Erase** (E) and **Fill gaps** (Shift+F), plus
    **More tools**, which shows the remaining effects.
 3. The **options of the active tool**. Brush and Erase have size chips 1, 3, 6 and 12 mm.
-4. **Display** (collapsed): fill or outline, opacity, window/level presets, **Voxel view**.
-5. A sticky footer. Without a study the main button is **Save lesion · Ctrl+Enter** and the second is **Map network →**
-   (for lesions in MNI space; otherwise it explains why and offers **Normalize to MNI…**). With a study the main button
-   is **Done → next · Ctrl+Enter**.
+4. The **Overlay** row: a slider for the opacity of the lesion fill in the slice views, with an **Outline** switch
+   that shows the outline only. Window/level presets, **Voxel view** and **Show lesion in 3D** are in the **⋯** menu
+   of the inspector header.
+5. On a scan in native space, a **Normalize to MNI** row (value **Native space**) opens the card that normalizes the
+   scan (**Normalize scan only** while the lesion is empty).
+6. A sticky footer. Without a study the main button is **Save lesion · Ctrl+Enter** and, under it, the link
+   **Map this lesion's network →**, which opens Map (for a lesion in scan space, Map offers to normalize it to MNI
+   first). With a study the main button is **Done → next · Ctrl+Enter**. Opening a subject's own scan while the study
+   is open opens that subject; opening any other scan, lesion or scene closes the study first (the subject's edits are
+   saved, and a message offers **Reopen study**).
 
-**The first click.** The Brush is armed when you came to trace: **Start on MNI template**, **Continue in Draw →**,
+**The first click.** The Brush is armed when you came to trace: **Start on template**, **Continue in Draw →**,
 **Open in Draw**, a loaded lesion file or set. A scan you only dropped or opened lands in Draw **unarmed**: a
 left-drag then adjusts window/level, so that looking at a scan never paints on it. Pick a tool (P) to start drawing.
 **Space** pauses the active tool (and resumes it); while paused, left-drag adjusts window/level.
@@ -200,7 +218,7 @@ Saving a lesion and saving the scene are different things, with different keys:
 | What you want | Key | What is written |
 | ------------- | --- | --------------- |
 | Keep the lesion as a file | **Ctrl+Shift+S**, or **Ctrl+Enter** without a study | A binary mask `<name>_lesion.nii.gz` (uint8) **on the lesion's own grid**, plus a sidecar `<name>_lesion.json` |
-| Save the whole session | **Ctrl+S** | The scene (`.mrml` or `.mrb`) exactly as official 3D Slicer writes it |
+| Save the whole session | **Ctrl+S** | In a project (every scan or template session), the project is saved at once; it is saved continuously anyway, see [Where Slicer Studio saves your work](../studio_projects.md). Without a project (Classic, a study), the scene (`.mrml` or `.mrb`) exactly as official 3D Slicer writes it |
 | Save under another name | **Save lesion as…** in the ⋯ menu of the Lesion card, or Search | Always asks for the file |
 | Go to the next subject of a study | **Ctrl+Enter** ("Done → next") | `lesions/<id>_space-<space>_desc-lesion_mask.nii.gz` and a row in `participants.tsv` |
 
@@ -210,24 +228,36 @@ Saving a lesion and saving the scene are different things, with different keys:
   show a toast with **Show in folder**.
 - **The name** is `<sub-XX>_lesion.nii.gz` when the scan or node name has a subject label, else
   `<scan name>_lesion.nii.gz`. If the last file in the folder ends in a number (`case-001_lesion`), the next one is
-  suggested (`case-002_lesion`). The folder is the last one you used, else the scan's folder, never the application
-  folder.
+  suggested (`case-002_lesion`). In a project the folder is the project's `Lesions` folder. Without a project it is the
+  last one you used, else the scan's folder, never the application folder.
 - **An empty lesion writes nothing** ("The lesion is empty: nothing was saved").
 - **The sidecar** is a small JSON file next to the mask with `Source` (the scan, as a path relative to the sidecar),
   `Space`, `Notes`, `SourceReference` and `GeneratedBy`. 3D Slicer and FSL ignore it; tools that read BIDS use it.
   When you open the lesion alone later, `Source` lets Studio offer to open the scan it was drawn on.
-- **Quitting.** If only saved lesions and the template are unsaved, the message says "Your lesion is saved as
-  sub-01_lesion.nii.gz. The session (scene) is not saved." with **Quit** as the default. If a lesion has changes
-  since it was saved, **Save lesion…** is the default.
+- **Quitting.** In a project the project is saved first and the message only asks "All changes are saved in
+  Projects/<name>. Quit?"; nothing about unsaved changes is asked once the save succeeded. Without a project (Classic),
+  if only saved lesions and the template are unsaved, the message says "Your lesion is saved as
+  sub-01_lesion.nii.gz. The session (scene) is not saved." with **Quit** as the default, and if a lesion has changes
+  since it was saved, **Save lesion…** is the default. With a study open, there is no Save: the current subject is
+  written to the study first and the message only asks "All changes are saved in study <name>. Quit?". If
+  participants.tsv cannot be saved (another program saved it with a row it cannot read, or keeps it locked), the
+  message names the subjects whose study changes are not saved and why: **Cancel** lets you repair the table first, and
+  **Quit** keeps the changes in the study's `.studio/inbox/`, which adds them when you open the study again after the
+  table is repaired.
 
 Autosave (see [below](#autosave-and-recovery)) is not Save: it says "Autosaved", never "Saved".
 
 ### Map
 
-Map is the [Lesion Network Mapping](lesionnetworkmapping.md) module. Its inspector shows the cards Seed, Normalize
-to MNI, Connectome, Preflight, Run everything (when the seed is a cohort), Compute, Result, QA, Cohort, Clusters,
-Networks and Export, and a footer that always reads "Research use only — not for clinical decisions" with the
-references. The top bar shows the state of the computation next to the switcher ("No connectome", "Ready", "Mapping
+Map is the [Lesion Network Mapping](lesionnetworkmapping.md) module. Which cards its inspector shows depends on the seed: **Lesion** shows Seed, Normalize to MNI (when a scan is open),
+Connectome, Compute, Result, QA, Clusters, Networks, Circuits, Compare, Report and Export. **Cohort** shows Seed,
+Connectome, Preflight, Run everything, Compute, QA, Cohort, Nulls, Validate, Robust, Clusters, Networks, Circuits,
+Compare, Calibrate and Report (no Normalize to MNI, Result or Export: the cohort's maps are in the Cohort card).
+**Coordinates** and **Stimulation** show Seed, Connectome, Compute, Circuits and Report. The table in
+[Lesion Network Mapping](lesionnetworkmapping.md) lists the seeds that show each card. The footer is always
+visible and is one line, "Research use only. Lesion network mapping specificity is debated. **Read more**". **Read
+more** opens the whole statement ("Research use only — not for clinical decisions", with its three references), which
+the Report card also shows. The top bar shows the state of the computation next to the switcher ("No connectome", "Ready", "Mapping
 34%", "Done · N=1000"). With the seed set to **Cohort**, **Ctrl+Enter** runs everything; otherwise it maps the
 network. **Ctrl+E** exports. A computation is stopped only with its **Stop** button, never with Esc.
 
@@ -257,7 +287,7 @@ does not change the layout.
 | `Ctrl+Enter` | the main button of the inspector |
 | `Ctrl+O` | Open… (loads the files directly) |
 | `Ctrl+H` | Library (Windows and Linux) |
-| `Ctrl+S` `Ctrl+W` `Ctrl+0` `Ctrl+2` `Ctrl+3` `Ctrl+4` | save the scene, close the scene, error log, settings, Python console, Extensions Manager (as in 3D Slicer) |
+| `Ctrl+S` `Ctrl+W` `Ctrl+0` `Ctrl+2` `Ctrl+3` `Ctrl+4` | save now (the project; the scene in Classic), close the scene, error log, settings, Python console, Extensions Manager (as in 3D Slicer) |
 
 Inside a text field, the field keeps the keys it needs (Esc with unsent edits, typed characters). On German and French
 keyboards AltGr+digit acts as Ctrl+Alt+digit in a view.
@@ -280,8 +310,10 @@ Laterality is always shown, and never guessed:
 
 - Every slice view shows **R/L**, **A/P** and **S/I** at its edges, computed from the view's orientation (also for
   oblique and flipped views). Over a figure the letters other than R/L are not shown.
-- The axial and coronal views say, in words at the bottom left, "Left is on screen right" (the radiological display
-  that 3D Slicer uses) or "Left is on screen left". A neurological display for the views is not part of Studio yet.
+- The axial and coronal views say, in words at the bottom right, "Radiological · L on right" (the radiological display
+  that 3D Slicer uses) or "Neurological · L on left" for a flipped view; a narrow view shows the short "L on right" or
+  "L on left". The bottom left shows the name of the volume. A neurological display for the views is not part of Studio
+  yet.
 - **Hemisphere words ("Left", "Right", "Both hemispheres") appear only in MNI space**, where the midline is known.
   In scan space coordinates are shown with direction letters ("L 11.2 · P 17.8 · S 9.5 (scanner)") and a tooltip says
   they are measured from the image origin, not from the midline. The in-view readout shows MNI or scanner space
@@ -300,11 +332,12 @@ node attributes. After saving the lesion, start a new lesion (it asks, with Undo
 
 ## Appearance
 
-**Application Settings > Appearance** has three choices, applied as soon as you make them (density after a restart):
+**Application Settings > Appearance** has four choices, applied as soon as you make them (density after a restart):
 
 - **Theme:** System, Dark or Light. Dark is the default. System follows the operating system.
 - **Accent color:** the colour of selected items, links and highlighted controls (a reset button restores the default).
 - **Density:** Comfortable (default) or Compact, which uses the spacing of earlier 3D Slicer versions.
+- **Font and size:** the interface font, Inter by default.
 
 The font is Inter, applied when you have not chosen another font. These choices are saved only in the Studio's own
 settings keys (`Appearance/Theme`, `Appearance/Accent`, `Appearance/Density`, `Appearance/Font`); the settings that
@@ -338,12 +371,18 @@ browser, edited in a spreadsheet and backed up by copying it.
 - **One writer.** While Studio has a study open, only Studio writes `participants.tsv`. Programs that run in the
   background post their results to `.studio/inbox/`, and Studio merges them. If you edit the file in a spreadsheet
   while the study is open, Studio keeps the cells you changed on disk, unless it changed the same cell.
+- **Two windows on one study.** Opening a study that another Slicer Studio window (or a lab member on a shared drive)
+  has open shows a warning; trace each subject in one window only. If both windows save the same subject's lesion, the
+  later save is written and the other window's version is kept in `.studio/conflicts/`, and a message names that copy.
 - **No absolute paths.** The files that are meant to be shared (the study, the tables, the sidecars) store paths
   relative to the study folder. `.studio` is application state and `derivatives/lnm/*/provenance.json` and
   `reproduce.sh` keep full local paths on purpose, because they reproduce one run on one computer.
 - **Creating a study.** **Create study** on the folder card writes `study.json`, `participants.tsv` and a `lesions/` folder
-  into the folder you opened; your own files are not changed or moved. Scans and lesions are paired by the ID found in
-  the file names (`sub-01`) and by the lesion words listed in `study.json`. A `participants.tsv` or `.csv` in the folder
+  into the folder you opened; your scans and lesions are not changed or moved (a participants.tsv that is already there gets columns added; the original is kept in `.studio`). Scans and lesions are paired by the ID found in
+  the file names (`sub-01`, `patient01_T1.nii.gz`), else in the subject folders inside the folder you opened
+  (`patient01/T1.nii.gz` and `patient01/lesion.nii.gz`), and by the lesion words listed in `study.json`. Folders above the
+  one you opened give an ID only when the folder you opened is itself a modality or session folder (`sub-01/anat`); files
+  without one are skipped, and the toast says how to name them or to set the ID rule in **Import**. A `participants.tsv` or `.csv` in the folder
   supplies the group and the scores. Only the subject you are editing is loaded in the scene. **Import** in the inspector adds
   files, folders or a participants table later.
 - **Journal.** While you draw, the lesion is written to `.studio/journal/` two seconds after the last edit, in the
@@ -365,11 +404,11 @@ close does not lose them. It runs in Studio and in Classic.
 - **Where.** A private folder in the application data of your user account: `~/.local/share/slicer.org/Slicer/StudioAutosave` on
   Linux, `~/Library/Application Support/slicer.org/Slicer/StudioAutosave` on macOS and under `%LOCALAPPDATA%` on Windows. It is
   not a folder such as Documents, which is often synchronised to the cloud. You can change it in
-  **Application Settings > Autosave** or with the environment variable `SLICER_STUDIO_AUTOSAVE_DIR`.
+  **Application Settings > Saving** (under **Recovery**, **Location**) or with the environment variable `SLICER_STUDIO_AUTOSAVE_DIR`.
 - **Retention.** The most recent 5 sessions are kept, within 2 GB, for at most 14 days. Sessions that you leave with
   "Exit (discard modifications)" are kept for that time too, so that an accidental discard can be undone.
 - **Privacy.** Autosaves can contain patient data, so the folder is private to your account (mode 0700 on
-  Linux and macOS). **Delete all autosaves…** in the Autosave settings removes the autosaves of every closed session for good.
+  Linux and macOS). **Delete all autosaves…** in the Saving settings removes the autosaves of every closed session for good.
 - **Autosave is not Save.** The top bar shows "Autosaved · 2 min ago" (in Classic, a short message in the status
   bar). Ctrl+S, the exit prompt and the saved state of the scene keep their meaning: the exit prompt tells you that
   unsaved changes were autosaved and remain recoverable for 14 days.
@@ -380,7 +419,7 @@ close does not lose them. It runs in Studio and in Classic.
   autosave folder.
 - **Opening an autosave in official 3D Slicer.** An autosave is a normal scene. In official 3D Slicer 5.12 or 5.13
   use **File > Load Scene** on the `Scene.mrml` in the session's folder.
-- **Switching it off.** Clear **Autosave the scene** in Application Settings > Autosave, set
+- **Switching it off.** Turn off **Save automatically** in Application Settings > Saving, set
   `Studio/Autosave/Enabled` to false, or start with the environment variable `SLICER_STUDIO_AUTOSAVE=0`. Autosave
   never runs with `--testing` or `--no-main-window`.
 
@@ -390,7 +429,7 @@ The keys are listed in [Settings](../settings.md#saving).
 
 - **Classic interface** (≡ menu, or **Ctrl+Alt+0**, or **⋯ > Open in Classic**): the menu bar, toolbars, module panel
   and Data Probe come back exactly as in 3D Slicer, and the window layout you had before is restored. **View >
-  Studio interface** (or Ctrl+Alt+0 again) returns to Studio. Studio remembers your choice (`Studio/Mode`).
+  Switch to Studio interface** (or Ctrl+Alt+0 again) returns to Studio. Studio remembers your choice (`Studio/Mode`).
 - **Start in Classic once:** set the environment variable `SLICER_CLASSIC_UI=1` before starting.
 - **Disable Studio permanently:** set `Studio/Enabled` to false in `Slicer.ini` (see [Settings](../settings.md#slicer-studio-settings)), or choose Classic and leave it.
 - Studio is never applied when Slicer is started with `--testing` or `--no-main-window`, so scripts, tests and

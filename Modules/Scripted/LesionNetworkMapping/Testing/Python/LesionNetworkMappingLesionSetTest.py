@@ -144,6 +144,17 @@ class DiceTest(unittest.TestCase):
 
 
 class VolumeAndTallyTest(unittest.TestCase):
+    def test_volume_summary_equal_volumes_no_warning(self):
+        import warnings
+
+        for values in ([0.98, 0.98, 0.98000000000000001, 0.9800000000000001], [0.984123456789] * 3):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                summary = lesionset.volume_summary(values)
+            self.assertEqual([str(w.message) for w in caught], [])
+            self.assertIsNone(summary["skew"])
+            self.assertFalse(summary["suggest_log"])
+
     def test_volume_summary_and_log_suggestion(self):
         summary = lesionset.volume_summary([1.0, 2.0, 3.0, 4.0, 100.0])
         self.assertEqual(summary["median"], 3.0)
@@ -213,6 +224,22 @@ class BalanceTest(unittest.TestCase):
         table = lesionset.balance({"a": {"volume_ml": 1.0}, "b": {"volume_ml": 9.0}, "c": {"volume_ml": 1.0}, "d": {"volume_ml": 2.0}}, ["a", "b"], ["c", "d"], names=("volume_ml",))
         self.assertTrue(table["volume_ml"]["flagged"])
 
+    def test_infinite_smd_is_kept_apart_from_no_data_in_the_summary(self):
+        covariates = {"a": {"hemisphere_left": 1.0}, "b": {"hemisphere_left": 1.0}, "c": {"hemisphere_left": 0.0}, "d": {"hemisphere_left": None}}
+        table = lesionset.balance(covariates, ["a", "b"], ["c"], names=("hemisphere_left",))
+        self.assertEqual(table["hemisphere_left"]["smd"], math.inf)
+        row = lesionset._balance_row(table["hemisphere_left"])
+        self.assertIsNone(row["smd"])
+        self.assertEqual(row["smd_inf"], 1)
+        self.assertTrue(row["flagged"])
+        self.assertEqual(lesionset._balance_row(lesionset.balance(covariates, ["c"], ["a"], names=("hemisphere_left",))["hemisphere_left"])["smd_inf"], -1)
+        json.dumps(row, allow_nan=False)
+        no_data = lesionset._balance_row(lesionset.balance(covariates, ["a"], ["d"], names=("hemisphere_left",))["hemisphere_left"])
+        self.assertIsNone(no_data["smd"])
+        self.assertNotIn("smd_inf", no_data)
+        finite = lesionset._balance_row(lesionset.balance({"a": {"v": 1.0}, "b": {"v": 2.0}, "c": {"v": 1.5}, "d": {"v": 2.5}}, ["a", "b"], ["c", "d"], names=("v",))["v"])
+        self.assertNotIn("smd_inf", finite)
+
     def test_matching_is_seeded_and_without_replacement(self):
         rng = np.random.default_rng(11)
         cases = {f"sub-c{k:02d}": {"volume_ml": float(v), "wm_frac": float(w)} for k, (v, w) in enumerate(zip(rng.lognormal(2.5, 0.6, 12), rng.uniform(0.2, 0.8, 12), strict=True))}
@@ -234,6 +261,30 @@ class BalanceTest(unittest.TestCase):
         simple = lesionset.matched_subsample({"sub-a": {"x": 5.0}}, {"sub-b": {"x": 1.0}, "sub-c": {"x": 4.0}, "sub-d": {"x": 9.0}}, ["x"], seed=0)
         self.assertEqual(simple["pairs"][0][:2], ["sub-a", "sub-c"])
         self.assertEqual(simple["sids"], ["sub-a", "sub-c"])
+
+    def test_matching_with_fewer_controls_improves_balance(self):
+        # More cases than controls: the kept cases are those nearest to the controls, not a random share
+        rng = np.random.default_rng(1)
+        cases = {f"sub-c{k:03d}": {"volume_ml": float(v)} for k, v in enumerate(rng.lognormal(3.0, 1.0, 12))}
+        controls = {f"sub-k{k:03d}": {"volume_ml": float(v)} for k, v in enumerate(rng.lognormal(2.5, 1.0, 8))}
+        for seed in range(20):
+            matched = lesionset.matched_subsample(cases, controls, ["volume_ml"], seed=seed)
+            self.assertEqual(matched["matched_from"], "controls")
+            self.assertEqual(len(matched["pairs"]), 8)
+            self.assertEqual(len(matched["unmatched_cases"]), 4)
+            self.assertEqual(sorted(pair[1] for pair in matched["pairs"]), sorted(controls))
+            self.assertLess(abs(matched["smd_after"]["volume_ml"]), abs(matched["smd_before"]["volume_ml"]), f"seed {seed}")
+        # The obvious case: two controls, the two nearest of four cases are kept
+        simple = lesionset.matched_subsample({"sub-a": {"x": 1.0}, "sub-b": {"x": 2.0}, "sub-c": {"x": 50.0}, "sub-d": {"x": 60.0}}, {"sub-y": {"x": 1.5}, "sub-z": {"x": 2.5}}, ["x"], seed=0)
+        self.assertEqual(simple["sids"], ["sub-a", "sub-b", "sub-y", "sub-z"])
+        self.assertEqual(simple["unmatched_cases"], ["sub-c", "sub-d"])
+        # ratio 2 with five controls: two cases, each with two controls
+        two = lesionset.matched_subsample(cases, dict(list(controls.items())[:5]), ["volume_ml"], seed=3, ratio=2)
+        self.assertEqual(len(two["pairs"]), 4)
+        self.assertEqual(len({pair[0] for pair in two["pairs"]}), 2)
+        self.assertEqual(len({pair[1] for pair in two["pairs"]}), 4)
+        # Enough controls: matched from the cases' side as before
+        self.assertEqual(lesionset.matched_subsample(dict(list(cases.items())[:4]), controls, ["volume_ml"], seed=0)["matched_from"], "cases")
 
     def test_subset_never_edits_include(self):
         tmp = tempfile.mkdtemp(prefix="lnm-lesionset-subset-")
@@ -395,6 +446,26 @@ class StudyTest(unittest.TestCase):
         self.assertTrue(summary["literature"][0]["text"].startswith("This set: 2 lesions. Sets of \u2265 10 heterogeneous lesions approach the degree map"))
         json.dumps(summary, allow_nan=False)  # strict JSON
 
+    def test_corrupt_deflate_stream_is_an_unreadable_lesion(self):
+        """A .nii.gz with a valid gzip header but a damaged deflate stream (gzip raises ``zlib.error``, which is no
+        OSError/ValueError/EOFError) is left out as unreadable; the other lesions are still loaded.
+        """
+        import zlib
+
+        from LesionNetworkMappingLib import nifti
+
+        path = os.path.join(self.folder, "lesions", "b.nii.gz")  # sub-02
+        with open(path, "wb") as f:
+            f.write(b"\x1f\x8b\x08\x00" + b"garbage-not-a-nifti" * 10)
+        for reader in (nifti.read_nifti_header, nifti.read_nifti, nifti.read_raw_header):
+            with self.assertRaises(ValueError, msg=reader.__name__) as raised:
+                reader(path)
+            self.assertIsInstance(raised.exception, zlib.error)  # callers that catch zlib.error keep working
+            self.assertIn("b.nii.gz", str(raised.exception))
+        occ = lesionset.load_occupancies(self.study)
+        self.assertEqual(occ.sids, ["sub-01", "sub-03", "sub-04"])
+        self.assertEqual(occ.excluded[lesionset.EXCLUDED_UNREADABLE], ["sub-02"])
+
     def test_run_posts_through_the_inbox(self):
         participants = os.path.join(self.folder, "participants.tsv")
         with open(participants, "rb") as f:
@@ -486,6 +557,14 @@ class LiteratureTest(unittest.TestCase):
         # The nearest reference: 0.22 is nearer 0.25 than 0.16
         self.assertIn("At mean pairwise Dice 0.25, conjunction was significant for 97%", lesionset.literature_context({"n": 5, "dice": {"mean": 0.22}})[1]["text"])
         self.assertIn("At mean pairwise Dice 0.16", lesionset.literature_context({"n": 5, "dice": {"mean": 0.2}})[1]["text"])
+        # Blind tracing: the set size is the total number of lesions, never the number of cases
+        self.assertTrue(lesionset.literature_context({"n": 12, "n_cases": 7}, blind=True)[0]["text"].startswith("This set: 12 lesions."))
+        self.assertTrue(lesionset.literature_context({"n": 12, "n_cases": 7})[0]["text"].startswith("This set: 7 lesions."))
+
+    def test_literature_context_singular(self):
+        # Bug report-html-singular-plural-1-lesions-1-maps: one lesion reads "1 lesion", not "1 lesions"
+        text = lesionset.literature_context({"n": 1, "n_cases": 1})[0]["text"]
+        self.assertTrue(text.startswith("This set: 1 lesion. "), text)
 
 
 if __name__ == "__main__":

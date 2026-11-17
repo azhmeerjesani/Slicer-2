@@ -149,6 +149,28 @@ def setRaterName(name):
     qt.QSettings().setValue(RATER_SETTING, str(name or "").strip())
 
 
+def raterNameDialog(parent):
+    """The question for the rater's name: an input dialog with the Studio dialog chrome (VISUAL 4.7), a primary OK and a
+    secondary Cancel without the legacy style icons.
+    """
+    from . import ui
+
+    dialog = qt.QInputDialog(parent)
+    dialog.setObjectName("StudioRaterNameDialog")
+    dialog.setWindowTitle(_("Your name"))
+    dialog.setLabelText(_("Name or initials recorded with each review (kept in this computer's settings):"))
+    dialog.sizeHint  # QInputDialog builds its buttons on the first size query
+    box = dialog.findChild("QDialogButtonBox")
+    if box is not None:
+        for button, role in ((box.button(qt.QDialogButtonBox.Ok), "primary"), (box.button(qt.QDialogButtonBox.Cancel), "secondary")):
+            if button is not None:
+                button.setIcon(qt.QIcon())
+                button.setMinimumHeight(36)
+                ui.setRole(button, role)
+    ui.dialogChrome(dialog)
+    return dialog
+
+
 def raterName(ask=True, parent=None):
     """The name recorded with a review: ``Studio/RaterName``, asked once when it is not set.
 
@@ -160,8 +182,11 @@ def raterName(ask=True, parent=None):
         return name
     if not ask or _isTesting() or slicer.util.mainWindow() is None:
         return UNNAMED
-    text = qt.QInputDialog.getText(parent or slicer.util.mainWindow(), _("Your name"),
-                                   _("Name or initials recorded with each review (kept in this computer's settings):"))
+    dialog = raterNameDialog(parent or slicer.util.mainWindow())
+    run = getattr(dialog, "exec", None) or dialog.exec_
+    accepted = run() == qt.QDialog.Accepted
+    text = dialog.textValue() if accepted else ""
+    dialog.deleteLater()
     text = str(text or "").strip()
     if not text:
         return None
@@ -285,6 +310,16 @@ def transition(sid, to, comment=None, reason=None, session=None, who=None, via="
     except rules.TransitionError as e:
         _toast(str(e), ms=5000, level="warning")
         return None
+    except OSError as e:
+        # A study folder that cannot be written (a shared, read-only study): the failed apply_transition changed nothing
+        logging.warning(f"Studio review: the review of {sid} was not recorded: {e}")
+        _toast(_("The study folder cannot be written, so the review was not recorded ({error})").format(error=e.strerror or e),
+               ms=6000, level="warning")
+        if studyObject.subject(sid) != row:
+            # The submit step (→ pending) was recorded before the decision failed: save it and tell the views
+            session.setValues([], {})
+            session.flush()
+        return None
     _writeSidecarReview(studyObject, sid)
     session.setValues([], {})  # save soon and tell the views
     session.flush()
@@ -372,7 +407,7 @@ class ReviewActions:
         formLayout.addWidget(self.reasonCombo)
         self.commentEdit = qt.QLineEdit()
         self.commentEdit.setObjectName(f"{prefix}Comment")
-        self.commentEdit.setClearButtonEnabled(True)
+        ui.setClearButton(self.commentEdit)
         self.commentEdit.connect("returnPressed()", self.send)
         self.commentEdit.connect("textChanged(QString)", lambda _text: self.errorLabel.hide())
         self.reasonCombo.connect("currentIndexChanged(int)", lambda _index: self.errorLabel.hide())
@@ -450,6 +485,8 @@ class ReviewActions:
             self._modeChanged()
 
     def hideForm(self):
+        if self._decide is None:
+            return  # disposed: the decision that just ended the review (the last lesion of the queue) took the widgets with it
         changed = self._mode is not None
         focus = slicer.app.focusWidget()
         hadFocus = changed and focus is not None and self.form.isAncestorOf(focus)

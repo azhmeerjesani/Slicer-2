@@ -404,5 +404,503 @@ class ReferenceIntegrationTest(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(z[ref.maps["sigma_r"] > 0])))
 
 
+def _has_slicer():
+    try:
+        import slicer
+    except ImportError:
+        return False
+    return getattr(slicer, "app", None) is not None
+
+
+@unittest.skipUnless(_has_slicer(), "needs the Slicer application")
+class QaNumberFormatTest(unittest.TestCase):
+    """BB-1 qa-validate-negative-zero-shown: a value that rounds to zero is printed "0.00", never "-0.00"."""
+
+    def test_reference_table_numbers(self):
+        from LesionNetworkMappingUI import card_qa
+
+        self.assertEqual(card_qa.QACard._number(-0.003), "0.00")
+        self.assertEqual(card_qa.QACard._number(-0.0), "0.00")
+        self.assertEqual(card_qa.QACard._number(0.004), "0.00")
+        self.assertEqual(card_qa.QACard._number(-0.05), "-0.05")
+        self.assertEqual(card_qa.QACard._number(-1.234), "-1.23")
+        self.assertEqual(card_qa.QACard._number(float("nan")), "\u2013")
+        self.assertEqual(card_qa._fixed(-0.0004, 3), "0.000")
+        self.assertEqual(card_qa._fixed(-0.1004, 3), "-0.100")
+
+
+@unittest.skipUnless(_has_slicer(), "needs the Slicer application")
+class QaDerivedOverlayParkTest(unittest.TestCase):
+    """BB-1 qa-derived-map-stays-drawn-after-run-parked-for-other-lesion: when the run of a QA derived map (debiased view or
+    analytic RL z) stops being the current run (the Map page parks it for another lesion or connectome), the derived map
+    leaves the views and the QA toggles are cleared.
+    """
+
+    def setUp(self):
+        import slicer
+
+        from LesionNetworkMappingUI import card_qa, context
+
+        slicer.mrmlScene.Clear(0)
+        self.ctx = context.MapContext(runner=object())
+        self.card = card_qa.QACard(self.ctx)
+        self.run = context.RunInfo(runDir=tempfile.mkdtemp(prefix="lnm-qa-park-"), n=10)
+        self.addCleanup(shutil.rmtree, self.run.runDir, True)
+        self.addCleanup(self.card.cleanup)
+        self.ctx.setCurrentRun(self.run)
+
+    def _showOverlay(self, kind, widget):
+        import slicer
+
+        volume = slicer.util.addVolumeFromArray(np.zeros((2, 2, 2), dtype=np.float32), name=f"derived {kind}", nodeClassName="vtkMRMLScalarVolumeNode")
+        self.card._overlays[kind] = (volume, self.run.runDir, "AvgR")
+        self.card._shown = kind
+        self.card._setChecked(widget, True)
+        slicer.util.setSliceViewerLayers(foreground=volume)
+        return volume
+
+    def _foregroundIds(self):
+        import slicer
+
+        return {composite.GetForegroundVolumeID() for composite in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode")}
+
+    def _check(self, kind, widget):
+        volume = self._showOverlay(kind, widget)
+        volumeId = volume.GetID()
+        self.ctx.setCurrentRun(self.run)  # the same run again: the derived map stays
+        self.assertIn(volumeId, self._foregroundIds())
+        self.assertEqual(self.card.shownOverlay()["kind"], kind)
+        self.ctx.setCurrentRun(None)  # parked for another lesion
+        self.assertNotIn(volumeId, self._foregroundIds())
+        self.assertIsNone(volume.GetScene())
+        self.assertIsNone(self.card.shownOverlay())
+        self.assertFalse(widget.checked)
+        self.assertEqual(self.card._overlays, {})
+
+    def test_debiased_view_leaves_the_views(self):
+        self._check("debiased", self.card.debiasedCheckBox)
+
+    def test_analytic_z_leaves_the_views(self):
+        self._check("analytic", self.card.analyticButton)
+
+    def test_other_run(self):
+        from LesionNetworkMappingUI import context
+
+        volume = self._showOverlay("debiased", self.card.debiasedCheckBox)
+        other = context.RunInfo(runDir=self.run.runDir + "-other", n=10)
+        self.ctx.setCurrentRun(other)
+        self.assertNotIn(volume.GetID(), self._foregroundIds())
+        self.assertIsNone(self.card.shownOverlay())
+        self.assertFalse(self.card.debiasedCheckBox.checked)
+
+    def _reenter(self, kind, widget):
+        """Map is left and entered again: its layers put the plain map back in the views; the card puts its derived map back."""
+        import slicer
+
+        volume = self._showOverlay(kind, widget)
+        if kind == "debiased":
+            self.card._overlays[kind] = (volume, self.run.runDir, "T")  # the statistic displayed (no parameter node: T)
+        plain = slicer.util.addVolumeFromArray(np.ones((2, 2, 2), dtype=np.float32), name="plain map", nodeClassName="vtkMRMLScalarVolumeNode")
+        slicer.util.setSliceViewerLayers(foreground=plain)
+        self.assertNotIn(volume.GetID(), self._foregroundIds())
+        notified = []
+        slicer.modules.LesionNetworkMappingWidget = type("W", (), {"onDerivedOverlayChanged": lambda self: notified.append(1)})()
+        self.addCleanup(lambda: delattr(slicer.modules, "LesionNetworkMappingWidget"))
+        self.card.reshowShownOverlay()
+        return volume, notified
+
+    def test_debiased_view_comes_back_when_map_is_entered_again(self):
+        volume, notified = self._reenter("debiased", self.card.debiasedCheckBox)
+        self.assertEqual(self._foregroundIds(), {volume.GetID()})
+        self.assertEqual(self.card.shownOverlay()["kind"], "debiased")
+        self.assertTrue(self.card.debiasedCheckBox.checked)
+        self.assertTrue(notified)
+
+    def test_analytic_z_comes_back_when_map_is_entered_again(self):
+        volume, notified = self._reenter("analytic", self.card.analyticButton)
+        self.assertEqual(self._foregroundIds(), {volume.GetID()})
+        self.assertEqual(self.card.shownOverlay()["kind"], "analytic")
+        self.assertTrue(self.card.analyticButton.checked)
+        self.assertTrue(notified)
+
+    def test_derived_map_that_is_gone_is_dropped_when_map_is_entered_again(self):
+        import slicer
+
+        volume = self._showOverlay("debiased", self.card.debiasedCheckBox)
+        slicer.mrmlScene.RemoveNode(volume)
+        self.card.reshowShownOverlay()
+        self.assertIsNone(self.card.shownOverlay())
+        self.assertFalse(self.card.debiasedCheckBox.checked)
+        self.assertEqual(self.card._overlays, {})
+
+    def test_nothing_shown_changes_nothing(self):
+        self.card.reshowShownOverlay()
+        self.assertIsNone(self.card.shownOverlay())
+
+
+@unittest.skipUnless(_has_slicer(), "needs the Slicer application")
+class QaNullRowWhileRunningTest(unittest.TestCase):
+    """BB-1 map-single:qa-null-row-says-run-stopped-while-running: each partial map of a run that goes on made the QA card's Null
+    row say "not computed, the run stopped at N=.. (partial)". That text is only for a run that ended early; while the run
+    goes on the row says the null is computed with the map.
+    """
+
+    def setUp(self):
+        import slicer
+
+        from LesionNetworkMappingUI import card_qa, context
+
+        slicer.mrmlScene.Clear(0)
+        self.ctx = context.MapContext(runner=object())
+        self.card = card_qa.QACard(self.ctx)
+        self.addCleanup(self.card.cleanup)
+
+    def _text(self, running, partial):
+        self.card._refreshNull(None, None, None, running, partial, 50)
+        return str(self.card.nullLabel.text)
+
+    def test_running_partial_map_says_computed_with_the_map(self):
+        text = self._text(True, True)
+        self.assertNotIn("stopped", text)
+        self.assertIn("computed with the map", text)
+
+    def test_run_that_ended_early_says_stopped(self):
+        text = self._text(False, True)
+        self.assertIn("the run stopped at N=50", text)
+
+    def test_snapshot_event_of_a_running_run(self):
+        self.card.onRunEvent({"event": "start", "qc": []})
+        self.card.onRunEvent({"event": "snapshot", "n": 50})
+        self.assertNotIn("stopped", str(self.card.nullLabel.text))
+
+
+@unittest.skipUnless(_has_slicer(), "needs the Slicer application")
+class QaGroupChipFastModeTest(unittest.TestCase):
+    """BB-1 qa-group-chip-uses-fast-mode-approximate-group-map: the QA card's group chip and reference rows describe the
+    exact group map. An exact-pooled Nulls run wins over a newer fast-mode one (whose group_qa is of the approximate
+    fast-mode map); a fast-only run is labelled approximate and its reference rows are not shown as the group map's.
+
+    BB-1 qa-group-chip-verdict-depends-on-unnamed-null-kind: the chip's verdict does not follow whichever kind of Nulls
+    ran last. An rl_independent run wins over a newer run of another kind, the chip and label name the null kind, and an
+    rl_strength run (matched on μC_r, the axis the chip measures) never gives a verdict.
+    """
+
+    IDS = ("sub-01", "sub-02", "sub-03")
+
+    def setUp(self):
+        import types
+
+        import slicer
+
+        from LesionNetworkMappingLib import cohortmaps
+        from LesionNetworkMappingUI import card_qa, context
+
+        slicer.mrmlScene.Clear(0)
+        self.root = tempfile.mkdtemp(prefix="lnm-qa-groupfast-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.folder = os.path.join(self.root, "cohort")
+        os.makedirs(self.folder)
+        self.mapsTsv = os.path.join(self.folder, "maps.tsv")
+        with open(self.mapsTsv, "w", encoding="utf-8") as f:
+            f.write("participant_id\tAvgR\n" + "".join(f"{pid}\tn/a\n" for pid in self.IDS))
+        with open(os.path.join(self.folder, cohortmaps.COHORTMAPS_JSON), "w", encoding="utf-8") as f:
+            json.dump({"run_id": "cm-1"}, f)
+        self.stamp = os.stat(self.mapsTsv).st_mtime
+        os.utime(self.mapsTsv, (self.stamp, self.stamp))
+        self.ctx = context.MapContext(runner=object())
+        self.card = card_qa.QACard(self.ctx)
+        self.addCleanup(self.card.cleanup)
+        self.ctx.cohortMaps = self.mapsTsv
+        self.ctx.bundle = types.SimpleNamespace(path=os.path.join(self.root, "none.lnmc"), name="Synthetic")
+        self.card._mode = lambda: "cohort"
+        self.card._hasReferenceFiles = lambda bundle: True
+
+    def _writeNulls(self, name, fast, percentile, muR, level, k, after, kind="rl_independent"):
+        folder = os.path.join(self.folder, name)
+        os.makedirs(folder)
+        values = {"mu_r": muR, "mu_rho": muR, "pc1_r": muR, "r2_ref": muR, "percentile": percentile, "k": k, "level": level,
+                  "text": "test verdict", "null_kind": kind}  # fmt: skip
+        record = {"format": "lnm-nulls", "kind": kind, "mode": "approximate" if fast else "exact_pooled", "approximate": fast,
+                  "statistic": "approximate Fz" if fast else "T", "participants": list(self.IDS), "excluded": [], "inputs": {"cohortmaps_run": "cm-1"},
+                  "group_qa": {"available": True, "null_kind": kind, "mean": values, "overlap": dict(values),
+                               "statistic": "approximate Fz" if fast else "T"}}  # fmt: skip
+        path = os.path.join(folder, "nulls.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(record, f)
+        os.utime(path, (self.stamp + after, self.stamp + after))
+
+    def test_exact_run_wins_over_newer_fast_run(self):
+        self._writeNulls("nulls-rl_independent-exact", False, 68.8, 0.9836, "amber", 199, after=10)
+        self._writeNulls("nulls-rl_independent-fast", True, 99.2, 0.9976, "red", 500, after=20)
+        values = self.card._findGroupQa()
+        self.assertEqual(values["k"], 199)
+        self.assertFalse(values.get("approximate", False))
+        self.card.refresh()
+        self.assertEqual(self.card.calibratedChip.text, "69th percentile")
+        self.assertIn("r(μC_r) = 0.98", self.card.calibratedLabel.text)
+        self.assertIn("of 199 null cohorts", self.card.calibratedLabel.text)
+        self.assertFalse(self.card.table.isHidden())
+        self.assertEqual(self.card.table.item(0, 1).text(), "0.98")
+
+    def test_fast_only_is_labelled_approximate(self):
+        self._writeNulls("nulls-rl_independent-fast", True, 99.2, 0.9976, "red", 500, after=20)
+        values = self.card._findGroupQa()
+        self.assertTrue(values["approximate"])
+        self.card.refresh()
+        chip, label = self.card.calibratedChip.text, self.card.calibratedLabel.text
+        self.assertEqual(chip, "99th percentile (approx.)")
+        self.assertIn("Fast-mode run (approximate maps, not the group map)", label)
+        self.assertIn("exact mode", label)
+        self.assertNotIn("1.00", label)  # the approximate map's r(μC_r) is not shown as the group map's
+        self.assertTrue(self.card.table.isHidden())
+        self.assertTrue(self.card.r2Label.isHidden())
+
+    def test_rl_independent_wins_over_newer_rl_strength_run(self):
+        self._writeNulls("nulls-rl_independent-exact", False, 68.8, 0.9836, "amber", 199, after=10)
+        self._writeNulls("nulls-rl_strength-exact", False, 0.0, 0.9836, "below", 99, after=20, kind="rl_strength")
+        values = self.card._findGroupQa()
+        self.assertEqual((values["null_kind"], values["k"]), ("rl_independent", 199))
+        self.card.refresh()
+        self.assertEqual(self.card.calibratedChip.text, "69th percentile")
+        self.assertEqual(self.card.calibratedChip.property("chipLevel"), "warn")
+        self.assertIn("of 199 null cohorts (rl_independent", self.card.calibratedLabel.text)
+        self.assertIn("rl_independent", self.card.calibratedChip.toolTip)
+        self.assertIn("K = 199", self.card.calibratedChip.toolTip)
+
+    def test_rl_independent_wins_over_newer_cohort_shift_run(self):
+        self._writeNulls("nulls-rl_independent-exact", False, 68.8, 0.9836, "amber", 199, after=10)
+        self._writeNulls("nulls-rl_cohort_shift-exact", False, 80.0, 0.9836, "amber", 20, after=20, kind="rl_cohort_shift")
+        self.assertEqual(self.card._findGroupQa()["null_kind"], "rl_independent")
+        shutil.rmtree(os.path.join(self.folder, "nulls-rl_independent-exact"))
+        self.card.refresh()  # without an rl_independent run, another kind calibrates the chip and is named
+        self.assertEqual(self.card.calibratedChip.text, "80th percentile")
+        self.assertIn("of 20 null cohorts (rl_cohort_shift", self.card.calibratedLabel.text)
+
+    def test_rl_strength_alone_gives_no_verdict(self):
+        self._writeNulls("nulls-rl_strength-exact", False, 0.0, 0.9836, "below", 99, after=20, kind="rl_strength")
+        self.card.refresh()
+        label = self.card.calibratedLabel.text
+        self.assertEqual(self.card.calibratedChip.text, "Not calibrated")
+        self.assertEqual(self.card.calibratedChip.property("chipLevel"), "neutral")
+        self.assertIn("rl_strength", label)
+        self.assertIn("mean connectivity (μC_r)", label)
+        self.assertIn("Run Nulls with rl_independent", label)
+        self.assertNotIn("less degree-like", label)
+        self.assertFalse(self.card.table.isHidden())  # the reference rows of the group map are still shown
+        from LesionNetworkMappingUI import card_nulls
+
+        text = card_nulls.NullsCard.groupQaText(
+            {"available": True, "null_kind": "rl_strength", "mean": {"percentile": 0.0, "k": 99, "level": "below", "text": "x", "null_kind": "rl_strength"}, "statistic": "T"})
+        self.assertIn("not the QA card's verdict", text)
+        self.assertIn("99 rl_strength null cohorts", text)
+
+    def test_nulls_card_strength_map_stale_and_texts(self):
+        import types
+
+        from LesionNetworkMappingLib import thresholds
+        from LesionNetworkMappingUI import card_nulls
+
+        card = card_nulls.NullsCard
+        fake = types.SimpleNamespace(kind="rl_strength", kPoolSpin=types.SimpleNamespace(value=2000), seedSpin=types.SimpleNamespace(value=0),
+                                     strengthCombo=types.SimpleNamespace(currentData="signed"))
+        fake.rule = lambda: thresholds.normalize_rule(None)
+        fake.overlapSettings = lambda: (0.0, "both")
+        fake.kValue = lambda: 199
+        fake.usesPool = lambda: True
+        fake.effectiveMode = lambda: "exact"
+        record = {"rule": thresholds.normalize_rule(None), "overlap_pct": 0, "sign": "both", "k": 199, "k_pool": 2000, "seeds": {"seed": 0}, "kind": "rl_strength", "design": {"strength": "abs"}}
+        self.assertEqual(card.staleReasons(fake, record), ["strength map"])
+        fake.strengthCombo.currentData = "abs"
+        self.assertEqual(card.staleReasons(fake, record), [])
+        fake.strengthCombo.currentData = "signed"
+        self.assertEqual(card.staleReasons(fake, dict(record, design={"strength": "signed"})), [])
+        group = {"available": True, "null_kind": "rl_strength", "mean": {"percentile": 40.0, "k": 99, "text": "x", "null_kind": "rl_strength"}, "statistic": "T"}
+        self.assertIn("absolute hubness", card.groupQaText(group, strength="abs"))
+        self.assertNotIn("μC_r, ", card.groupQaText(group, strength="abs").split("r(group map")[0])
+        self.assertIn("mean connectivity, μC_r", card.groupQaText(group, strength="signed"))
+
+    def test_nulls_card_fast_cohort_shift_with_fewer_shifts_is_not_stale(self):
+        """BB-1 cohort-shift-fast-permanent-stale-k: a run that kept K = 3 of 200 requested is not marked stale."""
+        import types
+
+        from LesionNetworkMappingLib import thresholds
+        from LesionNetworkMappingUI import card_nulls
+
+        card = card_nulls.NullsCard
+        fake = types.SimpleNamespace(kind="rl_cohort_shift", kPoolSpin=types.SimpleNamespace(value=2000), seedSpin=types.SimpleNamespace(value=0))
+        fake.rule = lambda: thresholds.normalize_rule(None)
+        fake.overlapSettings = lambda: (0.0, "both")
+        fake.kValue = lambda: 200
+        fake.usesPool = lambda: False
+        fake.effectiveMode = lambda: "fast"
+        record = {"rule": thresholds.normalize_rule(None), "overlap_pct": 0, "sign": "both", "k": 3, "k_requested": 200, "seeds": {"seed": 0}, "kind": "rl_cohort_shift"}
+        self.assertEqual(card.staleReasons(fake, record), [])
+        fake.kValue = lambda: 100
+        self.assertEqual(card.staleReasons(fake, record), ["K"])
+        self.assertEqual(card.staleReasons(fake, {key: value for key, value in record.items() if key != "k_requested"}), ["K"])  # older record: K itself
+
+    def test_nulls_card_labels_fast_group_qa(self):
+        from LesionNetworkMappingUI import card_nulls
+
+        values = {"percentile": 99.2, "k": 500, "level": "red", "text": "more degree-like"}
+        text = card_nulls.NullsCard.groupQaText({"available": True, "mean": values, "statistic": "approximate Fz"})
+        self.assertIn("fast-mode map (approximate", text)
+        self.assertIn("(shown in the QA card)", card_nulls.NullsCard.groupQaText({"available": True, "mean": values, "statistic": "T"}))
+
+    def test_nulls_card_shows_run_warnings_and_small_k(self):
+        """The card shows a run's recorded warnings and a K below MIN_K (bug nulls-run-warnings-dropped-cohort-shift-k-shrinks-to-3)."""
+        from LesionNetworkMappingUI import card_nulls
+
+        card = card_nulls.NullsCard
+        shifts = {"code": "shifts", "message": "Only 3 of 20 shared shifts keep the cohort inside the brain."}
+        text = card.warningsText({"k": 3, "k_requested": 20, "below_min_k": True, "warnings": [shifts, {"code": "min_k", "message": "Only 3 null cohorts (of 20 requested): ..."}]})
+        self.assertIn("Only 3 of 20 shared shifts", text)
+        self.assertIn("no voxel can reach p ≤ 0.05", text)
+        self.assertNotIn("(of 20 requested): ...", text)  # the card's own sentence replaces the min_k warning
+        self.assertIn("no voxel can reach p ≤ 0.05", card.warningsText({"k": 5}))  # an older record without the flag
+        self.assertEqual(card.warningsText({"k": 1000, "warnings": []}), "")
+        self.assertIn("not calibrated", card.groupQaText({"available": False, "level": "not_calibrated", "k": 3, "text": "only 3 null cohorts; at least 19 are needed for a percentile"}))
+
+    def test_nulls_card_arguments_resume_a_stopped_run(self):
+        """BB-1 nulls-stop-then-run-recomputes-exact-null-maps: Run passes --resume so the saved batches of a stopped run are kept."""
+        from types import SimpleNamespace
+
+        from LesionNetworkMappingUI import card_nulls
+
+        fake = SimpleNamespace(
+            ctx=SimpleNamespace(bundle=SimpleNamespace(path="bundle"), study=None), outDir=lambda: "out", effectiveMode=lambda: "exact",
+            overlapSettings=lambda: (0.5, "both"), kValue=lambda: 3000, rule=lambda: None, kind="rl_independent", usesPool=lambda: True,
+            kPoolSpin=SimpleNamespace(value=300), participantsPath=lambda: "", seedSpin=SimpleNamespace(value=1), controlSet=None)
+        args = card_nulls.NullsCard.arguments(fake, "maps.tsv")
+        self.assertIn("--resume", args)
+
+
+def _edit_preprocessing(bundle_path):
+    """Change the preprocessing record of connectome.json, which makes the bundle's reference maps stale."""
+    manifest = os.path.join(bundle_path, "connectome.json")
+    with open(manifest, encoding="utf-8") as f:
+        metadata = json.load(f)
+    metadata["preprocessing"] = dict(metadata.get("preprocessing") or {}, note="converted again")
+    with open(manifest, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
+
+
+class StaleReferenceTest(unittest.TestCase):
+    """BB-1 stale-reference-maps-manager-yes-qa-says-map-again-dead-end: reference maps built before the connectome's
+    preprocessing record changed are rejected by the loader, so the manager does not say "yes" for them and the QA card
+    offers to rebuild them instead of "Map again" (which cannot help).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="lnm-qa-stale-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        rng = np.random.default_rng(3)
+        shape = (8, 8, 8)
+        mask = np.zeros(shape, dtype=bool)
+        mask[1:7, 1:7, 1:7] = True
+        n_voxels = int(mask.sum())
+        self.path = os.path.join(self.tmp, "stale.lnmc")
+        writer = connectome.ConnectomeWriter(self.path, mask, np.diag([2.0, 2.0, 2.0, 1.0]), name="Stale", overwrite=True)
+        for s in range(3):
+            writer.add_subject(f"sub-{s + 1:02d}", [rng.standard_normal((n_voxels, 20)) + 10.0])
+        writer.finalize()
+        reference.build(self.path, n_seeds=20, k=2, power_iters=1, register=False, emit=lambda *args, **kwargs: None)
+
+    def test_manager_space_column_uses_the_grid_space_without_declared_metadata(self):
+        from LesionNetworkMappingLib import engine, manager
+
+        out = os.path.join(self.tmp, "nlin6.lnmc")
+        affine = np.array([[-2, 0, 0, 90], [0, 2, 0, -126], [0, 0, 2, -72], [0, 0, 0, 1.0]])
+        connectome.make_synthetic(out, shape=(91, 109, 91), n_subjects=1, runs=(5,), affine=affine, name="Grid")
+        bundle = connectome.ConnectomeBundle(out)
+        self.assertIsNone(bundle.metadata.get("space"))
+        self.assertEqual(engine.connectome_space(bundle), "MNI152NLin6Asym")
+        self.assertEqual(manager.bundle_summary(out)["space"], "MNI152NLin6Asym")
+        self.assertIsNone(manager.bundle_summary(self.path)["space"])  # unknown grid, nothing declared
+
+    def test_manager_row_says_out_of_date(self):
+        from LesionNetworkMappingLib import manager
+
+        row = manager.bundle_summary(self.path)
+        self.assertEqual(row["reference_status"], "ok")
+        self.assertTrue(row["has_reference"])
+        _edit_preprocessing(self.path)
+        self.assertIsNone(reference.load_reference(self.path))
+        row = manager.bundle_summary(self.path)
+        self.assertTrue(row["has_reference"])  # reference.json is still there
+        self.assertEqual(row["reference_status"], "stale")
+        self.assertIn("preprocessing", row["reference_reason"])
+        shutil.rmtree(os.path.join(self.path, "derived", "reference"))
+        self.assertEqual(manager.bundle_summary(self.path)["reference_status"], "missing")
+
+    def test_manager_row_flags_deleted_reference_map(self):
+        from LesionNetworkMappingLib import manager
+
+        folder = os.path.join(self.path, "derived", "reference")
+        self.assertEqual(manager.bundle_summary(self.path)["reference_status"], "ok")
+        os.remove(os.path.join(folder, "pcs.npy"))
+        self.assertIsNone(reference.load_reference(self.path))
+        row = manager.bundle_summary(self.path)
+        self.assertEqual(row["reference_status"], "corrupt")
+        self.assertIn("pcs.npy", row["reference_reason"])
+
+    def test_quick_status_skips_the_time_series_only(self):
+        self.assertEqual(reference.reference_status(self.path, verify=False, check_data=False)[0]["status"], "ok")
+        _edit_preprocessing(self.path)
+        self.assertEqual(reference.reference_status(self.path, verify=False, check_data=False)[0]["status"], "stale")
+
+    @unittest.skipUnless(_has_slicer(), "needs the Slicer application")
+    def test_manager_column_and_qa_card(self):
+        import slicer
+
+        import LesionNetworkMapping
+        from LesionNetworkMappingLib import manager
+        from LesionNetworkMappingUI import card_qa, context
+
+        text = LesionNetworkMapping.ConnectomeManagerDialog._referenceText
+        self.assertEqual(text(manager.bundle_summary(self.path)), "yes")
+
+        slicer.mrmlScene.Clear(0)
+        bundle = connectome.ConnectomeBundle.open(self.path)
+        self.addCleanup(bundle.close)
+        ctx = context.MapContext(runner=object())
+        card = card_qa.QACard(ctx)
+        self.addCleanup(card.cleanup)
+        ctx.bundle = bundle
+        run = context.RunInfo(runDir=os.path.join(self.tmp, "run"), n=3)
+        os.makedirs(run.runDir)
+        ctx.setCurrentRun(run)
+        card.qa = {}  # a map computed without reference maps
+
+        # Valid reference maps: the map was made before them, mapping again calibrates it
+        card.refresh()
+        self.assertIn("Map again", card.calibratedLabel.text)
+        self.assertNotIn("out of date", card.calibratedLabel.text)
+        self.assertTrue(card.referenceButton.isHidden())
+
+        # Out-of-date reference maps: the manager says so and the card offers to rebuild them
+        # (the card's bundle stays the one opened before connectome.json changed, as in the app)
+        _edit_preprocessing(self.path)
+        self.assertEqual(text(manager.bundle_summary(self.path)), "out of date")
+        card.qa = {}
+        card.refresh()
+        label = card.calibratedLabel.text
+        self.assertIn("out of date", label)
+        self.assertIn("preprocessing", label)
+        self.assertIn("Rebuild them", label)
+        self.assertNotIn("Map again.", label)
+        self.assertFalse(card.referenceButton.isHidden())
+        self.assertTrue(card.referenceButton.text.startswith("Rebuild reference maps"))
+        self.assertEqual(card.referenceButton.objectName, "LNMQABuildReferenceButton")
+
+        # No reference maps at all: the usual Build action
+        shutil.rmtree(os.path.join(self.path, "derived", "reference"))
+        self.assertEqual(text(manager.bundle_summary(self.path)), "no")
+        card.qa = {}
+        card.refresh()
+        self.assertIn("no reference maps yet", card.calibratedLabel.text)
+        self.assertTrue(card.referenceButton.text.startswith("Build reference maps"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -240,6 +240,92 @@ class MethodsTest(_StudyCase):
         self.assertIn("| fwe | \\|T\\| ≥ 5.22 |", methods.render([table], "md"))  # pipes in table cells are escaped
         self.assertIn("| none | not recorded |", methods.render([table], "md"))
 
+    def test_robustness_sentences_state_parameters_and_results(self):
+        # Each robustness analysis registers nested summaries (medians, comparisons, counts) and its settings as params
+        runs.register_kind("robustness")
+        self.make_study([("sub-01", {"group": "case"})])
+        rule_a = {"kind": "fwe_bonferroni", "alpha": 0.05}
+        rule_b = {"kind": "top_pct", "value": 10.0, "statistic": "Fz", "sign": "both"}
+        sweep = {"overlap_pct": 25.0, "sign": "both", "lesions": "all"}
+        self.register("robustness", self.run_dir("sweep-a"), summary={"analysis": "sweep", "conclusion_flips": None, "settings": 25}, params={"analysis": "sweep", "rule": rule_a, **sweep})
+        self.register("robustness", self.run_dir("sweep-b"), summary={"analysis": "sweep", "conclusion_flips": "Conclusion flips at Custom T, ≥ 50% overlap (the ROI no longer survives).", "settings": 25},
+                      params={"analysis": "sweep", "rule": rule_b, **sweep})
+        self.register("robustness", self.run_dir("splithalf"), summary={"analysis": "splithalf", "label": "lesion split-half", "lesion_split_half": {"r_overlap": 0.9312, "dice_sensitivity": 0.8, "r_glm_t": None}},
+                      params={"analysis": "splithalf", "rule": rule_a, "sign": "both", "overlap_pct": 25.0, "n_splits": 500, "design": True, "glm_input": "Fz", "strata": None, "lesions": "all"})
+        self.register("robustness", self.run_dir("seeds"), summary={"analysis": "seeds", "seed_variants": ["sphere2", "sphere4"], "comparisons": {"sphere2": {"median_lesion_r": 0.971, "median_lesion_dice": 0.9, "n_changed": 4, "group_r": 0.99}}},
+                      params={"analysis": "seeds", "variants": ["sphere2", "sphere4"], "rule": rule_a, "probabilistic": False})
+        self.register("robustness", self.run_dir("consolidate-l"), summary={"analysis": "consolidate", "consolidation": {"side": "L", "mirrored": 4, "kept": 6, "empty": 0, "bilateral_or_midline": 1}}, params={"analysis": "consolidate", "side": "L"})
+        self.register("robustness", self.run_dir("consolidate-r"), summary={"analysis": "consolidate", "consolidation": {"side": "R", "mirrored": 2, "kept": 8, "empty": 0, "bilateral_or_midline": 1}}, params={"analysis": "consolidate", "side": "R"})
+        self.register("robustness", self.run_dir("chsh"), summary={"analysis": "connectome_split_half", "split_half": {"label": "GSP1000MF", "n_odd": 500, "n_even": 500, "median_r": 0.991, "min_r": 0.98, "small_halves": False}},
+                      params={"analysis": "connectome_split_half"})
+        text = {section.id: section.text() for section in methods.methods_sections(self.root)}["statistics"]
+        lines = [line for line in text.splitlines() if line.startswith("Robustness")]
+        self.assertEqual(len(lines), 7)
+        joined = "\n".join(lines)
+        # Sweep: the rule differs between the two runs, and the conclusion is stated either way
+        self.assertIn("FWE (Bonferroni) (alpha 0.05)", joined)
+        self.assertIn("Top x% (N-independent) (value 10", joined)
+        self.assertIn("no conclusion flip found", joined)
+        self.assertIn("Conclusion flips at Custom T", joined)
+        # Split-half: number of splits, seed (not recorded here), design, medians
+        for phrase in ("500 random splits (seed not recorded)", "with the GLM design", "overlap maps 0.931", "sensitivity maps 0.8", "GLM t maps not recorded"):
+            self.assertIn(phrase, joined)
+        # Seeds: variants and comparison
+        for phrase in ("sphere2, sphere4", "sphere2: median r 0.971", "over 4 changed lesion(s)"):
+            self.assertIn(phrase, joined)
+        # Consolidation: the side and the counts, so the two runs differ
+        for phrase in ("left hemisphere", "right hemisphere", "mirrored 4, kept 6", "mirrored 2, kept 8", "bilateral or midline (not mirrored) 1"):
+            self.assertIn(phrase, joined)
+        # Connectome split-half: halves and r
+        for phrase in ("GSP1000MF", "500 and 500 subjects", "median r 0.991", "minimum r 0.98"):
+            self.assertIn(phrase, joined)
+        self.assertNotIn("analysis seeds.", joined)
+        self.assertEqual(methods.lint_wording(joined), [])
+        # A summary of another shape keeps the scalar fallback
+        self.assertEqual(methods.robustness_text({"split_half": 0.98}), "split_half 0.98")
+
+    def test_overwritten_robustness_runs_are_not_cited(self):
+        # Every Robust analysis writes one fixed folder: a rerun overwrites the earlier run's files, so only the run whose id is in the result file is cited
+        runs.register_kind("robustness")
+        self.make_study([("sub-01", {"group": "case"})])
+        folder = self.run_dir("robustness")
+        first = self.register("robustness", folder, summary={"analysis": "splithalf", "label": "lesion split-half", "lesion_split_half": {"r_overlap": 0.5}},
+                              params={"analysis": "splithalf", "n_splits": 100}, files={"splithalf.json": {"run_id": None}})
+        second = self.register("robustness", folder, summary={"analysis": "splithalf", "label": "lesion split-half", "lesion_split_half": {"r_overlap": 0.9}},
+                               params={"analysis": "splithalf", "n_splits": 200}, files={"splithalf.json": {"run_id": None}})
+        seeds_folder = self.run_dir("robustness-seeds")
+        old_seeds = self.register("robustness", seeds_folder, summary={"analysis": "seeds", "seed_variants": ["sphere2"]}, params={"analysis": "seeds", "variants": ["sphere2"]})
+        new_seeds = self.register("robustness", seeds_folder, summary={"analysis": "seeds", "seed_variants": ["sphere4"]}, params={"analysis": "seeds", "variants": ["sphere4"]})
+        export.write_json_atomic(os.path.join(folder, "splithalf.json"), {"run_id": second})
+        export.write_json_atomic(os.path.join(seeds_folder, "variants.json"), {"run_id": new_seeds})
+        text = {section.id: section.text() for section in methods.methods_sections(self.root)}["statistics"]
+        self.assertIn(f"(run {second})", text)
+        self.assertNotIn(f"(run {first})", text)
+        self.assertIn(f"(run {new_seeds})", text)
+        self.assertNotIn(f"(run {old_seeds})", text)
+        self.assertEqual(len([line for line in text.splitlines() if line.startswith("Robustness")]), 2)
+
+    def test_overwritten_nulls_runs_are_not_cited(self):
+        # Two nulls runs of the same kind and mode write one folder (nulls-<kind>-<mode>): only the run whose id is in
+        # nulls.json is cited (bug bash: every finished nulls run was cited, with the overwritten run's stale numbers)
+        self.make_study([("sub-01", {"group": "case"})])
+        folder = self.run_dir("nulls-rl_independent-exact")
+        first = self.register("nulls", folder, summary={"mode": "exact", "kind": "rl_independent", "k_pool": 20, "n_voxels": 24})
+        second = self.register("nulls", folder, summary={"mode": "exact", "kind": "rl_independent", "k_pool": 20, "n_voxels": 30})
+        export.write_json_atomic(os.path.join(folder, "nulls.json"), {"run_id": second})
+        # A run without a readable nulls.json, or one without a run id, is still cited
+        legacy_folder = self.run_dir("nulls-rl_strength-exact")
+        legacy = self.register("nulls", legacy_folder, summary={"mode": "exact", "kind": "rl_strength", "k_pool": 20})
+        no_id_folder = self.run_dir("nulls-shuffle-exact")
+        no_id = self.register("nulls", no_id_folder, summary={"mode": "exact", "kind": "shuffle", "k_pool": 20})
+        export.write_json_atomic(os.path.join(no_id_folder, "nulls.json"), {"run_id": None})
+        text = {section.id: section.text() for section in methods.methods_sections(self.root)}["statistics"]
+        self.assertIn(f"(run {second})", text)
+        self.assertNotIn(f"(run {first})", text)
+        self.assertIn(f"(run {legacy})", text)
+        self.assertIn(f"(run {no_id})", text)
+        self.assertEqual(len([line for line in text.splitlines() if line.startswith(methods.KIND_LABELS["nulls"])]), 3)
+
     def test_acknowledgement_only_for_gsp_bundles(self):
         self.make_study([("sub-01", {})])
         self.cohortmaps(gsp=False)
@@ -317,6 +403,38 @@ class MethodsTextCompatibilityTest(unittest.TestCase):
             self.assertIn(phrase, text)
         self.assertEqual(methods.lint_wording(text), [])
 
+    def test_top_pct_states_the_signed_rank_rule(self):
+        """A one-sided top-x% rule is written with its signed cut (as the sidecar's "derived" field), never as |T| or |mean Fz|."""
+        info = _bundle(True)
+        subset = {"preview": False, "partial": False, "n_requested": 120, "random": False, "seed": 0}
+        values = [float(i) for i in range(-40, 60)]  # top 5%: T >= 54.05, -T >= 35.05
+        expected = {
+            ("T", "pos"): ("T maps were thresholded at the top 5% of positive T values (T ≥ 54;", "|T|"),
+            ("T", "neg"): ("T maps were thresholded at the top 5% of negative T values (T ≤ -35;", "|T|"),
+            ("T", "both"): ("T maps were thresholded at the top 5% of absolute T values (|T| ≥ 54;", None),
+            ("Fz", "pos"): ("Mean Fz maps were thresholded at the top 5% of positive mean Fz values (mean Fz ≥ 54;", "|mean Fz|"),
+            ("Fz", "neg"): ("Mean Fz maps were thresholded at the top 5% of negative mean Fz values (mean Fz ≤ -35;", "|mean Fz|"),
+            ("Fz", "both"): ("Mean Fz maps were thresholded at the top 5% of absolute mean Fz values (|mean Fz| ≥ 54;", None),
+        }
+        for (statistic, sign), (phrase, absent) in expected.items():
+            with self.subTest(statistic=statistic, sign=sign):
+                rule = thresholds.normalize_rule({"kind": "top_pct", "value": 5, "statistic": statistic, "sign": sign})
+                resolved = thresholds.resolve(rule, 120, 100, values=values)
+                threshold = {"rule": rule, "resolved": resolved.to_dict(), "derived": thresholds.describe(resolved)}
+                text = export.methods_text(info, 120, subset, threshold, [{"name": "sub-01", "qa": {}}], {"null": {"k": 0}}, software={"slicer": "5.11"})
+                self.assertIn(phrase, text)
+                self.assertIn("rank rule top_pct, no p-value", text)
+                self.assertNotIn("effect size;", text)
+                if absent is not None:
+                    self.assertNotIn(absent, text.split("## Parameters")[0])
+                self.assertEqual(methods.lint_wording(text), [])
+        # A one-sided rule that nothing passes (no value of that sign) is stated, not formatted as a number
+        rule = thresholds.normalize_rule({"kind": "top_pct", "value": 5, "statistic": "T", "sign": "neg"})
+        resolved = thresholds.resolve(rule, 120, 100, values=[1.0, 2.0])
+        threshold = {"rule": rule, "resolved": resolved.to_dict(), "derived": thresholds.describe(resolved)}
+        text = export.methods_text(info, 120, subset, threshold, [{"name": "sub-01", "qa": {}}], {"null": {"k": 0}}, software={"slicer": "5.11"})
+        self.assertIn("top 5% of negative T values (no voxel of this sign, nothing passes;", text)
+
 
 class ChecklistTest(_StudyCase):
     def test_empty_study_is_not_run(self):
@@ -384,6 +502,31 @@ class ChecklistTest(_StudyCase):
         self.assertIn(export.DISCLAIMER, markdown)
         self.assertIn("never block", markdown)
 
+    def test_lesion_set_of_a_pipeline_output_folder(self):
+        # The pipeline's Lesion-set stage writes <out>/lesionset.json only (never the study's derivatives/lnm/lesionset.json):
+        # A2 reads it in the exported checklist.md (include_dirs) and in the app's Report card (done pipeline runs)
+        self.make_study([("sub-01", {"group": "case"})])
+        self.assertEqual(checklist.ITEMS_BY_ID["A2"].evaluate(self.root)["status"], checklist.NOT_RUN)
+        out = self.run_dir("conn-GSP1000MF")
+        export.write_json_atomic(os.path.join(out, "lesionset.json"), {"format": "slicer-lnm-lesionset", "summary": {"n": 10, "volume": {"median": 0.32}, "dice": {"median": 0.0}}})
+        written = export.write_methods(self.root, out, formats=("md",))
+        a2 = {item["id"]: item for item in written["items"]}["A2"]
+        self.assertEqual(a2["status"], checklist.DONE)
+        self.assertEqual(a2["value"], "10 lesions; median volume 0.32; median pairwise Dice 0")
+        self.assertEqual(a2["evidence"], ["file:derivatives/lnm/conn-GSP1000MF/lesionset.json"])
+        with open(written["checklist"], encoding="utf-8") as f:
+            self.assertNotIn("lesion-set diagnostics not run", f.read())
+        self.assertEqual(checklist.ITEMS_BY_ID["A2"].evaluate(self.root)["status"], checklist.NOT_RUN)  # not registered yet
+        self.register("pipeline", out)
+        a2 = checklist.ITEMS_BY_ID["A2"].evaluate(self.root)
+        self.assertEqual((a2["status"], a2["evidence"]), (checklist.DONE, ["file:derivatives/lnm/conn-GSP1000MF/lesionset.json"]))
+        # An output folder outside the study is cited by file name, never by a local path
+        outside = os.path.join(self.tmp, "elsewhere")
+        os.makedirs(outside)
+        export.write_json_atomic(os.path.join(outside, "lesionset.json"), {"summary": {"n": 3}})
+        a2 = checklist.ITEMS_BY_ID["A2"].evaluate(self.root, records=methods.Records(self.root, include_dirs=[outside]))
+        self.assertEqual((a2["status"], a2["value"], a2["evidence"]), (checklist.DONE, "3 lesions", ["file:lesionset.json"]))
+
     def test_volume_off_and_overlap_without_null_are_flagged(self):
         self.make_study([("sub-01", {"group": "case"})])
         self.glm(covariates=())
@@ -392,6 +535,20 @@ class ChecklistTest(_StudyCase):
         self.assertEqual(items["F8"]["status"], checklist.FLAGGED)
         self.assertIn("volume covariate off", items["F8"]["value"])
         self.assertEqual(items["E7"]["status"], checklist.FLAGGED)
+
+    def test_pipeline_overlap_stage_without_null_is_flagged(self):
+        self.make_study([("sub-01", {"group": "case"})])
+        out = self.run_dir("pipeline")
+        export.write_json_atomic(
+            os.path.join(out, "pipeline.json"),
+            {"format": "slicer-lnm-pipeline", "stages": [{"name": "nulls", "status": "skipped"}, {"name": "overlap", "status": "done"}]},
+        )
+        pipeline_id = self.register("pipeline", out)
+        item = checklist.ITEMS_BY_ID["E7"].evaluate(self.root)
+        self.assertEqual((item["status"], item["value"]), (checklist.FLAGGED, "overlap maps without a null reference"))
+        self.assertEqual(item["evidence"], [pipeline_id])
+        export.write_json_atomic(os.path.join(out, "pipeline.json"), {"format": "slicer-lnm-pipeline", "stages": [{"name": "overlap", "status": "skipped"}]})
+        self.assertEqual(checklist.ITEMS_BY_ID["E7"].evaluate(self.root)["status"], checklist.NOT_RUN)
 
     def test_dot_colours(self):
         self.assertEqual(checklist.dot_colour([]), checklist.GREY)
@@ -410,6 +567,26 @@ class ChecklistTest(_StudyCase):
         self.assertIn("localizes", item["value"])
 
 
+    def test_wording_item_uses_the_run_output_folder(self):
+        # A run whose output folder is outside the study (BIDS-App) checks its own methods, not an earlier run's
+        self.make_study([("sub-01", {})])
+        out = os.path.join(self.tmp, "outside", "conn-X")
+        files = export.write_methods(self.root, out)
+        with open(files["checklist"], encoding="utf-8") as f:
+            text = f.read()
+        row = next(line for line in text.splitlines() if line.startswith("| K15 |"))
+        self.assertIn("| done |", row)
+        self.assertIn("file:methods.md", row)
+        self.assertNotIn(self.tmp, row)
+        # An earlier run's methods in the study are not cited
+        with open(os.path.join(self.run_dir("report"), "methods.md"), "w", encoding="utf-8") as f:
+            f.write("This network localizes the symptom.\n")
+        files = export.write_methods(self.root, out)
+        with open(files["checklist"], encoding="utf-8") as f:
+            row = next(line for line in f.read().splitlines() if line.startswith("| K15 |"))
+        self.assertIn("| done |", row)
+        self.assertNotIn("localizes", row)
+
     def test_wording_item_under_a_cache_folder(self):
         # A study whose own path contains "cache" is still checked; only cache folders below derivatives/ are skipped
         self.root = os.path.join(self.tmp, "cache", "study")
@@ -420,6 +597,17 @@ class ChecklistTest(_StudyCase):
         with open(os.path.join(self.run_dir("cache"), "methods.md"), "w", encoding="utf-8") as f:
             f.write("This network localizes the symptom.\n")
         self.assertEqual(checklist.ITEMS_BY_ID["K15"].evaluate(self.root)["status"], checklist.DONE)
+
+    def test_wording_item_ignores_publication_bundle_copies(self):
+        # Copies of the methods inside exported bundles are not the study's own methods or report
+        self.make_study([("sub-01", {})])
+        bundle = os.path.join(self.root, "derivatives", "lnm", "publication", "20260101T000000Z")
+        os.makedirs(bundle)
+        for name in ("methods.md", "methods.html", "methods.txt"):
+            with open(os.path.join(bundle, name), "w", encoding="utf-8") as f:
+                f.write("Neutral text.\n")
+        item = checklist.ITEMS_BY_ID["K15"].evaluate(self.root)
+        self.assertEqual(item["status"], checklist.NOT_RUN, item["value"])
 
 
 class ExportFilesTest(_StudyCase):
@@ -478,6 +666,18 @@ class ExportFilesTest(_StudyCase):
         with open(out, encoding="utf-8") as f:
             self.assertEqual(json.load(f)["missing"], manifest["missing"])
         self.assertEqual(checklist.ITEMS_BY_ID["J14"].evaluate(self.root)["status"], checklist.FLAGGED)
+
+    def test_j14_counts_exported_bundle_folder(self):
+        # The bundle export writes publication/<UTC>/manifest.json, not publication/manifest.json
+        bundle = os.path.join(self.root, "derivatives", "lnm", "publication", "20261113T090747Z")
+        os.makedirs(os.path.join(bundle, "neurovault"))
+        self.assertEqual(checklist.ITEMS_BY_ID["J14"].evaluate(self.root)["status"], checklist.NOT_RUN)
+        export.write_json_atomic(os.path.join(bundle, "manifest.json"), {"files": [{"path": "a"}], "missing": ["reproduce"]})
+        result = checklist.ITEMS_BY_ID["J14"].evaluate(self.root)
+        self.assertEqual(result["status"], checklist.FLAGGED)
+        self.assertIn("reproduce", result["value"])
+        export.write_json_atomic(os.path.join(bundle, "manifest.json"), {"files": [{"path": "a"}], "missing": []})
+        self.assertEqual(checklist.ITEMS_BY_ID["J14"].evaluate(self.root)["status"], checklist.DONE)
 
     def test_neurovault_df_per_map_type(self):
         folder = os.path.join(self.tmp, "maps")

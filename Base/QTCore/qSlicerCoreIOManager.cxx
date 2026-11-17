@@ -711,14 +711,37 @@ bool qSlicerCoreIOManager::loadNodes(const qSlicerIO::IOFileType& fileType,
                                      vtkCollection* loadedNodes,
                                      vtkMRMLMessageCollection* userMessages /*=nullptr*/)
 {
+  this->setProperty("SlicerStudioClearSceneAnswer", QVariant());
+  // A scene loaded with "clear" replaces the scene: the application may keep it (see clearSceneRequested())
+  const bool clearsScene = fileType == QString("SceneFile") && parameters.value("clear").toBool();
+  if (clearsScene && !this->confirmClearScene())
+  {
+    return false;
+  }
   vtkNew<vtkMRMLIOProperties> properties;
   qSlicerIO::toVTKProperties(parameters, properties);
-  return this->fileIOManager()->LoadNodes(fileType.toStdString(), properties, loadedNodes, userMessages);
+  const bool success = this->fileIOManager()->LoadNodes(fileType.toStdString(), properties, loadedNodes, userMessages);
+  if (clearsScene)
+  {
+    emit clearSceneFinished();
+  }
+  return success;
 }
 
 //-----------------------------------------------------------------------------
 bool qSlicerCoreIOManager::loadNodes(const QList<qSlicerIO::IOProperties>& files, vtkCollection* loadedNodes, vtkMRMLMessageCollection* userMessages /*=nullptr*/)
 {
+  this->setProperty("SlicerStudioClearSceneAnswer", QVariant());
+  // A scene loaded with "clear" replaces the scene: the application may keep it (see clearSceneRequested())
+  bool clearsScene = false;
+  for (const qSlicerIO::IOProperties& fileProperties : files)
+  {
+    clearsScene = clearsScene || (fileProperties.value("fileType").toString() == QString("SceneFile") && fileProperties.value("clear").toBool());
+  }
+  if (clearsScene && !this->confirmClearScene())
+  {
+    return false;
+  }
   // Load the files using the file IO manager, as a single loading operation (for progress reporting)
   vtkNew<vtkCollection> propertiesList;
   for (const qSlicerIO::IOProperties& fileProperties : files)
@@ -727,7 +750,27 @@ bool qSlicerCoreIOManager::loadNodes(const QList<qSlicerIO::IOProperties>& files
     qSlicerIO::toVTKProperties(fileProperties, properties);
     propertiesList->AddItem(properties);
   }
-  return this->fileIOManager()->LoadNodesFromList(propertiesList, loadedNodes, userMessages);
+  const bool success = this->fileIOManager()->LoadNodesFromList(propertiesList, loadedNodes, userMessages);
+  if (clearsScene)
+  {
+    emit clearSceneFinished();
+  }
+  return success;
+}
+
+//-----------------------------------------------------------------------------
+bool qSlicerCoreIOManager::confirmClearScene()
+{
+  this->setProperty("SlicerStudioClearSceneAnswer", QVariant());
+  emit clearSceneRequested();
+  if (this->property("SlicerStudioClearSceneAnswer").toString() == "cancel")
+  {
+    // The answer is kept until the next load, so that the cancelled load is not reported as an error
+    // (see qSlicerIOManager::showLoadNodesResultDialog())
+    emit clearSceneFinished();
+    return false;
+  }
+  return true;
 }
 
 //-----------------------------------------------------------------------------

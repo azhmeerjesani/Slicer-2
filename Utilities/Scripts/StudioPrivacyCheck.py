@@ -7,12 +7,14 @@ usage: StudioPrivacyCheck.py [--strict] <root> [<root> ...]    exit status 0 whe
 Each file with hits is printed with its class and the first hits. Classes (CLAUDE.md: shared files hold paths relative to
 the file; provenance and reproduce files are the exception, by design):
 
-  scene          .mrml (also inside .mrb)                        shared: a hit fails
+  scene          .mrml, and every text member of a .mrb (.mrml, .json, .tsv, .csv, .txt, ...: the .mrb is shared as a whole,
+                 so a table saved as .csv or a text node saved as .txt inside it counts like the scene)  shared: a hit fails
   table          .tsv / .csv                                     shared: a hit fails
   sidecar/study  other .json next to data, study files           shared: a hit fails
   log            .log in a study folder (for example derivatives/normalization/<sid>/logs; the child output of a run,
                  written with paths relative to the run folder)  shared: a hit fails
-  other          anything else that is text                      shared: a hit fails
+  other          anything else that is text, and colour tables   shared: a hit fails
+                 (.ctbl, and a .txt that starts with "# Color table file": 3D Slicer writes the full path of the file there)
   report         .html / .md / .txt                              reported, not a failure
   run-record     argv / inputs of a run: runs.jsonl, normalization.json, provenance.json, reproduce.sh and reproduce_<name>.sh
                  (for example the pipeline's reproduce_pipeline.sh), job and design records
@@ -22,7 +24,8 @@ the file; provenance and reproduce files are the exception, by design):
 --strict also counts cohortmaps.json and glm.json as shared outputs (their paths are relative since W3-I1).
 
 Absolute local paths are the folders of Linux and macOS homes, mounts and volumes (/home, /root, /Users, /tmp, /opt, /Volumes,
-/mnt, /media, /data, /private, the macOS temporary folders /var/folders), Windows drive paths (C:/..., also with backslashes)
+/mnt, /media, /data, /private, the macOS temporary folders /var/folders, and the usual cluster folders /scratch, /work, /srv,
+/gpfs, /lustre), Windows drive paths (C:/..., also with backslashes)
 and Windows UNC paths (\\server\share). The number of files checked (the .mrb and text files above) is printed per root.
 """
 
@@ -36,7 +39,7 @@ import zipfile
 # ("http://" is not a drive). Windows UNC paths: two backslashes, a server, a backslash and a share ("\\\\server\\share"; in
 # JSON each backslash is doubled)
 PAT = re.compile(
-    r"(?<![\w.])((?:/tmp|/home|/root|/Users|/opt|/Volumes|/mnt|/media|/data|/private|/var/folders)/[^\"'\t\n<>]*"
+    r"(?<![\w.])((?:/tmp|/home|/root|/Users|/opt|/Volumes|/mnt|/media|/data|/private|/var/folders|/scratch|/work|/srv|/gpfs|/lustre)/[^\"'\t\n<>]*"
     r"|[A-Za-z]:[\\/][^\"'\t\n<>]*"
     r"|(?<![\\\w])\\{2,}[\w.$-]+\\+[\w.$-][^\"'\t\n<>]*)",
 )
@@ -44,7 +47,9 @@ RUN_RECORDS = {"runs.jsonl", "normalization.json", "provenance.json", "slnm.json
 #: Reproduce scripts are run records: reproduce.sh and reproduce_<name>.sh (the pipeline's reproduce_pipeline.sh), nothing else
 REPRODUCE_SCRIPT = re.compile(r"^reproduce(_\w+)?\.sh$")
 RUN_RECORDS_LOOSE = {"cohortmaps.json", "glm.json"}
-TEXT_SUFFIXES = (".mrml", ".json", ".jsonl", ".tsv", ".csv", ".html", ".md", ".txt", ".sh", ".log")
+TEXT_SUFFIXES = (".mrml", ".json", ".jsonl", ".tsv", ".csv", ".html", ".md", ".txt", ".sh", ".log", ".ctbl")
+#: First line of a colour table that 3D Slicer wrote as .ctbl or .txt (followed by the full path of the file)
+COLOR_TABLE_HEADER = "# Color table file "
 SHARED = ("scene", "table", "sidecar/study", "log", "other")
 
 
@@ -68,13 +73,19 @@ def classify(rel, name, strict=False):
 
 
 def _texts(path, rel, name, strict):
-    """``[(label, class, text)]`` of a file: the scenes, sidecars and tables inside a .mrb, the file itself if it is text."""
+    """``[(label, class, text)]`` of a file: every text member inside a .mrb (scene, sidecar, table .tsv/.csv, text node .txt, ...:
+    the .mrb is shared as a whole), the file itself if it is text.
+    """
     if name.endswith(".mrb"):
         with zipfile.ZipFile(path) as z:
-            return [(f"{rel}!{n}", "scene", z.read(n).decode("utf-8", "replace")) for n in z.namelist() if n.endswith((".mrml", ".json", ".tsv"))]
+            return [(f"{rel}!{n}", "scene", z.read(n).decode("utf-8", "replace")) for n in z.namelist() if n.endswith(TEXT_SUFFIXES)]
     if name.endswith(TEXT_SUFFIXES):
         with open(path, encoding="utf-8", errors="replace") as f:
-            return [(rel, classify(rel, name, strict), f.read())]
+            text = f.read()
+        cls = classify(rel, name, strict)
+        if cls == "report" and name.endswith(".txt") and text.startswith(COLOR_TABLE_HEADER):
+            cls = "other"  # a colour table (data), not a report
+        return [(rel, cls, text)]
     return []
 
 
@@ -116,6 +127,9 @@ def scan(roots, strict=False, out=print, counts=None):
 
 
 def main(argv):
+    if argv[:1] in (["-h"], ["--help"]):
+        print(__doc__)
+        return 0
     strict = "--strict" in argv
     roots = [a for a in argv if a != "--strict"]
     if not roots:

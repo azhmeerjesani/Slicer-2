@@ -25,6 +25,7 @@ strip, policy card) add their rows and ⋯ items without editing this file.
 
 import html
 import logging
+import math
 import re
 import traceback
 
@@ -88,6 +89,24 @@ def _boundingBox(mask):
     return k0, k1, int(jIndices[0]), int(jIndices[-1]), int(iIndices[0]), int(iIndices[-1])
 
 
+def nearestArrayAxis(ijkToRAS, direction):
+    """``(array axis, |cos|)`` of the axis of a (k, j, i) array whose RAS direction is closest to ``direction`` (RAS).
+
+    Array axis 0 is k (matrix column 2), 1 is j (column 1), 2 is i (column 0). The k axis of a sagittal or coronal
+    acquisition is left-right or anterior-posterior: the slicing axis of an axial view (S) is then another axis.
+    """
+    matrix = np.asarray(ijkToRAS, dtype=float)
+    vector = np.asarray(direction, dtype=float)[:3]
+    vector = vector / (float(np.linalg.norm(vector)) or 1.0)
+    best, bestCos = 0, -1.0
+    for axis, column in ((0, 2), (1, 1), (2, 0)):
+        columnVector = matrix[:3, column]
+        cos = abs(float(np.dot(columnVector, vector))) / (float(np.linalg.norm(columnVector)) or 1.0)
+        if cos > bestCos:
+            best, bestCos = axis, cos
+    return best, bestCos
+
+
 def computeLesionMetrics(array_kji, spacing, ijkToRAS, axis=0, brainMask=None):
     """Metrics of a lesion mask.
 
@@ -99,16 +118,17 @@ def computeLesionMetrics(array_kji, spacing, ijkToRAS, axis=0, brainMask=None):
     :return: ``{voxels, ml, parts, gaps, centroid_ras, outside_pct, bbox, x_min, x_max, spans_both}``:
 
       - ``gaps``: array indices along ``axis``, inside the lesion extent, of the slices without any lesion voxel;
+        ``gaps_by_axis``: the same along each array axis (0 = k, 1 = j, 2 = i), see ``nearestArrayAxis()``;
       - ``centroid_ras``: (R, A, S) of the centre of mass, None for an empty lesion;
-      - ``x_min``/``x_max``: RAS x extent of the voxel centres; ``spans_both``: voxels lie more than one voxel on both
-        sides of x = 0 (the midline on an MNI grid only);
+      - ``x_min``/``x_max``: RAS x extent of the voxel centres; ``spans_both``: the voxels (their full width, not only
+        their centres) reach both sides of x = 0, so the column that holds x = 0 counts (the midline on an MNI grid only);
       - ``bbox``: ``(k0, k1, j0, j1, i0, i1)`` inclusive, None for an empty lesion.
     """
     array = np.asarray(array_kji)
     mask = array if array.dtype == bool else array != 0
     matrix = np.asarray(ijkToRAS, dtype=float) if ijkToRAS is not None else np.diag([*(float(s) for s in spacing), 1.0])
     voxelVolume = abs(float(np.linalg.det(matrix[:3, :3])))
-    empty = {"voxels": 0, "ml": 0.0, "parts": 0, "gaps": [], "centroid_ras": None, "outside_pct": None, "bbox": None,
+    empty = {"voxels": 0, "ml": 0.0, "parts": 0, "gaps": [], "gaps_by_axis": ([], [], []), "centroid_ras": None, "outside_pct": None, "bbox": None,
              "x_min": None, "x_max": None, "spans_both": False}
     if mask.ndim != 3 or mask.size == 0:
         return empty
@@ -123,17 +143,33 @@ def computeLesionMetrics(array_kji, spacing, ijkToRAS, axis=0, brainMask=None):
 
     _labels, parts = ndimage.label(crop, structure=partsStructure())
 
-    # Gap slices: empty slices between the first and the last slice of the lesion along the axis
-    otherAxes = tuple(index for index in range(3) if index != axis)
-    occupied = crop.any(axis=otherAxes)
-    offset = (k0, j0, i0)[axis]
-    gaps = [int(index) + offset for index in np.flatnonzero(~occupied)]
+    # Gap slices: empty slices between the first and the last slice of the lesion, along each array axis (the
+    # caller picks the axis of a view, which depends on how the scan was acquired)
+    gapsByAxis = []
+    for gapAxis in range(3):
+        occupied = crop.any(axis=tuple(index for index in range(3) if index != gapAxis))
+        offset = (k0, j0, i0)[gapAxis]
+        gapsByAxis.append([int(index) + offset for index in np.flatnonzero(~occupied)])
+    gaps = gapsByAxis[axis]
 
-    kk, jj, ii = np.nonzero(crop)
-    indices = np.vstack((ii + i0, jj + j0, kk + k0, np.ones(ii.size))).astype(float)
-    centroid = matrix @ indices.mean(axis=1)
-    xs = matrix[0] @ indices
-    xMin, xMax = float(xs.min()), float(xs.max())
+    # Centroid and x extent without per-voxel index arrays (they cost about 100 bytes per lesion voxel: a large
+    # Threshold froze the GUI and ran out of memory). The mean index comes from the voxel counts per i, j and k plane;
+    # x is linear in (i, j, k), so its extent comes slice by slice from one (j, i) plane of x values.
+    meanIndex = [float(np.dot(np.count_nonzero(crop, axis=tuple(other for other in range(3) if other != countAxis)),
+                              np.arange(crop.shape[countAxis], dtype=float))) / voxels + (k0, j0, i0)[countAxis]
+                 for countAxis in range(3)]
+    centroid = matrix @ np.array([meanIndex[2], meanIndex[1], meanIndex[0], 1.0])
+    xi = matrix[0, 0] * np.arange(i0, i1 + 1, dtype=float)
+    xj = matrix[0, 1] * np.arange(j0, j1 + 1, dtype=float)
+    xPlane = xj[:, None] + xi[None, :]
+    xMin, xMax = math.inf, -math.inf
+    for sliceIndex in range(crop.shape[0]):
+        sliceMask = crop[sliceIndex]
+        xk = matrix[0, 2] * (k0 + sliceIndex) + matrix[0, 3]
+        sliceMin = float(np.min(xPlane, where=sliceMask, initial=math.inf))
+        if sliceMin != math.inf:
+            xMin = min(xMin, sliceMin + xk)
+            xMax = max(xMax, float(np.max(xPlane, where=sliceMask, initial=-math.inf)) + xk)
     voxelWidthX = float(np.linalg.norm(matrix[0, :3])) or 1.0
 
     outside = None
@@ -147,22 +183,33 @@ def computeLesionMetrics(array_kji, spacing, ijkToRAS, axis=0, brainMask=None):
         "ml": voxels * voxelVolume / 1000.0,
         "parts": int(parts),
         "gaps": gaps,
+        "gaps_by_axis": tuple(gapsByAxis),
         "centroid_ras": (float(centroid[0]), float(centroid[1]), float(centroid[2])),
         "outside_pct": outside,
         "bbox": bbox,
         "x_min": xMin,
         "x_max": xMax,
-        "spans_both": xMin < -voxelWidthX and xMax > voxelWidthX,
+        # voxel extents, not centres: the column that holds x = 0 reaches both sides of it on any MNI grid (its centre is at
+        # 0 on the FSL grids, at -0.5 mm on the 2009c 2 mm grid)
+        "spans_both": xMin - voxelWidthX / 2 < 0 < xMax + voxelWidthX / 2,
     }
 
 
 def formatMl(ml):
-    """Volume text: "2.27 mL", "0.042 mL" (three significant digits below 0.1 mL)."""
+    """Volume text: "2.27 mL", "0.042 mL" (two significant digits below 0.1 mL), always plain decimals.
+
+    Never exponent notation: one 0.4 mm voxel is "0.000064 mL"; below a millionth of a mL it is "<0.000001 mL".
+    """
     if ml >= 100:
         return f"{ml:.0f} mL"
     if ml >= 0.1:
         return f"{ml:.2f} mL"
-    return f"{ml:.2g} mL" if ml > 0 else "0 mL"
+    if ml <= 0:
+        return "0 mL"
+    if ml < 1e-6:
+        return "<0.000001 mL"
+    decimals = 1 - math.floor(math.log10(ml))
+    return f"{ml:.{decimals}f} mL"
 
 
 def readoutHtml(metrics, sideWord=None, sideLevel="neutral", outsideKnown=False):
@@ -232,11 +279,10 @@ def fixesHtml(stats, outsideKnown=False):
 
 
 def _setPixelFont(widget, basePx, weight=None):
-    font = qt.QFont(widget.font)
-    font.setPixelSize(ui.fontPx(basePx))
-    if weight is not None:
-        font.setWeight(weight)
-    widget.setFont(font)
+    """Set a ``basePx`` font (for a 13 px body) on ``widget``, and keep it in proportion to the application font, also
+    while the card is not in the window (the card is not shown in every workspace).
+    """
+    ui._font(widget, ui.fontPx(basePx), weight)
 
 
 def _iconButton(iconName, toolTip, objectName, checkable=False):
@@ -255,20 +301,111 @@ def _iconButton(iconName, toolTip, objectName, checkable=False):
     return button
 
 
+class _NameEditFilter(qt.QObject):
+    """Event filter of ``_NameEdit``: focus in and out switch between the whole name and the elided name, a resize re-elides."""
+
+    def __init__(self, edit):
+        qt.QObject.__init__(self, edit)
+        self._edit = edit
+
+    def eventFilter(self, obj, event):
+        eventType = event.type()
+        if eventType == qt.QEvent.FocusIn:
+            self._edit.beginEdit()
+        elif eventType == qt.QEvent.FocusOut:
+            # A context menu of the field (Paste...) is part of the edit. The field emits editingFinished with the
+            # whole text while it handles this event, so the name is elided after that.
+            if event.reason() != qt.Qt.PopupFocusReason:
+                qt.QTimer.singleShot(0, self._edit.endEdit)
+        elif eventType in (qt.QEvent.Resize, qt.QEvent.Show):
+            self._edit.showElided()
+        elif eventType in (qt.QEvent.ShortcutOverride, qt.QEvent.KeyPress) and event.key() == qt.Qt.Key_Escape:
+            # Esc with unsent edits cancels them (the shell leaves Esc to a modified line edit, USABILITY 3 rung 0); without
+            # unsent edits the key goes on to the Esc ladder of the shell.
+            if self._edit.hasUnsentEdits():
+                if eventType == qt.QEvent.ShortcutOverride:
+                    event.accept()
+                else:
+                    self._edit.cancelEdit()
+                    event.accept()
+                return True
+        return False
+
+
 class _NameEdit(qt.QLineEdit):
-    """Flat line edit of the lesion name: Enter commits, Esc (with unsent edits) restores the name."""
+    """Flat line edit of the lesion name: Enter commits, Esc (with unsent edits) restores the name.
+
+    While it is not edited the field shows the name elided with an ellipsis to its width (the whole name is the tool tip),
+    so a long name is never cut in the middle of a letter; while it is edited it holds the whole name.
+    """
+
+    # What the frame, the 3 px padding and the text margin of the field take from its width
+    TEXT_MARGINS = 12
 
     def __init__(self, commit):
         qt.QLineEdit.__init__(self)
         self._commit = commit
         self._shown = ""
+        self._editing = False
+        self._toolTip = ""
+        self._toolTipFor = None
+        self._filter = _NameEditFilter(self)
+        self.installEventFilter(self._filter)
         self.connect("editingFinished()", self._onEditingFinished)
+
+    def setBaseToolTip(self, toolTip, toolTipFor):
+        """``toolTip``: the tool tip of the field; ``toolTipFor(name)``: its tool tip while the name is elided."""
+        self._toolTip = toolTip
+        self._toolTipFor = toolTipFor
+        self.showElided()
+
+    def name(self):
+        """The whole name of the lesion (``text`` is the elided name while the field is not edited)."""
+        return self._shown
 
     def setName(self, name):
         self._shown = name
-        if not self.hasFocus() and self.text != name:
-            self.setText(name)
+        self.showElided()
+
+    def isEditing(self):
+        return self._editing or self.hasFocus()
+
+    def beginEdit(self):
+        """Show the whole name for editing."""
+        self._editing = True
+        if str(self.text) != self._shown:
+            self.setText(self._shown)
+
+    def hasUnsentEdits(self):
+        """True if the field holds text that was typed and not committed."""
+        return self.hasFocus() and (bool(self.isModified()) or str(self.text) != self._shown)
+
+    def cancelEdit(self):
+        """Put the name back in the field (Esc): a later focus-out then commits nothing."""
+        self.setText(self._shown)
+        self.setModified(False)
+        self.selectAll()
+
+    def endEdit(self):
+        """Show the elided name again (unless the field has the focus)."""
+        if self.hasFocus():
+            return
+        self._editing = False
+        self.showElided()
+
+    def showElided(self):
+        if self.isEditing():
+            return
+        name = self._shown
+        width = int(self.width) - self.TEXT_MARGINS
+        shown = name
+        # Before the field is laid out its width says nothing: the whole name is shown
+        if width > 40:
+            shown = self.fontMetrics().elidedText(name, qt.Qt.ElideRight, width)
+        if str(self.text) != shown:
+            self.setText(shown)
             self.setCursorPosition(0)
+        self.setToolTip(self._toolTipFor(name) if shown != name and callable(self._toolTipFor) else self._toolTip)
 
     def _onEditingFinished(self):
         text = str(self.text).strip()
@@ -276,6 +413,42 @@ class _NameEdit(qt.QLineEdit):
             self._commit(text)
         elif not text:
             self.setText(self._shown)
+        if not self.hasFocus():
+            self.endEdit()
+
+
+class _SwitcherFilter(qt.QObject):
+    """Elides the lesion name on the switcher button to its width when it is resized."""
+
+    def __init__(self, card):
+        qt.QObject.__init__(self, card.switcher)
+        self._card = card
+
+    def eventFilter(self, obj, event):
+        if event.type() in (qt.QEvent.Resize, qt.QEvent.Show):
+            self._card._showSwitcherText()
+        return False
+
+
+def _textWidth(label):
+    """Width (px) of the whole text of an ``ui.elideLabel()`` in its font."""
+    text = str(label.property("studioFullText") or "")
+    metrics = label.fontMetrics()
+    advance = getattr(metrics, "horizontalAdvance", None)
+    return int(advance(text) if advance is not None else metrics.width(text))
+
+
+class _StatCellsFitter(qt.QObject):
+    """Shares the stat row of a ``LesionCard`` between its cells again when the row is resized (``_fitStatCells()``)."""
+
+    def __init__(self, card):
+        qt.QObject.__init__(self)
+        self._card = card
+
+    def eventFilter(self, obj, event):
+        if event.type() == qt.QEvent.Resize:
+            self._card._fitStatCells()
+        return False
 
 
 class LesionCard:
@@ -323,7 +496,9 @@ class LesionCard:
         self.nameEdit.setFrame(False)
         self.nameEdit.setMinimumWidth(60)
         self.nameEdit.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
-        self.nameEdit.setToolTip(ui.tooltip(_("Lesion name"), "Enter", _("Rename the lesion (the file name follows)")))
+        self.nameEdit.setBaseToolTip(
+            ui.tooltip(_("Lesion name"), "Enter", _("Rename the lesion (the file name follows)")),
+            lambda name: ui.tooltip(name, "Enter", _("Rename the lesion (the file name follows)")))
         self.nameEdit.setAccessibleName(_("Lesion name"))
         ui.setText(self.nameEdit, "section")
         # The name reads as a title on the card; the field shows only while it is edited (focus)
@@ -343,6 +518,8 @@ class LesionCard:
         self.switcher.setToolTip(ui.tooltip(_("Lesions"), None, _("Choose the lesion to edit; the others keep their files")))
         self.switcher.setFocusPolicy(qt.Qt.TabFocus)
         ui.setText(self.switcher, "section")
+        self._switcherFilter = _SwitcherFilter(self)
+        self.switcher.installEventFilter(self._switcherFilter)
         self.switcherMenu = qt.QMenu(self.switcher)
         self.switcherMenu.setObjectName("StudioLesionSwitcherMenu")
         self.switcherMenu.connect("aboutToShow()", self._fillSwitcherMenu)
@@ -384,12 +561,22 @@ class LesionCard:
             cellLayout = qt.QVBoxLayout(cell)
             cellLayout.setContentsMargins(10, 6, 8, 6)
             cellLayout.setSpacing(0)
-            value = ui.label("", "number", "text", "StudioLesionStatValue")
-            caption = ui.label(caption, "small", "text3", "StudioLesionStatCaption")
+            # The value is elided too ("Both hemispheres" -> "Both hem…"): an unelided value keeps its size hint and
+            # squeezes the other cells (their captions were cut to "Pa")
+            value = ui.elideLabel(ui.label("", "number", "text", "StudioLesionStatValue"))
+            # Elided ("Part · 0 ga…") when the cell is too narrow for its caption: never cut off mid-letter
+            captionText = caption
+            caption = ui.elideLabel(ui.label("", "small", "text3", "StudioLesionStatCaption"))
+            ui.setElidedText(caption, captionText)
             cellLayout.addWidget(value)
             cellLayout.addWidget(caption)
+            # The stretch factors are the widths the cells need for their texts (``_fitStatCells()``), so at the default
+            # 340 px inspector "1.44 mL", "Part · 0 gaps" and "scanner space" all fit whole
             statsLayout.addWidget(cell, 1)
             self.statValues[key] = (value, caption)
+        self.statsLayout = statsLayout
+        self._statCellsFitter = _StatCellsFitter(self)
+        self.statsFrame.installEventFilter(self._statCellsFitter)
         ui.bindStyleSheet(self.statsFrame, lambda: (
             f"QFrame#StudioLesionStats {{ background-color: {ui.token('card-low').name()}; border: 1px solid {ui.token('hairline').name()}; border-radius: 8px; }}"
             f"QFrame#StudioLesionStatCell {{ background: transparent; border: none; border-left: 1px solid {ui.token('hairline').name()}; border-radius: 0px; }}"
@@ -406,7 +593,8 @@ class LesionCard:
         readoutLayout.addWidget(self.statsFrame)
         # The fixes that the stat cells call for ("2 parts · Keep largest")
         self.fixesLabel = self._label("StudioLesionFixes", 12, links=True)
-        self.saveStateLabel = self._label("StudioLesionSaveState", 12)
+        # One line, elided ("Saved · sub-21_space-MNI152NL…"): a long BIDS name has no break point and was cut mid-letter
+        self.saveStateLabel = ui.elideLabel(self._label("StudioLesionSaveState", 12))
         self.spaceLabel = self._label("StudioLesionSpaceLine", 12)
         self.hintLabel = ui.elideLabel(self._label("StudioLesionHint", 12))
         # Row 3: the save state, and "New lesion" once the lesion is saved (the next case starts on a new lesion and
@@ -568,7 +756,7 @@ class LesionCard:
         self.nameEdit.setVisible(not multiple)
         self.switcher.setVisible(multiple)
         self.nameEdit.setName(name)
-        self.switcher.setText(f"{name} ▾")
+        self._showSwitcherText()
         self.switcher.setAccessibleName(_("Lesion {name}, {count} lesions").format(name=name, count=len(lesions)))
         # Without a segment yet (an empty lesion) the swatch is an empty outline: never an invisible button
         self._setSwatchColor(state.get("color"))
@@ -587,8 +775,7 @@ class LesionCard:
         self._setStats(stats)
         self._setReadout(state.get("readoutHtml"), stats)
         self._setText(self.fixesLabel, fixesHtml(stats) if stats else None, "text2")
-        self._setText(self.saveStateLabel, state.get("saveState"), "text3")
-        self.saveStateLabel.setToolTip(state.get("saveStateToolTip") or "")
+        self._setSaveStateText(state.get("saveState"), state.get("saveStateToolTip") or "")
         self.saveRow.setVisible(bool(state.get("saveState")))
         self._setSaveStateIcon(state.get("saveState"))
         self.newLesionButton.setVisible(bool(state.get("offerNewLesion")) and enabled)
@@ -631,6 +818,19 @@ class LesionCard:
         if not label.isVisibleTo(self.widget):
             label.show()
 
+    def _setSaveStateText(self, text, toolTip):
+        """The save state line: one line, elided to its width; the tooltip is the given one, else the whole text while elided."""
+        if not text:
+            if not self.saveStateLabel.isHidden():
+                self.saveStateLabel.hide()
+            return
+        styleSheet = f"QLabel {{ color: {ui.token('text3').name()}; background: transparent; border: none; }}"
+        if self.saveStateLabel.styleSheet != styleSheet:
+            self.saveStateLabel.setStyleSheet(styleSheet)
+        ui.setElidedText(self.saveStateLabel, text, toolTip)
+        if not self.saveStateLabel.isVisibleTo(self.widget):
+            self.saveStateLabel.show()
+
     def _setHint(self, text):
         """The hint of the tool: one caption line, elided to its width (the whole text is the tooltip)."""
         if not text:
@@ -659,7 +859,9 @@ class LesionCard:
         if not stats:
             self.readoutLabel.setMinimumHeight(0)
             self.readoutLabel.setMaximumHeight(16777215)
-            self.readoutLabel.setTextInteractionFlags(qt.Qt.LinksAccessibleByMouse | qt.Qt.LinksAccessibleByKeyboard)
+            # Only a text with a link is a keyboard stop (a label without one draws no focus ring)
+            self.readoutLabel.setTextInteractionFlags(
+                qt.Qt.LinksAccessibleByMouse | qt.Qt.LinksAccessibleByKeyboard if "<a " in (readoutHtml or "") else qt.Qt.NoTextInteraction)
             # The text is shown: screen readers read it (not the readout of the stats shown before)
             if self.readoutLabel.accessibleName:
                 self.readoutLabel.setAccessibleName("")
@@ -693,18 +895,19 @@ class LesionCard:
                 gaps=_("1 gap") if gaps == 1 else _("{count} gaps").format(count=gaps)), parts > 1 or gaps > 0),
             # In scanner space: "Unknown" with the reason under it, compactly (VISUAL 4.4)
             "side": ((stats.get("side") or (_("Unknown") if stats.get("sideNote") else "\u2013")),
-                     _("Side · {note}").format(note=stats["sideNote"]) if stats.get("sideNote") and not stats.get("side") else _("Side"),
+                     stats["sideNote"] if stats.get("sideNote") and not stats.get("side") else _("Side"),
                      stats.get("sideLevel") == "warn"),
         }
         for key, (valueText, captionText, warn) in values.items():
             value, caption = self.statValues[key]
-            if str(value.text) != valueText:
-                value.setText(valueText)
-            if str(caption.text) != captionText:
-                caption.setText(captionText)
+            if str(value.property("studioFullText") or "") != valueText:
+                ui.setElidedText(value, valueText)
+            if str(caption.property("studioFullText") or "") != captionText:
+                ui.setElidedText(caption, captionText)
             styleSheet = f"QLabel {{ color: {ui.token('warning').name()}; }}" if warn else ""
             if value.styleSheet != styleSheet:
                 value.setStyleSheet(styleSheet)
+        self._fitStatCells()
         # A fixed height from the fonts: in a short inspector (1366 x 768) the scroll area lays the panel out at its
         # minimum size, which would squeeze the value onto the caption
         value, caption = self.statValues["volume"]
@@ -712,6 +915,41 @@ class LesionCard:
         if self.statsFrame.minimumHeight != height or self.statsFrame.maximumHeight != height:
             self.statsFrame.setFixedHeight(height)
         self.statsFrame.show()
+
+    def _fitStatCells(self):
+        """Share the width of the stat row so that every cell gets the width its value and caption need, and the width
+        left over is shared equally; when the row is too narrow for all three texts (a narrow inspector or a long
+        "Both hemispheres"), the Side cell gives way first and then all cells shrink in proportion, and their labels elide. Equal thirds cut "scanner space" (and "Side ·
+        scanner space") at the default 340 px inspector, where the Volume cell had room to spare.
+        """
+        available = self.statsFrame.contentsRect().width()
+        if available <= 0:
+            return
+        needs = []
+        for key in ("volume", "parts", "side"):
+            value, caption = self.statValues[key]
+            # The margins are the cell layout's (the cell widget itself has none)
+            margins = value.parent().layout().contentsMargins()
+            needs.append(max(_textWidth(value), _textWidth(caption)) + margins.left() + margins.right() + 2)
+        spare = available - sum(needs)
+        if spare >= 0:
+            widths = [need + spare // len(needs) for need in needs]
+        else:
+            # Too narrow for all three texts: the Side value ("Both hemispheres") is the one that gives way first, down
+            # to about 6 characters ("Both…"), so "97.34 mL" and "Part · 0 gaps" stay whole; only when that is not
+            # enough do all the cells shrink in proportion
+            deficit = -spare
+            sideMin = min(needs[2], 6 * self.statValues["side"][0].fontMetrics().averageCharWidth() + 20)
+            cut = min(deficit, max(0, needs[2] - sideMin))
+            widths = list(needs)
+            widths[2] -= cut
+            deficit -= cut
+            if deficit > 0:
+                total = sum(widths)
+                widths = [max(1, width - deficit * width // total) for width in widths]
+        for index, width in enumerate(widths):
+            if self.statsLayout.stretch(index) != width:
+                self.statsLayout.setStretch(index, width)
 
     def _setSaveStateIcon(self, text):
         saved = bool(text) and str(text).startswith(_("Saved"))
@@ -750,11 +988,38 @@ class LesionCard:
         self.notesFrame.setVisible(visible)
         if callable(self.notesVisibilityChanged):
             self.notesVisibilityChanged(visible)
+        if visible:
+            self._scrollIntoView(self.notesFrame)
+
+    def _scrollIntoView(self, target):
+        """Scroll the inspector so ``target`` shows once the layout has settled (a newly shown frame has no size yet).
+
+        setFocus() and showing a frame do not scroll a QScrollArea, so Notes opened at the bottom of a tall inspector would
+        stay below the fold (SPEC 2.11: the focus ring is visible).
+        """
+        scrollArea = None
+        parent = self.widget.parent()
+        while parent is not None:
+            if parent.inherits("QScrollArea"):
+                scrollArea = parent
+                break
+            parent = parent.parent()
+        if scrollArea is None:
+            return
+
+        def scroll():
+            if ui._isAlive(scrollArea) and ui._isAlive(target) and scrollArea.widget() is not None \
+                    and scrollArea.isAncestorOf(target) and target.isVisible():
+                scrollArea.ensureWidgetVisible(target)
+
+        qt.QTimer.singleShot(0, scroll)
 
     def focusNotes(self, field="notes"):
         """Open the Notes and focus the notes field ("notes") or the source field ("source")."""
         self.setNotesVisible(True)
-        (self.sourceReferenceEdit if field == "source" else self.notesEdit).setFocus(qt.Qt.OtherFocusReason)
+        edit = self.sourceReferenceEdit if field == "source" else self.notesEdit
+        edit.setFocus(qt.Qt.OtherFocusReason)
+        self._scrollIntoView(edit)
 
     def startRename(self):
         """Focus the name field with the name selected (the ⋯ "Rename lesion" item)."""
@@ -762,6 +1027,7 @@ class LesionCard:
             # Several lesions: rename in a dialog-free way by showing the edit for this lesion
             self.switcher.hide()
             self.nameEdit.show()
+        self.nameEdit.beginEdit()
         self.nameEdit.setFocus(qt.Qt.OtherFocusReason)
         self.nameEdit.selectAll()
 
@@ -797,6 +1063,20 @@ class LesionCard:
 
     def _onSwatchClicked(self):
         self.controller.chooseColor()
+
+    def _showSwitcherText(self):
+        """The lesion name on the switcher button, elided ("Left MCA inf… ▾") when it does not fit; the whole name is its tool tip."""
+        name = self._state.get("name") or ""
+        width = int(self.switcher.width) - 36  # the padding of the button and the " ▾" after the name
+        shown = name
+        if width > 40:
+            shown = self.switcher.fontMetrics().elidedText(name, qt.Qt.ElideRight, width)
+        text = f"{shown} ▾"
+        if str(self.switcher.text) != text:
+            self.switcher.setText(text)
+        self.switcher.setToolTip(
+            ui.tooltip(name, None, _("Choose the lesion to edit; the others keep their files")) if shown != name
+            else ui.tooltip(_("Lesions"), None, _("Choose the lesion to edit; the others keep their files")))
 
     def _onRename(self, name):
         self.controller.renameLesion(name)
@@ -848,6 +1128,10 @@ class LesionCard:
         Only edits the user made since the last commit are written: a field that only shows the lesion's own value is
         left alone.
         """
+        try:
+            self.sourceReferenceEdit.objectName
+        except Exception:
+            return  # the card's widgets are already destroyed (the application is quitting): nothing is being typed
         if self._notesTimer.isActive():
             self._commitNotes()
         if self.sourceReferenceEdit.isModified():

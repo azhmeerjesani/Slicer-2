@@ -7,6 +7,9 @@ only set on a chip or banner when the style does not paint roles.
 """
 
 import html
+import logging
+import os
+import re
 
 import ctk
 import qt
@@ -26,6 +29,93 @@ _LEVEL_COLORS = {
 }
 
 
+def dialogStartFolder(fallback=""):
+    """Where a file dialog without a folder of its own starts (``StudioLib.importer.dialogStartFolder``: /data in the web build).
+
+    ``fallback`` is returned when Studio is not available and in every build except the web one.
+    """
+    try:
+        from StudioLib import importer
+
+        return importer.dialogStartFolder(fallback)
+    except Exception:
+        return fallback
+
+
+def unwritableMessage(error):
+    """The sentence for a folder that cannot be written (permission denied, read-only medium), or None for any other error.
+
+    The folder is the one that holds the file the failing call named: no exception class, errno or temporary file name.
+    """
+    import errno
+
+    if not isinstance(error, OSError) or error.errno not in (errno.EACCES, errno.EPERM, errno.EROFS) or not error.filename:
+        return None
+    name = os.fspath(error.filename)
+    folder = os.path.dirname(name.rstrip(os.sep)) or name
+    return _("The folder {folder} cannot be written. Choose another folder.").format(folder=folder)
+
+
+def typedPath(text):
+    """A path typed in a dialog field, as the absolute path a job is given: ``~`` is expanded; "" for an empty field.
+
+    Jobs run with the module folder as their working folder (``jobrunner``), so a relative path would be written inside
+    the application (a ``~`` that is not expanded is a relative path too): None is returned for one, and the dialog shows
+    ``relativePathProblem()`` instead of starting the job.
+    """
+    text = str(text or "").strip()
+    if not text:
+        return ""
+    path = os.path.expanduser(text)
+    return os.path.normpath(path) if os.path.isabs(path) else None
+
+
+def relativePathProblem(text):
+    """Why a typed path (``typedPath`` gave None) is not used, and what to type instead."""
+    text = str(text or "").strip()
+    name = os.path.basename(os.path.normpath(text)) if text else ""
+    example = "~/" + (name if name not in ("", ".", "..", "~") else "SlicerStudio")
+    return _("{path} is not a full path: type one that starts with / or ~ (for example {example}), or choose the folder with the browse button.").format(path=text, example=example)
+
+
+def notAFolderProblem(path):
+    """Why an absolute destination cannot be a folder (it, or the nearest existing part of it, is a file), or None.
+
+    Without this the job fails later with a raw ``[Errno 17] File exists`` (or ``[Errno 20]``) from ``os.makedirs``.
+    """
+    path = str(path or "")
+    if not path:
+        return None
+    probe = path
+    while probe and not os.path.lexists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            return None
+        probe = parent
+    if probe and os.path.exists(probe) and not os.path.isdir(probe):
+        return _("{path} is a file, not a folder: choose a folder, or type a new folder name.").format(path=probe)
+    return None
+
+
+def unwritableProblem(path):
+    """Why files cannot be created for the absolute destination ``path`` (its nearest existing folder is not writable), or None.
+
+    The same plain sentence as ``unwritableMessage``, said before a job starts instead of as a raw ``[Errno 13]`` after it failed.
+    """
+    path = str(path or "")
+    if not path:
+        return None
+    probe = path
+    while probe and not os.path.lexists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            return None
+        probe = parent
+    if probe and os.path.isdir(probe) and not os.access(probe, os.W_OK | os.X_OK):
+        return _("The folder {folder} cannot be written. Choose another folder.").format(folder=probe)
+    return None
+
+
 def _studioUi():
     """``StudioLib.ui``, or None when the Studio module is not available."""
     try:
@@ -33,6 +123,151 @@ def _studioUi():
     except Exception:
         return None
     return ui
+
+
+def wrapCheckBox(checkBox):
+    """Return the widget to add to a layout in place of ``checkBox``: a row with the check box and its text as a word-wrapped
+    label (Studio), so that a long text does not make the inspector wider. Without Studio it is ``checkBox`` itself.
+    Show or hide the returned row, not the check box.
+    """
+    ui = _studioUi()
+    return ui.wrapCheckBox(checkBox) if ui is not None else checkBox
+
+
+def addWrapRow(layout, rowLayout):
+    """Add the box layout ``rowLayout`` (a row of controls) to ``layout``. With Studio the row stacks its controls when the
+    inspector is narrower than they need side by side (a larger application font makes a row wider than the inspector, and
+    the widest row would make the inspector wider for good); without Studio it is added as it is. Return what was added.
+    """
+    ui = _studioUi()
+    if ui is None:
+        layout.addLayout(rowLayout)
+        return rowLayout
+    spacing = layout.spacing
+    spacing = spacing() if callable(spacing) else spacing
+    row = ui.wrapLayout(rowLayout, spacing=spacing if spacing >= 0 else 6)
+    layout.addWidget(row)
+    return row
+
+
+def showInFileManager(path):
+    """Open a folder or file with the desktop; where there is no file manager (the web build) show its location with [Copy path].
+
+    ``StudioLib.projects`` does the work when the Studio module is available, else the desktop is asked directly.
+    """
+    try:
+        from StudioLib import projects
+    except Exception:
+        projects = None
+    if projects is not None:
+        return projects.showInFileManager(path)
+    return bool(qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(path)))
+
+
+def showSubjectsInLibrary(studyPath, subjects, shell=None):
+    """Show the study at ``studyPath`` in the Library with ``subjects`` selected, the list scrolled to the first (L-37).
+
+    Map keeps a study of its own (Seed > Cohort, remembered in ``Studio/LNM/CohortStudy``): when the Library does not
+    have that study open, it is opened there first (``StudioLib.study_ui.openStudy``), else the Library would show its
+    Projects page with no subject on screen. Return whether the subjects could be shown.
+    """
+    subjects = list(subjects or [])
+    try:
+        from StudioLib import library, study_ui
+    except Exception:
+        library = study_ui = None
+    if study_ui is not None and studyPath:
+        current = study_ui.session()
+        currentPath = getattr(getattr(current, "study", None), "path", None) if current is not None else None
+        same = bool(currentPath) and os.path.normcase(os.path.abspath(currentPath)) == os.path.normcase(os.path.abspath(studyPath))
+        if not same:
+            try:
+                study_ui.openStudy(studyPath, shell, showLibrary=True)
+            except Exception as error:
+                logging.exception("Lesion network mapping: the study could not be opened in the Library")
+                message = str(error) or _("The study could not be opened in the Library.")
+                if shell is not None and hasattr(shell, "toast"):
+                    shell.toast(message, 6000)
+                else:
+                    slicer.util.errorDisplay(message)
+                return False
+    if shell is not None:
+        shell.switchTo("library")
+    elif hasattr(slicer.modules, "studio"):
+        slicer.util.selectModule("Studio")
+    if library is None:
+        return False
+    try:
+        views = list(getattr(library, "_studyViews", []))
+        for view in views:
+            if hasattr(view, "search"):
+                view.search.setText("")
+            if hasattr(view, "setFilter"):
+                view.setFilter("all")
+        library._setStudySelection(subjects)
+        for view in views:
+            row = view.model.rowOf(subjects[0]) if subjects and hasattr(view, "model") else -1
+            if row >= 0:
+                view.table.scrollTo(view.model.index(row, 0))
+    except Exception:
+        logging.exception("Lesion network mapping: the Library could not select the subjects")
+        return False
+    return bool(views)
+
+
+def openLink(url):
+    """Open a web address in the browser; where there is none (the web build) show the link with [Copy link]."""
+    try:
+        from StudioLib import projects
+    except Exception:
+        projects = None
+    if projects is not None:
+        return projects.openLink(url)
+    return bool(qt.QDesktopServices.openUrl(qt.QUrl(url)))
+
+
+def availableArea(widget=None):
+    """The available geometry (``QRect``, without panels) of the screen that shows ``widget``, else of the primary screen; None without a screen."""
+    try:
+        ui = _studioUi()
+        screen = ui.screenOf(widget) if ui is not None else None
+        if screen is None:
+            screens = qt.QGuiApplication.screens()
+            screen = screens[0] if screens else None
+        return screen.availableGeometry if screen is not None else None
+    except Exception:  # noqa: BLE001 (the default size is fine without a screen)
+        return None
+
+
+def fitDialogToScreen(dialog, width, height, minWidth, minHeight):
+    """Resize ``dialog`` to ``width`` x ``height``, kept to 90% of the available screen area (a window manager adds a title bar and panels).
+
+    The minimum size is lowered with it, so a short screen (960x540 at 200% scaling) can still show the whole dialog. The content must scroll.
+    """
+    area = availableArea(dialog.parentWidget())
+    if area is not None:
+        width = min(width, int(area.width() * 0.9))
+        height = min(height, int(area.height() * 0.9))
+        minWidth = min(minWidth, width)
+        minHeight = min(minHeight, height)
+    dialog.setMinimumSize(minWidth, minHeight)
+    dialog.resize(width, height)
+
+
+def routeLinks(widget):
+    """Send the links clicked in a ``QLabel`` or ``QTextBrowser`` through :func:`openLink` (a link window in the web build).
+
+    ``setOpenExternalLinks(True)`` would call ``QDesktopServices::openUrl`` inside Qt, which shows nothing in the web build.
+    Without the Studio module the widget keeps Qt's own opening. Return ``widget``.
+    """
+    try:
+        from StudioLib import projects
+    except Exception:
+        projects = None
+    if projects is not None:
+        return projects.routeLinks(widget)
+    widget.setOpenExternalLinks(True)
+    return widget
 
 
 def _styleSupportsRoles():
@@ -67,23 +302,48 @@ def _paletteChipColors(level):
 
 
 def _font(widget, pixelSize, bold=False):
+    """Set a ``pixelSize`` px font (for a 13 px body) on ``widget``. In Studio it follows the application font when that
+    changes (also while the widget is not in the window).
+    """
     ui = _studioUi()
-    font = qt.QFont(widget.font)
-    size = pixelSize
-    if ui is not None and hasattr(ui, "fontPx"):
+    weight = qt.QFont.DemiBold if bold else None
+    if ui is not None and hasattr(ui, "_font") and hasattr(ui, "fontPx"):
         try:
-            size = ui.fontPx(pixelSize)
+            ui._font(widget, ui.fontPx(pixelSize), weight)
+            return
         except Exception:
-            size = pixelSize
-    font.setPixelSize(int(size))
-    if bold:
-        font.setWeight(qt.QFont.DemiBold)
+            pass
+    font = qt.QFont(widget.font)
+    font.setPixelSize(int(pixelSize))
+    if weight is not None:
+        font.setWeight(weight)
     widget.setFont(font)
 
 
 #
 # Card
 #
+
+
+class _CardCreatedFilter(qt.QObject):
+    """Make a ``card()`` apply its collapsed state to the children that were shown before the card was created.
+
+    ``ctk.ctkCollapsibleButton`` hides the children of a collapsed card only once it has been created through its own
+    ``setVisible()``. A card that is created because its parent is shown (the usual case) never gets that call, so a child
+    that was shown while the card was still hidden stays visible in the collapsed card (a chip cut by the card's edge, an
+    empty strip under the title). On the first Show event the card calls ``setVisible(True)`` itself, which makes ctk
+    apply the collapsed state to all its children.
+    """
+
+    def eventFilter(self, obj, event):
+        if event.type() == qt.QEvent.Show:
+            try:
+                obj.removeEventFilter(self)
+                if obj.collapsed:
+                    obj.setVisible(True)
+            except Exception:
+                pass
+        return False
 
 
 def card(title, objectName=None, collapsed=False):
@@ -100,9 +360,15 @@ def card(title, objectName=None, collapsed=False):
     if objectName:
         button.setObjectName(objectName)
     button.setProperty("slicerRole", "card")
+    # Preferred, not the Minimum policy of the button: with Minimum a layout never makes the card narrower than its size hint
+    # (the widest a row of the card can be, for example a form with its labels next to the fields), which would make the
+    # inspector wider than its stored width. Preferred shrinks the card to its minimum size hint (rows wrap).
+    button.setSizePolicy(qt.QSizePolicy.Preferred, button.sizePolicy.verticalPolicy())
     # The button measures its title row when its style changes: measure it again for the card role
     qt.QApplication.sendEvent(button, qt.QEvent(qt.QEvent.StyleChange))
     button.collapsed = bool(collapsed)
+    createdFilter = _CardCreatedFilter(button)
+    button.installEventFilter(createdFilter)
     return button
 
 
@@ -132,6 +398,14 @@ def setStep(cardButton, number, state="", summary=""):
 #
 
 
+def _fitChipWidth(chipLabel):
+    """A chip never shrinks below its text: the label's own minimum size ignores the stylesheet padding, so a
+    crowded row would otherwise squeeze it and clip both ends of the text.
+    """
+    chipLabel.setMinimumWidth(0)
+    chipLabel.setMinimumWidth(chipLabel.sizeHint.width())
+
+
 def setChipLevel(chipLabel, level, text=None):
     """Change the level (and optionally the text) of a chip made by ``chip()``."""
     if level not in CHIP_LEVELS:
@@ -141,6 +415,7 @@ def setChipLevel(chipLabel, level, text=None):
     ui = _studioUi()
     if ui is not None:
         ui.setChipLevel(chipLabel, level)
+        _fitChipWidth(chipLabel)
         return
     chipLabel.setProperty("chipLevel", level)
     if _styleSupportsRoles():
@@ -149,6 +424,7 @@ def setChipLevel(chipLabel, level, text=None):
         background, foreground = _paletteChipColors(level)
         chipLabel.setStyleSheet(f"QLabel {{ border: none; border-radius: 10px; padding: 0px 8px; background-color: {background}; color: {foreground}; }}")
     _repolish(chipLabel)
+    _fitChipWidth(chipLabel)
 
 
 def chip(text, level="neutral"):
@@ -174,6 +450,23 @@ def chip(text, level="neutral"):
 #
 
 
+def breakableText(text, longest=24):
+    """``text`` with a zero-width space after the ``. / _ - :`` of every word longer than ``longest`` characters.
+
+    A word-wrapped QLabel breaks at spaces only, so a long host name or file name is clipped at the right edge of the
+    label without an ellipsis. Words up to ``longest`` characters (all of the usual text) are left as they are.
+    """
+    def fix(match):
+        word = match.group(0)
+        return re.sub(r"([./_:-])", "\\1\u200b", word) if len(word) > longest else word
+
+    text = str(text)
+    return text if "<" in text else re.sub(r"\S+", fix, text)  # rich text (markup) is left alone
+
+
+_BANNER_BESIDE_MAX_CHARS = 16  # total length of the action labels that may sit beside the note
+
+
 def banner(text, actions=(), level="warn"):
     """Return a notice frame: a word-wrapped text and one button per ``(label, callback)`` of ``actions``.
 
@@ -184,14 +477,23 @@ def banner(text, actions=(), level="warn"):
     frame.setObjectName("LNMBanner")
     frame.setProperty("bannerLevel", level)
     frame.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
-    layout = qt.QHBoxLayout(frame)
+    # Long button texts would squeeze the word-wrapped note into a narrow column (a button cannot wrap), so the
+    # buttons go on their own row under the note then; short ones sit beside it.
+    stacked = sum(len(buttonText) for buttonText, _callback in actions) > _BANNER_BESIDE_MAX_CHARS
+    layout = qt.QVBoxLayout(frame) if stacked else qt.QHBoxLayout(frame)
     layout.setContentsMargins(10, 6, 6, 6)
     layout.setSpacing(6)
-    label = qt.QLabel(text)
+    label = qt.QLabel(breakableText(text))
     label.setObjectName("LNMBannerText")
     label.setWordWrap(True)
     label.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
     layout.addWidget(label, 1)
+    buttonRow = qt.QHBoxLayout() if stacked else layout
+    if stacked:
+        buttonRow.setContentsMargins(0, 0, 0, 0)
+        buttonRow.setSpacing(6)
+        buttonRow.addStretch(1)
+        layout.addLayout(buttonRow)
     for buttonText, callback in actions:
         button = qt.QToolButton()
         button.setObjectName("LNMBannerButton")
@@ -200,7 +502,10 @@ def banner(text, actions=(), level="warn"):
         button.setToolButtonStyle(qt.Qt.ToolButtonTextOnly)
         button.setProperty("slicerRole", "ghost")
         button.connect("clicked()", callback)
-        layout.addWidget(button, 0, qt.Qt.AlignTop)
+        if stacked:
+            buttonRow.addWidget(button)
+        else:
+            layout.addWidget(button, 0, qt.Qt.AlignTop)
     ui = _studioUi()
     if ui is not None:
         ui.bindStyleSheet(frame, lambda: _bannerStyleSheet(level))  # follows theme changes
@@ -209,8 +514,11 @@ def banner(text, actions=(), level="warn"):
     return frame
 
 
-def _bannerStyleSheet(level):
-    """Stylesheet of a banner frame only (its border; the left edge has the level's colour)."""
+def _bannerStyleSheet(level, selector="QFrame[bannerLevel]"):
+    """Stylesheet of a banner frame only (its border; the left edge has the level's colour).
+
+    The frame is selected by its ``bannerLevel`` property, not its object name: callers rename banner frames.
+    """
     ui = _studioUi()
     if ui is not None and level in ("ok", "warn", "danger", "busy"):
         edge = ui.token({"ok": "success", "warn": "warning", "danger": "danger", "busy": "accent"}[level]).name()
@@ -219,15 +527,15 @@ def _bannerStyleSheet(level):
         edge = _paletteChipColors(level)[1]
         hairline = slicer.app.palette().color(qt.QPalette.Active, qt.QPalette.Mid).name()
     return (
-        f"QFrame#LNMBanner {{ border: 1px solid {hairline}; border-left: 3px solid {edge}; border-radius: 6px; }}"
-        "QFrame#LNMBanner QLabel { border: none; background: transparent; }")
+        f"{selector} {{ border: 1px solid {hairline}; border-left: 3px solid {edge}; border-radius: 6px; }}"
+        f"{selector} QLabel {{ border: none; background: transparent; }}")
 
 
 def setBannerText(bannerFrame, text):
     """Change the text of a banner made by ``banner()``."""
     label = bannerFrame.findChild(qt.QLabel, "LNMBannerText")
     if label is not None:
-        label.setText(text)
+        label.setText(breakableText(text))
 
 
 #
@@ -282,7 +590,7 @@ def noticeLine(objectName="LNMNoticeLine"):
 
         ui.bindStyleSheet(frame, styleSheet)
     else:
-        frame.setStyleSheet(_bannerStyleSheet("warn").replace("LNMBanner", objectName))
+        frame.setStyleSheet(_bannerStyleSheet("warn", f"QFrame#{objectName}"))
     frame.hide()
     return frame
 
@@ -334,6 +642,7 @@ class ProgressRow:
 
     def __init__(self, stopText="Stop", objectNamePrefix="LNM"):
         self.job = None
+        self._wrapSaved = None
         self.widget = qt.QWidget()
         self.widget.setObjectName(f"{objectNamePrefix}ProgressRow")
         layout = qt.QVBoxLayout(self.widget)
@@ -394,10 +703,25 @@ class ProgressRow:
         elif job.state == "cancelled":
             self.setProgress(job.progress, text="Stopped")
         else:
-            self.setProgress(job.progress, text=f"Failed: {job.failureReason or 'unknown error'}")
+            self.setProgress(job.progress, text=f"Failed: {job.failureReason or 'unknown error'}", failed=True)
 
-    def setProgress(self, fraction, text=None):
-        """``fraction`` in 0..1, or None for a busy bar; ``text`` replaces the status line when given."""
+    def _setFailureWrap(self, on):
+        """A failure line is read in full (it wraps, whatever the owner chose for the progress line); other lines get the owner's choice back."""
+        label = self.label
+        if on:
+            if self._wrapSaved is None:
+                self._wrapSaved = (label.wordWrap, label.sizePolicy)
+            label.setWordWrap(True)
+            label.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Preferred)
+        elif self._wrapSaved is not None:
+            wrap, policy = self._wrapSaved
+            self._wrapSaved = None
+            label.setWordWrap(wrap)
+            label.setSizePolicy(policy)
+
+    def setProgress(self, fraction, text=None, failed=False):
+        """``fraction`` in 0..1, or None for a busy bar; ``text`` replaces the status line when given; ``failed``: the line is a failure (it wraps and is the tooltip)."""
+        self._setFailureWrap(failed)
         if fraction is None:
             self.bar.setRange(0, 0)
         else:
@@ -405,8 +729,11 @@ class ProgressRow:
             self.bar.setValue(round(min(max(float(fraction), 0.0), 1.0) * 1000))
         if text is not None:
             self.label.setText(text)
+            self.label.setToolTip(text if failed else "")
 
     def reset(self, text=""):
+        self._setFailureWrap(False)
+        self.label.setToolTip("")
         self.bar.setRange(0, 1000)
         self.bar.setValue(0)
         self.label.setText(text)
@@ -453,8 +780,24 @@ def segmented(labels):
     return frame, group
 
 
+def nameSegmentedButtons(group, entries):
+    """Give the buttons of a ``segmented()`` group an accessible name and a tooltip each.
+
+    ``entries`` holds one ``(name, description)`` per button, in the order of the group. The buttons of a glyph-only
+    segmented control (plus, minus, plus-minus) would otherwise be announced by their glyph and have no tooltip of their own
+    (USABILITY 10: every control has a tooltip, "Name · description").
+    """
+    ui = _studioUi()
+    for button, (name, description) in zip(group.buttons(), entries, strict=False):
+        button.setAccessibleName(name)
+        button.setToolTip(ui.tooltip(name, None, description) if ui is not None else f"{name} · {description}")
+
+
 #: Height of the rows of a ``tableView()`` (VISUAL 4.5: 28 px)
 TABLE_ROW_HEIGHT = 28
+
+#: Left and right padding (px) of the items of a ``tableView()`` (the ``::item`` rule of its style sheet)
+TABLE_ITEM_PADDING = 6
 
 
 def _tableStyleSheet():
@@ -464,10 +807,13 @@ def _tableStyleSheet():
         return ""
     hairline = ui.token("hairline").name()
     table = 'QTableWidget[lnmTable="true"]'
+    # The "selected" token is white in Light, like the dialogs and cards the tables sit on: the selected row would be
+    # invisible. As in the Settings list and Search, Light marks it with the control-pressed token (VISUAL 3)
+    selected = ui.token("selected" if ui.isDark() else "control-pressed").name()
     return (
         f"{table} {{ background: transparent; border: none; gridline-color: {hairline}; }}"
-        f"{table}::item {{ border: none; border-bottom: 1px solid {hairline}; padding: 0px 6px; }}"
-        f"{table}::item:selected {{ background-color: {ui.token('selected').name()}; color: {ui.token('text').name()}; }}"
+        f"{table}::item {{ border: none; border-bottom: 1px solid {hairline}; padding: 0px {TABLE_ITEM_PADDING}px; }}"
+        f"{table}::item:selected {{ background-color: {selected}; color: {ui.token('text').name()}; }}"
         f"{table} QHeaderView::section {{ background: transparent; color: {ui.token('text3').name()}; border: none;"
         f" border-bottom: 1px solid {hairline}; padding: 2px 6px; font-size: {ui.fontPx(11)}px; }}")
 
@@ -480,6 +826,9 @@ def tableView(columns):
     table.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
     table.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
     table.setSelectionMode(qt.QAbstractItemView.SingleSelection)
+    # Tab and Shift+Tab leave the table (SPEC 2.9); the arrow keys move between the rows. Qt's default moves Tab from
+    # cell to cell and wraps from the last cell to the first: the focus could never leave the table
+    table.setTabKeyNavigation(False)
     table.setAlternatingRowColors(False)
     table.setShowGrid(False)
     table.setFrameShape(qt.QFrame.NoFrame)
@@ -498,6 +847,40 @@ def tableView(columns):
 
 #: Text colors of positive (hot) and negative (cold) values in tables: (dark, light)
 VALUE_COLORS = {"hot": ("#ffb02e", "#a35200"), "cold": ("#7ab8ff", "#1f5fbf")}
+
+
+def onPaletteChange(widget, callback):
+    """Call ``callback()`` after the application palette changed (a run-time theme switch) while ``widget`` is alive.
+
+    For colors that are baked into items or rich text and that a stylesheet does not repaint. Without Studio there is no
+    palette notification, and nothing is registered.
+    """
+    ui = _studioUi()
+    if ui is None:
+        return
+
+    def listener():
+        try:
+            widget.objectName
+        except Exception:  # the widget was deleted
+            ui.removePaletteListener(listener)
+            return
+        callback()
+
+    ui.addPaletteListener(listener)
+
+
+def hideMenuIndicator(button):
+    """Hide the menu indicator of a tool button with a menu. Studio's style does that itself for the ghost role; a
+    stylesheet of the button would freeze the palette that the style picks its colors from, so that the label keeps the
+    colors of the theme that was active when it was created.
+    """
+    rule = "QToolButton::menu-indicator { image: none; width: 0px; }"
+    ui = _studioUi()
+    if ui is None:
+        button.setStyleSheet(rule)
+        return
+    ui.bindStyleSheet(button, lambda: "" if ui.supportsRoles() else rule)
 
 
 def valueColor(value):
@@ -541,10 +924,39 @@ def _bindDisclaimerColor(label):
 DISCLAIMER_LINE = "Research use only. Lesion network mapping specificity is debated."
 
 
+#: The text of the "Read more" button of the disclaimer line (``LNMDisclaimerReadMore``)
+DISCLAIMER_READ_MORE = "Read more"
+
+
+def _readMoreButton(callback):
+    """Return the link-styled "Read more" button of the disclaimer line: a real button, so it is one Tab stop with a
+    visible focus ring and Enter or Space opens the popover (USABILITY 9.1: no invisible focus stops). A link inside the
+    label's text is not: a ``QLabel`` with ``LinksAccessibleByKeyboard`` takes a first, inert Tab stop with no link selected,
+    and a Python event filter that works around it crashes the application when the label is deleted at shutdown.
+    """
+    ui = _studioUi()
+    if ui is not None and hasattr(ui, "linkButtonWidget"):
+        button = ui.linkButtonWidget(DISCLAIMER_READ_MORE, callback, "LNMDisclaimerReadMore")
+        ui.setText(button, "small")  # the 11 px of the line
+        return button
+    button = qt.QPushButton(DISCLAIMER_READ_MORE)
+    button.setObjectName("LNMDisclaimerReadMore")
+    button.setFlat(True)
+    button.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+    button.setSizePolicy(qt.QSizePolicy.Maximum, qt.QSizePolicy.Fixed)
+    palette = qt.QPalette(button.palette)
+    palette.setColor(qt.QPalette.ButtonText, slicer.app.palette().color(qt.QPalette.Link))
+    button.setPalette(palette)
+    _font(button, 11)
+    button.connect("clicked()", callback)
+    return button
+
+
 def disclaimerLine(parent=None):
     """Return the one-line disclaimer of the Studio inspector (``LNMDisclaimerLine``): an info icon, "Research use only.
-    Lesion network mapping specificity is debated." and "Read more", which shows the whole ``export.DISCLAIMER`` (with
-    its references) in a popover. The full text is also the tooltip.
+    Lesion network mapping specificity is debated." (the ``LNMDisclaimer`` label) and the link-styled button "Read more"
+    (``LNMDisclaimerReadMore``, the line's one Tab stop), which shows the whole ``export.DISCLAIMER`` (with its
+    references) in a popover. The full text is also the tooltip.
     """
     from LesionNetworkMappingLib import export
 
@@ -561,23 +973,24 @@ def disclaimerLine(parent=None):
     if ui is not None:
         icon.setPixmap(ui.pixmap("info", 13, "text3"))
     layout.addWidget(icon, 0, qt.Qt.AlignTop)
-    link = ui.token("accent-fg").name() if ui is not None else slicer.app.palette().color(qt.QPalette.Link).name()
-    label = qt.QLabel(f'{html.escape(DISCLAIMER_LINE)} <a href="#more" style="color: {link}; text-decoration: none;">Read more</a>')
+    label = qt.QLabel(DISCLAIMER_LINE)
     # The objectName of the disclaimer label that the Map tour and the tests point at
     label.setObjectName("LNMDisclaimer")
-    label.setTextFormat(qt.Qt.RichText)
+    label.setTextFormat(qt.Qt.PlainText)
     label.setWordWrap(True)
     label.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
     label.setToolTip(export.DISCLAIMER)
-    label.setTextInteractionFlags(qt.Qt.LinksAccessibleByMouse | qt.Qt.LinksAccessibleByKeyboard)
     _font(label, 11)
     _bindDisclaimerColor(label)
+    layout.addWidget(label, 1)
 
-    def readMore(_link=None, label=label):
+    def readMore(label=label):
         showDisclaimer(label)
 
-    label.connect("linkActivated(QString)", readMore)
-    layout.addWidget(label, 1)
+    # "Read more" is a real button after the text (on the last line of the wrapped text, like the buttons of a notice line)
+    button = _readMoreButton(readMore)
+    button.setToolTip(export.DISCLAIMER)
+    layout.addWidget(button, 0, qt.Qt.AlignBottom)
     return frame
 
 
@@ -609,6 +1022,6 @@ def helpLink(text, url):
     label.setObjectName("LNMHelpLink")
     label.setTextFormat(qt.Qt.RichText)
     label.setTextInteractionFlags(qt.Qt.TextBrowserInteraction)
-    label.setOpenExternalLinks(True)
+    routeLinks(label)
     label.setToolTip(url)
     return label

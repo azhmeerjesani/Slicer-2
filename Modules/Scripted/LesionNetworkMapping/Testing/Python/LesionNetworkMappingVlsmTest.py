@@ -99,6 +99,7 @@ class MinimumOverlapTest(unittest.TestCase):
         self.assertEqual(vlsm.min_lesion_count(4, min_lesions=0, min_percent=0), 1)
         self.assertEqual(vlsm.min_lesion_rule(), "max(5, 10%)")
         self.assertEqual(vlsm.min_lesion_rule(3, 0), "3 lesions")
+        self.assertEqual(vlsm.min_lesion_rule(1, 0), "1 lesion")
 
     def test_mask_is_exact(self):
         grid = Grid((10, 4, 4), np.diag([2.0, 2.0, 2.0, 1.0]))
@@ -223,6 +224,145 @@ class VlsmRunTest(unittest.TestCase):
         self.assertNotIn("volume_off", [check.code for check in reason.design.warnings])
         self.assertEqual(reason.design.spec.volume_off_reason, "matched volumes")
 
+    def test_methods_paragraph_describes_the_run(self):
+        """The Statistics methods text of a VLSM run names the rule actually used (overlap rule, contrast, covariates,
+        permutation method, corrections), the smallest observed FWE p rather than the attainable floor 1/n_perm, and
+        describes VLSM as location, not as a network (bug bash: it was a dump of the registry summary keys).
+        """
+        from LesionNetworkMappingLib import methods
+
+        study, _scores = make_study(os.path.join(self.tmp, "methods-study"), n=24, seed=5)
+        spec = designlib.DesignSpec(test="continuous", score_column="score", contrast="negative", group_column=None, covariates=["volume_ml"])
+        record = vlsm.vlsm(study.path, spec, grid=self.grid, space=SPACE, min_lesions=6, min_percent=0, n_perm=1000, seed=3)
+        text = methods.render([methods.find_section(methods.methods_sections(study.path), "statistics")], "txt")
+        self.assertIn("at least 6 lesions were tested", text)
+        self.assertIn(f"{record['min_overlap']['n_voxels_tested']} voxels", text)
+        self.assertIn(f"contrast {record['contrast']['label']} (negative)", text)
+        self.assertIn("covariates: volume_ml (total lesion volume).", text)
+        self.assertIn("Freedman-Lane", text)
+        self.assertIn("1000 permutations, seed 3", text)
+        self.assertIn("voxelwise max-statistic FWE (primary, alpha 0.05) and Benjamini-Hochberg FDR", text)
+        observed = methods._number(record["fwe"]["min_p"])
+        self.assertIn(f"the smallest observed FWE p was {observed} (the smallest attainable p is 0.001)", text)
+        self.assertNotIn("min_p", text)
+        # The FDR floor is stated, as in the GLM paragraph (bug bash: "0 with FDR q" next to FWE voxels went unexplained)
+        fdr = record["fdr"]
+        self.assertIn(f"BH-FDR reaches q ≤ 0.05 only when at least {fdr['floor_voxels']} voxels reach the smallest attainable p (FDR floor); "
+                      f"{fdr['voxels_at_floor']} voxels reached it.", text)
+        self.assertNotIn("FDR floor", methods.vlsm_paragraph({**record, "fdr": {**fdr, "enabled": False}}))
+        # Bug bash: a lesion off the template grid is not a listwise (missing value) exclusion
+        off_grid = methods.vlsm_paragraph({**record, "n_excluded": 1, "excluded": {"outside the template2mm grid": ["sub-27"]}})
+        self.assertIn("1 not analysed: outside the template2mm grid 1)", off_grid)
+        self.assertNotIn("listwise", off_grid)
+        self.assertNotIn("network associated with", text)
+        self.assertIn("VLSM tests location, not the network", text)
+        self.assertEqual(methods.lint_wording(text), [])
+        # The registry summary names the attainable floor as such and keeps the observed FWE minimum
+        summary = runs.load(study.path)[record["run_id"]]["summary"]
+        self.assertNotIn("min_p", summary)
+        self.assertEqual((summary["min_attainable_p"], summary["fwe_min_p"]), (record["min_attainable_p"], record["fwe"]["min_p"]))
+        # Without vlsm.json (or a registry written before), the old summary "min_p" is called the attainable p
+        legacy = methods.vlsm_summary_text({"n": 24, "n_voxels": 73, "n_perm": 1000, "fwe_significant": 0, "min_p": 0.001}, "vlsm-old")
+        self.assertIn("smallest attainable p 0.001", legacy)
+        self.assertNotIn("min_p", legacy)
+
+    def test_tfce_record_and_methods_state_parameters_and_result(self):
+        """A TFCE run records H, E, steps and connectivity in vlsm.json and the methods paragraph states them and the TFCE
+        result (bug bash: "H = not recorded, E = not recorded" and the TFCE-significant voxels were left out).
+        """
+        from LesionNetworkMappingLib import methods, tfce as tfcelib
+
+        study, _scores = make_study(os.path.join(self.tmp, "tfce-study"), n=24, seed=5)
+        spec = designlib.DesignSpec(test="continuous", score_column="score", contrast="negative", group_column=None, covariates=["volume_ml"])
+        record = vlsm.vlsm(study.path, spec, grid=self.grid, space=SPACE, min_lesions=6, min_percent=0, n_perm=50, seed=3, tfce=True)
+        tfce = record["tfce"]
+        self.assertTrue(tfce["enabled"])
+        self.assertEqual((tfce["H"], tfce["E"], tfce["steps"], tfce["connectivity"]),
+                         (tfcelib.DEFAULT_H, tfcelib.DEFAULT_E, tfcelib.DEFAULT_STEPS, tfcelib.DEFAULT_CONNECTIVITY))
+        self.assertIn("n_significant", tfce)
+        text = methods.vlsm_paragraph(record, "vlsm-1")
+        self.assertNotIn("H = not recorded", text)
+        self.assertIn(f"TFCE (H = {methods._number(tfcelib.DEFAULT_H)}, E = {methods._number(tfcelib.DEFAULT_E)}, {tfcelib.DEFAULT_STEPS} steps", text)
+        self.assertIn(f"TFCE: {tfce['n_significant']} voxels with TFCE FWE p", text)
+
+    def test_methods_name_the_covariate_transforms(self):
+        """The covariates clause names the model actually fitted: log(volume_ml), z(age) (BB-1: a run with log volume was
+        described as plain lesion volume, so copied methods text reported another model).
+        """
+        from LesionNetworkMappingLib import methods
+
+        record = {"design_type": "continuous", "test": "continuous", "n": 28, "covariates": ["volume_ml", "age"],
+                  "transforms": {"volume_ml": "log", "age": "z"}, "contrast": {"label": "scoreNeg", "spec": "negative"}}
+        text = methods.vlsm_paragraph(record, "vlsm-1")
+        self.assertIn("covariates: log(volume_ml) (total lesion volume), z(age).", text)
+        plain = methods.vlsm_paragraph({**record, "transforms": {}}, "vlsm-1")
+        self.assertIn("covariates: volume_ml (total lesion volume), age.", plain)
+        self.assertNotIn("log(", plain)
+        legacy = {key: value for key, value in record.items() if key != "transforms"}  # vlsm.json written before transforms
+        self.assertIn("covariates: volume_ml (total lesion volume), age.", methods.vlsm_paragraph(legacy, "vlsm-1"))
+
+    def test_methods_cite_only_the_run_whose_outputs_are_in_the_folder(self):
+        """Two VLSM runs into the same folder: the methods cite only the later one (bug bash: the overwritten run was
+        cited too, as a fallback paragraph "vlsm.json not recorded").
+        """
+        from LesionNetworkMappingLib import methods
+
+        study, _scores = make_study(os.path.join(self.tmp, "twice-study"), n=24, seed=5)
+        spec = designlib.DesignSpec(test="continuous", score_column="score", contrast="negative", group_column=None, covariates=["volume_ml"])
+        first = vlsm.vlsm(study.path, spec, grid=self.grid, space=SPACE, min_lesions=6, min_percent=0, n_perm=200, seed=3)
+        second = vlsm.vlsm(study.path, spec, grid=self.grid, space=SPACE, min_lesions=6, min_percent=0, n_perm=200, seed=3)
+        self.assertNotEqual(first["run_id"], second["run_id"])
+        text = methods.render([methods.find_section(methods.methods_sections(study.path), "statistics")], "txt")
+        self.assertEqual(text.count("Voxel-based lesion-symptom mapping (run"), 1, text)
+        self.assertIn(second["run_id"], text)
+        self.assertNotIn(first["run_id"], text)
+
+    def test_share_export_describes_vlsm_maps(self):
+        """The share-safe export and the NeuroVault metadata describe VLSM maps as lesion-location maps (not network
+        maps), the coverage map as a lesion count, and record the sign coding (the "negative" score contrast flips the
+        sign) and the df; vlsm.json records the sign coding too (bug bash: generic "Group lesion network map" text,
+        SignCoding "not recorded", modality fMRI-BOLD).
+        """
+        from LesionNetworkMappingLib import export, share
+
+        study, _scores = make_study(os.path.join(self.tmp, "share-study"), n=24, seed=5)
+        spec = designlib.DesignSpec(test="continuous", score_column="score", contrast="negative", group_column=None, covariates=["volume_ml"])
+        record = vlsm.vlsm(study.path, spec, grid=self.grid, space=SPACE, min_lesions=6, min_percent=0, n_perm=200, seed=3)
+        self.assertIn("lesion at the voxel goes with a lower score (after the covariates)", record["sign_coding"])
+        self.assertIn("flipped", record["sign_coding"])
+        out = os.path.join(self.tmp, "share-out")
+        share.export_dataset(study.path, out, {"licence": "CC0-1.0", "maps": True})
+        desc = record["contrast"]["desc"]
+
+        def sidecar(suffix):
+            with open(os.path.join(out, "group", f"group_space-{SPACE}_desc-{suffix}_map.json"), encoding="utf-8") as stream:
+                return json.load(stream)
+
+        tstat = sidecar(desc + "Tstat")
+        self.assertTrue(tstat["Description"].startswith("Voxel-based lesion-symptom map"), tstat)
+        self.assertNotIn("network", tstat["Description"])
+        self.assertEqual(tstat["Statistic"], "T")
+        self.assertEqual(tstat["SignCoding"], record["sign_coding"])
+        self.assertEqual(tstat["DegreesOfFreedom"], record["df"])
+        self.assertEqual(tstat["NumberOfSubjects"], record["n"])
+        self.assertIn("lesion goes with a higher score", sidecar(desc + "PartialR")["SignCoding"])
+        coverage = sidecar("vlsmCoverage")
+        self.assertIn("lesion count", coverage["Description"])
+        self.assertNotIn("statistic;", coverage["Description"])
+        self.assertNotEqual(coverage["SignCoding"], export.NOT_RECORDED)
+        folder = os.path.dirname(record["record"])
+        images = {image["name"]: image for image in export.neurovault_metadata([os.path.join(folder, name) for name in sorted(os.listdir(folder)) if name.endswith(".nii.gz")])["images"]}
+        for name, image in images.items():
+            self.assertEqual(image["modality"], "Other", name)
+            self.assertNotIn("lesion network map", image["description"] or "", name)
+            self.assertEqual(image["target_template_image"], "GenericMNI", name)
+        self.assertIn("p-value", images[f"group_space-{SPACE}_desc-{desc}PFwe_map"]["description"])
+        # A vlsm.json written before it recorded the sign coding: derived from its contrast; group contrasts name the levels
+        legacy = {key: value for key, value in record.items() if key != "sign_coding"}
+        self.assertEqual(vlsm.sign_coding(legacy), record["sign_coding"])
+        groups = {"test": "two_group", "stat": "t", "contrast": {"spec": "B>A"}, "n_per_level": {"case": 20, "control": 20}}
+        self.assertIn("lesioned more often in control than in case", vlsm.sign_coding(groups))
+
     def test_group_contrast_and_refusals(self):
         out = os.path.join(self.tmp, "groups")
         record = vlsm.vlsm(self.study.path, designlib.DesignSpec(levels=["case", "control"], contrast="A>B"), grid=self.grid, space=SPACE, n_perm=200, out_dir=out, register=False)
@@ -234,6 +374,48 @@ class VlsmRunTest(unittest.TestCase):
             vlsm.prepare(self.study.path, designlib.DesignSpec(test="one_sample", group_column=None), grid=self.grid, space=SPACE)
         with self.assertRaisesRegex(jobs.JobError, "No voxel is lesioned in at least 40"):
             vlsm.vlsm(self.study.path, score_spec(), grid=self.grid, space=SPACE, min_lesions=40, n_perm=200, out_dir=os.path.join(self.tmp, "none"), register=False)
+
+    def test_stopped_or_failed_rerun_keeps_finished_result(self):
+        """A rerun into the folder of a finished result that is stopped (or fails) during the permutations leaves that
+        result whole: its maps, design.json, lesions.tsv and its vlsm.json (status done), and find_results still lists it.
+        """
+        study, _scores = make_study(os.path.join(self.tmp, "rerun-study"), seed=2)  # its own study: find_results of the class study stays one result
+        out = vlsm.default_out_dir(study.path, vlsm.prepare(study.path, score_spec(), grid=self.grid, space=SPACE).design)  # the folder the VLSM tab reruns into
+        first = vlsm.vlsm(study.path, score_spec(), grid=self.grid, space=SPACE, n_perm=200, out_dir=out, register=False)
+
+        def snapshot():
+            found = {}
+            for name in sorted(os.listdir(out)):
+                with open(os.path.join(out, name), "rb") as handle:
+                    found[name] = handle.read()
+            return found
+
+        before = snapshot()
+        self.assertTrue(all(name in before for name in first["outputs"].values()))
+        token = jobs.CancelToken(signals=False)
+
+        def emit(event, **fields):
+            if event == "progress" and fields.get("stage") == "permutations":
+                token.cancel("stopped")
+
+        with self.assertRaises(jobs.Cancelled):
+            vlsm.vlsm(study.path, score_spec(), grid=self.grid, space=SPACE, min_lesions=3, n_perm=5000, seed=4, out_dir=out, register=False, cancel=token, emit=emit,
+                      batch=50)
+        self.assertEqual(snapshot(), before)
+
+        def failing_emit(event, **fields):
+            if event == "progress" and fields.get("stage") == "permutations":
+                raise RuntimeError("disk full")
+
+        with self.assertRaises(RuntimeError):
+            vlsm.vlsm(study.path, score_spec(), grid=self.grid, space=SPACE, min_lesions=3, n_perm=5000, seed=4, out_dir=out, register=False, emit=failing_emit, batch=50)
+        self.assertEqual(snapshot(), before)
+        self.assertEqual(vlsm.read_record(out)["status"], "done")
+        self.assertIn(out, vlsm.find_results(study.path))
+        # A rerun that finishes replaces the earlier result (no map of it is left next to the new one)
+        again = vlsm.vlsm(study.path, score_spec(), grid=self.grid, space=SPACE, min_lesions=3, n_perm=200, seed=4, out_dir=out, register=False)
+        self.assertEqual(again["min_overlap"]["min_lesions"], 3)
+        self.assertEqual(sorted(os.listdir(out)), sorted([*again["outputs"].values(), vlsm.VLSM_JSON, again["design_json"], again["design_matrix"], again["lesions_tsv"]]))
 
     def test_command_line(self):
         out = os.path.join(self.tmp, "cli")
@@ -254,6 +436,48 @@ class VlsmRunTest(unittest.TestCase):
         code, events, _stderr = _run_cli("run", "--study", self.study.path, "--design", bad, "--grid", grid, "--space", SPACE, "--out", os.path.join(self.tmp, "bad"))
         self.assertEqual(code, jobs.EXIT_USAGE)
         self.assertEqual(events[-1]["code"], "design_blocked")
+
+    def test_command_line_usage_errors_name_the_option(self):
+        grid = os.path.join(self.tmp, "usage-grid.nii.gz")
+        nifti.write_nifti(grid, np.zeros(SHAPE, dtype=np.uint8), AFFINE)
+        out = os.path.join(self.tmp, "usage")
+        cases = (
+            (("--study", self.study.path, "--grid", grid, "--space", "Foo"), "Unknown --space Foo \\(known: MNI152NLin2009cAsym.*: no lesion of the study is in its family \\(space MNI152NLin2009cAsym is not in the unknown family of Foo: 40\\)"),
+            (("--study", self.study.path, "--grid", grid, "--space", "MNI152NLin6Asym"), "No lesion of the study is in the family of --space MNI152NLin6Asym \\(space MNI152NLin2009cAsym is not in the fsl6 family"),
+            (("--study", os.path.join(self.tmp, "no-such-study"), "--grid", grid, "--space", SPACE), "The --study folder does not exist"),
+            (("--study", self.tmp, "--grid", grid, "--space", SPACE), "The --study folder is not a study folder"),
+            (("--study", self.study.path, "--grid", grid), "Pass --space for this grid: The grid \\(16 x 16 x 16 voxels, 2x2x2 mm\\)"),
+            (("--study", self.study.path, "--grid", os.path.join(self.tmp, "missing.nii.gz")), "The --grid .*missing.nii.gz does not exist \\(accepted: template2mm"),
+            (("--study", self.study.path, "--grid", "bogus"), "The --grid bogus cannot be used: .*\\(accepted: template2mm, a grid id"),
+            (("--study", self.study.path, "--grid", "user:no-such-template"), "The --grid user:no-such-template cannot be used"),
+        )
+        for arguments, pattern in cases:
+            with self.subTest(arguments=arguments):
+                code, events, stderr = _run_cli("run", *arguments, "--out", out, "--perm", "200")
+                self.assertEqual(code, jobs.EXIT_USAGE, stderr)
+                self.assertEqual(events[-1]["code"], "usage")
+                self.assertRegex(events[-1]["message"], pattern)
+                self.assertNotIn("Error:", events[-1]["message"])
+                self.assertNotIn("Grid(", events[-1]["message"])
+
+    def test_command_line_accepts_the_study_own_space_label(self):
+        # A user's own template label (outside the known families) is a valid --space when the lesions carry it: the
+        # label is not rejected up front, only one no lesion of the study can use is
+        custom = "MyTemplate"
+        study, _scores = make_study(os.path.join(self.tmp, "custom-study"), n=12, space=custom)
+        grid = os.path.join(self.tmp, "custom-grid.nii.gz")
+        nifti.write_nifti(grid, np.zeros(SHAPE, dtype=np.uint8), AFFINE)
+        out = os.path.join(self.tmp, "custom")
+        code, events, stderr = _run_cli("run", "--study", study.path, "--grid", grid, "--space", custom, "--out", out, "--perm", "50", "--min-lesions", "2", "--min-percent", "0", "--threads", "1")
+        self.assertEqual(code, 0, stderr + json.dumps(events[-1:]))
+        self.assertEqual(events[-1]["event"], "done")
+        with open(os.path.join(out, vlsm.VLSM_JSON), encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["space"], custom)
+        # The same label on lesions that carry another one is the usage error, not an unexplained empty design
+        code, events, _stderr = _run_cli("run", "--study", self.study.path, "--grid", grid, "--space", custom, "--out", os.path.join(self.tmp, "custom-bad"), "--perm", "50")
+        self.assertEqual(code, jobs.EXIT_USAGE)
+        self.assertEqual(events[-1]["code"], "usage")
+        self.assertIn("Unknown --space MyTemplate", events[-1]["message"])
 
 
 class SeedClusterTest(unittest.TestCase):

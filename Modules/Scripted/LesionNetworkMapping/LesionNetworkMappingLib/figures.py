@@ -60,7 +60,9 @@ Outputs (:func:`write_figure`)
 ``<out>/figures/<name>/``: ``<name>.png`` and ``.tiff`` (with dpi), ``<name>.svg`` (the raster as an
 embedded base64 PNG, vector text and colour bar), ``<name>.pdf`` (Pillow), ``figure.json`` (every
 parameter, input sha256s, no local paths), ``caption.txt`` (orientation, statistic, rule ⇒ |T| and p,
-N, df, connectome, colour range, slice coordinates) and ``<name>_sourcedata.csv``. Tutorial studies get
+N, df, connectome, colour range, slice coordinates) and ``<name>_sourcedata.csv``. Rendering again under
+the same name replaces the earlier figure: its files that the new one does not write (other formats, other
+page counts) are removed, so the folder holds what ``figure.json`` lists. Tutorial studies get
 a ``TUTORIAL DATA`` watermark and synthetic bundles ``SYNTHETIC`` (:func:`watermark_for`).
 
 Command line::
@@ -72,8 +74,10 @@ It writes ``DIR/figures/<name>/`` and registers the run (kind ``figure``) in the
 """
 
 import base64
+import contextlib
 import copy
 import csv
+import gzip
 import hashlib
 import io
 import json
@@ -82,6 +86,7 @@ import os
 import re
 import sys
 import time
+import zlib
 from dataclasses import dataclass, field, fields
 from xml.sax.saxutils import escape as _xml_escape
 
@@ -104,6 +109,8 @@ AXIS_NAMES = "xyz"
 JOURNAL_WIDTHS_MM = {"single": 89.0, "double": 183.0}
 DPIS = (300, 450, 600)
 DEFAULT_WIDTH_MM = JOURNAL_WIDTHS_MM["double"]
+MIN_WIDTH_PX = 50  # narrower figures cannot hold a single panel (Pillow then fails with "x1 must be >= x0")
+MAX_WIDTH_MM = 100000.0  # keeps the pixel count finite; memory limits are a separate matter
 DEFAULT_DPI = 300
 FORMATS = ("png", "tiff", "svg", "pdf")
 #: Sequential colour stops of count and percent maps (SPEC §4.12)
@@ -111,8 +118,12 @@ SEQUENTIAL_COLORS = ("#3B0F70", "#8C2981", "#DE4968", "#FE9F6D", "#FCFDBF")
 LESION_COLOR = "#F2545B"  # SPEC §4.12
 LUT_ENTRIES = colormaps.DEFAULT_ENTRIES
 WINDOW_PERCENTILE = 99.5  # SPEC §4.12 (as display.WINDOW_PERCENTILE)
+COLORBAR_ROW_EM = 1.25  # line spacing (in label heights) of a second row of colour bar tick labels
 WIDEN_FACTOR = 1.1  # a threshold at or above W widens W to at least this multiple of the threshold
 WATERMARKS = {"tutorial": "TUTORIAL DATA", "synthetic": "SYNTHETIC"}
+#: Colour and opacity of the watermark (figures here and the report figures of :mod:`reportfigs`)
+WATERMARK_COLOR = "#808080"
+WATERMARK_OPACITY = 0.25
 #: Font sizes in points (converted to pixels at the figure's dpi)
 TEXT_PT = 7.0
 LETTER_PT = 9.0
@@ -121,7 +132,7 @@ FONT_FAMILY_SVG = "Inter, Helvetica, Arial, sans-serif"
 TRANSPARENT_NOTE = "below the threshold, opacity = (|value| / threshold)²; suprathreshold voxels outlined (transparent thresholding, Taylor et al. 2023)"
 SLAB_POINTS = 2_000_000  # display-grid points resliced per map_coordinates call (bounds memory)
 
-_ASCII = {"≥": ">=", "≤": "<=", "\u2212": "-", "\u2013": "-", "—": "-", "±": "+/-", "·": "|", "\u00d7": "x", "µ": "u", "⇒": "=>", "\u03b1": "alpha", "…": "...", "²": "^2", "°": " deg", "\u2019": "'"}
+_ASCII = {"≥": ">=", "≤": "<=", "\u2212": "-", "\u2013": "-", "—": "-", "±": "+/-", "·": "|", "\u00d7": "x", "µ": "u", "\u03bc": "u", "⇒": "=>", "\u03b1": "alpha", "…": "...", "²": "^2", "°": " deg", "\u2019": "'"}
 
 
 # Inputs
@@ -162,7 +173,9 @@ def _strip_nii(name):
 def load_volume(source, name=None):
     """A :class:`Volume` from a NIfTI path, a ``(data, affine[, name])`` tuple or a Volume.
 
-    4D images keep their first volume. Non-finite values are kept (they are never shown).
+    A file with several volumes (4D, or a vector image) is refused: a figure shows one 3D volume, and drawing only the
+    first one would silently drop the others. A 4D file with a single volume is read as 3D. Non-finite values are kept
+    (they are never shown).
     """
     if source is None:
         return None
@@ -170,10 +183,24 @@ def load_volume(source, name=None):
         return source if name is None else Volume(source.data, source.affine, name, source.sha256, source.source)
     if isinstance(source, (str, os.PathLike)):
         path = os.fspath(source)
-        data, affine, _ = nifti.read_nifti(path)
-        if data.ndim > 3:
-            data = data.reshape(*data.shape[:3], -1)[..., 0]
         base = os.path.basename(path)
+        try:
+            data, affine, _ = nifti.read_nifti(path)
+        except ValueError:
+            raise  # the NIfTI reader's own messages already name the file
+        except (OSError, EOFError, zlib.error) as exc:
+            if isinstance(exc, gzip.BadGzipFile):
+                reason = "not a NIfTI image (it is not gzip-compressed data)"
+            elif isinstance(exc, (EOFError, zlib.error)):
+                reason = "the compressed data is truncated or damaged"
+            else:
+                reason = getattr(exc, "strerror", None) or str(exc)
+            raise ValueError(f"Cannot read {base}: {reason}") from exc
+        if data.ndim > 3:
+            count = int(np.prod(data.shape[3:]))
+            if count != 1:
+                raise ValueError(f"{base} holds {count} volumes (shape {tuple(int(n) for n in data.shape)}); a figure shows one 3D volume. Save the volume to show as a 3D NIfTI file (for example with fslroi, or Slicer's Volumes module) and give that file.")
+            data = data.reshape(data.shape[:3])
         return Volume(np.asarray(data), np.asarray(affine, dtype=np.float64), name or _strip_nii(base), sha256_file(path), base)
     if isinstance(source, (tuple, list)) and len(source) in (2, 3):
         data = np.asarray(source[0])
@@ -207,8 +234,10 @@ class DisplayGrid:
         return float(self.origin[axis] + index * self.spacing)
 
     def index(self, axis, coordinate):
-        """Nearest plane index of a world coordinate along ``axis`` (clipped to the grid)."""
-        index = round((float(coordinate) - self.origin[axis]) / self.spacing)
+        """Nearest plane index of a world coordinate along ``axis`` (clipped to the grid; a coordinate halfway
+        between two planes takes the upper one, so evenly spaced coordinates stay on distinct planes).
+        """
+        index = math.floor((float(coordinate) - self.origin[axis]) / self.spacing + 0.5)
         return min(max(index, 0), self.shape[axis] - 1)
 
     def contains(self, axis, coordinate):
@@ -231,7 +260,11 @@ def display_grid(reference, spacing=None, crop=True, margin_mm=4.0):
     :param crop: cover only the finite non-zero voxels of each reference (its whole field of view when
       it has none).
     :param margin_mm: margin added around the covered box.
-    Plane coordinates are multiples of the spacing, so 0 mm is a plane.
+    The planes go through the voxel centres of the references (along each axis, those of the reference
+    with the finest voxels along it), so a display point never falls between the voxel centres of an
+    input on that lattice: linear sampling would average an isolated voxel away, and nearest sampling
+    would break exact ties differently for the same image stored RAS or LPS. Where no reference is
+    aligned with the axes, the planes are multiples of the spacing (0 mm is a plane).
     """
     references = [reference] if isinstance(reference, Volume) else [volume for volume in reference if volume is not None]
     if not references:
@@ -242,10 +275,32 @@ def display_grid(reference, spacing=None, crop=True, margin_mm=4.0):
     if not spacing > 0:
         raise ValueError(f"The display spacing must be positive, got {spacing}")
     boxes = np.array([_world_box(volume, crop) for volume in references])
-    low = np.floor((boxes[:, 0].min(axis=0) - margin_mm) / spacing) * spacing
-    high = np.ceil((boxes[:, 1].max(axis=0) + margin_mm) / spacing) * spacing
+    phase = _lattice_phase(references, spacing)
+    low = np.floor((boxes[:, 0].min(axis=0) - margin_mm - phase) / spacing) * spacing + phase
+    high = np.ceil((boxes[:, 1].max(axis=0) + margin_mm - phase) / spacing) * spacing + phase
     shape = tuple(round((hi_ - lo_) / spacing) + 1 for lo_, hi_ in zip(low, high, strict=False))
-    return DisplayGrid(tuple(float(value) for value in low), spacing, shape)
+    return DisplayGrid(tuple(float(round(value, 6)) + 0.0 for value in low), spacing, shape)
+
+
+def _lattice_phase(references, spacing):
+    """Per world axis, the offset (0 <= offset < spacing, mm) of the voxel-centre planes of the reference
+    with the finest voxels along that axis (0 where no reference has a voxel axis along it).
+    """
+    phase = np.zeros(3)
+    finest = np.full(3, np.inf)
+    for volume in references:
+        affine = np.asarray(volume.affine, dtype=np.float64)
+        matrix = affine[:3, :3]
+        lengths = np.linalg.norm(matrix, axis=0)
+        for column in range(3):
+            axis = int(np.argmax(np.abs(matrix[:, column])))
+            size = abs(matrix[axis, column])
+            if not size > 0 or abs(size - lengths[column]) > 1e-6 * lengths[column] or not size < finest[axis] - 1e-6:
+                continue  # an oblique voxel axis has no planes along a world axis; on ties the first reference wins
+            finest[axis] = size
+            offset = float(np.mod(affine[axis, 3], spacing))
+            phase[axis] = 0.0 if min(offset, spacing - offset) < 1e-6 * spacing else offset
+    return phase
 
 
 def _world_box(volume, crop):
@@ -263,6 +318,34 @@ def _world_box(volume, crop):
     corners = np.array([[x, y, z, 1.0] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
     world = (affine @ corners.T)[:3].T
     return world.min(axis=0), world.max(axis=0)
+
+
+def inside_fraction(volume, grid):
+    """Share (0..1) of the finite non-zero voxels of ``volume`` whose centres lie inside ``grid``'s box
+    (None when the volume has no such voxel).
+    """
+    data = np.asarray(volume.data)
+    if data.dtype.kind not in "fiub":
+        return None
+    nonzero = np.isfinite(data) & (data != 0)
+    ijk = np.argwhere(nonzero)
+    if not len(ijk):
+        return None
+    affine = np.asarray(volume.affine, dtype=np.float64)
+    world = ijk.astype(np.float64) @ affine[:3, :3].T + affine[:3, 3]
+    position = (world - np.asarray(grid.origin, dtype=np.float64)) / grid.spacing
+    inside = np.all((position >= -0.5) & (position <= np.asarray(grid.shape, dtype=np.float64) - 0.5), axis=1)
+    return float(inside.mean())
+
+
+def _percent_text(share):
+    """``share`` (0..1) as a percentage for a caption note, never rounded to 0% or 100% unless exact."""
+    percent = 100.0 * share
+    if 0 < percent < 0.1:
+        return "less than 0.1%"
+    if 99.9 < percent < 100:
+        return "more than 99.9%"
+    return f"{percent:.1f}%"
 
 
 def reslice(volume, grid, order=1, cval=0.0, dtype=np.float32):
@@ -321,6 +404,12 @@ def symmetric_window(arrays, percentile=WINDOW_PERCENTILE):
 # Slices
 
 
+def _finite_slices(values, text):
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError(f"--slices {text!r} must use finite numbers in mm (not inf or nan), e.g. 'A -20 -10 0 10 20 30'")
+    return values
+
+
 def parse_slices(text, default_plane="axial"):
     """Parse a slice specification: ``"A -20 -10 0 10 20 30"``, ``"C 0"``, ``"S -40 40"``, ``"z=-20,0,20"``,
     ``"auto"`` or ``"A auto 6"``.
@@ -346,14 +435,18 @@ def parse_slices(text, default_plane="axial"):
             plane = head.lower()
             tokens = tokens[1:]
     if not tokens or tokens[0].lower() == "auto":
-        count = int(tokens[1]) if len(tokens) > 1 else None
+        try:
+            count = int(tokens[1]) if len(tokens) > 1 else None
+        except ValueError:
+            raise ValueError(f"Cannot read the slice specification {text!r} (the number of automatic slices must be a whole number, e.g. 'A auto 6')") from None
         if count is not None and count < 1:
             raise ValueError(f"The number of automatic slices must be at least 1, got {count}")
         return plane, None, count
     try:
-        return plane, [float(token) for token in tokens], None
+        values = [float(token) for token in tokens]
     except ValueError:
         raise ValueError(f"Cannot read the slice specification {text!r} (expected e.g. 'A -20 -10 0 10 20 30')") from None
+    return plane, _finite_slices(values, text), None
 
 
 def auto_slices(values, grid, plane, count=6, threshold=None, sign="both", min_separation_mm=8.0):
@@ -435,6 +528,16 @@ def section(volume3d, plane, index, sign="both"):
         where = np.argmax(np.abs(values), axis=axis)
         return np.take_along_axis(values, np.expand_dims(where, axis), axis=axis).squeeze(axis)
     return np.take(volume3d, index, axis=axis)
+
+
+def projection_sign(mode, threshold, sign):
+    """The sign a map projection keeps: ``sign`` only where the display hides the other sign (a finite
+    threshold in a thresholded mode, as in :func:`diverging_rgba`); an unthresholded panel shows every
+    non-zero voxel, so it projects the signed maximum |value| ("both").
+    """
+    if mode == "unthresholded" or threshold is None or not math.isfinite(threshold):
+        return "both"
+    return sign
 
 
 def _tile_mm(grid, plane):
@@ -601,7 +704,7 @@ def render_slice(scene, plane, index, size, convention=DEFAULT_CONVENTION, cross
         rgb[_edge(projected)] = _hex(scene.outline_color)
     for layer in scene.layers:
         label = layer.kind in ("binary", "outline") or (layer.kind == "sequential" and layer.discrete)
-        values = section(layer.values, plane, index, layer.sign if layer.kind == "diverging" else "both")
+        values = section(layer.values, plane, index, projection_sign(layer.mode, layer.threshold, layer.sign) if layer.kind == "diverging" else "both")
         pixels = _resample2d(orient(values, convention), shape, 0 if label else 1)
         contour = None
         if layer.kind == "diverging":
@@ -710,6 +813,16 @@ class Annotation:
     bold: bool = False
     colors: tuple = ()
     role: str = ""
+
+    def __post_init__(self):
+        self.text = _single_line(self.text)
+
+
+def _single_line(text):
+    """``text`` on one line: Pillow refuses an anchor with multi-line text, and an SVG text element has no line break."""
+    if not text:
+        return text
+    return re.sub(r"(?:\r\n|[\r\n\x0b\x0c\x85\u2028\u2029])+", " ", str(text)).strip()
 
 
 def _pt(points, dpi):
@@ -865,8 +978,26 @@ class Options:
             raise ValueError(f"convention must be neurological or radiological, got {self.convention!r}")
         if self.sign is not None and self.sign not in thresholds.SIGNS:
             raise ValueError(f"sign must be one of {', '.join(thresholds.SIGNS)}, got {self.sign!r}")
-        if not self.width_mm > 0 or int(self.dpi) < 30:
-            raise ValueError("width_mm must be positive and dpi at least 30")
+        if not (math.isfinite(float(self.width_mm)) and float(self.width_mm) > 0) or int(self.dpi) < 30:
+            raise ValueError(f"--width-mm must be a finite number of mm above 0 and the dpi at least 30, got width {self.width_mm} mm and dpi {self.dpi}")
+        if float(self.width_mm) / 25.4 * int(self.dpi) < MIN_WIDTH_PX or float(self.width_mm) > MAX_WIDTH_MM:
+            raise ValueError(
+                f"--width-mm {self.width_mm:g} is out of range at {int(self.dpi)} dpi: the figure must be at least {MIN_WIDTH_PX} pixels "
+                f"({MIN_WIDTH_PX / int(self.dpi) * 25.4:.0f} mm at this dpi) and at most {MAX_WIDTH_MM:g} mm wide",
+            )
+        if self.window is not None and not (math.isfinite(float(self.window)) and float(self.window) > 0):
+            raise ValueError(f"The window must be positive, got {self.window}")
+        if self.columns is not None and int(self.columns) < 1:
+            # A negative count gave an empty row split (a blank figure, or max() of nothing); 0 was silently "default"
+            raise ValueError(f"The number of columns must be at least 1, got {self.columns}")
+        if self.n is not None and int(self.n) < 1:
+            # 0 and negative N used to pass: 0 as "N unknown", a negative N as a T map with N < 2 drawn unthresholded
+            raise ValueError(f"The number of subjects (N) must be at least 1, got {self.n}")
+        if self.v is not None and int(self.v) < 1:
+            # 0 is not "not given": V is the number of voxels tested, at least 1 (as thresholds.resolve says)
+            raise ValueError(f"The number of voxels must be at least 1, got {self.v}")
+        if self.title:
+            self.title = _single_line(self.title)
         if self.watermark is not None and self.watermark not in WATERMARKS.values():
             self.watermark = WATERMARKS.get(str(self.watermark).lower(), str(self.watermark))
         return self
@@ -905,34 +1036,91 @@ class MapInfo:
     fraction: float | None = None
     v: int = 0
     key: str = ""  # unique within a figure (the role, else the name, de-duplicated)
+    values: object = None  # finite in-mask values of the native map (for the shown-sign share)
 
 
-def _in_mask_values(volume, mask):
+def _tested_voxels(volume, mask):
+    """The voxels of ``volume`` (on its own grid) that count as tested: the finite in-mask voxels, or the finite
+    non-zero voxels without a mask.
+    """
     data = np.asarray(volume.data, dtype=np.float64)
     if mask is not None:
         if np.shape(mask.data) == data.shape and np.allclose(mask.affine, volume.affine, atol=1e-4):
             inside = np.asarray(mask.data) > 0
         else:
             inside = reslice(mask, _NativeGrid(volume), order=0) > 0
-        values = data[inside]
-    else:
-        values = data[np.isfinite(data) & (data != 0)]
-    return values[np.isfinite(values)]
+        return inside & np.isfinite(data)
+    return np.isfinite(data) & (data != 0)
 
 
-def _resolve(info, options):
-    """Resolve the threshold of one map (None when the figure is unthresholded)."""
+def _in_mask_values(volume, mask):
+    return np.asarray(volume.data, dtype=np.float64)[_tested_voxels(volume, mask)]
+
+
+def _shared_v(infos, options):
+    """One number of voxels tested (V) for all the maps of a multi-map figure (triptych, replication), which are
+    tested over the same voxels: --v when given, else the voxels tested in any of the maps (the union when they
+    share a grid, else the largest count). V used to be each map's own count, so without --mask a sparse map (a
+    conjunction zero outside its overlap) got a much smaller V, hence a lower Bonferroni threshold than the other
+    panels, under a colour bar that stated only the first panel's threshold.
+    """
+    if options.v is not None:
+        return int(options.v)
+    first = infos[0].volume
+    if all(np.shape(info.volume.data) == np.shape(first.data) and np.allclose(info.volume.affine, first.affine, atol=1e-4) for info in infos):
+        union = np.zeros(np.shape(first.data), dtype=bool)
+        for info in infos:
+            union |= _tested_voxels(info.volume, options.mask)
+        return int(union.sum())
+    return max(int(_in_mask_values(info.volume, options.mask).size) for info in infos)
+
+
+def _resolve_all(infos, options):
+    """Resolve the thresholds of the maps of one figure, with one V for all of them (:func:`_shared_v`)."""
+    v = _shared_v(infos, options) if len(infos) > 1 else None
+    for info in infos:
+        _resolve(info, options, v)
+
+
+def _resolve(info, options, v=None):
+    """Resolve the threshold of one map (None when the figure is unthresholded); ``v``: the figure's shared
+    number of voxels tested (default: --v, else the map's own count).
+    """
     values = _in_mask_values(info.volume, options.mask)
-    info.v = int(options.v or values.size or 1)
+    info.values = values
+    info.v = int(options.v) if options.v is not None else int(values.size)
     rule = options.rule
     if rule is None and options.threshold is not None:
         rule = {"kind": "custom_t", "value": float(options.threshold)}
     if rule is None:
+        if v is not None:
+            info.v = int(v)
         return None
+    if info.v < 1:
+        # V = 0 used to fall back to 1 silently, so an FWE threshold became the uncorrected one under the FWE label
+        if options.mask is not None:
+            raise ValueError(f"The mask ({options.mask.name}) covers no finite voxel of the map {info.volume.name}: it is empty, lies outside the map's field of view or covers only its NaN voxels, so the number of voxels tested (V) is unknown. Is the mask in the map's space? Otherwise give V with --v.")
+        raise ValueError(f"The map {info.volume.name} has no finite non-zero voxel, so the number of voxels tested (V) is unknown. Give V with --v.")
+    if v is not None:
+        info.v = int(v)
+    rule = thresholds.normalize_rule(rule)
+    if rule["kind"] == "top_pct" and options.sign and rule.get("sign") != options.sign:
+        # The sign of a top-x% rule chooses its cut-off (top x% of T, -T or |T|): the shown sign (--sign) used to change
+        # only the tail drawn, at the other tail's cut-off, under the rule's "top x%" label. Resolve the rule for the
+        # shown sign, as the module's sign buttons do (onSignClicked).
+        rule = dict(rule, sign=options.sign)
     if options.n:
         resolved = thresholds.resolve(rule, int(options.n), info.v, gsr=options.gsr, values=values)
     else:
         resolved = thresholds.resolve_unknown_n(rule, info.v, values=values)
+    if not math.isfinite(resolved.value) and options.mode != "unthresholded":
+        # No threshold (N < 2, or top_pct with no voxel of the sign): a "thresholded" panel used to show the whole
+        # map under a caption that said voxels below the threshold were hidden (or that nothing passes)
+        reason = resolved.banner or "the threshold is undefined."
+        raise ValueError(
+            f"The rule {thresholds.rule_label(resolved.rule)} gives no threshold for the map {info.volume.name}: {reason} "
+            "Change the rule, its sign or N (--n), or draw the map unthresholded (--mode unthresholded).",
+        )
     info.resolved = resolved
     info.fraction = resolved.fraction
     return resolved
@@ -965,9 +1153,12 @@ def _letters(count):
     return [chr(ord("A") + index) if index < 26 else f"A{index - 25}" for index in range(count)]
 
 
-def _compose(panels, options, fonts, colorbars=(), panel_columns=1, heading=None):
+def _compose(panels, options, fonts, colorbars=(), panel_columns=1, heading=None, pad_rows=False):
     """Lay out panels (each a grid of tiles at one mm-to-pixel scale) at the figure width and return
     (base image, annotations, tile records).
+
+    With ``pad_rows`` a row that holds fewer than ``panel_columns`` panels is sized as if it were full, so
+    the scale only depends on the column count (a gallery's last page keeps the tile size of the others).
     """
     from PIL import Image
 
@@ -994,12 +1185,18 @@ def _compose(panels, options, fonts, colorbars=(), panel_columns=1, heading=None
     for members in panel_rows:
         mm = sum(max(sum(w for w, _ in row) for row in layouts[p][1]) for p in members)
         gaps = sum((max(len(row) for row in layouts[p][0]) - 1) * gap for p in members) + (len(members) - 1) * panel_gap
+        if pad_rows and len(members) < panel_columns:
+            widest = max(members, key=lambda p: max(sum(w for w, _ in row) for row in layouts[p][1]))
+            missing = panel_columns - len(members)
+            mm += missing * max(sum(w for w, _ in row) for row in layouts[widest][1])
+            gaps += missing * ((max(len(row) for row in layouts[widest][0]) - 1) * gap + panel_gap)
         scale = min(scale, (available - gaps) / mm)
     scale = max(scale, 0.05)
 
     # Heading line
     y = margin
     annotations = []
+    heading = _elide(heading, fonts, text_px, available, bold=True) if heading else heading
     if heading:
         annotations.append(Annotation("text", margin, y, text=heading, size=text_px, anchor="lt", bold=True))
         y += round(text_px * 1.6)
@@ -1026,9 +1223,11 @@ def _compose(panels, options, fonts, colorbars=(), panel_columns=1, heading=None
             panel_h = ty - gap - y
             if panel.letter or panel.title:
                 annotations.append(Annotation("text", x, y + header_h * 0.82, text=panel.letter, size=letter_px, anchor="ls", bold=True, role="panel letter"))
-                if panel.title:
-                    offset = fonts.width(panel.letter + "  ", letter_px, bold=True) if panel.letter else 0
-                    annotations.append(Annotation("text", x + offset, y + header_h * 0.82, text=panel.title, size=text_px, anchor="ls", role="panel title"))
+                offset = fonts.width(panel.letter + "  ", letter_px, bold=True) if panel.letter else 0
+                # A title wider than its panel would print over the next panel's letter and title (or run off the figure)
+                title = _elide(panel.title, fonts, text_px, panel_w - offset) if panel.title else ""
+                if title:
+                    annotations.append(Annotation("text", x + offset, y + header_h * 0.82, text=title, size=text_px, anchor="ls", role="panel title"))
             panel.meta["bbox"] = [x, y, x + panel_w, y + panel_h]
             x += panel_w + panel_gap
             row_height = max(row_height, panel_h)
@@ -1040,8 +1239,12 @@ def _compose(panels, options, fonts, colorbars=(), panel_columns=1, heading=None
     for bar in colorbars:
         y += round(text_px * 1.8)
         inset = round(fonts.width("\u221200.0", small_px) / 2)  # room for the first tick value
-        annotations.extend(_colorbar(bar, margin + inset, y, round(available * (0.45 if options.width_mm > 120 else 0.8)), bar_h, fonts, text_px, small_px))
-        y += bar_h + round(small_px * 1.8)
+        items = _colorbar(bar, margin + inset, y, round(available * (0.45 if options.width_mm > 120 else 0.8)), bar_h, fonts, text_px, small_px)
+        annotations.extend(items)
+        # A second row of tick labels (a threshold next to the bar end) needs a line of its own
+        first_row_bottom = y + bar_h * 1.9 + small_px * 0.65
+        second_row = any(item.role in ("tick value", "threshold value") and item.y > first_row_bottom for item in items)
+        y += bar_h + round(small_px * 1.8) + (round(small_px * COLORBAR_ROW_EM) if second_row else 0)
     height = y + margin
 
     base = Image.new("RGB", (width_px, height), (255, 255, 255))
@@ -1054,17 +1257,36 @@ def _compose(panels, options, fonts, colorbars=(), panel_columns=1, heading=None
         left, right = side_labels(tile.plane, options.convention)
         annotations.append(Annotation("text", tx + pad, ty + h_px - pad, text=left, size=small_px, color=ink, anchor="lb", bold=True, role="stamp"))
         annotations.append(Annotation("text", tx + w_px - pad, ty + h_px - pad, text=right, size=small_px, color=ink, anchor="rb", bold=True, role="stamp"))
-        if tile.top_left:
-            annotations.append(Annotation("text", tx + pad, ty + pad, text=tile.top_left, size=small_px, color=ink, anchor="lt", role="slice"))
+        # Both labels stay inside their own tile: a case label wider than the tile is elided (the full text
+        # stays in figure.json and the case table)
+        top_left = _elide(tile.top_left, fonts, small_px, w_px - 2 * pad) if tile.top_left else ""
+        if top_left:
+            annotations.append(Annotation("text", tx + pad, ty + pad, text=top_left, size=small_px, color=ink, anchor="lt", role="slice"))
         if tile.top_right:
-            annotations.append(Annotation("text", tx + w_px - pad, ty + pad, text=tile.top_right, size=small_px, color=ink, anchor="rt", role="case"))
+            room = w_px - 2 * pad - (fonts.width(top_left, small_px) + 2 * pad if top_left else 0)
+            top_right = _elide(tile.top_right, fonts, small_px, room)
+            if top_right:
+                annotations.append(Annotation("text", tx + w_px - pad, ty + pad, text=top_right, size=small_px, color=ink, anchor="rt", role="case"))
         record = {"panel": panel.letter, "plane": tile.plane, "bbox": [tx, ty, tx + w_px, ty + h_px], "stamps": {"left": left, "right": right}}
         record.update(tile.meta)
         tiles_out.append(record)
     if options.watermark:
         # First, so every label and stamp is drawn over it and stays readable
-        annotations.insert(0, Annotation("text", width_px / 2, height / 2, text=options.watermark, size=min(width_px / max(len(options.watermark), 1) * 1.2, height * 0.3), color="#808080", opacity=0.25, anchor="mm", bold=True, role="watermark"))
+        annotations.insert(0, Annotation("text", width_px / 2, height / 2, text=options.watermark, size=min(width_px / max(len(options.watermark), 1) * 1.2, height * 0.3), color=WATERMARK_COLOR, opacity=WATERMARK_OPACITY, anchor="mm", bold=True, role="watermark"))
     return base, annotations, tiles_out
+
+
+def _elide(text, fonts, size, room, bold=False):
+    """``text`` cut with an ellipsis at the end so it is at most ``room`` pixels wide ("" when not even
+    one character and the ellipsis fit).
+    """
+    if fonts.width(text, size, bold) <= room:
+        return text
+    for count in range(len(text) - 1, 0, -1):
+        cut = text[:count].rstrip() + "\u2026"
+        if fonts.width(cut, size, bold) <= room:
+            return cut
+    return ""
 
 
 def _is_dark(color):
@@ -1087,9 +1309,13 @@ def _colorbar(bar, x, y, width, height, fonts, text_px, small_px):
         colors = tuple(_to_hex(rgb) for rgb in diverging_lut())
         for value in (-window, 0.0, window):
             ticks.append((x + width * (value + window) / (2 * window), _fmt(value), False))
-        threshold = bar.get("threshold")
-        if threshold is not None and math.isfinite(threshold) and threshold > 0:
-            sign = bar.get("sign", "both")
+        levels = bar.get("thresholds")
+        if levels is None:
+            levels = [bar.get("threshold")]
+        sign = bar.get("sign", "both")
+        for threshold in levels:
+            if threshold is None or not math.isfinite(threshold) or threshold <= 0:
+                continue
             for value, keep in ((-threshold, sign != "pos"), (threshold, sign != "neg")):
                 if not keep:
                     continue
@@ -1097,7 +1323,7 @@ def _colorbar(bar, x, y, width, height, fonts, text_px, small_px):
                 clamped = max(-window, min(window, value))
                 label = _fmt(value) if clamped == value else ("\u2265 " if value > 0 else "\u2264 ") + _fmt(value)
                 ticks.append((x + width * (clamped + window) / (2 * window), label, True))
-            ticks.sort(key=lambda tick: tick[0])
+        ticks.sort(key=lambda tick: tick[0])
     else:
         vmax = bar["vmax"]
         if bar.get("discrete"):
@@ -1111,11 +1337,43 @@ def _colorbar(bar, x, y, width, height, fonts, text_px, small_px):
             ticks = [(x, _fmt(vmin), False), (x + width, _fmt(vmax), False)]
     items.append(Annotation("bar", x, y, w=width, h=height, colors=colors, role=bar["label"]))
     items.append(Annotation("rect", x, y + height, w=width, h=1, color="#000000"))
-    for tx, label, is_threshold in ticks:
-        tick = height * (0.9 if is_threshold else 0.45)
-        items.append(Annotation("line", tx, y + height, w=tx, h=y + height + tick, size=1, color="#000000", role="threshold tick" if is_threshold else "tick"))
+    rows = _label_rows(ticks, fonts, small_px)
+    # Where each label sits (left, right, top offset below the bar, row), so that the tick line of a label on a
+    # lower row stops above any label on an upper row that it would otherwise strike through
+    spans = []
+    for (tx, label, is_threshold), row in zip(ticks, rows, strict=True):
+        tick = height * (0.9 if is_threshold else 0.45) + row * COLORBAR_ROW_EM * small_px
+        half = fonts.width(label, small_px) / 2
+        spans.append((tx - half, tx + half, tick + small_px * 0.15, row))
+    for (tx, label, is_threshold), row in zip(ticks, rows, strict=True):
+        tick = height * (0.9 if is_threshold else 0.45) + row * COLORBAR_ROW_EM * small_px
+        line = tick
+        for left, right, top, other in spans:
+            if other < row and left <= tx <= right:
+                line = min(line, top - 1)
+        items.append(Annotation("line", tx, y + height, w=tx, h=y + height + line, size=1, color="#000000", role="threshold tick" if is_threshold else "tick"))
         items.append(Annotation("text", tx, y + height + tick + small_px * 0.15, text=label, size=small_px, anchor="mt", role="threshold value" if is_threshold else "tick value"))
     return items
+
+
+def _label_rows(ticks, fonts, small_px):
+    """The row (0 = the first line below the bar, 1 = the line under it) of each tick label, so that no two
+    labels overprint: the end and centre values keep row 0 and a threshold value whose centred text would
+    touch a label already placed there (a threshold widened to 1.1 x its value lies close to the bar end)
+    drops to the next row that is free.
+    """
+    gap = small_px * 0.4
+    rows = [0] * len(ticks)
+    placed = []  # (left, right, row) of the labels placed so far
+    for index in sorted(range(len(ticks)), key=lambda i: ticks[i][2]):  # plain ticks first
+        tx, label, _ = ticks[index]
+        half = fonts.width(label, small_px) / 2
+        row = 0
+        while any(r == row and tx - half < right + gap and tx + half > left - gap for left, right, r in placed):
+            row += 1
+        rows[index] = row
+        placed.append((tx - half, tx + half, row))
+    return rows
 
 
 # Context: shared loading, display grid and caption pieces
@@ -1159,8 +1417,45 @@ class _Context:
     def _input(self, role, volume):
         self.inputs.append({"role": role, "name": volume.name, "file": volume.source, "sha256": volume.sha256})
 
+    def check_coverage(self, volumes, what="map"):
+        """Compare the input(s) with the template-based display grid, which silently drops whatever lies
+        outside it. Raises when none of the (non-empty) inputs overlaps the grid; else returns the list of
+        (volume, share inside) pairs for the inputs that are partly outside. Inputs without a template
+        define the grid and are always covered.
+        """
+        if self.template is None:
+            return []
+        shares = [(volume, inside_fraction(volume, self.grid)) for volume in volumes]
+        present = [(volume, share) for volume, share in shares if share is not None]
+        if present and all(share == 0.0 for _, share in present):
+            names = ", ".join(volume.name for volume, _ in present[:3]) + (", ..." if len(present) > 3 else "")
+            if len(present) == 1 and what.endswith("s"):
+                what = what[:-1]  # one input: "the lesion", not "the lesions"
+            be = "Are" if what.endswith("s") else "Is"
+            raise ValueError(f"No voxel of the {what} ({names}) lies inside the template's field of view ({self.template.name}); nothing could be drawn. {be} the {what} in the template's space (for example MNI)?")
+        return [(volume, share) for volume, share in present if share < 1.0]
+
+    def lesion_notes(self, volumes, labels=None):
+        """Caption sentences for lesions that lie partly or wholly outside the template's field of view
+        (raises when all of them do).
+        """
+        partial = self.check_coverage(volumes, "lesions")
+        if not partial:
+            return []
+        labels = labels if labels is not None else [str(index + 1) for index in range(len(volumes))]
+        by_id = {id(volume): label for volume, label in zip(volumes, labels, strict=False)}
+        cases = [by_id[id(volume)] for volume, _ in partial]
+        shown = ", ".join(cases[:8]) + (", ..." if len(cases) > 8 else "")
+        worst = min(share for _, share in partial)
+        # "1 of 1 lesion lies", "1 of 2 lesions lies", "2 of 2 lesions lie": the noun follows the total, the verb the count
+        noun = "lesion" if len(volumes) == 1 else "lesions"
+        verb = "lies" if len(cases) == 1 else "lie"
+        return [f"Warning: {len(cases)} of {len(volumes)} {noun} {verb} partly or wholly outside the template's field of view (case {shown}; at worst {_percent_text(1.0 - worst)} of a lesion is not shown)."]
+
     def map(self, source, title, role="map"):
         volume = load_volume(source)
+        for _, share in self.check_coverage([volume]):
+            self.notes.append(f"Warning: {_percent_text(1.0 - share)} of the non-zero voxels of {volume.name} lie outside the template's field of view and are not shown; the statistics above describe the whole map.")
         self._input(role, volume)
         key = base = volume.name if role == "map" else role
         suffix = 2
@@ -1245,6 +1540,36 @@ def _mode_sentence(mode, companion):
     if companion and mode != "unthresholded":
         text += " Each thresholded panel has an unthresholded companion with the same colour range."
     return text
+
+
+def _threshold_condition(statistic, sign, threshold):
+    """The displayed threshold condition: "|T| ≥ 5.15", "T ≥ 5.15" or "T ≤ -5.15" for ``sign`` both/pos/neg (negative values in the Unicode minus sign, as :func:`_fmt` writes them)."""
+    if sign == "neg":
+        return f"{statistic} ≤ {_fmt(-threshold)}"
+    if sign == "pos":
+        return f"{statistic} ≥ {_fmt(threshold)}"
+    return f"|{statistic}| ≥ {_fmt(threshold)}"
+
+
+def _sign_sentence(infos, sign, mode, statistic):
+    """Which tail the thresholded panels show when ``sign`` is "pos" or "neg" (empty for "both" or when
+    nothing is thresholded): the other tail is hidden there, so the caption must say so, with the share of
+    in-mask voxels of the shown tail (the rule line gives the two-sided |value| share).
+    """
+    if sign not in ("pos", "neg") or mode == "unthresholded":
+        return ""
+    shown, hidden = ("positive", "negative") if sign == "pos" else ("negative", "positive")
+    parts = []
+    resolved_infos = [info for info in infos if info.resolved is not None and math.isfinite(info.resolved.value)]
+    for info in resolved_infos:
+        text = _threshold_condition(statistic, sign, info.resolved.value)
+        if info.values is not None:
+            share = thresholds.fraction_connected(info.values, info.resolved, sign)
+            if math.isfinite(share):
+                text += f", {thresholds._format_fraction(share)} of in-mask voxels"
+        parts.append(text if len(resolved_infos) == 1 else f"{info.title}: {text}")
+    detail = f" ({'; '.join(parts)})" if parts else ""
+    return f"Thresholded panels show only {shown} values{detail}; {hidden} values are hidden there."
 
 
 def _slices_sentence(plane, coordinates):
@@ -1358,12 +1683,28 @@ def _companion_titles(options):
 
 
 def _map_bar(infos, window, sign, options, statistic):
-    threshold = next((info.resolved.value for info in infos if info.resolved is not None and math.isfinite(info.resolved.value)), None)
+    """The colour bar of map panels. When the maps' thresholds differ (a top-x% rule cuts each map at its own
+    value), the label names each panel's threshold and every threshold gets a tick; the bar used to state only the
+    first map's threshold for all panels.
+    """
+    levels = []  # [threshold, [titles]] in panel order, equal thresholds merged
+    for info in infos:
+        if info.resolved is None or not math.isfinite(info.resolved.value):
+            continue
+        for level in levels:
+            if math.isclose(level[0], info.resolved.value, rel_tol=1e-9, abs_tol=1e-12):
+                level[1].append(info.title)
+                break
+        else:
+            levels.append([info.resolved.value, [info.title]])
     label = f"{_units(options, statistic)} (shared range ±{_fmt(window)}"
-    if threshold is not None:
-        label += f"; threshold {'|' + statistic + '|' if sign == 'both' else statistic} ≥ {_fmt(threshold)}"
+    if len(levels) == 1:
+        label += f"; threshold {_threshold_condition(statistic, sign, levels[0][0])}"
+    elif levels:
+        label += "; thresholds " + ", ".join(f"{_threshold_condition(statistic, sign, value)} ({', '.join(titles)})" for value, titles in levels)
     label += ")"
-    return {"kind": "diverging", "window": float(window), "threshold": threshold, "sign": sign, "label": label}
+    threshold = levels[0][0] if len(levels) == 1 else None
+    return {"kind": "diverging", "window": float(window), "threshold": threshold, "thresholds": [value for value, _ in levels], "sign": sign, "label": label}
 
 
 def _map_rows(panels, infos, planes_coords):
@@ -1371,7 +1712,7 @@ def _map_rows(panels, infos, planes_coords):
     for panel in panels:
         info = next(i for i in infos if i.key == panel.meta["key"])
         for plane, coordinate, index in planes_coords:
-            values = section(info.grid_values, plane, index, panel.meta["sign"])
+            values = section(info.grid_values, plane, index, projection_sign(panel.meta["mode"], panel.meta["threshold"], panel.meta["sign"]))
             threshold = panel.meta["threshold"]
             scores = _scores(values, panel.meta["sign"])
             finite = values[np.isfinite(values) & (values != 0)]
@@ -1409,6 +1750,9 @@ def pair(map, template=None, slices="auto", **kwargs):  # noqa: A002
     kwargs["companion"] = True
     if kwargs.get("mode") == "unthresholded":
         raise ValueError("The pair preset shows a thresholded map: choose mode hard or transparent")
+    if kwargs.get("rule") is None and kwargs.get("threshold") is None:
+        # Without a threshold there is no thresholded panel (nor a companion), and the caption would still say "Thresholded and unthresholded map"
+        raise ValueError("The pair preset shows a thresholded map: give a threshold rule (--rule) or a threshold (--threshold)")
     return _montage("pair", [map], template, slices, kwargs)
 
 
@@ -1440,6 +1784,7 @@ def _montage(preset, maps, template, slices, kwargs):
         _orientation_sentence(options.convention, [plane]),
         *(_threshold_sentence(info, statistic) for info in infos),
         _mode_sentence(mode, options.companion),
+        _sign_sentence(infos, sign, mode, statistic),
         f"Colour range symmetric ±{_fmt(window)} shared by all panels; warm colours are positive, cool colours negative.",
         _slices_sentence(plane, [c for _, c, _ in planes]),
         *ctx.notes,
@@ -1468,8 +1813,7 @@ def triptych(sensitivity, specificity, conjunction, template=None, slices="A aut
     volumes = [load_volume(source) for source in (sensitivity, specificity, conjunction)]
     ctx = _Context("triptych", options, template, volumes)
     infos = [ctx.map(volume, title, role=title.lower()) for volume, title in zip(volumes, titles, strict=False)]
-    for info in infos:
-        _resolve(info, options)
+    _resolve_all(infos, options)
     plane, coordinates, count = parse_slices(slices)
     if coordinates is None:
         threshold = infos[-1].resolved.value if infos[-1].resolved is not None else None
@@ -1488,6 +1832,7 @@ def triptych(sensitivity, specificity, conjunction, template=None, slices="A aut
         _orientation_sentence(options.convention, [plane]),
         *(_threshold_sentence(info, statistic) for info in infos),
         _mode_sentence(mode, options.companion),
+        _sign_sentence(infos, sign, mode, statistic),
         f"Colour range symmetric ±{_fmt(window)} shared by all panels; warm colours are positive, cool colours negative.",
         _slices_sentence(plane, [c for _, c, _ in planes]),
         *ctx.notes,
@@ -1513,9 +1858,52 @@ def spatial_r(a, b, mask=None):
     return (float((x * y).sum()) / denominator if denominator > 0 else math.nan), int(keep.sum())
 
 
+def _same_grid(volume, reference):
+    """Whether ``volume`` has exactly ``reference``'s array shape and affine."""
+    return np.shape(volume.data) == np.shape(reference.data) and np.allclose(volume.affine, reference.affine, atol=1e-4)
+
+
+def _same_lattice(volume, reference, tol=1e-3):
+    """Whether every voxel centre of ``reference`` falls on a voxel centre of ``volume``'s lattice: the same
+    spacing and axes up to the order and the flips of the stored axes (a RAS file and its LPS or FSL-style copy),
+    with offsets of a whole number of voxels (``tol`` in voxels).
+    """
+    to_volume = np.linalg.inv(np.asarray(volume.affine, dtype=np.float64)) @ np.asarray(reference.affine, dtype=np.float64)
+    linear, offset = to_volume[:3, :3], to_volume[:3, 3]
+    signed = np.round(linear)
+    if not np.allclose(linear, signed, atol=tol) or not np.allclose(offset, np.round(offset), atol=tol):
+        return False
+    return bool((np.abs(signed).sum(axis=0) == 1).all() and (np.abs(signed).sum(axis=1) == 1).all())
+
+
+def _replication_r(a, b, mask_volume=None):
+    """Spatial r of maps ``a`` and ``b`` on a grid of their own (never the template's display grid, whose
+    interpolation onto finer voxels smooths the maps and inflates r and the voxel count).
+
+    Returns (r, voxels, r_grid, where): r_grid is "native" when the voxel centres coincide (``b`` is then moved
+    voxel for voxel onto ``a``'s grid, without interpolation), else "resampled" (the finer map linearly resampled
+    onto the coarser map's grid); voxels outside either map's field of view are left out.
+    """
+    if _same_lattice(b, a):
+        reference, values = a, (b.data if _same_grid(b, a) else reslice(b, _NativeGrid(a), order=0, cval=np.nan, dtype=np.float64))
+        r_grid, where = "native", "on the maps' common grid"
+    else:
+        size_a, size_b = (abs(float(np.linalg.det(np.asarray(v.affine, dtype=np.float64)[:3, :3]))) for v in (a, b))
+        reference, other = (b, a) if size_b > size_a * (1.0 + 1e-6) else (a, b)
+        values = reslice(other, _NativeGrid(reference), order=1, cval=np.nan, dtype=np.float64)
+        r_grid, where = "resampled", f"on the grid of {reference.name}, the coarser map, with {other.name} linearly resampled onto it"
+    mask = None
+    if mask_volume is not None:
+        mask = mask_volume.data if _same_grid(mask_volume, reference) else reslice(mask_volume, _NativeGrid(reference), order=0)
+    r, voxels = spatial_r(reference.data, values, mask)
+    return r, voxels, r_grid, where
+
+
 def replication(first, second, template=None, slices="auto", titles=("Discovery", "Replication"), **kwargs):
-    """Two maps side by side (unthresholded by default) with their spatial correlation r, computed on
-    the maps' own grid when they share it (else on the display grid) inside the mask when given.
+    """Two maps side by side (unthresholded by default) with their spatial correlation r, inside the mask when
+    given. r never depends on the template or on how the files are stored: it is computed on the maps' own grid
+    when their voxel centres coincide (whatever the axis order or flips of the files), else on the grid of the
+    coarser map with the other map linearly resampled onto it.
     """
     kwargs = dict(kwargs)
     kwargs.setdefault("mode", "unthresholded")
@@ -1523,20 +1911,9 @@ def replication(first, second, template=None, slices="auto", titles=("Discovery"
     volumes = [load_volume(first), load_volume(second)]
     ctx = _Context("replication", options, template, volumes)
     infos = [ctx.map(volume, title, role=title.lower()) for volume, title in zip(volumes, titles, strict=False)]
-    for info in infos:
-        _resolve(info, options)
+    _resolve_all(infos, options)
     a, b = infos[0].volume, infos[1].volume
-    same_grid = np.shape(a.data) == np.shape(b.data) and np.allclose(a.affine, b.affine, atol=1e-4)
-    if same_grid:
-        mask = None
-        if ctx.mask is not None:
-            mask = reslice(ctx.mask, _NativeGrid(a), order=0) if not (np.shape(ctx.mask.data) == np.shape(a.data) and np.allclose(ctx.mask.affine, a.affine, atol=1e-4)) else ctx.mask.data
-        r, voxels = spatial_r(a.data, b.data, mask)
-        where = "on the maps' common grid"
-    else:
-        mask = ctx.mask_on_grid() if ctx.mask is not None else None
-        r, voxels = spatial_r(infos[0].grid_values, infos[1].grid_values, mask)
-        where = "on the display grid"
+    r, voxels, r_grid, where = _replication_r(a, b, ctx.mask)
     plane, coordinates, count = parse_slices(slices)
     if coordinates is None:
         combined = np.abs(infos[0].grid_values) + np.abs(infos[1].grid_values)
@@ -1556,13 +1933,14 @@ def replication(first, second, template=None, slices="auto", titles=("Discovery"
         _orientation_sentence(options.convention, [plane]),
         *(_threshold_sentence(info, statistic) for info in infos if info.resolved is not None),
         _mode_sentence(mode, options.companion),
+        _sign_sentence(infos, sign, mode, statistic),
         f"Colour range symmetric ±{_fmt(window)} shared by both maps; warm colours are positive, cool colours negative.",
         _slices_sentence(plane, [c for _, c, _ in planes]),
         *ctx.notes,
         *_context_sentences(ctx),
     ]
     meta = _threshold_meta(infos, window, planes)
-    meta.update({"spatial_r": None if not math.isfinite(r) else r, "r_voxels": voxels, "r_grid": "native" if same_grid else "display"})
+    meta.update({"spatial_r": None if not math.isfinite(r) else r, "r_voxels": voxels, "r_grid": r_grid})
     figure = _finish(ctx, panels, "replication", caption, None, [_map_bar(infos, window, sign, options, statistic)], extra_meta=meta)
     figure.sourcedata = _map_rows(panels, infos, planes) + [{"panel": "", "map": f"{a.name} vs {b.name}", "plane": "spatial_r", "coordinate_mm": "", "voxels_nonzero": voxels, "min": "", "max": "", "window": "", "threshold": "", "sha256": "", "mode": "", "voxels_suprathreshold": "", "r": r}]
     return figure
@@ -1602,6 +1980,7 @@ def glass(map, mask=None, template=None, **kwargs):  # noqa: A002
         _orientation_sentence(options.convention, PLANES),
         *(_threshold_sentence(info, statistic) for info in infos),
         _mode_sentence(mode, options.companion),
+        _sign_sentence(infos, sign, mode, statistic),
         f"Colour range symmetric ±{_fmt(window)} shared by all panels; warm colours are positive, cool colours negative.",
         *ctx.notes,
         *_context_sentences(ctx),
@@ -1628,6 +2007,18 @@ def ortho(map, point=None, template=None, **kwargs):  # noqa: A002
         point = tuple(ctx.grid.coordinate(axis, peak[axis]) for axis in range(3))
     point = tuple(float(value) for value in point)
     indices = [ctx.grid.index(axis, point[axis]) for axis in range(3)]
+    for plane in PLANES:
+        axis = PLANE_AXIS[plane]
+        if not ctx.grid.contains(axis, point[axis]):
+            # The clipped index shows the edge plane; the crosshair line marking this coordinate in the
+            # two other tiles lies outside their images, so it is not drawn (the tile of this plane keeps
+            # its own crosshair, which marks the two other coordinates).
+            others = [other for other in PLANES if other != plane]
+            ctx.notes.append(
+                f"The {plane} coordinate {_signed(point[axis])} mm is outside the display grid; "
+                f"the nearest {plane} plane is shown, and the crosshair line for {AXIS_NAMES[axis]} = {_signed(point[axis])} mm "
+                f"is missing from the {others[0]} and {others[1]} tiles.",
+            )
     planes = [(plane, ctx.grid.coordinate(PLANE_AXIS[plane], indices[PLANE_AXIS[plane]]), indices[PLANE_AXIS[plane]]) for plane in PLANES]
 
     def build(info):
@@ -1640,6 +2031,7 @@ def ortho(map, point=None, template=None, **kwargs):  # noqa: A002
         _orientation_sentence(options.convention, PLANES),
         *(_threshold_sentence(info, statistic) for info in infos),
         _mode_sentence(mode, options.companion),
+        _sign_sentence(infos, sign, mode, statistic),
         f"Colour range symmetric ±{_fmt(window)} shared by all panels; warm colours are positive, cool colours negative.",
         *ctx.notes,
         *_context_sentences(ctx),
@@ -1649,6 +2041,22 @@ def ortho(map, point=None, template=None, **kwargs):  # noqa: A002
     figure = _finish(ctx, panels, "ortho", caption, None, [_map_bar(infos, window, sign, options, statistic)], extra_meta=meta)
     figure.sourcedata = _map_rows(panels, infos, planes)
     return figure
+
+
+def _require_lesion_counts(volume):
+    """Refuse a ``--count`` map whose finite values are not whole numbers of at least 0 (a percent map, a
+    probability map, a signed statistic): rounding it would draw impossible lesion counts.
+    """
+    values = np.asarray(volume.data, dtype=np.float64)
+    values = values[np.isfinite(values)]
+    if not values.size:
+        return
+    if values.min() < 0:
+        raise ValueError(f"{volume.name} is not a lesion count map: it has negative values (minimum {values.min():g}). Give the overlapCount map, whose values are whole numbers of lesions.")
+    fractional = values[np.abs(values - np.rint(values)) > 1e-3]
+    if fractional.size:
+        hint = "; it looks like a percent map, give the overlapCount map" if values.max() <= 100 else ""
+        raise ValueError(f"{volume.name} is not a lesion count map: its values are not whole numbers (for example {fractional[0]:g}){hint}. A lesion count map (for example overlapCount) is needed.")
 
 
 def overlap(count=None, lesions=None, template=None, slices="auto", n_lesions=None, binarize_at=0.5, **kwargs):
@@ -1671,6 +2079,7 @@ def overlap(count=None, lesions=None, template=None, slices="auto", n_lesions=No
         ctx = _Context("overlap", options, template, volumes)
         for volume in volumes:
             ctx._input("lesion", volume)
+        outside_notes = ctx.lesion_notes(volumes)
         first = volumes[0]
         if all(np.shape(v.data) == np.shape(first.data) and np.allclose(v.affine, first.affine, atol=1e-4) for v in volumes):
             native = np.zeros(np.shape(first.data), dtype=np.int32)
@@ -1688,11 +2097,18 @@ def overlap(count=None, lesions=None, template=None, slices="auto", n_lesions=No
         volume = load_volume(count)
         ctx = _Context("overlap", options, template, volume)
         ctx._input("count", volume)
+        outside_notes = [f"Warning: {_percent_text(1.0 - share)} of the non-zero voxels of {volume.name} lie outside the template's field of view and are not shown." for _, share in ctx.check_coverage([volume], "count map")]
+        _require_lesion_counts(volume)
         native = np.rint(np.nan_to_num(np.asarray(volume.data, dtype=np.float64))).astype(np.int32)
         grid_count = np.rint(reslice(volume, ctx.grid, order=0)).astype(np.int32)
         name = volume.name
     max_count = int(native.max()) if native is not None and native.size else int(grid_count.max())
+    if n_lesions is not None and (n_lesions < 1 or n_lesions < max_count):
+        # The maximum count is the number of lesions that cover one voxel, so it cannot exceed the number of lesions
+        raise ValueError(f"--n-lesions {n_lesions} cannot be the number of lesions behind the count map: its maximum count is {max_count}, so there are at least {max(max_count, 1)} lesions")
     legend = _overlap_legend(max_count, n_lesions)
+    if outside_notes and int(grid_count.max()) < max_count:
+        outside_notes.append(f"The maximum ({max_count}) is reached outside the displayed area; the largest count shown is {int(grid_count.max())}.")
     plane, coordinates, n_slices = parse_slices(slices)
     if coordinates is None:
         coordinates = auto_slices(grid_count.astype(np.float32), ctx.grid, plane, n_slices or 6)
@@ -1701,12 +2117,13 @@ def overlap(count=None, lesions=None, template=None, slices="auto", n_lesions=No
     layer = Layer(grid_count, "sequential", vmin=0, vmax=max(max_count, 1), discrete=True, opacity=1.0)
     tiles = [TileSpec(p, index, _slice_label(p, c), meta={"coordinate_mm": c}) for p, c, index in planes]
     panels = [PanelSpec(ctx.scene([layer]), tiles, options.columns or len(tiles), "", meta={"map": name, "mode": "count", "max_count": max_count, "legend": legend})]
-    of = f" of {n_lesions} lesions ({round(100.0 * max_count / n_lesions):.0f}%)" if n_lesions else ""
+    of = f" of {n_lesions} {'lesion' if n_lesions == 1 else 'lesions'} ({round(100.0 * max_count / n_lesions):.0f}%)" if n_lesions else ""
     caption = [
         f"Lesion overlap: colour = number of lesions covering each voxel, exact integer bins 1\u2013{max(max_count, 1)} (sequential colour map); maximum {max_count}{of}.",
         _orientation_sentence(options.convention, [plane]),
         f"A voxel counts for a lesion when its value is ≥ {binarize_at:g}." if lesions is not None else "",
         _slices_sentence(plane, [c for _, c, _ in planes]),
+        *outside_notes,
         *_context_sentences(ctx),
     ]
     bar = {"kind": "sequential", "vmin": 0, "vmax": max(max_count, 1), "discrete": True, "label": f"lesions per voxel ({legend})"}
@@ -1732,10 +2149,12 @@ def max_area_index(mask3d, axis=2):
     return int(np.argmax(areas)), int(areas.max())
 
 
-def gallery(lesions, template=None, labels=None, per_page=30, binarize_at=0.5, **kwargs):
+def gallery(lesions, template=None, labels=None, per_page=30, binarize_at=0.5, cancel=None, **kwargs):
     """One axial tile per lesion at its maximum-area slice: red fill on the template, the case number
     (supplementary-table order: ``labels`` or 1..N) at the top right, z at the top left, L/R stamps.
 
+    :param cancel: optional :class:`jobs.CancelToken` (or any callable); checked between lesions and pages,
+        it raises :class:`jobs.Cancelled` when the job is stopped.
     :return: a list of :class:`Figure` pages of ``per_page`` tiles (``columns`` per row, default 6).
     """
     options = _options(kwargs)
@@ -1745,11 +2164,16 @@ def gallery(lesions, template=None, labels=None, per_page=30, binarize_at=0.5, *
     labels = [str(label) for label in labels] if labels is not None else [str(index + 1) for index in range(len(volumes))]
     if len(labels) != len(volumes):
         raise ValueError(f"{len(labels)} labels for {len(volumes)} lesions")
-    per_page = max(1, int(per_page))
+    if int(per_page) < 1:
+        # 0 and negative used to become 1 silently (one tile per page)
+        raise ValueError(f"The number of tiles per page must be at least 1, got {per_page}")
+    per_page = int(per_page)
     pages = []
     ctx_all = _Context("gallery", options, template, volumes)
+    outside_notes = ctx_all.lesion_notes(volumes, labels)
     entries = []
     for volume, label in zip(volumes, labels, strict=False):
+        _check_cancel(cancel, len(entries))
         on_grid = reslice(volume, ctx_all.grid, order=0) >= binarize_at
         index, area = max_area_index(on_grid, 2)
         # Keep only the chosen axial section (a tile renders that plane alone): a read-only 3D view of it
@@ -1759,6 +2183,7 @@ def gallery(lesions, template=None, labels=None, per_page=30, binarize_at=0.5, *
         del on_grid
     total_pages = (len(entries) + per_page - 1) // per_page
     for page in range(total_pages):
+        _check_cancel(cancel, page)
         chunk = entries[page * per_page:(page + 1) * per_page]
         ctx = ctx_all.page() if page else ctx_all
         tiles = []
@@ -1775,8 +2200,9 @@ def gallery(lesions, template=None, labels=None, per_page=30, binarize_at=0.5, *
             rows.append({"case": label, "lesion": volume.name, "sha256": volume.sha256, "plane": "axial", "coordinate_mm": round(z, 3), "area_mm2": round(area * ctx.grid.spacing**2, 3), "voxels_display_grid": voxels})
         columns = options.columns or 6
         caption = [
-            f"Lesion gallery ({len(entries)} lesions{f', page {page + 1} of {total_pages}' if total_pages > 1 else ''}): each lesion (red) on the axial slice of its largest area; numbers match the case table; z in mm.",
+            f"Lesion gallery ({len(entries)} {'lesion' if len(entries) == 1 else 'lesions'}{f', page {page + 1} of {total_pages}' if total_pages > 1 else ''}): each lesion (red) on the axial slice of its largest area; numbers match the case table; z in mm.",
             _orientation_sentence(options.convention, ["axial"]),
+            *outside_notes,
             *_context_sentences(ctx),
         ]
         figure = _finish_gallery(ctx, panels, columns, caption, rows, page, total_pages)
@@ -1786,7 +2212,7 @@ def gallery(lesions, template=None, labels=None, per_page=30, binarize_at=0.5, *
 
 def _finish_gallery(ctx, panels, columns, caption, rows, page, total_pages):
     options = ctx.options
-    base, annotations, tiles = _compose(panels, options, ctx.fonts, (), columns, options.title)
+    base, annotations, tiles = _compose(panels, options, ctx.fonts, (), columns, options.title, pad_rows=True)
     meta = {
         "format": FORMAT,
         "version": VERSION,
@@ -1882,45 +2308,71 @@ def _write_bytes(path, data):
     os.replace(tmp, path)
 
 
-def write_figure(figure, out_root, name, formats=FORMATS):
+_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+RESUME_NAME = ".figure-resume.json"  # in the figure folder: --resume skips a figure that is complete for the same inputs and options
+_RESUME_IGNORED = ("cancel_file", "resume", "threads", "parent_run", "run_root")
+
+
+def _check_cancel(cancel, done=None):
+    """Raise ``jobs.Cancelled`` when ``cancel`` (a CancelToken or any callable) says the job was stopped."""
+    if cancel is not None and cancel():
+        raise jobs.Cancelled(done=done, reason=getattr(cancel, "reason", None))
+
+
+def _sha256_file(path, block=1 << 20):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(block):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_figure(figure, out_root, name, formats=FORMATS, cancel=None):
     """Write a figure (or a list of gallery pages) to ``<out_root>/figures/<name>/``.
 
     Files: ``<name>.png/.tiff/.svg/.pdf`` (pages: ``<name>_p01.png`` ... and one multi-page PDF),
     ``figure.json``, ``caption.txt`` and ``<name>_sourcedata.csv``.
 
+    ``cancel`` (a :class:`jobs.CancelToken` or any callable) is checked while the files are encoded; a stopped
+    job raises :class:`jobs.Cancelled` before the first file of this call is written (no partial figure).
+
     :return: dict {"dir": folder, "files": [file names], "figure_json": path}.
     """
-    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", name or ""):
+    if not _NAME_PATTERN.match(name or ""):
         raise ValueError(f"Figure names use letters, digits, '.', '_' and '-': {name!r}")
     unknown = sorted(set(formats) - set(FORMATS))
     if unknown:
         raise ValueError(f"Unknown format(s): {', '.join(unknown)}")
     pages = list(figure) if isinstance(figure, (list, tuple)) else [figure]
     folder = os.path.join(os.fspath(out_root), "figures", name)
-    os.makedirs(folder, exist_ok=True)
     files = []
+    payloads = []  # (file name, bytes): everything is encoded before the first write, so a stop leaves no partial figure
     stems = [name] if len(pages) == 1 else [f"{name}_p{index + 1:02d}" for index in range(len(pages))]
     for page, stem in zip(pages, stems, strict=False):
+        _check_cancel(cancel, len(files))
         image = page.image()
         if "png" in formats:
-            _write_bytes(os.path.join(folder, stem + ".png"), page.png_bytes())
+            payloads.append((stem + ".png", page.png_bytes()))
             files.append(stem + ".png")
+            _check_cancel(cancel, len(files))
         if "tiff" in formats:
             buffer = io.BytesIO()
             image.save(buffer, "TIFF", dpi=(page.dpi, page.dpi), compression="tiff_lzw")
-            _write_bytes(os.path.join(folder, stem + ".tiff"), buffer.getvalue())
+            payloads.append((stem + ".tiff", buffer.getvalue()))
             files.append(stem + ".tiff")
+            _check_cancel(cancel, len(files))
         if "svg" in formats:
-            _write_bytes(os.path.join(folder, stem + ".svg"), page.svg().encode("utf-8"))
+            payloads.append((stem + ".svg", page.svg().encode("utf-8")))
             files.append(stem + ".svg")
     if "pdf" in formats:
+        _check_cancel(cancel, len(files))
         buffer = io.BytesIO()
         images = [page.image() for page in pages]
         images[0].save(buffer, "PDF", resolution=float(pages[0].dpi), save_all=len(images) > 1, append_images=images[1:], title=name, creator="Slicer Studio LNM figures")
-        _write_bytes(os.path.join(folder, name + ".pdf"), buffer.getvalue())
+        payloads.append((name + ".pdf", buffer.getvalue()))
         files.append(name + ".pdf")
     caption = "\n".join(page.caption.strip() for page in pages) + "\n"
-    _write_bytes(os.path.join(folder, "caption.txt"), caption.encode("utf-8"))
+    payloads.append(("caption.txt", caption.encode("utf-8")))
     files.append("caption.txt")
     rows = [row for page in pages for row in (page.sourcedata or [])]
     csv_name = f"{name}_sourcedata.csv"
@@ -1932,7 +2384,7 @@ def write_figure(figure, out_root, name, formats=FORMATS):
     writer.writeheader()
     for row in rows:
         writer.writerow({key: ("" if value is None else value) for key, value in row.items()})
-    _write_bytes(os.path.join(folder, csv_name), buffer.getvalue().encode("utf-8"))
+    payloads.append((csv_name, buffer.getvalue().encode("utf-8")))
     files.append(csv_name)
     first = pages[0].meta
     record = dict(first)
@@ -1944,8 +2396,36 @@ def write_figure(figure, out_root, name, formats=FORMATS):
     record["files"] = files + ["figure.json"]
     record["software"] = _versions()
     record["created"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    _write_bytes(os.path.join(folder, "figure.json"), (json.dumps(_json_ready(record), indent=1, ensure_ascii=False) + "\n").encode("utf-8"))
+    payloads.append(("figure.json", (json.dumps(_json_ready(record), indent=1, ensure_ascii=False) + "\n").encode("utf-8")))
+    _check_cancel(cancel, len(files))
+    previous = _previous_outputs(folder, name)
+    os.makedirs(folder, exist_ok=True)
+    for file_name, data in payloads:
+        _write_bytes(os.path.join(folder, file_name), data)
+    # A render under the same name replaces the previous one: remove the files of the previous figure that this
+    # one no longer writes (other formats, or <name>_pNN pages when the page count changed), so the folder holds
+    # only what figure.json lists. Only files the previous figure.json listed are removed; other files stay.
+    for file_name in sorted(previous - set(record["files"])):
+        with contextlib.suppress(OSError):
+            os.remove(os.path.join(folder, file_name))
     return {"dir": folder, "files": record["files"], "figure_json": os.path.join(folder, "figure.json")}
+
+
+def _previous_outputs(folder, name):
+    """The image files that an earlier :func:`write_figure` under ``name`` wrote into ``folder`` (from its figure.json).
+
+    Only plain file names that ``write_figure`` itself makes for ``name`` are returned (``<name>.png/.tiff/.svg/.pdf``
+    and ``<name>_pNN.png/.tiff/.svg``), so an edited or foreign figure.json can never point the cleanup at other files.
+    """
+    try:
+        with open(os.path.join(folder, "figure.json"), encoding="utf-8") as f:
+            listed = json.load(f).get("files") or []
+    except (OSError, ValueError, AttributeError):
+        return set()
+    if not isinstance(listed, list):
+        return set()
+    pattern = re.compile(re.escape(name) + r"(?:_p\d{2,})?\.(?:png|tiff|svg|pdf)")
+    return {item for item in listed if isinstance(item, str) and pattern.fullmatch(item) and os.path.isfile(os.path.join(folder, item))}
 
 
 # Command line
@@ -1969,7 +2449,7 @@ def _parser():
     parser.add_argument("--point", default=None, help="x,y,z in mm (ortho; default: the peak)")
     parser.add_argument("--mode", choices=MODES, default=None, help="display mode of thresholded panels (default hard; replication: unthresholded)")
     parser.add_argument("--no-companion", action="store_true", help="omit the unthresholded companion panels")
-    parser.add_argument("--sign", choices=thresholds.SIGNS, default=None)
+    parser.add_argument("--sign", choices=thresholds.SIGNS, default=None, help="values shown in thresholded panels (default: the rule's sign, else both); a top_pct rule is resolved for this sign")
     parser.add_argument("--statistic", default=None, help="statistic name on the colour bar (default: from the rule)")
     parser.add_argument("--units", default=None, help="units shown on the colour bar")
     parser.add_argument("--window", type=float, default=None, help="symmetric colour range W (default: 99.5th percentile of |value|)")
@@ -2012,19 +2492,86 @@ def _relative(root, path):
     return os.path.basename(path) if rel.startswith("..") else rel.replace(os.sep, "/")
 
 
-def main(argv=None):
-    """Command-line entry point (see the module docstring); returns the exit code."""
+def _resume_hash(args, formats):
+    """Hash of everything that decides the figure (options and the bytes of the input files); no path is stored."""
+    from . import runs
+
+    values = {key: value for key, value in vars(args).items() if key not in _RESUME_IGNORED}
+    values["formats"] = formats
+    inputs = [*args.map, *args.lesion, args.count, args.template, args.mask]
+    values["inputs_sha256"] = [_sha256_file(path) if path and os.path.isfile(path) else None for path in inputs]
+    values["library"] = _versions()["library"]
+    return runs.params_sha256(values)
+
+
+def main(argv=None, cancel=None):
+    """Command-line entry point (see the module docstring); returns the exit code.
+
+    ``--cancel-file`` (or a ``cancel`` token given by an in-process caller) stops the job with exit code 3 before
+    any file of the figure is written; ``--resume`` skips a figure that a previous run completed for the same
+    inputs and options (its files are reported again and no run is registered a second time).
+    """
     argv = list(sys.argv[1:] if argv is None else argv)
-    args = _parser().parse_args(argv)
+    from .transforms import _join_point_values
+
+    # '--point -30,20,10' (every left-hemisphere point) would be refused by argparse: write it '--point=-30,20,10'
+    args = _parser().parse_args(_join_point_values(argv))
+    cancel = cancel or jobs.CancelToken(args.cancel_file)
     jobs.emit("start", job=JOB, argv=argv)
     if args.out is None and args.study is None:
         raise jobs.JobError("Give --out or --study", code="usage", exit_code=jobs.EXIT_USAGE)
     if args.rule is not None and args.threshold is not None:
         raise jobs.JobError("Give --rule or --threshold, not both", code="usage", exit_code=jobs.EXIT_USAGE)
+    # Whole numbers of at least 1: checked before anything is read or rendered (0 and negatives used to be accepted)
+    if args.columns is not None and args.columns < 1:
+        raise jobs.JobError(f"--columns must be at least 1, got {args.columns}", code="usage", exit_code=jobs.EXIT_USAGE)
+    if args.per_page < 1:
+        raise jobs.JobError(f"--per-page must be at least 1, got {args.per_page}", code="usage", exit_code=jobs.EXIT_USAGE)
+    if args.out is not None:
+        # An --out that is a file (or lies under one) would fail in write_figure with "[Errno 20] Not a directory"
+        blocker = os.path.abspath(args.out)
+        while blocker and not os.path.exists(blocker) and os.path.dirname(blocker) != blocker:
+            blocker = os.path.dirname(blocker)
+        if os.path.exists(blocker) and not os.path.isdir(blocker):
+            where = "is a file, not a folder" if blocker == os.path.abspath(args.out) else f"lies under {blocker}, which is a file, not a folder"
+            raise jobs.JobError(f"--out {args.out} {where}; give a folder for the figures", code="input")
+    if args.study is not None and not os.path.isfile(os.path.join(args.study, "study.json")):
+        # A mistyped --study (or one that does not exist) used to be created, with a run registry, as a stray folder
+        raise jobs.JobError(f"--study {args.study} is not a study folder (no study.json there); check the path", code="input")
     out_root = args.out or os.path.join(args.study, "derivatives", "lnm")
     run_root = args.run_root or args.study or _find_study(out_root) or out_root
     name = args.name or args.preset
     formats = [item.strip().lower() for item in args.formats.split(",") if item.strip()]
+    # Validate at once: write_figure checks too, but only after the whole figure has been rendered
+    unknown = sorted(set(formats) - set(FORMATS))
+    if unknown:
+        raise jobs.JobError(
+            f"Unknown format(s): {', '.join(unknown)} (use {', '.join(FORMATS)})", code="usage", exit_code=jobs.EXIT_USAGE,
+        )
+    if not formats:
+        raise jobs.JobError(f"Give at least one format in --formats ({', '.join(FORMATS)})", code="usage", exit_code=jobs.EXIT_USAGE)
+    if not _NAME_PATTERN.match(name or ""):
+        # Also refused at once: write_figure checks the name too, but only after the whole figure has been rendered
+        raise jobs.JobError(
+            f"--name may use letters, digits, '.', '_' and '-' and must start with a letter or digit: {name!r}",
+            code="usage", exit_code=jobs.EXIT_USAGE,
+        )
+    # An explicit --font that is not a file is refused (Fonts() alone would silently use Pillow's font, which is
+    # only the right fallback when no font was asked for)
+    if args.font is not None and not os.path.isfile(args.font):
+        raise jobs.JobError(f"Font file not found: {args.font} (--font needs an Inter TTF file)", code="input")
+    if args.font is not None:
+        # A file that is not a font (a text file, an empty file, a renamed download) would otherwise fail only when
+        # the first text is drawn, with Pillow's bare "unknown file format"
+        try:
+            from PIL import ImageFont
+
+            ImageFont.truetype(args.font, 10)
+        except OSError as exc:
+            raise jobs.JobError(
+                f"Cannot read the font {args.font} (--font): not a TrueType/OpenType font ({exc}); give an Inter TTF file",
+                code="input",
+            ) from exc
     watermark = args.watermark
     if watermark == "auto":
         watermark = watermark_for(args.study, args.connectome)
@@ -2054,7 +2601,23 @@ def main(argv=None):
     if args.mode:
         options["mode"] = args.mode
     preset = args.preset
+    cancel.raise_if_cancelled(done=0)
+    state = None
+    if _NAME_PATTERN.match(name or ""):
+        state = jobs.ResumeState(os.path.join(out_root, "figures", name, RESUME_NAME))
+        if not args.resume:
+            state.clear()
     try:
+        if args.resume and state is not None and state.done:
+            key = _resume_hash(args, formats)
+            folder = os.path.join(out_root, "figures", name)
+            files = state.data.get("files") or []
+            if state.data.get("params_sha256") == key and files and all(os.path.isfile(os.path.join(folder, item)) for item in files):
+                for file_name in files:
+                    jobs.emit("result", kind="figure", path=os.path.join(folder, file_name))
+                jobs.emit("done", outputs=[os.path.join(folder, f) for f in files], elapsed=round(jobs.elapsed(), 3), run_id=state.data.get("run_id"), resumed=True)
+                return 0
+            state.clear()
         needs = {"montage": 1, "pair": 1, "glass": 1, "ortho": 1, "replication": 2, "triptych": 3}
         if preset in needs and len(args.map) != needs[preset]:
             raise ValueError(f"The {preset} preset needs {needs[preset]} --map")
@@ -2069,9 +2632,14 @@ def main(argv=None):
             options.pop("mask")
             figure = glass(args.map[0], mask=args.mask, template=args.template, **options)
         elif preset == "ortho":
-            point = None if args.point is None else tuple(float(v) for v in args.point.split(","))
+            try:
+                point = None if args.point is None else tuple(float(v) for v in args.point.split(","))
+            except ValueError:
+                raise ValueError(f"--point needs three numbers x,y,z (for example 10,-20,30), got {args.point!r}") from None
             if point is not None and len(point) != 3:
                 raise ValueError("--point needs x,y,z")
+            if point is not None and not all(math.isfinite(v) for v in point):
+                raise ValueError(f"--point needs three finite numbers x,y,z in mm (not inf or nan), got {args.point!r}")
             figure = ortho(args.map[0], point, args.template, **options)
         elif preset == "overlap":
             for key in ("rule", "n", "v", "threshold", "sign", "statistic", "units", "companion", "window", "mask"):
@@ -2080,8 +2648,8 @@ def main(argv=None):
         else:
             for key in ("rule", "n", "v", "threshold", "sign", "statistic", "units", "companion", "window", "mask"):
                 options.pop(key)
-            figure = gallery(args.lesion, args.template, args.label, args.per_page, **options)
-        written = write_figure(figure, out_root, name, formats)
+            figure = gallery(args.lesion, args.template, args.label, args.per_page, cancel=cancel, **options)
+        written = write_figure(figure, out_root, name, formats, cancel=cancel)
     except (ValueError, TypeError, OSError) as exc:
         raise jobs.JobError(str(exc), code="input") from None
     from . import runs
@@ -2099,6 +2667,12 @@ def main(argv=None):
         "name": name,
     }
     run_id = runs.register(run_root, "figure", written["dir"], parents=args.parent_run, params=params, status="done", summary={"files": written["files"]})
+    if state is not None:
+        try:
+            state.data = {"params_sha256": _resume_hash(args, formats), "files": written["files"], "run_id": run_id}
+            state.mark_done("figure")
+        except OSError:
+            pass  # only --resume loses its shortcut
     for file_name in written["files"]:
         jobs.emit("result", kind="figure", path=os.path.join(written["dir"], file_name))
     jobs.emit("done", outputs=[os.path.join(written["dir"], f) for f in written["files"]], elapsed=round(jobs.elapsed(), 3), run_id=run_id)

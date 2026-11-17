@@ -14,10 +14,13 @@ without writing a setting):
 - (c) switches: the switch track is on the right edge of a ``ui.switch()`` row, the label on the left;
 - (d) text that fits: in a 1366 x 768 window, every visible plain-text label and text button of the Studio surfaces
   (top bar, Library, Draw, Map) shows its whole text (or elides it on purpose with an ellipsis);
-- (e) the view bars: the flat bar is a pill with the view dot, and the slice readout keeps its plain text.
+- (e) the view bars: the flat bar is a pill with the view dot, and the slice readout keeps its plain text; the corner text
+  of a flat view is the Studio text only while Studio is shown (Classic keeps the "L:", "F:" and "B:" lines).
 """
 
+import itertools
 import os
+import tempfile
 import time
 
 import numpy as np
@@ -222,6 +225,15 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
     # (b) cards and constants
     #
 
+    def test_draw_tool_tile_icons_all_vendored(self):
+        """Every icon of draw.EFFECT_APPEARANCE is a vendored Lucide file (a missing one, formerly spline.svg of Auto outline,
+        makes effectAppearance() fall back to the effect's own coloured raster icon).
+        """
+        from StudioLib import draw, ui
+
+        missing = [f"{name}: {icon}" for name, (_text, icon) in draw.EFFECT_APPEARANCE.items() if not os.path.isfile(ui.iconPath(icon))]
+        self.assertEqual(missing, [], "Lucide icons of the Draw tool tiles are missing")
+
     def test_cards(self):
         from StudioLib import ui
 
@@ -246,7 +258,7 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
             self._pump()
             try:
                 self.assertEqual(frame.property("slicerRole"), "card")
-                margins = cardLayout.contentsMargins()
+                margins = ui.layoutContentsMargins(cardLayout)
                 self.assertEqual((margins.left(), margins.right(), margins.bottom()), (ui.CARD_PADDING,) * 3)
                 title = frame.findChild("QLabel", "StudioCardTitle")
                 self.assertIsNotNone(title)
@@ -263,6 +275,108 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
                 host.hide()
                 host.deleteLater()
                 self._pump()
+
+    #
+    # (b2) role text on a transparent background
+    #
+
+    def _roleTextColor(self, host, label):
+        """The text color painted by the label (its rectangle in a grab of the host): the pixel farthest from the most common one."""
+        from collections import Counter
+
+        host.show()
+        self._pump()
+        image = host.grab().toImage()
+        rect = label.geometry
+        pixels = []
+        for y in range(rect.top(), rect.bottom() + 1):
+            for x in range(rect.left(), rect.right() + 1):
+                color = qt.QColor(image.pixel(x, y))
+                pixels.append((color.red(), color.green(), color.blue()))
+        background = Counter(pixels).most_common(1)[0][0]
+        foreground = max(pixels, key=lambda p: sum(abs(p[i] - background[i]) for i in range(3)))
+        return qt.QColor(*foreground), qt.QColor(*background)
+
+    def test_lesion_card_save_state_elides_long_file_name(self):
+        """The "Saved \u00b7 <file>" line of the Lesion card is one elided line next to "New lesion": a long BIDS name has no
+        break point and was cut mid-letter at the right edge (VISUAL 6: no clipped text).
+        """
+        from StudioLib import lesioncard
+
+        name = "sub-21_space-MNI152NLin6Asym_lesion.nii.gz"
+        card = lesioncard.LesionCard(lesioncard._NullController())
+        try:
+            card.widget.resize(300, 300)
+            card.widget.show()
+            card.refresh({"saveState": f"Saved \u00b7 {name}", "saveStateToolTip": "", "offerNewLesion": True, "enabled": True})
+            self._pump(8)
+            label = card.saveStateLabel
+            self.assertTrue(label.isVisible())
+            self.assertFalse(label.wordWrap)
+            shown = str(label.text)
+            self.assertTrue(shown.endswith("\u2026"), shown)
+            self.assertLess(label.fontMetrics().horizontalAdvance(shown), label.width + 1)
+            self.assertIn(name, str(label.toolTip))
+            # Wide enough: the whole text, no tooltip
+            card.widget.resize(900, 300)
+            self._pump(8)
+            self.assertEqual(str(label.text), f"Saved \u00b7 {name}")
+        finally:
+            card.widget.deleteLater()
+
+    def test_role_text_on_transparent_background(self):
+        """A stylesheet "background: transparent" (a parent panel's QLabel rule) must not make the light theme paint role
+        text with the dark tokens: the transparent window brush is black, which isDark() read as a dark palette.
+        """
+        from StudioLib import ui
+
+        for theme in ("dark", "light"):
+            self._setTheme(theme)
+            for role, token in (("caption", "text3"), ("secondaryText", "text2"), ("kbd", "text2")):
+                host = qt.QWidget()
+                host.setAttribute(qt.Qt.WA_DontShowOnScreen, True)
+                host.setAutoFillBackground(True)
+                hostPalette = host.palette
+                hostPalette.setColor(qt.QPalette.Window, ui.token("card"))
+                host.setPalette(hostPalette)
+                layout = qt.QVBoxLayout(host)
+                label = qt.QLabel("Volume")
+                label.setProperty("slicerRole", role)
+                label.setStyleSheet("QLabel { background: transparent; }")
+                layout.addWidget(label)
+                try:
+                    painted, background = self._roleTextColor(host, label)
+                    self.assertEqual(label.palette.color(qt.QPalette.Window).alpha(), 0, "the label has a transparent window brush")
+                    ratio = ui.contrastRatio(painted, background)
+                    self.assertGreaterEqual(ratio, 4.5, f"{theme} {role}: text {painted.name()} on {background.name()} is {ratio:.2f}:1")
+                    # The antialiased edge pixels are blended: the darkest/lightest pixel is within a few levels of the token
+                    expected = ui.token(token)
+                    self.assertLessEqual(abs(painted.red() - expected.red()) + abs(painted.green() - expected.green()) + abs(painted.blue() - expected.blue()), 60,
+                                         f"{theme} {role}: painted {painted.name()}, token {token} is {expected.name()}")
+                finally:
+                    host.hide()
+                    host.deleteLater()
+                    self._pump()
+        # A dark panel in the light theme: the closest opaque ancestor decides, so the dark tokens are right there
+        self._setTheme("light")
+        panel = qt.QWidget()
+        panel.setAttribute(qt.Qt.WA_DontShowOnScreen, True)
+        panel.setAutoFillBackground(True)
+        panelPalette = panel.palette
+        panelPalette.setColor(qt.QPalette.Window, qt.QColor("#18181b"))
+        panel.setPalette(panelPalette)
+        layout = qt.QVBoxLayout(panel)
+        label = qt.QLabel("Volume")
+        label.setProperty("slicerRole", "caption")
+        label.setStyleSheet("QLabel { background: transparent; }")
+        layout.addWidget(label)
+        try:
+            painted, background = self._roleTextColor(panel, label)
+            self.assertGreaterEqual(ui.contrastRatio(painted, background), 4.5, f"dark panel in the light theme: {painted.name()} on {background.name()}")
+        finally:
+            panel.hide()
+            panel.deleteLater()
+            self._pump()
 
     #
     # (c) switches
@@ -299,6 +413,51 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
                 host.hide()
                 host.deleteLater()
                 self._pump()
+
+    def test_appearance_switches_centred_on_their_labels(self):
+        """Settings > Appearance (VISUAL 4.7): the three switches are as tall as the 44 px label rows, so each one is
+        centred on its label; Classic gives the check boxes their natural height back.
+        """
+        from StudioLib import shell, ui
+
+        self._setTheme("dark")
+        self._applyStudio()
+        dialog = slicer.app.settingsDialog()
+        dialog.setCurrentPanel("Appearance")
+        dialog.show()
+        self._pump(6)
+        try:
+            panel = dialog.findChild("QWidget", "qSlicerSettingsStylesPanel")
+            self.assertIsNotNone(panel)
+            pairs = (("ShowToolTipsLabel", "ShowToolTipsCheckBox"), ("ShowToolButtonTextLabel", "ShowToolButtonTextCheckBox"),
+                     ("RestoreUILabel", "RestoreUICheckBox"))
+            for labelName, boxName in pairs:
+                label = panel.findChild("QLabel", labelName)
+                box = panel.findChild("QCheckBox", boxName)
+                self.assertEqual(box.property("slicerRole"), "switch", boxName)
+                self.assertGreaterEqual(box.minimumHeight, ui.SETTINGS_ROW_HEIGHT, boxName)
+                labelCentre = label.mapToGlobal(qt.QPoint(0, label.height // 2)).y()
+                boxCentre = box.mapToGlobal(qt.QPoint(0, box.height // 2)).y()
+                self.assertLessEqual(abs(labelCentre - boxCentre), 2, f"{boxName}: switch centre {boxCentre}, label centre {labelCentre}")
+            # The combo boxes and the font button keep their natural height but are centred on their labels as well
+            combos = (("ThemeLabel", "ThemeComboBox"), ("DensityLabel", "DensityComboBox"), ("FontLabel", "FontButton"))
+            for labelName, controlName in combos:
+                label = panel.findChild("QLabel", labelName)
+                control = panel.findChild("QWidget", controlName)
+                self.assertTrue(control.isVisible(), controlName)
+                labelCentre = label.mapToGlobal(qt.QPoint(0, label.height // 2)).y()
+                controlCentre = control.mapToGlobal(qt.QPoint(0, control.height // 2)).y()
+                self.assertLessEqual(abs(labelCentre - controlCentre), 2, f"{controlName}: centre {controlCentre}, label centre {labelCentre}")
+            # Classic: the natural height again
+            live = shell._shell
+            live._settingsLook.restore()
+            self._pump()
+            for _labelName, boxName in pairs:
+                self.assertLess(panel.findChild("QCheckBox", boxName).minimumHeight, ui.SETTINGS_ROW_HEIGHT, boxName)
+            self.assertEqual(panel.findChild("QWidget", "FontButton").sizePolicy.horizontalPolicy(), qt.QSizePolicy.Minimum)
+        finally:
+            dialog.hide()
+            self._pump()
 
     #
     # (d) text that fits at 1366 x 768
@@ -412,6 +571,536 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
             readout = card.findChild("QLabel", "StudioLesionReadout")
             self.assertLessEqual(stats.geometry.bottom(), readout.height - 1)
 
+    def test_lesion_stat_caption_is_elided_when_cut(self):
+        """A stat caption that does not fit its cell ("scanner space" in a 180 px row) ends with an ellipsis (VISUAL 6: no clipped
+        text); the whole caption is its tool tip, and it shows whole again in a wide cell.
+        """
+        from StudioLib import draw, importer
+
+        studioShell = self._applyStudio()
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(1366, 768)
+        self._wait(lambda: self.mainWindow.width <= 1366, 2000)
+        importer.startOnTemplate(shell=studioShell)
+        self._restores.append(importer._closeTemplateBanner)
+        self._pump(10)
+        self._paintLesion((-30.0, -10.0, 20.0), 10.0)
+        draw.session(studioShell).refreshPanel(computeMetrics=True)
+        self._pump(10)
+        card = draw.lesionCard()
+        card._setStats({"ml": 1.2, "parts": 1, "gaps": 0, "side": None, "sideNote": "scanner space", "sideLevel": "warn"})
+        caption = card.statValues["side"][1]
+        whole = "scanner space"
+        self.assertEqual(str(caption.property("studioFullText")), whole)
+        card.statsFrame.setFixedWidth(600)
+        self._pump(6)
+        self.assertEqual(str(caption.text), whole)
+        card.statsFrame.setFixedWidth(180)
+        self._pump(6)
+        shown = str(caption.text)
+        self.assertTrue(shown.endswith("…"), f"the cut caption has no ellipsis: {shown!r}")
+        self.assertLessEqual(self._textWidth(caption, shown), caption.width)
+        self.assertIn(whole, str(caption.toolTip))
+        card.statsFrame.setMaximumWidth(16777215)
+        card.statsFrame.setMinimumWidth(0)
+        self._pump(4)
+        draw.session(studioShell).refreshPanel(computeMetrics=True)
+
+    def test_lesion_card_scanner_space_qualifier_fits_default_width(self):
+        """At the default 340 px inspector the Side cell keeps its whole "scanner space" qualifier (studio.md: "Unknown" with
+        "scanner space" under it), not "Side · scan…", and the Volume value ("1.44 mL") and the Parts caption stay whole
+        too: the cells share the row by what their texts need, not in equal thirds (or a fixed 2:3:4).
+        """
+        from StudioLib import draw, importer
+
+        studioShell = self._applyStudio()
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(1920, 1080)
+        self._wait(lambda: self.mainWindow.width >= 1900, 2000)
+        importer.startOnTemplate(shell=studioShell)
+        self._restores.append(importer._closeTemplateBanner)
+        self._pump(10)
+        self._paintLesion((-30.0, -10.0, 20.0), 10.0)
+        draw.session(studioShell).refreshPanel(computeMetrics=True)
+        self._pump(10)
+        card = draw.lesionCard()
+        card._setStats({"ml": 1.44, "parts": 1, "gaps": 0, "side": None, "sideNote": "scanner space", "sideLevel": "warn"})
+        self._pump(6)
+        self.assertEqual(str(card.statValues["volume"][0].property("studioFullText")), "1.44 mL")
+        self.assertEqual(str(card.statValues["side"][1].property("studioFullText")), "scanner space")
+        for key in ("volume", "parts", "side"):
+            value, caption = card.statValues[key]
+            self.assertEqual(str(value.text), str(value.property("studioFullText")), f"{key} value is cut: {value.text!r}")
+            self.assertEqual(str(caption.text), str(caption.property("studioFullText")), f"{key} caption is cut: {caption.text!r}")
+            self.assertLessEqual(self._textWidth(value, str(value.text)), value.width, f"{key} value overflows its cell")
+            self.assertLessEqual(self._textWidth(caption, str(caption.text)), caption.width, f"{key} caption overflows its cell")
+
+    def test_list_row_text_is_elided_when_cut(self):
+        """The text of a ``ui.listRow()`` ("Normalize scan only" next to the "Native space" value at a 125 % font) that does
+        not fit the row ends with an ellipsis instead of being cut mid-word (VISUAL 6); the whole text is its tool tip and
+        shows whole again in a wide row. ``ui.setListRowText()`` elides the same way.
+        """
+        from StudioLib import ui
+
+        whole = "Normalize scan only"
+        for theme in ("dark", "light"):
+            self._setTheme(theme)
+            host = qt.QWidget()
+            hostLayout = qt.QVBoxLayout(host)
+            hostLayout.setContentsMargins(0, 0, 0, 0)
+            row = ui.listRow("globe", whole, "Native space")
+            hostLayout.addWidget(row)
+            text = row.findChild("QLabel", "StudioListRowText")
+            try:
+                host.setFixedWidth(600)
+                host.show()
+                self._pump(6)
+                self.assertEqual(str(text.text), whole, f"{theme}: a wide row shows the whole text")
+                host.setFixedWidth(230)
+                self._pump(6)
+                shown = str(text.text)
+                self.assertTrue(shown.endswith("…"), f"{theme}: the cut row text has no ellipsis: {shown!r}")
+                self.assertLessEqual(self._textWidth(text, shown), text.width, f"{theme}: the elided text fits the label")
+                self.assertIn(whole, str(text.toolTip))
+                ui.setListRowText(row, "Normalize scan only (changed)")
+                self._pump(4)
+                shown = str(text.text)
+                self.assertTrue(shown.endswith("…"), f"{theme}: setListRowText did not elide: {shown!r}")
+                self.assertEqual(str(row.accessibleName), whole)
+                host.setFixedWidth(600)
+                self._pump(6)
+                self.assertEqual(str(text.text), "Normalize scan only (changed)")
+            finally:
+                host.hide()
+                host.deleteLater()
+
+    def test_lesion_stat_cells_keep_captions_with_both_hemispheres(self):
+        """A long Side value ("Both hemispheres") must not squeeze the other stat cells: no label of a cell shows a clipped
+        half word, every text that does not fit ends with an ellipsis (1366 x 768, the Parts caption was cut to "Pa").
+        """
+        from StudioLib import draw, importer
+
+        studioShell = self._applyStudio()
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(1366, 768)
+        self._wait(lambda: self.mainWindow.width <= 1366, 2000)
+        importer.startOnTemplate(shell=studioShell)
+        self._restores.append(importer._closeTemplateBanner)
+        self._pump(10)
+        self._paintLesion((-30.0, -10.0, 20.0), 10.0)
+        draw.session(studioShell).refreshPanel(computeMetrics=True)
+        self._pump(10)
+        card = draw.lesionCard()
+        card._setStats({"ml": 2.59, "parts": 1, "gaps": 0, "side": "Both hemispheres", "sideLevel": "warn"})
+        for width in (230, 300):
+            card.statsFrame.setFixedWidth(width)
+            self._pump(6)
+            for key, (value, caption) in card.statValues.items():
+                for label in (value, caption):
+                    shown = str(label.text)
+                    whole = str(label.property("studioFullText"))
+                    self.assertLessEqual(self._textWidth(label, shown), label.width,
+                                         f"{key} cell label {shown!r} is cut off at {width} px")
+                    self.assertTrue(shown == whole or shown.endswith("…"), f"{key} cell label {shown!r} is cut without an ellipsis")
+        card.statsFrame.setMaximumWidth(16777215)
+        card.statsFrame.setMinimumWidth(0)
+        self._pump(4)
+        draw.session(studioShell).refreshPanel(computeMetrics=True)
+
+    def test_lesion_volume_and_captions_whole_with_both_hemispheres(self):
+        """With "Both hemispheres" in the Side cell at about the default inspector width the Volume value ("97.34 mL",
+        "941 mL"), its caption and "Part · 0 gaps" are shown whole; only the Side cell gives way (BB-1: "94…" read as 94).
+        """
+        from StudioLib import draw, importer
+
+        studioShell = self._applyStudio()
+        importer.startOnTemplate(shell=studioShell)
+        self._restores.append(importer._closeTemplateBanner)
+        self._pump(10)
+        card = draw.lesionCard()
+        try:
+            for ml, parts in ((97.34, 3), (941.0, 12), (2.0, 2)):
+                card._setStats({"ml": ml, "parts": parts, "gaps": 0, "side": "Both hemispheres", "sideLevel": "warn"})
+                for width in (300, 280):
+                    card.statsFrame.setFixedWidth(width)
+                    self._pump(6)
+                    for key in ("volume", "parts"):
+                        value, caption = card.statValues[key]
+                        for label in (value, caption):
+                            self.assertEqual(str(label.text), str(label.property("studioFullText")),
+                                             f"{key} label {str(label.text)!r} is elided at {width} px for {ml} mL")
+        finally:
+            card.statsFrame.setMaximumWidth(16777215)
+            card.statsFrame.setMinimumWidth(0)
+            self._pump(4)
+            draw.session(studioShell).refreshPanel(computeMetrics=True)
+
+    def test_lesion_name_is_elided_when_long(self):
+        """A lesion name that does not fit the name field of the Lesion card ends with an ellipsis (VISUAL 6: no clipped text);
+        it never starts in a half letter after a rename, the whole name is the tool tip, and it is whole while it is edited.
+        """
+        from StudioLib import draw, importer
+
+        studioShell = self._applyStudio()
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(1366, 768)
+        self._wait(lambda: self.mainWindow.width <= 1366, 2000)
+        importer.startOnTemplate(shell=studioShell)
+        self._restores.append(importer._closeTemplateBanner)
+        self._pump(10)
+        self._paintLesion((-30.0, -10.0, 20.0), 10.0)
+        draw.session(studioShell).refreshPanel(computeMetrics=True)
+        self._pump(10)
+        card = draw.lesionCard()
+        edit = card.nameEdit
+        self.assertTrue(edit.isVisible())
+        long = "Left MCA infarct sub-patient042 acute"
+        edit.beginEdit()
+        edit.setText(long)
+        edit.editingFinished()
+        self._pump(4)
+        draw.session(studioShell).refreshPanel(computeMetrics=True)
+        self._pump(6)
+        edit.endEdit()
+        self.assertEqual(draw.lesionNodes()[0].GetName(), long, "the rename was not committed")
+        self.assertEqual(edit.name(), long, "the card does not show the renamed lesion")
+        shown = str(edit.text)
+        self.assertTrue(shown.endswith("…"), f"the long name has no ellipsis: {shown!r}")
+        self.assertTrue(shown.startswith("Left MCA"), f"the name does not start at its beginning: {shown!r}")
+        self.assertLessEqual(self._textWidth(edit, shown), edit.width - edit.TEXT_MARGINS)
+        self.assertEqual(edit.cursorPosition, 0)
+        self.assertIn(long, str(edit.toolTip))
+        # A short name shows whole, with the usual tool tip
+        edit.setName("Lesion")
+        self.assertEqual(str(edit.text), "Lesion")
+        # Edited: the whole name
+        edit.setName(long)
+        edit.beginEdit()
+        self.assertEqual(str(edit.text), long)
+        edit.endEdit()
+        self.assertTrue(str(edit.text).endswith("…"))
+        # With several lesions the switcher button elides the name the same way
+        card.refresh({"name": long, "lesions": [("a", long, True), ("b", "Second", True)]})
+        self._pump(6)
+        self.assertTrue(card.switcher.isVisible())
+        buttonText = str(card.switcher.text)
+        self.assertTrue(buttonText.endswith("… ▾"), f"the switcher shows the name clipped: {buttonText!r}")
+        self.assertIn(long, str(card.switcher.toolTip))
+        card.refresh({"name": "Lesion", "lesions": []})
+        draw.session(studioShell).refreshPanel(computeMetrics=True)
+
+    def test_draw_inspector_padding(self):
+        """The Lesion card, the section label and the tool tiles of Draw sit on one 16 px inspector padding (VISUAL 2.7, 4.4).
+
+        The card ran from edge to edge of the inspector and the tiles sat in a square 1 px box (the frame of the tool grid)
+        that started 9 px from the edge: three left edges in one column. The classic presentation keeps the frame.
+        """
+        from StudioLib import draw, importer, ui
+
+        studioShell = self._applyStudio()
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(1366, 768)
+        self._wait(lambda: self.mainWindow.width <= 1366, 2000)
+        importer.startOnTemplate(shell=studioShell)
+        self._restores.append(importer._closeTemplateBanner)
+        self._pump(10)
+        editor = slicer.modules.SegmentEditorWidget.editor
+        scrollArea = self.mainWindow.findChild("QDockWidget", "PanelDockWidget").findChild("QScrollArea", "ScrollArea")
+        viewport = scrollArea.viewport()
+        padding = ui.INSPECTOR_PADDING
+        for theme in ("dark", "light"):
+            self._setTheme(theme)
+            self._pump(6)
+            left = viewport.mapToGlobal(qt.QPoint(0, 0)).x()
+            right = left + viewport.width
+
+            def edges(widget, left=left, right=right):
+                x = widget.mapToGlobal(qt.QPoint(0, 0)).x()
+                return x - left, right - (x + widget.width)
+
+            card = draw.lesionCard().widget
+            label = self.mainWindow.findChild("QLabel", "StudioDrawToolsLabel")
+            frame = editor.findChild("QFrame", "EffectsGroupBox")
+            tiles = [button for button in frame.findChildren("QToolButton") if button.isVisible() and button.property("slicerRole") == "toolTile"]
+            self.assertGreaterEqual(len(tiles), 4, theme)
+            self.assertEqual(edges(card), (padding, padding), f"{theme}: the Lesion card is not inset by the inspector padding")
+            self.assertEqual(edges(label)[0], padding, theme)
+            self.assertEqual(min(edges(tile)[0] for tile in tiles), padding, f"{theme}: the tool tiles are not on the left edge of the cards")
+            self.assertEqual(min(edges(tile)[1] for tile in tiles), padding, f"{theme}: the tool tiles do not end at the right padding")
+            self.assertEqual(frame.frameShape, qt.QFrame.NoFrame, f"{theme}: the tool tiles sit in a bordered box")
+        studioShell.classic(persist=False)
+        self._pump()
+        self.assertEqual(frame.frameShape, qt.QFrame.StyledPanel, "the classic presentation lost the frame of the tool grid")
+
+    def test_tile_label_text_wraps_at_a_space(self):
+        """``SegmentEditor.tileLabelText()`` keeps a label that fits, breaks one that does not at a space (the shortest wider
+        line) and shortens at its end a word that is too wide, never in the middle of a word ("Aut...ine").
+        """
+        import SegmentEditor
+
+        font = qt.QFont()
+        font.setPixelSize(11)
+        metrics = qt.QFontMetrics(font)
+        wide = metrics.horizontalAdvance("Auto outline") + 4
+        self.assertEqual(SegmentEditor.tileLabelText("Auto outline", metrics, wide), "Auto outline")
+        narrow = metrics.horizontalAdvance("Auto outline") - 10
+        self.assertEqual(SegmentEditor.tileLabelText("Auto outline", metrics, narrow), "Auto\noutline")
+        self.assertEqual(SegmentEditor.tileLabelText("Mask  volume", metrics, narrow), "Mask\nvolume")
+        # The break that makes the wider line shortest
+        width = max(metrics.horizontalAdvance("Go go go"), metrics.horizontalAdvance("gogogogogo")) + SegmentEditor.TILE_TEXT_MARGIN
+        self.assertEqual(SegmentEditor.tileLabelText("Go go go gogogogogo", metrics, width), "Go go go\ngogogogogo")
+        # One long word is shortened at its end, a short one stays whole
+        self.assertEqual(SegmentEditor.tileLabelText("Brush", metrics, 100), "Brush")
+        # A label of two words that fits but leaves less than the padding free is broken; one word stays whole
+        edge = metrics.horizontalAdvance("Fill gaps") + SegmentEditor.TILE_TEXT_MARGIN + 1
+        self.assertEqual(SegmentEditor.tileLabelText("Fill gaps", metrics, edge), "Fill gaps")
+        self.assertEqual(SegmentEditor.tileLabelText("Fill gaps", metrics, edge, SegmentEditor.TILE_LABEL_PADDING), "Fill\ngaps")
+        self.assertEqual(SegmentEditor.tileLabelText("Brush", metrics, metrics.horizontalAdvance("Brush") + SegmentEditor.TILE_TEXT_MARGIN, SegmentEditor.TILE_LABEL_PADDING), "Brush")
+        cut = SegmentEditor.tileLabelText("Extraordinarily", metrics, 40)
+        self.assertTrue(cut.endswith("\u2026") and cut.startswith("Extra") and metrics.horizontalAdvance(cut) <= 40 - SegmentEditor.TILE_TEXT_MARGIN, cut)
+
+    def test_draw_tool_tiles_share_one_height_with_a_larger_font(self):
+        """With a 125 % application font (17 px) a two-word label that no longer fits its tile is broken in two lines. The tile
+        of such a label used to be taller than the others (the style sizes a tile from its contents) and the grid centred the
+        shorter ones: the tile row was ragged (BB-1, Smart fill at 66 px beside four 60 px tiles). Now every tile has the
+        height of the tallest one, a breakable label keeps ``TILE_LABEL_PADDING`` px free, and the default font keeps 60 px.
+        """
+        import SegmentEditor
+        from StudioLib import importer
+
+        studioShell = self._applyStudio()
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(1366, 768)
+        self._wait(lambda: self.mainWindow.width <= 1366, 2000)
+        importer.startOnTemplate(shell=studioShell)
+        self._restores.append(importer._closeTemplateBanner)
+        self._pump(10)
+        widget = slicer.modules.SegmentEditorWidget
+        base = qt.QFont(qt.QApplication.font())
+        large = qt.QFont(base)
+        large.setPixelSize(17)
+
+        def tiles():
+            return [button for button in widget._effectButtons()[1:] if button.isVisibleTo(widget.editor)]
+
+        originalFonts = {str(tile.objectName): qt.QFont(tile.font) for tile in widget._effectButtons()[1:]}
+
+        self.assertEqual({tile.height for tile in tiles()}, {SegmentEditor.TILE_MINIMUM_SIZE[1]}, "the default font changed the tile height")
+        try:
+            qt.QApplication.setFont(large)
+            self._pump(16)
+            # The style gives a tile 0.8 of the application font when it polishes it (at startup); a tile font of 14 px (0.8 * 17)
+            # stands in for the restart that a Settings > Appearance > Font change needs. The inspector may be wider than at 1366 px
+            # in a long test session: the font grows until a label has to break.
+            for pixelSize in range(14, 25):
+                for tile in widget._effectButtons()[1:]:
+                    tileFont = qt.QFont(tile.font)
+                    tileFont.setPixelSize(pixelSize)
+                    tile.setFont(tileFont)
+                widget._applyStudioEffects()
+                self._pump(8)
+                if any("\n" in str(tile.text) for tile in tiles()):
+                    break
+            current = tiles()
+            self.assertGreaterEqual(len(current), 4)
+            self.assertEqual(len({tile.height for tile in current}), 1, f"the tiles differ in height: {[(str(t.text), t.height) for t in current]}")
+            for tile in current:
+                metrics = qt.QFontMetrics(tile.font)
+                for line in str(tile.text).split("\n"):
+                    self.assertLessEqual(metrics.horizontalAdvance(line) + SegmentEditor.TILE_TEXT_MARGIN, tile.width, f"{line!r} is wider than its tile")
+                if " " in " ".join(str(tile.text).split("\n")):
+                    # A one-line label of several words keeps its padding
+                    self.assertTrue("\n" in str(tile.text) or metrics.horizontalAdvance(str(tile.text)) + SegmentEditor.TILE_TEXT_MARGIN + SegmentEditor.TILE_LABEL_PADDING <= tile.width, str(tile.text))
+            self.assertTrue(any("\n" in str(tile.text) for tile in current), "a 17 px font should break a label (the premise of this test)")
+        finally:
+            qt.QApplication.setFont(base)
+            for tile in widget._effectButtons()[1:]:
+                tile.setFont(originalFonts[str(tile.objectName)])
+            self._pump(16)
+            widget._applyStudioEffects()
+            self._pump(8)
+        self.assertEqual({tile.height for tile in tiles()}, {SegmentEditor.TILE_MINIMUM_SIZE[1]}, "the tiles keep the height of the large font")
+
+    def test_draw_more_tools_tile_labels_not_elided_1366(self):
+        """The tiles of Draw > More tools show their names whole: "Auto outline", "Grow seeds" and "Mask volume" are wrapped at the
+        space, "Threshold" fits a 56 px tile; the style used to elide them in the middle of the word ("Aut...ine", "Thr...old",
+        "Gro...eds", "Ma...me"). The tool grid has equal columns and the tiles keep their 60 px height.
+        """
+        import SegmentEditor
+        from StudioLib import draw, importer
+
+        studioShell = self._applyStudio()
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(1366, 768)
+        self._wait(lambda: self.mainWindow.width <= 1366, 2000)
+        importer.startOnTemplate(shell=studioShell)
+        self._restores.append(importer._closeTemplateBanner)
+        self._pump(10)
+        widget = slicer.modules.SegmentEditorWidget
+        self.assertEqual(widget._appliedPresentation, "studio")
+        widget.setMoreToolsShown(True)
+        self._pump(6)
+        tiles = [button for button in widget._effectButtons() if button.isVisibleTo(widget.editor)]
+        self.assertGreaterEqual(len(tiles), 10, "More tools shows every tool")
+        widths = set()
+        for tile in tiles:
+            effect = widget._buttonEffect(tile)
+            title = draw.EFFECT_APPEARANCE.get(effect.name, (effect.title,))[0]
+            text = str(tile.text)
+            self.assertNotIn("\u2026", text, f"{title}: shortened")
+            self.assertEqual(" ".join(text.split()), title, f"{title}: not the tool name, or broken inside a word")
+            metrics = qt.QFontMetrics(tile.font)
+            for line in text.split("\n"):
+                self.assertLessEqual(metrics.horizontalAdvance(line) + SegmentEditor.TILE_TEXT_MARGIN, tile.width, f"{title}: {line!r} is wider than its {tile.width} px tile")
+            self.assertEqual(tile.height, SegmentEditor.TILE_MINIMUM_SIZE[1], f"{title}: the tile is not 60 px tall")
+            self.assertEqual(str(tile.accessibleName), title)
+            widths.add(tile.width)
+        self.assertLessEqual(max(widths) - min(widths), 1, f"the tile columns differ: {sorted(widths)}")
+        self.assertEqual(next(str(tile.text) for tile in tiles if widget._buttonEffect(tile).name == "Level tracing"), "Auto\noutline")
+        # Back to the classic presentation: plain titles, no column stretch
+        studioShell.classic(persist=False)
+        self._pump(4)
+        classicTexts = [str(button.text) for button in widget._effectButtons(allButtons=True) if widget._buttonEffect(button) is not None]
+        self.assertNotIn("Auto\noutline", classicTexts)
+        self.assertTrue(all("\n" not in text for text in classicTexts), classicTexts)
+
+    def test_draw_inspector_padding_with_qt6_layout_margins(self):
+        """Qt 6: QLayout declares the ``contentsMargins`` property, so PythonQt gives a QMargins value and not the getter.
+
+        The tile grid inset called ``layout.contentsMargins()``, which raised "'QMargins' object is not callable" in the
+        middle of the studio presentation: Draw showed the classic Segment Editor (no Lesion card, no Save lesion, two
+        tile columns). Here the module layout behaves as with Qt 6 and Draw still gets the Studio presentation.
+        """
+        import SegmentEditor
+        from StudioLib import draw, importer
+
+        class Qt6Layout:
+            """A QLayout as PythonQt wraps it with Qt 6: ``contentsMargins`` is the property value."""
+
+            def __init__(self, layout):
+                object.__setattr__(self, "_layout", layout)
+
+            def __getattr__(self, name):
+                if name == "contentsMargins":
+                    return self._layout.contentsMargins()
+                return getattr(self._layout, name)
+
+        class Qt6LayoutOwner:
+            """A widget whose ``layout()`` is a ``Qt6Layout``."""
+
+            def __init__(self, widget):
+                object.__setattr__(self, "_widget", widget)
+
+            def __getattr__(self, name):
+                if name == "layout":
+                    return lambda: Qt6Layout(self._widget.layout())
+                return getattr(self._widget, name)
+
+        widget = slicer.modules.segmenteditor.widgetRepresentation().self()
+        realLayout = widget.layout
+        widget.layout = Qt6Layout(realLayout)
+
+        def restoreLayout():
+            widget.layout = realLayout
+
+        self._restores.append(restoreLayout)
+        studioShell = self._applyStudio()
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(1366, 768)
+        self._wait(lambda: self.mainWindow.width <= 1366, 2000)
+        importer.startOnTemplate(shell=studioShell)
+        self._restores.append(importer._closeTemplateBanner)
+        self._pump(10)
+        self.assertEqual(studioShell.currentWorkspace(), "draw")
+        self.assertEqual(widget._appliedPresentation, "studio", "Draw shows the classic Segment Editor")
+        readout = self.mainWindow.findChild("QLabel", "StudioLesionReadout")
+        self.assertTrue(readout is not None and readout.isVisible(), "the Lesion card is not shown")
+        saveButtons = [button for button in self.mainWindow.findChildren("QPushButton") if "Save lesion" in str(button.text) and button.isVisible()]
+        self.assertTrue(saveButtons, "no Save lesion button")
+        self.assertEqual(widget.editor.effectColumnCount, widget.studioColumnCount(widget.parent.width))
+
+        # Every layout of the inset (module, editor, tile grid) with the Qt 6 behaviour
+        editor = widget.editor
+        frame = editor.findChild("QFrame", "EffectsGroupBox")
+        grid = frame.layout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        realChild = widget._child
+        widget.editor = Qt6LayoutOwner(editor)
+        widget._child = lambda className, name: Qt6LayoutOwner(frame) if name == "EffectsGroupBox" else realChild(className, name)
+        try:
+            widget._updateTileGridInset()
+        finally:
+            widget.editor = editor
+            del widget._child
+        outer = realLayout.contentsMargins()
+        inner = editor.layout().contentsMargins()
+        margins = grid.contentsMargins()
+        padding = SegmentEditor.STUDIO_INSPECTOR_PADDING
+        expected = (max(0, padding - outer.left() - inner.left()), 0, max(0, padding - outer.right() - inner.right()), 0)
+        self.assertEqual((margins.left(), margins.top(), margins.right(), margins.bottom()), expected)
+        self.assertIsNotNone(draw.lesionCard())
+
+        # The helper reads the margins with Qt 5 (method) and Qt 6 (property value)
+        layout = qt.QVBoxLayout()
+        layout.setContentsMargins(3, 4, 5, 6)
+        for candidate in (layout, Qt6Layout(layout)):
+            margins = SegmentEditor._layoutContentsMargins(candidate)
+            self.assertEqual((margins.left(), margins.top(), margins.right(), margins.bottom()), (3, 4, 5, 6))
+
+    def test_draw_size_row_keeps_its_size_with_two_images_1366(self):
+        """With a second image the source chip "on <scan> ▾" does not squeeze the Size control (1 / 3 / 6 / 12).
+
+        The chip shared the row of the segmented control and the row (an Ignored size policy) let the control shrink
+        below its size hint: its segments overlapped and "12" was cut. The chip has a row of its own and is elided.
+        """
+        from StudioLib import draw
+
+        studioShell = self._applyStudio()
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(1366, 768)
+        self._wait(lambda: self.mainWindow.width <= 1366, 2000)
+        from StudioLib import importer
+
+        # A scan opened with the importer (it switches to Draw, whose lesion uses it), then a second image
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "sub-0123_ses-baseline_acq-mprage_T1w.nrrd")
+            slicer.util.saveNode(self._addVolume("sub-0123_ses-baseline_acq-mprage_T1w"), path)
+            slicer.mrmlScene.Clear(0)
+            importer.loadFiles([path], studioShell)
+            self._pump(8)
+        self._wait(lambda: studioShell.currentWorkspace() == "draw", 5000)
+        first = draw.lesionNodes()[1]
+        self._addVolume("sub-0123_ses-followup_T1w")
+        studioShell.switchTo("library")
+        self._pump(4)
+        studioShell.switchTo("draw")
+        self._pump(10)
+        draw.session(studioShell).refreshPanel()
+        slicer.modules.SegmentEditorWidget.editor.setActiveEffectByName("Paint")
+        self._pump(10)
+        draw.session(studioShell).refreshPanel()
+        self._pump(6)
+        sizes = self.mainWindow.findChild("QFrame", "StudioBrushSizes")
+        chip = self.mainWindow.findChild("QToolButton", "StudioSourceChip")
+        row = self.mainWindow.findChild("QWidget", "StudioDrawChipsRow")
+        self.assertIsNotNone(sizes)
+        self.assertTrue(sizes.isVisible() and chip.isVisible(), "the size control and the source chip are shown")
+        self.assertGreaterEqual(sizes.width, sizes.sizeHint.width(), "the size control is squeezed below its size hint")
+        buttons = [button for button in sizes.findChildren("QToolButton") if button.isVisible()]
+        self.assertEqual(len(buttons), 4)
+        for left, right in itertools.pairwise(buttons):
+            self.assertLess(left.geometry.right(), right.geometry.left(), "segments of the size control overlap")
+        for button in buttons:
+            self.assertGreaterEqual(button.width, button.sizeHint.width() - 1, f"segment {button.text} is narrower than its hint")
+        self.assertLessEqual(chip.geometry.bottom(), row.height, "the source chip lies inside the size row")
+        self.assertTrue(
+            chip.mapTo(row, qt.QPoint(0, 0)).y() >= sizes.mapTo(row, qt.QPoint(0, 0)).y() + sizes.height - 1,
+            "the source chip lies under the size control, not beside it",
+        )
+        self.assertLessEqual(chip.width, row.width, "the source chip is wider than its row")
+        self.assertTrue(chip.text.startswith("on ") and chip.text.endswith("▾"))
+        self.assertIn(first.GetName(), chip.toolTip, "the tooltip has the full scan name")
+
     def test_tour_offer_in_canvas_1366(self):
         """The first-start tour offer lies whole inside the Library canvas at 1366 x 768, off the content of the page."""
         from StudioLib import tour
@@ -454,6 +1143,73 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
     #
     # (e) view bars
     #
+
+    def test_secondary_texts_follow_application_font(self):
+        """The secondary texts of Map and Draw (role fonts of the style: ``secondaryText``, ``caption``, ``chip``; the lesion card
+        labels; the Map disclaimer) grow with the application font when it is changed at run time (Settings > Appearance > Font),
+        also in a workspace that is not shown at that time (USABILITY 9.4): they kept their size until the next start (BB-1).
+        """
+        from StudioLib import ui
+
+        studioShell = self._applyStudio()
+        volume = self._addVolume()
+        slicer.util.setSliceViewerLayers(background=volume, fit=True)
+        for workspace in ("draw", "map"):
+            studioShell.switchTo(workspace)
+            self._pump(10)
+        studioShell.switchTo("library")
+        self._pump(10)
+        names = [
+            "StudioLesionReadout",
+            "StudioLesionSaveState",
+            "StudioStatusChip",
+            "LNMNormalizeExplanation",
+            "LNMSubjectsText",
+            "LNMNullHint",
+            "LNMDerivedLine",
+            "LNMDisclaimer",
+        ]
+
+        def widgets():
+            found = {}
+            for widget in qt.QApplication.allWidgets():
+                name = str(widget.objectName)
+                if name in names and widget.isWidgetType() and hasattr(widget, "text"):
+                    found.setdefault(name, []).append(widget)
+            return found
+
+        def pixelSize(widget):
+            return qt.QFontInfo(widget.font).pixelSize()
+
+        before = widgets()
+        missing = [name for name in names if name not in before]
+        if "LNMNormalizeExplanation" in missing and "LNMDisclaimer" in missing:
+            self.skipTest("the Map module is not available")
+        self.assertEqual(missing, [], "labels of the test are missing")
+        sizesBefore = {name: [pixelSize(widget) for widget in found] for name, found in before.items()}
+        base = qt.QFont(qt.QApplication.font())
+        self._restores.append(lambda: qt.QApplication.setFont(base))
+        basePx = round(ui.applicationFontPx())
+        large = qt.QFont(base)
+        large.setPixelSize(basePx + 4)
+        qt.QApplication.setFont(large)
+        self._pump(10)
+        self.assertEqual(round(ui.applicationFontPx()), basePx + 4, "the application font did not change (the premise of this test)")
+        after = widgets()
+        for name in names:
+            for index, widget in enumerate(after[name]):
+                self.assertGreater(
+                    pixelSize(widget),
+                    sizesBefore[name][index],
+                    f"{name} keeps its {sizesBefore[name][index]} px font after the application font grew by 4 px",
+                )
+        # The sizes keep their proportion: back to the first font, back to the first sizes
+        qt.QApplication.setFont(base)
+        self._pump(10)
+        again = widgets()
+        for name in names:
+            for index, widget in enumerate(again[name]):
+                self.assertLessEqual(abs(pixelSize(widget) - sizesBefore[name][index]), 1, f"{name} after the font is back")
 
     def test_map_panel(self):
         """Map in Studio (V-03): the seed modes are a row of short labels above the steps, still shown after the Seed step
@@ -526,6 +1282,16 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
             widget._updateSteps()
             connectome.collapsed = False
 
+    def test_map_legend_ticks_readable_for_small_windows(self):
+        """The legend ticks keep enough decimals to show a window below 0.05 (a Debiased view reads -0.039, 0, 0.039)."""
+        from StudioLib import mappage
+
+        window = 0.0389
+        ticks = [mappage._tickText(v, window) for v in (-window, 0.0, window)]
+        self.assertEqual(ticks, ["\u22120.039", "0", "0.039"])
+        self.assertEqual([mappage._tickText(v, 5.0) for v in (-5.0, 0.0, 5.0)], ["\u22125.0", "0", "5.0"])
+        self.assertEqual(mappage._tickText(-12.0, 12.0), "\u221212")
+
     def test_map_overlay_follows_layout(self):
         """The map legend and layer chips hide while a layout hides the main view and come back with it (V-03 review)."""
         from StudioLib import mappage
@@ -562,6 +1328,274 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         self._pump(6)
         self.assertTrue(self._wait(overlay.legend.isVisible, 2000))
         self.assertTrue(overlay.chips.isVisible())
+
+    def test_toast_keeps_clear_of_map_legend_and_chips(self):
+        """At 1366x768 the sticky toast ("Saving to Projects/... Rename") is centred under the main view, where the map
+        legend (bottom-right) and the layer chips (bottom-left) reach: the toast keeps above them, so that none of the
+        overlay slots overlap (USABILITY 6.3), and it comes back down when the Map overlay is gone.
+        """
+        from StudioLib import hud, mappage
+
+        studioShell = self._applyStudio()
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(1366, 768)
+        self._wait(lambda: self.mainWindow.width <= 1366, 2000)
+        studioShell.switchTo("map")
+        self._pump(10)
+        overlay = mappage.overlay()
+        if overlay is None:
+            self.skipTest("the Map overlay is not available")
+        state = {"statistic": "T", "window": 4.0, "level": 0.0, "threshold": None, "thresholdText": "Unthresholded", "sign": "both",
+                 "opacity": 0.8, "outline": False}
+        refresh = overlay.refresh
+
+        def place():
+            overlay._state = state
+            overlay.place()
+
+        overlay.refresh = place
+        self._restores.append(lambda: setattr(overlay, "refresh", refresh))
+        # The main view fills the area, down to the bottom where the toast is
+        initialLayout = self.layoutManager.layout
+        self._restores.append(lambda: self.layoutManager.setLayout(initialLayout))
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView)
+        self._pump(6)
+        place()
+        self._pump(4)
+        self.assertTrue(self._wait(overlay.legend.isVisible, 2000))
+        self.assertTrue(overlay.chips.isVisible())
+        parent = self.mainWindow.centralWidget()
+        # A toast of the kind of a new project's ("Saving to Projects/Untitled project" and Rename), as wide as the views
+        # (a narrow main view puts the legend and the chips under a shorter one)
+        studioShell.toast("Saving to Projects/Untitled project " + "with a very long name of its own " * 8, sticky=True, action=lambda: None, actionText="Rename")
+        sticky = studioShell._stickyToast
+        self.assertTrue(sticky.isVisible())
+
+        def rects():
+            frame = sticky.frame
+            toastRect = qt.QRect(frame.x, frame.y, frame.width, frame.height)
+            return toastRect, [qt.QRect(w.x, w.y, w.width, w.height) for w in (overlay.legend, overlay.chips) if w.isVisible()]
+
+        def overlaps():
+            toastRect, cards = rects()
+            return [card for card in cards if toastRect.intersects(card)]
+
+        self.assertEqual(overlaps(), [])
+        # The test only means something when the plain centred position would cover a card: put the toast there
+        providers = list(hud._floatingCardProviders)
+        hud._floatingCardProviders[:] = []
+        try:
+            sticky.updatePosition()
+            covered = overlaps()
+        finally:
+            hud._floatingCardProviders[:] = providers
+        sticky.updatePosition()
+        if not covered:
+            self.skipTest("the toast does not reach the legend at this size")
+        self.assertEqual(overlaps(), [])
+        toastRect, cards = rects()
+        self.assertGreaterEqual(toastRect.top(), 0)
+        self.assertLess(toastRect.bottom(), min(card.top() for card in cards))
+        # The Map overlay is gone: the toast is back at the bottom, centred, under no card
+        mappage._removeOverlay()
+        self._pump(4)
+        self.assertEqual(sticky.frame.y, parent.height - hud.TOAST_HEIGHT - hud.TOAST_BOTTOM_MARGIN)
+        studioShell._stickyToast.hide()
+
+    def test_map_legend_threshold_text_never_clips(self):
+        """A long threshold text in the 220 px map legend is elided with an ellipsis (rule name first, the value stays) and
+        the label's tooltip holds the whole text; a text that fits the label is shown whole, with no tooltip, even when it
+        fits by a pixel (the default FWE rule); the text is fitted again when the label's width changes.
+        """
+        from StudioLib import mappage
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("map")
+        self._pump(10)
+        overlay = mappage.overlay()
+        if overlay is None:
+            self.skipTest("the Map overlay is not available")
+        state = {"statistic": "T", "window": 4.0, "level": 0.0, "threshold": None, "thresholdText": "", "sign": "both", "opacity": 0.8, "outline": False}
+        label = overlay.thresholdLabel
+
+        def show(statistic, text):
+            state.update({"statistic": statistic, "thresholdText": text})
+            overlay.statisticLabel.setText(statistic)
+            overlay._showThreshold(text)
+            overlay.legend.layout().activate()
+            self._pump(3)
+            return str(label.text)
+
+        def fitsLabel(text):
+            return mappage._textWidth(label.font, text) <= label.width
+
+        overlay._state = state
+        overlay.place()
+        self.assertTrue(self._wait(overlay.legend.isVisible, 2000))
+        short = "FWE 5% · T ≥ 4.20"
+        self.assertEqual(show("T", short), short)
+        self.assertEqual(str(label.toolTip), "")
+        # The default rule's text fits the label by a pixel or so: it must not be elided (it was, with 12 px of slack)
+        fwe = "FWE (Bonferroni) · |T| ≥ 4.67"
+        seen = {}
+        for statistic, text, value in (("T", fwe, "|T| ≥ 4.67"),
+                                       ("T", "Top x% (N-independent) · T ≥ 2.28", "T ≥ 2.28"),
+                                       ("T", "|T| ≥ 7 convention (N≈1000) · |T| ≥ 7.00", "|T| ≥ 7.00"),
+                                       ("Fz", "Top x% (N-independent) · |Fz| ≥ 0.0304", "|Fz| ≥ 0.0304")):
+            shown = show(statistic, text)
+            seen[text] = fits = fitsLabel(text)
+            self.assertTrue(shown.endswith(value), shown)
+            self.assertTrue(fitsLabel(shown), (shown, label.width))
+            self.assertLessEqual(label.x + label.width, overlay.legend.width)
+            if fits:
+                # Shown whole, no ellipsis, no tooltip: a text that fits is never shortened
+                self.assertEqual(shown, text)
+                self.assertEqual(str(label.toolTip), "")
+            else:
+                self.assertIn("…", shown)
+                self.assertIn(text, str(label.toolTip))
+        # The long texts never fit a 220 px legend, so the elision branch was exercised
+        self.assertFalse(all(seen.values()), seen)
+        # In any font: a text that fits the label by less than one narrow glyph is shown whole (no slack, and the card's
+        # 1 px border counted)
+        show("T", short)
+        tight = fwe
+        while True:
+            candidate = tight.replace(")", "i)", 1)
+            if not fitsLabel(candidate):
+                break
+            tight = candidate
+        self.assertEqual(show("T", tight), tight)
+        self.assertEqual(str(label.toolTip), "")
+        # A wider statistic shrinks the label: the text is fitted again to the new width without a new threshold text
+        text = "|T| ≥ 7 convention (N≈1000) · |T| ≥ 7.00"
+        shown = show("T", text)
+        widthBefore = label.width
+        overlay.statisticLabel.setText("|Fz|")
+        overlay.legend.layout().activate()
+        self._pump(3)
+        self.assertLess(label.width, widthBefore)
+        refitted = str(label.text)
+        self.assertNotEqual(refitted, shown)
+        self.assertTrue(refitted.endswith("|T| ≥ 7.00"), refitted)
+        self.assertTrue(fitsLabel(refitted), (refitted, label.width))
+        self.assertIn(text, str(label.toolTip))
+
+    def test_map_legend_tick_values_readable_in_both_themes(self):
+        """The legend's tick values (-3.6, 0, 3.6) are painted with at least 4.5:1 contrast on the legend fill (the Window
+        colour at 86% over the black view), in the dark and in the light theme: text3 is only 3.8:1 on the light fill.
+        """
+        from collections import Counter
+
+        from StudioLib import mappage, ui
+
+        studioShell = self._applyStudio()
+        for theme in ("dark", "light"):
+            self._setTheme(theme)
+            studioShell.switchTo("map")
+            self._pump(10)
+            overlay = mappage.overlay()
+            if overlay is None:
+                self.skipTest("the Map overlay is not available")
+            overlay._state = {"statistic": "T", "window": 7.2, "level": 0.0, "threshold": None, "thresholdText": "", "sign": "both", "opacity": 0.8, "outline": False}
+            overlay.place()
+            self.assertTrue(self._wait(overlay.legend.isVisible, 2000), theme)
+            window = qt.QColor(ui.token("window"))
+            fill = qt.QColor(round(window.red() * 0.86), round(window.green() * 0.86), round(window.blue() * 0.86))
+            self.assertEqual(len(overlay.tickLabels), 3)
+            for tick in overlay.tickLabels:
+                tick.setText("-3.6")
+                self._pump(3)
+                image = tick.grab().toImage()
+                pixels = [(qt.QColor(image.pixel(x, y)).red(), qt.QColor(image.pixel(x, y)).green(), qt.QColor(image.pixel(x, y)).blue())
+                          for y in range(image.height()) for x in range(image.width())]
+                background = Counter(pixels).most_common(1)[0][0]
+                foreground = max(pixels, key=lambda p: sum(abs(p[i] - background[i]) for i in range(3)))
+                ratio = ui.contrastRatio(qt.QColor(*foreground), fill)
+                self.assertGreaterEqual(ratio, 4.5, f"{theme} {tick.objectName}: tick text {qt.QColor(*foreground).name()} on the legend fill {fill.name()} is {ratio:.2f}:1")
+
+    def test_closed_combo_text_is_elided_with_an_ellipsis(self):
+        """The current text of a closed combo box that does not fit is drawn elided ("…"), not clipped in the middle of a word
+        (VISUAL.md section 6): the combo looks the same as one that holds a shorter text ending in an "…" that is visible. The
+        base style clips, so for it no such text looks the same.
+        """
+        long = "Quick look: lesion network overlap (Boes 2015) · adapted from a long study title"
+        width = 170
+        holder = qt.QWidget()
+        holder.resize(300, 60)
+        holder.show()
+
+        def look(text, style=None):
+            combo = qt.QComboBox(holder)
+            combo.addItem(text)
+            if style is not None:
+                combo.setStyle(style)
+            combo.setGeometry(4, 4, width, combo.sizeHint.height())
+            combo.show()
+            self._pump(3)
+            image = combo.grab().toImage()
+            combo.hide()
+            combo.setParent(None)
+            return image
+
+        try:
+            metrics = qt.QFontMetrics(qt.QComboBox().font)
+            self.assertGreater(metrics.horizontalAdvance(long), width, "the text must not fit the combo")
+            # Texts whose "…" is inside the field (24 px are the arrow and the padding)
+            visible = sorted({metrics.elidedText(long, qt.Qt.ElideRight, room) for room in range(40, width - 24)})
+            self.assertTrue(all(form.endswith("…") for form in visible))
+            shown = look(long)
+            self.assertTrue(any(shown == look(form) for form in visible), "a combo text that does not fit is drawn elided with an ellipsis")
+            clipped = look(long, qt.QStyleFactory.create("Fusion"))
+            self.assertFalse(any(clipped == look(form, qt.QStyleFactory.create("Fusion")) for form in visible),
+                             "the base style clips the text (the comparison sees the difference)")
+        finally:
+            holder.deleteLater()
+
+    def test_map_overlay_follows_one_up_sagittal_coronal(self):
+        """The map legend and layer chips follow the only slice view of a one-up Sagittal or Coronal layout, not Red only."""
+        from StudioLib import mappage
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("map")
+        self._pump(10)
+        overlay = mappage.overlay()
+        if overlay is None:
+            self.skipTest("the Map overlay is not available")
+        state = {"statistic": "T", "window": 4.0, "level": 0.0, "threshold": None, "thresholdText": "Unthresholded", "sign": "both",
+                 "opacity": 0.8, "outline": False}
+        refresh = overlay.refresh
+
+        def place():
+            overlay._state = state
+            overlay.place()
+
+        overlay.refresh = place
+        self._restores.append(lambda: setattr(overlay, "refresh", refresh))
+        initialLayout = self.layoutManager.layout
+        self._restores.append(lambda: self.layoutManager.setLayout(initialLayout))
+        layouts = (("Red", slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView),
+                   ("Yellow", slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpYellowSliceView),
+                   ("Green", slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpGreenSliceView),
+                   ("Red", slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView))
+        for name, layout in layouts:
+            self.layoutManager.setLayout(layout)
+            self._pump(6)
+            place()
+            self._pump(4)
+            self.assertTrue(self.layoutManager.sliceWidget(name).isVisible(), name)
+            self.assertTrue(self._wait(overlay.legend.isVisible, 2000), f"legend in the layout of {name}")
+            self.assertTrue(overlay.chips.isVisible(), f"chips in the layout of {name}")
+            # The legend sits inside the view that is shown
+            view = self.layoutManager.sliceWidget(name).sliceView()
+            topLeft = overlay.parent.mapFromGlobal(view.mapToGlobal(qt.QPoint(0, 0)))
+            self.assertGreaterEqual(overlay.legend.x, topLeft.x())
+            self.assertLessEqual(overlay.legend.x + overlay.legend.width, topLeft.x() + view.width)
+        # A layout without slice views still hides them
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUp3DView)
+        self._pump(6)
+        self.assertFalse(overlay.legend.isVisible())
+        self.assertFalse(overlay.chips.isVisible())
 
     def test_flat_view_bar(self):
         studioShell = self._applyStudio()
@@ -603,3 +1637,172 @@ class StudioVisualTest(ScriptedLoadableModuleTest):
         self._pump(4)
         self.assertFalse(bool(bar.property("slicerFlatViewBar")))
         self.assertNotEqual(bar.height, 34)
+
+    def test_flat_view_bar_readout_follows_application_font(self):
+        """The readout of the flat view bar ("I 10.2 mm   128 / 256") keeps room for its text when the application font is
+        changed while the views are shown (Settings > Appearance > Font): the widths were measured only when the flat style was
+        applied, so the last digit was cut under the link icon (BB-1). A smaller font gives the room back.
+        """
+        import re
+
+        from StudioLib import ui
+
+        studioShell = self._applyStudio()
+        volume = self._addVolume()
+        slicer.util.setSliceViewerLayers(background=volume, fit=True)
+        studioShell.switchTo("draw")
+        self._pump(10)
+        controller = self.layoutManager.sliceWidget("Red").sliceController()
+        flatBefore = controller.flatStyle
+        self._restores.append(lambda: controller.setProperty("flatStyle", flatBefore))
+        controller.setProperty("flatStyle", True)
+        layoutNode = self.layoutManager.layout
+        self._restores.append(lambda: self.layoutManager.setLayout(layoutNode))
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView)
+        readout = slicer.util.findChild(controller.barWidget(), "SliceIndexLabel")
+        self.assertTrue(self._wait(lambda: " / " in str(readout.text) and "mm" in str(readout.text), 2000), readout.text)
+        base = qt.QFont(qt.QApplication.font())
+        self._restores.append(lambda: qt.QApplication.setFont(base))
+
+        def needed():
+            plain = re.sub(r"<[^>]+>", "", str(readout.text)).strip()
+            return qt.QFontMetrics(readout.font).horizontalAdvance(plain)
+
+        self.assertGreaterEqual(readout.width, needed(), "the readout is cut before the font change")
+        widthBefore = readout.width
+        basePx = round(ui.applicationFontPx())
+        for pixelSize in (basePx + 3, basePx + 7):
+            large = qt.QFont(base)
+            large.setPixelSize(pixelSize)
+            qt.QApplication.setFont(large)
+            self._pump(8)
+            self.assertEqual(round(ui.applicationFontPx()), pixelSize, "the application font did not change (the premise of this test)")
+            self.assertTrue(readout.isVisible(), f"the readout is hidden with a {pixelSize} px font")
+            self.assertGreaterEqual(readout.width, needed(), f"the readout is cut with a {pixelSize} px font")
+        qt.QApplication.setFont(base)
+        self._pump(8)
+        self.assertGreaterEqual(readout.width, needed())
+        self.assertLessEqual(readout.width, widthBefore + 4, "the readout kept the room of the larger font")
+
+    def test_settings_number_field_shows_its_unit_at_large_font(self):
+        """A settings number field (``ui.numberField()``) shows its whole value and unit ("2048 MB") at a larger application
+        font and with a 5-digit value: the width was fixed at 88 px, which cut it to "2048 M" at 125% (BB-1).
+        """
+        from StudioLib import ui
+
+        base = qt.QFont(qt.QApplication.font())
+        self._restores.append(lambda: qt.QApplication.setFont(base))
+        basePx = round(ui.applicationFontPx())
+        for pixelSize in (basePx, basePx + 4, basePx + 8):
+            font = qt.QFont(base)
+            font.setPixelSize(pixelSize)
+            qt.QApplication.setFont(font)
+            for maximum, value, suffix in ((102400, 2048, " MB"), (365, 14, " days")):
+                spinBox = ui.numberField(1, maximum, value, suffix)
+                spinBox.show()
+                self._pump(4)
+                lineEdit = spinBox.lineEdit()
+                metrics = qt.QFontMetrics(lineEdit.font)
+                for number in (value, maximum):
+                    text = f"{number}{suffix}"
+                    spinBox.setValue(number)
+                    self.assertGreaterEqual(
+                        lineEdit.width, metrics.horizontalAdvance(text),
+                        f"'{text}' is cut at {pixelSize} px ({lineEdit.width} px of text room)")
+                self.assertGreaterEqual(spinBox.width, ui.SETTINGS_NUMBER_WIDTH)
+                spinBox.hide()
+                spinBox.deleteLater()
+        qt.QApplication.setFont(base)
+
+    def test_flat_view_bar_figure_has_no_patient_direction(self):
+        """A figure view bar never states a patient direction (U-04, USABILITY P6): the readout is the slice index only
+        ("1 / 1"), without "S 0.0 mm" and without the origin caveat, while a scan view keeps its direction letter.
+        """
+        import re
+
+        studioShell = self._applyStudio()
+        volume = self._addVolume()
+        figure = self._addVolume(shape=(1, 24, 24))
+        figure.SetName("figure for the bar")
+        figure.SetAttribute("Studio.Role", "figure")
+        slicer.util.setSliceViewerLayers(background=volume, fit=True)
+        studioShell.switchTo("draw")
+        self._pump(10)
+        controllers = {name: self.layoutManager.sliceWidget(name).sliceController() for name in ("Red", "Yellow")}
+        for controller in controllers.values():
+            flatBefore = controller.flatStyle
+            self._restores.append(lambda controller=controller, flatBefore=flatBefore: controller.setProperty("flatStyle", flatBefore))
+            controller.setProperty("flatStyle", True)
+        yellowComposite = self.layoutManager.sliceWidget("Yellow").mrmlSliceCompositeNode()
+        backgroundBefore = yellowComposite.GetBackgroundVolumeID()
+        self._restores.append(lambda: yellowComposite.SetBackgroundVolumeID(backgroundBefore))
+        yellowComposite.SetBackgroundVolumeID(figure.GetID())
+        self._pump(10)
+
+        def readoutOf(name):
+            label = slicer.util.findChild(controllers[name].barWidget(), "SliceIndexLabel")
+            return re.sub(r"<[^>]+>", "", str(label.text)).strip(), re.sub(r"<[^>]+>", "", str(label.toolTip))
+
+        # One view at a time: the bar is wide enough for the full readout
+        layoutNode = self.layoutManager.layout
+        self._restores.append(lambda: self.layoutManager.setLayout(layoutNode))
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView)
+        self.assertTrue(self._wait(lambda: " / " in readoutOf("Red")[0] and "mm" in readoutOf("Red")[0], 2000), readoutOf("Red"))
+        self.assertRegex(readoutOf("Red")[0], r"^[RLAPSI] [0-9.]+ mm\s+\d+ / \d+$")
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpYellowSliceView)
+        self._pump(6)
+        yellowComposite.SetLinkedControl(False)
+        yellowComposite.SetBackgroundVolumeID(figure.GetID())
+        yellowNode = self.layoutManager.sliceWidget("Yellow").mrmlSliceNode()
+        yellowNode.SetOrientationToAxial()
+        yellowNode.SetSliceOffset(0.0)
+        self.assertTrue(self._wait(lambda: " / " in readoutOf("Yellow")[0], 2000), readoutOf("Yellow"))
+        self._pump(6)
+        text, toolTip = readoutOf("Yellow")
+        self.assertEqual(text, "1 / 1")
+        self.assertNotRegex(toolTip, r"\bmm\b|midline|origin")
+        self.assertIn("slice 1 of 1", toolTip)
+
+    def _bottomLeftCornerText(self, sliceViewName="Red"):
+        """The bottom-left corner text of a slice view once the pending annotation updates are done."""
+        sliceAnnotations = slicer.modules.DataProbeInstance.infoWidget.sliceAnnotations
+        self._pump(4)
+        sliceAnnotations.updatePendingViewAnnotations()
+        return str(self.layoutManager.sliceWidget(sliceViewName).sliceView().cornerAnnotation().GetText(0))
+
+    def test_flat_view_corner_text_classic(self):
+        """Classic keeps the corner text of official 3D Slicer on flat view bars (D13): "L:", "F:" with the opacity and
+        "B:" lines. Studio names only the image under the layers (VISUAL 4.3), and switching back to Classic brings the
+        official lines back without another change of the view.
+        """
+        dataProbe = getattr(slicer.modules, "DataProbeInstance", None)
+        if dataProbe is None or dataProbe.infoWidget is None:
+            self.skipTest("the Data Probe is not shown")
+        sliceAnnotations = dataProbe.infoWidget.sliceAnnotations
+        if not sliceAnnotations.sliceViewAnnotationsEnabled or not sliceAnnotations.bottomLeft:
+            self.skipTest("the bottom-left slice view annotations are turned off in this profile")
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView)
+        controller = self.layoutManager.sliceWidget("Red").sliceController()
+        flatBefore = controller.flatStyle
+        self._restores.append(lambda: controller.setProperty("flatStyle", flatBefore))
+        controller.setProperty("flatStyle", True)
+        background = self._addVolume("MR_head")
+        foreground = self._addVolume("Overlay")
+        label = slicer.modules.volumes.logic().CreateAndAddLabelVolume(slicer.mrmlScene, background, "Labels")
+        slicer.util.setSliceViewerLayers(background=background, foreground=foreground, foregroundOpacity=0.4, label=label, fit=True)
+        official = f"L: {label.GetName()} (100%)\nF: Overlay (40%)\nB: MR_head\n"
+
+        # Classic with a flat view bar: the text of official 3D Slicer
+        self.assertTrue(controller.flatStyle)
+        self.assertEqual(self._bottomLeftCornerText(), official)
+
+        # Studio: the readable name of the image alone
+        studioShell = self._applyStudio()
+        controller.setProperty("flatStyle", True)
+        self._pump(4)
+        self.assertEqual(self._bottomLeftCornerText(), "MR head\n")
+
+        # Back to Classic (Ctrl+Alt+0): the official lines again, with no other change of the view
+        studioShell.classic(persist=False)
+        self.assertTrue(controller.flatStyle)
+        self.assertEqual(self._bottomLeftCornerText(), official)

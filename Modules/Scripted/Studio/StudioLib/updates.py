@@ -37,13 +37,17 @@ Settings (fork-only, SPEC 9.7 rule 5): ``Studio/Updates/AutoCheck`` (default tru
 The functions above the "Service" section use no Qt and no Slicer object (the tests use them with local files).
 """
 
+import filecmp
 import hashlib
+import http.client
+import errno
 import importlib
 import json
 import logging
 import os
 import platform
 import re
+import shutil
 import sys
 import threading
 import time
@@ -105,9 +109,12 @@ MANIFEST_MAX_BYTES = 256 * 1024
 CHECK_DEADLINE_S = 2 * CHECK_TIMEOUT_S
 #: Longest release notes kept (characters)
 NOTES_MAX_CHARS = 20000
-#: Network timeout of a download, per read (seconds)
+#: A download that receives no byte for this long (seconds) fails with "timed out" (also the timeout of connecting)
 DOWNLOAD_TIMEOUT_S = 60
+#: Largest block taken from the connection at once (bytes); a read returns what has arrived, it does not wait for a full block
 DOWNLOAD_CHUNK = 256 * 1024
+#: The download looks at Cancel at least this often (seconds), also while the server is slow or silent
+DOWNLOAD_POLL_S = 0.5
 #: While the application runs, a check is made when the last one is older than this (seconds)
 RECHECK_INTERVAL_S = 24 * 3600
 #: The optional-update notice is shown at the earliest this long after startup (ms), when no other prompt is shown
@@ -116,11 +123,27 @@ NOTICE_RETRY_MS = 5000
 NOTICE_MAX_RETRIES = 24
 
 SETTINGS_GROUP = "Studio/Updates"
+def isoTime(seconds=None):
+    """An ISO 8601 time in UTC ("2026-11-01T05:30:00Z"), so that it means the same instant after a time zone change."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds if seconds is not None else time.time()))
+
+
+def parseTime(text):
+    """Seconds since the epoch of a time written by ``isoTime``; one without a zone (written by earlier versions) is
+    local time. None when ``text`` is empty or not a time.
+    """
+    from . import projects
+
+    return projects.parseTime(text) if text else None
+
+
 DEFAULT_SETTINGS = {"AutoCheck": True, "LastCheck": "", "LastManifest": "", "SkippedVersion": ""}
 
 #: Object names (stable once released, SPEC 9.2)
 REQUIRED_DIALOG_OBJECT_NAME = "StudioRequiredUpdateDialog"
 UPDATE_DIALOG_OBJECT_NAME = "StudioUpdateDialog"
+#: Classic: the message shown when a download ends after the update dialog was closed (Studio shows a toast)
+CLOSED_NOTICE_OBJECT_NAME = "StudioUpdateClosedNotice"
 NOTICE_OBJECT_NAME = "StudioUpdateNotice"
 HELP_ACTION_OBJECT_NAME = "StudioCheckForUpdatesAction"
 NOTICE_KEY = "updates"
@@ -131,6 +154,53 @@ _ASSET_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,254}$")
 
 class UpdateError(Exception):
     """A check or a download failed; the message is shown to the user."""
+
+
+def sentence(text):
+    """``text`` as a finished sentence (a full stop added when it ends without one), so that it can be followed by
+    another sentence: "Cannot reach the update server. Slicer Studio was not changed.".
+    """
+    text = str(text or "").strip()
+    return text if not text or text[-1] in ".!?\u2026" else text + "."
+
+
+#: Error numbers of a connection that cannot be made or that broke
+_NETWORK_ERRNOS = frozenset(
+    getattr(errno, name) for name in (
+        "ECONNREFUSED", "ECONNRESET", "ECONNABORTED", "ENETUNREACH", "ENETDOWN", "ENETRESET", "EHOSTUNREACH", "EHOSTDOWN",
+        "EADDRNOTAVAIL", "EPIPE", "ETIMEDOUT", "ENOTCONN", "EPROTO", "ENOPROTOOPT") if hasattr(errno, name))
+
+
+def _networkFailure(error):
+    """How a failed connection is described in plain words, or None when ``error`` is not about the network (a file that
+    cannot be written, for example). Never the error number or the text of the resolver or the proxy.
+    """
+    import socket
+    import ssl
+
+    reason = getattr(error, "reason", None)  # URLError wraps the OSError
+    if isinstance(reason, BaseException):
+        error = reason
+    if isinstance(error, (socket.timeout, TimeoutError)):
+        return _("no answer in time")
+    if isinstance(error, ssl.SSLError):
+        return _("the secure connection failed")
+    if isinstance(error, ValueError):
+        return _("the address is not valid")
+    if isinstance(error, (socket.gaierror, socket.herror, ConnectionError, http.client.HTTPException)):
+        return _("no connection")
+    if isinstance(error, OSError) and (error.errno in _NETWORK_ERRNOS or getattr(error, "winerror", None) or error.errno is None):
+        # no error number: the text of a proxy ("Tunnel connection failed: 502 Bad Gateway"), a name that is not found
+        return _("no connection")
+    return None
+
+
+def cannotReach(error):
+    """An ``UpdateError`` for a check or download that could not connect to the update server: a plain sentence and what
+    to do, without the error number or the library's text.
+    """
+    return UpdateError(_("Cannot reach the update server ({reason}). Check your internet connection and try again.").format(
+        reason=_networkFailure(error) or _("no connection")))
 
 
 #
@@ -241,8 +311,12 @@ def _policy(feed):
     return {"extraHosts": _overrideHosts(feed), "allowInsecureLoopback": overridden, "allowFile": overridden}
 
 
-def _open(url, feed, timeout):
-    """Open ``url`` with the redirect and host rules of ``feed``. Return the response."""
+def _open(url, feed, timeout, notFound=None):
+    """Open ``url`` with the redirect and host rules of ``feed``. Return the response.
+
+    A 404 means "no release with an update manifest" when the manifest is fetched; ``notFound`` is the message for
+    another file (the release file of a download), where the manifest was found and the file is missing.
+    """
     import urllib.error
     import urllib.request
 
@@ -259,11 +333,13 @@ def _open(url, feed, timeout):
         raise
     except urllib.error.HTTPError as error:
         if error.code == 404:
-            raise UpdateError(_("No release with an update manifest was found ({address}).").format(address=url))
+            raise UpdateError(notFound or _("No release with an update manifest was found ({address}).").format(address=url))
         raise UpdateError(_("The server answered {code} {reason}.").format(code=error.code, reason=error.reason))
     except (urllib.error.URLError, OSError, ValueError) as error:
-        reason = getattr(error, "reason", error)
-        raise UpdateError(_("Cannot reach the update server: {reason}").format(reason=reason))
+        raise cannotReach(error)
+    except http.client.HTTPException:
+        # not an OSError: a reply that is not HTTP (BadStatusLine), cut off or malformed
+        raise UpdateError(_("Cannot reach the update server (it did not send a valid answer). Try again later."))
 
 
 #
@@ -306,8 +382,11 @@ def parseManifest(content):
     """Return the ``Manifest`` of ``content`` (bytes, text or dict), or raise ``UpdateError`` if it is not valid."""
     try:
         data = content if isinstance(content, dict) else json.loads(content.decode("utf-8") if isinstance(content, (bytes, bytearray)) else content)
-    except (ValueError, UnicodeDecodeError) as error:
-        raise UpdateError(_("The update manifest is not valid JSON: {error}").format(error=error))
+    except (ValueError, UnicodeDecodeError):
+        # an answer that is not JSON at all is not from our feed: a proxy block page, a login page or an empty answer;
+        # the parser's own text ("Expecting value: line 1 column 1") would only confuse
+        raise UpdateError(_("The update server did not send an update manifest (a proxy or login page may be in the way). "
+                            "Check your internet connection, try another network, and try again."))
     if not isinstance(data, dict):
         raise UpdateError(_("The update manifest is not a JSON object."))
     problems = []
@@ -358,7 +437,10 @@ def fetchManifest(feed=None, timeout=CHECK_TIMEOUT_S):
             try:
                 block = read(16 * 1024)
             except OSError as error:
-                raise UpdateError(_("Cannot reach the update server: {reason}").format(reason=error))
+                raise cannotReach(error)
+            except http.client.HTTPException:  # not an OSError: a chunked or other reply that is cut off or malformed
+                raise UpdateError(_("Cannot reach the update server (the connection was interrupted). "
+                                    "Check your internet connection and try again."))
             if not block:
                 break
             blocks.append(block)
@@ -437,6 +519,117 @@ def verifyFile(path, size, sha256):
         raise UpdateError(_("The download does not have the SHA-256 checksum of the release: it was refused."))
 
 
+class _BodyReader:
+    """Reads the body of ``response`` in a helper thread, so that the download can look at Cancel while the server is
+    slow or silent (a read of the connection cannot be interrupted, and one that is cut by a timeout cannot be resumed).
+    ``get(timeout)`` returns the next block (``b""`` at the end), or None when nothing came within ``timeout``, or raises
+    the error of the connection. ``stop()`` ends the thread: it closes the connection for reading, which wakes a read
+    that waits.
+    """
+
+    def __init__(self, response, size):
+        import queue
+
+        self.response = response
+        self.size = size
+        self.blocks = queue.Queue(maxsize=4)
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, name="StudioDownload", daemon=True)
+        self.thread.start()
+
+    def _put(self, item):
+        import queue
+
+        while not self.stopped.is_set():
+            try:
+                self.blocks.put(item, timeout=0.2)
+                return
+            except queue.Full:
+                pass
+
+    def _run(self):
+        read = getattr(self.response, "read1", self.response.read)  # what has arrived: not a wait for a full block
+        try:
+            while not self.stopped.is_set():
+                block = read(self.size)
+                self._put(("data", block))
+                if not block:
+                    return
+        except Exception as error:
+            self._put(("error", error))
+
+    def get(self, timeout):
+        import queue
+
+        try:
+            kind, value = self.blocks.get(timeout=timeout)
+        except queue.Empty:
+            return None
+        if kind == "error":
+            raise value
+        return value
+
+    def stop(self):
+        import socket
+
+        self.stopped.set()
+        if self.thread.is_alive():
+            try:
+                self.response.fp.raw._sock.shutdown(socket.SHUT_RDWR)
+            except (AttributeError, OSError):
+                pass
+            self.thread.join(2)
+
+
+class _OpenWithCancel:
+    """Opens ``url`` in a helper thread (``_open`` blocks until the server has sent its headers, and a blocked connect
+    or read cannot be interrupted), so that Cancel is looked at while the server is silent. ``wait(cancelled)`` returns
+    the response, raises the ``UpdateError`` of ``_open``, or raises ``UpdateError("The download was cancelled.")`` when
+    ``cancelled()`` turned True first: the thread is then abandoned (it ends with the connection timeout) and closes the
+    response itself if one arrives late.
+    """
+
+    def __init__(self, url, feed, timeout, notFound=None):
+        self.lock = threading.Lock()
+        self.done = threading.Event()
+        self.abandoned = False
+        self.response = None
+        self.error = None
+        self.thread = threading.Thread(target=self._run, args=(url, feed, timeout, notFound), name="StudioDownloadOpen", daemon=True)
+        self.thread.start()
+
+    def _run(self, url, feed, timeout, notFound):
+        response = None
+        error = None
+        try:
+            response = _open(url, feed, timeout, notFound=notFound)
+        except BaseException as exception:  # handed to the thread that waits
+            error = exception
+        with self.lock:
+            if self.abandoned:
+                if response is not None:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+                return
+            self.response = response
+            self.error = error
+        self.done.set()
+
+    def wait(self, cancelled=None):
+        while not self.done.wait(DOWNLOAD_POLL_S):
+            if cancelled is not None and cancelled():
+                break
+        with self.lock:
+            if not self.done.is_set():
+                self.abandoned = True
+                raise UpdateError(_("The download was cancelled."))
+            if self.error is not None:
+                raise self.error
+            return self.response
+
+
 def downloadAsset(manifest, key, directory, feed=None, progress=None, cancelled=None):
     """Download the release file of the platform ``key`` to ``directory`` and verify it. Return its path.
 
@@ -464,23 +657,34 @@ def downloadAsset(manifest, key, directory, feed=None, progress=None, cancelled=
     digest = hashlib.sha256()
     received = 0
     try:
-        with _open(url, feed, DOWNLOAD_TIMEOUT_S) as response, open(part, "wb") as stream:
+        missing = _("The release {version} has no downloadable file {name} yet (404: {address}).").format(
+            version=manifest.version, name=asset["name"], address=url)
+        opened = _OpenWithCancel(url, feed, DOWNLOAD_TIMEOUT_S, notFound=missing).wait(cancelled)
+        with opened as response, open(part, "wb") as stream:
             length = response.headers.get("Content-Length") if hasattr(response, "headers") else None
             if length and length.isdigit() and int(length) != size:
                 raise UpdateError(_("The download has the wrong size ({actual} bytes instead of {expected}): it was refused.").format(actual=int(length), expected=size))
-            while True:
-                if cancelled is not None and cancelled():
-                    raise UpdateError(_("The download was cancelled."))
-                block = response.read(DOWNLOAD_CHUNK)
-                if not block:
-                    break
-                received += len(block)
-                if received > size:
-                    raise UpdateError(_("The download is larger than the release file ({expected} bytes): it was refused.").format(expected=size))
-                digest.update(block)
-                stream.write(block)
-                if progress:
-                    progress(received, size)
+            if progress:
+                progress(0, size)
+            reader = _BodyReader(response, DOWNLOAD_CHUNK)
+            try:
+                while True:
+                    if cancelled is not None and cancelled():
+                        raise UpdateError(_("The download was cancelled."))
+                    block = reader.get(DOWNLOAD_POLL_S)
+                    if block is None:
+                        continue  # nothing arrived yet: look at Cancel again (the connection gives up after DOWNLOAD_TIMEOUT_S)
+                    if not block:
+                        break
+                    received += len(block)
+                    if received > size:
+                        raise UpdateError(_("The download is larger than the release file ({expected} bytes): it was refused.").format(expected=size))
+                    digest.update(block)
+                    stream.write(block)
+                    if progress:
+                        progress(received, size)
+            finally:
+                reader.stop()
         if received != size:
             raise UpdateError(_("The download has the wrong size ({actual} bytes instead of {expected}): it was refused.").format(actual=received, expected=size))
         if digest.hexdigest() != asset["sha256"]:
@@ -491,8 +695,162 @@ def downloadAsset(manifest, key, directory, feed=None, progress=None, cancelled=
         raise
     except OSError as error:
         _removeQuietly(part)
-        raise UpdateError(_("The download failed: {error}").format(error=error))
+        if _networkFailure(error) is not None:
+            raise cannotReach(error)
+        # a local failure (no space left, no permission): its plain reason, without the error number and the file name
+        reason = (getattr(error, "strerror", None) or "").strip().rstrip(".")
+        raise UpdateError(_("The download failed: {reason}.").format(reason=reason) if reason else _("The download failed."))
+    except http.client.HTTPException:  # not an OSError: a chunked reply that is cut off or malformed (the network dropped)
+        _removeQuietly(part)
+        raise UpdateError(_("The download failed (the connection was interrupted). Check your internet connection and try again."))
     return path
+
+
+def _removeStaged(prepared, wait):
+    """Remove the staging folder of ``prepared`` (an update that was cancelled before it was offered), now (``wait``) or
+    in a background thread.
+    """
+    root = os.path.dirname(prepared.staged) if prepared is not None and prepared.staged else None
+    if not root or not os.path.isdir(root) or not os.path.basename(root).endswith(updates_install.STAGING_SUFFIX):
+        return
+    if wait:
+        try:
+            updates_install._removeTree(root)
+        except OSError:
+            logging.warning("Updates: could not remove the cancelled update:\n" + traceback.format_exc())
+    else:
+        updates_install.removeInBackground(root)
+
+
+#: Written when an update is prepared: which run staged it (the staging folder is removed by the next start if that run died)
+STAGED_MARKER = "staged.json"
+
+
+def _processAlive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # exists, but belongs to another user
+    return True
+
+
+#: Folder of the update state where every running Slicer Studio window names its process and installation (one file
+#: per process, removed at its exit): an update is not swapped in while another window of the installation runs
+RUNNING_DIRECTORY = "running"
+
+
+def _processStartToken(pid):
+    """When the process ``pid`` started, as a text that changes when the system gives the pid to another process, or
+    None when it cannot be read.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as f:
+            return f.read().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        pass
+    if sys.platform != "darwin":
+        return None
+    import subprocess
+
+    try:
+        result = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], stdin=subprocess.DEVNULL, capture_output=True, timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    text = result.stdout.decode(errors="replace").strip()
+    return text or None
+
+
+def _runningDirectory():
+    return os.path.join(stateDirectory(), RUNNING_DIRECTORY)
+
+
+def registerRunning(target):
+    """Name this process as a running window of the installation ``target`` (until ``unregisterRunning()``)."""
+    if not target:
+        return None
+    path = os.path.join(_runningDirectory(), f"{os.getpid()}.json")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        temporary = path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as f:
+            json.dump({"pid": os.getpid(), "target": os.path.realpath(target), "token": _processStartToken(os.getpid())}, f)
+        os.replace(temporary, path)
+    except OSError:
+        logging.warning("Updates: could not register the running window:\n" + traceback.format_exc())
+        return None
+    return path
+
+
+def unregisterRunning():
+    _removeQuietly(os.path.join(_runningDirectory(), f"{os.getpid()}.json"))
+
+
+def otherRunningWindows(target):
+    """The processes of the other Slicer Studio windows that run from the installation ``target``: those registered in
+    the update state folder (by this user), and on Linux every process whose executable is inside ``target``. The
+    records of windows that ended without removing theirs (a crash) are removed.
+    """
+    if not target:
+        return []
+    realTarget = os.path.realpath(target)
+    pids = set()
+    directory = _runningDirectory()
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        names = []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(directory, name)
+        try:
+            with open(path, encoding="utf-8") as f:
+                entry = json.load(f)
+        except (OSError, ValueError):
+            continue
+        pid = entry.get("pid") if isinstance(entry, dict) else None
+        if type(pid) is not int or pid <= 0 or pid == os.getpid():
+            continue
+        token = entry.get("token")
+        if not _processAlive(pid) or (token and _processStartToken(pid) not in (None, token)):
+            _removeQuietly(path)  # the window ended (the pid may now belong to another process)
+            continue
+        if os.path.realpath(str(entry.get("target") or "")) == realTarget:
+            pids.add(pid)
+    try:
+        pids.update(updates_install.processesRunningFrom(realTarget))
+    except Exception:
+        logging.warning("Updates: looking for other windows failed:\n" + traceback.format_exc())
+    return sorted(pids)
+
+
+def _otherWindowsError(pids):
+    return updates_install.OtherWindowsOpen(
+        _("Another Slicer Studio window is open from this installation. Close it, then try again: the update cannot "
+          "replace Slicer Studio while it runs."), pids)
+
+
+#: How long after the helper started an install without a result can still be pending: the helper waits at most
+#: ``updates_install.EXIT_WAIT_S`` for the application to exit, then swaps the folders (this bounds a recorded pid that
+#: the system gave to another process, for example after a restart)
+INSTALL_PENDING_GRACE_S = 1800
+
+
+def _installPending(record, result):
+    """True while the install of ``record`` may still finish: no result is written yet, and the process that the helper
+    waits for (a Slicer Studio that is still exiting) or the helper itself still runs.
+    """
+    if result:
+        return False
+    waited, helper = record.get("pid"), record.get("helperPid")
+    if waited == os.getpid():
+        return False  # the record of this run (tests): nothing else can finish it
+    started = updates_install.recordStartTime(record)
+    if started is None or time.time() - started > updates_install.EXIT_WAIT_S + INSTALL_PENDING_GRACE_S:
+        return False
+    return any(type(pid) is int and pid > 0 and pid != os.getpid() and _processAlive(pid) for pid in (waited, helper))
 
 
 def _removeQuietly(path):
@@ -558,6 +916,46 @@ def downloadDirectory():
     return os.path.join(stateDirectory(), "downloads")
 
 
+def manualPackageDirectory():
+    """Where a verified package that the user must install by hand is kept: the user's Downloads folder, which the
+    manual steps name and which Slicer Studio never cleans up (unlike ``downloadDirectory()``). Main thread only.
+    """
+    import qt
+
+    if manualPackageDirectoryOverride:
+        return manualPackageDirectoryOverride
+    return qt.QStandardPaths.writableLocation(qt.QStandardPaths.DownloadLocation) or os.path.expanduser("~")
+
+
+def keepPackage(path, directory):
+    """Move the downloaded package ``path`` to ``directory`` (see ``manualPackageDirectory()``) so that it can be
+    installed by hand. A file of the same name is never overwritten: the same file is reused, another one gets a
+    numbered name. Return the path of the kept package, or ``path`` when it cannot be moved.
+    """
+    name = os.path.basename(path)
+    stem, extension = (name[:-len(".tar.gz")], ".tar.gz") if name.endswith(".tar.gz") else os.path.splitext(name)
+    destination = None
+    try:
+        os.makedirs(directory, exist_ok=True)
+        if os.path.samefile(os.path.dirname(os.path.abspath(path)), directory):
+            return path
+        destination = os.path.join(directory, name)
+        number = 2
+        while os.path.lexists(destination):
+            if os.path.isfile(destination) and filecmp.cmp(destination, path, shallow=False):
+                _removeQuietly(path)
+                return destination
+            destination = os.path.join(directory, f"{stem} ({number}){extension}")
+            number += 1
+        shutil.move(path, destination)
+        return destination
+    except OSError:
+        logging.warning("Updates: could not keep the package for an install by hand:\n" + traceback.format_exc())
+        if destination and os.path.isfile(path) and os.path.isfile(destination):
+            _removeQuietly(destination)  # a partial copy (another file system)
+        return path if os.path.isfile(path) else (destination or path)
+
+
 #
 # Service
 #
@@ -570,6 +968,8 @@ installTargetOverride = None
 currentVersionOverride = None
 #: Tests: replaces the private state folder (install record, downloads)
 stateDirectoryOverride = None
+#: Tests: replaces the folder where a package to install by hand is kept (the user's Downloads folder)
+manualPackageDirectoryOverride = None
 
 
 def instance():
@@ -714,13 +1114,17 @@ class UpdateService:
         self.prepared = None
         self.requiredDialog = None
         self.updateDialog = None
+        self._settingsWatched = None  # the Settings dialog whose finished(int) returns the update dialog to the main window
         self.notice = None
+        self.noticeVersion = None
         self.noticeWhere = None
         self.banner = None
         self.helpAction = None
         self._then = None
         self._checkTask = None
         self._checkCallbacks = []
+        #: True from the startup check until the startup decision is made: the startup shows the result itself
+        self._startupPending = False
         self._listeners = []
         self._noticeRetries = 0
         self._noticeTimer = None
@@ -728,13 +1132,19 @@ class UpdateService:
         self._tourHoldTimer = None
         self._tourHeld = None
         self._quitConnected = False
+        self._discardConnected = False
         self._relaunch = True
+        #: Staged copies of dropped updates, removed by the next download (``_discardPrepared()``)
+        self._staleStaging = []
         self._finishedMessage = None
+        self._failedInstall = None  # (version, reason, log) of the last failed install: the required-update dialog says it
+        self._finishedLog = None  # the install log of a failed install (the toast's "Show log" action opens it)
         self._startTime = time.monotonic()
         #: How long the startup waited for the check before going on (ms; None until then, or when a required
         #: update is shown)
         self.startupWaitMs = None
         self._paletteRegistered = False
+        self._runningRegistered = False
         manifest = cachedManifest()
         if manifest is not None:
             self.status = evaluate(manifest, currentVersion(), settingsValue("SkippedVersion"))
@@ -749,13 +1159,22 @@ class UpdateService:
 
         self._then = then
         try:
+            # Another window that installs an update waits for this one (and tells the user to close it)
+            if registerRunning(self.installTarget()) is not None:
+                import slicer
+
+                slicer.app.connect("aboutToQuit()", unregisterRunning)
+                self._runningRegistered = True
+        except Exception:
+            logging.error("Updates: registering the running window failed:\n" + traceback.format_exc())
+        try:
             self.finishInstall()
         except Exception:
             logging.error("Updates: finishing the last update failed:\n" + traceback.format_exc())
         qt.QTimer.singleShot(1200, self.installUserInterface)
         if self.automaticChecksEnabled():
             self._holdTourOffer()
-            self.check(onDone=self._onStartupCheck, timeoutS=STARTUP_WAIT_S)
+            self._startupCheck(STARTUP_WAIT_S)
         else:
             # No check: a cached required release is shown with Update now (only a failed check means offline)
             self._continueStartup()
@@ -796,6 +1215,15 @@ class UpdateService:
             except Exception:
                 pass
         self._disconnectQuit()
+        if self._runningRegistered:
+            import slicer
+
+            try:
+                slicer.app.disconnect("aboutToQuit()", unregisterRunning)
+            except Exception:
+                pass
+            unregisterRunning()
+            self._runningRegistered = False
         if _service is self:
             _service = None
 
@@ -925,22 +1353,34 @@ class UpdateService:
         self._checkTask = _Task(lambda task: fetchManifest(feed), self._onChecked, timeoutS=timeoutS, onTimeout=self._onCheckTimeout).start()
         return True
 
+    def _startupCheck(self, timeoutS):
+        """The check of the startup: its result is shown by the startup decision (_onStartupCheck), not by _onChecked."""
+        self._startupPending = True
+        return self.check(onDone=self._onStartupCheck, timeoutS=timeoutS)
+
     def checkNow(self):
         """Check now (Settings, Search, menus), whatever the channel and the AutoCheck setting."""
         return self.check()
 
     def _onChecked(self, manifest, error):
+        startup = self._startupPending  # the startup decision shows the result of the startup check itself
         self.checking = False
         self._checkTask = None
         if error is None:
             setSettingsValue("LastManifest", manifest.toJson())
-            setSettingsValue("LastCheck", time.strftime("%Y-%m-%dT%H:%M:%S"))
+            setSettingsValue("LastCheck", isoTime())
             self.status = evaluate(manifest, currentVersion(), settingsValue("SkippedVersion"))
             self.lastError = None
         else:
             logging.info(f"Updates: check failed: {error}")
             self.lastError = error
         self._reportCheck(self.status if error is None else None, error)
+        if error is None and not startup:
+            # A check after the startup (Check again on the banner, Settings, Search, the daily check, a late answer):
+            # bring the banner and the notice up to date, for example "Connect to the internet and check again"
+            # becomes "is required (you have X)" with Update now, and the banner of a release that is no longer
+            # required goes
+            self._showAvailability(startup=False)
 
     def _onCheckTimeout(self, manifest, error, late):
         if not late:
@@ -950,8 +1390,6 @@ class UpdateService:
                 callback(None, error)
             return
         self._onChecked(manifest, error)
-        if error is None:
-            self._showAvailability(startup=False)
 
     def _reportCheck(self, status, error):
         callbacks, self._checkCallbacks = self._checkCallbacks, []
@@ -965,19 +1403,16 @@ class UpdateService:
     def _maybeRecheck(self):
         if not self.automaticChecksEnabled() or self.checking:
             return
-        last = settingsValue("LastCheck")
-        try:
-            lastTime = time.mktime(time.strptime(last, "%Y-%m-%dT%H:%M:%S")) if last else 0
-        except ValueError:
-            lastTime = 0
+        lastTime = parseTime(settingsValue("LastCheck")) or 0
         if time.time() - lastTime >= RECHECK_INTERVAL_S:
-            self.check(onDone=lambda status, error: self._showAvailability(startup=False) if error is None else None)
+            self.check()
 
     #
     # Startup decision
     #
 
     def _onStartupCheck(self, status, error):
+        self._startupPending = False
         if error is None and status is not None and status.kind == "required" and self.canInstallRelease(status):
             self.showRequiredDialog()
             return
@@ -1047,9 +1482,19 @@ class UpdateService:
         if status.kind == "required":
             # Not installable here (development build, web version, no file for this computer), offline (cached
             # manifest), checks off (cached manifest) or found after the startup
+            self.hideNotice()
             self.showBanner(offline=offline)
-        elif not status.skipped:
+        elif not status.skipped and not self.updateUnderway(status.version):
+            # The latest release is optional: the banner of an earlier required result (a release that is no longer
+            # the latest, or no longer required) must not contradict the notice
+            self.hideBanner()
+            if self.notice is not None and self.noticeVersion != status.version:
+                # A later check found another version: the notice names the version that Update now and Skip act on
+                self.hideNotice()
             self.scheduleNotice()
+        else:
+            self.hideNotice()
+            self.hideBanner()
 
     #
     # Optional update: the notice
@@ -1065,6 +1510,21 @@ class UpdateService:
             self._noticeTimer.connect("timeout()", self._tryNotice)
         elapsedMs = (time.monotonic() - self._startTime) * 1000.0
         self._noticeTimer.start(int(max(0, NOTICE_DELAY_MS - elapsedMs)))
+
+    def studioEntered(self):
+        """Studio was applied in the middle of the session (from Classic): announce an optional update that is waiting.
+
+        The notice is scheduled once at startup and gives up when there is no Studio shell then (a start in Classic),
+        so the switch to Studio schedules it again, under the same conditions as ``_showAvailability()``.
+        """
+        status = self.status
+        if status is None or not status.available or status.kind != "optional" or status.skipped or self.notice is not None:
+            return
+        if self.updateUnderway(status.version):
+            return
+        if channel() != "release" and feedOverride() is None and _installableOverride is None:
+            return
+        self.scheduleNotice()
 
     def _otherPromptShown(self):
         import slicer
@@ -1091,11 +1551,20 @@ class UpdateService:
         status = self.status
         if shell is None or status is None or status.kind != "optional" or status.skipped or self.notice is not None:
             return
+        if self.updateUnderway(status.version):
+            # Its download or preparation runs, it is ready, or its install is already chosen (Install when I quit):
+            # Skip could not take it back, so there is nothing to offer
+            return
         if self.canInstall() and not self.releaseHasFile(status):
             # The release has no file for this computer yet: Update now could not work (Settings > Updates shows why)
             return
-        if self._otherPromptShown() or not shell.mainWindow.isVisible() or self.showNotice() is None:
-            # Another prompt is shown (or the inspector notice slot is taken): try again later
+        if self._otherPromptShown():
+            # Another prompt (the first-start tour lasts about 2 minutes, a dialog can stay open for longer) comes
+            # first: wait for it as long as it lasts, without using up the retries, so the notice appears when it ends
+            self._noticeTimer.start(NOTICE_RETRY_MS)
+            return
+        if not shell.mainWindow.isVisible() or self.showNotice() is None:
+            # The window is hidden (or the inspector notice slot is taken): try again later, a limited number of times
             self._noticeRetries += 1
             if self._noticeRetries < NOTICE_MAX_RETRIES:
                 self._noticeTimer.start(NOTICE_RETRY_MS)
@@ -1118,7 +1587,7 @@ class UpdateService:
         if where is None:
             widget.deleteLater()
             return None
-        self.notice, self.noticeWhere = widget, where
+        self.notice, self.noticeWhere, self.noticeVersion = widget, where, status.version
         return widget
 
     def _placeNotice(self, shell, widget, key):
@@ -1139,7 +1608,7 @@ class UpdateService:
 
     def hideNotice(self):
         widget, where = self.notice, self.noticeWhere
-        self.notice = self.noticeWhere = None
+        self.notice = self.noticeWhere = self.noticeVersion = None
         if widget is None:
             return
         self._removePlaced(widget, where, NOTICE_KEY)
@@ -1158,6 +1627,26 @@ class UpdateService:
         if _isAlive(widget):
             widget.hide()
             widget.deleteLater()
+
+    def installChosen(self, version=None):
+        """True when the prepared update (of ``version``, if given) is set to install: Install when I quit, a restart
+        that waits for the quit, or its install helper already runs (administrator rights given).
+        """
+        prepared = self.prepared
+        if prepared is None or not (self._quitConnected or prepared.launched):
+            return False
+        return version is None or prepared.version == version
+
+    def updateUnderway(self, version):
+        """True when ``version`` is already being downloaded or prepared, is prepared (waiting for the choice in the
+        update dialog) or has its install chosen: the notice offers nothing for it.
+        """
+        if self.job is not None and getattr(self.job, "version", None) == version:
+            return True
+        prepared = self.prepared
+        if prepared is not None and prepared.version == version:
+            return True
+        return self.installChosen(version)
 
     def skip(self):
         """Skip of the notice: this version is not offered again (Settings > Updates still shows it)."""
@@ -1215,7 +1704,8 @@ class UpdateService:
             self.banner = (widget, where)
             return widget
         # Classic: a non-modal message, once
-        box = qt.QMessageBox(_mainWindow())
+        # Over Settings (application-modal) the box is a child of Settings so that its buttons work at once
+        box = qt.QMessageBox(self._updateDialogParent())
         box.setObjectName("StudioRequiredUpdateBanner")
         box.setIcon(qt.QMessageBox.Warning)
         box.setWindowTitle(_("Update required"))
@@ -1228,9 +1718,19 @@ class UpdateService:
             updateButton.setObjectName("StudioRequiredUpdateBannerUpdateButton")
             updateButton.connect("clicked()", self.updateNow)
         box.setModal(False)
+        # OK (or Update now) dismisses the box: forget it, so that it is not shown again when Settings closes
+        box.connect("finished(int)", lambda result, box=box: self._onBannerFinished(box))
         box.show()
         self.banner = (box, "window")
         return box
+
+    def _onBannerFinished(self, box):
+        """The Classic required-update box was dismissed with one of its buttons: it is no longer the banner."""
+        if self.banner is None or self.banner[1] != "window" or self.banner[0] != box:
+            return
+        self.banner = None
+        if _isAlive(box):
+            box.deleteLater()
 
     def hideBanner(self):
         banner, self.banner = self.banner, None
@@ -1277,12 +1777,102 @@ class UpdateService:
         if status is None or not status.available:
             self.showUpdates(check=True)
             return None
+        # A later check found another version than the one prepared: Update now acts on the version it names
+        stale = self.prepared is not None and self.prepared.version != status.version
+        if stale and self._discardPrepared():
+            stale = False
+        parent = self._updateDialogParent()
         if self.updateDialog is None or not _isAlive(self.updateDialog.dialog):
-            self.updateDialog = UpdateDialog(self, _mainWindow())
+            self.updateDialog = UpdateDialog(self, parent)
+        else:
+            self.updateDialog.setParentWindow(parent)
         self.updateDialog.show()
-        if self.job is None and self.prepared is None:
+        if self.job is not None and getattr(self.job, "version", status.version) != status.version:
+            # A later check found another version while an older one downloads: stop that download and get this one
+            self.updateDialog.replaceJob()
+        elif self.job is None and self.prepared is None:
             self.updateDialog.begin()
+        elif stale and self.job is None:
+            # Its install helper already runs (administrator rights given): it cannot be taken back, so say so
+            self.updateDialog.preparedInstead(self.prepared.version, status.version)
         return self.updateDialog
+
+    def _updateDialogParent(self):
+        """The window the update dialog is shown over. Settings is application-modal (it runs its own event loop), and Qt
+        blocks the input of every window that is not the modal one or its child: from Settings > Updates the dialog
+        has to be a child of Settings to be usable at once. It goes back to the main window when Settings closes.
+        """
+        import slicer
+
+        mainWindow = _mainWindow()
+        settings = slicer.app.settingsDialog()
+        if settings is not None and settings.isVisible() and slicer.app.activeModalWidget() == settings:
+            if self._settingsWatched != settings:
+                self._settingsWatched = settings
+                settings.connect("finished(int)", self._onSettingsClosed)
+            return settings
+        return mainWindow
+
+    def _returnBannerToMainWindow(self):
+        """The Classic required-update box shown over Settings goes back to the main window, and stays visible unless
+        the user dismissed it (OK) while Settings was open: a dismissed box is not shown again.
+        """
+        if self.banner is None or self.banner[1] != "window":
+            return
+        box = self.banner[0]
+        mainWindow = _mainWindow()
+        if not _isAlive(box) or mainWindow is None or box.parent() == mainWindow:
+            return
+        dismissed = box.isHidden()  # explicitly hidden (close, OK), not just hidden with Settings
+        box.setParent(mainWindow, box.windowFlags())
+        if dismissed:
+            self.banner = None
+            box.deleteLater()
+        else:
+            box.show()
+
+    def _onSettingsClosed(self, result=0):
+        """Settings closed: the update dialog (hidden with it) returns to the main window, shown again if it was open."""
+        self._returnBannerToMainWindow()
+        dialog = self.updateDialog
+        if dialog is None or not _isAlive(dialog.dialog):
+            return
+        dialog.setParentWindow(_mainWindow())
+        if dialog.wanted:
+            dialog.show()
+        else:
+            dialog.placeClosedNotice(_mainWindow())
+
+    def _discardPrepared(self):
+        """Drop the prepared update (and its Install when I quit) so that another version can be downloaded. Return
+        False if it cannot be dropped: its install helper already runs (administrator rights given).
+        """
+        import slicer
+
+        prepared = self.prepared
+        if prepared is None:
+            return True
+        if prepared.launched:
+            return False
+        self.prepared = None
+        if self._quitConnected:
+            try:
+                slicer.app.disconnect("aboutToQuit()", self._onAboutToQuit)
+            except Exception:
+                pass
+            self._quitConnected = False
+        self._relaunch = True
+        if self.updateDialog is not None:
+            # Its title and its ready state name the dropped version
+            self.updateDialog.dispose()
+            self.updateDialog = None
+        # The staged copy is removed by the next download before it prepares (same folder), else by the next start
+        self._staleStaging.append(os.path.dirname(prepared.staged))
+        package = prepared.package
+        if package and os.path.isfile(package) and os.path.dirname(os.path.abspath(package)) == os.path.abspath(downloadDirectory()):
+            _removeQuietly(package)
+        self._notify()
+        return True
 
     def unavailableReason(self):
         """Why this installation cannot update itself (shown with the manual way), or None."""
@@ -1307,32 +1897,79 @@ class UpdateService:
         target = self.installTarget()
         feed = feedUrl()
         directory = downloadDirectory()
+        keepDirectory = manualPackageDirectory()
         if target is None and key in ("macos-arm64", "macos-x86_64", "linux-x86_64"):
             raise updates_install.InstallError(_("The installed application was not found."))
         unavailable = _("This computer cannot install the update.")
+        cancelledText = _("The update was cancelled.")
+        if self._otherLiveOwner() is not None:
+            # The download and staging folders are shared by every Slicer Studio of this user: preparing here would
+            # replace (and the exit would delete) the copy that another running window may have chosen to install
+            raise updates_install.InstallError(_("The update is already being prepared, or is prepared, in another Slicer Studio "
+                                                 "window. Finish or close it there, then try again."))
+        others = otherRunningWindows(target)
+        if others:
+            # The swap would replace the folder that the other window runs from (two versions in one process)
+            raise _otherWindowsError(others)
+        stale, self._staleStaging = self._staleStaging, []
+        # From now on this run owns the download and staging folders: another Slicer Studio that starts with the same
+        # state folder must not clean them up (the marker names this run until it ends or its update is registered)
+        self._writeStagedMarker(None)
 
         def run(task):
+            for root in stale:
+                # The staged copy of a dropped update (a later check found another version)
+                if os.path.isdir(root) and os.path.basename(root).endswith(updates_install.STAGING_SUFFIX):
+                    updates_install._removeTree(root)
             task.phase = "download"
             path = downloadAsset(manifest, key, directory, feed=feed, progress=task.setProgress, cancelled=task.cancelled)
             if task.cancelled():
                 raise UpdateError(_("The download was cancelled."))
             task.phase = "prepare"
-            if key == "linux-x86_64":
-                return updates_install.prepareLinux(path, target, manifest.version)
-            if key in ("macos-arm64", "macos-x86_64"):
-                return updates_install.prepareMacOS(path, target, manifest.version, stagingParent=None)
-            raise UpdateError(unavailable)
+            prepared = None
+            try:
+                if key == "linux-x86_64":
+                    prepared = updates_install.prepareLinux(path, target, manifest.version, cancelled=task.cancelled)
+                elif key in ("macos-arm64", "macos-x86_64"):
+                    prepared = updates_install.prepareMacOS(path, target, manifest.version, stagingParent=None, cancelled=task.cancelled)
+            except updates_install.InstallError as error:
+                if task.cancelled():
+                    # Cancel during the preparation: the staged copy is removed, the verified download is kept (in the
+                    # private download folder) for the next try
+                    raise UpdateError(cancelledText) from None
+                if error.manualSteps and os.path.isfile(path):
+                    # The steps tell the user to install this package by hand: it leaves the private download folder
+                    # (emptied at the next start) for a folder the user knows, and the steps name its full path
+                    kept = keepPackage(path, keepDirectory)
+                    error.manualSteps = updates_install.manualSteps("linux" if key == "linux-x86_64" else "macos", kept, target)
+                raise
+            if prepared is None:
+                raise UpdateError(unavailable)
+            if task.cancelled():
+                # Cancel came as the preparation ended: the update is not kept
+                _removeStaged(prepared, wait=True)
+                raise UpdateError(cancelledText)
+            return prepared
 
         def done(prepared, error):
             self.job = None
+            if error is None and job.cancelled():
+                # Cancel came after the worker finished (before this report): the update is not kept
+                _removeStaged(prepared, wait=False)
+                prepared, error = None, UpdateError(cancelledText)
             if error is None:
                 self.prepared = prepared
+                self._registerStaged(prepared)
+            else:
+                self._removeOwnStagedMarker()
             onUpdate(prepared, error)
             self._notify()
 
-        self.job = _Task(run, done)
-        self.job.phase = "download"
-        return self.job.start()
+        job = self.job = _Task(run, done)
+        job.phase = "download"
+        #: The version this job downloads: Update now compares it with the version a later check found
+        job.version = manifest.version
+        return job.start()
 
     def installOnQuit(self, relaunch=True):
         """Swap in the prepared update when the application exits (and relaunch it). With administrator rights the
@@ -1343,17 +1980,132 @@ class UpdateService:
         prepared = self.prepared
         if prepared is None:
             return False
+        if not prepared.launched:
+            # Another window of the installation opened while the update was prepared: it must be closed first
+            others = otherRunningWindows(prepared.target)
+            if others:
+                raise _otherWindowsError(others)
         self._relaunch = relaunch
         if prepared.needsAdmin and not prepared.launched:
             prepared.launch(stateDirectory(), relaunch=relaunch, record=self._installRecord())
-            return True
-        if not self._quitConnected:
+        elif not self._quitConnected:
             slicer.app.connect("aboutToQuit()", self._onAboutToQuit)
             self._quitConnected = True
+        if self.notice is not None and self.noticeVersion == prepared.version:
+            # A notice placed meanwhile (another check) would offer Skip of a version that installs anyway
+            self.hideNotice()
         return True
+
+    #
+    # A prepared update that is not installed
+    #
+
+    def _writeStagedMarker(self, root):
+        """Write the marker that names this run as the owner of the download and the staged copy (``root``, or None
+        while the update is still downloading or being prepared).
+        """
+        try:
+            os.makedirs(stateDirectory(), exist_ok=True)
+            with open(os.path.join(stateDirectory(), STAGED_MARKER), "w", encoding="utf-8") as f:
+                json.dump({"pid": os.getpid(), "root": root}, f)
+        except OSError:
+            logging.warning("Updates: could not write the staging marker:\n" + traceback.format_exc())
+
+    def _otherLiveOwner(self):
+        """The pid of another running Slicer Studio that the staging marker names as the owner of the download and the
+        staged copy (it may still install them), or None.
+        """
+        try:
+            with open(os.path.join(stateDirectory(), STAGED_MARKER), encoding="utf-8") as f:
+                marker = json.load(f)
+        except (OSError, ValueError):
+            return None
+        pid = marker.get("pid") if isinstance(marker, dict) else None
+        if isinstance(pid, int) and pid != os.getpid() and _processAlive(pid):
+            return pid
+        return None
+
+    def _removeOwnStagedMarker(self):
+        """The download or the preparation failed or was cancelled: this run no longer owns anything."""
+        path = os.path.join(stateDirectory(), STAGED_MARKER)
+        try:
+            with open(path, encoding="utf-8") as f:
+                marker = json.load(f)
+            if isinstance(marker, dict) and marker.get("pid") == os.getpid():
+                _removeQuietly(path)
+        except (OSError, ValueError):
+            pass
+
+    def _registerStaged(self, prepared):
+        """Remember the staged copy (for the cleanup of a run that dies) and remove it at exit unless the user chose to
+        install it (Restart now, Install when I quit).
+        """
+        import slicer
+
+        self._writeStagedMarker(os.path.dirname(prepared.staged))
+        if not self._discardConnected:
+            slicer.app.connect("aboutToQuit()", self._onQuitDiscard)
+            self._discardConnected = True
+
+    def _onQuitDiscard(self):
+        prepared = self.prepared
+        if prepared is None or prepared.launched or self._quitConnected:
+            return  # nothing prepared, or the install is chosen: the helper (or the next start) takes over
+        if self._otherLiveOwner() is not None:
+            return  # the shared folders now belong to another running window: its update must not be deleted
+        try:
+            root = os.path.dirname(prepared.staged)
+            if os.path.isdir(root) and os.path.basename(root).endswith(updates_install.STAGING_SUFFIX):
+                updates_install._removeTree(root)
+            package = prepared.package
+            if package and os.path.isfile(package) and os.path.dirname(os.path.abspath(package)) == os.path.abspath(downloadDirectory()):
+                _removeQuietly(package)
+            _removeQuietly(os.path.join(stateDirectory(), STAGED_MARKER))
+        except Exception:
+            logging.error("Updates: removing the unused update failed:\n" + traceback.format_exc())
+
+    def _removeAbandonedStaging(self):
+        """At start, when no install record exists: remove what a run that did not install its prepared update (crash,
+        killed) left: the staged copy next to the installation (or in the temporary folder) and the downloaded package.
+        """
+        stateDir = stateDirectory()
+        markerPath = os.path.join(stateDir, STAGED_MARKER)
+        roots = []
+        target = self.installTarget()
+        if target:
+            roots.append(updates_install.stagingRoot(target))
+        try:
+            with open(markerPath, encoding="utf-8") as f:
+                marker = json.load(f)
+        except (OSError, ValueError):
+            marker = None
+        if isinstance(marker, dict):
+            pid = marker.get("pid")
+            if isinstance(pid, int) and pid != os.getpid() and _processAlive(pid):
+                return  # another running Slicer Studio prepared it and may still install it
+            root = marker.get("root")
+            if isinstance(root, str) and os.path.basename(root).endswith(updates_install.STAGING_SUFFIX):
+                roots.append(root)
+        elif not target:
+            return
+        for root in dict.fromkeys(roots):
+            if os.path.isdir(root):
+                updates_install.removeInBackground(root)
+        downloads = downloadDirectory()
+        if os.path.isdir(downloads):
+            for name in os.listdir(downloads):
+                updates_install.removeInBackground(os.path.join(downloads, name))
+        _removeQuietly(markerPath)
 
     def _disconnectQuit(self):
         import slicer
+
+        if self._discardConnected:
+            try:
+                slicer.app.disconnect("aboutToQuit()", self._onQuitDiscard)
+            except Exception:
+                pass
+            self._discardConnected = False
 
         if self._quitConnected:
             try:
@@ -1379,7 +2131,9 @@ class UpdateService:
         if prepared is None or prepared.launched:
             return
         try:
-            prepared.launch(stateDirectory(), relaunch=self._relaunch, record=self._installRecord())
+            # A window of the installation opened after the update was chosen: the helper also waits for it to close
+            prepared.launch(stateDirectory(), relaunch=self._relaunch, record=self._installRecord(),
+                            waitFor=otherRunningWindows(prepared.target))
         except Exception:
             logging.error("Updates: starting the install helper failed:\n" + traceback.format_exc())
 
@@ -1431,6 +2185,8 @@ class UpdateService:
         """
         stateDir = stateDirectory()
         if not os.path.exists(os.path.join(stateDir, "install.json")):  # updates_install.RECORD_FILE, without importing it
+            # No update was installed: a prepared update that the previous run did not install is of no use any more
+            self._removeAbandonedStaging()
             return None
         record, result = updates_install.readRecord(stateDir)
         if record is None:
@@ -1439,7 +2195,14 @@ class UpdateService:
         if not target or os.path.realpath(str(record.get("target") or "")) != os.path.realpath(target):
             # The update of another installation (for example a package, while this is a build tree)
             return None
+        if _installPending(record, result):
+            # Another Slicer Studio chose the update and is still exiting (a big scene, a slow disk): its helper installs
+            # the update once it has exited, and the version that then starts reports the result
+            logging.info("Updates: the update to {} is still being installed by another Slicer Studio".format(record.get("version")))
+            return None
         updates_install.clearRecord(stateDir)
+        self._finishedLog = None
+        self._failedInstall = None
         newVersion = str(record.get("version") or "")
         succeeded = result == "ok" and versionModule.tryParse(newVersion) is not None and versionModule.compare(newVersion, currentVersion()) == 0
         if succeeded:
@@ -1455,6 +2218,8 @@ class UpdateService:
             self._finishedMessage = ("warn", _("The update to {version} could not be installed: {reason}. Slicer Studio {current} was kept. "
                                                "Details: {log}").format(version=newVersion or "?", reason=reason, current=currentVersion(),
                                                                       log=record.get("log") or ""))
+            self._finishedLog = record.get("log") or None
+            self._failedInstall = (newVersion or "?", reason, record.get("log") or None)
         package = record.get("package")
         if package and os.path.isfile(package) and os.path.dirname(os.path.abspath(package)) == os.path.abspath(downloadDirectory()):
             _removeQuietly(package)
@@ -1467,14 +2232,16 @@ class UpdateService:
         return succeeded
 
     def _offerSessionForRecovery(self, sessionDir):
-        """The session closed for the update with unsaved work is offered for recovery like a crashed one."""
+        """The session closed for the update with unsaved work is offered for recovery like a crashed one (it is marked
+        as closed for the update, so that the recovery dialog does not say that Slicer crashed).
+        """
         try:
             from StudioLib import recovery
 
             root = os.path.dirname(os.path.normpath(sessionDir))
             for session in recovery.scan(root):
                 if os.path.normpath(session.path) == os.path.normpath(sessionDir) and session.status == "closed-unsaved":
-                    recovery.markSession(session, "running", synchronous=True)
+                    recovery.markSession(session, "running", synchronous=True, closedForUpdate=True)
                     return True
         except Exception:
             logging.error("Updates: " + traceback.format_exc())
@@ -1490,13 +2257,28 @@ class UpdateService:
         logging.info(f"Updates: {text}")
         shell = _shell()
         if shell is not None:
-            shell.toast(text, 6000, sticky=level == "warn", level="consequence" if level == "warn" else "info")
+            log, self._finishedLog = self._finishedLog, None
+            if level == "warn" and log:
+                # The toast is one elided line, so the log path would be cut: the full text is its tooltip, and the
+                # action opens the log (the folder when the log is gone)
+                shell.toast(text, 6000, sticky=True, level="consequence", action=lambda: _openLog(log), actionText=_("Show log"),
+                            toolTip=text)
+            else:
+                shell.toast(text, 6000, sticky=level == "warn", level="consequence" if level == "warn" else "info")
         elif level == "warn":
             slicer.util.warningDisplay(text, windowTitle=_("Update"))
         else:
             mainWindow = _mainWindow()
             if mainWindow is not None and mainWindow.statusBar() is not None:
                 mainWindow.statusBar().showMessage(text, 6000)
+
+
+def _openLog(path):
+    """Open the install log of a failed update in the system's viewer (its folder when the file is gone)."""
+    import qt
+
+    target = path if os.path.exists(path) else os.path.dirname(path)
+    return bool(qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(target)))
 
 
 #
@@ -1527,15 +2309,46 @@ class _EscapeCloseFilter:
 def _notesBrowser(notes, maximumHeight=220):
     import qt
 
+    from . import projects
+
     browser = qt.QTextBrowser()
     browser.setObjectName("StudioUpdateNotes")
-    browser.setOpenExternalLinks(True)
+    projects.routeLinks(browser)
     if notes and hasattr(browser, "setMarkdown"):
         browser.setMarkdown(notes)
+        _flattenHeadings(browser)
     else:
         browser.setPlainText(notes or _("No release notes."))
     browser.setMaximumHeight(maximumHeight)
     return browser
+
+
+def _flattenHeadings(browser):
+    """Show the headings of Markdown release notes at the body size in the semibold weight: the default sizes (up to twice the
+    body) would make "What's new" larger than the title of the dialog.
+    """
+    import qt
+
+    document = browser.document
+    block = document.begin()
+    while block.isValid():
+        if block.blockFormat().headingLevel() > 0:
+            cursor = qt.QTextCursor(block)
+            cursor.movePosition(qt.QTextCursor.EndOfBlock, qt.QTextCursor.KeepAnchor)
+            charFormat = qt.QTextCharFormat()
+            charFormat.setProperty(qt.QTextFormat.FontSizeAdjustment, 0)
+            charFormat.setFontWeight(qt.QFont.DemiBold)
+            cursor.mergeCharFormat(charFormat)
+        block = block.next()
+
+
+def _dialogStyleSheet():
+    """The rules of the update dialogs inside the dialog chrome."""
+    from StudioLib import ui
+
+    return (f"QTextBrowser#StudioUpdateNotes {{ background-color: {ui.token('card-low').name()}; border: 1px solid {ui.token('hairline').name()};"
+            " border-radius: 10px; padding: 6px 8px; }"
+            f"QLabel#StudioUpdateStatus {{ color: {ui.token('text2').name()}; }}")
 
 
 def _progressText(received, total):
@@ -1561,20 +2374,18 @@ class RequiredUpdateDialog:
         self.dialog.setModal(True)
         self.dialog.setMinimumWidth(480)
         layout = qt.QVBoxLayout(self.dialog)
-        layout.setContentsMargins(20, 18, 20, 16)
-        layout.setSpacing(10)
-        title = qt.QLabel(_("Update to Slicer Studio {version}").format(version=status.version))
-        title.setObjectName("StudioRequiredUpdateTitle")
-        ui._font(title, ui.fontPx(16), qt.QFont.DemiBold)
-        layout.addWidget(title)
+        layout.setContentsMargins(24, 24, 24, 22)
+        layout.setSpacing(14)
         if status.belowMinimum:
             text = _("This version ({current}) is no longer supported. Slicer Studio {version} is required to continue.")
         else:
             text = _("Slicer Studio {version} is a required update (you have {current}).")
-        self.text = qt.QLabel(text.format(version=status.version, current=status.currentVersion) + " "
-                              + _("Slicer Studio downloads it, checks it and restarts. Your settings and autosaved work are kept."))
-        self.text.setWordWrap(True)
-        layout.addWidget(self.text)
+        body = text.format(version=status.version, current=status.currentVersion) + " " + _(
+            "Slicer Studio downloads it, checks it and restarts. Your settings and autosaved work are kept.")
+        # Header (VISUAL 4.7): the icon tile beside the title and the body text
+        header, self.titleLabel, self.text = ui.dialogHeader(
+            "download", _("Update to Slicer Studio {version}").format(version=status.version), body, "StudioRequiredUpdate")
+        layout.addLayout(header)
         layout.addWidget(_notesBrowser(status.manifest.notes))
         self.progress = qt.QProgressBar()
         self.progress.setObjectName("StudioUpdateProgress")
@@ -1586,19 +2397,35 @@ class RequiredUpdateDialog:
         self.statusLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
         self.statusLabel.setVisible(False)
         layout.addWidget(self.statusLabel)
+        self.logButton = None
+        failed = getattr(service, "_failedInstall", None)
+        if failed:
+            # The toast of the failed install is behind this modal dialog (its "Show log" cannot be clicked), and
+            # "Update now" would repeat the same install: say why it failed here, with the log
+            version, reason, log = failed
+            self._setStatus(_("The last attempt to install {version} failed: {reason}. Slicer Studio {current} was kept. "
+                              "You can try again, or install it by hand from the download page.").format(
+                                  version=version, reason=reason, current=status.currentVersion), error=True)
+            if log:
+                self.logButton = ui.linkButtonWidget(_("Show log"), lambda: _openLog(log), "StudioRequiredUpdateLogButton")
+                layout.addWidget(self.logButton)
+        # Footer (VISUAL 4.7): the link on the left, the single primary button on the right
         buttons = qt.QHBoxLayout()
-        buttons.addStretch(1)
-        self.quitButton = qt.QPushButton(_("Quit"))
-        self.quitButton.setObjectName("StudioRequiredUpdateQuitButton")
-        self.quitButton.connect("clicked()", self.quit)
+        buttons.setSpacing(10)
+        self.quitButton = ui.linkButtonWidget(_("Quit"), self.quit, "StudioRequiredUpdateQuitButton")
         buttons.addWidget(self.quitButton)
+        buttons.addStretch(1)
         self.updateButton = qt.QPushButton(_("Update now"))
         self.updateButton.setObjectName("StudioRequiredUpdateNowButton")
         self.updateButton.setDefault(True)
+        self.updateButton.setMinimumHeight(36)
+        self.updateButton.setMinimumWidth(96)
         ui.setRole(self.updateButton, "primary")
         self.updateButton.connect("clicked()", self.onUpdateClicked)
         buttons.addWidget(self.updateButton)
         layout.addLayout(buttons)
+        # Dialog chrome (VISUAL 4.7): frameless, rounded, bordered, over a backdrop
+        ui.dialogChrome(self.dialog, styleSheet=_dialogStyleSheet)
         self._filter = _EscapeCloseFilter.create()
         self.dialog.installEventFilter(self._filter)
         # Esc and the close button are filtered; anything else that ends the dialog (reject(), done()) shows it again
@@ -1630,7 +2457,11 @@ class RequiredUpdateDialog:
     def onUpdateClicked(self):
         if self.state == "downloading":
             if self.task is not None:
+                # The job stops at its next check (the preparation removes what it extracted): the dialog then goes
+                # back to its offer
                 self.task.cancel()
+                self.updateButton.setEnabled(False)
+                self._setStatus(_("Cancelling…"))
             return
         if self.state == "ready":
             self._restart()
@@ -1657,6 +2488,8 @@ class RequiredUpdateDialog:
         if task is None:
             return
         received, total = task.progress
+        if task.cancelled():
+            return  # "Cancelling…" stays until the job has stopped
         if getattr(task, "phase", "") == "prepare":
             self.progress.setRange(0, 0)
             self._setStatus(_("Checked. Preparing the new version…"))
@@ -1666,13 +2499,15 @@ class RequiredUpdateDialog:
             self._setStatus(_progressText(received, total))
 
     def _onJobDone(self, prepared, error):
+        cancelled = self.task is not None and self.task.cancelled()
         self.task = None
         self.progress.setVisible(False)
+        self.updateButton.setEnabled(True)
         if error is not None:
             self.state = "offer"
-            self.updateButton.setText(_("Try again"))
+            self.updateButton.setText(_("Update now") if cancelled else _("Try again"))
             manual = getattr(error, "manualSteps", None)
-            self._setStatus(str(error) + (" " + manual if manual else ""), error=True)
+            self._setStatus(sentence(error) + (" " + manual if manual else ""), error=True)
             return
         self.state = "ready"
         self.updateButton.setText(_("Restart now"))
@@ -1682,6 +2517,12 @@ class RequiredUpdateDialog:
     def _restart(self):
         try:
             self.service.installOnQuit(relaunch=True)
+        except updates_install.OtherWindowsOpen as error:
+            # The update stays ready: Restart now installs it once the other window is closed
+            self.state = "ready"
+            self.updateButton.setText(_("Restart now"))
+            self._setStatus(str(error), error=True)
+            return
         except updates_install.InstallError as error:
             self.state = "offer"
             self.updateButton.setText(_("Try again"))
@@ -1695,6 +2536,14 @@ class RequiredUpdateDialog:
         if self.state != "ready":
             self.service.prepared = None
             self.service._disconnectQuit()
+        else:
+            # The update is ready and installs at the exit, but Quit is not Restart now: the exit that Restart now
+            # asked for (and the user cancelled) must not start the application again. (With administrator rights the
+            # helper is already running with its relaunch choice and cannot be changed.)
+            try:
+                self.service.installOnQuit(relaunch=False)
+            except updates_install.InstallError:
+                logging.error("Updates: setting the install at quit failed:\n" + traceback.format_exc())
         self._closeApplication()
 
     def _closeApplication(self):
@@ -1736,48 +2585,100 @@ class UpdateDialog:
         self.service = service
         self.task = None
         self.state = "idle"
+        #: The user pressed Cancel during the download: its end is then not announced
+        self._cancelRequested = False
+        #: Update now named a newer version while an older one downloads: the stopped job is followed by a new download
+        self._replaceRequested = False
+        #: Open (shown and not closed by the user), also while hidden along with its parent window
+        self.wanted = False
+        #: Classic: the message that says how a download ended after the dialog was closed (Studio uses a toast)
+        self.closedNotice = None
         status = service.status
         self.dialog = qt.QDialog(parent)
         self.dialog.setObjectName(UPDATE_DIALOG_OBJECT_NAME)
         self.dialog.setWindowTitle(_("Update Slicer Studio"))
         self.dialog.setMinimumWidth(460)
         layout = qt.QVBoxLayout(self.dialog)
-        layout.setContentsMargins(20, 18, 20, 16)
-        layout.setSpacing(10)
-        self.title = qt.QLabel(_("Slicer Studio {version}").format(version=status.version if status else "?"))
-        ui._font(self.title, ui.fontPx(16), qt.QFont.DemiBold)
-        layout.addWidget(self.title)
-        self.text = qt.QLabel()
+        self._layout = layout
+        layout.setContentsMargins(24, 24, 24, 22)
+        layout.setSpacing(14)
+        header, self.title, self.text = ui.dialogHeader(
+            "download", _("Slicer Studio {version}").format(version=status.version if status else "?"), " ", "StudioUpdate")
         self.text.setObjectName("StudioUpdateStatus")
-        self.text.setWordWrap(True)
         self.text.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
-        layout.addWidget(self.text)
+        layout.addLayout(header)
         self.progress = qt.QProgressBar()
         self.progress.setObjectName("StudioUpdateProgress")
         layout.addWidget(self.progress)
         buttons = qt.QHBoxLayout()
+        buttons.setSpacing(10)
         buttons.addStretch(1)
         self.secondaryButton = qt.QPushButton(_("Cancel"))
         self.secondaryButton.setObjectName("StudioUpdateSecondaryButton")
+        self.secondaryButton.setMinimumHeight(36)
+        ui.setRole(self.secondaryButton, "secondary")
         self.secondaryButton.connect("clicked()", self.onSecondary)
         buttons.addWidget(self.secondaryButton)
         self.primaryButton = qt.QPushButton(_("Restart now"))
         self.primaryButton.setObjectName("StudioUpdatePrimaryButton")
+        self.primaryButton.setMinimumHeight(36)
+        self.primaryButton.setMinimumWidth(96)
         ui.setRole(self.primaryButton, "primary")
         self.primaryButton.connect("clicked()", self.onPrimary)
         buttons.addWidget(self.primaryButton)
         layout.addLayout(buttons)
+        # Dialog chrome (VISUAL 4.7). Non-modal, so without the backdrop: the main window stays usable behind it
+        ui.dialogChrome(self.dialog, backdrop=False, styleSheet=_dialogStyleSheet)
+        self.dialog.connect("finished(int)", self._onFinished)
+
+    def _onFinished(self, result):
+        self.wanted = False
+
+    def setParentWindow(self, parent):
+        """Show the dialog over another window (the Settings dialog while that is modal, else the main window)."""
+        dialog = self.dialog
+        if parent is None or not _isAlive(dialog) or dialog.parentWidget() == parent:
+            return
+        dialog.setParent(parent, dialog.windowFlags())
 
     def show(self):
+        self.wanted = True
+        self._hideClosedNotice()
         self.dialog.show()
+        self._fitToText()
         self.dialog.raise_()
         self.dialog.activateWindow()
 
+    def _setText(self, text):
+        if self.text.text != text:
+            self.text.setText(text)
+            self._fitToText()
+
+    def _fitToText(self):
+        """Give the shown dialog the height its wrapped status text needs at the dialog's width. A window's layout keeps
+        only its minimum size, which ignores height-for-width, so the dialog would otherwise keep the height it got for
+        its first, one-line text and cut a longer status (a failure reason with the manual steps) under the buttons.
+        """
+        dialog = self.dialog
+        if not _isAlive(dialog) or not dialog.isVisible():
+            # Showing the window sizes it for its text (QWidget::adjustSize() includes height-for-width)
+            return
+        self._layout.activate()
+        needed = max(self._layout.totalHeightForWidth(dialog.width), self._layout.totalMinimumSize().height())
+        if needed > 0 and needed != dialog.height:
+            dialog.resize(dialog.width, needed)
+
     def begin(self):
+        # The dialog is reused for later updates: its title names the version that is downloaded now
+        status = self.service.status
+        if status is not None:
+            self.title.setText(_("Slicer Studio {version}").format(version=status.version))
         reason = self.service.unavailableReason()
         if reason:
             self._setState("unavailable", reason)
             return
+        self._cancelRequested = False
+        self._replaceRequested = False
         try:
             self.task = self.service.startJob(self._onJobDone)
         except updates_install.InstallError as error:
@@ -1792,32 +2693,130 @@ class UpdateDialog:
         self.progress.setVisible(state == "downloading")
         self.primaryButton.setVisible(state in ("ready", "failed"))
         self.primaryButton.setText(_("Restart now") if state == "ready" else _("Try again"))
+        self.secondaryButton.setEnabled(True)
         self.secondaryButton.setText({"downloading": _("Cancel"), "ready": _("Install when I quit")}.get(state, _("Close")))
         if state == "ready":
             self.primaryButton.setDefault(True)
+        self._fitToText()
 
     def _updateProgress(self):
         task = self.task
         if task is None:
             return
         received, total = task.progress
+        if task.cancelled():
+            return  # "Cancelling…" stays until the job has stopped
         if getattr(task, "phase", "") == "prepare":
             self.progress.setRange(0, 0)
-            self.text.setText(_("Checked. Preparing the new version…"))
+            self._setText(_("Checked. Preparing the new version…"))
         elif total:
             self.progress.setRange(0, 1000)
             self.progress.setValue(int(received * 1000 / total))
-            self.text.setText(_progressText(received, total))
+            self._setText(_progressText(received, total))
+
+    def replaceJob(self):
+        """A later check found another version while this dialog downloads an older one: stop that download, then
+        download, check and prepare the version found (``_onJobDone()`` starts it once the stopped job has ended).
+        """
+        task = self.task
+        if task is None or task is not self.service.job:
+            if self.service.job is not None:
+                # Not this dialog's job (cannot happen in the application): stop it, it is not offered any more
+                self.service.job.cancel()
+                return
+            self.begin()
+            return
+        status = self.service.status
+        oldVersion = getattr(task, "version", "?")
+        if status is not None:
+            self.title.setText(_("Slicer Studio {version}").format(version=status.version))
+        self._replaceRequested = True
+        self._cancelRequested = False
+        task.cancel()
+        self._setState("downloading", _("Stopping the download of Slicer Studio {version}…").format(version=oldVersion))
+        self.progress.setRange(0, 0)
 
     def _onJobDone(self, prepared, error):
         self.task = None
+        if self._replaceRequested:
+            # The stopped download of an older version ended (its files are removed): download the version found
+            self._replaceRequested = False
+            self.begin()
+            return
         if error is not None:
             manual = getattr(error, "manualSteps", None)
-            self._setState("failed", str(error) + (" " + manual if manual else "") + " " + _("Slicer Studio was not changed."))
+            self._setState("failed", sentence(error) + (" " + manual if manual else "") + " " + _("Slicer Studio was not changed."))
+        else:
+            self._setState("ready", _("Slicer Studio {version} was downloaded and checked. Slicer Studio restarts to install it; "
+                                      "you are asked to save unsaved work, and autosaved work is offered for recovery after the restart.").format(
+                version=prepared.version))
+        self._announceIfClosed(prepared, error)
+
+    def _showAgain(self):
+        """Show the closed dialog again as it is (the result stays; Update now would start a failed download over)."""
+        if _isAlive(self.dialog):
+            self.setParentWindow(self.service._updateDialogParent())
+            self.show()
+
+    def _announceIfClosed(self, prepared, error):
+        """The dialog was closed (Esc, the close button) while the download went on: tell the user how it ended, with a
+        button that shows the dialog again (Restart now, Install when I quit, Try again). Otherwise the update is
+        prepared, or has failed, without any sign, and is discarded when the application quits.
+        """
+        if self.wanted or self._cancelRequested:
+            return  # the dialog shows the result, or the user cancelled it themselves
+        if error is None:
+            text = _("Slicer Studio {version} is ready to install").format(version=prepared.version)
+        else:
+            status = self.service.status
+            text = _("Slicer Studio {version} could not be downloaded").format(version=status.version if status is not None else "?")
+        shell = _shell()
+        if shell is not None:
+            shell.toast(text, 8000, action=self._showAgain, actionText=_("Show"), sticky=True, level="consequence")
             return
-        self._setState("ready", _("Slicer Studio {version} was downloaded and checked. Slicer Studio restarts to install it; "
-                                  "you are asked to save unsaved work, and autosaved work is offered for recovery after the restart.").format(
-            version=prepared.version))
+        # Classic (no Studio shell, so no toast): a non-modal message with the same Show button
+        self._showClosedNotice(text, error is None)
+
+    def _showClosedNotice(self, text, ready):
+        import qt
+
+        self._hideClosedNotice()
+        box = qt.QMessageBox(self.service._updateDialogParent())
+        box.setObjectName(CLOSED_NOTICE_OBJECT_NAME)
+        box.setIcon(qt.QMessageBox.Information if ready else qt.QMessageBox.Warning)
+        box.setWindowTitle(_("Update Slicer Studio"))
+        box.setText(text)
+        if ready:
+            box.setInformativeText(_("Show it to restart now or to install it when you quit. "
+                                     "Otherwise it is removed when you quit."))
+        showButton = box.addButton(_("Show"), qt.QMessageBox.AcceptRole)
+        showButton.setObjectName(CLOSED_NOTICE_OBJECT_NAME + "ShowButton")
+        showButton.connect("clicked()", self._showAgain)
+        box.addButton(qt.QMessageBox.Close)
+        box.setDefaultButton(showButton)
+        box.setModal(False)
+        box.setAttribute(qt.Qt.WA_DeleteOnClose, True)
+        box.show()
+        self.closedNotice = box
+
+    def _hideClosedNotice(self):
+        box, self.closedNotice = self.closedNotice, None
+        if box is not None and _isAlive(box):
+            box.close()
+
+    def placeClosedNotice(self, parent):
+        """Settings closed: the Classic notice (hidden with it, when it was shown over Settings) returns to ``parent``."""
+        box = self.closedNotice
+        if box is None or not _isAlive(box) or parent is None or box.parentWidget() == parent:
+            return
+        box.setParent(parent, box.windowFlags())
+        box.show()
+
+    def preparedInstead(self, preparedVersion, version):
+        """The update shown is ready but is not the latest one, and it cannot be taken back."""
+        self.title.setText(_("Slicer Studio {version}").format(version=preparedVersion))
+        self._setState("ready", _("Slicer Studio {prepared} is ready and installs when you quit Slicer Studio; it cannot be taken back "
+                                  "any more. Update again after that to get Slicer Studio {version}.").format(prepared=preparedVersion, version=version))
 
     def onPrimary(self):
         if self.state == "failed":
@@ -1827,6 +2826,9 @@ class UpdateDialog:
             return
         try:
             closing = self.service.restartToUpdate()
+        except updates_install.OtherWindowsOpen as error:
+            self._setState("ready", str(error))  # still ready: Restart now installs it once the other window is closed
+            return
         except updates_install.InstallError as error:
             self._setState("failed", str(error))
             return
@@ -1836,22 +2838,32 @@ class UpdateDialog:
     def onSecondary(self):
         if self.state == "downloading":
             if self.task is not None:
+                # The job stops at its next check (the preparation removes what it extracted)
+                self._cancelRequested = True
+                self._replaceRequested = False
                 self.task.cancel()
+                self.secondaryButton.setEnabled(False)
+                self._setText(_("Cancelling…"))
             return
         if self.state == "ready":
             try:
                 self.service.installOnQuit(relaunch=False)
+            except updates_install.OtherWindowsOpen as error:
+                self._setState("ready", str(error))
+                return
             except updates_install.InstallError as error:
                 self._setState("failed", str(error))
                 return
             shell = _shell()
             if shell is not None:
                 shell.toast(_("The update installs when you quit"), 3000)
+        self.wanted = False
         self.dialog.hide()
 
     def dispose(self):
         if self.task is not None:
             self.task.cancel()
+        self._hideClosedNotice()
         if _isAlive(self.dialog):
             self.dialog.hide()
             self.dialog.deleteLater()

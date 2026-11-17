@@ -14,10 +14,12 @@ Run without Slicer's GUI:
 import datetime
 import json
 import os
+import random
 import shutil
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 MODULE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if MODULE_DIR not in sys.path:
@@ -256,9 +258,32 @@ class AssignTest(StudyTestBase):
         record = agreement.assign(self.study, fraction=0.2)
         self.assertIsInstance(record["seed"], int)
         self.assertEqual(len(record["sids"]), 2)  # ceil(0.2 * 6)
-        chosen = agreement.assign(self.study, sids=["sub-05", "sub-06", "sub-99"], rater="Ana Bell")
+        # Carl Diaz traced sub-05 and sub-06, so sub-01..sub-04 are eligible for him; the unseeded draw above takes at most two of them
+        wanted = ["sub-01", "sub-02", "sub-03", "sub-04", "sub-99"]
+        chosen = agreement.assign(self.study, sids=wanted, rater="Carl Diaz")
         self.assertIsNone(chosen["seed"])
-        self.assertEqual(chosen["skipped"], [sid for sid in ["sub-05", "sub-06", "sub-99"] if sid not in chosen["sids"]])
+        self.assertTrue(chosen["sids"])
+        self.assertEqual(chosen["skipped"], [sid for sid in wanted if sid not in chosen["sids"]])
+        self.assertIn("sub-99", chosen["skipped"])
+
+    def test_selected_subjects_do_not_depend_on_the_unseeded_draw(self):
+        # The unseeded draw of 2 of the 6 subjects is random: the follow-up assignment must work for every possible draw
+        pool = sorted(self.centers)
+        draws = {}
+        for seed in range(2000):
+            draws.setdefault(frozenset(random.Random(seed).sample(pool, 2)), seed)
+            if len(draws) == 15:
+                break
+        self.assertEqual(len(draws), 15)  # all pairs of the six subjects
+        for pair, seed in draws.items():
+            with unittest.mock.patch.object(agreement.secrets, "randbelow", return_value=seed):
+                record = agreement.assign(self.study, fraction=0.2)
+            self.assertEqual((record["seed"], set(record["sids"])), (seed, set(pair)))
+            wanted = ["sub-01", "sub-02", "sub-03", "sub-04", "sub-99"]
+            chosen = agreement.assign(self.study, sids=wanted, rater="Carl Diaz")
+            self.assertEqual(chosen["sids"], [sid for sid in wanted[:4] if sid not in pair])
+            self.assertEqual(chosen["skipped"], [sid for sid in wanted if sid not in chosen["sids"]])
+            agreement.unassign(self.study, [*record["sids"], *chosen["sids"]])
 
     def test_inter_mode_leaves_out_the_raters_own_lesions(self):
         pool = agreement.eligible(self.study, rater="Ana Bell", mode="inter")
@@ -447,6 +472,41 @@ class SummaryTest(StudyTestBase):
         lesions = next(section for section in sections if section.id == "lesions")
         items = [item for kind, *rest in lesions.blocks if kind == "ul" for item in rest[0]]
         self.assertTrue(any(item.startswith("Inter-rater agreement: 3 pair(s); median Dice 0.8") for item in items), items)
+
+    def test_summary_in_steps_matches_and_recomputes_changed_pairs(self):
+        """prepare_summary → compute_summary (a worker thread: files and numpy only) → summary(computed=...) gives what summary()
+        gives, recomputes a pair whose second tracing changed meanwhile, and stops with jobs.Cancelled (BB-1: the Library
+        computed every pair on the GUI thread).
+        """
+        from LesionNetworkMappingLib import jobs
+
+        agreement.assign(self.study, sids=["sub-01", "sub-02", "sub-03"], rater="Carl Diaz")
+        self.second("sub-01", "Carl Diaz", cube((13, 20, 20), 3))
+        self.second("sub-02", "Carl Diaz", cube((28, 20, 20), 3))
+        self.second("sub-03", "Carl Diaz", cube((30, 30, 30), 2))
+        expected = agreement.summary(self.study, write=False, update_rows=False)
+        prepared = agreement.prepare_summary(self.study)
+        self.assertEqual([job["participant_id"] for job in prepared["jobs"]], ["sub-01", "sub-02", "sub-03"])
+        steps = []
+        computed = agreement.compute_summary(prepared, progress=lambda *step: steps.append(step))
+        self.assertEqual(steps, [("pairs", 0, 3), ("pairs", 1, 3), ("pairs", 2, 3), ("baseline", None, None)])
+        reads = []
+        with unittest.mock.patch.object(agreement, "load_mask", side_effect=lambda path: reads.append(path) or agreement.nifti.read_nifti(path)[:2]):
+            data = agreement.summary(self.study, write=False, update_rows=False, computed=computed)
+        self.assertEqual(reads, [], "the main thread reads no mask when the worker computed every pair")
+        self.assertEqual(data["pairs"], expected["pairs"])
+        self.assertEqual(data["median"], expected["median"])
+        self.assertEqual(data["baseline"], expected["baseline"])
+        # A second tracing saved again while the worker ran is computed again on the main thread
+        computed = agreement.compute_summary(agreement.prepare_summary(self.study))
+        self.second("sub-03", "Carl Diaz", cube((20, 12, 20), 3))  # now the same as the first tracing
+        data = agreement.summary(self.study, write=False, update_rows=False, computed=computed)
+        self.assertEqual(expected["pairs"][2]["dice"], 0.0)
+        self.assertEqual(data["pairs"][2]["dice"], 1.0)
+        self.assertEqual(data["pairs"][:2], expected["pairs"][:2])
+        # Stop: before the next file is read
+        with self.assertRaises(jobs.Cancelled):
+            agreement.compute_summary(agreement.prepare_summary(self.study), progress=lambda *step: steps.append(step), cancel=lambda: len(steps) > 4)
 
 
 class AdjudicateTest(StudyTestBase):

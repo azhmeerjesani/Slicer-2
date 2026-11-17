@@ -1,7 +1,7 @@
 """Library workspace of Slicer Studio (SPEC 3.1): the start page, and the place that answers "what is open".
 
 - ``LibraryCanvas``: the calm page shown over the paused views while Library is the current workspace.
-  It has a drop zone, the Open…, Open folder… and Start on MNI template buttons, the recently loaded
+  It has a drop zone, the Start on template ▾, Open folder… and Open… buttons, the projects and the recently loaded
   files and links to the sample data and to the Classic interface. Once data is loaded (``hasData()``) the
   drop zone becomes a strip and the page shows the current work: the ``CurrentWorkCard`` (scans, lesions with their
   metrics and save state, Continue in Draw) and, for lesions loaded at once, the ``LoadedSetCard``.
@@ -23,7 +23,6 @@
 the Data module. Files are loaded by ``StudioLib.importer``.
 """
 
-import html
 import logging
 import os
 import re
@@ -114,6 +113,12 @@ def _setFont(widget, pixelSize, weight=None, letterSpacing=None):
     widget.setFont(font)
 
 
+#: Logical size of the icons in buttons (VISUAL 3). Buttons set it explicitly: without it they use the style's
+#: PM_ButtonIconSize (24, so that legacy PNGs are not resampled), and at a device pixel ratio above 1 a 16 px icon,
+#: which has a pixmap for that ratio, is then drawn at 24 px instead of 16.
+_BUTTON_ICON_SIZE = 16
+
+
 def _buttonRow():
     """A row of the height of the Library buttons (36 px).
 
@@ -133,6 +138,7 @@ def _secondaryButton(text, objectName, callback):
     button = qt.QPushButton(text)
     button.setObjectName(objectName)
     button.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Expanding)
+    button.setIconSize(qt.QSize(_BUTTON_ICON_SIZE, _BUTTON_ICON_SIZE))
     ui.setRole(button, "secondary")
     button.connect("clicked()", callback)
     return button
@@ -192,8 +198,8 @@ class _Elider(qt.QObject):
     """Keeps the text of labels elided to their width.
 
     A label with an Ignored horizontal size policy never widens its container; its full text is the ``fullText`` property
-    and its elide mode the ``elideMode`` property ("middle" or "left"; with "left" the last ``keepTail`` characters stay
-    visible, so that the entities at the end of a file name remain readable).
+    and its elide mode the ``elideMode`` property ("middle", "right" or "left"; with "left" the last ``keepTail`` characters
+    stay visible, so that the entities at the end of a file name remain readable).
     """
 
     def eventFilter(self, obj, event):
@@ -208,26 +214,50 @@ class _Elider(qt.QObject):
         text = str(label.property("fullText") or "")
         width = label.width
         if width <= 8:
-            # Not laid out yet: the Resize event comes
-            label.setText(text)
+            # Not laid out yet (the Resize event comes), or squeezed to nothing: a label that is marked ``hideWhenTiny`` then
+            # shows no sliver of its text
+            label.setText("" if label.property("hideWhenTiny") and label.isVisible() else text)
             return
+        # The padding of the label's stylesheet (a chip) is not room for text
+        width -= int(label.property("elidePadding") or 0)
         metrics = qt.QFontMetrics(label.font)
         if label.property("elideMode") == "left":
             keepTail = int(label.property("keepTail") or 0)
             width = max(width, metrics.horizontalAdvance(text[-keepTail:]) if keepTail else 0)
             label.setText(metrics.elidedText(text, qt.Qt.ElideLeft, width))
+        elif label.property("elideMode") == "right":
+            label.setText(metrics.elidedText(text, qt.Qt.ElideRight, width))
+        elif label.property("elideMode") == "path":
+            label.setText(_elidePath(metrics, text, width))
         else:
             label.setText(metrics.elidedText(text, qt.Qt.ElideMiddle, width))
+
+
+def _elidePath(metrics, text, width):
+    """``text`` (a path) elided to ``width`` pixels in the middle of its parent folders, the last folder name kept whole when it fits."""
+    if metrics.horizontalAdvance(text) <= width:
+        return text
+    cut = text.rstrip("/\\").rfind("/") + 1
+    head, tail = text[:cut], text[cut:]
+    room = width - metrics.horizontalAdvance(tail)
+    if not head or room < metrics.horizontalAdvance("…/"):
+        return metrics.elidedText(text, qt.Qt.ElideMiddle, width)
+    return metrics.elidedText(head, qt.Qt.ElideMiddle, room) + tail
 
 
 _elider = None
 
 
-def _elidedLabel(text="", pixelSize=12, objectName=None, mode="middle", keepTail=0):
-    """A plain-text label whose text is elided to its width (``setElidedText()``); the full text is its tool tip."""
+def _elidedLabelFilter():
+    """The shared event filter (``_Elider``) that keeps the text of labels made by ``_elidedLabel()`` elided to their width."""
     global _elider
     if _elider is None:
         _elider = _Elider()
+    return _elider
+
+
+def _elidedLabel(text="", pixelSize=12, objectName=None, mode="middle", keepTail=0):
+    """A plain-text label whose text is elided to its width (``setElidedText()``); the full text is its tool tip."""
     label = qt.QLabel()
     if objectName:
         label.setObjectName(objectName)
@@ -236,7 +266,7 @@ def _elidedLabel(text="", pixelSize=12, objectName=None, mode="middle", keepTail
     _setFont(label, pixelSize)
     label.setProperty("elideMode", mode)
     label.setProperty("keepTail", int(keepTail))
-    _installEventFilter(label, _elider)
+    _installEventFilter(label, _elidedLabelFilter())
     setElidedText(label, text)
     return label
 
@@ -266,6 +296,7 @@ def _roleButton(text, objectName, callback, role):
     button = qt.QPushButton(text)
     button.setObjectName(objectName)
     button.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Expanding)
+    button.setIconSize(qt.QSize(_BUTTON_ICON_SIZE, _BUTTON_ICON_SIZE))
     ui.setRole(button, role)
     button.setAutoDefault(True)
     button.connect("clicked()", callback)
@@ -292,6 +323,11 @@ def _runAction(function, errorMessage):
     try:
         return function()
     except Exception as e:
+        if getattr(e, "user_problem", False):
+            # A problem with the user's own file (a table that is not UTF-8, ...): its message says what to do, not a program
+            # error. A warning box (warningDisplay logs the warning itself), never errorDisplay: that logs an ERROR and lights the badge.
+            slicer.util.warningDisplay(f"{errorMessage}\n\n{e}")
+            return None
         logging.error(f"Studio Library: {errorMessage}\n{traceback.format_exc()}")
         if not slicer.app.testingEnabled():
             slicer.util.errorDisplay(f"{errorMessage}\n\n{e}")
@@ -492,6 +528,7 @@ def recentEntries(limit=RECENT_ROW_COUNT, outsideRootOnly=False):
     openedTimes = _importer().recentOpenTimes()
     internal = _internalFolders()
     projectsFolder = _rootFolder() if outsideRootOnly else _projectsFolder()
+    movedProjects = projectsFolder is not None and _hasPartiallyMovedProjects()
     entries = []
     for properties, action in candidates:
         if len(entries) >= limit:
@@ -501,6 +538,10 @@ def recentEntries(limit=RECENT_ROW_COUNT, outsideRootOnly=False):
             continue
         if projectsFolder and isInternalPath(path, [projectsFolder]):
             continue
+        if _importer().isFailedLoad(path):
+            continue  # the IO manager lists a file whose load failed too: it never opened, so it is not offered again
+        if movedProjects and _projectOfPath(path) is not None:
+            continue  # a project that Projects lists from the new folder of a move that failed partway (BB-1)
         entry = RecentEntry(properties, action, openedTimes)
         if entry.exists():
             entries.append(entry)
@@ -516,6 +557,28 @@ def _projectsFolder():
     if not projects.isEnabled():
         return None
     return os.path.normcase(os.path.realpath(projects.projectsFolder()))
+
+
+def _hasPartiallyMovedProjects():
+    """True when a move of the Slicer Studio folder that failed partway left projects in the new folder (Library lists them
+    in Projects: ``projects.partialMove``).
+    """
+    try:
+        from . import projects
+
+        return projects.partialMove() is not None
+    except ImportError:
+        return False
+
+
+def _projectOfPath(path):
+    """The project of the Slicer Studio folder that holds ``path`` (``projects.projectOfPath``), or None."""
+    try:
+        from . import projects
+
+        return projects.projectOfPath(path)
+    except (ImportError, OSError, ValueError):
+        return None
 
 
 def _rootFolder():
@@ -615,6 +678,20 @@ class RecentList(qt.QObject):
         ui.bindStyleSheet(self.widget, self._styleSheet)
         _installEventFilter(self.widget, self)
         _watchRecentMenu(self._onRecentFilesChanged)
+        self._listensToProjects = False
+        if outsideRootOnly:
+            # The Slicer Studio folder changes while the page is shown (Change... > Keep them where they are): no show event follows
+            try:
+                from . import projects
+
+                projects.addListener(self._onProjectsChanged)
+                self._listensToProjects = True
+            except ImportError:
+                pass
+
+    def _onProjectsChanged(self):
+        if _isAlive(self.widget) and self.widget.isVisible():
+            self.refresh(force=False)
 
     def _createRow(self):
         index = len(self.rows)
@@ -673,10 +750,12 @@ class RecentList(qt.QObject):
 
     @staticmethod
     def _settingsKey():
-        """What the rows show besides the menu: the times and the folders that Studio recorded."""
+        """What the rows show besides the menu: the times and the folders that Studio recorded, and the Slicer Studio folder
+        (the Library page hides what lies inside it, so a new folder after Change... > Keep shows the old projects as recent files).
+        """
         settings = qt.QSettings()
         return (str(settings.value("Studio/RecentOpenTimes") or ""), str(settings.value("Studio/RecentFolders") or ""),
-                str(settings.value("Studio/RecentStudies") or ""))
+                str(settings.value("Studio/RecentStudies") or ""), _rootFolder() or "")
 
     def refresh(self, force=True):
         """Read the recently loaded files again: the studies first (``Studio/RecentStudies``), then the folders opened in Studio,
@@ -762,6 +841,11 @@ class RecentList(qt.QObject):
 
     def dispose(self):
         _unwatchRecentMenu(self._onRecentFilesChanged)
+        if self._listensToProjects:
+            self._listensToProjects = False
+            from . import projects
+
+            projects.removeListener(self._onProjectsChanged)
         if _isAlive(self.widget):
             ui.bindStyleSheet(self.widget, None)
 
@@ -829,6 +913,9 @@ def volumeKind(node):
     if node.IsA("vtkMRMLLabelMapVolumeNode"):
         return "labelmap"
     if node.IsA("vtkMRMLScalarVolumeNode"):
+        # Map network results (computing, partial, finished, threshold masks) carry LNM.Result but no role
+        if node.GetAttribute("LNM.Result") == "1":
+            return space.ROLE_STATMAP
         # A template of a scene saved before the tag existed
         return "template" if node.GetName().startswith(space.TEMPLATE_SPACE) else "scan"
     return "volume"
@@ -876,11 +963,18 @@ def lesionScan(segmentationNode):
 
 
 def lesionTitle(segmentationNode):
-    """Name shown for a lesion: its segment ("Lesion") when it has one, else the name of the segmentation."""
+    """Name shown for a lesion: the name of its segmentation node (as Draw's lesion switcher and Open now show it).
+
+    The importer names every imported mask's segment "Lesion", so the segment name cannot tell lesion files apart;
+    it is used only when the node has no name.
+    """
+    name = segmentationNode.GetName()
+    if name:
+        return name
     segmentation = segmentationNode.GetSegmentation()
     if segmentation.GetNumberOfSegments() == 1:
-        return segmentation.GetNthSegment(0).GetName() or segmentationNode.GetName()
-    return segmentationNode.GetName()
+        return segmentation.GetNthSegment(0).GetName()
+    return ""
 
 
 def nodeFile(node):
@@ -891,7 +985,7 @@ def nodeFile(node):
 
 
 def _internalFolders():
-    """Real paths of the application's cache and temporary folders and of the sample data cache."""
+    """Real paths of the application's cache and temporary folders, of the sample data cache and of the autosave folder."""
     folders = []
     for attribute in ("cachePath", "temporaryPath"):
         value = getattr(slicer.app, attribute, None)
@@ -907,12 +1001,19 @@ def _internalFolders():
         folders.append(downloads.cacheDirectory())
     except Exception:
         pass
+    try:
+        from . import autosave_io
+
+        # The private autosave scenes (an entry that an earlier version recorded when a session was recovered)
+        folders.append(autosave_io.defaultRoot())
+    except Exception:
+        pass
     return [os.path.normcase(os.path.realpath(folder)) for folder in folders if folder]
 
 
 def isInternalPath(path, folders=None):
-    """True for a file in the application's cache or temporary folders or in the sample data cache (the templates and the
-    samples that Studio downloads): not a file of the user, so Recent never lists it. ``folders``: ``_internalFolders()``.
+    """True for a file in the application's cache or temporary folders, in the sample data cache (the templates and the
+    samples that Studio downloads) or in the private autosave folder: not a file of the user, so Recent never lists it. ``folders``: ``_internalFolders()``.
     """
     if not path:
         return False
@@ -930,7 +1031,7 @@ def lesionSummary(segmentationNode, compute=False):
     """What the Current work card says about a lesion: ``{"text", "side", "metrics"}``.
 
     ``text`` is "Left · 2.27 mL · 1 part" (the side word, "Left", "Right" or "Both hemispheres", only when the lesion grid is
-    a known MNI grid), "Empty" for a lesion without voxels, "…" while the metrics are not computed yet (the cache of
+    a known MNI grid; the enclosed volume for a closed surface source), "Empty" for a lesion without voxels, "…" while the metrics are not computed yet (the cache of
     ``draw.lesionMetrics()`` is cold; ``compute`` computes them now) and "Nothing drawn yet" without a segment.
     """
     if segmentationNode.GetSegmentation().GetNumberOfSegments() == 0:
@@ -940,7 +1041,12 @@ def lesionSummary(segmentationNode, compute=False):
     if metrics is None:
         return {"text": "…", "side": None, "metrics": None}
     if not metrics["voxels"]:
-        return {"text": _("Empty"), "side": None, "metrics": metrics}
+        surface = draw.surfaceMetrics(segmentationNode)
+        if surface is None:
+            return {"text": _("Empty"), "side": None, "metrics": metrics}
+        # A closed surface source (official 3D Slicer can save one): its enclosed volume and pieces
+        metrics = dict(metrics, mL=surface["mL"], parts=surface["parts"], centroidRas=surface["centroidRas"],
+                       spans_both=surface["spans_both"])
     side = space.hemisphereWord(metrics["centroidRas"][0], segmentationNode, partsSpanBoth=bool(metrics.get("spans_both")))
     volume = metrics["mL"]
     parts = [side] if side else []
@@ -961,7 +1067,13 @@ def lesionSaveInfo(segmentationNode):
 
 
 def isLesionUnsaved(segmentationNode):
-    """True when closing the lesion would lose voxels: it has voxels and is not saved (or changed since it was saved)."""
+    """True when closing the lesion would lose voxels: it has voxels and is not saved (or changed since it was saved).
+
+    In a project nothing is unsaved: the project stores the lesion (.seg.nrrd) and the autosave keeps it, whatever the
+    NIfTI save state says (as the Current work buttons already assume).
+    """
+    if _projectService() is not None:
+        return False
     if lesionSaveInfo(segmentationNode)[0] == "saved":
         return False
     return not _importer().isSegmentationEmpty(segmentationNode)
@@ -1059,6 +1171,64 @@ def openScanInDraw(volumeNode, shell=None):
     return lesion
 
 
+def labelMapToLesion(volumeNode):
+    """Turn a label map volume (a mask opened in Classic, or by the Data module) into a lesion: a segmentation named like the
+    volume, whose first segment is "Lesion", bound to the scan of the same grid if there is one. The label map is closed.
+    Return the lesion (None if the conversion failed; the label map stays then).
+    """
+    importer = _importer()
+    lesion = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", volumeNode.GetName())
+    lesion.CreateDefaultDisplayNodes()
+    lesion.GetSegmentation().SetConversionParameter(
+        slicer.vtkSegmentationConverter.GetReferenceImageGeometryParameterName(), importer._volumeGeometry(volumeNode))
+    if not slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(volumeNode, lesion):
+        slicer.mrmlScene.RemoveNode(lesion)
+        return None
+    segmentation = lesion.GetSegmentation()
+    if segmentation.GetNumberOfSegments() == 0:
+        segmentId = segmentation.AddEmptySegment("", importer.LESION_SEGMENT_NAME, importer.LESION_COLOR)
+    else:
+        segmentId = segmentation.GetNthSegmentID(0)
+        segmentation.GetSegment(segmentId).SetName(importer.LESION_SEGMENT_NAME)
+    importer.styleLesionSegment(lesion, segmentId)
+    scan = next((node for node in scanNodes() if importer._referenceGeometryMatches(lesion, node)), None)
+    if scan is not None:
+        lesion.SetReferenceImageGeometryParameterFromVolumeNode(scan)
+    volumeId = volumeNode.GetID()
+    storageNode = volumeNode.GetStorageNode()
+    sourceFile = storageNode.GetFileName() if storageNode is not None else None
+    closeNode(volumeNode, confirm=False)
+    _rememberLesionSource(lesion, volumeId, sourceFile)
+    return lesion
+
+
+def _rememberLesionSource(lesion, volumeId, path):
+    """Tell the open project that ``lesion`` was made from the label map ``volumeId`` that was read from ``path``: dropping
+    that file again finds the lesion (``importer.openNodeForFile()``) instead of loading a second copy.
+    """
+    writer = _projectWriter()
+    if writer is not None and hasattr(writer, "transferSource"):
+        writer.transferSource(volumeId, lesion.GetID(), path)
+
+
+def _projectWriter():
+    try:
+        from . import autosave
+
+        service = autosave.instance()
+    except ImportError:
+        return None
+    return getattr(service, "projectWriter", None) if service is not None else None
+
+
+def labelMapInDraw(volumeNode, shell=None):
+    """"Open in Draw" for a label map: it becomes a lesion (``labelMapToLesion()``) that Draw edits."""
+    lesion = labelMapToLesion(volumeNode)
+    if lesion is None:
+        return None
+    return continueInDraw(shell if shell is not None else _shell(), lesion)
+
+
 def continueInDraw(shell=None, segmentationNode=None, volumeNode=None):
     """"Continue in Draw →": edit the lesion that Draw edited (or ``segmentationNode``) on its scan, with the brush armed.
 
@@ -1068,12 +1238,25 @@ def continueInDraw(shell=None, segmentationNode=None, volumeNode=None):
     shell = shell if shell is not None else _shell()
     model = _Model()
     lesion = segmentationNode if segmentationNode is not None else model.currentLesion()
+    if lesion is None and segmentationNode is None:
+        # Masks opened in Classic are label map volumes: they are the lesions that Draw continues
+        for node in model.others:
+            if volumeKind(node) == "labelmap":
+                lesion = labelMapToLesion(node)
+                if lesion is not None:
+                    model = _Model()
+                    break
     if lesion is None:
         if model.scans:
             return openScanInDraw(model.scans[0], shell)
         _switchToDraw(shell)
         return None
     scan = volumeNode if volumeNode is not None else lesionScan(lesion)
+    if scan is None and shell is not None:
+        # The lesion's scan is closed (or was never opened): Draw says so and offers to open it, as for a lesion opened alone
+        _importer().showLesionWithoutScan(lesion, shell)
+        _switchToDraw(shell)
+        return lesion
     editor = _segmentEditor()
     editsIt = editor is not None and _sameNode(editor.segmentationNode(), lesion) and (scan is None or _sameNode(editor.sourceVolumeNode(), scan))
     if not editsIt:
@@ -1082,15 +1265,43 @@ def continueInDraw(shell=None, segmentationNode=None, volumeNode=None):
     return lesion
 
 
+def templateToDrawOn():
+    """The template that "New lesion on template" starts the lesion on (None without a template).
+
+    With several templates in the scene this is the one the user draws on: the template that Draw edits, else the template
+    of a template lesion with strokes (what offers the button; the current lesion first), and only then the first template
+    of the scene.
+    """
+    templates = [node for node in scanNodes() if isTemplateNode(node)]
+    if not templates:
+        return None
+
+    def listed(node):
+        return next((template for template in templates if _sameNode(template, node)), None)
+
+    editor = _segmentEditor()
+    template = listed(editor.sourceVolumeNode() if editor is not None else None)
+    if template is not None:
+        return template
+    model = _Model()
+    current = model.currentLesion()
+    importer = _importer()
+    for lesion in ([current] if current is not None else []) + model.templateLesions():
+        template = listed(model.scanOf.get(lesion.GetID()))
+        if template is not None and not importer.isSegmentationEmpty(lesion):
+            return template
+    return templates[0]
+
+
 def newLesionOnTemplate(shell=None):
     """"New lesion on template": a new empty lesion on the template (the plain "Start on MNI template" continues the existing
     one), shown in Draw. Return it (None without a template).
     """
     shell = shell if shell is not None else _shell()
-    templates = [node for node in scanNodes() if isTemplateNode(node)]
-    if not templates:
+    template = templateToDrawOn()
+    if template is None:
         return None
-    lesion = _importer().newLesionSegmentation(templates[0], shell=shell)
+    lesion = _importer().newLesionSegmentation(template, shell=shell)
     if lesion is not None:
         _switchToDraw(shell)
     return lesion
@@ -1114,7 +1325,7 @@ def closeScene():
     """
     service = _projectService()
     if service is not None:
-        service.newProject()
+        service.newProject(title=_("Close scene"))
         return
     mainWindow = slicer.util.mainWindow()
     action = mainWindow.findChild("QAction", "FileCloseSceneAction") if mainWindow is not None else None
@@ -1129,19 +1340,53 @@ def showInDataModule(node=None):
     slicer.util.selectModule("Data")
 
 
+def _removeSequenceOf(proxyNode):
+    """When ``proxyNode`` shows the current item of a sequence (a 4D image, ``importer.loadSequence()``), remove that sequence
+    and its browser, the browser first: a browser left in the scene makes the proxy again as soon as it is removed.
+
+    A browser that also plays other sequences only lets go of this one; a sequence that another browser plays stays.
+    """
+    try:
+        logic = slicer.modules.sequences.logic()
+    except AttributeError:
+        return
+    if logic is None:
+        return
+    browsers = vtk.vtkCollection()
+    logic.GetBrowserNodesForProxyNode(proxyNode, browsers)
+    sequences = []
+    for index in range(browsers.GetNumberOfItems()):
+        browserNode = browsers.GetItemAsObject(index)
+        sequenceNode = browserNode.GetSequenceNode(proxyNode)
+        if sequenceNode is None:
+            continue
+        sequences.append(sequenceNode)
+        if browserNode.GetNumberOfSynchronizedSequenceNodes(True) <= 1:
+            _removeWithRelated(browserNode)
+        else:
+            browserNode.RemoveSynchronizedSequenceNode(sequenceNode.GetID())
+    for sequenceNode in sequences:
+        if slicer.mrmlScene.IsNodePresent(sequenceNode) and logic.GetFirstBrowserNodeForSequenceNode(sequenceNode) is None:
+            _removeWithRelated(sequenceNode)
+
+
 def _removeWithRelated(node):
     scene = slicer.mrmlScene
     related = [node.GetNthDisplayNode(i) for i in range(node.GetNumberOfDisplayNodes())] if hasattr(node, "GetNumberOfDisplayNodes") else []
     if hasattr(node, "GetNumberOfStorageNodes"):
         related.extend(node.GetNthStorageNode(i) for i in range(node.GetNumberOfStorageNodes()))
-    scene.RemoveNode(node)
+    if not node.IsA("vtkMRMLSequenceBrowserNode") and not node.IsA("vtkMRMLSequenceNode"):
+        _removeSequenceOf(node)
+    if scene.IsNodePresent(node):
+        scene.RemoveNode(node)
     for other in related:
         if other is not None and scene.IsNodePresent(other):
             scene.RemoveNode(other)
 
 
 def closeNode(node, confirm=True):
-    """Close one row: remove the node with its display and storage nodes. Return False when the user kept it.
+    """Close one row: remove the node with its display and storage nodes, and for a 4D image also its sequence and sequence
+    browser. Return False when the user kept it.
 
     A lesion with unsaved voxels asks first (``confirm``). The Segment Editor lets go of the node before it is removed.
     """
@@ -1149,7 +1394,7 @@ def closeNode(node, confirm=True):
         return False
     if confirm and node.IsA("vtkMRMLSegmentationNode") and isLesionUnsaved(node):
         if not _confirmClose(_("{name} has changes that are not saved.").format(name=node.GetName()),
-                             _("Save the lesion in Draw first (Ctrl+Shift+S), or close it and lose the changes.")):
+                             _("Save the lesion in Draw first ({key}), or close it and lose the changes.").format(key=ui.keyText("Ctrl+Shift+S"))):
             return False
     editor = _segmentEditor()
     if editor is not None:
@@ -1174,7 +1419,7 @@ def closeLoadedSet(confirm=True):
     unsaved = [node for node in loaded.nodes() if isLesionUnsaved(node)]
     if confirm and unsaved:
         if not _confirmClose(_("{count} lesions of this set have changes that are not saved.").format(count=len(unsaved)),
-                             _("Save them in Draw first (Ctrl+Shift+S), or close the set and lose the changes.")):
+                             _("Save them in Draw first ({key}), or close the set and lose the changes.").format(key=ui.keyText("Ctrl+Shift+S"))):
             return False
     loaded.close()
     return True
@@ -1310,42 +1555,169 @@ class _OfferLine:
         self.signature = None
 
 
+class _LesionRowFilter(qt.QObject):
+    """Lays a lesion row out again when its width changes (``_LesionBlock.relayout()``)."""
+
+    def __init__(self, block):
+        qt.QObject.__init__(self)
+        self.block = block
+
+    def eventFilter(self, obj, event):
+        if event.type() in (qt.QEvent.Resize, qt.QEvent.Show):
+            self.block.relayout()
+        return False
+
+
 class _LesionBlock:
-    """Widgets of the lesion rows of the Current work card: name, metrics and save state."""
+    """Widgets of the lesion rows of the Current work card: name, metrics and save state.
+
+    One line when the row is wide enough for all of them: swatch, name, metrics, save state chip (VISUAL 4.2). In a narrow
+    row (the card's text column is about 215 px wide at 1366 x 768) the metrics and the chip go to a second line below the
+    name: the volume ("0.51 mL"), the card's key number, and the state stay readable and only the name is elided.
+    """
+
+    #: Narrowest name (about 16 characters), and narrowest save state chip; the chip's stylesheet padding is 2 x 8 px
+    NAME_MIN_WIDTH = 110
+    #: The widest the name is made (its whole text unless longer; the rest of the line is the filler's)
+    NAME_MAX_WIDTH = 320
+    CHIP_MIN_WIDTH = 56
+    CHIP_PADDING = 16
+    SWATCH = 10
+    SPACING = 8
+    #: Room the metrics keep next to the chip in the second line
+    METRICS_MIN_WIDTH = 50
 
     def __init__(self, segmentationNode, indent):
         self.nodeId = segmentationNode.GetID()
+        self.indent = indent
+        self.chipWidth = self.CHIP_MIN_WIDTH
+        self.mode = None
         self.widget = qt.QWidget()
         self.widget.setObjectName("StudioCurrentWorkLesion")
+        # The row never asks the card for less than a one-line row did (the name's minimum and the narrowest chip), so that the
+        # card's ``fit()`` still moves its action column below a narrow text column (where the scan name is elided) as before
+        self.widget.setMinimumWidth(indent + self.SWATCH + 3 * self.SPACING + self.NAME_MIN_WIDTH + self.CHIP_MIN_WIDTH)
+        rootLayout = qt.QVBoxLayout(self.widget)
+        rootLayout.setContentsMargins(indent, 0, 0, 0)
+        rootLayout.setSpacing(2)
         # One line (VISUAL 4.2): swatch, name, metrics, save state chip
-        layout = qt.QHBoxLayout(self.widget)
-        layout.setContentsMargins(indent, 0, 0, 0)
-        layout.setSpacing(8)
+        self._topRow = qt.QHBoxLayout()
+        self._topRow.setContentsMargins(0, 0, 0, 0)
+        self._topRow.setSpacing(self.SPACING)
+        rootLayout.addLayout(self._topRow)
+        # The second line of a narrow row (hidden otherwise): the metrics and the chip, under the name, and in a still narrower
+        # row (the chip does not fit next to the metrics) the chip on a third line
+        self._detailRow = qt.QWidget()
+        self._detailRow.setObjectName("StudioCurrentWorkLesionDetails")
+        detailLayout = qt.QVBoxLayout(self._detailRow)
+        detailLayout.setContentsMargins(self.SWATCH + self.SPACING, 0, 0, 0)
+        detailLayout.setSpacing(2)
+        self._lineTwo = qt.QHBoxLayout()
+        self._lineTwo.setContentsMargins(0, 0, 0, 0)
+        self._lineTwo.setSpacing(self.SPACING)
+        detailLayout.addLayout(self._lineTwo)
+        self._lineThree = qt.QWidget()
+        lineThreeLayout = qt.QHBoxLayout(self._lineThree)
+        lineThreeLayout.setContentsMargins(0, 0, 0, 0)
+        self._lineThreeLayout = lineThreeLayout
+        detailLayout.addWidget(self._lineThree)
+        self._lineThree.hide()
+        self._detailRow.hide()
+        rootLayout.addWidget(self._detailRow)
         self.swatch = qt.QLabel()
         self.swatch.setObjectName("StudioCurrentWorkLesionSwatch")
-        self.swatch.setFixedSize(10, 10)
-        layout.addWidget(self.swatch, 0, qt.Qt.AlignVCenter)
+        self.swatch.setFixedSize(self.SWATCH, self.SWATCH)
+        self._topRow.addWidget(self.swatch, 0, qt.Qt.AlignVCenter)
         self.nameLabel = _elidedLabel("", 13, "StudioCurrentWorkLesionName")
         font = qt.QFont(self.nameLabel.font)
         font.setWeight(qt.QFont.Medium)
         self.nameLabel.setFont(font)
-        self.nameLabel.setSizePolicy(qt.QSizePolicy.Preferred, qt.QSizePolicy.Preferred)
-        self.nameLabel.setMinimumWidth(40)
-        self.nameLabel.setMaximumWidth(220)
-        self.metricsLabel = qt.QLabel()
-        self.metricsLabel.setObjectName("StudioCurrentWorkLesionMetrics")
-        self.stateLabel = qt.QLabel()
-        self.stateLabel.setObjectName("StudioCurrentWorkLesionState")
-        for label in (self.metricsLabel, self.stateLabel):
-            label.setTextFormat(qt.Qt.RichText)
-            label.setWordWrap(False)
-            _setFont(label, 12)
-        self.metricsLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
-        self.stateLabel.setSizePolicy(qt.QSizePolicy.Maximum, qt.QSizePolicy.Fixed)
+        # An Ignored label as wide as its whole text (at most NAME_MAX_WIDTH; ``refresh()`` sets the maximum) and as the row allows: a
+        # Preferred label would take the width of its elided text and never grow back ("L...n" in a wide row)
+        self.nameLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        # Its minimum is wide enough for the start and the end of a name ("sub-PCS0…e_lesion"); the name is the first to be elided
+        self.nameLabel.setMinimumWidth(self.NAME_MIN_WIDTH)
+        self.nameLabel.setMaximumWidth(self.NAME_MAX_WIDTH)
+        # The metrics ("Left · 4.22 mL · 1 part") are elided to the width the row leaves them (a rich-text label cannot
+        # be elided by Qt and was cut off mid-word next to the state chip); "Both hemispheres" is colored by the card's
+        # stylesheet (property ``studioWarn``)
+        self.metricsLabel = _elidedLabel("", 12, "StudioCurrentWorkLesionMetrics", mode="right")
+        self.metricsLabel.setProperty("hideWhenTiny", True)
+        # The chip is elided too ("Saved in…"; its full text is the tool tip), between a minimum and its whole text
+        # (``setChipWidth()``)
+        self.stateLabel = _elidedLabel("", 12, "StudioCurrentWorkLesionState", mode="right")
+        self.stateLabel.setProperty("elidePadding", self.CHIP_PADDING)
         self.stateLabel.setFixedHeight(20)
-        layout.addWidget(self.nameLabel)
-        layout.addWidget(self.metricsLabel, 1)
-        layout.addWidget(self.stateLabel)
+        # Fixed (its width is set by ``relayout()``): the layout gives a label with an Ignored size policy no room of its own
+        self.stateLabel.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Fixed)
+        # A stretch far above the filler's and the metrics': the name takes the width of its whole text before they take any
+        self._topRow.addWidget(self.nameLabel, 100)
+        # Takes the spare width of the name's line when the metrics and the chip are on the lines below (the name is capped at
+        # NAME_MAX_WIDTH), so that the swatch and the name stay left-aligned instead of centred; hidden in a wide row
+        self._topFiller = qt.QWidget()
+        self._topFiller.setObjectName("StudioCurrentWorkLesionFiller")
+        self._topFiller.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
+        self._topFiller.setFixedHeight(0)
+        self._topFiller.hide()
+        self._topRow.addWidget(self._topFiller, 1)
+        self._topRow.addWidget(self.metricsLabel, 1)
+        self._topRow.addWidget(self.stateLabel, 0)
+        self.mode = "wide"
+        self._filter = _LesionRowFilter(self)
+        _installEventFilter(self.widget, self._filter)
+
+    def setName(self, title, toolTip=None):
+        """Set the name; the label is as wide as its whole text (at most ``NAME_MAX_WIDTH``)."""
+        setElidedText(self.nameLabel, title, toolTip)
+        self.nameLabel.setMaximumWidth(min(self.NAME_MAX_WIDTH, qt.QFontMetrics(self.nameLabel.font).horizontalAdvance(title) + 4))
+
+    def setChipWidth(self, chipText):
+        """The width of the whole chip text; the chip is never wider, and in a row with room never narrower (``relayout()``)."""
+        self.chipWidth = qt.QFontMetrics(self.stateLabel.font).horizontalAdvance(chipText) + self.CHIP_PADDING + 4
+        self.relayout()
+
+    def relayout(self):
+        """Choose the layout for the row's width: "wide" (everything on one line) when the row has room for the name's minimum,
+        the whole metrics and the whole chip; "compact" (the metrics and the chip on a second line under the name); "stacked"
+        (the chip on a third line) when they do not fit side by side. The name is elided first, the metrics last.
+        """
+        if not _isAlive(self.widget):
+            return
+        width = self.widget.width - self.indent
+        metricsNeed = qt.QFontMetrics(self.metricsLabel.font).horizontalAdvance(str(self.metricsLabel.property("fullText") or "")) + 4
+        lineRoom = width - self.SWATCH - self.SPACING
+        if width >= self.SWATCH + 3 * self.SPACING + self.NAME_MIN_WIDTH + metricsNeed + self.chipWidth:
+            mode = "wide"
+        elif lineRoom >= metricsNeed + self.SPACING + self.chipWidth:
+            mode = "compact"
+        else:
+            mode = "stacked"
+        # A fixed width for the chip: its whole text unless the row is narrower
+        self.stateLabel.setFixedWidth(self.chipWidth if mode != "stacked" else max(self.CHIP_MIN_WIDTH, min(self.chipWidth, lineRoom)))
+        self.metricsLabel.setMinimumWidth(metricsNeed if mode == "wide" else 0)
+        if mode == self.mode:
+            return
+        self.mode = mode
+        for label in (self.metricsLabel, self.stateLabel):
+            for layout in (self._topRow, self._lineTwo, self._lineThreeLayout):
+                layout.removeWidget(label)
+        if mode == "wide":
+            self._topRow.addWidget(self.metricsLabel, 1)
+            self._topRow.addWidget(self.stateLabel, 0)
+        else:
+            self._lineTwo.addWidget(self.metricsLabel, 1)
+            if mode == "compact":
+                self._lineTwo.addWidget(self.stateLabel, 0)
+            else:
+                self._lineThreeLayout.addWidget(self.stateLabel, 0, qt.Qt.AlignLeft)
+        self._lineThree.setVisible(mode == "stacked")
+        self._detailRow.setVisible(mode != "wide")
+        self._topFiller.setVisible(mode != "wide")
+
+    @property
+    def compact(self):
+        """True when the metrics and the chip are not on the name's line."""
+        return self.mode != "wide"
 
     def node(self):
         node = slicer.mrmlScene.GetNodeByID(self.nodeId)
@@ -1377,10 +1749,14 @@ class CurrentWorkCard(qt.QObject):
         cardLayout = qt.QHBoxLayout()
         cardLayout.setSpacing(20)
         outerLayout.addLayout(cardLayout)
+        self._outerLayout = outerLayout
+        self._cardLayout = cardLayout
+        self._stage = 0
         # The project's thumbnails, on black (the image is the hero): the axial view, and the coronal and sagittal views
         # beside it (V-02)
         strip = qt.QWidget()
         strip.setObjectName("StudioCurrentWorkThumbnails")
+        self._strip = strip
         stripLayout = qt.QHBoxLayout(strip)
         stripLayout.setContentsMargins(0, 0, 0, 0)
         stripLayout.setSpacing(4)
@@ -1423,12 +1799,13 @@ class CurrentWorkCard(qt.QObject):
         actions = qt.QWidget()
         actions.setObjectName("StudioCurrentWorkActions")
         actions.setFixedWidth(self.ACTIONS_WIDTH)
+        self._actions = actions
         actionsLayout = qt.QVBoxLayout(actions)
         actionsLayout.setContentsMargins(0, 0, 0, 0)
         actionsLayout.setSpacing(8)
         actionsLayout.addStretch(1)
         self.continueButton = _roleButton(_("Continue in Draw →"), "StudioCurrentWorkContinueButton", lambda: continueInDraw(_shell()), "primary")
-        self.continueButton.setToolTip(_("Edit the lesion in Draw (Ctrl+Alt+2)"))
+        self.continueButton.setToolTip(ui.tooltip(_("Edit the lesion in Draw"), "Ctrl+Alt+2"))
         self.continueButton.setFixedHeight(36)
         self.closeButton = _roleButton(_("Close"), "StudioCurrentWorkCloseButton", lambda: closeScene(), "secondary")  # noqa: PLW0108 (looked up when clicked)
         self.closeButton.setToolTip(_("Close the scene"))
@@ -1458,6 +1835,7 @@ class CurrentWorkCard(qt.QObject):
         self._scanRows = []
         self._blocks = {}
         self._pendingMetrics = []
+        self._metricsJob = None  # (lesion ID, draw.MetricsJob) of the metrics that a worker thread computes
         self._metricsTimer = qt.QTimer()
         self._metricsTimer.setSingleShot(True)
         self._metricsTimer.setInterval(0)
@@ -1469,6 +1847,43 @@ class CurrentWorkCard(qt.QObject):
         ui.addPaletteListener(self._onPalette)
         self._showProject()
 
+    def fit(self, width):
+        """Lay the card out for a page ``width`` px wide (USABILITY 9.4: at ``QT_SCALE_FACTOR=2`` on 1080p the window is 960
+        logical px wide and the inspector takes a third of it), the first of these that fits:
+
+        0. the thumbnails, the details and the 200 px action column side by side;
+        1. the actions under the thumbnails and the details, as wide as the card;
+        2. the thumbnails above the details too.
+
+        So that the primary "Continue in Draw" is never cut off.
+        """
+        for stage in (0, 1, 2):
+            self._setStage(stage)
+            if self.widget.minimumSizeHint.width() <= width:
+                break
+
+    def stage(self):
+        """0 (side by side), 1 (the actions below) or 2 (the thumbnails above the details too)."""
+        return self._stage
+
+    def _setStage(self, stage):
+        if stage == self._stage:
+            return
+        self._stage = stage
+        actions = self._actions
+        if stage >= 1:
+            self._cardLayout.removeWidget(actions)
+            self._outerLayout.insertWidget(1, actions)
+            actions.setMinimumWidth(0)
+            actions.setMaximumWidth(16777215)
+        else:
+            self._outerLayout.removeWidget(actions)
+            self._cardLayout.addWidget(actions)
+            actions.setFixedWidth(self.ACTIONS_WIDTH)
+        actions.show()
+        self._cardLayout.setDirection(qt.QBoxLayout.TopToBottom if stage >= 2 else qt.QBoxLayout.LeftToRight)
+        self._cardLayout.setAlignment(self._strip, qt.Qt.AlignLeft if stage >= 2 else qt.Qt.AlignTop)
+
     @staticmethod
     def _styleSheet():
         t = {name: ui.token(name).name() for name in ("text", "text2", "text3", "success", "warning", "control-hover")}
@@ -1477,6 +1892,7 @@ class CurrentWorkCard(qt.QObject):
             "QLabel#StudioCurrentWorkThumbnail, QLabel#StudioCurrentWorkThumbnailSide { background-color: #000000; border: none; border-radius: 8px; }"
             f"QLabel#StudioCurrentWorkScanFolder, QLabel#StudioCurrentWorkMeta, QLabel#StudioCurrentWorkMore {{ color: {t['text3']}; }}"
             f"QLabel#StudioCurrentWorkLesionMetrics {{ color: {t['text2']}; }}"
+            f'QLabel#StudioCurrentWorkLesionMetrics[studioWarn="true"] {{ color: {t["warning"]}; }}'
             f"QLabel#StudioCurrentWorkLesionState {{ color: {t['text2']}; background-color: {t['control-hover']}; border-radius: 10px; padding: 0px 8px; }}"
             f'QLabel#StudioCurrentWorkLesionState[saveState="saved"] {{ color: {t["success"]}; background-color: {tint["success"]}; }}'
             f'QLabel#StudioCurrentWorkLesionState[saveState="unsaved"] {{ color: {t["warning"]}; background-color: {tint["warning"]}; }}'
@@ -1484,11 +1900,13 @@ class CurrentWorkCard(qt.QObject):
 
     def setProject(self, info):
         """The current project (``projects.ProjectInfo``) of the Slicer Studio folder, or None: its name, when it was saved
-        and its thumbnail.
+        and its thumbnail. The scan rows show the folders of the scans' files too: a project that moved (Change folder >
+        Move, Rename) took its files along without a change of the scene that the card would hear of.
         """
         self._project = info
         if _isAlive(self.widget):
             self._showProject()
+            self._updateScanFolders()
 
     def _showProject(self):
         info = self._project
@@ -1580,12 +1998,8 @@ class CurrentWorkCard(qt.QObject):
         self._blocks[lesion.GetID()] = block
         self.rowsLayout.addWidget(block.widget)
 
-    def _updateTexts(self, queue=True):
-        """Set the texts of the rows. ``queue``: lesions whose metrics are not cached are queued for ``_computeNext()``."""
-        model = self._model
-        if model is None:
-            return
-        warning = ui.token("warning").name()
+    def _updateScanFolders(self):
+        """Set the folder line of each scan row (where its file is now)."""
         for scanId, folderLabel in self._scanRows:
             scan = slicer.mrmlScene.GetNodeByID(scanId)
             if scan is None:
@@ -1601,8 +2015,16 @@ class CurrentWorkCard(qt.QObject):
             elif isInternalPath(path):
                 text, toolTip = _("Sample data"), path
             else:
-                text = toolTip = os.path.dirname(path)
+                toolTip = os.path.dirname(path)
+                text = _shortFolder(toolTip)
             setElidedText(folderLabel, text, toolTip)
+
+    def _updateTexts(self, queue=True):
+        """Set the texts of the rows. ``queue``: lesions whose metrics are not cached are queued for ``_computeNext()``."""
+        model = self._model
+        if model is None:
+            return
+        self._updateScanFolders()
         for lesionId, block in self._blocks.items():
             lesion = block.node()
             if lesion is None:
@@ -1611,7 +2033,7 @@ class CurrentWorkCard(qt.QObject):
             displayNode = lesion.GetDisplayNode()
             if displayNode is not None and not (displayNode.GetVisibility() and displayNode.GetVisibility2D()):
                 title += " · " + _("hidden")
-            setElidedText(block.nameLabel, title, lesion.GetName())
+            block.setName(title, lesion.GetName())
             segmentation = lesion.GetSegmentation()
             segment = segmentation.GetNthSegment(0) if segmentation.GetNumberOfSegments() else None
             color = qt.QColor.fromRgbF(*segment.GetColor()[:3]).name() if segment is not None else ui.token("lesion").name()
@@ -1621,12 +2043,15 @@ class CurrentWorkCard(qt.QObject):
             summary = lesionSummary(lesion)
             plain = summary["text"]
             block.metricsLabel.setProperty("plainText", plain)
-            block.metricsLabel.setToolTip(self._metricsToolTip(summary))
-            if summary["side"] == "Both hemispheres":
-                block.metricsLabel.setText(f'<span style="color:{warning}">{html.escape(plain)}</span>')
-            else:
-                block.metricsLabel.setText(html.escape(plain))
-            if queue and summary["metrics"] is None and lesion.GetSegmentation().GetNumberOfSegments() and lesionId not in self._pendingMetrics:
+            warn = summary["side"] == "Both hemispheres"
+            if bool(block.metricsLabel.property("studioWarn")) != warn:
+                block.metricsLabel.setProperty("studioWarn", warn)
+                block.metricsLabel.style().unpolish(block.metricsLabel)
+                block.metricsLabel.style().polish(block.metricsLabel)
+            # The tool tip: the whole text (it may be elided) and the counts
+            setElidedText(block.metricsLabel, plain, "\n".join(part for part in (plain, self._metricsToolTip(summary)) if part))
+            if queue and summary["metrics"] is None and lesion.GetSegmentation().GetNumberOfSegments() and lesionId not in self._pendingMetrics \
+                    and not (self._metricsJob is not None and self._metricsJob[0] == lesionId):
                 self._pendingMetrics.append(lesionId)
             state, text = lesionSaveInfo(lesion)
             block.stateLabel.setProperty("plainText", text)
@@ -1638,7 +2063,9 @@ class CurrentWorkCard(qt.QObject):
             block.stateLabel.setToolTip(" · ".join(part for part in (text, _draw().saveStateText(lesion)[1] or "") if part))
             # The chip says the state; the full text (file, time) is its tooltip
             chipText = text.split(" · ")[0] if text else ""
-            block.stateLabel.setText(html.escape(chipText))
+            setElidedText(block.stateLabel, chipText, block.stateLabel.toolTip)
+            block.setChipWidth(chipText)
+            block.relayout()
         if queue and self._pendingMetrics:
             self._metricsTimer.start()
 
@@ -1647,25 +2074,51 @@ class CurrentWorkCard(qt.QObject):
         metrics = summary["metrics"]
         if not metrics or not metrics["voxels"]:
             return ""
-        return _("{voxels} voxels · {parts} parts · {gaps} gaps").format(voxels=metrics["voxels"], parts=metrics["parts"], gaps=len(metrics["gaps"]))
+        voxels, parts, gaps = metrics["voxels"], metrics["parts"], len(_draw().viewGaps(metrics))
+        # Singular for exactly 1, as the visible text ("1 part") does
+        return " · ".join(
+            (
+                _("{count} voxel").format(count=voxels) if voxels == 1 else _("{count} voxels").format(count=voxels),
+                _("{count} part").format(count=parts) if parts == 1 else _("{count} parts").format(count=parts),
+                _("{count} gap").format(count=gaps) if gaps == 1 else _("{count} gaps").format(count=gaps),
+            ),
+        )
 
     def _computeNext(self):
-        """Compute the metrics of the next lesion with a cold cache (one per event loop iteration)."""
+        """Compute the metrics of the next lesion with a cold cache, in a worker thread (``draw.MetricsJob``): a large lesion
+        takes seconds and must not freeze the window. The card says "…" until the result is in; polled every 30 ms.
+        """
         if not _isAlive(self.widget):
             return
+        job = self._metricsJob
+        if job is not None:
+            if not job[1].done:
+                self._metricsTimer.start(30)
+                return
+            self._metricsJob = None
+            try:
+                if job[1].error is not None:
+                    raise job[1].error
+                job[1].finish()
+            except Exception:
+                logging.error(f"Studio Library: lesion metrics failed:\n{traceback.format_exc()}")
+            else:
+                self._updateTexts()
         while self._pendingMetrics:
             lesionId = self._pendingMetrics.pop(0)
             lesion = slicer.mrmlScene.GetNodeByID(lesionId)
             if lesion is None or lesionId not in self._blocks:
                 continue
             try:
-                lesionSummary(lesion, compute=True)
+                started = _draw().lesionMetricsJob(lesion) if lesion.GetSegmentation().GetNumberOfSegments() else None
             except Exception:
                 logging.error(f"Studio Library: lesion metrics failed:\n{traceback.format_exc()}")
                 continue
-            self._updateTexts(queue=False)
-            if self._pendingMetrics:
-                self._metricsTimer.start()
+            if started is None:
+                self._updateTexts(queue=False)
+                continue
+            self._metricsJob = (lesionId, started)
+            self._metricsTimer.start(30)
             return
 
     #
@@ -1782,7 +2235,7 @@ def participantsLine(path):
     columns, rowCount = header
     shown = [column for column in columns if column != "participant_id"][:4]
     more = "…" if len([c for c in columns if c != "participant_id"]) > len(shown) else ""
-    text = _("{name} · {count} rows").format(name=os.path.basename(path), count=rowCount)
+    text = (_("{name} · 1 row") if rowCount == 1 else _("{name} · {count} rows")).format(name=os.path.basename(path), count=rowCount)
     return text + (" · " + ", ".join(shown) + more if shown else "")
 
 
@@ -1819,7 +2272,7 @@ class LoadedSetCard(qt.QObject):
 
         buttonRow = _buttonRow()
         self.reviewButton = _roleButton(_("Review in Draw"), "StudioLoadedSetReviewButton", lambda: reviewLoadedSet(_shell(), self._chosenIndex()), "primary")
-        self.reviewButton.setToolTip(_("Edit one lesion at a time in Draw; Alt+← and Alt+→ step through the set"))
+        self.reviewButton.setToolTip(_("Edit one lesion at a time in Draw; {previous} and {next} step through the set").format(previous=ui.keyText("Alt+Left"), next=ui.keyText("Alt+Right")))
         self.closeButton = _roleButton(_("Close set"), "StudioLoadedSetCloseButton", lambda: closeLoadedSet(), "secondary")  # noqa: PLW0108
         self.closeButton.setToolTip(_("Remove these lesions from the scene (files are never deleted)"))
         buttonRow.layout().addWidget(self.reviewButton, 3)
@@ -1872,9 +2325,18 @@ class LoadedSetCard(qt.QObject):
         if studyUi is None or loaded is None:
             return None
         files = [nodeFile(node) for node in loaded.nodes() if nodeFile(node)]
-        if not closeLoadedSet(confirm=True):
+        problem = studyUi.studyFolderProblem(studyUi._commonFolder(files)) if files else None
+        if problem:
+            # Checked before the set is closed: Studio's own folders (a project's Images/, ...) never become a study
+            shell = _shell()
+            if shell is not None:
+                shell.toast(problem, ms=8000, level="warning")
             return None
-        return _runAction(lambda: studyUi.createStudy(files, _shell()), _("Failed to create the study."))
+        # The group-mapping step (L-01) of a participants.tsv in the study folder, before the set is closed
+        groups = studyUi.askGroupMapping(studyUi._commonFolder(files)) if files else {}
+        if groups is None or not closeLoadedSet(confirm=True):
+            return None
+        return _runAction(lambda: studyUi.createStudy(files, _shell(), **groups), _("Failed to create the study."))
 
     def refresh(self):
         """Show or hide the card. Return True when it is shown."""
@@ -2106,6 +2568,7 @@ class OpenNowCard(qt.QObject):
             eye.setObjectName("StudioOpenNowEye")
             eye.setAutoRaise(True)
             eye.setFixedSize(24, 24)
+            eye.setIconSize(qt.QSize(_BUTTON_ICON_SIZE, _BUTTON_ICON_SIZE))
             ui.setRole(eye, "ghost")
             ui.installButtonKeys(eye)
             eye.connect("clicked()", lambda nodeId=item["id"]: self._toggleEye(nodeId))
@@ -2118,6 +2581,7 @@ class OpenNowCard(qt.QObject):
         more.setObjectName("StudioOpenNowMenuButton")
         more.setAutoRaise(True)
         more.setFixedSize(24, 24)
+        more.setIconSize(qt.QSize(_BUTTON_ICON_SIZE, _BUTTON_ICON_SIZE))
         more.setToolTip(_("More"))
         more.setAccessibleName(_("More about {name}").format(name=item["name"]))
         more.setPopupMode(qt.QToolButton.InstantPopup)
@@ -2129,7 +2593,8 @@ class OpenNowCard(qt.QObject):
         more.setMenu(menu)
         layout.addWidget(more)
         self.rowsLayout.addWidget(row)
-        self._rows.append((row, eye, item))
+        # The row keeps the node ID, not the node: a removed scan or a closed scene is freed even while the row lives
+        self._rows.append((row, eye, {key: value for key, value in item.items() if key != "node"}))
 
     def _fillMenu(self, menu, item):
         kind = item["kind"]
@@ -2147,8 +2612,10 @@ class OpenNowCard(qt.QObject):
 
         if kind != "set":
             addAction(_("Rename…"), "StudioOpenNowRename", lambda: (renameNode(node()), self.refresh()))
-        canDraw = kind == "lesion" or (kind == "volume" and item["volumeKind"] in ("scan", "template"))
-        if kind == "set":
+        canDraw = kind == "lesion" or (kind == "volume" and item["volumeKind"] in ("scan", "template", "labelmap"))
+        if kind == "volume" and item["volumeKind"] == "labelmap":
+            addAction(_("Open in Draw"), "StudioOpenNowOpenInDraw", lambda: labelMapInDraw(node(), _shell()))
+        elif kind == "set":
             addAction(_("Open in Draw"), "StudioOpenNowOpenInDraw", lambda: reviewLoadedSet(_shell()))
         elif kind == "lesion":
             addAction(_("Open in Draw"), "StudioOpenNowOpenInDraw", lambda: continueInDraw(_shell(), node()))
@@ -2170,7 +2637,8 @@ class OpenNowCard(qt.QObject):
             from . import niftiexport, niftiexport_ui
         except ImportError:
             return
-        if item["kind"] == "set":
+        isSet = item["kind"] == "set"  # the closures below do not keep the item (it holds the node)
+        if isSet:
             importer = _importer()
             loaded = importer.loadedSet()
 
@@ -2187,7 +2655,7 @@ class OpenNowCard(qt.QObject):
 
         def update():
             # A lesion that was empty when the row was made may have voxels now: checked each time the menu opens
-            reason = niftiexport.unavailableReason(node()) if item["kind"] != "set" else ""
+            reason = niftiexport.unavailableReason(node()) if not isSet else ""
             action.setEnabled(not reason)
             action.setToolTip(reason or _("Write it as a NIfTI file (check others to export them at once) for FSL, SPM, AFNI or nibabel"))
 
@@ -2217,6 +2685,7 @@ class OpenNowCard(qt.QObject):
         self.moreLink.setVisible(extra > 0)
         if extra > 0:
             self.moreLink.setText(_("+{count} more · Show in Data module").format(count=extra))
+        scheduleTabOrder()
         return len(items)
 
     def rowNames(self):
@@ -2572,12 +3041,49 @@ def _setStudySelection(sids, source=None):
                 logging.error(f"Studio Library: study selection update failed:\n{traceback.format_exc()}")
 
 
+class keepQueuePlace:
+    """Context manager around a QC verdict on ``sids`` (P / X keys, the QC mosaic's Looks right / Doesn't look right).
+
+    In a QC filter (QC fail, Normalization to review) the judged rows leave the list and the selection becomes empty: the
+    row that takes their place is then selected, so that the next verdict goes to the next subject of the queue and the
+    SUBJECT card stays shown (BB-1). ``views`` are the lists to follow (default: the live subject lists).
+    """
+
+    def __init__(self, sids, views=None):
+        self.sids = list(sids)
+        self.views = views
+        self.places = []
+
+    def __enter__(self):
+        views = self.views if self.views is not None else [view for view in _studyViews if isinstance(view, StudyList)]
+        selected = set(studySelection())
+        for view in views:
+            if not _isAlive(view.widget) or not all(sid in selected for sid in self.sids):
+                continue
+            first = min((view.model.rowOf(sid) for sid in self.sids), default=-1)
+            if first >= 0:
+                self.places.append((view, first))
+        return self
+
+    def __exit__(self, excType, excValue, tb):
+        if excType is not None:
+            return False
+        for view, first in self.places:
+            if not _isAlive(view.widget) or studySelection() or view.selectedIds():
+                break
+            if all(view.model.rowOf(sid) < 0 for sid in self.sids) and view.model.rowCount() > 0:
+                view.selectIds([view.model.sid(min(first, view.model.rowCount() - 1))])
+                break
+        return False
+
+
 def _listenToStudies():
     if _studyListening[0]:
         return
     studyUi = _studyUi()
     if studyUi is not None:
         studyUi.addListener(_onStudyChanged)
+        studyUi.addSaveListener(_onStudySaved)
         _studyListening[0] = True
 
 
@@ -2590,8 +3096,28 @@ def _onStudyChanged(studySession):
     refreshStudy()
 
 
+def _onStudySaved(studySession):
+    """participants.tsv was saved (or the save failed): the STUDY card's save line no longer says "Saving…"."""
+    if studySession is not _studySession():
+        return
+    for view in list(_studyViews):
+        cards = getattr(view, "cards", None)
+        if cards is not None and _isAlive(view.widget):
+            try:
+                cards.studyCard.refreshSaveStatus()
+            except Exception:
+                logging.error(f"Studio Library: save status update failed:\n{traceback.format_exc()}")
+
+
 def refreshStudy():
     """Show the open study (or its absence) in the canvas and in the module panel."""
+    session = _studySession()
+    if session is not None:
+        try:
+            # A lesion file changed outside Studio: its thumbnail is redrawn, so its metrics are measured again too
+            session.computeMissingMetrics()
+        except Exception:
+            logging.error(f"Studio Library: lesion metrics check failed:\n{traceback.format_exc()}")
     for view in list(_studyViews):
         if not _isAlive(view.widget):
             _studyViews.remove(view)
@@ -2669,8 +3195,8 @@ class StudyList(qt.QObject):
         self.search = qt.QLineEdit()
         self.search.setObjectName("StudioStudySearch")
         self.search.setPlaceholderText(_("Search subjects"))
-        self.search.setClearButtonEnabled(True)
-        self.search.setToolTip(ui.tooltip(_("Search subjects"), "/", _("filter the list by id, group, status or notes")))
+        ui.setClearButton(self.search)
+        self._setSearchToolTip(False)
         self.search.connect("textChanged(QString)", lambda text: self.refresh())
         self.search.setMinimumWidth(140)
         rowLayout.addWidget(self.search, 1 if compact else 0)
@@ -2741,6 +3267,9 @@ class StudyList(qt.QObject):
         self.table.setShowGrid(False)
         self.table.setWordWrap(False)
         self.table.setFocusPolicy(qt.Qt.StrongFocus)
+        # Tab and Shift+Tab leave the table, the arrow keys move (SPEC 2.9). Qt's default moves Tab from cell to cell and
+        # wraps from the last cell to the first: the focus could never reach the inspector cards
+        self.table.setTabKeyNavigation(False)
         self.table.verticalHeader().hide()
         self.table.verticalHeader().setDefaultSectionSize(STUDY_ROW_HEIGHT)
         self.table.verticalHeader().setMinimumSectionSize(STUDY_ROW_HEIGHT)
@@ -2952,12 +3481,20 @@ class StudyList(qt.QObject):
 
     # Content
 
+    def _setSearchToolTip(self, blind):
+        """The search tooltip names what the search matches: not the group while the study traces blind."""
+        description = (_("filter the list by id, status or notes") if blind else
+                       _("filter the list by id, group, status or notes"))
+        self.search.setToolTip(ui.tooltip(_("Search subjects"), "/", description))
+
     def visibleRows(self, studySession):
         """The rows that the filter, the search and the sort show, in their order."""
         rows = studySession.study.subjects
         entry = self._activeFilter()
         predicate = entry.get("predicate") if entry else None
         query = str(self.search.text).strip().lower()
+        # Blind tracing: the search never matches a hidden column, or typing "case" would list exactly the cases (BB-1)
+        searchKeys = [key for key in SEARCH_KEYS if key not in _hiddenColumns(studySession.study)] if query else []
         shown = []
         for index, row in enumerate(rows):
             if predicate is not None:
@@ -2968,7 +3505,7 @@ class StudyList(qt.QObject):
                     logging.error(f"Studio Library: the filter {entry.get('label')} failed:\n{traceback.format_exc()}")
                     continue
             if query:
-                haystack = " ".join(str(row.get(key, "")) for key in ("participant_id", "group", "status", "qc", "notes", "source_id")).lower()
+                haystack = " ".join(str(row.get(key, "")) for key in searchKeys).lower()
                 if query not in haystack:
                     continue
             shown.append((index, row))
@@ -2984,6 +3521,7 @@ class StudyList(qt.QObject):
             return
         for shortcut in self.shortcuts:
             shortcut.setEnabled(True)
+        self._setSearchToolTip("group" in _hiddenColumns(studySession.study))
         self._rebuildChips()
         extra = libcardColumns()
         signature = tuple(entry["key"] for entry in extra)
@@ -2994,6 +3532,9 @@ class StudyList(qt.QObject):
         selected = studySelection()
         # A model reset scrolls to the top: keep the place of the user (a QC key, a thumbnail or a save refreshes the rows)
         scrolls = [(view, view.verticalScrollBar().value) for view in self._itemViews()]
+        # It also clears the keyboard cursor (the current index): without it the next arrow key starts at the first row
+        currentIndex = self.table.currentIndex()
+        currentId = self.model.sid(currentIndex.row()) if currentIndex.isValid() else None
         self._settingSelection = True
         try:
             self.model.setRows(rows, studySession.current())
@@ -3002,8 +3543,10 @@ class StudyList(qt.QObject):
                 row = self.model.rowOf(sid)
                 if row >= 0:
                     selectionModel.select(self.model.index(row, 0), qt.QItemSelectionModel.Select | qt.QItemSelectionModel.Rows)
+            self._restoreCurrent(currentId)
         finally:
             self._settingSelection = False
+        self._pruneHiddenSelection(selected)
         self._sizeColumns()
         if self.grid is not None and self.viewMode() == "grid":
             self.grid.prepare(studySession, rows)
@@ -3022,8 +3565,11 @@ class StudyList(qt.QObject):
         widths = {"participant_id": 140, "group": 90, "volume_ml": 90, "space": 170, "status": 100, "qc": 70}
         if self.compact:
             widths = {"participant_id": 96, "group": 64, "volume_ml": 64, "space": 96, "status": 80, "qc": 48}
+        # The widths are designed for the 13 px body: they follow the application font (SPEC 4.5), and a header whose label
+        # is still longer than its width gets the width that the label needs, not a label cut mid-letter (BB-1)
         for index, entry in enumerate(self.model.columns):
-            header.resizeSection(index, widths.get(entry["key"], 110))
+            width = ui.fontPx(widths.get(entry["key"], 110))
+            header.resizeSection(index, max(width, header.sectionSizeHint(index)))
 
     # Selection
 
@@ -3048,10 +3594,38 @@ class StudyList(qt.QObject):
                 row = self.model.rowOf(sid)
                 if row >= 0:
                     selectionModel.select(self.model.index(row, 0), qt.QItemSelectionModel.Select | qt.QItemSelectionModel.Rows)
+            currentIndex = self.table.currentIndex()
+            self._restoreCurrent(self.model.sid(currentIndex.row()) if currentIndex.isValid() else None)
         finally:
             self._settingSelection = False
         if self.onSelection is not None:
             self.onSelection()
+
+    def _pruneHiddenSelection(self, selected):
+        """Drop from the shared selection the subjects that the filter or the search no longer shows (in no live list):
+        a P / X in a QC filter, a chip or a search hides them, and the cards (Redo N selected, BATCH) must not act on rows
+        that no list shows as selected (BB-1).
+        """
+        others = [view for view in _studyViews if view is not self and isinstance(view, StudyList) and _isAlive(view.widget)]
+        hidden = {sid for sid in selected if self.model.rowOf(sid) < 0 and not any(view.model.rowOf(sid) >= 0 for view in others)}
+        if hidden:
+            _setStudySelection([sid for sid in studySelection() if sid not in hidden], source=self)
+
+    def _restoreCurrent(self, sid):
+        """Put the keyboard cursor (the current index, shared by the list and the grid) on ``sid`` when it is selected or
+        nothing is, else on the first selected row; the selection is not changed (the arrow keys go on from there).
+        """
+        selectionModel = self.table.selectionModel()
+        selectedRows = sorted({index.row() for index in selectionModel.selectedRows()})
+        row = self.model.rowOf(sid) if sid else -1
+        if row < 0 or (selectedRows and row not in selectedRows):
+            row = selectedRows[0] if selectedRows else -1
+        if row < 0:
+            return
+        current = self.table.currentIndex()
+        if current.isValid() and current.row() == row:
+            return
+        selectionModel.setCurrentIndex(self.model.index(row, max(0, current.column())), qt.QItemSelectionModel.NoUpdate)
 
     def selectIds(self, sids):
         _setStudySelection(list(sids))
@@ -3192,7 +3766,8 @@ class StudyList(qt.QObject):
         if studySession is None or not sids:
             return
         column = self.qcColumn()
-        studySession.setQc(sids, value, column)
+        with keepQueuePlace(sids, views=[self]):
+            studySession.setQc(sids, value, column)
         shell = _shell()
         if shell is not None:
             label = {"pass": _("pass"), "fail": _("fail"), "unreviewed": _("not reviewed")}.get(value, value)
@@ -3333,11 +3908,27 @@ def _studyTemplateFile(studySession):
     return path or studyUi.sampleFile(studyUi.DEFAULT_TEMPLATE_SAMPLE)
 
 
+# The subject columns that the "Search subjects" field matches (less the hidden ones while the study traces blind)
+SEARCH_KEYS = ("participant_id", "group", "status", "qc", "notes", "source_id")
+
+
 def _hiddenColumns(studyObject):
-    """Columns hidden from tracers when the study sets ``blind_tracing``: group, scores and symptoms (LNM addendum 7.1)."""
+    """Columns hidden from tracers when the study sets ``blind_tracing``: group, scores and symptoms (LNM addendum 7.1).
+
+    The blinded columns of ``review.blinded_columns`` and the symptom columns (``review.SYMPTOM_COLUMNS``) also when the
+    table has none yet, so the SUBJECT card does not offer them while tracing blind. An empty set without blinding.
+    """
     if not getattr(studyObject, "blind_tracing", False):
         return set()
     hidden = {"group"}
+    try:
+        import importlib
+
+        rules = importlib.import_module("LesionNetworkMappingLib.review")
+        hidden.update(rules.blinded_columns(studyObject))
+        hidden.update(rules.SYMPTOM_COLUMNS)
+    except Exception:
+        logging.error(f"Studio Library: the blinded columns could not be read:\n{traceback.format_exc()}")
     try:
         hidden.update(name for name, _confirmed in studyObject.score_columns())
     except Exception:
@@ -3409,6 +4000,12 @@ class _CardInfo:
         else:
             self.note = _("No lesion yet") if self.status == "untraced" else _("No preview")
         self.signature = (self.status, self.qc, self.current, self.bottomChips, self.topChips, self.thumbKey)
+
+    def failedNote(self, service):
+        """The note of a card whose thumbnail failed: names a lesion file that cannot be read, else ``note``."""
+        if service is not None and self.request is not None and self.request.lesion and service.lesionUnreadable(self.thumbKey):
+            return _("Lesion file cannot be read")
+        return self.note
 
 
 class _GridView(qt.QListView):
@@ -3814,7 +4411,7 @@ class StudyGrid(qt.QObject):
             else:
                 painter.setFont(self._font(11))
                 painter.setPen(qt.QColor(THUMB_CHIP_COLORS["muted"]))
-                note = _("Making preview…") if state == "pending" else info.note
+                note = _("Making preview…") if state == "pending" else info.failedNote(self._service)
                 painter.drawText(thumbRect, int(qt.Qt.AlignCenter), note)
             # Chips: extension columns at the top, space and volume at the bottom of the thumbnail
             painter.setFont(self._font(11))
@@ -3970,8 +4567,8 @@ class StudyPage(qt.QObject):
         if studySession is None:
             return None
         sids = self.list.selectedIds()
-        sid = sids[0] if sids else studySession.current() or studySession.study.next_subject(None, status="untraced") or (
-            studySession.study.subject_ids[0] if len(studySession.study) else None)
+        sid = sids[0] if sids else studySession.current() or studySession.resumeTarget() or studySession.study.next_subject(
+            None, status="untraced") or (studySession.study.subject_ids[0] if len(studySession.study) else None)
         if sid is None:
             return None
         return _runAction(lambda: studySession.open(sid), _("Failed to open {sid}.").format(sid=sid))
@@ -4003,6 +4600,37 @@ def studyCounts(studyObject):
     return text
 
 
+def gridDisplayName(gridId):
+    """A grid in user words ("TemplateFlow 2009 grid, 2 mm"), not by its registry key ("TF2009-2mm")."""
+    try:
+        from LesionNetworkMappingLib import geometry
+
+        spec = geometry.GRID_BY_ID.get(gridId)
+    except Exception:
+        spec = None
+    if spec is None:
+        return str(gridId)
+    size = f"{spec.resolution} mm"
+    if spec.family == "spm":
+        return _("SPM/ICBM grid, {size}").format(size=size)
+    if spec.family == "2009":
+        return _("TemplateFlow 2009 grid, {size}").format(size=size)
+    return _("{grid} grid, {size}").format(grid=gridId, size=size)
+
+
+def gridQuestionText(gridId, count):
+    """The question about an ambiguous grid, with the singular for one file."""
+    name = gridDisplayName(gridId)
+    if count == 1:
+        return _("1 file is on the {grid}, which several templates share. Which space is it in?").format(grid=name)
+    return _("{n} files are on the {grid}, which several templates share. Which space are they in?").format(n=count, grid=name)
+
+
+def gridAnswerText(candidate):
+    """Button text of a candidate space: the full name ("MNI152Lin (SPM)"), never a shortened one ("Lin")."""
+    return {"MNI152Lin": "MNI152Lin (SPM)"}.get(candidate, candidate)
+
+
 #
 # Inspector cards of a study (STUDY, SUBJECT, BATCH, IMPORT)
 #
@@ -4026,6 +4654,17 @@ def _rowButton(text, objectName, callback, role="secondary"):
     return row, button
 
 
+def studyTemplateText(template):
+    """The 'Tracing template' line of the STUDY card; a study made headlessly can have no template (study.json "template": null)."""
+    templateId = (template or {}).get("id")
+    if not templateId:
+        return _("Tracing template: not set")
+    res = (template or {}).get("res")
+    if res in (None, ""):
+        return _("Tracing template: {id}").format(id=templateId)
+    return _("Tracing template: {id} {res} mm").format(id=templateId, res=res)
+
+
 class StudyCard(qt.QObject):
     """STUDY: name, folder, counts, save status, tracing template, grid questions, and the study actions."""
 
@@ -4038,6 +4677,9 @@ class StudyCard(qt.QObject):
         layout.addWidget(self.nameLabel)
         self.folderLink = _linkButton("", "StudioStudyCardFolder", self._showFolder)
         self.folderLink.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        # The path is elided to the pixel width of the link (the study folder name kept), again whenever the card is resized
+        self.folderLink.setProperty("elideMode", "path")
+        _installEventFilter(self.folderLink, _elidedLabelFilter())
         ui.bindStyleSheet(self.folderLink, lambda: (
             f"QPushButton#StudioStudyCardFolder {{ background: transparent; border: none; color: {ui.token('accent-fg').name()}; "
             "padding: 0px; text-align: left; }"))
@@ -4069,19 +4711,24 @@ class StudyCard(qt.QObject):
         self._extras = []
         self._questionsSignature = None
 
+    def refreshSaveStatus(self):
+        studySession = _studySession()
+        if studySession is None:
+            return
+        text, when = studySession.saveStatus()
+        self.saveLabel.setText(text + (" · " + relativeTime(when) if when else ""))
+
     def refresh(self):
         studySession = _studySession()
         if studySession is None:
             return
         studyObject = studySession.study
         self.nameLabel.setText(studyObject.name)
-        self.folderLink.setText(_elideMiddle(studyObject.path, 46))
-        self.folderLink.setToolTip(studyObject.path)
+        setElidedText(self.folderLink, studyObject.path)
         self.countsLabel.setText(studyCounts(studyObject))
-        text, when = studySession.saveStatus()
-        self.saveLabel.setText(text + (" · " + relativeTime(when) if when else ""))
+        self.refreshSaveStatus()
         template = studyObject.template or {}
-        self.templateLabel.setText(_("Tracing template: {id} {res} mm").format(id=template.get("id", "—"), res=template.get("res", "")))
+        self.templateLabel.setText(studyTemplateText(template))
         studyUi = _studyUi()
         mismatch = studyUi.templateMismatch(studyObject) if studyUi is not None else None
         self.mismatchLabel.setText(mismatch or "")
@@ -4099,20 +4746,19 @@ class StudyCard(qt.QObject):
         _clearLayout(self.questionsLayout)
         for gridId, candidates, count in questions:
             label = _cardLabel("StudioStudyGridQuestion", 12, "text")
-            label.setText(_("{n} files are on the {grid} grid, which several templates share. Which space are they in?").format(n=count, grid=gridId))
+            label.setText(gridQuestionText(gridId, count))
             self.questionsLayout.addWidget(label)
-            row = qt.QWidget()
-            rowLayout = qt.QHBoxLayout(row)
-            rowLayout.setContentsMargins(0, 0, 0, 0)
-            rowLayout.setSpacing(4)
+            buttons = []
             for candidate in candidates:
-                button = qt.QPushButton(candidate.replace("MNI152", ""))
+                button = qt.QPushButton(gridAnswerText(candidate))
                 button.setObjectName("StudioStudyGridAnswer")
                 button.setToolTip(candidate)
                 ui.setRole(button, "secondary")
                 button.connect("clicked()", lambda gridId=gridId, candidate=candidate: studySession.answerGrid(gridId, candidate))
-                rowLayout.addWidget(button)
-            self.questionsLayout.addWidget(row)
+                buttons.append(button)
+            # The answers go under each other when the inspector is narrow: three of them side by side
+            # are wider than the 340 px inspector (they would scroll)
+            self.questionsLayout.addWidget(ui.wrapRow(buttons, width=ui.WRAP_ROW_WIDTH + 60, spacing=4))
 
     def _refreshExtras(self, studySession):
         cards = libcardCards("study")
@@ -4140,15 +4786,25 @@ class StudyCard(qt.QObject):
     def _showFolder(self):
         studySession = _studySession()
         if studySession is not None:
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(studySession.study.path))
+            from . import projects
+
+            projects.showInFileManager(studySession.study.path)
 
     def _merge(self):
         studySession = _studySession()
         if studySession is not None:
-            applied = studySession.applyInbox()
+            applied = studySession.applyInbox(report=False)
+            rejected = studySession.inboxRejectedText()
+            # Only the files with values that were merged count; a rejected file is said apart, with why
+            merged = sum(1 for _path, sids in applied if sids)
+            heldSids = sorted({sid for _path, sids in studySession.lastInboxHeld for sid in sids})
+            # A result that repoints the open subject waits until its edits are written (StudySession.applyInbox)
+            held = _("The results for {sids} wait until its edits are written").format(sids=", ".join(heldSids)) if heldSids else ""
+            text = _("Merged {n} job results").format(n=merged) if merged else ("" if rejected or held else _("No job results to merge"))
             shell = _shell()
             if shell is not None:
-                shell.toast(_("Merged {n} job results").format(n=len(applied)) if applied else _("No job results to merge"))
+                shell.toast(" · ".join(part for part in (text, held, rejected) if part), ms=9000 if rejected else 4000 if held else 1600,
+                            level="warning" if rejected else "info")
 
     def _close(self):
         studyUi = _studyUi()
@@ -4208,14 +4864,6 @@ def _gridResolution(path):
     return _resolutions[key]
 
 
-def _elideMiddle(text, length):
-    text = str(text)
-    if len(text) <= length:
-        return text
-    half = (length - 1) // 2
-    return text[:half] + "…" + text[-(length - 1 - half):]
-
-
 class SubjectCard(qt.QObject):
     """SUBJECT: id, scan and lesion, space chip, volume, group, scores, notes and Open in Draw (the selected or current subject)."""
 
@@ -4238,7 +4886,7 @@ class SubjectCard(qt.QObject):
         self.metricsLabel = _cardLabel("StudioSubjectCardMetrics", 12, "text")
         layout.addWidget(self.metricsLabel)
         groupRow = qt.QHBoxLayout()
-        groupLabel = _cardLabel("StudioSubjectCardGroupLabel")
+        self.groupLabel = groupLabel = _cardLabel("StudioSubjectCardGroupLabel")
         groupLabel.setText(_("Group"))
         groupRow.addWidget(groupLabel)
         self.groupFrame, self.groupButtons = ui.segmented([_("Case"), _("Control"), "—"])
@@ -4302,7 +4950,11 @@ class SubjectCard(qt.QObject):
                 metrics.insert(0, lesion["sides"])
         metrics.append(studyCell(row, "status")[0])
         self.metricsLabel.setText(" · ".join(metrics))
-        group = row.get("group")
+        # Blind tracing (L-43): the group, the scores and the symptoms of the subject are not shown
+        hidden = _hiddenColumns(studySession.study)
+        self.groupFrame.setVisible("group" not in hidden)
+        self.groupLabel.setVisible("group" not in hidden)
+        group = row.get("group") if "group" not in hidden else None
         index = {"case": 0, "control": 1}.get(group, 2)
         button = self.groupButtons.button(index)
         if button is not None and not button.isChecked():
@@ -4310,6 +4962,8 @@ class SubjectCard(qt.QObject):
         scores = []
         for column, confirmed in studySession.study.score_columns():
             value = row.get(column)
+            if column in hidden:
+                continue
             if not _missing(value):
                 scores.append(f"{column}: {value}" + ("" if confirmed else " ?"))
         self.scoresLabel.setText("  ·  ".join(scores))
@@ -4348,7 +5002,7 @@ class SubjectCard(qt.QObject):
 
     def _onGroup(self, index):
         studySession = _studySession()
-        if studySession is None or self.sid is None:
+        if studySession is None or self.sid is None or "group" in _hiddenColumns(studySession.study):
             return
         group = ("case", "control", "n/a")[index]
         if studySession.study.subject(self.sid).get("group") != group:
@@ -4582,14 +5236,22 @@ class ImportCard(qt.QObject):
             result = _runAction(lambda: studySession.importTable(str(path)), _("Failed to import the table."))
             shell = _shell()
             if result and shell is not None:
-                shell.toast(_("{added} added, {updated} updated").format(added=len(result["added"]), updated=len(result["updated"])))
+                text = _("{added} added, {updated} updated").format(added=len(result["added"]), updated=len(result["updated"]))
+                renamed = result.get("renamed") or {}
+                if renamed:  # columns named like the study's with other values (status of alive / deceased) are kept apart
+                    text += " · " + _("kept {columns} (other values than the study's)").format(
+                        columns=", ".join(_("{column} as {original}").format(column=column, original=original) for column, original in renamed.items()))
+                shell.toast(text, ms=8000 if renamed else 1600)
 
     @staticmethod
     def _report(studySession, report):
         shell = _shell()
         if report and shell is not None:
-            shell.toast(_("{added} subjects added, {updated} updated, {skipped} files skipped").format(
-                added=len(report["added"]), updated=len(report["updated"]), skipped=len(report["skipped"])), ms=4000)
+            text = _("{added} subjects added, {updated} updated").format(added=len(report["added"]), updated=len(report["updated"]))
+            # Files without a subject id: the toast says how to name them (patient01/T1.nii.gz) or to set the ID rule
+            noId = any(item.get("reason") == "no subject id" for item in report["skipped"])
+            text += ", " + (_studyUi().skippedText(report) if report["skipped"] else _("0 files skipped"))
+            shell.toast(text, ms=10000 if noId else 4000)
 
     def dispose(self):
         for _key, widget, _card in self._extras:
@@ -4721,7 +5383,8 @@ class FolderCard:
     """Card offered for a folder with several NIfTI files: "N NIfTI files found", the reason when there are too many to
     load at once, and an enabled way on: Load all (up to ``MAX_LOAD_ALL_FILES`` files), Open one subject…, and
     Create study when the study page (W3-07) is part of this build: the primary button for any number of files, with the
-    group mapping of a participants table whose groups are not case / control.
+    group mapping of a participants table whose groups are not case / control. Studio's own folders (Studies/, Projects/,
+    a project, the Slicer Studio folder: ``study_ui.studyFolderProblem``) show why instead of Create study.
     """
 
     def __init__(self, folder, files, onClose=None):
@@ -4766,13 +5429,20 @@ class FolderCard:
         self.participantsPath = table
         # The reason is in the card, not in a tool tip
         self.studyAvailable = _studyUi() is not None
+        # Studio's own folders (Studies/, Projects/, a project, ...) never become a study: the reason replaces the plan
+        self.studyProblem = _studyUi().studyFolderProblem(folder) if self.studyAvailable else None
         self.groupColumn = None
         self.groupCombos = {}
-        if self.studyAvailable:
+        if self.studyProblem:
+            self.planLabel = self._textLabel(self.studyProblem, "StudioFolderCardStudyPlan")
+            layout.addWidget(self.planLabel)
+        elif self.studyAvailable:
             self._addStudyPlan(layout, folder, table)
         self.reasonLabel = None
         if self.tooMany:
-            if self.studyAvailable:
+            if self.studyProblem:
+                reason = _("{count} files: open one subject at a time").format(count=len(self.files))
+            elif self.studyAvailable:
                 reason = _("{count} files: open one subject at a time, or create a study").format(count=len(self.files))
             else:
                 reason = _("{count} files: open one subject at a time, or create a study when available").format(count=len(self.files))
@@ -4783,7 +5453,7 @@ class FolderCard:
         buttonRow.setSpacing(8)
         buttonRow.addStretch(1)
         self.createStudyButton = None
-        if self.studyAvailable:
+        if self.studyAvailable and not self.studyProblem:
             # The study is the way on for a folder of subjects (any number of files)
             self.createStudyButton = qt.QPushButton(_("Create study"))
             self.createStudyButton.setToolTip(_("Make a study of this folder: study.json, participants.tsv and lesions/ are written here; "
@@ -4846,19 +5516,31 @@ class FolderCard:
         self.close()
         return _runAction(lambda: _importer().loadFiles(paths, _shell()), _("Failed to load the files."))
 
+    GROUP_ROWS_SHOWN = 8  # rows visible at once; more values scroll
+
     def _addStudyPlan(self, layout, folder, table):
         """Where the study goes and, for a participants table whose groups are not case / control, how they map (L-01)."""
         studyUi = _studyUi()
-        self.planLabel = self._textLabel(_("Create study writes study.json and lesions/ in this folder; your files are not changed."),
-                                         "StudioFolderCardStudyPlan")
+        if table and os.path.abspath(table) == os.path.abspath(os.path.join(folder, "participants.tsv")):
+            # The folder's own table is adopted in place (study_ui.adoptFolder): columns are added, the original is kept
+            planText = _("Create study writes study.json and lesions/ in this folder and adds columns to your participants.tsv "
+                         "(your columns are kept; a copy of the original is kept in .studio). Your scans are not changed.")
+        else:
+            planText = _("Create study writes study.json and lesions/ in this folder; your files are not changed.")
+        self.planLabel = self._textLabel(planText, "StudioFolderCardStudyPlan")
         layout.addWidget(self.planLabel)
         if not table:
             return
         try:
             columns, rows = studyUi.readTable(table)
             proposal = studyUi.groupMappingProposal(columns, rows)
-        except Exception:
-            logging.warning(f"Studio Library: {table} could not be read:\n{traceback.format_exc()}")
+        except Exception as e:
+            if getattr(e, "user_problem", False):
+                # The user's file (not UTF-8, ...): said in the card, what to do is in the message
+                logging.warning(f"Studio Library: {e}")
+                layout.addWidget(self._textLabel(str(e), "StudioFolderCardTableProblem"))
+            else:
+                logging.warning(f"Studio Library: {table} could not be read:\n{traceback.format_exc()}")
             return
         if proposal is None:
             return
@@ -4866,7 +5548,14 @@ class FolderCard:
         label = self._textLabel(_("Groups in column '{column}':").format(column=self.groupColumn), "StudioFolderCardGroupTitle")
         layout.addWidget(label)
         targets = ((_("Case"), "case"), (_("Control"), "control"), (_("Exclude"), "exclude"), ("—", None))
-        for value, target in list(mapping.items())[:8]:
+        # Every distinct value gets a combo (a value without one would silently end up as group n/a); a long list
+        # scrolls inside the card instead of growing it
+        rowsWidget = qt.QWidget()
+        rowsWidget.setObjectName("StudioFolderCardGroupRows")
+        rowsLayout = qt.QVBoxLayout(rowsWidget)
+        rowsLayout.setContentsMargins(0, 0, 0, 0)
+        rowsLayout.setSpacing(4)
+        for value, target in mapping.items():
             row = qt.QHBoxLayout()
             row.setSpacing(8)
             valueLabel = self._textLabel(f"{value}  →", "StudioFolderCardGroupValue")
@@ -4877,8 +5566,21 @@ class FolderCard:
                 combo.addItem(text, data)
             combo.setCurrentIndex(next(index for index, (_text, data) in enumerate(targets) if data == target))
             row.addWidget(combo)
-            layout.addLayout(row)
+            rowsLayout.addLayout(row)
             self.groupCombos[value] = combo
+        if len(mapping) <= self.GROUP_ROWS_SHOWN:
+            layout.addWidget(rowsWidget)
+            return
+        scroll = qt.QScrollArea()
+        scroll.setObjectName("StudioFolderCardGroupScroll")
+        scroll.setFrameShape(qt.QFrame.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea#StudioFolderCardGroupScroll, QWidget#StudioFolderCardGroupRows { background: transparent; }"
+                             "QScrollArea#StudioFolderCardGroupScroll > QWidget#qt_scrollarea_viewport { background: transparent; }")
+        scroll.setWidget(rowsWidget)
+        scroll.setFixedHeight(self.GROUP_ROWS_SHOWN * (qt.QComboBox().sizeHint.height() + 4))
+        layout.addWidget(scroll)
 
     def groupMapping(self):
         """{value: "case" | "control" | "exclude" | None} as chosen in the card (None without a group column to map)."""
@@ -4895,13 +5597,10 @@ class FolderCard:
         groupColumn, mapping = self.groupColumn, self.groupMapping()
 
         def create():
-            inFolder = table is not None and os.path.normcase(os.path.dirname(os.path.abspath(table))) == os.path.normcase(os.path.abspath(folder))
-            studySession = studyUi.createStudy(files, _shell(), folder=folder, groupColumn=groupColumn if inFolder else None,
-                                               groupMapping=mapping if inFolder else None)
-            if table is not None and not inFolder:
-                # A participants table of the parent folder (BIDS): imported into the new study
-                studySession.importTable(table, groupColumn, mapping)
-            return studySession
+            # The table the card shows supplies the groups and the scores with the group mapping chosen in the card:
+            # the folder's own participants.tsv is adopted in place, any other table (a participants.csv next to the
+            # files, a participants table of the parent folder in BIDS) is imported (study_ui.createStudy)
+            return studyUi.createStudy(files, _shell(), folder=folder, groupColumn=groupColumn, groupMapping=mapping, table=table)
 
         studySession = _runAction(create, _("Failed to create the study."))
         if studySession is not None:
@@ -4952,6 +5651,11 @@ FOOTER_LINE_HEIGHT = 32
 #: The page (VISUAL 4.2): at most 1100 px of content, 40 px on the sides and 28 px at the top
 PAGE_MAX_WIDTH = 1100
 PAGE_SIDE_PADDING = 40
+#: Space between the title and the buttons of the header (side by side, or one above the other on a narrow page)
+HEADER_SPACING = 16
+HEADER_SPACING_NARROW = 12
+#: The narrowest the folder caption gets (elided in the middle) before the header buttons go under the title
+CAPTION_MIN_WIDTH = 220
 PAGE_TOP_PADDING = 28
 #: The dashed frame of the empty state around the drop zone
 DROP_FRAME_SIZE = (620, 340)
@@ -4975,6 +5679,29 @@ def _showRootFolder():
         logging.error(f"Studio Library: the folder could not be shown:\n{traceback.format_exc()}")
 
 
+def _captionFolder(folder):
+    """A folder path for the Library caption, its parts joined by " \u203a ": no leading separator for an absolute path
+    (a folder outside the home folder, a disk such as /Volumes/Data), none for "~" or a trailing slash.
+    """
+    folder = str(folder or "").replace("\\", "/")
+    parts = [part for part in folder.split("/") if part]
+    if parts and parts[0] == "~" and len(parts) > 1:
+        parts = parts[1:]
+    return " \u203a ".join(parts)
+
+
+def _rootUnwritable():
+    """True once autosave found that the Slicer Studio folder cannot be written."""
+    from . import autosave
+
+    from . import projects
+
+    service = autosave.instance()
+    if service is not None and service.rootUnwritable():
+        return True
+    return projects.isRootReadOnly()  # also before any write was tried (an empty session on a read-only drive)
+
+
 class LibraryCanvas(qt.QObject):
     """The Library page shown over the views (SPEC 3.1, VISUAL 4.2): a full-width page (at most ``PAGE_MAX_WIDTH`` px of
     content) with the "Projects" header and its buttons, the Continue card of what is open, the projects of the Slicer
@@ -4993,8 +5720,14 @@ class LibraryCanvas(qt.QObject):
         self.scrollArea.setObjectName("StudioLibraryScroll")
         self.scrollArea.setFrameShape(qt.QFrame.NoFrame)
         self.scrollArea.setWidgetResizable(True)
-        self.scrollArea.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        # The scroll area draws no focus ring, so it is no keyboard stop: its controls are (USABILITY 9.1)
+        self.scrollArea.setFocusPolicy(qt.Qt.NoFocus)
+        # Below the page's minimum width the header and the Continue card reflow (``_updateNarrow()``); the scroll bar is the
+        # last resort for what still does not fit (a control is never cut off without a way to reach it)
+        self.scrollArea.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAsNeeded)
         outerLayout.addWidget(self.scrollArea)
+        self._narrow = False
+        _installEventFilter(self.scrollArea.viewport(), self)
         content = qt.QWidget()
         content.setObjectName("StudioLibraryContent")
         self.contentLayout = qt.QVBoxLayout(content)
@@ -5052,7 +5785,7 @@ class LibraryCanvas(qt.QObject):
         self.header.setObjectName("StudioLibraryHeader")
         headerLayout = qt.QHBoxLayout(self.header)
         headerLayout.setContentsMargins(0, 0, 0, 0)
-        headerLayout.setSpacing(16)
+        headerLayout.setSpacing(HEADER_SPACING)
         titleColumn = qt.QVBoxLayout()
         titleColumn.setSpacing(4)
         self.pageTitle = ui.label(_("Projects"), "display", "text", "StudioLibraryTitle")
@@ -5064,6 +5797,7 @@ class LibraryCanvas(qt.QObject):
         self.captionIcon.setFixedSize(14, 14)
         captionRow.addWidget(self.captionIcon)
         self.captionLabel = ui.label("", "caption", "text3", "StudioLibraryCaption")
+        self._captionText = ""
         captionRow.addWidget(self.captionLabel)
         self.captionSeparator = ui.label("·", "caption", "text3", "StudioLibraryLinkSeparator")
         captionRow.addWidget(self.captionSeparator)
@@ -5072,9 +5806,13 @@ class LibraryCanvas(qt.QObject):
         captionRow.addStretch(1)
         titleColumn.addLayout(captionRow)
         # Once data is loaded the page has no drop zone: a second caption line says that files can be dropped anywhere
-        self.captionDropHint = ui.label(_("Drop scans, lesion masks or folders anywhere on the window to add them"), "caption", "text3",
-                                        "StudioLibraryDropHint")
+        self.captionDropHint = ui.label("", "caption", "text3", "StudioLibraryDropHint")
         self.captionDropHint.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        # Side by side with the buttons the title column can be narrower than the sentence (1366x768 with the inspector open):
+        # the hint is elided to the column (the whole sentence is the tool tip) and never cut in the middle of a letter
+        self.captionDropHint.setProperty("elideMode", "middle")
+        _installEventFilter(self.captionDropHint, _elidedLabelFilter())
+        setElidedText(self.captionDropHint, _("Drop scans, lesion masks or folders anywhere on the window to add them"))
         self.captionDropHint.hide()
         titleColumn.addWidget(self.captionDropHint)
         headerLayout.addLayout(titleColumn, 1)
@@ -5084,6 +5822,7 @@ class LibraryCanvas(qt.QObject):
         headerButtonsLayout.setContentsMargins(0, 0, 0, 0)
         headerButtonsLayout.setSpacing(8)
         headerLayout.addWidget(self.headerButtons, 0, qt.Qt.AlignBottom)
+        self.headerLayout = headerLayout
         columnLayout.addWidget(self.header)
         columnLayout.addSpacing(24)
 
@@ -5108,6 +5847,7 @@ class LibraryCanvas(qt.QObject):
         self.templateMenuButton.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
         self.templateMenuButton.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Expanding)
         self.templateMenuButton.setFixedWidth(ui.BUTTON_HEIGHT)
+        self.templateMenuButton.setIconSize(qt.QSize(_BUTTON_ICON_SIZE, _BUTTON_ICON_SIZE))
         ui.setRole(self.templateMenuButton, "secondary")
         self.templateMenu = qt.QMenu(self.templateMenuButton)
         self.templateMenu.setObjectName("studioTemplateMenu")
@@ -5168,14 +5908,15 @@ class LibraryCanvas(qt.QObject):
         self.dropZoneIcon = ui.iconTile("import", 48, 24, "StudioDropZoneIcon")
         dropZoneLayout.addWidget(self.dropZoneIcon, 0, qt.Qt.AlignHCenter)
         dropZoneLayout.addSpacing(6)
-        dropZoneTitle = ui.label(_("Drop scans, DICOM folders or Slicer scenes"), "title", "text", "StudioDropZoneTitle")
+        dropZoneTitle = ui.label(_("Drop scans, DICOM folders or Slicer scenes"), "title", "text", "StudioDropZoneTitle", wrap=True)
         dropZoneTitle.setAlignment(qt.Qt.AlignCenter)
         dropZoneLayout.addWidget(dropZoneTitle)
         dropZoneHint = ui.label(_("NIfTI, NRRD, DICOM folders, lesion masks and .mrb scenes · or press {shortcut}").format(shortcut=openShortcut),
-                                "caption", "text3", "StudioDropZoneHint")
+                                "caption", "text3", "StudioDropZoneHint", wrap=True)
         dropZoneHint.setAlignment(qt.Qt.AlignCenter)
         dropZoneLayout.addWidget(dropZoneHint)
         dropZoneLayout.addSpacing(10)
+        self.dropFullLayout = dropZoneLayout
         self.dropButtonsSlot = qt.QHBoxLayout()
         self.dropButtonsSlot.setContentsMargins(0, 0, 0, 0)
         dropZoneLayout.addLayout(self.dropButtonsSlot)
@@ -5224,6 +5965,12 @@ class LibraryCanvas(qt.QObject):
 
             self.projectsSection = projects_ui.ProjectsSection()
             columnLayout.addWidget(self.projectsSection.widget)
+            # The Continue card names the open project: the section lists the projects again when one is created (a scan
+            # was loaded) or changes, with no workspace switch
+            # (the same refresh keeps the caption right when the projects folder is chosen or changed)
+            self.projectsSection.onRefreshed = self._onProjectsRefreshed
+            # Saves of the open project (while working in Draw, say) do not list and rebuild the projects of a hidden Library
+            self.projectsSection.deferWhenHidden = True
         except Exception:
             logging.error(f"Studio Library: the Projects section failed:\n{traceback.format_exc()}")
 
@@ -5253,7 +6000,7 @@ class LibraryCanvas(qt.QObject):
         self.sampleDataLink.setToolTip(_("Load a sample scan (downloaded from the 3D Slicer sample data)"))
         linkRow.addWidget(self.sampleDataLink)
         self.classicLink = self._ghost(_("Classic interface"), "StudioLibraryClassicLink", switchToClassic, "monitor")
-        self.classicLink.setToolTip(_("Switch to the Classic interface (Ctrl+Alt+0)"))
+        self.classicLink.setToolTip(ui.tooltip(_("Switch to the Classic interface"), "Ctrl+Alt+0"))
         linkRow.addWidget(self.classicLink)
         linkRow.addStretch(1)
         columnLayout.addLayout(linkRow)
@@ -5301,6 +6048,8 @@ class LibraryCanvas(qt.QObject):
         self._setStrip(False)
         ui.bindStyleSheet(self.widget, self._styleSheet)
         ui.addPaletteListener(self._refreshIcons)
+        # A larger application font wraps the headline and the formats line and grows the zone (USABILITY 9.4)
+        ui.addPaletteListener(self._fitDropZone)
         self._refreshIcons()
         self._refreshCaption()
 
@@ -5383,22 +6132,85 @@ class LibraryCanvas(qt.QObject):
             from . import projects
 
             enabled = projects.isEnabled()
-            folder = projects.shortPath(projects.root())
-            folder = folder[2:] if folder.startswith("~/") else folder
-            text = _("Saved automatically in {folder}").format(folder=folder.replace("/", " \u203a ")) if enabled else ""
-            toolTip = projects.root() if enabled else ""
+            folder = _captionFolder(projects.shortPath(projects.root()))
+            if enabled and projects.isRootMissing():
+                # The chosen folder is on a drive that is not connected: not "saved automatically" there (A-09)
+                text = _("Not found, connect its drive: {folder}").format(folder=folder)
+                toolTip = projects.rootMissingText() + "\n" + projects.root()
+            elif enabled and _rootUnwritable():
+                # The folder could not be written when a project was last made in it: nothing is saved there (autosave paused)
+                text = _("Autosave paused: {folder} cannot be written").format(folder=folder)
+                toolTip = projects.root()
+            else:
+                text = _("Saved automatically in {folder}").format(folder=folder) if enabled else ""
+                toolTip = projects.root() if enabled else ""
         except Exception:
             enabled, text, toolTip = False, "", ""
         self.pageTitle.setText(_("Projects") if enabled else _("Library"))
         if not enabled:
             text = _("Open scans and lesion masks, or start on the MNI template")
-        self.captionLabel.setText(text)
+        self._captionText = text
         self.captionLabel.setToolTip(toolTip)
         self.captionLink.setVisible(enabled)
         self.captionSeparator.setVisible(enabled)
         self.captionIcon.setVisible(enabled)
+        self._fitCaption()
+
+    def _fitCaption(self):
+        """Show the caption elided (in the middle) to the room the title column has, so that a long folder path never widens
+        the page (USABILITY 9.4); the tool tip has the whole path.
+        """
+        if not _isAlive(self.captionLabel):
+            return
+        text = self._captionText
+        room = min(PAGE_MAX_WIDTH, self.scrollArea.viewport().width - 2 * PAGE_SIDE_PADDING)
+        if not self._narrow and self.headerButtons.isVisibleTo(self.header):
+            room -= self.headerButtons.sizeHint.width() + HEADER_SPACING + 12  # 12 px of slack for the stretches of the page
+        for widget in (self.captionIcon, self.captionSeparator, self.captionLink):
+            if widget.isVisibleTo(self.header):
+                room -= widget.sizeHint.width() + 6
+        if not self._narrow:
+            # Side by side with the buttons the caption is cut to 220 px at the most; under them the page can reflow
+            room = max(room, CAPTION_MIN_WIDTH)
+        if room < 80 or self.scrollArea.viewport().width <= 8:
+            # Not laid out yet (the Resize event of the viewport comes) or no room: the whole text
+            self.captionLabel.setText(text)
+            return
+        self.captionLabel.setText(qt.QFontMetrics(self.captionLabel.font).elidedText(text, qt.Qt.ElideMiddle, room))
+
+    def _setHeaderNarrow(self, narrow):
+        self._narrow = narrow
+        self.headerLayout.setDirection(qt.QBoxLayout.TopToBottom if narrow else qt.QBoxLayout.LeftToRight)
+        self.headerLayout.setSpacing(HEADER_SPACING_NARROW if narrow else HEADER_SPACING)
+        self.headerLayout.setAlignment(self.headerButtons, qt.Qt.AlignLeft if narrow else qt.Qt.AlignBottom)
+        self._fitCaption()
+
+    def _updateNarrow(self):
+        """Reflow the header and the Continue card when the page is narrower than they are side by side (USABILITY 9.4: at
+        ``QT_SCALE_FACTOR=2`` on 1080p the window is 960 logical px wide and the inspector takes a third of it): the header
+        buttons go under the title, the card's parts under each other (``CurrentWorkCard.fit()``).
+        """
+        if not _isAlive(self.scrollArea):
+            return
+        available = min(PAGE_MAX_WIDTH, self.scrollArea.viewport().width - 2 * PAGE_SIDE_PADDING)
+        # Side by side: the buttons, and the caption (its icon, at least CAPTION_MIN_WIDTH of text, the separator and the link)
+        needed = self.headerButtons.sizeHint.width() + HEADER_SPACING + CAPTION_MIN_WIDTH
+        for widget in (self.captionIcon, self.captionSeparator, self.captionLink):
+            if widget.isVisibleTo(self.header):
+                needed += widget.sizeHint.width() + 6
+        self._setHeaderNarrow(self.headerButtons.isVisibleTo(self.header) and needed > available)
+        if self._currentWork is not None:
+            self._currentWork.fit(available)
+
+    def isNarrow(self):
+        """Whether the header and the Continue card are laid out for a narrow page."""
+        return bool(self._narrow)
 
     def eventFilter(self, obj, event):
+        if obj == self.scrollArea.viewport():
+            if event.type() == qt.QEvent.Resize and hasattr(self, "column"):
+                self._updateNarrow()
+            return False
         # A click on the drop zone (or on its frame) opens files
         if obj in (self.dropZone, self.dropFrame) and event.type() in (qt.QEvent.MouseButtonPress, qt.QEvent.MouseButtonRelease):
             if event.button() != qt.Qt.LeftButton:
@@ -5457,6 +6269,11 @@ class LibraryCanvas(qt.QObject):
 
     def refreshData(self):
         """Show the open study, else the current work (and the loaded set) when data is loaded, else the empty state."""
+        shown = self._refreshData()
+        scheduleTabOrder()
+        return shown
+
+    def _refreshData(self):
         studySession = _studySession()
         if studySession is not None:
             self._showStudy(True)
@@ -5481,12 +6298,15 @@ class LibraryCanvas(qt.QObject):
                 except Exception:
                     logging.error(f"Studio Library: {type(card).__name__} failed:\n{traceback.format_exc()}")
                     card.widget.hide()
+            # A card made now (a scan was loaded while Library showed) starts with the open project, if there is one
+            self._syncCurrentProject()
         else:
             for card in (self._currentWork, self._loadedSet):
                 if card is not None:
                     card.widget.hide()
         self.dataSection.setVisible(shown)
         self._setStrip(shown)
+        self._updateNarrow()
         return shown
 
     def _setStrip(self, strip):
@@ -5513,15 +6333,14 @@ class LibraryCanvas(qt.QObject):
             self.dropBottomSlot.addWidget(self.dropFrame)
             self.headerButtons.layout().addWidget(self.buttonRow)
         else:
-            self.dropZone.setFixedSize(COLUMN_WIDTH, DROP_ZONE_HEIGHT)
             self.dropZone.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Fixed)
-            self.dropFrame.setFixedHeight(DROP_FRAME_SIZE[1])
             self.dropFrame.setMinimumWidth(min(DROP_FRAME_SIZE[0], COLUMN_WIDTH + 40))
             self.dropFrame.setMaximumWidth(DROP_FRAME_SIZE[0])
             self.dropFrame.layout().removeWidget(self.dropZone)
             self.dropFrame.layout().addWidget(self.dropZone, 0, qt.Qt.AlignCenter)
             self.dropTopSlot.addWidget(self.dropFrame, 0, qt.Qt.AlignHCenter)
             self.dropButtonsSlot.addWidget(self.buttonRow, 0, qt.Qt.AlignHCenter)
+            self._fitDropZone()
         self.dropTopSpacing.setVisible(not strip)
         self.headerButtons.setVisible(strip)
         self.dropFrame.setVisible(not strip)
@@ -5531,15 +6350,44 @@ class LibraryCanvas(qt.QObject):
         style.polish(self.dropFrame)
         self.dropZone.setToolTip(_("Drop more files here, or click to open files") if strip else _("Drop files here, or click to open files"))
 
+    def _fitDropZone(self):
+        """The empty-state zone is 480 x 220 (its frame 340 high) at the default font; with a larger application font its
+        text wraps within the 480 px and the zone and its frame grow with the text, so that nothing is cut (USABILITY 9.4).
+        """
+        if self._dataShown:
+            return
+        layout = self.dropFullLayout
+        height = max(DROP_ZONE_HEIGHT, layout.totalHeightForWidth(COLUMN_WIDTH) if layout.hasHeightForWidth() else 0)
+        self.dropZone.setFixedSize(COLUMN_WIDTH, height)
+        self.dropFrame.setFixedHeight(DROP_FRAME_SIZE[1] + height - DROP_ZONE_HEIGHT)
+
     def isStrip(self):
         return bool(self._dataShown)
+
+    def _onProjectsRefreshed(self):
+        """The Projects section listed the projects again (a project changed, or the folder was chosen or changed)."""
+        self._syncCurrentProject()
+        # Whether a project is attached decides the Close button and the lesion chips (A-09): closing a study re-attaches
+        # the project after the card was drawn without it
+        card = self._currentWork
+        if card is not None and card.widget.isVisible() and _studySession() is None:
+            try:
+                card.refresh()
+            except Exception:
+                logging.error(f"Studio Library: the current work card failed:\n{traceback.format_exc()}")
+        self._refreshCaption()
+        scheduleTabOrder()
+
+    def _syncCurrentProject(self):
+        """Show the open project (as the Projects section lists it) on the Continue card."""
+        if self._currentWork is not None and self.projectsSection is not None and hasattr(self.projectsSection, "currentInfo"):
+            self._currentWork.setProject(self.projectsSection.currentInfo())
 
     def refresh(self):
         self.refreshData()
         if self.projectsSection is not None:
             self.projectsSection.refresh()
-            if self._currentWork is not None and hasattr(self.projectsSection, "currentInfo"):
-                self._currentWork.setProject(self.projectsSection.currentInfo())
+            self._syncCurrentProject()
         if self.studiesSection is not None:
             try:
                 self.studiesSection.refresh()
@@ -5547,6 +6395,7 @@ class LibraryCanvas(qt.QObject):
                 logging.error(f"Studio Library: the Studies section failed:\n{traceback.format_exc()}")
         self._refreshCaption()
         self.recentList.refresh(force=False)
+        scheduleTabOrder()
 
     def focusFirst(self):
         """Focus the subject list of an open study, else "Continue in Draw" when the current work is shown, else the first recent
@@ -5831,6 +6680,13 @@ class LibraryPanel(qt.QObject):
         self.recentList = None
         self.studyCards = None
         self._sceneRefresher = _SceneRefresher(self.refresh)
+        # The open project changes without a scene event (Change folder > Move switches it to its new folder, a rename or a
+        # save changes what the project card shows): the card follows the project notifications, debounced (saves notify)
+        self._overviewTimer = qt.QTimer()
+        self._overviewTimer.setSingleShot(True)
+        self._overviewTimer.setInterval(100)
+        self._overviewTimer.connect("timeout()", self._refreshOverview)
+        self._listensToProjects = False
         _installEventFilter(self.widget, self)
         _panels.append(self)
 
@@ -5881,7 +6737,32 @@ class LibraryPanel(qt.QObject):
 
         ui.addPaletteListener(self._refreshIcons)
         self._refreshIcons()
+        self._listenToProjects()
         self.refresh()
+
+    def _listenToProjects(self):
+        projects = ProjectOverviewCard._projects()
+        if projects is not None and not self._listensToProjects:
+            self._listensToProjects = True
+            projects.addListener(self._scheduleOverview)
+
+    def _scheduleOverview(self):
+        if _isAlive(self.widget):
+            self._overviewTimer.start()
+
+    def _refreshOverview(self):
+        """The project card shows the project that is open now (its name and folder after Change folder > Move, for example)."""
+        if not self.isBuilt() or not _isAlive(self.widget) or not self.widget.isVisible():
+            return
+        if _studySession() is None and self.withCanvas() and hasData():
+            self.overviewCard.refresh()
+
+    def _disposeProjectListener(self):
+        self._overviewTimer.stop()
+        projects = ProjectOverviewCard._projects()
+        if projects is not None and self._listensToProjects:
+            self._listensToProjects = False
+            projects.removeListener(self._scheduleOverview)
 
     @staticmethod
     def withCanvas():
@@ -5894,6 +6775,10 @@ class LibraryPanel(qt.QObject):
         """
         if not self.isBuilt():
             return
+        self._refresh()
+        scheduleTabOrder()
+
+    def _refresh(self):
         withCanvas = self.withCanvas()
         studySession = _studySession()
         if studySession is not None:
@@ -5960,6 +6845,7 @@ def _livePanel():
             if panel.recentList is not None:
                 panel.recentList.dispose()
             panel._sceneRefresher.dispose()
+            panel._disposeProjectListener()
             if panel.openNowCard is not None:
                 panel.openNowCard.dispose()
             continue
@@ -5973,6 +6859,35 @@ def _livePanel():
 
 _canvas = None
 _sceneWatcher = None
+_tabOrderScheduled = False
+
+
+def scheduleTabOrder():
+    """Put the Tab order of the Library canvas and of the Library inspector in their reading order, once the cards that are
+    being built or rebuilt are all there. The keyboard focus chain of Qt follows the creation order of the widgets, which is
+    not the order on the screen where a card is created late (the Continue card, the study filter chips, the Import card) or
+    rebuilt (the "Open now" rows), so that Tab would reach the cards of the middle of the page after its bottom links and
+    after the inspector (USABILITY 9.1). Many refreshes in a row make one arrangement.
+    """
+    global _tabOrderScheduled
+    if _tabOrderScheduled:
+        return
+    _tabOrderScheduled = True
+    qt.QTimer.singleShot(0, _arrangeTabOrder)
+
+
+def _arrangeTabOrder():
+    global _tabOrderScheduled
+    _tabOrderScheduled = False
+    try:
+        if _canvas is not None and _isAlive(_canvas.widget) and _canvas.widget.isVisible():
+            ui.arrangeTabOrder(_canvas.widget)
+        panel = _livePanel()
+        shell = _shell()
+        if shell is not None and panel is not None and panel.isBuilt() and panel.widget.isVisible():
+            shell.arrangeInspectorTabOrder()
+    except Exception:
+        logging.error(f"Studio Library: the Tab order could not be arranged:\n{traceback.format_exc()}")
 
 
 def canvas():
@@ -6115,6 +7030,10 @@ def enter(shell):
     shell.setInspectorVisible(not isEmptyState(shell))
     libraryCanvas.refresh()
     libraryCanvas.focusFirst()
+    # The inspector panel stays shown across Classic and back (no Show event): it still holds the Classic cards
+    panel = _livePanel()
+    if panel is not None and panel.isBuilt():
+        panel.refresh()
     if _sceneWatcher is not None:
         _sceneWatcher.dispose()
     _sceneWatcher = _SceneWatcher(shell)

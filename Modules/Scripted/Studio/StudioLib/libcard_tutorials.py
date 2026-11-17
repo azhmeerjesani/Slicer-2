@@ -6,7 +6,7 @@ without an open study). It opens a dialog with the cohorts of ``LesionNetworkMap
 ``catalog/tutorials.json``; CC0 and Apache sources only):
 
 - the list shows the title, the licence and the size; the details show the summary, the licence badge, whether the masks
-  are in MNI space or native (normalize first, A-03), what the cohort teaches, the guidance on the lesion volume
+  are in MNI space or native (normalize first in Library > Normalization), what the cohort teaches, the guidance on the lesion volume
   covariate where there is one, and the citation to use;
 - options: all subjects or the first 25 (a quick start), the scans of native cohorts (large, off by default) and the
   folder of the new study (a new folder: nothing is overwritten);
@@ -59,9 +59,17 @@ def _toast(text, ms=3000, **kwargs):
         logging.info(f"Studio tutorials: {text}")
 
 
+def _studyFolderProblem(folder):
+    """Why ``folder`` cannot become the new study (``study_ui.studyFolderProblem``: Studio's own folders, a project or a
+    folder inside another study), or None. None too when this build has no study library.
+    """
+    studyUi = library._studyUi()
+    return studyUi.studyFolderProblem(folder) if studyUi is not None else None
+
+
 def cacheFolder():
-    """The LNM cache folder (``<application cache>/LNM``, as the other cards use it)."""
-    return os.path.join(slicer.app.cachePath, "LNM")
+    """The LNM cache folder (``$SLICER_LNM_CACHE``, else ``<application cache>/LNM``, as the other cards use it)."""
+    return _lnm("fetch").app_cache_dir()
 
 
 def defaultFolder(entry):
@@ -203,21 +211,32 @@ class TutorialsDialog:
         layout.addWidget(self.linkRow)
 
         layout.addWidget(self._header(_("Options")))
-        form = qt.QFormLayout()
+        # A grid, not a QFormLayout: Qt 5 keeps the row spacing of a form row whose widgets are all hidden, which left an empty
+        # band between "Subjects" and "New study in" when the scans and downloaded-folder rows do not apply. A grid row with
+        # only hidden widgets takes no space at all.
+        form = qt.QGridLayout()
         form.setContentsMargins(0, 0, 0, 0)
-        form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(8)
+        form.setColumnStretch(1, 1)
+        labelAlign = qt.Qt.AlignLeft | qt.Qt.AlignVCenter
         self.limitCombo = qt.QComboBox()
         self.limitCombo.setObjectName("StudioTutorialsLimit")
         self.limitCombo.setAccessibleName(_("Subjects"))
         self.limitCombo.setSizeAdjustPolicy(qt.QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.limitCombo.setMinimumContentsLength(12)
         self.limitRow = form
-        form.addRow(_("Subjects"), self.limitCombo)
+        form.addWidget(qt.QLabel(_("Subjects")), 0, 0, labelAlign)
+        form.addWidget(self.limitCombo, 0, 1)
+        self.scansRow = qt.QWidget()
+        scansLayout = qt.QVBoxLayout(self.scansRow)
+        scansLayout.setContentsMargins(0, 0, 0, 0)
         self.scansCheck = qt.QCheckBox(_("Also download the scans"))
         self.scansCheck.setObjectName("StudioTutorialsScans")
-        form.addRow("", self.scansCheck)
+        scansLayout.addWidget(self.scansCheck)
         self.scansNote = library._cardLabel("StudioTutorialsScansNote", 12, "text3")
-        form.addRow("", self.scansNote)
+        scansLayout.addWidget(self.scansNote)
+        form.addWidget(self.scansRow, 1, 1)
         self.sourceRow = qt.QWidget()
         sourceLayout = qt.QHBoxLayout(self.sourceRow)
         sourceLayout.setContentsMargins(0, 0, 0, 0)
@@ -229,7 +248,9 @@ class TutorialsDialog:
         self.sourceBrowse.setObjectName("StudioTutorialsSourceBrowse")
         self.sourceBrowse.connect("clicked()", self.browseSource)
         sourceLayout.addWidget(self.sourceBrowse)
-        form.addRow(_("Downloaded folder"), self.sourceRow)
+        self.sourceLabel = qt.QLabel(_("Downloaded folder"))
+        form.addWidget(self.sourceLabel, 2, 0, labelAlign)
+        form.addWidget(self.sourceRow, 2, 1)
         self.folderRow = qt.QWidget()
         folderLayout = qt.QHBoxLayout(self.folderRow)
         folderLayout.setContentsMargins(0, 0, 0, 0)
@@ -241,7 +262,8 @@ class TutorialsDialog:
         self.folderBrowse.setObjectName("StudioTutorialsBrowse")
         self.folderBrowse.connect("clicked()", self.browse)
         folderLayout.addWidget(self.folderBrowse)
-        form.addRow(_("New study in"), self.folderRow)
+        form.addWidget(qt.QLabel(_("New study in")), 3, 0, labelAlign)
+        form.addWidget(self.folderRow, 3, 1)
         layout.addLayout(form)
         self.sizeLabel = library._cardLabel("StudioTutorialsSize", 12, "text2")
         layout.addWidget(self.sizeLabel)
@@ -304,9 +326,9 @@ class TutorialsDialog:
 
     @staticmethod
     def _header(text):
-        label = qt.QLabel(text.upper())
+        label = qt.QLabel(text)
         label.setProperty("slicerRole", "sectionHeader")
-        library._setFont(label, 11, qt.QFont.DemiBold, 0.6)
+        library._setFont(label, 12, qt.QFont.DemiBold)
         return label
 
     def _sizeLine(self, entry):
@@ -373,7 +395,7 @@ class TutorialsDialog:
         ui.setChipLevel(self.spaceChip, "warn" if native else "neutral")
         self.summaryLabel.setText(entry["summary"])
         self.nativeLabel.setVisible(native)
-        self.nativeLabel.setText(_("The masks are in scan (native) space: normalize first (A-03). The scans are an option below; without them the study opens but cannot be normalized in the app."))
+        self.nativeLabel.setText(_("The masks are in scan (native) space: normalize first (Library > Normalization). The scans are an option below; without them the study opens but cannot be normalized in the app."))
         self.stepsLabel.setText("\n".join(f"{number}. {step}" for number, step in enumerate(entry["steps"], 1)))
         guidance = entry.get("volume_covariate")
         self.guidanceHeader.setVisible(bool(guidance))
@@ -387,18 +409,19 @@ class TutorialsDialog:
         self.limitCombo.blockSignals(True)
         self.limitCombo.clear()
         total = entry.get("n_subjects")
-        self.limitCombo.addItem(_("All {n} subjects").format(n=total) if total else _("All subjects"), None)
+        self.limitCombo.addItem((_("All {n} subject") if total == 1 else _("All {n} subjects")).format(n=total) if total else _("All subjects"), None)
         if total is None or total > QUICK_START_SUBJECTS:
             self.limitCombo.addItem(_("The first {n} (quick start)").format(n=QUICK_START_SUBJECTS), QUICK_START_SUBJECTS)
         self.limitCombo.blockSignals(False)
         self.limitCombo.setCurrentIndex(0)
+        self.scansRow.setVisible(native and not isFolder)
         self.scansCheck.setVisible(native and not isFolder)
         self.scansCheck.setChecked(False)
         scanBytes = entry.get("scan_bytes_each")
         self.scansNote.setVisible(native and not isFolder)
         self.scansNote.setText(_("The scans are needed to normalize in the app; about {size} each.").format(size=tutorials.human_size(scanBytes)) if scanBytes else "")
         self.sourceRow.setVisible(isFolder)
-        self.limitRow.labelForField(self.sourceRow).setVisible(isFolder)
+        self.sourceLabel.setVisible(isFolder)
         self.folderEdit.setText(self._folders.get(entry["id"]) or defaultFolder(entry))
         self._refreshSize()
         self._refreshCache()
@@ -427,10 +450,26 @@ class TutorialsDialog:
     def folder(self):
         return str(self.folderEdit.text).strip()
 
+    @staticmethod
+    def _typedPath(text):
+        """``text`` of a folder field as the absolute path the job is given (``~`` expanded), "" when empty, None when relative.
+
+        The job runs in the module folder (``jobrunner``): a relative path, or a ``~`` left as typed, would put the study
+        inside the application, so the dialog refuses it (``_pathProblem``) and checks the same path that the job gets.
+        """
+        from LesionNetworkMappingUI import widgets
+
+        return widgets.typedPath(text)
+
+    @staticmethod
+    def _pathProblem(text):
+        from LesionNetworkMappingUI import widgets
+
+        return widgets.relativePathProblem(text)
+
     def _options(self):
-        """What a build is made from: the study folder, the subject limit and the scans option."""
-        folder = self.folder()
-        return (os.path.normpath(folder) if folder else "", self.limit(), self.scans())
+        """What a build is made from: the study folder (absolute; None when relative), the subject limit and the scans option."""
+        return (self._typedPath(self.folder()), self.limit(), self.scans())
 
     def _onOptionChanged(self):
         self._refreshSize()
@@ -441,14 +480,22 @@ class TutorialsDialog:
         busy = self.isBusy()
         # "Built" only while the dialog still describes that build: another folder, size or scans option offers a new build.
         built = self.resultPath is not None and os.path.isdir(self.resultPath) and getattr(self, "_resultId", None) == (entry or {}).get("id") and self._resultOptions == self._options()
-        folder = self.folder()
+        folder = self._typedPath(self.folder())
         needsSource = entry is not None and entry["source"]["type"] == "folder"
+        source = self._typedPath(self.sourceEdit.text) if needsSource else ""
         reason = ""
         if not folder:
-            reason = _("Choose a folder for the new study")
-        elif os.path.isfile(folder) or (os.path.isdir(folder) and os.listdir(folder)):
+            reason = _("Choose a folder for the new study") if folder == "" else self._pathProblem(self.folder())
+        elif _studyFolderProblem(folder):
+            # The same rule as New study and Create study (A-09): never a study in Projects/, a project or another study
+            reason = _studyFolderProblem(folder)
+        elif os.path.isfile(folder):
+            reason = _("This is a file: choose a folder")
+        elif os.path.isdir(folder) and os.listdir(folder):
             reason = _("This folder is not empty: choose a new one")
-        elif needsSource and not os.path.isdir(str(self.sourceEdit.text).strip()):
+        elif needsSource and source is None:
+            reason = self._pathProblem(self.sourceEdit.text)
+        elif needsSource and not os.path.isdir(source):
             reason = _("Choose the folder you downloaded")
         self.downloadButton.setText(_("Build study") if needsSource else _("Download and build"))
         self.downloadButton.setEnabled(not busy and not reason)
@@ -457,7 +504,7 @@ class TutorialsDialog:
         self.openButton.setVisible(built)
         self.stopButton.setVisible(busy)
         self.closeButton.setText(_("Hide") if busy else _("Close"))
-        for widget in (self.listWidget, self.limitCombo, self.scansCheck, self.folderEdit, self.folderBrowse, self.sourceEdit, self.sourceBrowse):
+        for widget in (self.listWidget, self.limitCombo, self.scansCheck, self.folderEdit, self.folderBrowse, self.sourceEdit, self.sourceBrowse, self.cacheButton):
             widget.setEnabled(not busy)
 
     # Actions
@@ -466,17 +513,19 @@ class TutorialsDialog:
         entry = self.entry()
         link = entry["source"].get("link") if entry else None
         if link:
-            qt.QDesktopServices.openUrl(qt.QUrl(link))
+            from . import projects
+
+            projects.openLink(link)
 
     def browse(self):
-        start = os.path.dirname(self.folder()) or os.path.expanduser("~")
+        start = os.path.dirname(self._typedPath(self.folder()) or "") or library._importer().dialogStartFolder(os.path.expanduser("~"))
         chosen = qt.QFileDialog.getExistingDirectory(self.dialog, _("Folder of the new study"), start)
         if chosen:
             entry = self.entry()
             self.folderEdit.setText(os.path.join(str(chosen), entry["id"]) if os.path.isdir(str(chosen)) and os.listdir(str(chosen)) else str(chosen))
 
     def browseSource(self):
-        chosen = qt.QFileDialog.getExistingDirectory(self.dialog, _("The folder you downloaded"), str(self.sourceEdit.text) or os.path.expanduser("~"))
+        chosen = qt.QFileDialog.getExistingDirectory(self.dialog, _("The folder you downloaded"), str(self.sourceEdit.text) or library._importer().dialogStartFolder(os.path.expanduser("~")))
         if chosen:
             self.sourceEdit.setText(str(chosen))
 
@@ -497,9 +546,14 @@ class TutorialsDialog:
         except ImportError:
             self.statusLabel.setText(_("The job runner is not available in this build."))
             return False
-        dest = self.folder()
+        dest = self._typedPath(self.folder())
+        if not dest:  # the button checks this too: never let a relative path reach the job (it would build inside the application)
+            return False
+        if _studyFolderProblem(dest):  # the button checks this too: the folder may have changed since (a project or study made there)
+            self._updateButtons()
+            return False
         self._startOptions = self._options()
-        sourceDir = str(self.sourceEdit.text).strip() or None
+        sourceDir = (self._typedPath(self.sourceEdit.text) or None) if entry["source"]["type"] == "folder" else None
         args = buildArguments(entry, dest, self.limit(), self.scans(), sourceDir, catalog=catalogPath)
         spec = jobrunner.JobSpec("LesionNetworkMappingLib.tutorials", args, title=_("Tutorial cohort"), heavy=False, kind="tutorial", runRoot=self.tutorials.cache_root(cacheFolder()),
                                  onEvent=self._onEvent, onDone=self._onDone, name="tutorial")
@@ -508,6 +562,7 @@ class TutorialsDialog:
         self._resultOptions = None
         self._jobId = entry["id"]
         self._warnings = 0
+        self._notes = []
         self.progressBar.setRange(0, 0)
         self.progressBar.show()
         self.statusLabel.setText(_("Listing the files…"))
@@ -527,12 +582,14 @@ class TutorialsDialog:
             self.statusLabel.setText(labels.get(event.get("name"), str(event.get("label") or "")))
         elif kind == "warning":
             self._warnings += 1
+            if event.get("message"):
+                self._notes.append(str(event["message"]))
         elif kind == "progress":
             stage, done, total = event.get("stage"), event.get("done") or 0, event.get("total") or 0
             if stage == "download":
                 have, want = event.get("bytes_done") or 0, event.get("bytes_total") or 0
                 fraction = have / want if want else (done / total if total else 0)
-                text = _("Downloading… {done} of {total} files").format(done=done, total=total)
+                text = (_("Downloading… {done} of {total} file") if total == 1 else _("Downloading… {done} of {total} files")).format(done=done, total=total)
                 if want:
                     text += " · " + _("{have} of {want}").format(have=self.tutorials.human_size(have), want=self.tutorials.human_size(want))
                 self.statusLabel.setText(text)
@@ -556,11 +613,15 @@ class TutorialsDialog:
             subjects = int(result.get("subjects") or 0)
             text = (_("Built {n} subject") if subjects == 1 else _("Built {n} subjects")).format(n=subjects)
             if result.get("native"):
-                text += " · " + _("normalize first (A-03)")
+                text += " · " + _("normalize first (Library > Normalization)")
             if self._warnings:
-                text += " · " + (_("{n} note, see the job log") if self._warnings == 1 else _("{n} notes, see the job log")).format(n=self._warnings)
+                text += " · " + (_("{n} note") if self._warnings == 1 else _("{n} notes")).format(n=self._warnings)
+                shown = self._notes[:5]
+                text += "\n" + "\n".join("• " + note for note in shown)
+                if self._warnings > len(shown):
+                    text += "\n" + _("… and {n} more (in the README of the study)").format(n=self._warnings - len(shown))
             self.statusLabel.setText(text)
-            _toast(_("Tutorial study ready · {n} subjects").format(n=subjects), 6000, action=self.openStudy, actionText=_("Open"))
+            _toast((_("Tutorial study ready · {n} subject") if subjects == 1 else _("Tutorial study ready · {n} subjects")).format(n=subjects), 6000, action=self.openStudy, actionText=_("Open"))
         elif job.state == "cancelled":
             self.statusLabel.setText(_("Stopped. Downloaded files are kept; nothing was built."))
         else:

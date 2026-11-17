@@ -135,6 +135,28 @@ void qMRMLSegmentSelectorWidget::onCurrentNodeChanged(vtkMRMLNode* node)
     qvtkReconnect(d->SegmentationNode, segmentationNode, vtkSegmentation::SegmentModified, this, SLOT(populateSegmentCombobox()));
 
     d->SegmentationNode = segmentationNode;
+
+    // The stored multi-selection may hold segment IDs of the previous segmentation node.
+    // As in upstream it is kept and restored by populateSegmentCombobox (a selection set
+    // before the node, or IDs shared by several segmentations, survive a node change).
+    // The IDs that do not exist in the new node are dropped silently: restoring them
+    // would report a selection change (those IDs are missing, so the selection shrinks),
+    // which listeners (such as the slice controller's segment visibility menu) apply to
+    // the new node, hiding its segments. The new selection is set by whoever owns the widget.
+    if (segmentationNode && segmentationNode->GetSegmentation())
+    {
+      vtkSegmentation* segmentation = segmentationNode->GetSegmentation();
+      QStringList keptSegmentIDs;
+      for (const QString& segmentID : d->SelectedSegmentIDs)
+      {
+        if (segmentation->GetSegment(segmentID.toUtf8().constData()))
+        {
+          keptSegmentIDs << segmentID;
+        }
+      }
+      d->SelectedSegmentIDs = keptSegmentIDs;
+    }
+
     this->populateSegmentCombobox();
   }
 }

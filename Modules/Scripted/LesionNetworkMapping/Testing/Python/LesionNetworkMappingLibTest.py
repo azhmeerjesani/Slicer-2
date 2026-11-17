@@ -7,6 +7,7 @@ Run without Slicer's GUI:
 """
 
 import contextlib
+import errno
 import io
 import json
 import os
@@ -17,6 +18,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 MODULE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if MODULE_DIR not in sys.path:
@@ -26,7 +28,7 @@ import numpy as np
 from scipy import io as sio
 from scipy import stats as scipy_stats
 
-from LesionNetworkMappingLib import connectome, engine, export, geometry, nifti, qa, stats, thresholds
+from LesionNetworkMappingLib import connectome, engine, export, geometry, jobs, nifti, qa, stats, thresholds
 
 # float16 stores the unit-norm time series with unit roundoff u = 2**-11. By Cauchy-Schwarz the error
 # of r = x . s is at most ~u from the voxel row plus ~2u from the seed, i.e. |dr| <= 3u ~ 1.5e-3.
@@ -82,6 +84,24 @@ class _TempDirTestCase(unittest.TestCase):
 
     def path(self, *parts):
         return os.path.join(self.tmp, *parts)
+
+
+class NotABundleHintTest(_TempDirTestCase):
+    def test_unfinished_parent_and_other_folders(self):
+        partial = self.path("dest", "x.lnmc")
+        os.makedirs(partial)
+        with open(os.path.join(partial, connectome.PARTIAL_MANIFEST_NAME), "w") as f:
+            f.write("{}")
+        self.assertEqual(connectome.not_a_bundle_hint(partial), "unfinished")
+        done = self.path("dest2", "y.lnmc")
+        os.makedirs(done)
+        with open(os.path.join(done, connectome.MANIFEST_NAME), "w") as f:
+            f.write("{}")
+        self.assertEqual(connectome.not_a_bundle_hint(self.path("dest2")), done)
+        os.makedirs(self.path("empty"))
+        self.assertIsNone(connectome.not_a_bundle_hint(self.path("empty")))
+        self.assertIsNone(connectome.not_a_bundle_hint(self.path("missing")))
+        self.assertIsNone(connectome.not_a_bundle_hint(done))
 
 
 class NiftiTest(_TempDirTestCase):
@@ -162,6 +182,38 @@ class NiftiTest(_TempDirTestCase):
             f.write(b"\0" * 400)
         with self.assertRaises(ValueError):
             nifti.read_nifti(path)
+
+    def test_image_data_problem_finds_files_cut_short(self):
+        """A file cut short is found (readers that show its missing part as zeros say nothing); a complete file is not,
+        also as several gzip members or with padding after the stream (BB-1).
+        """
+        import gzip
+
+        data = np.random.default_rng(5).integers(0, 2, size=(20, 18, 16)).astype(np.uint8)
+        path = self.path("lesion.nii.gz")
+        nifti.write_nifti(path, data, RAS_AFFINE)
+        with open(path, "rb") as f:
+            raw = f.read()
+        plain = gzip.decompress(raw)
+        expected = len(plain)
+
+        def write(name, payload):
+            with open(self.path(name), "wb") as f:
+                f.write(payload)
+            return nifti.image_data_problem(self.path(name))
+
+        self.assertIsNone(nifti.image_data_problem(path))
+        self.assertIsNone(write("plain.nii", plain))
+        self.assertIsNone(write("members.nii.gz", gzip.compress(plain[:1000]) + gzip.compress(plain[1000:])))
+        self.assertIsNone(write("padded.nii.gz", raw + b"\0" * 16))
+        self.assertIsNone(write("trailing.nii.gz", raw + b"not gzip"))
+        self.assertIsNone(nifti.image_data_problem(self.path("absent.nii.gz")), "a missing file is left to the caller")
+        self.assertIsNone(write("nifti2.nii", (540).to_bytes(4, "little") + b"\0" * 600), "not read here: left to other readers")
+        self.assertIn("cut short", write("half.nii", plain[:expected // 2]))
+        self.assertIsNotNone(write("half.nii.gz", raw[:len(raw) // 2]))
+        self.assertIsNotNone(write("header.nii.gz", raw[:30]))
+        self.assertIsNotNone(write("members-cut.nii.gz", (gzip.compress(plain[:1000]) + gzip.compress(plain[1000:]))[:-200]))
+        self.assertIsNotNone(write("short-stream.nii.gz", gzip.compress(plain[:expected - 10])), "a complete stream of too few bytes")
 
     def test_consistent_with_simpleitk(self):
         try:
@@ -757,6 +809,36 @@ class BundleTest(_TempDirTestCase):
                 connectome.ConnectomeWriter(path, mask, affine, resume=True)
         self.assertEqual(connectome.ConnectomeBundle.open(path).subject_ids, ["s3"])
 
+    def test_a_full_disk_leaves_no_temporary_file_and_a_resume_removes_stale_ones(self):
+        path = self.path("full.lnmc")
+        writer = connectome.ConnectomeWriter(path, self.mask, RAS_AFFINE)
+        writer.add_subject("s1", _random_subjects(self.rng, self.n_voxels, 1, (6,))[0])
+        subjects_dir = os.path.join(path, "subjects")
+        def short_write(file, array, *args, **kwargs):
+            file.write(b"\x93NUMPY partial")
+            raise OSError("409600 requested and 303040 written")  # numpy's short write on a full disk has no errno
+
+        with mock.patch.object(connectome.np, "save", short_write):
+            with self.assertRaises(OSError) as context:
+                writer.add_subject("s2", _random_subjects(self.rng, self.n_voxels, 1, (6,))[0])
+        self.assertTrue(jobs.is_disk_full_error(context.exception))
+        self.assertTrue(jobs.is_disk_full_error(OSError(errno.ENOSPC, "No space left on device")))
+        self.assertFalse(jobs.is_disk_full_error(OSError(errno.EACCES, "denied")))
+        self.assertFalse(jobs.is_disk_full_error(ValueError("409600 requested and 303040 written")))
+        self.assertEqual(sorted(os.listdir(subjects_dir)), ["s1.f16.npy", "s1.norms.npy"])
+        self.assertFalse(writer.has_subject("s2"))
+        # Files of a writer that was killed (another pid) are removed by the resume, so they never reach the finished bundle
+        for stale in (os.path.join(subjects_dir, "s2.f16.npy.4242.tmp"), os.path.join(path, "connectome.partial.json.4242.tmp")):
+            with open(stale, "wb") as f:
+                f.write(b"partial")
+        resumed = connectome.ConnectomeWriter(path, self.mask, RAS_AFFINE, resume=True)
+        self.assertTrue(resumed.has_subject("s1"))
+        resumed.add_subject("s2", _random_subjects(self.rng, self.n_voxels, 1, (6,))[0])
+        resumed.finalize()
+        leftovers = [name for folder, _, names in os.walk(path) for name in names if name.endswith(".tmp")]
+        self.assertEqual(leftovers, [])
+        self.assertEqual(connectome.ConnectomeBundle.open(path).subject_ids, ["s1", "s2"])
+
     def test_prefetch_thread_stops_on_early_close(self):
         bundle = _write_bundle(self.path("prefetch.lnmc"), _random_subjects(self.rng, self.n_voxels, 6, (10,)), self.mask)
         for reuse_buffers in (False, True):
@@ -814,6 +896,104 @@ class BundleTest(_TempDirTestCase):
         nifti.write_nifti(self.path("sub-03_run-1_bold.nii.gz"), np.zeros((*self.mask.shape, 5), np.float32), RAS_AFFINE)
         with self.assertRaisesRegex(ValueError, "not on the mask grid"):
             connectome.from_nifti_timeseries(self.path("sub-*_bold.nii.gz"), mask_path, self.path("bad.lnmc"))
+
+    def test_resume_only_continues_an_interrupted_conversion_of_the_same_inputs(self):
+        """Bug BB-1 convert-resume-into-finished-bundle-duplicates-subjects: a resume into a finished bundle appended its
+        subjects again under other ids, renamed it and erased its terms (and the manager reported success).
+        """
+        from LesionNetworkMappingLib import manager
+
+        mask_path = self.path("mask.nii.gz")
+        nifti.write_nifti(mask_path, self.mask.astype(np.uint8), RAS_AFFINE)
+        for name in ("sub-01_bld001", "sub-02_bld001", "sub-03_bld001"):
+            nifti.write_nifti(self.path(f"{name}.nii.gz"), self.rng.standard_normal((*self.mask.shape, 6)).astype(np.float32), RAS_AFFINE)
+        runs = self.path("sub-*_bld001.nii.gz")
+        grouping = r"(?P<subject>sub-\d+)_bld"
+        out = self.path("finished.lnmc")
+        connectome.from_nifti_timeseries(runs, mask_path, out, runs_grouping=grouping, name="Finished", citation="Cite me", data_use_terms="Research use only.")
+        manifest = os.path.join(out, connectome.MANIFEST_NAME)
+        with open(manifest, encoding="utf-8") as f:
+            before = f.read()
+        # A finished bundle has nothing to resume: refused (with other ids, or with the same inputs), and left unchanged
+        for kwargs in ({}, {"runs_grouping": grouping}):
+            with self.assertRaisesRegex(FileExistsError, "finished connectome bundle"):
+                connectome.from_nifti_timeseries(runs, mask_path, out, name="Other", resume=True, **kwargs)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(jobs.JobError) as context:
+                manager.main(["convert", "--source", "nifti", "--input", self.tmp, "--mask", mask_path, "--out", out, "--name", "Other", "--resume"])
+        self.assertEqual(context.exception.code, "exists")
+        with open(manifest, encoding="utf-8") as f:
+            self.assertEqual(f.read(), before)
+        self.assertEqual(sorted(os.listdir(os.path.join(out, "subjects"))), sorted(f"sub-0{i}.{ext}.npy" for i in (1, 2, 3) for ext in ("f16", "norms")))
+        # An interrupted conversion resumed with other subjects (another runs grouping) is refused too
+        partial = self.path("partial.lnmc")
+        writer = connectome.ConnectomeWriter(partial, self.mask, RAS_AFFINE, name="Partial", citation="Cite me", data_use_terms="Research use only.")
+        writer.add_subject("sub-01", [self.rng.standard_normal((self.n_voxels, 6))])
+        with self.assertRaisesRegex(ValueError, "not in these inputs"):
+            connectome.from_nifti_timeseries(runs, mask_path, partial, resume=True)
+        # Resumed with the same inputs and no texts, it keeps its name, citation and terms
+        bundle = connectome.ConnectomeBundle.open(connectome.from_nifti_timeseries(runs, mask_path, partial, runs_grouping=grouping, resume=True))
+        self.assertEqual(bundle.subject_ids, ["sub-01", "sub-02", "sub-03"])
+        self.assertEqual((bundle.name, bundle.citation, bundle.data_use_terms), ("Partial", "Cite me", "Research use only."))
+
+    def test_a_moved_bundle_says_it_is_gone_not_a_python_exception(self):
+        """Bug BB-1 moved-bundle-message-raw-filenotfounderror: a registered folder that was moved showed
+        "FileNotFoundError: Not a connectome bundle (missing connectome.json)" in the manager row and the card banner.
+        """
+        from LesionNetworkMappingLib import manager
+
+        gone = self.path("old", "Syn.lnmc")
+        row = manager.bundle_summary(gone)
+        for text in (row["error"], manager.provenance_line(row)):
+            self.assertNotIn("FileNotFoundError", text)
+            self.assertNotIn("missing connectome.json", text)
+            self.assertIn("no longer at", text)
+            self.assertIn(gone, text)
+            self.assertIn("Add bundle", text)
+            self.assertIn("Remove", text)
+        # A folder that is there but is not a bundle keeps its own explanation
+        os.makedirs(self.path("empty.lnmc"))
+        other = manager.bundle_summary(self.path("empty.lnmc"))["error"]
+        self.assertIn("missing connectome.json", other)
+        self.assertNotIn("FileNotFoundError", other)
+
+    def test_converting_again_without_resume_keeps_a_stopped_conversion(self):
+        """Bug BB-1 convert-without-resume-silently-deletes-stopped-conversion: converting again into a stopped conversion
+        without resume (the Convert dialog's default) deleted the subjects it had written and started from zero, without asking.
+        """
+        from LesionNetworkMappingLib import manager
+
+        mask_path = self.path("mask.nii.gz")
+        nifti.write_nifti(mask_path, self.mask.astype(np.uint8), RAS_AFFINE)
+        inputs = self.path("stopped-inputs")
+        os.makedirs(inputs)
+        for name in ("sub-01", "sub-02", "sub-03"):
+            nifti.write_nifti(os.path.join(inputs, f"{name}.nii.gz"), self.rng.standard_normal((*self.mask.shape, 6)).astype(np.float32), RAS_AFFINE)
+        out = self.path("stopped.lnmc")
+        writer = connectome.ConnectomeWriter(out, self.mask, RAS_AFFINE, name="Stopped")
+        writer.add_subject("sub-01", [self.rng.standard_normal((self.n_voxels, 6))])
+        written = sorted(os.listdir(os.path.join(out, "subjects")))
+        self.assertEqual(written, ["sub-01.f16.npy", "sub-01.norms.npy"])
+        # Neither the writer, the NIfTI converter nor the manager job deletes it without resume or overwrite
+        with self.assertRaisesRegex(FileExistsError, "interrupted conversion"):
+            connectome.ConnectomeWriter(out, self.mask, RAS_AFFINE)
+        with self.assertRaisesRegex(FileExistsError, "interrupted conversion"):
+            connectome.from_nifti_timeseries(os.path.join(inputs, "*.nii.gz"), mask_path, out)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(jobs.JobError) as context:
+                manager.main(["convert", "--source", "nifti", "--input", inputs, "--mask", mask_path, "--out", out])
+        self.assertEqual(context.exception.code, "interrupted")
+        self.assertEqual(sorted(os.listdir(os.path.join(out, "subjects"))), written)
+        self.assertTrue(os.path.isfile(os.path.join(out, connectome.PARTIAL_MANIFEST_NAME)))
+        # Resume continues it; overwrite (asked for) starts over
+        bundle = connectome.ConnectomeBundle.open(connectome.from_nifti_timeseries(os.path.join(inputs, "*.nii.gz"), mask_path, out, resume=True))
+        self.assertEqual(bundle.subject_ids, ["sub-01", "sub-02", "sub-03"])
+        again = self.path("stopped-again.lnmc")
+        writer = connectome.ConnectomeWriter(again, self.mask, RAS_AFFINE, name="Stopped")
+        writer.add_subject("old", [self.rng.standard_normal((self.n_voxels, 6))])
+        bundle = connectome.ConnectomeBundle.open(connectome.from_nifti_timeseries(os.path.join(inputs, "*.nii.gz"), mask_path, again, overwrite=True))
+        self.assertEqual(bundle.subject_ids, ["sub-01", "sub-02", "sub-03"])
+        self.assertFalse(os.path.exists(os.path.join(again, "subjects", "old.f16.npy")))
 
     def test_from_leaddbs(self):
         shape = (6, 7, 8)
@@ -940,9 +1120,11 @@ class CommandLineTest(_TempDirTestCase):
         result, events = self._run("--bundle", meta["path"], "--lesion", lesion_path, "--out", out_dir, "--subjects", "3", "--random", "--seed", "4")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(events[-1]["n"], 3)
+        # A bundle that cannot be opened is a usage error (exit code 2, the option named), not a crash (exit code 1)
         result, events = self._run("--bundle", self.path("missing.lnmc"), "--lesion", lesion_path, "--out", out_dir)
-        self.assertEqual(result.returncode, 1)
-        self.assertEqual(events[-1]["event"], "error")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual((events[-1]["event"], events[-1]["code"]), ("error", "usage"))
+        self.assertIn("--bundle", events[-1]["message"])
         self.assertIn("missing.lnmc", events[-1]["message"])
         # Invalid arguments are reported as a JSON error event too (argparse exit code 2)
         result, events = self._run("--bundle", meta["path"], "--lesion", lesion_path, "--out", out_dir, "--threads", "abc")
@@ -1460,6 +1642,10 @@ class ExportTest(_TempDirTestCase):
         self.assertEqual(engine._unique_name("sub-07_ses-2", ["sub-07_ses-2", "sub-07_ses-2_lesion-2"]), "sub-07_ses-2_lesion-3")
         self.assertEqual(engine._unique_name("patient01_lesion", ["patient01_lesion"]), "patient01_lesion-2")
         self.assertEqual(engine._unique_name("sub-08", ["sub-07"]), "sub-08")
+        # Names that differ only in case name one map file on macOS: they are made unique too
+        self.assertEqual(engine._unique_name("lesion", ["Lesion"]), "lesion-2")
+        self.assertEqual(engine._unique_name("sub-p01", ["sub-P01"]), "sub-p01_lesion-2")
+        self.assertEqual(engine._unique_name("LESION-2", ["Lesion", "lesion-2"]), "LESION-2-2")
         peaks = stats.peak_table(np.array([0.0, 5.0, -7.0]), geometry.Grid((3, 1, 1), RAS_AFFINE), top_k=2, min_distance_mm=0.5)
         export.write_peaks_tsv(self.path("peaks.tsv"), peaks, ["Precuneus"])
         with open(self.path("peaks.tsv"), encoding="utf-8") as f:
@@ -1524,7 +1710,7 @@ class ExportTest(_TempDirTestCase):
         self.assertEqual(sidecar["lesion"]["file"], os.path.relpath(lesion_path, out).replace(os.sep, "/"))
         self.assertNotIn(self.tmp, json.dumps(sidecar))
         self.assertGreater(sidecar["lesion"]["voxels_on_connectome_grid"], 0)
-        self.assertEqual(set(sidecar["qa"]), {"degree_r", "degree_rho", "degree_level", "null", "null_level"})
+        self.assertEqual(set(sidecar["qa"]), {"degree_r", "degree_rho", "degree_level", "null", "null_level", "lesion_space", "space_notice"})
         self.assertEqual(sidecar["qa"]["null"]["k"], 4)
         self.assertEqual(sidecar["threshold"]["derived"], thresholds.describe(thresholds.resolve(None, 3, 3752)))
         with open(os.path.join(out, "provenance.json"), encoding="utf-8") as f:

@@ -20,7 +20,9 @@ This page is the overview. Three pages go deeper:
 
 ## Research use only
 
-Every sidecar, the methods text, the report and the footer of the module carry this statement:
+Every sidecar, the methods text and the report carry this statement. The footer of the module shows it as one line,
+"Research use only. Lesion network mapping specificity is debated. Read more", and **Read more** opens the whole
+statement:
 
 > Research use only — not for clinical decisions. Lesion network mapping specificity is debated (van den Heuvel et al., 2026, Nat Neurosci, doi:10.1038/s41593-025-02196-7; Siddiqi et al., 2026, bioRxiv, doi:10.64898/2026.02.24.707529; Zalesky & Cash, 2026, Nat Neurosci, doi:10.1038/s41593-026-02259-3).
 
@@ -65,32 +67,32 @@ capped so that the computer stays usable.
 ## The Map workspace
 
 The inspector of the Map workspace is a list of **cards** in a fixed order; the same cards appear in the Classic
-interface. Cards that do not apply to the seed (Lesion, Cohort, Coordinates or Stimulation) are hidden, and the research-only
+interface. Cards that do not apply to the seed (Lesion, Cohort, Coordinates or Stimulation) are hidden (the last column of the table says which seeds show each card), and the research-only
 statement is always visible at the bottom.
 
-| Card | What it is for |
-| ---- | -------------- |
-| Battery strip | six dots that show which of the checks below have been run |
-| Recipe | the named analysis recipe and the state of the analysis plan ("Plan: open", "Plan: locked 2026-10-18 · 3f2a…") |
-| Seed | Lesion, Cohort (n lesions), Coordinates or Stimulation |
-| Normalize to MNI | native-space lesions (see [Intake](lnm_intake.md#normalize-native-space-lesions-to-mni)) |
-| Connectome | the connectome in use: name, DOI, version, N, ages, GSR, voxels, the data use terms, and **Manage…** |
-| Preflight | the checks before a run: study, connectome and its terms, design |
-| Run everything | the automated cohort analysis (cohort seed) |
-| Compute | **Map network** (or **Maps only** for a cohort) |
-| Result | the map, its threshold rule and the percentage of voxels above it, the GSR banner |
-| QA | the degree similarity and the relocated-lesion null chip |
-| Cohort | tabs **Overlap**, **Contrast**, **Symptom** and **VLSM** |
-| Nulls | null-referenced sensitivity |
-| Validate | out-of-sample validation against baselines |
-| Robust | threshold sweep, other connectome, split-half, influence |
-| Clusters | cluster tables with atlas labels |
-| Networks | the networks that a map overlaps |
-| Circuits | a result re-seeded as a circuit; damage scores and targets |
-| Compare | comparison with other maps and a library of reference maps |
-| Calibrate | empirical false-positive rate and planted-network recovery |
-| Report | the reporting checklist, the methods text and the publication bundle |
-| Export | the maps with their sidecars |
+| Card | What it is for | Shown for seed |
+| ---- | -------------- | -------------- |
+| Battery strip | six dots that show which of the checks below have been run | All |
+| Recipe | the named analysis recipe and the state of the analysis plan ("Plan: open", "Plan: locked 2026-10-18 · 3f2a…") | All |
+| Seed | Lesion, Cohort (n lesions), Coordinates or Stimulation | All |
+| Normalize to MNI | native-space lesions (see [Intake](lnm_intake.md#normalize-native-space-lesions-to-mni)) | Lesion |
+| Connectome | the connectome in use: name, DOI, version, N, ages, GSR, voxels, the data use terms, and **Manage…** | All |
+| Preflight | the checks before a run: study, connectome and its terms, design | Cohort |
+| Run everything | the automated cohort analysis (cohort seed) | Cohort |
+| Compute | **Map network** (or **Maps only** for a cohort) | All |
+| Result | the map, its threshold rule and the percentage of voxels above it, the GSR banner | Lesion; other seeds only while a map is browsed |
+| QA | the degree similarity and the relocated-lesion null chip | Lesion, Cohort |
+| Cohort | tabs **Overlap**, **Contrast**, **Symptom** and **VLSM** | Cohort; Coordinates and Stimulation once seed maps exist |
+| Nulls | null-referenced sensitivity | Cohort |
+| Validate | out-of-sample validation against baselines | Cohort |
+| Robust | threshold sweep, other connectome, split-half, influence | Cohort |
+| Clusters | cluster tables with atlas labels | Lesion, Cohort |
+| Networks | the networks that a map overlaps | Lesion, Cohort |
+| Circuits | a result re-seeded as a circuit; damage scores and targets | All |
+| Compare | comparison with other maps and a library of reference maps | Lesion, Cohort |
+| Calibrate | empirical false-positive rate and planted-network recovery | Cohort |
+| Report | the reporting checklist, the methods text and the publication bundle | All |
+| Export | the maps with their sidecars | Lesion |
 
 **Ctrl+Enter** runs the preflight and then the computation. The status chip follows the running job ("Mapping 34%",
 "GLM 1200/5000 · 3 min left").
@@ -100,9 +102,10 @@ statement is always visible at the bottom.
 1. **Open or create a study** in the Library (drop a folder of lesion masks, or use a
    [tutorial cohort](lnm_data.md#templates-atlases-and-tutorials)). Check that the lesions are in MNI space or normalize
    them first ([Intake](lnm_intake.md)). Confirm the role of any column you want to use (a group or a score).
-2. **Choose a connectome** in the Connectome card. If you have none, **Manage… > Get a connectome…** offers the catalog,
-   after you have read and accepted the provider's terms ([Data](lnm_data.md#getting-a-connectome)), and **Create
-   synthetic demo** makes a toy one for learning.
+2. **Choose a connectome** in the Connectome card. If you have none, the card shows **Get a connectome…**, which offers
+   the catalog, after you have read and accepted the provider's terms ([Data](lnm_data.md#getting-a-connectome)), and
+   **Use the demo**, which makes a toy one for learning. (Once a connectome is registered the card shows **Manage…**
+   instead, and the catalog is in **Manage… > Get a connectome…**.)
 3. **Open Map**, set the seed to **Cohort**, and read the **Preflight** card. It says what is missing before anything runs.
 4. **Run everything** (or **Maps only** and the single steps). Look at the overlap and the QA chips first.
 5. **Compare cases with controls or relate a score** in the Cohort card ([Statistics](lnm_statistics.md)), look at the
@@ -175,7 +178,9 @@ output.
 **Converting a connectome.** **Map > Connectome > Manage…** opens the connectome manager, which registers a bundle,
 converts one (a folder of preprocessed 4D NIfTI runs on one brain mask, or a Lead-DBS fMRI connectome folder),
 builds the degree map and the reference maps, and removes a registration (never the files). A conversion shows the
-disk space it needs before it starts and can be resumed. On the command line:
+disk space it needs before it starts and can be resumed. The converted bundle is registered and listed in the
+Connectome card; it is selected only when the open project has no connectome yet, so a conversion that ends while you
+work never changes the connectome of your map. On the command line:
 
 ```
 PythonSlicer -m LesionNetworkMappingLib.manager convert --source nifti --input DIR_OR_GLOB --mask MASK.nii.gz --out NAME.lnmc
@@ -186,12 +191,13 @@ PythonSlicer -m LesionNetworkMappingLib.manager estimate --source nifti --input 
 **Where to get a connectome.** The module is made for the **Brain Genomics Superstruct Project (GSP1000)** connectome, the
 one used for most lesion network mapping papers. GSP1000 is **not** included with Slicer Studio and is **never downloaded
 by itself**. You can fetch it from the Harvard Dataverse (doi:[10.7910/DVN/ILXIKS](https://doi.org/10.7910/DVN/ILXIKS)) with
-**Manage… > Get a connectome…**, only after you have clicked "Load terms", read the provider's current Data Use Terms and
-ticked "I accept". Or obtain it yourself and convert it once. Time series that are already preprocessed for Lead-DBS
+**Get a connectome…** (in the Connectome card, or in **Manage…** when a connectome is already registered), only after you
+have clicked "Load terms", read the provider's current Data Use Terms and ticked "I have read and accept these terms". Or obtain it yourself and
+convert it once. Time series that are already preprocessed for Lead-DBS
 (doi:[10.7910/DVN/KKTJQC](https://doi.org/10.7910/DVN/KKTJQC)) can be converted or fetched too. For trying the module,
-**Create synthetic demo** in the connectome manager builds a small connectome of random numbers with planted networks on
-your computer. It is labelled "SYNTHETIC — not real data" in the module, in every sidecar and on figures; never use it for a
-conclusion.
+**Use the demo** in the Connectome card (**Create synthetic demo** in the connectome manager) builds a small connectome of
+random numbers with planted networks on your computer. It is labelled "SYNTHETIC — not real data" in the module, in every
+sidecar and on figures; never use it for a conclusion.
 
 **Data use terms.** The terms text of a connectome is shown in the Connectome card. **Compute stays disabled until you tick
 "I accept these data use terms"** for that connectome. The acceptance is stored for that connectome (as a hash of its
@@ -341,7 +347,10 @@ PFdr, TfcePFwe, HedgesG, PartialR and R.
 **Display.** A result opens as a volume on the MNI template with the shared colour table "LNM Diverging" (hot and cold,
 transparent below the threshold) and the lesion as a white outline, opacity 80%. The colour table node is saved with
 the scene, so a scene with a map looks the same in official 3D Slicer. **Export…** (Ctrl+E) copies the outputs of a
-result to a folder you choose.
+result to a folder you choose. When that folder already holds the maps of another lesion with the same name, Export asks
+first: export into a new folder (`conn-<label>-2`), replace them, or cancel. Outside a study a lesion is named after its
+segmentation and segment; accented letters are written as plain ones (José: `Jose`), and a name in another script gets a
+short tag of it (张三: `u1d841bc0`), so that two patients keep two names.
 
 ## Command-line tools
 
@@ -363,6 +372,23 @@ files as the module, prints one JSON event per line, and uses the exit codes 0 d
 | `pipeline` | `init`, `plan`, `run`, `status` and `report` (Run everything and its HTML report) |
 | `manager`, `fetchconnectome`, `fetch`, `leaddbs`, `refmaps`, `tutorials` | connectome conversion and download, resources, Lead-DBS, reference maps, tutorial cohorts |
 | `recipes`, `transforms`, `coords`, `lesionset`, `preflight`, `app` | recipes, transform tools, coordinate seeds, lesion-set summary, preflight, the BIDS App |
+
+### Atrophy seeds (command line)
+
+Atrophy network mapping (Tetreault 2020) is a command-line feature: the Seed card of the Map workspace offers Lesion,
+Cohort, Coordinates and Stimulation, but not atrophy maps. The `coords atrophy` command thresholds one per-patient
+w-map (or z-map; negative means atrophy) for each participant, writes the seeds and `lesions.tsv` to a run folder,
+and `cohortmaps` then maps them like lesions:
+
+```
+PythonSlicer -m LesionNetworkMappingLib.coords atrophy --bundle CONNECTOME.lnmc --out RUNFOLDER \
+    --wmap sub-01=sub-01_wmap.nii.gz --wmap sub-02=sub-02_wmap.nii.gz [--rule w<-2] [--weighted]
+```
+
+`--rule` is `w<-2` (the default), `w<-1.5`, `w<-2.5` or `top5%`; `--weighted` weights the seed voxels by -w instead of
+using a binary seed. The command does not check the space of a w-map: each w-map must already be in the MNI space of
+the connectome (it is placed where its own header says), and a w-map in another space gives a wrong map without a
+notice.
 
 ## Citations
 

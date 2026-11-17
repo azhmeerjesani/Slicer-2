@@ -5,8 +5,9 @@ extension())``; SPEC D2/D3). This module is that extension and the hooks around 
 
 - **Panel**: the Lesion card (``StudioLib.lesioncard``) with the brush size chips and the source chip, the tool
   tiles (Brush, Outline, Smart fill, Erase, Fill gaps; "More tools ▾"), the options of the active tool, the
-  Display card (collapsed) and a sticky call-to-action footer: "Save lesion · Ctrl+Enter" without a study,
-  "Done → next · Ctrl+Enter" with one, and the secondary "Map network →" / "Normalize to MNI…".
+  Overlay row with the Outline switch (VISUAL 4.4; the display items are in the ⋯ menu) and a sticky call-to-action
+  footer: "Save lesion · Ctrl+Enter" without a study, "Done → next · Ctrl+Enter" with one, and the link
+  "Map this lesion's network →".
 - **Tool state** (``_DrawSession``, from QW-A): the user's last tool survives every round trip. Arming is intent
   based (USABILITY 5.2, D-U2): Brush is armed on entry for Start on MNI template, New lesion, a loaded lesion
   file, a loaded set, an explicit request (``requestArm()``, "Continue in Draw") or a return with a recorded
@@ -15,7 +16,8 @@ extension())``; SPEC D2/D3). This module is that extension and the hooks around 
 - **Save model** (USABILITY 8): ``saveLesion()`` writes the lesion on its own grid (the segmentation's reference
   geometry, never the source volume's), a BIDS-style sidecar, and nothing for an empty lesion. After the first save
   of a session the CTA and ``Ctrl+Shift+S`` re-save silently; "Save lesion as…" always asks.
-  ``lesionSaveState()`` tells Saved / Unsaved changes / Last saved as / Not saved yet.
+  ``lesionSaveState()`` tells Saved / Unsaved changes / Last saved as / Not saved yet. Both are off in the second
+  tracing, adjudication and review states (``saveLesionBlockedReason()``): their footer writes their own files.
 - **Metrics** (``lesionMetrics()``): cached by the labelmap content, used by the card (300 ms after an edit).
 - **Keys** (Draw only): N / Shift+N gap slices, C centre on the lesion, Alt+←/→ loaded set or study subjects,
   Ctrl+Shift+S save, Ctrl+Y redo; the mnemonics P D M E L Shift+F O come with the presentation.
@@ -37,6 +39,7 @@ import json
 import logging
 import math
 import os
+import threading
 import pkgutil
 import re
 import tempfile
@@ -126,7 +129,7 @@ EFFECT_APPEARANCE = {
     "Fill between slices": (_("Fill gaps"), "between-horizontal-start"),
     "Level tracing": (_("Auto outline"), "spline"),
     "Threshold": (_("Threshold"), "contrast"),
-    "Grow from seeds": (_("Grow from seeds"), "sprout"),
+    "Grow from seeds": (_("Grow seeds"), "sprout"),
     "Smoothing": (_("Smooth"), "waves"),
     "Islands": (_("Islands"), "split"),
     "Margin": (_("Margin"), "scaling"),
@@ -205,8 +208,36 @@ def _canEdit(editor):
 
 
 def _canDraw(editor):
-    """True if a tool can be picked: a segmentation and a source volume (the first tool adds the "Lesion" segment)."""
-    return editor.segmentationNode() is not None and editor.sourceVolumeNode() is not None
+    """True if a tool can be picked: a segmentation and a source volume (the first tool adds the "Lesion" segment), and the
+    segmentation is not shown read-only (``READ_ONLY_ATTRIBUTE``).
+    """
+    segmentationNode = editor.segmentationNode()
+    return segmentationNode is not None and editor.sourceVolumeNode() is not None and not readOnlyReason(segmentationNode)
+
+
+#: Attribute of a segmentation that Draw shows read-only: no tool, no tool key, no card fix (adjudication: the two
+#: tracings until Edit…). Its value says why, shown as Draw's hint.
+READ_ONLY_ATTRIBUTE = "Studio.ReadOnly"
+
+
+def readOnlyReason(segmentationNode):
+    """Why ``segmentationNode`` is shown read-only (``READ_ONLY_ATTRIBUTE``), or "" if it can be edited."""
+    if segmentationNode is None:
+        return ""
+    return segmentationNode.GetAttribute(READ_ONLY_ATTRIBUTE) or ""
+
+
+def syncReadOnly(editor=None):
+    """The Segment Editor is read-only (tools off and deselected, tool keys off) while it edits a read-only segmentation
+    (``READ_ONLY_ATTRIBUTE``), and editable otherwise. Return True if it is read-only.
+    """
+    editor = editor if editor is not None else segmentEditor()
+    if editor is None or not hasattr(editor, "setReadOnly"):
+        return False
+    readOnly = bool(readOnlyReason(editor.segmentationNode()))
+    if bool(editor.readOnly) != readOnly:
+        editor.setReadOnly(readOnly)
+    return readOnly
 
 
 #: Name that the Segment Editor gives a segment it adds ("Segment_1"): Draw renames the first one to its lesion name
@@ -264,6 +295,32 @@ def _editableVolumes():
     return [node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode") if _isEditableSource(node)]
 
 
+def _colourVolume():
+    """The colour (vector) volume that is open but never a source of Draw (a figure or map is not a scan), or None."""
+    for node in slicer.util.getNodesByClass("vtkMRMLVectorVolumeNode"):
+        if node.GetAttribute("Studio.Role") in ("figure", "statmap"):
+            continue
+        imageData = node.GetImageData()
+        if imageData is not None and 1 not in imageData.GetDimensions():
+            return node
+    return None
+
+
+def _singleSliceVolume():
+    """The scan that is open but cannot be traced only because it is a single slice (SPEC 6.7: a 2D image is never a source),
+    or None: a grayscale one-slice image (a figure, map or colour image is not a scan, and has its own route).
+    """
+    for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
+        if node.IsA("vtkMRMLLabelMapVolumeNode") or node.IsA("vtkMRMLVectorVolumeNode"):
+            continue
+        if node.GetAttribute("Studio.Role") in ("figure", "statmap"):
+            continue
+        imageData = node.GetImageData()
+        if imageData is not None and 1 in imageData.GetDimensions():
+            return node
+    return None
+
+
 def _isTemplateVolume(node):
     if node is None:
         return False
@@ -314,11 +371,10 @@ def _selectedSegmentId(segmentationNode, editor=None):
 _metricsCache = {}
 
 
-def _labelmapArray(segmentationNode, segmentId):
-    """``(mask_kji, ijkToRAS 4x4 numpy, labelmap MTime)`` of a segment's internal binary labelmap, or None when empty.
+def _labelmapInputs(segmentationNode, segmentId):
+    """``(array_kji view, label value, ijkToRAS 4x4 numpy, labelmap)`` of a segment's internal binary labelmap, or None when empty.
 
-    The array is the shared layer (other segments may use other label values): the mask compares with this
-    segment's label value. ``ijkToRAS`` maps the array's (i, j, k) index to RAS.
+    ``array_kji`` is a view of the shared layer without a copy (other segments may use other label values).
     """
     try:
         labelmap = segmentationNode.GetBinaryLabelmapInternalRepresentation(segmentId)
@@ -335,7 +391,40 @@ def _labelmapArray(segmentationNode, segmentId):
     extent = labelmap.GetExtent()
     offset = np.eye(4)
     offset[:3, 3] = (extent[0], extent[2], extent[4])
-    return array == labelValue, matrix @ offset, labelmap.GetMTime()
+    return array, labelValue, matrix @ offset, labelmap
+
+
+def _labelmapArray(segmentationNode, segmentId):
+    """``(mask_kji, ijkToRAS 4x4 numpy, labelmap MTime)`` of a segment's internal binary labelmap, or None when empty.
+
+    The array is the shared layer (other segments may use other label values): the mask compares with this
+    segment's label value. ``ijkToRAS`` maps the array's (i, j, k) index to RAS.
+    """
+    inputs = _labelmapInputs(segmentationNode, segmentId)
+    if inputs is None:
+        return None
+    array, labelValue, matrix, labelmap = inputs
+    return array == labelValue, matrix, labelmap.GetMTime()
+
+
+#: Slab size (voxels) of the emptiness scan: no full-size comparison mask, and the scan stops at the first voxel found
+_SCAN_SLAB_VOXELS = 4 * 1024 * 1024
+
+
+def _anyVoxel(array, labelValue):
+    """True if any voxel of ``array`` equals ``labelValue``; slab by slab with an early exit (no full-size temporary)."""
+    if array.ndim == 0 or array.size == 0:
+        return False
+    perSlice = max(1, array.size // array.shape[0])
+    step = max(1, _SCAN_SLAB_VOXELS // perSlice)
+    for start in range(0, array.shape[0], step):
+        if (array[start:start + step] == labelValue).any():
+            return True
+    return False
+
+
+#: {(node ID, segment ID): (stamp, segmentation, empty)} of isLesionEmpty() with the labelmap content
+_emptyCache = {}
 
 
 def _contentStamp(segmentationNode):
@@ -371,13 +460,21 @@ def lesionMetrics(segmentationNode, compute=False, segmentId=None, axis=0):
         return cached[2]
     if not compute:
         return None
-    data = _labelmapArray(segmentationNode, segmentId)
-    if data is None:
-        metrics = lesioncard.computeLesionMetrics(np.zeros((1, 1, 1), bool), (1, 1, 1), np.eye(4), axis=axis)
-        matrix = None
-    else:
-        mask, matrix, _mtime = data
-        metrics = lesioncard.computeLesionMetrics(mask, None, matrix, axis=axis)
+    inputs = _labelmapInputs(segmentationNode, segmentId)
+    metrics, matrix = _rawMetrics(inputs, axis)
+    return _storeMetrics(segmentationNode, key, stamp, metrics, matrix)
+
+
+def _rawMetrics(inputs, axis):
+    """``(lesioncard.computeLesionMetrics() result, ijkToRAS or None)`` of ``_labelmapInputs()``: numpy only (it runs in a worker thread too)."""
+    if inputs is None:
+        return lesioncard.computeLesionMetrics(np.zeros((1, 1, 1), bool), (1, 1, 1), np.eye(4), axis=axis), None
+    array, labelValue, matrix, _labelmap = inputs
+    return lesioncard.computeLesionMetrics(array == labelValue, None, matrix, axis=axis), matrix
+
+
+def _storeMetrics(segmentationNode, key, stamp, metrics, matrix):
+    """Complete the raw metrics (``mL``, ``centroidRas``, ``sides``: MRML, main thread) and cache them by ``stamp``."""
     metrics = dict(metrics)
     metrics["mL"] = metrics["ml"]
     metrics["centroidRas"] = metrics["centroid_ras"]
@@ -391,6 +488,57 @@ def lesionMetrics(segmentationNode, compute=False, segmentId=None, axis=0):
     if len(_metricsCache) > 64:
         _metricsCache.pop(next(iter(_metricsCache)))
     return metrics
+
+
+class MetricsJob:
+    """``lesionMetrics(compute=True)`` in a worker thread, so a large lesion does not freeze the window.
+
+    ``start()`` reads the MRML inputs on the calling (main) thread; the thread only runs numpy and scipy on the labelmap
+    view (the job holds the labelmap, so it stays alive). Poll ``done`` and call ``finish()`` on the main thread: it caches
+    the result and returns the metrics (None when the lesion was closed meanwhile or the thread failed).
+    """
+
+    def __init__(self, segmentationNode, segmentId=None, axis=0):
+        self._node = segmentationNode
+        self._segmentId = segmentId or _selectedSegmentId(segmentationNode)
+        self._axis = axis
+        self._key = (segmentationNode.GetID(), self._segmentId, axis)
+        self._stamp = _contentStamp(segmentationNode)
+        self._segmentation = segmentationNode.GetSegmentation()
+        self._inputs = _labelmapInputs(segmentationNode, self._segmentId)
+        self._result = None
+        self.error = None
+        self.done = False
+        self._thread = threading.Thread(target=self._run, name="StudioLesionMetrics", daemon=True)
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def _run(self):
+        try:
+            self._result = _rawMetrics(self._inputs, self._axis)
+        except BaseException as error:
+            self.error = error
+        finally:
+            self.done = True
+
+    def finish(self):
+        if self._result is None or self._segmentation is not self._node.GetSegmentation():
+            return None
+        metrics, matrix = self._result
+        self._inputs = None
+        return _storeMetrics(self._node, self._key, self._stamp, metrics, matrix)
+
+
+def lesionMetricsJob(segmentationNode, segmentId=None, axis=0):
+    """A started ``MetricsJob`` when the metrics are not cached (and there is a segment), else None."""
+    if segmentationNode is None:
+        return None
+    segmentId = segmentId or _selectedSegmentId(segmentationNode)
+    if not segmentId or lesionMetrics(segmentationNode, segmentId=segmentId, axis=axis) is not None:
+        return None
+    return MetricsJob(segmentationNode, segmentId, axis).start()
 
 
 #: space.isMni() of segmentations: {node ID: (reference geometry, Studio.Space, result)}
@@ -419,16 +567,98 @@ def isLesionEmpty(segmentationNode, segmentIds=None):
     segmentation = segmentationNode.GetSegmentation()
     if segmentIds is None:
         segmentIds = [segmentation.GetNthSegmentID(index) for index in range(segmentation.GetNumberOfSegments())]
+    stamp = _contentStamp(segmentationNode)
     for segmentId in segmentIds:
-        data = _labelmapArray(segmentationNode, segmentId)
-        if data is not None and data[0].any():
+        key = (segmentationNode.GetID(), segmentId)
+        cached = _emptyCache.get(key)
+        if cached is not None and cached[0] == stamp and cached[1] is segmentation:
+            hasVoxel = cached[2]
+        else:
+            inputs = _labelmapInputs(segmentationNode, segmentId)
+            hasVoxel = inputs is not None and _anyVoxel(inputs[0], inputs[1])
+            _emptyCache[key] = (stamp, segmentation, hasVoxel)
+            if len(_emptyCache) > 256:
+                _emptyCache.pop(next(iter(_emptyCache)))
+        if hasVoxel:
             return False
-        if data is None and segmentationNode.GetBinaryLabelmapInternalRepresentation(segmentId) is None:
-            # Not a binary labelmap (closed surface source): not known to be empty
-            segment = segmentation.GetSegment(segmentId)
-            if segment is not None and segment.GetRepresentationNames():
+        if segmentationNode.GetBinaryLabelmapInternalRepresentation(segmentId) is None:
+            # Not a binary labelmap (closed surface source): empty only when its source representation is
+            if segmentHasNonLabelmapContent(segmentationNode, segmentId):
                 return False
     return True
+
+
+def _sourceRepresentation(segmentationNode, segmentId):
+    """The data of a segment's source representation (for example its closed surface ``vtkPolyData``), or None."""
+    if segmentationNode is None or not segmentId:
+        return None
+    segmentation = segmentationNode.GetSegmentation()
+    segment = segmentation.GetSegment(segmentId)
+    if segment is None:
+        return None
+    # vtkSegment has no Python-usable list of its representations: ask for the source one by name
+    representation = segment.GetRepresentation(segmentation.GetSourceRepresentationName())
+    if representation is None:
+        representation = segment.GetRepresentation(slicer.vtkSegmentationConverter.GetSegmentationClosedSurfaceRepresentationName())
+    return representation
+
+
+def segmentHasNonLabelmapContent(segmentationNode, segmentId):
+    """True when a segment without binary labelmap holds data in its source representation (a closed surface with
+    points, or a non-empty image such as a fractional labelmap).
+    """
+    representation = _sourceRepresentation(segmentationNode, segmentId)
+    if representation is None:
+        return False
+    if representation.IsA("vtkPolyData"):
+        return representation.GetNumberOfPoints() > 0
+    if representation.IsA("vtkImageData"):
+        return not representation.IsEmpty() if hasattr(representation, "IsEmpty") else representation.GetNumberOfPoints() > 0
+    return True
+
+
+#: Surface metrics of segments with a closed surface source: {(node ID, segment ID): (polydata, MTime, metrics)}
+_surfaceMetricsCache = {}
+
+
+def surfaceMetrics(segmentationNode, segmentId=None):
+    """``{"mL", "parts", "centroidRas", "spans_both"}`` of the closed surface of a segment that has no binary labelmap
+    (a segmentation whose source representation is "Closed surface", as official 3D Slicer writes it), else None.
+    """
+    if segmentationNode is None:
+        return None
+    segmentId = segmentId or _selectedSegmentId(segmentationNode)
+    if not segmentId or segmentationNode.GetBinaryLabelmapInternalRepresentation(segmentId) is not None:
+        return None
+    polyData = _sourceRepresentation(segmentationNode, segmentId)
+    if polyData is None or not polyData.IsA("vtkPolyData") or polyData.GetNumberOfPoints() == 0:
+        return None
+    key = (segmentationNode.GetID(), segmentId)
+    cached = _surfaceMetricsCache.get(key)
+    if cached is not None and cached[0] is polyData and cached[1] == polyData.GetMTime():
+        return cached[2]
+    triangles = vtk.vtkTriangleFilter()
+    triangles.SetInputData(polyData)
+    connectivity = vtk.vtkPolyDataConnectivityFilter()
+    connectivity.SetInputConnection(triangles.GetOutputPort())
+    connectivity.SetExtractionModeToAllRegions()
+    connectivity.Update()
+    parts = connectivity.GetNumberOfExtractedRegions()
+    mass = vtk.vtkMassProperties()
+    mass.SetInputConnection(triangles.GetOutputPort())
+    mass.Update()
+    volume = abs(mass.GetVolume()) / 1000.0 if polyData.GetNumberOfPolys() else 0.0
+    bounds = polyData.GetBounds()
+    center = vtk.vtkCenterOfMass()
+    center.SetInputData(polyData)
+    center.SetUseScalarsAsWeights(False)
+    center.Update()
+    metrics = {"mL": volume, "parts": max(parts, 1), "centroidRas": tuple(center.GetCenter()),
+               "spans_both": bounds[0] < 0 < bounds[1]}
+    _surfaceMetricsCache[key] = (polyData, polyData.GetMTime(), metrics)
+    if len(_surfaceMetricsCache) > 64:
+        _surfaceMetricsCache.pop(next(iter(_surfaceMetricsCache)))
+    return metrics
 
 
 #
@@ -508,6 +738,9 @@ class _DrawSession(VTKObservationMixin):
         self._redoKeyFree = None
         #: Effect deselected by a Place or window/level mode, armed again when the mode ends
         self._suspendedEffect = None
+        #: Effect this session armed that the next evaluation has not seen yet (a Place mode that starts before it
+        #: deselects it, and must suspend it)
+        self._armedEffect = None
         #: The next entry (or the next lesion) arms Brush: an explicit intent ("Continue in Draw", New lesion)
         self._armRequested = False
         self._snapshot = None
@@ -515,6 +748,8 @@ class _DrawSession(VTKObservationMixin):
         self._observedSegmentation = None
         self._observedInteractionNode = None
         self._viewObservations = []
+        self._sliceNodeObservations = []
+        self._sliceNormals = {}
         self._strokePress = None
         self._lastStroke = None
         self._smoothBaseline = None
@@ -535,6 +770,12 @@ class _DrawSession(VTKObservationMixin):
         self._refreshTimer.setSingleShot(True)
         self._refreshTimer.setInterval(0)
         self._refreshTimer.connect("timeout()", self.refreshPanel)
+        # The brush size is a common effect parameter: changing it ([ ], Shift+wheel, a script) fires only the custom
+        # EffectParameterModified event of the node, never ModifiedEvent
+        self._brushTimer = qt.QTimer()
+        self._brushTimer.setSingleShot(True)
+        self._brushTimer.setInterval(0)
+        self._brushTimer.connect("timeout()", self._onBrushSizeChanged)
         self._adoptTimer = qt.QTimer()
         self._adoptTimer.setSingleShot(True)
         self._adoptTimer.setInterval(0)
@@ -543,6 +784,12 @@ class _DrawSession(VTKObservationMixin):
         self._followTimer.setSingleShot(True)
         self._followTimer.setInterval(30)
         self._followTimer.connect("timeout()", self._followStroke)
+        # A scene loaded while Draw is shown (a scene file or project opened in Draw): bound like an entry, after the
+        # loader made its own choice (importer.selectInSegmentEditor())
+        self._bindTimer = qt.QTimer()
+        self._bindTimer.setSingleShot(True)
+        self._bindTimer.setInterval(0)
+        self._bindTimer.connect("timeout()", self._bindAfterImport)
 
     @property
     def shell(self):
@@ -593,6 +840,7 @@ class _DrawSession(VTKObservationMixin):
         self._timer.stop()
         self._metricsTimer.stop()
         self._refreshTimer.stop()
+        self._bindTimer.stop()
         self._followTimer.stop()
         if self._adoptTimer.isActive():
             self._adoptTimer.stop()
@@ -739,12 +987,29 @@ class _DrawSession(VTKObservationMixin):
             return
         if self._observedNode is not None:
             self.removeObserver(self._observedNode, vtk.vtkCommand.ModifiedEvent, self._onParameterNodeModified)
+            self.removeObserver(self._observedNode, slicer.vtkMRMLSegmentEditorNode.EffectParameterModified,
+                                self._onEffectParameterModified)
         self._observedNode = node
         if node is not None:
             self.addObserver(node, vtk.vtkCommand.ModifiedEvent, self._onParameterNodeModified)
+            self.addObserver(node, slicer.vtkMRMLSegmentEditorNode.EffectParameterModified, self._onEffectParameterModified)
 
     def _onParameterNodeModified(self, caller, event):
         self._timer.start()
+
+    def _onEffectParameterModified(self, caller, event):
+        if self.active:
+            self._brushTimer.start()
+
+    def _onBrushSizeChanged(self):
+        """The brush size changed without a ModifiedEvent of the node: keep it and show it in the Size row."""
+        if not self.active:
+            return
+        editor = segmentEditor()
+        if editor is None or not _isModuleEntered() or _effectName(editor) not in ("Paint", "Erase"):
+            return
+        self._persistBrushDiameter(editor)
+        self.refreshPanel()
 
     def _evaluate(self):
         """Follow the effect chosen by the user, and arm the pending effect when the editor can edit."""
@@ -755,9 +1020,12 @@ class _DrawSession(VTKObservationMixin):
             # The module is being left (its exit() deactivates the effect): not a choice of the user
             return
         self._observe(editor)
+        # A read-only segmentation deselects the tool before the snapshot: no tool is armed on it (_canDraw())
+        syncReadOnly(editor)
         snapshot = _Snapshot(editor)
         previous = self._snapshot
         self._snapshot = snapshot
+        self._armedEffect = None
         segmentationNode = editor.segmentationNode()
         if previous is not None:
             if snapshot.effect is not None and snapshot.effect != previous.effect:
@@ -817,9 +1085,18 @@ class _DrawSession(VTKObservationMixin):
             self.pendingEffect = None
             return
         self.pendingEffect = None
+        interactionNode = slicer.app.applicationLogic().GetInteractionNode() if slicer.app.applicationLogic() is not None else None
+        if interactionNode is not None and interactionNode.GetCurrentInteractionMode() != slicer.vtkMRMLInteractionNode.ViewTransform:
+            # A Place or window/level mode started before the tool was armed (the template point of a figure pair
+            # right after its figure point): arming would end that mode (the click would draw), so the tool is
+            # suspended and armed when the mode ends (U14)
+            if self._suspendedEffect is None:
+                self._suspendedEffect = effectName
+            return
         if effectName in ("Paint", "Erase"):
             self._applyBrushDefault(editor)
         editor.setActiveEffectByName(effectName)
+        self._armedEffect = effectName
 
     def _onEffectChanged(self, editor, effectName):
         """A tool was chosen (or deselected): Smooth safety. The brush size is not set here: Brush and Erase share it (a
@@ -848,8 +1125,13 @@ class _DrawSession(VTKObservationMixin):
             if self._suspendedEffect is None:
                 editor = segmentEditor()
                 name = _effectName(editor) if editor is not None else None
-                if name is None and self._snapshot is not None:
-                    name = self._snapshot.effect
+                if name is None:
+                    # The editor deselected the tool before this observer ran: the tool it had, or the one about to
+                    # be armed when the mode ended and started again (a figure pair: figure point, then template
+                    # point)
+                    name = self._armedEffect or self.pendingEffect
+                    if name is None and self._snapshot is not None:
+                        name = self._snapshot.effect
                 if name is not None:
                     self._suspendedEffect = name
                     self.refreshPanel()
@@ -930,9 +1212,35 @@ class _DrawSession(VTKObservationMixin):
         # A handler of its own: the event argument of a shared handler does not tell the MRML scene events apart
         if not self.hasObserver(scene, scene.EndCloseEvent, self._onSceneEndClose):
             self.addObserver(scene, scene.EndCloseEvent, self._onSceneEndClose)
+        if not self.hasObserver(scene, scene.EndImportEvent, self._onSceneEndImport):
+            self.addObserver(scene, scene.EndImportEvent, self._onSceneEndImport)
 
     def _onSceneChanged(self, caller, event):
         self._refreshTimer.start()
+
+    def _onSceneEndImport(self, caller, event):
+        self._bindTimer.start()
+
+    def _bindAfterImport(self):
+        """A scene loaded while Draw is shown leaves the editor without a lesion when it replaced the scene (a second
+        scene file or project opened in Draw: the closing unbound it, and Draw is not entered again). Bind it as an entry
+        does (``enter()``): the lesion of the scene, else one bound to its scan; a lesion that the loader selected is kept.
+        """
+        if not self.active:
+            return
+        editor = segmentEditor()
+        if editor is None or editor.segmentationNode() is not None:
+            return
+        if extension().ensureSegmentation(editor) is None:
+            return
+        self._applyVoxelViewDefault(editor)
+        self._restore(editor)
+        self._observe(editor)
+        self._observeSegmentation(editor.segmentationNode())
+        self._snapshot = _Snapshot(editor)
+        self._timer.start()
+        self.refreshPanel()
+        self._metricsTimer.start()
 
     def _onSceneEndClose(self, caller, event):
         self._voxelViewDefaulted = set()
@@ -949,6 +1257,7 @@ class _DrawSession(VTKObservationMixin):
         self.state.segmentId = None
         self.state.sourceVolumeNodeId = None
         self._suspendedEffect = None
+        self._armedEffect = None
         self._lastActiveEffect = None
         self.pendingEffect = DEFAULT_EFFECT if self._armRequested else None
         editor = segmentEditor()
@@ -956,6 +1265,8 @@ class _DrawSession(VTKObservationMixin):
             if editor.activeEffect() is not None:
                 # The editor keeps its effect without a segmentation: the next case would start with it
                 editor.setActiveEffect(None)
+            # A read-only segmentation of the closed case does not leave the editor read-only
+            syncReadOnly(editor)
             # The deactivation by the closing is not compared with the tool of the closed case
             self._snapshot = _Snapshot(editor)
 
@@ -1025,6 +1336,24 @@ class _DrawSession(VTKObservationMixin):
                                              (vtk.vtkCommand.LeftButtonDoubleClickEvent, self._onDoubleClick, DOUBLE_CLICK_GUARD_PRIORITY)):
                 self._addViewObserver(observation, event, handler, priority, viewName)
             self._viewObservations.append(observation)
+            # The card's gap count follows the slicing axis of the gap view: refresh when a view's orientation changes
+            sliceNode = sliceWidget.mrmlSliceNode()
+            self._sliceNormals[viewName] = self._sliceNormal(sliceNode)
+            tag = sliceNode.AddObserver(vtk.vtkCommand.ModifiedEvent,
+                                        lambda caller, event, name=viewName: self._onSliceNodeModified(caller, name))
+            self._sliceNodeObservations.append((sliceNode, tag))
+
+    @staticmethod
+    def _sliceNormal(sliceNode):
+        sliceToRas = sliceNode.GetSliceToRAS()
+        return tuple(round(sliceToRas.GetElement(row, 2), 3) for row in range(3))
+
+    def _onSliceNodeModified(self, sliceNode, viewName):
+        normal = self._sliceNormal(sliceNode)
+        if normal != self._sliceNormals.get(viewName):
+            self._sliceNormals[viewName] = normal
+            if self.active:
+                self._refreshTimer.start()
 
     def _addViewObserver(self, observation, event, handler, priority, viewName):
         interactor = observation[0]
@@ -1049,6 +1378,12 @@ class _DrawSession(VTKObservationMixin):
                 except Exception:
                     pass
         self._viewObservations = []
+        for sliceNode, tag in self._sliceNodeObservations:
+            try:
+                sliceNode.RemoveObserver(tag)
+            except Exception:
+                pass
+        self._sliceNodeObservations = []
         if self._layoutManagerConnected:
             layoutManager = slicer.app.layoutManager()
             if layoutManager is not None:
@@ -1065,6 +1400,8 @@ class _DrawSession(VTKObservationMixin):
     def _reinstallViewObservers(self):
         if self.active:
             self._installViewObservers()
+            # The card counts the gaps along the axis of the view that the layout shows (gapViewName)
+            self.refreshPanel()
 
     def _onDoubleClick(self, interactor, viewName):
         """A double-click with a drawing tool does not maximize the view (the effect still gets it first)."""
@@ -1164,6 +1501,7 @@ class _DrawSession(VTKObservationMixin):
             # Created on every entry and disposed by leave(): nothing is kept across Classic
             self.footer = _CtaFooter(self)
         shell.setInspectorFooter(self.footer.widget)
+        extension()._scheduleTabOrder()
         self._updateFooter()
 
     def _updateFooter(self):
@@ -1382,18 +1720,46 @@ def _gapAxis(sliceNode, ijkToRAS):
     """``(array axis, aligned)`` of the labelmap axis closest to the slice normal of ``sliceNode``."""
     sliceToRas = sliceNode.GetSliceToRAS()
     normal = np.array([sliceToRas.GetElement(row, 2) for row in range(3)])
-    normal /= np.linalg.norm(normal) or 1.0
-    best, bestCos = 0, -1.0
-    # Array axis 0 is k (matrix column 2), 1 is j (column 1), 2 is i (column 0)
-    for axis, column in ((0, 2), (1, 1), (2, 0)):
-        direction = ijkToRAS[:3, column]
-        cos = abs(float(np.dot(direction, normal))) / (float(np.linalg.norm(direction)) or 1.0)
-        if cos > bestCos:
-            best, bestCos = axis, cos
+    best, bestCos = lesioncard.nearestArrayAxis(ijkToRAS, normal)
     return best, bestCos > 0.999
 
 
-def jumpToGap(step=1, shell=None, viewName="Red"):
+def gapViewName(shell=None):
+    """The slice view whose slicing axis N and the card's gap count follow: Red while the layout shows it, else the view
+    that is shown and was used last (a maximized Sagittal or Coronal view, a one-up layout), else the first one shown.
+    A hidden view is never the target (N would move a view that the user cannot see). "Red" when none is shown.
+    """
+    shown = [viewName for viewName, _sliceWidget in _layoutSliceViews()]
+    if not shown or "Red" in shown:
+        return "Red"
+    shell = _currentShell(shell)
+    tracker = getattr(shell, "hoverTracker", None) if shell is not None else None
+    if tracker is not None:
+        for name in (tracker.hoveredNow, tracker.lastSliceViewName):
+            if name in shown:
+                return name
+    return shown[0]
+
+
+def viewGaps(metrics, viewName=None):
+    """The gap slices of ``lesionMetrics()`` counted along the slicing axis of the view ``viewName`` (``gapViewName()``
+    without one; SPEC 5.6), the slices N jumps to; along S (the lesion z-extent) without that view. The k axis of the
+    labelmap is only right for an axial acquisition: a sagittal 3D T1 has k = left-right.
+    """
+    if viewName is None:
+        viewName = gapViewName()
+    if metrics is None or metrics.get("ijkToRAS") is None or not metrics.get("gaps_by_axis"):
+        return metrics["gaps"] if metrics is not None else []
+    layoutManager = slicer.app.layoutManager()
+    sliceWidget = layoutManager.sliceWidget(viewName) if layoutManager is not None else None
+    if sliceWidget is not None:
+        axis = _gapAxis(sliceWidget.mrmlSliceNode(), metrics["ijkToRAS"])[0]
+    else:
+        axis = lesioncard.nearestArrayAxis(metrics["ijkToRAS"], (0.0, 0.0, 1.0))[0]
+    return metrics["gaps_by_axis"][axis]
+
+
+def jumpToGap(step=1, shell=None, viewName=None):
     """N / Shift+N: move the view to the next (``step=1``) or previous gap slice of the lesion, wrapping; to the
     lesion's first slice when it has no gap. On an oblique view the nearest labelmap axis is used ("approx.").
     Return the slice index jumped to, or None.
@@ -1401,6 +1767,8 @@ def jumpToGap(step=1, shell=None, viewName="Red"):
     shell = _currentShell(shell)
     editor = segmentEditor()
     layoutManager = slicer.app.layoutManager()
+    if viewName is None:
+        viewName = gapViewName(shell)
     sliceWidget = layoutManager.sliceWidget(viewName) if layoutManager is not None else None
     segmentationNode = editor.segmentationNode() if editor is not None else None
     if sliceWidget is None or segmentationNode is None:
@@ -1495,12 +1863,18 @@ def _writeMask(segmentationNode, segmentId, mask, imageToWorldArray, extent):
 
 def _editLesion(transform, title, shell=None):
     """Apply ``transform(maskCrop, spacing) -> newCrop`` to the edited segment around its extent (2 voxel margin
-    plus the kernel), as one undo step. Return (voxels before, voxels after), or None when there is nothing to edit.
+    plus the kernel), as one undo step. Return (voxels before, voxels after, changed), or None when there is nothing
+    to edit. A transform that changes nothing adds no undo step (``changed`` is False): the caller must then not
+    offer an Undo, which would undo the user's previous, unrelated edit.
     """
     editor = segmentEditor()
     segmentationNode = editor.segmentationNode() if editor is not None else None
     segmentId = editor.currentSegmentID() if editor is not None else None
     if segmentationNode is None or not segmentId:
+        return None
+    if readOnlyReason(segmentationNode):
+        if shell is not None:
+            shell.toast(readOnlyReason(segmentationNode), 4000)
         return None
     data = _labelmapArray(segmentationNode, segmentId)
     if data is None or not data[0].any():
@@ -1518,7 +1892,7 @@ def _editLesion(transform, title, shell=None):
     result = transform(crop.copy(), spacing)
     before, after = int(np.count_nonzero(crop)), int(np.count_nonzero(result))
     if before == after and np.array_equal(crop, result):
-        return before, after
+        return before, after, False
     editor.saveStateForUndo()
     labelmap = segmentationNode.GetBinaryLabelmapInternalRepresentation(segmentId)
     extent = labelmap.GetExtent()
@@ -1527,12 +1901,31 @@ def _editLesion(transform, title, shell=None):
     offset = np.eye(4)
     offset[:3, 3] = (-extent[0], -extent[2], -extent[4])
     _writeMask(segmentationNode, segmentId, result, matrix @ offset, cropExtent)
-    return before, after
+    return before, after, True
 
 
 def _ellipsoid(spacing, radiusMm):
     """Ellipsoid structuring element (k, j, i) of ``radiusMm`` on a grid of ``spacing`` (i, j, k)."""
     radii = [max(0, round(radiusMm / max(1e-6, float(s)))) for s in (spacing[2], spacing[1], spacing[0])]
+    return _ellipsoidVoxels(radii)
+
+
+def _closingElement(spacing, gapMm):
+    """Structuring element (k, j, i) whose closing fills gaps up to ``gapMm`` on a grid of ``spacing`` (i, j, k).
+
+    A closing with a radius of r voxels fills gaps up to 2 r voxels wide, so along each axis the radius is half the
+    number of whole voxels that fit in ``gapMm``, rounded up: on a 2 mm grid a 2 mm gap (one voxel) needs a radius
+    of 1 voxel, which a radius of ``gapMm / 2`` in mm would round to 0 (no closing at all).
+    """
+    radii = []
+    for s in (spacing[2], spacing[1], spacing[0]):
+        gapVoxels = math.floor(gapMm / max(1e-6, float(s)) + 1e-6) if gapMm > 0 else 0
+        radii.append(max(0, math.ceil(gapVoxels / 2.0)))
+    return _ellipsoidVoxels(radii)
+
+
+def _ellipsoidVoxels(radii):
+    """Ellipsoid structuring element (k, j, i) with ``radii`` voxels along k, j and i."""
     grids = np.ogrid[tuple(slice(-r, r + 1) for r in radii)]
     distance = sum((g / max(r, 1)) ** 2 if r > 0 else g * 0.0 for g, r in zip(grids, radii, strict=True))
     return distance <= 1.0
@@ -1550,10 +1943,10 @@ def _keepLargest(mask, spacing):
 
 
 def _fillGapsAndSpecks(mask, spacing):
-    """Closing with a 2 mm ellipsoid, then removal of islands under 10 mm³ (SPEC 5.2 Clean up)."""
+    """Closing that fills gaps up to 2 mm, then removal of islands under 10 mm³ (SPEC 5.2 Clean up)."""
     from scipy import ndimage
 
-    structure = _ellipsoid(spacing, CLEANUP_CLOSING_MM / 2.0 if CLEANUP_CLOSING_MM > 0 else 0)
+    structure = _closingElement(spacing, CLEANUP_CLOSING_MM)
     closed = ndimage.binary_closing(mask, structure=structure) if structure.size > 1 else mask.copy()
     closed |= mask
     voxelVolume = float(np.prod(spacing))
@@ -1571,26 +1964,39 @@ def keepLargestPart(shell=None):
     """Keep the largest part of the lesion (26-connectivity), one undo step."""
     shell = _currentShell(shell)
     result = _editLesion(_keepLargest, _("Keep largest"), shell)
-    if result is not None and shell is not None:
-        shell.toast(_("Kept the largest part: {removed} voxels removed").format(removed=result[0] - result[1]),
-                    action=_undo, actionText=_("Undo"))
-    return result
+    if result is None:
+        return None
+    before, after, changed = result
+    if shell is not None:
+        if changed:
+            shell.toast(_("Kept the largest part: {removed} voxels removed").format(removed=before - after),
+                        action=_undo, actionText=_("Undo"))
+        else:
+            # No undo step was added: an Undo here would undo the user's previous edit
+            shell.toast(_("The lesion is one part: nothing to remove"))
+    return before, after
 
 
 def fillGapsAndSpecks(shell=None):
     """"Fill gaps and specks": closes gaps up to 2 mm and removes islands under 10 mm³, one undo step."""
     shell = _currentShell(shell)
     result = _editLesion(_fillGapsAndSpecks, _("Fill gaps and specks"), shell)
-    if result is not None and shell is not None:
-        before, after = result
-        shell.toast(_("Fill gaps and specks: {before} → {after} voxels").format(before=before, after=after), action=_undo, actionText=_("Undo"))
-    return result
+    if result is None:
+        return None
+    before, after, changed = result
+    if shell is not None:
+        if changed:
+            shell.toast(_("Fill gaps and specks: {before} → {after} voxels").format(before=before, after=after), action=_undo, actionText=_("Undo"))
+        else:
+            # No undo step was added: an Undo here would undo the user's previous edit
+            shell.toast(_("Fill gaps and specks: no gaps or specks to clean up"))
+    return before, after
 
 
 def fillGaps(shell=None):
     """The gaps link of the card: Fill gaps one-click when the effect offers it, else the Fill gaps tool."""
     editor = segmentEditor()
-    if editor is None or editor.effectByName("Fill between slices") is None:
+    if editor is None or editor.effectByName("Fill between slices") is None or not _canDraw(editor):
         return
     widget = _moduleWidget()
     if widget is not None and hasattr(widget, "activateEffect"):
@@ -1602,8 +2008,25 @@ def fillGaps(shell=None):
     for name in ("fillOneClick", "onFill", "fill"):
         method = getattr(scripted, name, None)
         if callable(method):
+            before = _lesionVoxelCount(editor)
             method()
+            # The effect only says "Nothing to fill." for an empty preview, but the preview always holds the strokes:
+            # one-voxel-thin strokes and separate foci are not bridged, and the link must not seem dead
+            after = _lesionVoxelCount(editor)
+            if before is not None and before == after:
+                _toast(_currentShell(shell), _("Nothing to fill between these slices: the strokes are too thin or too far "
+                                               "apart to join. Paint a wider shape on the slices, then fill again."))
             return
+
+
+def _lesionVoxelCount(editor):
+    """Voxels of the edited segment, or None when it cannot be read."""
+    segmentationNode = editor.segmentationNode() if editor is not None else None
+    segmentId = editor.currentSegmentID() if editor is not None else None
+    if segmentationNode is None or not segmentId:
+        return None
+    data = _labelmapArray(segmentationNode, segmentId)
+    return int(np.count_nonzero(data[0])) if data is not None else 0
 
 
 #
@@ -1611,27 +2034,41 @@ def fillGaps(shell=None):
 #
 
 #: Saved lesions of this session: {segmentation node ID: (weak reference, absolute path, content stamp, time)}. A record
-#: is valid only for the node it was made for (node IDs are reused after the scene is closed), and Draw clears them
-#: when the scene is closed.
+#: is valid only for the node it was made for (node IDs are reused after the scene is closed), and they are cleared
+#: when the scene is closed (``_onSceneClosed()``).
 _savedRecords = {}
 
 
-def _onSceneClosed():
+def _onSceneClosed(caller=None, event=None):
+    """The scene was closed: forget the lesions of the closed project (their metrics hold its vtkSegmentation)."""
     _savedRecords.clear()
     _metricsCache.clear()
     _mniCache.clear()
+    # The "lesion is in scan space" offer belongs to the closed lesion: its buttons would act on a deleted node
+    if _extension is not None:
+        _extension._nativeOffer = None
+        if _extension._session is not None:
+            _extension._session.refreshPanel()
+    # The assisted counts of lesion segments: the next scene reuses their node IDs (a study subject's counts are kept)
+    for key in [key for key in _assistCounts if not key.startswith(_STUDY_KEY_PREFIX)]:
+        del _assistCounts[key]
 
 
-#: The scene observed by ``_installImportGuard()`` and its observer tag
-_importGuard = {"scene": None, "tag": None}
+#: The scene observed by ``_installImportGuard()`` and its observer tags
+_importGuard = {"scene": None, "tag": None, "closeTag": None}
 
 
 def _installImportGuard():
-    """Observe the scene loads for ``_onSceneStartImport()`` (once per scene; Draw's own observers end when Draw is left)."""
+    """Observe the scene loads for ``_onSceneStartImport()`` and the scene closes for ``_onSceneClosed()`` (once per scene;
+    Draw's own observers end when Draw is left, and a project is usually closed from Library or Map: the caches of this
+    module would keep every closed project's lesion in memory).
+    """
     scene = slicer.mrmlScene
     if scene is None or _importGuard["scene"] is scene:
         return
     _importGuard["tag"] = scene.AddObserver(scene.StartImportEvent, _onSceneStartImport)
+    # Before the other observers of the close (high priority): one that starts the next project at once keeps its records
+    _importGuard["closeTag"] = scene.AddObserver(scene.EndCloseEvent, _onSceneClosed, 100.0)
     _importGuard["scene"] = scene
 
 
@@ -1657,6 +2094,37 @@ def _onSceneStartImport(caller=None, event=None):
         logging.error("Studio Draw: preparing the scene load failed:\n" + traceback.format_exc())
 
 
+def relocateSavedLesions(oldFolder, newFolder):
+    """A folder moved (the open project was renamed, or the Slicer Studio folder moved): the lesions saved in this session
+    inside ``oldFolder`` are now in ``newFolder``, so Save (the CTA and Ctrl+Shift+S) writes there and never makes the
+    old folder again (a ghost project in the Library).
+    """
+    if not oldFolder or not newFolder:
+        return
+    oldNorm, newNorm = os.path.normpath(oldFolder), os.path.normpath(newFolder)
+    oldReal = os.path.normcase(os.path.realpath(oldNorm))
+    for segmentationId, (reference, path, stamp, savedTime) in list(_savedRecords.items()):
+        normalized = os.path.normpath(path)
+        if normalized == oldNorm or normalized.startswith(oldNorm + os.sep):
+            relative = normalized[len(oldNorm):].lstrip(os.sep)
+        else:
+            real = os.path.normcase(os.path.realpath(normalized))
+            if real != oldReal and not real.startswith(oldReal + os.sep):
+                continue
+            relative = os.path.realpath(normalized)[len(os.path.realpath(oldNorm)):].lstrip(os.sep)
+        _savedRecords[segmentationId] = (reference, os.path.join(newNorm, relative) if relative else newNorm, stamp, savedTime)
+
+
+def followMovedLesions(movedPath):
+    """The lesions saved in this session that moved (a move of the Slicer Studio folder that failed partway): Save writes
+    them at their new place. ``movedPath(path)`` is the new path of ``path`` (``path`` itself when it did not move).
+    """
+    for segmentationId, (reference, path, stamp, savedTime) in list(_savedRecords.items()):
+        newPath = movedPath(path)
+        if newPath and newPath != path:
+            _savedRecords[segmentationId] = (reference, newPath, stamp, savedTime)
+
+
 def _savedRecord(segmentationNode):
     if segmentationNode is None:
         return None
@@ -1674,6 +2142,9 @@ def _unchangedSinceRead(segmentationNode, storageNode):
     """
     if not segmentationNode.GetModifiedSinceRead():
         return True
+    importer = _importer()
+    if importer is not None and hasattr(importer, "unchangedSinceLoad") and importer.unchangedSinceLoad(segmentationNode):
+        return True  # a fractional file whose voxels the importer set after the reader (as the file reads as a lesion)
     try:
         storedTime = storageNode.GetStoredTime().GetMTime()
     except (AttributeError, TypeError):
@@ -1733,6 +2204,14 @@ def saveStateText(segmentationNode):
         return " · ".join(part for part in parts if part), path
     # In a project (A-09) the lesion itself is saved with the project; the line then speaks of the NIfTI mask
     inProject = _projectLesionsFolder() is not None
+    problem = _projectSaveProblem() if inProject else None
+    if problem is not None:
+        # The project save failed (disk full, folder not writable): the card must not claim the lesion is saved; it says
+        # what the top bar says ("Not saved · Retry"), with the reason in the tooltip
+        lines = [problem, _("Press {key} to try again.").format(key=qt.QKeySequence("Ctrl+S").toString(qt.QKeySequence.NativeText))]
+        if state == "unsaved" and path:
+            lines.append(_("{name} is older than the lesion.").format(name=name))
+        return _("Not saved"), "\n".join(lines)
     if state == "unsaved":
         if inProject:
             return _("Saved in the project · {name} is older").format(name=name), _("{path}\nSave lesion updates it.").format(path=path)
@@ -1747,8 +2226,10 @@ def saveStateText(segmentationNode):
 
 
 def _sanitizeFileName(name):
-    """A file name made of letters, digits, ".", "_" and "-" only."""
-    name = re.sub(r"[^A-Za-z0-9._-]+", "_", str(name)).strip("._-")
+    """A file name made of letters, digits, ".", "_" and "-" only (accents are folded like Export as NIfTI: "Müller" -> "Muller")."""
+    from . import niftiexport
+
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", niftiexport.asciiText(name)).strip("._-")
     return re.sub(r"_+", "_", name)
 
 
@@ -1797,6 +2278,26 @@ def isUserFile(path):
     return not any(_isInside(path, directory) for directory in _applicationDirectories())
 
 
+def _projectSaveProblem():
+    """The reason the open project could not be saved (autosave state "error" or "paused", as the top bar shows
+    "Not saved · Retry"), or None when the project saves normally or there is no running autosave service.
+    """
+    try:
+        from . import autosave
+    except ImportError:
+        return None
+    service = autosave.instance()
+    if service is None:
+        return None
+    try:
+        status = service.status()
+    except Exception:
+        return None
+    if not getattr(status, "projectName", None) or getattr(status, "state", None) not in ("error", "paused"):
+        return None
+    return getattr(status, "message", None) or _("see the error log")
+
+
 def _projectLesionsFolder(create=False):
     """Lesions/ of the open project (A-09), or None without a project."""
     try:
@@ -1823,6 +2324,37 @@ def _watchProject():
         return
     projects.addListener(_onProjectChanged)
     _projectWatched = True
+
+
+_statusWatched = None  # the autosave service whose status the Lesion card follows
+_saveProblemShown = None  # the project save problem the Lesion card last spoke of
+
+
+def _watchSaveStatus():
+    """Update the save line of the Lesion card when a project save fails or succeeds again ("Not saved" <-> "Saved in
+    the project") without waiting for the next edit.
+    """
+    global _statusWatched
+    try:
+        from . import autosave
+    except ImportError:
+        return
+    service = autosave.instance()
+    if service is None or service is _statusWatched or not hasattr(service, "addStatusListener"):
+        return
+    service.addStatusListener(_onSaveStatus)
+    _statusWatched = service
+
+
+def _onSaveStatus(_status=None):
+    global _saveProblemShown
+    problem = _projectSaveProblem()
+    if problem == _saveProblemShown:
+        return
+    _saveProblemShown = problem
+    session = extension().session
+    if session is not None:
+        session.refreshPanel()
 
 
 def _onProjectChanged():
@@ -1911,8 +2443,10 @@ def defaultLesionFileName(segmentationNode, sourceVolumeNode=None, directory=Non
 
 def _withNiftiExtension(path):
     if not path.lower().endswith(NIFTI_EXTENSIONS):
-        path += ".nii.gz"
-    return path
+        return path + ".nii.gz"
+    # The NIfTI writer only accepts a lower-case extension ("Bad Nifti file name"): keep the stem, normalise the extension
+    stem, extension = (path[:-7], ".nii.gz") if path.lower().endswith(".nii.gz") else (path[:-4], ".nii")
+    return stem + extension
 
 
 def lesionNodes(editor=None):
@@ -1988,6 +2522,10 @@ def _recordedGridVolume(segmentationNode):
     return volumeNode
 
 
+class FolderNotWritableError(RuntimeError):
+    """The folder of the lesion file cannot be written (read-only folder or drive, no permission)."""
+
+
 def saveLesion(path, segmentationNode, referenceVolumeNode=None, segmentIds=None):
     """Write the segments of ``segmentationNode`` as a NIfTI label map (official Slicer writer) and return the path.
 
@@ -2027,9 +2565,19 @@ def saveLesion(path, segmentationNode, referenceVolumeNode=None, segmentIds=None
         directory = os.path.dirname(path)
         if directory and not os.path.isdir(directory):
             os.makedirs(directory, exist_ok=True)
+        if not os.access(directory or ".", os.W_OK | os.X_OK):
+            # Checked before writing: the writer would otherwise fail on its temporary folder, and could still
+            # overwrite an existing (writable) file in a read-only folder while the sidecar cannot be written
+            raise FolderNotWritableError(_("The lesion could not be saved: the folder {folder} cannot be written").format(
+                folder=directory or os.getcwd()))
         if not slicer.util.saveNode(labelmapNode, path):
             raise RuntimeError(_("Failed to write {path}").format(path=path))
     finally:
+        # The writer leaves its empty TempWrite<name> folder behind when it fails
+        import shutil
+        for leftover in (os.path.join(os.path.dirname(path), "TempWrite" + os.path.basename(path).split(".")[0]),):
+            if os.path.isdir(leftover) and not os.listdir(leftover):
+                shutil.rmtree(leftover, ignore_errors=True)
         # Remove the temporary label map and what the export added (its color table, display and storage nodes)
         for index in reversed(range(scene.GetNumberOfNodes())):
             node = scene.GetNthNode(index)
@@ -2072,6 +2620,26 @@ def _userTemplateOf(volumeNode):
         return None
 
 
+def _sidecarText(segmentationNode, attribute, key, path):
+    """Notes or source reference for the sidecar of ``path``: the lesion's attribute (an empty one was cleared in the
+    Lesion card). Without the attribute, a re-save to the file the lesion was loaded from keeps that sidecar's text.
+    """
+    value = segmentationNode.GetAttribute(attribute)
+    if value is not None:
+        return value
+    storageNode = segmentationNode.GetStorageNode()
+    loadedPath = storageNode.GetFileName() if storageNode is not None else None
+    if not loadedPath or os.path.normcase(os.path.realpath(loadedPath)) != os.path.normcase(os.path.realpath(path)):
+        return ""
+    try:
+        with open(sidecarPath(path), encoding="utf-8") as f:
+            existing = json.load(f)
+    except (OSError, ValueError):
+        return ""
+    value = existing.get(key) if isinstance(existing, dict) else None
+    return value if isinstance(value, str) else ""
+
+
 def writeSidecar(path, segmentationNode, sourceVolumeNode=None):
     """Write the BIDS-style sidecar of a saved lesion (D-U3; official Slicer and FSL ignore it). Return its path.
 
@@ -2084,8 +2652,8 @@ def writeSidecar(path, segmentationNode, sourceVolumeNode=None):
     content = {
         "Source": _sidecarSource(sidecar, sourceVolumeNode) if sourceVolumeNode is not None else None,
         "Space": lesionSpace[0] if lesionSpace else "scanner",
-        "Notes": segmentationNode.GetAttribute(NOTES_ATTRIBUTE) or "",
-        "SourceReference": segmentationNode.GetAttribute(SOURCE_REFERENCE_ATTRIBUTE) or "",
+        "Notes": _sidecarText(segmentationNode, NOTES_ATTRIBUTE, "Notes", path),
+        "SourceReference": _sidecarText(segmentationNode, SOURCE_REFERENCE_ATTRIBUTE, "SourceReference", path),
         "GeneratedBy": f"Slicer Studio {slicer.app.applicationVersion}",
     }
     if content["Source"] is None:
@@ -2106,7 +2674,9 @@ def _toast(shell, text, **kwargs):
 
 
 def _showInFolder(path):
-    qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(os.path.dirname(path)))
+    from . import projects
+
+    projects.showInFileManager(os.path.dirname(path))
 
 
 def _commitCardEdits():
@@ -2131,6 +2701,16 @@ def _writeLesion(shell, segmentationNode, sourceVolumeNode, path):
         with slicer.util.WaitCursor():
             path = saveLesion(path, segmentationNode, None if referenceGeometry else sourceVolumeNode)
             writeSidecar(path, segmentationNode, sourceVolumeNode)
+    except FolderNotWritableError as e:
+        logging.warning(f"Studio: {e}")
+        slicer.util.warningDisplay(str(e))
+        return None
+    except (OSError, RuntimeError) as e:
+        # Expected write failures: the reason is shown, no traceback
+        reason = (getattr(e, "strerror", None) or str(e)) if isinstance(e, OSError) else str(e)
+        logging.warning(f"Studio: cannot save the lesion: {reason}")
+        slicer.util.warningDisplay(_("The lesion could not be saved."), detailedText=reason)
+        return None
     except Exception as e:
         logging.error(f"Studio: cannot save the lesion:\n{traceback.format_exc()}")
         slicer.util.errorDisplay(_("The lesion could not be saved."), detailedText=str(e))
@@ -2160,12 +2740,47 @@ def _writeLesion(shell, segmentationNode, sourceVolumeNode, path):
     return path
 
 
+def saveLesionBlockedReason():
+    """Why Save lesion and Save lesion as… are off in Draw now, or "" when they are on.
+
+    They are off in the second tracing, adjudication and review states (``StudioLib.adjudicate``, ``StudioLib.review``):
+    each writes its own files with its footer (Ctrl+Enter): ``lesions/rater-<initials>/`` for a second tracing, a
+    consensus that keeps both tracings, a review edit that keeps the tracer's file. Save lesion would propose the first
+    tracer's file (the scan's folder and BIDS subject) and replace it, or reveal it to a blind rater.
+    """
+    try:
+        from . import adjudicate, review
+    except Exception:
+        return ""
+    key = ui.keyText(PRIMARY_SHORTCUT)
+    agreement = adjudicate.state()
+    if agreement is not None:
+        if agreement.queue == adjudicate.QUEUE_SECOND:
+            return _("Save lesion is off during a second tracing: {key} saves it to your rater folder").format(key=key)
+        return _("Save lesion is off during adjudication: A, B, Union, Intersection or Edit… writes the consensus")
+    if review.state() is not None:
+        return _("Save lesion is off during review: Approve ({key}) saves your edits and keeps the tracer's lesion").format(key=key)
+    return ""
+
+
+def _saveLesionAllowed(shell):
+    """False (with a toast that says why) in the states where Save lesion is off (``saveLesionBlockedReason()``)."""
+    reason = saveLesionBlockedReason()
+    if reason:
+        _toast(shell, reason, ms=5000, level="warning")
+        return False
+    return True
+
+
 def saveLesionDialog(shell=None, path=None):
     """"Save lesion as…": choose a NIfTI file (unless ``path`` is given) and save the lesion edited in Draw.
 
-    Return the written path, or None if cancelled, empty or failed (errors are shown).
+    Return the written path, or None if cancelled, empty, failed (errors are shown) or off in this state of Draw
+    (second tracing, adjudication, review: ``saveLesionBlockedReason()``).
     """
     shell = _currentShell(shell)
+    if not _saveLesionAllowed(shell):
+        return None
     _applyPendingSmartFill(shell)
     segmentationNode, sourceVolumeNode = lesionNodes()
     if segmentationNode is None:
@@ -2176,6 +2791,8 @@ def saveLesionDialog(shell=None, path=None):
             _toast(shell, _("The lesion is empty: nothing was saved"), ms=4000, level="warning")
             return None
         record = _savedRecord(segmentationNode)
+        if record is not None and not os.path.isdir(os.path.dirname(record[1])):
+            record = None  # its folder is gone: propose the default folder (the project's Lesions/), not the old one
         directory = os.path.dirname(record[1]) if record is not None else defaultSaveDirectory(sourceVolumeNode)
         name = os.path.basename(record[1]) if record is not None else defaultLesionFileName(segmentationNode, sourceVolumeNode, directory)
         segmentCount = segmentationNode.GetSegmentation().GetNumberOfSegments()
@@ -2199,11 +2816,14 @@ def saveLesionNow(shell=None):
     the dialog (in a project, A-09, it proposes Lesions/<name>.nii.gz of the project). Return the written path, or None.
     """
     shell = _currentShell(shell)
+    if not _saveLesionAllowed(shell):
+        return None
     _applyPendingSmartFill(shell)
     segmentationNode, sourceVolumeNode = lesionNodes()
     record = _savedRecord(segmentationNode)
-    if record is not None:
+    if record is not None and os.path.isdir(os.path.dirname(record[1])):
         return _writeLesion(shell, segmentationNode, sourceVolumeNode, record[1])
+    # Never saved, or its folder is gone (moved or deleted outside Slicer Studio): ask, never make the folder again
     return saveLesionDialog(shell)
 
 
@@ -2226,20 +2846,43 @@ def _applyPendingSmartFill(shell=None):
     return True
 
 
-#: Assisted voxels per subject (or segmentation and segment): {key: {tool: {"voxels": n, "applies": n, "params": [...]}}}
+#: Assisted voxels per study subject (``"study:<study folder>|<subject id>"``) or lesion segment (``"<segmentation id>/<segment
+#: id>"``): {key: {tool: {"voxels": n, "applies": n, "params": [...]}}}. A subject id is scoped by its study (another study
+#: has its own sub-01); the segment keys end with the scene (node IDs are reused after a close, ``_onSceneClosed``).
 _assistCounts = {}
 
+_STUDY_KEY_PREFIX = "study:"
 
-def _assistKey():
+
+def _studyAssistScope():
+    """(scope, subject id) of the open study of the shell: scope ``"study:<normalized study folder>"``; (None, None) without a
+    study, subject id None without a current subject.
+    """
     shell = _currentShell()
     study = getattr(shell, "studySession", None) if shell is not None else None
-    if study is not None and hasattr(study, "current"):
+    if study is None:
+        return None, None
+    path = None
+    try:
+        path = getattr(study, "path", None)
+    except Exception:
+        pass
+    scope = _STUDY_KEY_PREFIX + (os.path.normcase(os.path.realpath(str(path))) if path else f"#{id(study)}")
+    sid = None
+    if hasattr(study, "current"):
         try:
             subject = study.current()
             if subject:
-                return str(getattr(subject, "id", subject))
+                sid = str(getattr(subject, "id", subject))
         except Exception:
             pass
+    return scope, sid
+
+
+def _assistKey():
+    scope, sid = _studyAssistScope()
+    if scope is not None and sid:
+        return f"{scope}|{sid}"
     editor = segmentEditor()
     if editor is None or editor.segmentationNode() is None:
         return None
@@ -2262,11 +2905,18 @@ def notifyAssist(tool, addedVoxels, params=None):
 
 
 def assistCounts(key=None):
-    """Assisted counts of a subject id or ``"<segmentation id>/<segment id>"`` (default: the current one), or all."""
+    """Assisted counts of a subject id of the open study or ``"<segmentation id>/<segment id>"`` (default: the current one),
+    or all. A subject id is read in the open study only: another study's subject with the same id has its own counts.
+    """
     if key is None:
         key = _assistKey()
     if key == "all":
         return json.loads(json.dumps(_assistCounts))
+    if key is not None and not str(key).startswith(_STUDY_KEY_PREFIX):
+        scope, _sid = _studyAssistScope()
+        scoped = f"{scope}|{key}" if scope is not None else None
+        if scoped is not None and scoped in _assistCounts:
+            key = scoped
     return json.loads(json.dumps(_assistCounts.get(key, {})))
 
 
@@ -2307,6 +2957,18 @@ def setOptionsStudioLook(editor, studio, hideDiameter=False):
     optionsGroupBox = editor.findChild("QFrame", "EffectsOptionsFrame") if editor is not None else None
     if optionsGroupBox is None:
         return
+    # Space and Enter press a focused button of the tool options (Apply of Threshold, Islands, Margin...) in Draw: the
+    # Segment Editor's window-wide Space shortcut would pause the tool instead, and a QPushButton outside a dialog or a
+    # QToolButton does not react to Enter (USABILITY 9.1). The options of every tool exist from the start (the editor
+    # shows those of the active tool), and Draw calls this again after a change of the editor (refresh()).
+    for button in optionsGroupBox.findChildren("QAbstractButton"):
+        if bool(button.property("studioButtonKeys")) == bool(studio):
+            continue
+        button.setProperty("studioButtonKeys", True if studio else None)
+        if studio:
+            ui.installButtonKeys(button)
+        else:
+            ui.removeButtonKeys(button)
     for checkBox in optionsGroupBox.findChildren("QCheckBox"):
         role = "switch" if studio else None
         if checkBox.property("slicerRole") == role:
@@ -2324,6 +2986,7 @@ def setOptionsStudioLook(editor, studio, hideDiameter=False):
         style = checkBox.style()
         style.unpolish(checkBox)
         style.polish(checkBox)
+        ui.refreshCheckBoxHint(checkBox)
         checkBox.updateGeometry()
         checkBox.update()
     for label in optionsGroupBox.findChildren("QLabel"):
@@ -2361,6 +3024,7 @@ class DrawExtension:
         self._lastReadout = None
         self._lastReadoutKey = None
         self._lastStats = None
+        self._tabOrderScheduled = False
 
     #
     # Session
@@ -2373,6 +3037,7 @@ class DrawExtension:
     def attach(self, drawSession):
         self._session = drawSession
         _watchProject()
+        _watchSaveStatus()
 
     def detach(self, drawSession):
         if self._session is drawSession:
@@ -2424,7 +3089,27 @@ class DrawExtension:
         return ui.tooltip(text, " · ".join(keys) if keys else None, description)
 
     def onEnter(self):
-        pass
+        self._scheduleTabOrder()
+
+    def _scheduleTabOrder(self):
+        """Put the Tab order of the inspector in its reading order, once the widgets that are being added are all there
+        (the keyboard focus chain follows the creation order: a card that is added late, or placed above a row that was
+        created before it, would otherwise be reached out of order).
+        """
+        if self._tabOrderScheduled:
+            return
+        self._tabOrderScheduled = True
+        qt.QTimer.singleShot(0, self._arrangeTabOrder)
+
+    def _arrangeTabOrder(self):
+        self._tabOrderScheduled = False
+        shell = self._shell()
+        if shell is None or self._session is None:
+            return
+        try:
+            shell.arrangeInspectorTabOrder()
+        except Exception:
+            logging.error(f"Studio: the Tab order of the Draw inspector could not be arranged:\n{traceback.format_exc()}")
 
     def onExit(self):
         pass
@@ -2433,6 +3118,11 @@ class DrawExtension:
         """A lesion to draw into: the edited segmentation, else one bound to the source volume ("Lesions"), with a
         "Lesion" segment when it has none. Nothing is created while there is no scan (the empty state shows).
         """
+        importer = _importer()
+        pending = importer.takePendingSelection() if importer is not None and hasattr(importer, "takePendingSelection") else None
+        if pending is not None:
+            # The lesion that was chosen while the editor had no Segment Editor node (importer.selectInSegmentEditor())
+            importer.selectInSegmentEditor(*pending)
         segmentationNode = editor.segmentationNode()
         sourceVolumeNode = editor.sourceVolumeNode()
         if sourceVolumeNode is not None and not _isEditableSource(sourceVolumeNode):
@@ -2448,6 +3138,10 @@ class DrawExtension:
             if sourceVolumeNode is None:
                 return None
             segmentationNode = self._existingSegmentation(sourceVolumeNode)
+            if segmentationNode is not None:
+                # A segmentation that Studio did not create (loaded, or made by a script): the editor edits it, and
+                # it must be set before the source volume (qMRMLSegmentEditorWidget::setSourceVolumeNode needs it)
+                editor.setSegmentationNode(segmentationNode)
         if segmentationNode is None:
             # Without a segment: showing a scan in Draw adds no segment (the guided tours and a look leave the lesion
             # empty); the first tool adds the "Lesion" segment (ensureLesionSegment(), _adoptNewSegment())
@@ -2527,7 +3221,9 @@ class DrawExtension:
         header.setObjectName("StudioDrawHeader")
         header.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Maximum)
         layout = qt.QVBoxLayout(header)
-        layout.setContentsMargins(0, 4, 0, 4)
+        # The cards of the header (the empty state, the Lesion card, the cards before the tools) are inset by the inspector
+        # padding on both sides (VISUAL 2.7: 16), like the section labels and the tool tiles
+        layout.setContentsMargins(ui.INSPECTOR_PADDING, 4, ui.INSPECTOR_PADDING, 4)
         layout.setSpacing(6)
         self._header = header
         self._headerLayout = layout
@@ -2543,13 +3239,21 @@ class DrawExtension:
         layout.addLayout(self._cardsBefore)
 
         # Brush size (Paint and Erase): a segmented 1 / 3 / 6 / 12 mm and the diameter field (VISUAL 4.4), and the source chip
+        # on a row of its own: the scan name can be long, and sharing the row squeezed the segmented control until its
+        # segments overlapped
         self.chipsRow = qt.QWidget()
         self.chipsRow.setObjectName("StudioDrawChipsRow")
         self.chipsRow.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
-        chipsLayout = qt.QHBoxLayout(self.chipsRow)
+        rowsLayout = qt.QVBoxLayout(self.chipsRow)
+        rowsLayout.setContentsMargins(0, 0, 0, 0)
+        rowsLayout.setSpacing(2)
+        sizeRow = qt.QWidget()
+        sizeRow.setObjectName("StudioDrawSizeRow")
+        chipsLayout = qt.QHBoxLayout(sizeRow)
         # Aligned with the cards and the tool tiles
         chipsLayout.setContentsMargins(8, 2, 10, 2)
         chipsLayout.setSpacing(8)
+        rowsLayout.addWidget(sizeRow)
         self.brushChips = {}
         self.brushLabel = ui.label(_("Size"), "body", "text", "StudioBrushSizeLabel")
         chipsLayout.addWidget(self.brushLabel)
@@ -2594,7 +3298,12 @@ class DrawExtension:
         self.sourceMenu.connect("aboutToShow()", self._fillSourceMenu)
         self.sourceChip.setMenu(self.sourceMenu)
         ui.setRole(self.sourceChip, "ghost")
-        chipsLayout.addWidget(self.sourceChip)
+        # Never wider than the row: the text is elided to the room (_refreshSourceChip)
+        sourceRow = qt.QHBoxLayout()
+        sourceRow.setContentsMargins(8, 0, 10, 2)
+        sourceRow.addWidget(self.sourceChip)
+        sourceRow.addStretch(1)
+        rowsLayout.addLayout(sourceRow)
         # The size row follows the tool tiles (VISUAL 4.4): the Segment Editor puts it there (toolOptionsWidget()); the
         # header owns it until then
         self.chipsRow.setParent(header)
@@ -2606,8 +3315,8 @@ class DrawExtension:
         self.toolsRow.setObjectName("StudioDrawToolsRow")
         self.toolsRow.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
         self.toolsRowLayout = qt.QHBoxLayout(self.toolsRow)
-        # Aligned with the inspector padding (VISUAL 4.4: 16)
-        self.toolsRowLayout.setContentsMargins(ui.INSPECTOR_PADDING, 8, 0, 0)
+        # The header has the inspector padding (VISUAL 4.4: 16) on both sides
+        self.toolsRowLayout.setContentsMargins(0, 8, 0, 0)
         self.toolsRowLayout.setSpacing(6)
         self.toolsLabel = ui.sectionLabel(_("Tools"), "StudioDrawToolsLabel")
         self.toolsRowLayout.addWidget(self.toolsLabel)
@@ -2656,6 +3365,21 @@ class DrawExtension:
         """The layout that holds "More tools ▾" in the studio presentation: the right of the Tools label."""
         self.headerWidget()
         return self.toolsRowLayout
+
+    def _refreshSourceChip(self, name):
+        """The text of the source chip, elided in the middle to the width of the row (the full name is in the tooltip)."""
+        chip = self.sourceChip
+        width = int(self.chipsRow.width)
+        available = width - 18 if width > 100 else 300
+        metrics = chip.fontMetrics()
+        chip.setText(_("on {name} ▾").format(name=""))
+        # The button's padding and the menu indicator come on top of the text
+        overhead = int(chip.sizeHint.width()) - int(metrics.horizontalAdvance(chip.text))
+        room = max(40, available - overhead - int(metrics.horizontalAdvance(chip.text)))
+        shown = str(metrics.elidedText(name, qt.Qt.ElideMiddle, room))
+        chip.setText(_("on {name} ▾").format(name=shown))
+        body = _("the scan you draw on (and shown in the views)") + f": {name}"
+        chip.setToolTip(ui.tooltip(_("Source scan"), None, body))
 
     def toolOptionsWidget(self):
         """The size row (Brush and Erase), shown by the Segment Editor right after the tool tiles."""
@@ -2736,6 +3460,7 @@ class DrawExtension:
                       key=lambda k: self._cards[k][1])
         target.insertWidget(keys.index(key), widget)
         widget.show()
+        self._scheduleTabOrder()
 
     def removeInspectorCard(self, key):
         entry = self._cards.pop(key, None)
@@ -2747,6 +3472,7 @@ class DrawExtension:
                 layout.removeWidget(widget)
         widget.hide()
         widget.setParent(None)
+        self._scheduleTabOrder()
         return True
 
     def _discoverDrawCards(self):
@@ -2835,6 +3561,8 @@ class DrawExtension:
         if studio and editor.visible == empty:
             editor.setVisible(not empty)
         self.card.widget.setVisible(not empty)
+        # The "Tools" label and "More tools ▾" belong to the tool tiles, which the hidden editor holds
+        self.toolsRow.setVisible(not empty)
         if self._trailing is not None:
             self._trailing.setVisible(not empty)
         if empty:
@@ -2866,7 +3594,7 @@ class DrawExtension:
         volumes = _editableVolumes()
         showSource = len(volumes) > 1 and sourceVolumeNode is not None
         if showSource:
-            self.sourceChip.setText(_("on {name} ▾").format(name=sourceVolumeNode.GetName()))
+            self._refreshSourceChip(sourceVolumeNode.GetName())
         self.sourceChip.setVisible(showSource)
         self.chipsRow.setVisible(brushActive or showSource)
         # Lesion card
@@ -2903,6 +3631,17 @@ class DrawExtension:
             if (button.property("studioKey") or "") != key:
                 button.setProperty("studioKey", key)
                 button.update()
+        # "More tools ▾" (a QToolButton, shown only in the studio presentation): Space and Enter toggle it when it has the focus
+        # (on the right of the Tools label, moreToolsHost(); in the editor while it is not shown)
+        toolsRow = getattr(self, "toolsRow", None)
+        moreTools = toolsRow.findChild("QToolButton", "SegmentEditorMoreToolsButton") if toolsRow is not None else None
+        if moreTools is None:
+            moreTools = editor.findChild("QToolButton", "SegmentEditorMoreToolsButton")
+        if moreTools is not None:
+            if studio:
+                ui.installButtonKeys(moreTools)
+            else:
+                ui.removeButtonKeys(moreTools)
         setOptionsStudioLook(editor, studio, hideDiameter=studio and brushActive)
 
     @staticmethod
@@ -2930,9 +3669,13 @@ class DrawExtension:
         segmentId = _selectedSegmentId(segmentationNode, editor)
         segment = segmentationNode.GetSegmentation().GetSegment(segmentId) if segmentId else None
         displayNode = segmentationNode.GetDisplayNode()
-        readoutKey = (segmentationNode.GetID(), segmentId)
+        # The node and segment IDs come back after Ctrl+W (the next lesion is vtkMRMLSegmentationNode1 / Segment_1 again), so
+        # the key also holds the segmentation object: a new lesion with the same IDs is computed, not shown with the old stats
+        readoutKey = (segmentationNode.GetID(), segmentId, segmentationNode.GetSegmentation())
         metrics = lesionMetrics(segmentationNode, compute=computeMetrics or self._lastReadout is None or self._lastReadoutKey != readoutKey)
         if metrics is not None:
+            # Gaps along the slicing axis of the view N moves (Red, else the view shown), not along the k axis of the scan
+            metrics = dict(metrics, gaps=viewGaps(metrics))
             self._lastReadoutKey = readoutKey
             sideWord = metrics.get("sides") if _isMniLesion(segmentationNode) else None
             self._lastReadout = lesioncard.readoutHtml(metrics, sideWord, "warn" if sideWord == "Both hemispheres" else "neutral")
@@ -2990,6 +3733,9 @@ class DrawExtension:
         if self._transientHint and activeName == "Smoothing":
             return self._transientHint
         self._transientHint = None
+        reason = readOnlyReason(editor.segmentationNode()) if editor is not None else ""
+        if reason:
+            return reason
         if drawSession is not None and drawSession.suspendedEffect() is not None:
             title = EFFECT_APPEARANCE.get(drawSession.suspendedEffect(), (drawSession.suspendedEffect(),))[0]
             return _("{tool} resumes after the placement · Esc cancels").format(tool=title)
@@ -3108,7 +3854,7 @@ def newLesion(shell=None):
     importer = _importer()
     if importer is None or not hasattr(importer, "newLesionSegmentation"):
         return None
-    if shell is not None:
+    if shell is not None and getattr(shell, "studySession", None) is None:
         session(shell).requestArm()
     return importer.newLesionSegmentation(shell=shell)
 
@@ -3144,20 +3890,30 @@ def exportSegmentMasks(shell=None):
 
 
 def lesionMenuActions(shell=None):
-    """Items of the Lesion card ⋯ menu: [(label, callback)] (None for a separator)."""
-    actions = [
-        (_("Rename lesion"), lambda: renameLesion(shell)),
-        (_("New lesion"), lambda: newLesion(shell)),
+    """Items of the Lesion card ⋯ menu: [(label, callback)] (None for a separator).
+
+    With a study open there is no New lesion (like the card's own button): a study keeps one lesion per subject, the one
+    that Done writes. Save lesion saves it now instead. In second tracing, adjudication and review there is no Save
+    lesion and no Save lesion as… (``saveLesionBlockedReason()``): their footer writes their own files.
+    """
+    study = getattr(shell, "studySession", None) if shell is not None else None
+    actions = [(_("Rename lesion"), lambda: renameLesion(shell))]
+    if study is None:
+        actions.append((_("New lesion"), lambda: newLesion(shell)))
+    actions += [
         (_("Hide lesion"), lambda: hideLesion(shell)),
         None,
-        (_("Save lesion as…"), lambda: saveLesionDialog(shell)),
+    ]
+    if not saveLesionBlockedReason():
+        # Not offered in second tracing, adjudication or review: their footer writes their own files
+        if study is not None:
+            actions.append((_("Save lesion"), lambda: saveLesionNow(shell)))
+        actions.append((_("Save lesion as…"), lambda: saveLesionDialog(shell)))
+    actions += [
         (_("Export each segment as a NIfTI mask…"), lambda: exportSegmentMasks(shell)),
         (_("Fill gaps and specks"), lambda: fillGapsAndSpecks(shell)),
         (_("Keep largest part"), lambda: keepLargestPart(shell)),
     ]
-    study = getattr(shell, "studySession", None) if shell is not None else None
-    if study is not None:
-        actions.insert(4, (_("Save lesion"), lambda: saveLesionNow(shell)))
     return actions
 
 
@@ -3210,9 +3966,9 @@ class _EmptyState:
         if not visible:
             self.widget.hide()
             return
-        key = id(offer) if offer is not None else None
-        if key != self._offer:
-            self._offer = key
+        # The offer itself, not its id(): a new offer may get the id of a freed one, and then kept the old buttons
+        if offer is not self._offer:
+            self._offer = offer
             while self.buttons.count():
                 item = self.buttons.takeAt(0)
                 if item.widget() is not None:
@@ -3220,7 +3976,6 @@ class _EmptyState:
             importer = _importer()
             shell = self.ext._shell()
             if offer is None:
-                self.label.setText(_("Open a scan in Library or start on the MNI template"))
                 self._button(_("Open…"), lambda: shell.openFiles() if shell is not None else None, "StudioDrawOpenButton", primary=True)
                 if importer is not None:
                     self._button(_("Start on MNI template"), lambda: importer.startOnTemplate(shell=shell), "StudioDrawStartOnTemplateButton")
@@ -3237,6 +3992,20 @@ class _EmptyState:
                 ui.setRole(link, "ghost")
                 link.connect("clicked()", offer["showOnTemplate"])
                 self.buttons.addWidget(link)
+        if offer is None:
+            # Not part of the cached buttons: a single-slice image may be opened or closed while the offer stays None
+            singleSlice = _singleSliceVolume() if not _editableVolumes() else None
+            colour = _colourVolume() if not _editableVolumes() and singleSlice is None else None
+            if colour is not None:
+                text = _("{name} is a colour image, so it cannot be traced. Open a grayscale 3D scan or start on the MNI template.").format(
+                    name=colour.GetName())
+            elif singleSlice is not None:
+                text = _("{name} has a single slice, so it cannot be traced. Open a 3D scan or start on the MNI template.").format(
+                    name=singleSlice.GetName())
+            else:
+                text = _("Open a scan in Library or start on the MNI template")
+            if str(self.label.text) != text:
+                self.label.setText(text)
         self.widget.show()
 
 
@@ -3261,6 +4030,7 @@ class _DisplayCard:
         layout.setSpacing(0)
         self._updating = False
         self._fillShown = True
+        self._lastOpacity = 0.4  # the fill opacity brought back when the outline goes off while the fill is at 0%
 
         opacityRow = qt.QHBoxLayout()
         opacityRow.setSpacing(10)
@@ -3306,6 +4076,8 @@ class _DisplayCard:
                 segmentId = _selectedSegmentId(segmentationNode)
                 opacity = displayNode.GetSegmentOpacity2DFill(segmentId) if segmentId else displayNode.GetOpacity2DFill()
             self._fillShown = fill
+            if fill and opacity > 0:
+                self._lastOpacity = opacity
             # A hidden fill shows as 0%: moving the slider shows the fill again
             percent = round(opacity * 100) if fill else 0
             if self.opacitySlider.value != percent:
@@ -3330,19 +4102,35 @@ class _DisplayCard:
         segmentId = _selectedSegmentId(segmentationNode)
         if value > 0 and not displayNode.GetVisibility2DFill():
             displayNode.SetVisibility2DFill(True)
+        if value > 0:
+            self._lastOpacity = value / 100.0
         if segmentId:
             displayNode.SetSegmentOpacity2DFill(segmentId, value / 100.0)
         else:
             displayNode.SetOpacity2DFill(value / 100.0)
+        if value == 0 and not displayNode.GetVisibility2DOutline():
+            # Never nothing: a fill at 0% without the outline would hide the lesion, so the outline comes back
+            self.outlineSwitch.setChecked(True)
 
     def _onOutline(self, checked):
         displayNode = self._displayNode()
         if self._updating or displayNode is None:
             return
         displayNode.SetVisibility2DOutline(bool(checked))
-        if not checked and not displayNode.GetVisibility2DFill():
-            # Never nothing: without the outline the fill comes back
+        if checked:
+            return
+        segmentationNode, _source = lesionNodes()
+        segmentId = _selectedSegmentId(segmentationNode)
+        opacity = displayNode.GetSegmentOpacity2DFill(segmentId) if segmentId else displayNode.GetOpacity2DFill()
+        if not displayNode.GetVisibility2DFill() or opacity <= 0:
+            # Never nothing: without the outline the fill comes back (also from 0%, which showed the outline only)
             displayNode.SetVisibility2DFill(True)
+            restored = self._lastOpacity if self._lastOpacity > 0 else 0.4
+            if segmentId:
+                displayNode.SetSegmentOpacity2DFill(segmentId, restored)
+            else:
+                displayNode.SetOpacity2DFill(restored)
+            self.opacitySlider.setValue(round(restored * 100))
 
     def isShownIn3D(self):
         displayNode = self._displayNode()
@@ -3433,7 +4221,7 @@ class _CtaFooter:
         shell = self._shell()
         key = ui.keyText(PRIMARY_SHORTCUT)
         segmentationNode, _source = lesionNodes()
-        study = getattr(shell, "studySession", None) if shell is not None else None
+        study = _studyOfEditedLesion(shell, segmentationNode)
         if study is not None:
             label = _("Done → next · {key}").format(key=key)
             self._primary = lambda: doneNext(shell)
@@ -3450,7 +4238,9 @@ class _CtaFooter:
             self.saveButton.setText(label)
         self.saveButton.setToolTip(toolTip)
         self.saveButton.setAccessibleName(label)
-        self.saveButton.setEnabled(segmentationNode is not None)
+        # Nothing to save while the only open image is a single slice: Draw says why it cannot be traced
+        untraceable = _source is None and not _editableVolumes() and (_singleSliceVolume() is not None or _colourVolume() is not None)
+        self.saveButton.setEnabled(segmentationNode is not None and not untraceable)
         secondary = self._secondaryAction(segmentationNode, study)
         self._secondary = secondary
         self.secondaryButton.setVisible(secondary is not None)
@@ -3502,11 +4292,25 @@ class _CtaFooter:
         self.secondaryButton = None
 
 
+def _studyOfEditedLesion(shell, segmentationNode):
+    """The open study when Draw edits its subject's lesion (or no lesion), else None. A lesion of another scan (one that a
+    route of 3D Slicer loaded while the study is open) is saved with Save lesion: Done → next would write the hidden
+    subject instead, and the lesion that the user sees would be saved nowhere.
+    """
+    study = getattr(shell, "studySession", None) if shell is not None else None
+    if study is None or segmentationNode is None or not hasattr(study, "segmentationNode"):
+        return study
+    own = study.segmentationNode()
+    return study if own is not None and own.GetID() == segmentationNode.GetID() else None
+
+
 def doneNext(shell=None):
-    """Done → next (a study is open, W3-07): save this subject's lesion and open the next one."""
+    """Done → next (a study is open, W3-07): save this subject's lesion and open the next one. Save lesion when Draw
+    edits a lesion that is not the study subject's.
+    """
     shell = _currentShell(shell)
     _applyPendingSmartFill(shell)
-    study = getattr(shell, "studySession", None) if shell is not None else None
+    study = _studyOfEditedLesion(shell, lesionNodes()[0])
     if study is None:
         return saveLesionNow(shell)
     _commitCardEdits()
@@ -3558,11 +4362,13 @@ def _paletteEntries(shell=None):
     category = _("Draw")
     entries = [
         {"id": "draw.saveLesionAs", "title": _("Save lesion as…"), "category": category, "key": None, "synonyms": ["save as", "save lesion as", "save mask as"],
-         "callback": lambda: saveLesionDialog(shell), "enabled": hasLesion, "description": _("Choose the file of the lesion (NIfTI)")},
+         "callback": lambda: saveLesionDialog(shell), "enabled": lambda: hasLesion() and not saveLesionBlockedReason(),
+         "description": _("Choose the file of the lesion (NIfTI)")},
         {"id": "draw.renameLesion", "title": _("Rename lesion"), "category": category, "synonyms": ["rename", "lesion name"],
          "callback": lambda: (shell.switchTo("draw") if shell is not None else None, renameLesion(shell)), "enabled": hasLesion},
         {"id": "action.newLesion", "title": _("New lesion"), "category": _("Action"), "synonyms": ["another lesion", "new segmentation", "add lesion", "next lesion"],
-         "callback": lambda: newLesion(shell), "enabled": hasLesion, "description": _("A new lesion on the scan of Draw; the previous one is hidden")},
+         "callback": lambda: newLesion(shell), "enabled": lambda: hasLesion() and getattr(shell, "studySession", None) is None,
+         "description": _("A new lesion on the scan of Draw; the previous one is hidden")},
         {"id": "draw.centerLesion", "title": _("Center on lesion"), "category": category, "key": CENTER_SHORTCUT, "synonyms": ["center", "centre", "go to lesion", "find lesion"],
          "callback": lambda: centerOnLesion(shell), "enabled": hasLesion, "description": _("Bring all views to the lesion")},
         {"id": "draw.fillGapsAndSpecks", "title": _("Fill gaps and specks"), "category": category, "synonyms": ["clean up", "cleanup", "fill holes", "remove specks", "despeckle"],
@@ -3642,9 +4448,9 @@ def helpHtml(shell):
         ("Esc", _("Deselect the tool")),
         ("N · Shift+N", _("Next / previous gap slice")),
         ("C", _("Center on lesion")),
-        ("Alt+← · Alt+→", _("Previous / next lesion of a set or subject")),
+        (" · ".join(ui.keyText(key).replace("Left", "←").replace("Right", "→") for key in ("Alt+Left", "Alt+Right")), _("Previous / next lesion of a set or subject")),
         (ui.keyText(SAVE_LESION_SHORTCUT) + " · " + ui.keyText(PRIMARY_SHORTCUT), _("Save lesion")),
-        ("Ctrl+Z · " + ui.keyText(REDO_SHORTCUT), _("Undo · Redo")),
+        (ui.keyText("Ctrl+Z") + " · " + ui.keyText(REDO_SHORTCUT), _("Undo · Redo")),
     ]
     table = "".join(f"<tr><td style='padding-right: 12px;'><b>{html.escape(key)}</b></td><td>{html.escape(text)}</td></tr>" for key, text in rows)
     body = ""

@@ -75,6 +75,10 @@ public:
   /// Is the view a compare view
   bool isCompareView() const;
 
+  /// Is the background volume of the view a figure (Studio.Role = figure): a 2D picture with no patient directions.
+  /// The orientation entries "Reset orientation" and "Rotate to volume plane" leave such a view as it is.
+  bool isFigureBackground() const;
+
   /// Get slice orientation
   /// \sa setSliceOrientation(QString);
   QString sliceOrientation() const;

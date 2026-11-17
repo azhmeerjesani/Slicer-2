@@ -421,6 +421,11 @@ class StudioNormalizeTest(unittest.TestCase):
         self.assertEqual(len(events), 1, events)
         self.assertEqual((events[0]["from"], events[0]["to"]), ("unreviewed", "pass"))
         self.assertEqual(self.chips(["sub-01"]), {"sub-01": "Pass"})
+        # The judged row leaves the queue: the row that takes its place is selected, so the SUBJECT card stays shown (BB-1)
+        self.assertEqual([row["participant_id"] for row in listWidget.model.rows], ["sub-02", "sub-03"])
+        self.assertEqual(library.studySelection(), ["sub-02"])
+        self.assertEqual(listWidget.selectedIds(), ["sub-02"])
+        self.assertTrue(_wait(lambda: self.section().sid == "sub-02" and self.section().widget.isVisible(), 10), "the SUBJECT card was hidden")
         # analysis_rows excludes the rows that are normalized and not passed
         rows, excluded = self.Study.open(path).analysis_rows()
         self.assertEqual(sorted(row["participant_id"] for row in rows), ["sub-01", "sub-04"])
@@ -459,8 +464,10 @@ class StudioNormalizeTest(unittest.TestCase):
         review = ln._qcResultFor("sub-02").review()
         self.assertEqual(review.get("verdict"), "fail")
         self.assertEqual(self.chips(["sub-02"]), {"sub-02": "Fail"})
-        # Next to review is offered after a verdict
-        self.assertTrue(_wait(lambda: not section.nextRow.isHidden(), 5))
+        # The mosaic verdict goes on with the next row of the queue, as P / X do (BB-1): its mosaic is shown in turn
+        self.assertEqual(library.studySelection(), ["sub-03"])
+        self.assertTrue(_wait(lambda: self.section().sid == "sub-03" and self.section().widget.isVisible() and self.section().qcPanel is not None, 20),
+                        "the next row of the queue was not shown after the mosaic verdict")
         # P in the list writes norm_qc while the review filter is active
         listWidget.setFilter("norm_review")
         listWidget.selectIds(["sub-03"])
@@ -724,6 +731,54 @@ class StudioNormalizeTest(unittest.TestCase):
         self.assertEqual(self.chips(["sub-01"]), {"sub-01": "Stale"})
         self.assertEqual(len(self.auditEvents(path, "norm_lesion_edited", "sub-01")), 1)
 
+    def test_07b2_dirty_open_subject_does_not_hold_back_others(self):
+        """Only the open subject with unsaved edits waits; the results of the other subjects are merged, and the summary says who waits."""
+        from StudioLib import libcard_normalize as ln
+
+        path = self.makeStudy("dirtyhold", native=3, templateRows=0)
+        session = self.openStudy(path)
+        self.assertTrue(session.open("sub-02", switchToDraw=False))
+        job = ln.normalizeSubjects(["sub-01", "sub-02", "sub-03"])
+        self.assertIsNotNone(job)
+        session.markDirty()  # sub-02 is edited while the batch runs
+        manager = ln._manager
+        self.assertTrue(_wait(job.isFinished, BATCH_TIMEOUT_S))
+        _pump(500)
+        self.assertEqual(manager.unmerged, {"sub-02"})
+        self.assertEqual(self.disk(path, "sub-01")["space"], TEMPLATE)
+        self.assertEqual(self.disk(path, "sub-03")["space"], TEMPLATE)
+        self.assertEqual(self.disk(path, "sub-02")["space"], "native")
+        self.assertIn("sub-02: waiting", manager.lastSummary)
+        self.assertTrue(session.open("sub-01", switchToDraw=False))  # leaving writes the edits
+        self.assertTrue(_wait(lambda: not manager.unmerged, 15), "the held result was not merged after the edits were written")
+        self.assertEqual(self.disk(path, "sub-02")["space"], TEMPLATE)
+
+    def test_07c_skipped_open_subject_is_explained(self):
+        """The button counts the open subject with unsaved edits; the batch leaves it out and the toast says why."""
+        from StudioLib import libcard_normalize as ln
+
+        path = self.makeStudy("skipnote", native=2, templateRows=0)
+        session = self.openStudy(path)
+        self.assertTrue(session.open("sub-01", switchToDraw=False))
+        session.markDirty()
+        toasts = []
+        original = ln._toast
+        ln._toast = lambda text, ms=3000, **kwargs: toasts.append(str(text))
+        try:
+            job = ln.normalizeSubjects(["sub-01", "sub-02"])
+            self.assertIsNotNone(job)
+            manager = ln._manager
+            self.assertEqual([run.sids for run in manager.runs if run.isLive()], [["sub-02"]])
+            started = [text for text in toasts if text.startswith("Normalizing sub-02 in the background")]
+            self.assertEqual(len(started), 1, toasts)
+            self.assertIn("sub-01 has edits that are not saved yet", started[0])
+            manager.stop()
+            _wait(lambda: not manager.isBusy(), 60)
+        finally:
+            ln._toast = original
+            session._dirty = session._markedDirty = False
+            ln._manager.stop() if ln._manager is not None else None
+
     #
     # Stop and resume
     #
@@ -853,6 +908,94 @@ class StudioNormalizeTest(unittest.TestCase):
         self.assertFalse([key for key in new if "ormaliz" in key or key.startswith("Studio/LNM")], new)
         self.assertFalse([key for key in _settingsKeys() - self.keysBefore if "ormaliz" in key], _settingsKeys() - self.keysBefore)
         study_ui.closeStudy()
+
+    def test_11_progress_text_elided(self):
+        """A one-line progress text that is wider than its label ends with an ellipsis and is the tooltip (the label used to cut
+        "~28 s left" to "~28 s lef" without a sign), and it is the full text again in a wider label.
+        """
+        from LesionNetworkMappingUI import normalize_controller as nc
+        from LesionNetworkMappingUI import widgets
+
+        host = qt.QWidget()
+        layout = qt.QVBoxLayout(host)
+        row = widgets.ProgressRow(objectNamePrefix="StudioNormalizeDrawTest")
+        row.label.setWordWrap(False)
+        row.label.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
+        layout.addWidget(row.widget)
+        host.resize(260, 60)
+        host.show()
+        try:
+            text = "Normalizing · nonlinear · 26% · ~28 s left"
+            _pump(100)
+            nc.setRowProgress(row, 0.26, text)
+            _pump(100)
+            width = row.label.width
+            metrics = row.label.fontMetrics()
+            advance = getattr(metrics, "horizontalAdvance", None) or metrics.width
+            self.assertGreater(advance(text), width, "the test needs a label that is narrower than the text")
+            shown = str(row.label.text)
+            self.assertTrue(shown.endswith("…"), shown)
+            self.assertLessEqual(advance(shown), width)
+            self.assertIn(text, str(row.label.toolTip))
+            # The same text again changes nothing; a wider label shows it in full
+            nc.setRowProgress(row, 0.27, text)
+            self.assertEqual(str(row.label.text), shown)
+            host.resize(520, 60)
+            _pump(100)
+            self.assertEqual(str(row.label.text), text)
+            self.assertEqual(str(row.label.toolTip), "")
+            host.resize(260, 60)
+            _pump(100)
+            self.assertTrue(str(row.label.text).endswith("…"))
+            # Another text, set by the row itself, is not replaced by an old one on the next resize
+            row.setProgress(0.5, "Stopping…")
+            host.resize(300, 60)
+            _pump(100)
+            self.assertEqual(str(row.label.text), "Stopping…")
+        finally:
+            host.hide()
+            host.deleteLater()
+
+    def test_12_resume_label_singular(self):
+        """The Stopped / Interrupted line counts the subjects left in the singular for one ("1 subject left", not "1 subjects left")."""
+        from StudioLib import libcard_normalize as ln
+
+        class Label:
+            text = ""
+
+            def setText(self, text):
+                self.text = text
+
+            def setVisible(self, visible):
+                pass
+
+            setEnabled = setVisible
+
+        class Run:
+            failures = {}
+
+            def __init__(self, n, stopped):
+                self.n = n
+                self.stopped = stopped
+
+            def isBusy(self):
+                return False
+
+            def interrupted(self):
+                return ([f"sub-{i + 1:02d}" for i in range(self.n)], {})
+
+        class Card:
+            def __init__(self):
+                self.resumeLabel = Label()
+                self.progress = type("P", (), {"widget": Label()})()
+                self.resumeRow = self.failureLabel = self.reviewRow = self.reviewButton = Label()
+                self.session = type("S", (), {"study": {}})()
+
+        for n, stopped, expected in ((1, True, "Stopped · 1 subject left"), (1, False, "Interrupted · 1 subject left"),
+                                     (2, True, "Stopped · 2 subjects left"), (3, False, "Interrupted · 3 subjects left")):
+            card = Card()
+            ln.NormalizationCard._refreshStatus(card, Run(n, stopped), {"review": 0})
+            self.assertEqual(str(card.resumeLabel.text), expected)
 
 
 #: How long to let events run after Done so that the deferred automatic start has happened (ms)

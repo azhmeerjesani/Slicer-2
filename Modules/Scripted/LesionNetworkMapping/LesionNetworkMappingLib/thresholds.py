@@ -24,7 +24,8 @@ Rules that carry a ``reference_n`` get a banner when N differs from it by more t
 ``fz_abs`` and ``top_pct`` are N-independent *alternatives* to the T rules, never their
 "equivalents": T = mean Fz / (sd / sqrt(N)) and sd varies by voxel, so no Fz value corresponds to a T
 threshold, and this module never converts one into the other. ``top_pct`` needs the map values to
-resolve (the threshold is the |value| that leaves x% of the finite in-mask voxels above it).
+resolve (the threshold is the |value| that leaves x% of the finite in-mask voxels above it; only voxels
+of the chosen sign can pass, so when fewer than x% have that sign, all of them pass and a note says so).
 
 Symmetric |T| rules on connectomes preprocessed without global signal regression get the GSR banner
 (addendum §3.2, Cohen & Fox 2021); with GSR, negative peaks get the Murphy & Fox 2017 note.
@@ -59,6 +60,16 @@ NEGATIVE_PEAKS_NOTE = "The magnitude and extent of negative correlations are inf
 TOP_PCT_NEEDS_VALUES = "The top-x% rule needs the map values."
 N_FREE_KINDS = ("custom_t", "fz_abs", "top_pct")  # rules that can be applied to a map whose N is unknown
 N_UNKNOWN_NOTE = "The N of this map is unknown: no p-value."
+TOP_PCT_SHARE_NOTE = {
+    "both": "Only {share} of the in-mask voxels are non-zero: all of them pass (fewer than the top {x}%).",
+    "pos": "Only {share} of the in-mask voxels are positive: all of them pass (fewer than the top {x}%).",
+    "neg": "Only {share} of the in-mask voxels are negative: all of them pass (fewer than the top {x}%).",
+}
+_NO_VOXEL_OF_SIGN = {
+    "both": "The map has no non-zero values.",
+    "pos": "The map has no positive values: nothing passes.",
+    "neg": "The map has no negative values: nothing passes.",
+}
 
 
 @dataclass(frozen=True)
@@ -181,6 +192,13 @@ def normalize_rule(rule=None):
     kind = rule.get("kind")
     if kind not in KINDS:
         raise ValueError(f"Unknown threshold rule kind {kind!r}; expected one of {', '.join(KINDS)}")
+    allowed = {"kind", "reference_n", "override", *RULE_DEFAULTS[kind]}
+    unknown = sorted((key for key in rule if key not in allowed), key=str)
+    if unknown:
+        raise ValueError(
+            f"Unknown key(s) {', '.join(repr(key) for key in unknown)} in a {kind} threshold rule; "
+            f"expected: {', '.join(sorted(allowed))}",
+        )
     out = {"kind": kind, **RULE_DEFAULTS[kind]}
     out.update({key: value for key, value in rule.items() if key != "kind"})
     if kind == "top_pct":
@@ -333,8 +351,22 @@ def _resolve(rule, n, v, note, values):
             return Resolved(rule["statistic"], math.nan, df, None, None, "The map has no finite values.", False, n, v, rule, kind)
         import numpy as np
 
+        # A voxel passes only when its score is above 0 (a value of the chosen sign; the colour table shows
+        # nothing else). When fewer than x% of the voxels are of that sign (or non-zero for "both"), the
+        # percentile is 0 or below: the cut becomes the smallest score above 0, so all those voxels pass and
+        # a note says so, rather than a cut of the other sign that would count opposite-sign voxels (and,
+        # for Binarize, the zeros outside the brain).
+        above = scores[scores > 0.0]
+        if above.size == 0:
+            return Resolved(rule["statistic"], math.nan, df, None, None, _NO_VOXEL_OF_SIGN[rule["sign"]], False, n, v, rule, kind)
         value = float(np.percentile(scores, 100.0 - rule["value"]))
-        return Resolved(rule["statistic"], value, df, None, None, None, True, n, v, rule, kind)
+        notes = ()
+        if value <= 0.0:
+            value = float(above.min())
+        share = above.size / scores.size
+        if share < rule["value"] / 100.0:
+            notes = (TOP_PCT_SHARE_NOTE[rule["sign"]].format(share=_format_fraction(share), x=f"{rule['value']:g}"),)
+        return Resolved(rule["statistic"], value, df, None, None, None, True, n, v, rule, kind, notes=notes)
     if kind == "fz_abs":
         # An effect-size threshold on the mean Fz map: no p-value, valid for any N >= 1
         return Resolved("Fz", rule["value"], df, None, None, None if n >= 1 else "The map has no subjects.", n >= 1, n, v, rule, kind)
@@ -399,26 +431,51 @@ def _format_fraction(fraction):
     return f"{percent:.2g}%"
 
 
-def describe(resolved, fraction=None):
+def format_value(resolved):
+    """The threshold value of a resolved rule as the derived line (:func:`describe`) writes it: two decimals for T
+    ("5.27"), as typed for an Fz effect size ("0.05") and three significant digits for a top-x% cut ("0.0304", "3.7").
+    The Map legend and the Threshold.Rule of exported sidecars use it too, so they state the same threshold.
+    """
+    value = resolved.value
+    if not math.isfinite(value):
+        return f"{value:g}"
+    if resolved.rule.get("kind") == "top_pct":
+        return f"{value:.3g}"
+    if resolved.statistic == "Fz":
+        return f"{value:g}"
+    return f"{value:.2f}"
+
+
+def describe(resolved, fraction=None, sign=None):
     """The derived line shown under the threshold controls, e.g.
     "⇒ |T| ≥ 5.27 at N=1000 (df=999), V=292,019 · p_unc ≤ 1.7e-7".
 
     :param fraction: optional fraction (0-1) of in-mask voxels that pass (:func:`fraction_connected`),
       appended as " · 63% of in-mask voxels".
+    :param sign: the display sign "pos" or "neg" (one tail shown): the quantity reads "T ≥ x" or "T ≤ -x" like the
+      legend, and ``fraction`` must be that tail's share (``fraction_connected(values, resolved, sign)``). Ignored
+      for "both"/None and for top-x% rules (they carry their own sign).
     """
+    if sign in ("pos", "neg") and resolved.rule.get("kind") != "top_pct" and math.isfinite(resolved.value):
+        line = describe(resolved, fraction)
+        quantity = f"|{resolved.statistic}| ≥ {format_value(resolved)}"
+        if quantity in line:
+            one_tail = f"{resolved.statistic} ≥ {format_value(resolved)}" if sign == "pos" else f"{resolved.statistic} ≤ -{format_value(resolved)}"
+            return line.replace(quantity, one_tail, 1)
+        return line
     suffix = "" if fraction is None or not math.isfinite(fraction) else f" · {_format_fraction(fraction)} of in-mask voxels"
     unknown_n = N_UNKNOWN_NOTE in resolved.notes
     at_n = "N unknown" if unknown_n else f"N={resolved.n}"
     if unknown_n and resolved.rule.get("kind") == "custom_t" and math.isfinite(resolved.value):
-        return f"⇒ |T| ≥ {resolved.value:.2f} at {at_n}, V={resolved.v:,} · as typed (no p-value)" + suffix
+        return f"⇒ |T| ≥ {format_value(resolved)} at {at_n}, V={resolved.v:,} · as typed (no p-value)" + suffix
     if resolved.rule.get("kind") == "top_pct":
         sign = resolved.rule.get("sign", "both")
         quantity = {"both": f"|{resolved.statistic}|", "pos": resolved.statistic, "neg": f"-{resolved.statistic}"}[sign]
-        cut = f" (≥ {resolved.value:.3g})" if math.isfinite(resolved.value) else ""
+        cut = f" (≥ {format_value(resolved)})" if math.isfinite(resolved.value) else ""
         line = f"⇒ top {resolved.rule['value']:g}% of {quantity}{cut} at {at_n}, V={resolved.v:,} · rank rule (no p-value)"
         return line + suffix
     if resolved.statistic == "Fz":
-        return f"⇒ |Fz| ≥ {resolved.value:g} at {at_n}, V={resolved.v:,} · effect size (no p-value)" + suffix
+        return f"⇒ |Fz| ≥ {format_value(resolved)} at {at_n}, V={resolved.v:,} · effect size (no p-value)" + suffix
     if not math.isfinite(resolved.value):
         return f"⇒ no T threshold at N={resolved.n} (at least 2 subjects are needed)"
-    return f"⇒ |T| ≥ {resolved.value:.2f} at N={resolved.n} (df={resolved.df}), V={resolved.v:,} · p_unc ≤ {format_p(resolved.p_unc)}" + suffix
+    return f"⇒ |T| ≥ {format_value(resolved)} at N={resolved.n} (df={resolved.df}), V={resolved.v:,} · p_unc ≤ {format_p(resolved.p_unc)}" + suffix

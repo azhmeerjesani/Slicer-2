@@ -89,9 +89,11 @@ if __name__ == "__main__":
     set_blas_threads(sys.argv[1:])
 
 import argparse
+import errno
 import json
 import math
 import platform
+import re
 import secrets
 import signal
 import socket
@@ -109,6 +111,28 @@ EXIT_LOCKED = 75  # EX_TEMPFAIL
 MAX_THREADS_ENV = "SLICER_LNM_MAX_THREADS"
 
 _IS_WINDOWS = sys.platform == "win32"
+
+
+def utf8_locale_env(env=None, platform=None):
+    """Variables that give a child process a UTF-8 character locale on Linux; empty when it already has one.
+
+    Under the C or POSIX locale (or with no locale variable at all), the CTK launcher (``PythonSlicer``) decodes its
+    arguments with the 8-bit locale codec and drops every non-ASCII character, so a job given ``/data/Läsionsstudie``
+    receives ``/data/Lsionsstudie``. ``env`` is the environment the child gets (default ``os.environ``). The effective
+    character locale is the first non-empty of LC_ALL, LC_CTYPE and LANG; LC_ALL overrides LC_CTYPE, so a non-UTF-8
+    LC_ALL is replaced, otherwise only LC_CTYPE is set (messages, numbers and dates keep the user's locale).
+    """
+    if not (platform or sys.platform).startswith("linux"):
+        return {}
+    env = os.environ if env is None else env
+    for name in ("LC_ALL", "LC_CTYPE", "LANG"):
+        value = env.get(name)
+        if value:
+            if "UTF-8" in value.upper().replace("UTF8", "UTF-8"):
+                return {}
+            break
+    return {"LC_ALL": "C.UTF-8"} if env.get("LC_ALL") else {"LC_CTYPE": "C.UTF-8"}
+
 
 _clock = {"t0": time.monotonic()}
 _output_lock = threading.Lock()
@@ -183,6 +207,7 @@ def emit(event, **fields):
     gone) never raises: later events are discarded.
     """
     fields.pop("t", None)
+    fields.pop("final", None)  # the pipeline's Emitter reads this flag to skip its progress throttle
     if event == "start":
         fields.setdefault("pid", os.getpid())
         if "version" not in fields:
@@ -252,15 +277,76 @@ class Locked(JobError):
 # Command line
 
 
+#: Name that the library commands go by when ``app.run_library_command`` runs them (``slicer-lnm <command>``); None otherwise
+APP_PROG = None
+_PYTHON_M = "python -m LesionNetworkMappingLib."
+
+
+def _app_prog():
+    """``APP_PROG`` of the imported ``LesionNetworkMappingLib.jobs`` module: ``app.run_library_command`` sets it there, and
+    ``slicer-lnm jobs`` runs this file a second time as ``__main__`` (runpy), whose own ``APP_PROG`` stays None.
+    """
+    module = sys.modules.get(f"{__package__}.jobs") if __package__ else None
+    if module is None or module is sys.modules.get(__name__):
+        return APP_PROG
+    return getattr(module, "APP_PROG", None)
+
+
+#: Set to "1" in the environment of the jobs that the app's job runner starts, so that the hints of a run name the app's controls
+#: there and the command-line options in a terminal or a ``slicer-lnm`` run
+APP_JOB_ENV = "SLICER_LNM_APP_JOB"
+
+
+#: Set by the app's job runner to the application's process id: ``run_job`` then stops the job (cancelled, resumable) when the
+#: application is gone, as ``--parent-pid`` does. The PythonSlicer launcher outlives a crashed application (it is re-parented,
+#: and the job stays its child), so the orphan watchdog alone does not notice the crash.
+PARENT_PID_ENV = "SLICER_LNM_PARENT_PID"
+
+
+def env_parent_pid(argv=()):
+    """The application process id of ``PARENT_PID_ENV`` (None when unset or invalid, when it is this process, or when ``argv``
+    has its own ``--parent-pid``, which the command then watches itself).
+    """
+    if any(str(arg) == "--parent-pid" or str(arg).startswith("--parent-pid=") for arg in argv):
+        return None
+    value = os.environ.get(PARENT_PID_ENV, "").strip()
+    if not value.isdigit() or int(value) <= 1 or int(value) == os.getpid():
+        return None
+    return int(value)
+
+
+def in_app_job():
+    """True in a job that the app's job runner started (its messages are read in the app), False on a command line."""
+    return os.environ.get(APP_JOB_ENV) == "1"
+
+
+def command_text(text):
+    """``text`` with the library-command form ``python -m LesionNetworkMappingLib.<name>`` written as ``slicer-lnm <name>``
+    while ``app.run_library_command`` runs a command (the app's wrapper and the pip wheel have no ``python`` that can import
+    the package, so a copied ``python -m`` command would fail); unchanged otherwise.
+    """
+    prog = _app_prog()
+    if prog is None or not isinstance(text, str):
+        return text
+    return text.replace(_PYTHON_M, prog + " ")
+
+
 class JsonArgumentParser(argparse.ArgumentParser):
     """Argument parser without abbreviated options that reports usage errors as a JSON error event (exit code 2).
 
     Abbreviations are refused because run records keep the arguments as given and reproduce
     scripts rewrite them by their full names.
+
+    A command that can print events as text (``--events text``, or auto on a terminal) sets ``error_emit`` to its
+    event emitter: usage errors then look like the command's other errors. The default is ``emit`` (JSON).
     """
+
+    error_emit = None
 
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("allow_abbrev", False)
+        if kwargs.get("prog"):
+            kwargs["prog"] = command_text(kwargs["prog"])
         super().__init__(*args, **kwargs)
 
     def print_help(self, file=None):
@@ -269,8 +355,50 @@ class JsonArgumentParser(argparse.ArgumentParser):
 
     def error(self, message):
         self.print_usage(sys.stderr)
-        emit("error", code="usage", message=f"Invalid arguments: {message}")
+        (self.error_emit or emit)("error", code="usage", message=f"Invalid arguments: {message}")
         self.exit(EXIT_USAGE)
+
+
+def check_input_files(args, *options):
+    """Raise a usage error (exit 2) naming the first option of ``options`` that is given and is not an existing file.
+
+    ``options`` are attribute names of ``args`` (``"maps"`` for ``--maps``, ``"pool_maps"`` for ``--pool-maps``); an option
+    that is ``None`` (not given) is skipped. Without this check the missing file would end as an unexpected exception
+    (code "exception", a traceback, exit code 1) that never says which option was wrong.
+    """
+    for option in options:
+        path = getattr(args, option, None)
+        if path is not None and not os.path.isfile(path):
+            raise JobError(f"The file of --{option.replace('_', '-')} does not exist: {path}", code="usage", exit_code=EXIT_USAGE)
+
+
+def input_message(exc, args=None):
+    """The text of an input error for a command line: a plain sentence, never the Python class or a raw errno text.
+
+    A ``ValueError`` is already a plain sentence. A missing, unreadable or wrong-type file or folder (``OSError`` with a
+    file name) names that path and, when ``args`` (the parsed arguments) holds a path option that is the file or the
+    folder that contains it, the option. Other errors keep their class.
+    """
+    if type(exc) is ValueError:
+        return str(exc)
+    if not isinstance(exc, OSError) or not isinstance(exc.filename, (str, bytes, os.PathLike)):
+        return f"{type(exc).__name__}: {exc}"
+    path = os.fsdecode(exc.filename)
+    where = ""
+    for name, value in sorted(vars(args).items()) if args is not None else ():
+        for item in value if isinstance(value, (list, tuple)) else (value,):
+            for one in item if isinstance(item, (list, tuple)) else (item,):
+                if isinstance(one, str) and one and (os.path.abspath(path) + os.sep).startswith(os.path.abspath(one).rstrip(os.sep) + os.sep):
+                    where = f" (--{name.replace('_', '-')})"
+    if isinstance(exc, FileNotFoundError):
+        return f"The file or folder {path} does not exist{where}"
+    if isinstance(exc, PermissionError):
+        return f"The file or folder {path} cannot be read: permission denied{where}"
+    if isinstance(exc, IsADirectoryError):
+        return f"{path} is a folder, not a file{where}"
+    if isinstance(exc, NotADirectoryError):
+        return f"{path} is not a folder{where}"
+    return f"{path} cannot be read: {exc.strerror or exc}{where}"
 
 
 def positive_int(text):
@@ -391,6 +519,19 @@ class CancelToken:
 
 
 # Resume
+
+
+def is_disk_full_error(exc):
+    """True when ``exc`` is a write that failed because the disk (or the quota) is full.
+
+    Besides ``ENOSPC`` and ``EDQUOT`` this recognizes numpy's short write on a full disk, an ``OSError``
+    without an errno whose message reads "N requested and M written".
+    """
+    if not isinstance(exc, OSError):
+        return False
+    if exc.errno is not None:
+        return exc.errno in (errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC))
+    return bool(re.search(r"\d+ requested and \d+ written", str(exc)))
 
 
 def write_json_atomic(path, obj):
@@ -821,7 +962,8 @@ def run_job(main, argv=None, job=None, orphan=True, parent_pid=None, exit=True, 
       traceback lines, and exit 1.
     - SystemExit (from argparse, already reported) passes its code through.
 
-    The orphan watchdog runs by default (``orphan``), and ``parent_pid`` adds a parent watchdog:
+    The orphan watchdog runs by default (``orphan``), and ``parent_pid`` (else ``PARENT_PID_ENV``, which the app's job runner
+    sets, unless ``argv`` has its own ``--parent-pid``) adds a parent watchdog:
     when the watched process is gone every CancelToken reports cancellation. SIGTERM and SIGINT
     become cancellation requests, except inside the Slicer application (``signals=None`` and the
     ``slicer`` module is loaded), whose own handlers stay.
@@ -830,6 +972,8 @@ def run_job(main, argv=None, job=None, orphan=True, parent_pid=None, exit=True, 
     argv = list(sys.argv[1:] if argv is None else argv)
     if signals or (signals is None and "slicer" not in sys.modules):
         install_signal_handlers()
+    if not parent_pid:
+        parent_pid = env_parent_pid(argv)  # a job of the app's job runner: stop with the application (a crash included)
     if parent_pid:
         start_watchdogs(None, parent_pid=parent_pid, orphan=False)
     if orphan and _orphan_watchdog["thread"] is None:

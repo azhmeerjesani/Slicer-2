@@ -965,6 +965,13 @@ void vtkMRMLSliceNode::ReadXMLAttributes(const char** atts)
   vtkMRMLReadXMLBooleanMacro(widgetOutlineVisibility, WidgetOutlineVisible);
   vtkMRMLReadXMLBooleanMacro(useLabelOutline, UseLabelOutline);
   vtkMRMLReadXMLBooleanMacro(sliceEdgeVisibility3D, SliceEdgeVisibility3D);
+  // "Reformat" means an arbitrary orientation (not a preset name), and is stored when the
+  // slice is aligned to an oblique volume. The orientation is given by sliceToRAS, so skip it
+  // instead of logging an error about an invalid preset name.
+  if (!strcmp(xmlReadAttName, "orientation") && !strcmp(xmlReadAttValue, vtkMRMLSliceNode::GetReformatOrientationName()))
+  {
+    continue;
+  }
   vtkMRMLReadXMLStdStringMacro(orientation, Orientation);
   vtkMRMLReadXMLStringMacro(defaultOrientation, DefaultOrientation);
   vtkMRMLReadXMLStringMacro(orientationReference, OrientationReference);

@@ -98,6 +98,18 @@ def _number(value, digits=2):
     return "—" if math.isnan(value) else f"{value:.{digits}f}"
 
 
+def _gateNumber(value, constant):
+    """A median for the parity table: below the gate's constant it never rounds up to the constant (0.796, not 0.80)."""
+    try:
+        if constant is not None and float(value) < float(constant):
+            from LesionNetworkMappingLib import fastmap
+
+            return fastmap.format_below(value, float(constant))
+    except (TypeError, ValueError):
+        pass
+    return _number(value)
+
+
 def _duration(seconds):
     """"< 1 min", "12 min", "1 h 20 min"."""
     if seconds is None or not math.isfinite(seconds):
@@ -136,6 +148,43 @@ def cohortSubjects(mapsTsv):
     return [str(i) for i in ids] if isinstance(ids, list) and ids else None
 
 
+def _samePath(a, b):
+    try:
+        return os.path.normcase(os.path.realpath(os.fspath(a))) == os.path.normcase(os.path.realpath(os.fspath(b)))
+    except (TypeError, ValueError):
+        return False
+
+
+def otherConnectome(mapsTsv, bundle, cardBundle=None):
+    """The name of the connectome the lesion maps of ``mapsTsv`` were computed with when it is not ``bundle`` (an open
+    ``ConnectomeBundle``), else None.
+
+    The connectome of the maps is the one of their cohortmaps.json: the same manifest sha256 (stable when the bundle moves)
+    or the same folder. A record without either belongs to the Connectome card's connectome (``cardBundle``), whose cohort
+    folder holds the maps. The fast index dialog of another connectome (Manage… → select it → Build fast index…) must not use their
+    subjects or check its index against them, and must not write their parity report (the Nulls card reads it).
+    """
+    from LesionNetworkMappingLib import cohortmaps
+
+    if bundle is None or not mapsTsv:
+        return None
+    record = cohortmaps.read_record(os.path.join(os.path.dirname(os.path.abspath(os.fspath(mapsTsv))), cohortmaps.COHORTMAPS_JSON)) or {}
+    info = record.get("bundle") if isinstance(record.get("bundle"), dict) else {}
+    name = info.get("name") or getattr(cardBundle, "name", None) or _("another connectome")
+    manifest, path = info.get("manifest_sha256"), info.get("path")
+    if manifest or path:
+        if path and _samePath(path, bundle.path):
+            return None
+        try:
+            own = _sha256(os.path.join(bundle.path, "connectome.json"))
+        except OSError:
+            own = None
+        return None if manifest and manifest == own else name
+    if cardBundle is not None:
+        return None if _samePath(cardBundle.path, bundle.path) else name
+    return None
+
+
 def indexInfo(folder):
     """{"parcels", "subjects", "created", "sha256"} of a fast index folder (index.json only: no matrix is read), or None."""
     path = os.path.join(folder, "index.json")
@@ -171,15 +220,35 @@ class FastModeState:
         return f"FastModeState(enabled={self.enabled}, reason={self.reason!r})"
 
 
+def strataText(names):
+    """"brain stem, white matter (supervoxel)": the readable names of gate strata ids (unknown ids stay as they are)."""
+    return ", ".join(STRATUM_TEXT.get(name, name) for name in names or [])
+
+
 def failingText(gate):
     """"brainstem (median partial r 0.61 < 0.80), …": the strata and size bins that failed the gate."""
     parts = []
     for group in ("strata", "size_bins"):
         for name, verdict in (gate.get(group) or {}).items():
             if not verdict.get("passed"):
-                label = SIZE_BIN_TEXT.get(name, name) if group == "size_bins" else name
+                label = SIZE_BIN_TEXT.get(name, name) if group == "size_bins" else STRATUM_TEXT.get(name, name)
                 parts.append(f"{label} ({verdict.get('reason')})")
     return ", ".join(parts)
+
+
+def gateNotes(gate, shown=()):
+    """The gate messages worth adding to the gate text: not the per-stratum and per-size-bin failures (the "Failed:" line says
+    them with readable names) and the missing-reference-maps sentence written with the app's controls instead of a command.
+    """
+    notes = []
+    for message in gate.get("messages") or []:
+        if message.startswith("Fast mode is not allowed for "):
+            continue
+        if message.startswith("No reference maps"):
+            message = _("No reference maps: the partial r (mu_r and PC1 partialled out) cannot be computed, so no stratum passes. Build them in the Connectome card (Manage… → Build reference maps).")
+        if message not in " ".join(shown):
+            notes.append(message)
+    return notes[:3]
 
 
 def fastModeState(bundle, mapsTsv):
@@ -225,7 +294,7 @@ def fastModeState(bundle, mapsTsv):
         return FastModeState(reason=_("The parity gate needs at least {n} exact lesions. {text}").format(n=gate.get("min_lesions", fastmap.PARITY_MIN_LESIONS), text=text), index=folder, parity=path, report=report, total=total)
     if not gate.get("allowed_strata") or allowed < 2:
         return FastModeState(reason=_("The fast index fails the parity gate on your lesions: {text}.").format(text=failingText(gate) or _("no stratum passed")), index=folder, parity=path, report=report, allowed=allowed, total=total)
-    passed = ", ".join(gate["allowed_strata"])
+    passed = strataText(gate["allowed_strata"])
     summary = _("Parity gate passed on your lesions for {passed}: {allowed} of {total} checked lesions allowed.").format(passed=passed, allowed=allowed, total=total)
     failing = failingText(gate)
     if failing:
@@ -252,9 +321,12 @@ def packAtlasIds(pack, bundle=None):
 
 
 def missingAtlases(ids, cache=None):
-    """The atlas ids of ``ids`` that are not in the fetch cache (with their label tables)."""
+    """The atlas ids of ``ids`` that are not in the fetch cache (with their label tables); ``cache`` None is the
+    application's cache, where the Clusters card's Get atlases downloads them.
+    """
     from LesionNetworkMappingLib import fetch
 
+    cache = cache or fetch.app_cache_dir()
     missing = []
     for atlasId in ids:
         try:
@@ -266,6 +338,16 @@ def missingAtlases(ids, cache=None):
         if not cached:
             missing.append(atlasId)
     return missing
+
+
+def atlasTitle(atlasId):
+    """The readable catalog title of an atlas id (the id itself when the catalog has no such atlas)."""
+    from LesionNetworkMappingLib import fetch
+
+    try:
+        return fetch.find_resource(atlasId, ("atlases",)).title or atlasId
+    except Exception:
+        return atlasId
 
 
 def estimateBuild(bundle, nSubjects, nParcels, threads=None):
@@ -379,8 +461,7 @@ class FastIndexDialog(qt.QDialog):
         self._timer.connect("timeout()", self.refresh)
         self.setObjectName("LNMFastIndexDialog")
         self.setWindowTitle(_("Build fast index"))
-        self.setMinimumSize(560, 480)
-        self.resize(660, 760)
+        widgets.fitDialogToScreen(self, 660, 760, 560, 480)
         outer = qt.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 8)
         scroll = qt.QScrollArea()
@@ -604,12 +685,25 @@ class FastIndexDialog(qt.QDialog):
                 self.onParityDone(job)
         self.refresh()
 
-    def mapsTsv(self):
-        """maps.tsv of the cohort's finished lesion maps (the Cohort card's), or None."""
+    def cohortMapsTsv(self):
+        """maps.tsv of the cohort's finished lesion maps (the Cohort card's), whatever connectome they were computed with, or None."""
         path = getattr(self.ctx, "cohortMaps", None)
         if path and os.path.isfile(path) and (_readJson(os.path.join(os.path.dirname(path), "cohortmaps.json")) or {}).get("status") == "done":
             return path
         return None
+
+    def mapsConnectome(self):
+        """Name of the connectome of the Cohort card's lesion maps when it is not this dialog's connectome, else None."""
+        return otherConnectome(self.cohortMapsTsv(), self.bundle, getattr(self.ctx, "bundle", None))
+
+    def mapsTsv(self):
+        """maps.tsv of the cohort's finished lesion maps (the Cohort card's) when they were computed with this dialog's
+        connectome, or None: the dialog of another connectome (Manage…) offers neither their subjects nor a parity check on them.
+        """
+        path = self.cohortMapsTsv()
+        if path is None or self.mapsConnectome() is not None:
+            return None
+        return path
 
     def scheduleRefresh(self):
         self._timer.start()
@@ -680,7 +774,7 @@ class FastIndexDialog(qt.QDialog):
         return [entry["id"] for entry in self.packEntries()[0]]
 
     def chooseTiling(self):
-        folder = qt.QFileDialog.getExistingDirectory(self, _("Folder of a tiling (labels.nii.gz, labels.tsv)"), self.tilingDir or os.path.expanduser("~"))
+        folder = qt.QFileDialog.getExistingDirectory(self, _("Folder of a tiling (labels.nii.gz, labels.tsv)"), self.tilingDir or widgets.dialogStartFolder(os.path.expanduser("~")))
         if folder:
             self.tilingDir = folder
             self.refresh()
@@ -726,7 +820,7 @@ class FastIndexDialog(qt.QDialog):
         if custom:
             self.atlasStatus.setText("")
         elif missing:
-            self.atlasStatus.setText(_("Not downloaded yet: {names}.").format(names=", ".join(missing)) + (" " + " ".join(notices) if notices else ""))
+            self.atlasStatus.setText(_("Not downloaded yet: {names}.").format(names=", ".join(atlasTitle(atlasId) for atlasId in missing)) + (" " + " ".join(notices) if notices else ""))
         else:
             self.atlasStatus.setText(_("The atlases of this pack are on this computer.") + (" " + " ".join(notices) if notices else ""))
         self.atlasStatus.setVisible(bool(self.atlasStatus.text))
@@ -746,8 +840,11 @@ class FastIndexDialog(qt.QDialog):
             return
         self.bundleLabel.setText(_("Connectome: {name} · N={n:,} subjects · {v:,} voxels").format(name=bundle.name, n=bundle.n_subjects, v=bundle.n_voxels))
         key, ids = self.selectedSubjects()
+        other = None if self._cohortIds else self.mapsConnectome()
         if self._cohortIds:
             self.subjectsHint.setText(_("The lesion maps use {n} subjects.").format(n=len(self._cohortIds)) + ("" if ids == self._cohortIds else " " + _("Fast mode needs an index built from exactly those subjects.")))
+        elif other is not None:
+            self.subjectsHint.setText(_("The lesion maps of the Cohort card were computed with another connectome ({name}): fast mode for them needs an index of that connectome.").format(name=other))
         else:
             self.subjectsHint.setText(_("No lesion maps yet: fast mode needs an index built from the subjects of the lesion maps (Cohort card)."))
         existing = self._existingIndex(ids)
@@ -773,6 +870,8 @@ class FastIndexDialog(qt.QDialog):
     def _existingIndex(self, ids):
         from LesionNetworkMappingLib import nulls
 
+        if self.bundle is None:
+            return None
         try:
             folder = nulls.find_fast_index(self.bundle, ids)
         except (OSError, ValueError):
@@ -824,8 +923,9 @@ class FastIndexDialog(qt.QDialog):
         elif self.pack() == "fine":
             for entry in self.packEntries()[0]:
                 args += ["--atlas", f"{entry['id']}:{entry['stratum']}"]
-        if self.cache:
-            args += ["--cache", self.cache]
+        from LesionNetworkMappingLib import fetch
+
+        args += ["--cache", self.cache or fetch.app_cache_dir()]  # the folder the atlases were checked and downloaded in
         return args
 
     def startBuild(self):
@@ -876,6 +976,9 @@ class FastIndexDialog(qt.QDialog):
         if self.bundle is None:
             return False, _("Select a connectome first.")
         if mapsTsv is None:
+            other = self.mapsConnectome()
+            if other is not None:
+                return False, _("The lesion maps of the Cohort card were computed with another connectome ({name}). To check this connectome's index, choose it in the Connectome card and map the lesions with it.").format(name=other)
             return False, _("Map the lesions first (Cohort card): the parity check compares the index with their exact maps.")
         if self.parityJob is not None and not self.parityJob.isFinished():
             return False, _("The parity check is running…")
@@ -895,7 +998,7 @@ class FastIndexDialog(qt.QDialog):
         self.parityReason.setText(reason)
         self.parityReason.setVisible(bool(reason))
         if mapsTsv is None:
-            self.paritySource.setText(_("Exact maps: none yet."))
+            self.paritySource.setText(_("Exact maps: none computed with this connectome yet.") if self.mapsConnectome() is not None else _("Exact maps: none yet."))
         else:
             n = len(parityPairs(mapsTsv))
             self.paritySource.setText(_("Exact maps: the {n} lesion maps of the Cohort card that have a lesion file and an AvgFz map (at most {cap} are used).").format(n=n, cap=MAX_PARITY_LESIONS))
@@ -913,7 +1016,7 @@ class FastIndexDialog(qt.QDialog):
             report = _readJson(parityPath(mapsTsv))
             if report is not None:
                 state = fastModeState(self.bundle, mapsTsv)
-                self.showParity(report, stale=state.needsParity)
+                self.showParity(report, stale=state.needsParity or state.needsIndex)
                 return
         if mapsTsv is None:
             self.showParity(None)
@@ -957,9 +1060,9 @@ class FastIndexDialog(qt.QDialog):
         self.parityProgress.update()
         self.parityJob = None
         if not job.succeeded():
+            self._refreshParity()
             self.parityReason.setText(_("Stopped.") if job.state == "cancelled" else _("The parity check failed: {reason}").format(reason=job.failureReason))
             self.parityReason.show()
-            self._refreshParity()
             return
         self.refresh()
 
@@ -985,7 +1088,8 @@ class FastIndexDialog(qt.QDialog):
                     rows.append((STRATUM_TEXT.get(name, name) if group == "strata" else _("size {size}").format(size=SIZE_BIN_TEXT.get(name, name)), verdict))
         table.setRowCount(len(rows))
         for index, (name, verdict) in enumerate(rows):
-            cells = (name, str(verdict.get("n")), _number(verdict.get("median_partial_r")), _number(verdict.get("median_top10_dice")), _("Pass") if verdict.get("passed") else _("Fail"))
+            cells = (name, str(verdict.get("n")), _gateNumber(verdict.get("median_partial_r"), (gate.get("constants") or {}).get("partial_r")),
+                     _gateNumber(verdict.get("median_top10_dice"), (gate.get("constants") or {}).get("top10_dice")), _("Pass") if verdict.get("passed") else _("Fail"))
             for column, text in enumerate(cells):
                 item = qt.QTableWidgetItem(text)
                 item.setToolTip(str(verdict.get("reason") or ""))
@@ -1004,10 +1108,10 @@ class FastIndexDialog(qt.QDialog):
         lines = [_("Gate: median partial r ≥ {r:g} and median top-10% Dice ≥ {d:g}, per stratum and size bin, at least {n} exact lesions ({have} checked).").format(
             r=constants.get("partial_r", 0.0), d=constants.get("top10_dice", 0.0), n=gate.get("min_lesions"), have=total)]
         if gate.get("allowed_strata"):
-            lines.append(_("Passed: {names}. {allowed} of {total} checked lesions are allowed in fast mode.").format(names=", ".join(gate["allowed_strata"]), allowed=allowed, total=total))
+            lines.append(_("Passed: {names}. {allowed} of {total} checked lesions are allowed in fast mode.").format(names=strataText(gate["allowed_strata"]), allowed=allowed, total=total))
         if failing:
             lines.append(_("Failed: {failing}. Lesions in these groups are left out of fast-mode statistics.").format(failing=failing))
-        lines += [message for message in gate.get("messages") or [] if message not in " ".join(lines)][:3]
+        lines += gateNotes(gate, lines)
         if stale:
             lines.append(_("This report is out of date (another index or newer lesion maps): run the parity check again."))
         self.gateLabel.setText("\n".join(lines))
@@ -1035,7 +1139,7 @@ class FastIndexDialog(qt.QDialog):
             self.matrixButton.setToolTip("")
 
     def chooseMatrix(self):
-        path = qt.QFileDialog.getOpenFileName(self, _("Parcel matrix (.mat) of your own copy of the release"), os.path.expanduser("~"), "MATLAB (*.mat);;All files (*)")
+        path = qt.QFileDialog.getOpenFileName(self, _("Parcel matrix (.mat) of your own copy of the release"), widgets.dialogStartFolder(os.path.expanduser("~")), "MATLAB (*.mat);;All files (*)")
         if path:
             return self.compareMatrix(path)
         return None

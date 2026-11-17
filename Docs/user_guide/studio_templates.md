@@ -27,8 +27,19 @@ only:
   scan instead.
 - **Anything else is refused**: "This image is not in MNI space. Open it as a scan
   instead, or normalize it to MNI first."
+- **A NIfTI file whose sform and qform disagree** (by more than 0.1 mm) is refused
+  too, whatever they say: Slicer would show it at the qform while the check reads the
+  sform, so lesions drawn on it would not be at the MNI positions. Make the two agree
+  (for example with `fslorient -copysform2qform`) and add the file again. A template
+  of yours whose image disagrees this way is not opened either.
+- **A NIfTI file with an sform but no qform whose voxel size (pixdim) does not
+  match the sform** (by more than 0.1 mm anywhere in the image) is refused for the
+  same reason: Slicer takes the voxel size from pixdim, so it would show the image
+  at another size and place than the sform the check reads. Set the voxel size in
+  the header to the sform's and add the file again.
 
-A file with several volumes (4D) is added with its first volume only. Voxels that
+A 4D NIfTI file (several volumes) is added with its first volume only; a 4D NRRD file is
+refused, so save its first volume as NIfTI. Voxels that
 are not cubic are accepted with a warning: drawing and maps work best on
 near-isotropic templates.
 
@@ -56,8 +67,11 @@ In the dialog:
    - **Whole-head image**: helps normalization recover tilted scans. It must be on
      the grid of the image too.
    - **3D brain surfaces** (`.gii`, `.vtk`, `.vtp`, `.obj`, `.stl`, `.ply`): shown in
-     the 3D view when you start on the template. They must lie in MNI space. GIfTI
-     files need a reader, for example the SlicerFreeSurfer extension.
+     the 3D view when you start on the template. They must lie in MNI space, whose
+     coordinates are RAS: a file that does not state its coordinate system (most
+     FreeSurfer, BrainNet or nibabel exports) is read as RAS, and a `SPACE=RAS` or
+     `SPACE=LPS` header, as in every file Slicer saves, is followed. GIfTI files
+     need a reader, for example the SlicerFreeSurfer extension.
    - **Source and licence**: where the template comes from and how to cite it.
 4. Turn on **Use as my default template** if *Start on template* should open it.
 5. Press **Add template**. The files are copied into your Slicer Studio folder with
@@ -78,7 +92,11 @@ Slicer Studio/
 ```
 
 `template.json` holds file names relative to its folder and a sha256 checksum of
-each file, never a path on your computer. **Settings › Templates** lists every
+each file, never a path on your computer. A template folder you copy into
+`Templates/` yourself (a colleague's, or a duplicate) is listed as it is; when its
+`id` is already used by one of your templates, the copy gets its own id and name
+("Lab ICBM 2", `user:lab-icbm-2`, written into its `template.json`) and yours keeps
+its id. **Settings › Templates** lists every
 template with a thumbnail, its space, resolution and contrast, and a *Built-in* or
 *Yours* chip. There you can set the default, start on a template, show its folder
 or remove it (its folder goes to the Trash). Slicer Studio remembers the default
@@ -101,6 +119,9 @@ shared files.
   *MNI (other)* templates get the same note.
 - **Normalize to MNI**: a template with a brain mask can be the target: choose it
   under **Template** in the options of *Normalize to MNI* ("… (yours)"). The
+  template image must be a NIfTI file with cubic voxels aligned with the axes
+  (the mask may be NIfTI or NRRD); the add dialog says when an image cannot be a
+  target, and such a template is not listed there. The
   results are written on the grid of your template, and `normalization.json`
   records the template's id, name, space and checksums. Registration quality
   depends on the template; normalization stays experimental.
@@ -109,12 +130,23 @@ shared files.
   study on another computer that does not have the template, Slicer Studio says
   "This study uses the template … Add it…"; *Add it…* opens the dialog and accepts
   only the file with the same checksum. Until then the study opens on the built-in
-  template of the same family. *Normalize all* in the Library (and `normalize
+  template of the same family; its lesions stay in the study's MNI space (sides,
+  Map), and the Lesion card notes that the lesion grid and the template differ by a
+  few millimetres. A project reopened without the template, or a template removed
+  while it is open, keeps its lesion in the template's space in the same way.
+  *Normalize native subjects* in the Library (or *Normalize all native lesions* in the command palette; and `normalize
   batch --template auto`) normalizes the study's lesions to the study's template
   when it is on this computer with a brain mask; otherwise it uses the built-in
   2009c brain and says so. With a study open, *Start on template* (or choosing the
   default or the study's template in its ▾ menu) adds a case to the study; another
   template starts a case outside it.
+- **Sharing a study**: *Export study for sharing…* names your template (id, name,
+  space and image checksum) in the export's `dataset_description.json`
+  (`SlicerStudio.template`) and README, so the recipient can tell which template
+  the masks are on and add the same file. The template file itself is included only
+  when you tick **Include the template file** (off by default). It is then copied
+  unchanged into `template/` so that its checksum still matches, and checking its
+  licence is up to you.
 
 ## Projects and official 3D Slicer
 

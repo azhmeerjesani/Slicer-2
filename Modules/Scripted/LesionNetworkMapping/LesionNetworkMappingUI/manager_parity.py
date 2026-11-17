@@ -136,10 +136,14 @@ class ImportDialog(qt.QDialog):
         close.connect("clicked()", self.close)
         buttons.addWidget(close)
         layout.addLayout(buttons)
+        # Return in a field runs Import (not the first auto-default button, "Browse…", which opened a folder chooser)
+        for button in self.findChildren(qt.QPushButton):
+            button.setAutoDefault(False)
+        self.importButton.setDefault(True)
         self.scan()
 
     def browse(self):
-        folder = qt.QFileDialog.getExistingDirectory(self, _("Folder of Lead-DBS outputs"), self.folderEdit.text or os.path.expanduser("~"))
+        folder = qt.QFileDialog.getExistingDirectory(self, _("Folder of Lead-DBS outputs"), self.folderEdit.text or widgets.dialogStartFolder(os.path.expanduser("~")))
         if folder:
             self.folderEdit.setText(folder)
             self.scan()
@@ -148,9 +152,13 @@ class ImportDialog(qt.QDialog):
         """List the connectome labels of the folder's Lead-DBS maps (with their counts) in the combo box."""
         from LesionNetworkMappingLib import leaddbs
 
-        folder = self.folderEdit.text.strip()
+        folder = widgets.typedPath(self.folderEdit.text)
         self.labelCombo.clear()
         self.found = {}
+        if folder is None:
+            self.statusLabel.setText(widgets.relativePathProblem(self.folderEdit.text))
+            self.updateButtons()
+            return
         if not folder or not os.path.isdir(folder):
             self.statusLabel.setText(_("Choose the folder that holds the Lead-DBS outputs.") if not folder else _("Folder not found: {folder}").format(folder=folder))
             self.updateButtons()
@@ -164,7 +172,8 @@ class ImportDialog(qt.QDialog):
             label = leaddbs._alnum(conn)
             counts[label] = counts.get(label, 0) + 1
         for label in sorted(counts):
-            self.labelCombo.addItem(_("{label} ({n} lesions)").format(label=label, n=counts[label]), label)
+            text = _("{label} ({n} lesion)") if counts[label] == 1 else _("{label} ({n} lesions)")
+            self.labelCombo.addItem(text.format(label=label, n=counts[label]), label)
         if not counts:
             self.statusLabel.setText(_("No Lead-DBS maps in this folder (…_conn-…_desc-T_funcmap.nii[.gz])."))
         else:
@@ -176,13 +185,24 @@ class ImportDialog(qt.QDialog):
         destination = bool(_studyPath(self.ctx)) or bool(self.outEdit.text.strip())
         self.importButton.setEnabled(not running and self.labelCombo.count > 0 and (destination or self.destinationLabel is None))
 
+    def pathProblem(self):
+        """Why the typed folder or destination cannot be used (a relative path: the job runs in the module folder, so it would
+        be read or written inside the application, see ``widgets.typedPath``), or None.
+        """
+        edits = [self.folderEdit] + ([] if _studyPath(self.ctx) else [self.outEdit])
+        return next((widgets.relativePathProblem(edit.text) for edit in edits if widgets.typedPath(edit.text) is None), None)
+
     def arguments(self):
-        args = ["import", "--folder", self.folderEdit.text.strip(), "--label", self.labelCombo.currentData]
+        """The job's arguments (typed paths absolute, ``~`` expanded), or None when a path is missing or relative."""
+        folder = widgets.typedPath(self.folderEdit.text)
+        if not folder:
+            return None
+        args = ["import", "--folder", folder, "--label", self.labelCombo.currentData]
         studyPath = _studyPath(self.ctx)
         if studyPath:
             args += ["--study", studyPath]
         else:
-            out = self.outEdit.text.strip()
+            out = widgets.typedPath(self.outEdit.text)
             if not out:
                 return None
             args += ["--out", out]
@@ -191,9 +211,9 @@ class ImportDialog(qt.QDialog):
     def startImport(self):
         args = self.arguments()
         if args is None:
-            self.statusLabel.setText(_("Choose an output folder (or open a study first)."))
+            self.statusLabel.setText(self.pathProblem() or _("Choose an output folder (or open a study first)."))
             return None
-        qt.QSettings().setValue(IMPORT_FOLDER_SETTING, self.folderEdit.text.strip())
+        qt.QSettings().setValue(IMPORT_FOLDER_SETTING, args[args.index("--folder") + 1])
         self.statusLabel.setText(_("Importing…"))
         spec = jobrunner.JobSpec(JOB_MODULE, args, title=_("Importing Lead-DBS maps"), heavy=False, kind="leaddbs-import", name="leaddbs-import",
                                  runRoot=jobrunner.defaultRunRoot(), onEvent=lambda event: self.progress.update(), onDone=self.onDone)
@@ -213,8 +233,13 @@ class ImportDialog(qt.QDialog):
         mapsTsv = next((event.get("path") for event in job.results if event.get("kind") == "maps"), None)
         self.fillTable(mapsTsv, record.get("path") if record else None)
         warnings = [event.get("message") for event in job.warnings if event.get("message")]
-        text = _("Imported {n} lesion maps into {folder}. Use them in the Cohort card (its maps.tsv); the folder's mask.nii.gz is the mask of the statistics.").format(
-            n=(job.doneEvent or {}).get("n", "?"), folder=os.path.dirname(mapsTsv) if mapsTsv else "?")
+        count = (job.doneEvent or {}).get("n", "?")
+        template = (
+            _("Imported {n} lesion map into {folder}. Use it in the Cohort card (its maps.tsv); the folder's mask.nii.gz is the mask of the statistics.")
+            if count == 1
+            else _("Imported {n} lesion maps into {folder}. Use them in the Cohort card (its maps.tsv); the folder's mask.nii.gz is the mask of the statistics.")
+        )
+        text = template.format(n=count, folder=os.path.dirname(mapsTsv) if mapsTsv else "?")
         self.statusLabel.setText(" ".join([text, *warnings]))
 
     def fillTable(self, mapsTsv, recordPath):
@@ -252,12 +277,25 @@ class ParityDialog(qt.QDialog):
         self.termsJob = None
         self.termsSha = None
         self.catalogPath = None
-        self.cache = os.path.join(slicer.app.cachePath, "LNM")
+        from LesionNetworkMappingLib import fetch
+
+        self.cache = fetch.app_cache_dir()
         self.parityResult = None
         self.setObjectName("LNMLeadDbsParityDialog")
         self.setWindowTitle(_("Verify against Lead-DBS"))
-        self.setMinimumSize(760, 720)
-        layout = qt.QVBoxLayout(self)
+        widgets.fitDialogToScreen(self, 760, 720, 560, 420)
+        outer = qt.QVBoxLayout(self)  # the content scrolls on a short screen; the buttons stay in view
+        outer.setContentsMargins(0, 0, 0, 8)
+        scroll = qt.QScrollArea()
+        scroll.setObjectName("LNMLeadDbsParityScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(qt.QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        outer.addWidget(scroll, 1)
+        content = qt.QWidget()
+        content.setObjectName("LNMLeadDbsParityContent")
+        scroll.setWidget(content)
+        layout = qt.QVBoxLayout(content)
         layout.addWidget(_label(_("Maps 24 reference lesions (aphasia, addiction, epilepsy and synthetic sets of van den Heuvel et al. 2026) with this connectome and "
                                   "compares them with their published Lead-DBS GSP1000v2 Full Set maps. The numbers are measured, not promised: parity is "
                                   "like-for-like only on a connectome converted from the Lead-DBS release."), "LNMLeadDbsParityIntro"))
@@ -276,7 +314,7 @@ class ParityDialog(qt.QDialog):
         layout.addWidget(self.sourceLabel)
         self.termsView = qt.QTextBrowser()
         self.termsView.setObjectName("LNMLeadDbsParityTermsText")
-        self.termsView.setOpenExternalLinks(True)
+        widgets.routeLinks(self.termsView)
         self.termsView.setMinimumHeight(80)
         self.termsView.setMaximumHeight(150)
         layout.addWidget(self.termsView)
@@ -289,6 +327,9 @@ class ParityDialog(qt.QDialog):
         options.addWidget(qt.QLabel(_("Subjects:")))
         self.subsetCombo = qt.QComboBox()
         self.subsetCombo.setObjectName("LNMLeadDbsParitySubset")
+        # Items are added later (setBundle), so give the combo room for 'All subjects' and named subsets up front.
+        self.subsetCombo.setSizeAdjustPolicy(qt.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.subsetCombo.setMinimumContentsLength(16)
         options.addWidget(self.subsetCombo)
         self.saveMapsCheck = qt.QCheckBox(_("Also save our maps (Lead-DBS names)"))
         self.saveMapsCheck.setObjectName("LNMLeadDbsParitySaveMaps")
@@ -310,6 +351,7 @@ class ParityDialog(qt.QDialog):
         self.statusLabel = _label("", "LNMLeadDbsParityStatus", secondary=True, selectable=True)
         layout.addWidget(self.statusLabel)
         buttons = qt.QHBoxLayout()
+        buttons.setContentsMargins(9, 0, 9, 0)
         self.openButton = _button(_("Open folder"), "LNMLeadDbsParityOpenFolder")
         self.openButton.setEnabled(False)
         self.openButton.connect("clicked()", self.openFolder)
@@ -322,7 +364,10 @@ class ParityDialog(qt.QDialog):
         close = _button(_("Close"), "LNMLeadDbsParityClose")
         close.connect("clicked()", self.close)
         buttons.addWidget(close)
-        layout.addLayout(buttons)
+        outer.addLayout(buttons)
+        for button in self.findChildren(qt.QPushButton):
+            button.setAutoDefault(False)
+        self.verifyButton.setDefault(True)
         self.setBundle(bundlePath)
 
     # Bundle
@@ -511,7 +556,7 @@ class ParityDialog(qt.QDialog):
     def openFolder(self):
         if self.parityResult is None:
             return
-        qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(self.outputFolder()))
+        widgets.showInFileManager(self.outputFolder())
 
 
 #
@@ -550,6 +595,8 @@ def openParity(ctx, bundlePath):
 
 
 ACTIONS = [
-    {"id": "leaddbsImport", "label": _("Import Lead-DBS maps…"), "order": 60, "factory": openImport},
+    # "always": importing maps that Lead-DBS computed elsewhere needs no registered connectome (openImport ignores
+    # bundlePath; the records are pooled under "unknown:<label>"). Verify against Lead-DBS… needs a bundle.
+    {"id": "leaddbsImport", "label": _("Import Lead-DBS maps…"), "order": 60, "factory": openImport, "always": True},
     {"id": "leaddbsParity", "label": _("Verify against Lead-DBS…"), "order": 61, "factory": openParity},
 ]

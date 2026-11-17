@@ -231,6 +231,8 @@ class NullsTest(unittest.TestCase):
         np.testing.assert_allclose(maps["sensNullP"], p, rtol=1e-6)
         self.assertAlmostEqual(float(maps["sensNullP"][0]), 1 / (k + 1), places=7)
         self.assertAlmostEqual(numbers["min_attainable_p"], 1 / (k + 1))
+        self.assertIn("q \u2264 0.05", numbers["discreteness"])  # typographic, like the card's pre-run line
+        self.assertNotIn("<=", numbers["discreteness"])
         self.assertGreaterEqual(float(maps["sensNullP"].min()), 1 / (k + 1) - 1e-9)
         np.testing.assert_allclose(maps["sensNullQ"], glm.fdr_bh(p), rtol=1e-6)
         mean, sd = totals.mean(axis=0), totals.std(axis=0, ddof=1)
@@ -320,6 +322,14 @@ class NullsTest(unittest.TestCase):
             np.testing.assert_array_equal(pool.overlap(row).sum(axis=0), expected)
         np.testing.assert_array_equal(pool.draw(25, seed=9), sets)
 
+    def test_rule_resolved_of_a_top_pct_rule_is_the_rank_rule_note(self):
+        note = {"kind": "top_pct", "note": "resolved per map (rank rule)"}
+        resolved = nulls.resolve_rule(TOP10, N_LESIONS, 3752)
+        self.assertEqual(nulls.rule_resolved_record(resolved), note)
+        self.assertEqual(nulls.rule_resolved_record(None), note)
+        other = nulls.resolve_rule({"kind": "custom_t", "value": 3.0}, N_LESIONS, 3752)
+        self.assertEqual(nulls.rule_resolved_record(other), other.to_dict())
+
     def test_exact_run_outputs_and_resume(self):
         out = self.path("exact")
         events = []
@@ -329,6 +339,8 @@ class NullsTest(unittest.TestCase):
         self.assertEqual(events[-1][0], "done")
         self.assertEqual([f["name"] for e, f in events if e == "stage"], ["design", "null maps", "null cohorts", "inference", "write"])
         self.assertEqual(record["k"], 60)
+        with open(os.path.join(out, "nulls.json"), encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["observed"]["rule_resolved"], {"kind": "top_pct", "note": "resolved per map (rank rule)"})
         self.assertAlmostEqual(record["min_attainable_p"], 1 / 61)
         self.assertEqual(record["group_qa"]["overlap"]["k"], 60)
         self.assertIn(record["group_qa"]["overlap"]["level"], ("below", "amber", "red", "not_calibrated"))
@@ -368,6 +380,80 @@ class NullsTest(unittest.TestCase):
         for desc, values in reference_maps.items():
             np.testing.assert_array_equal(_read_map(os.path.join(resumed, os.path.basename(record["outputs"][desc])), self.bundle), values, err_msg=desc)
 
+    def test_maps_of_another_connectome_of_the_same_name_are_refused(self):
+        """Two connectomes with the same name share the cohort folder conn-<label>: the nulls of one never run on the other's maps (BB-1)."""
+        other_info = connectome.make_synthetic(self.path("other", "Synthetic.lnmc"), shape=SHAPE, n_subjects=5, runs=(30, 30), seed=7)
+        other = connectome.ConnectomeBundle.open(other_info["path"])
+        self.addCleanup(other.close)
+        self.assertEqual(other.name, self.bundle.name)
+        record = cohortmaps.read_record(os.path.join(self.maps_dir, cohortmaps.COHORTMAPS_JSON))
+        self.assertTrue(cohortmaps.record_matches_bundle(record, self.bundle))
+        self.assertFalse(cohortmaps.record_matches_bundle(record, other), "the maps of one connectome are taken as another's of the same name")
+        self.assertFalse(cohortmaps.record_matches_bundle(record, other.path))
+        # The same connectome in another folder (same connectome.json), the same folder (metadata edited in place), older records
+        moved = self.path("moved", "Synthetic.lnmc")
+        shutil.copytree(self.bundle.path, moved)
+        self.assertTrue(cohortmaps.record_matches_bundle(record, moved))
+        edited = {**record, "bundle": {**record["bundle"], "manifest_sha256": "0" * 64}}
+        self.assertTrue(cohortmaps.record_matches_bundle(edited, self.bundle))
+        self.assertFalse(cohortmaps.record_matches_bundle(edited, moved))
+        for legacy in ({}, {"bundle": "Synthetic"}, {"bundle": {"name": "Synthetic"}}):
+            self.assertTrue(cohortmaps.record_matches_bundle(legacy, other), legacy)
+        with self.assertRaises(jobs.JobError) as raised:
+            nulls.run(other, self.path("other-nulls"), maps_tsv=self.maps_tsv, kind="rl_independent", mode="exact", k=10, k_pool=2, rule=TOP10, emit=_quiet, register=False)
+        self.assertEqual(raised.exception.code, "input")
+        self.assertIn("another connectome", str(raised.exception))
+
+    def test_stopped_or_failed_rerun_keeps_finished_result(self):
+        """A rerun that is stopped or fails before it writes leaves the earlier finished result as it was (BB-1)."""
+        import hashlib
+
+        out = self.path("rerun")
+
+        def run(**kwargs):
+            return nulls.run(self.bundle, out, maps_tsv=self.maps_tsv, kind="rl_independent", mode="exact", k=60, k_pool=4, rule=TOP10, register=False, budget_bytes=1, **kwargs)
+
+        def snapshot():
+            names = sorted(name for name in os.listdir(out) if os.path.isfile(os.path.join(out, name)))
+            return {name: hashlib.sha256(open(os.path.join(out, name), "rb").read()).hexdigest() for name in names}
+
+        record = run(emit=_quiet)
+        finished = snapshot()
+        self.assertIn(nulls.NULLS_JSON, finished)
+        self.assertGreaterEqual(len(finished), 2 * len(nulls.OUTPUT_DESCS) + 4)
+
+        class StopAfterFirstBatch:
+            batches = 0
+
+            def __call__(self):
+                return self.batches >= 1
+
+        stop = StopAfterFirstBatch()
+
+        def on_event(event, **fields):
+            if event == "progress" and fields.get("stage") == "null maps" and fields.get("batch"):
+                stop.batches += 1
+
+        with self.assertRaises(jobs.Cancelled):
+            run(emit=on_event, cancel=stop, seed=1)
+        self.assertEqual(snapshot(), finished, "a stopped rerun keeps the finished result")
+
+        def fail(event, **fields):
+            if event == "progress" and fields.get("stage") == "null maps":
+                raise RuntimeError("simulated failure")
+
+        with self.assertRaises(RuntimeError):
+            run(emit=fail, seed=1)
+        self.assertEqual(snapshot(), finished, "a failed rerun keeps the finished result")
+        self.assertEqual(nulls.load_null_group_maps(out)[0].shape[0], record["k"])
+
+        # A rerun that finishes replaces the result: no file of the earlier run is left next to the new one's
+        again = run(emit=_quiet, seed=1)
+        replaced = snapshot()
+        self.assertEqual(set(replaced), set(finished))
+        self.assertNotEqual(replaced[nulls.NULLS_JSON], finished[nulls.NULLS_JSON])
+        self.assertEqual(again["seeds"]["seed"], 1)
+
     def test_kinds_and_modes(self):
         parity = self.passing_parity()
         for kind, mode, k in (("rl_strength", "exact", 30), ("rl_cohort_shift", "exact", 30), ("rl_independent", "fast", 40), ("rl_cohort_shift", "fast", 20), ("rl_overlap", "fast", 5)):
@@ -387,6 +473,56 @@ class NullsTest(unittest.TestCase):
                 self.assertIn("never report them as final observed maps", record["note"])
         self.assertEqual(record["design"]["iterations"], 150)
         self.assertLessEqual(record["design"]["ks_best_median"], record["design"]["ks_initial_median"])
+
+    def test_cohort_shift_shortfall_is_recorded_and_flagged(self):
+        """Fewer shared shifts than requested: the warning, the requested K and K < MIN_K reach nulls.json, the run registry
+        (methods) and the group QA (bug nulls-run-warnings-dropped-cohort-shift-k-shrinks-to-3).
+        """
+        from LesionNetworkMappingLib import methods
+
+        # A brain that is the lesions' bounding box: with 98% of the weight kept inside, only 3 of 20 shared shifts fit
+        ijk = np.stack(np.unravel_index(self.bundle.mask_indices, SHAPE), axis=1)
+        occupied = np.zeros(self.bundle.n_voxels, dtype=bool)
+        for positions, _weights in self.cohort.columns:
+            occupied[positions] = True
+        low, high = ijk[occupied].min(axis=0), ijk[occupied].max(axis=0)
+        box = np.all((ijk >= low) & (ijk <= high), axis=1)
+        events = []
+        root = self.path("shift-shortfall-root")
+        os.makedirs(root, exist_ok=True)
+        record = nulls.run(self.bundle, self.path("shift-shortfall"), maps_tsv=self.maps_tsv, kind="rl_cohort_shift", mode="exact", k=20, k_pool=20, rule=TOP10,
+                           brain_mask=box, min_inside=0.98, seed=7, reference=self.reference, run_root=root, emit=lambda event, **fields: events.append(dict(fields, event=event)))
+        k = record["k"]
+        self.assertLess(k, nulls.MIN_K)
+        self.assertEqual(record["k_requested"], 20)
+        self.assertTrue(record["below_min_k"])
+        self.assertTrue(record["inference"]["below_min_k"])
+        self.assertIn("no voxel can reach p ≤ 0.05", record["inference"]["discreteness"])
+        codes = [item["code"] for item in record["warnings"]]
+        self.assertIn("shifts", codes)
+        self.assertIn("min_k", codes)
+        self.assertIn(f"Only {k} of 20 shared shifts", next(item["message"] for item in record["warnings"] if item["code"] == "shifts"))
+        self.assertEqual([e["message"] for e in events if e["event"] == "warning" and e.get("code") in ("shifts", "min_k")], [item["message"] for item in record["warnings"] if item["code"] in ("shifts", "min_k")])
+        with open(self.path("shift-shortfall", nulls.NULLS_JSON), encoding="utf-8") as f:
+            saved = json.load(f)
+        self.assertEqual(saved["warnings"], record["warnings"])
+        self.assertEqual(saved["k_requested"], 20)
+        # No percentile verdict among a handful of null cohorts
+        self.assertFalse(record["group_qa"]["available"])
+        self.assertIn(f"at least {nulls.MIN_K}", record["group_qa"]["text"])
+        # The run registry summary, and so the methods, say what was asked for and what went wrong
+        summary = runs.read_summary(root, runs.list_runs(root, kind="nulls")[-1])
+        self.assertEqual((summary["k"], summary["k_requested"], summary["below_min_k"]), (k, 20, True))
+        text = methods.nulls_text(summary)
+        self.assertIn(f"{k} null cohorts", text)
+        self.assertIn("20 requested", text)
+        self.assertIn("p <= 0.05", text)
+        self.assertIn(f"Only {k} of 20 shared shifts", text)
+        # A run with enough cohorts has neither flag nor min_k warning
+        enough = nulls.run(self.bundle, self.path("shift-enough"), maps_tsv=self.maps_tsv, kind="rl_independent", mode="exact", k=30, k_pool=4, rule=TOP10, emit=_quiet, register=False)
+        self.assertFalse(enough["below_min_k"])
+        self.assertEqual(enough["k_requested"], 30)
+        self.assertNotIn("min_k", [item["code"] for item in enough["warnings"]])
 
     def test_empirical_pool(self):
         pool_dir = self.path("pool")

@@ -165,13 +165,19 @@ protected:
   /// Give the keyboard focus to the view when the mouse enters it, if the application property
   /// "SlicerFocusFollowsMouse" is set to true (it is not set by default). The focus is not moved
   /// away from text inputs (line edits, spin boxes, text edits, the Python console), and not while
-  /// a popup or modal window is open or the window of the view is not active.
+  /// a popup or modal window is open or the window of the view is not active, and not when the pointer
+  /// has not moved since it left the view (the Enter event after a popup closes).
   /// \sa qMRMLSliceView::enterEvent
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
   void enterEvent(QEnterEvent* event) override;
 #else
   void enterEvent(QEvent* event) override;
 #endif
+
+  /// Remember where the pointer was when it left the view, so that enterEvent can tell the pointer
+  /// entering the view from the Enter event that Qt sends to the view under a resting pointer when a
+  /// popup (menu, search palette) closes.
+  void leaveEvent(QEvent* event) override;
 
 private:
   Q_DECLARE_PRIVATE(qMRMLThreeDView);

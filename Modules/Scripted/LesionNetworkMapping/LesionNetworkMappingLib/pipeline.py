@@ -122,6 +122,10 @@ STOP_NAME = "STOP"
 LOCK_NAME = "lock.json"
 PROGRESS_JSON = "progress.json"
 PLAN_JSON = "plan.json"
+#: the study's participants table as the run planned it (``.pipeline/participants/``): the GLM, sLNM and null-model
+#: jobs read the groups, scores and covariates there, so that another writer of the study (a slicer-lnm run with
+#: another --group-map, an edit in the application) cannot change them in the middle of the run
+PARTICIPANTS_DIR = "participants"
 LESIONS_TSV = "lesions.tsv"
 #: maps.tsv of the kept lesions, written next to the cohortmaps maps.tsv when some lesions are excluded after mapping
 PIPELINE_MAPS_TSV = "maps_kept.tsv"
@@ -175,6 +179,9 @@ POPULATIONS = ("auto", "cases", "all")
 EVENT_MODES = ("auto", "json", "text")
 KEEP_AWAKE_MODES = ("auto", "on", "off")
 INPUTS = ("AvgFz", "T")
+#: Contrasts of the case-vs-control GLM (--contrast; design.py's names: A is case, B is control). A one-sided
+#: contrast tests one direction (tails 1), as a recipe or a locked analysis plan states it.
+CONTRASTS = ("two_sided", "A>B", "B>A")
 MIN_PER_GROUP = 3  # subjects per contrast group for the GLM (preflight's MIN_PER_CONTRAST_GROUP)
 MIN_SLNM_N = 10
 DEFAULT_SENSITIVITY = 90.0
@@ -210,19 +217,32 @@ NULLS_TOO_LONG = "Null models not run: the exact pooled null would take ≈ {} o
 REFERENCE_MISSING = "Reference maps not built: they are built only when asked (--build-references; about {})"
 REFERENCE_READ_ONLY = "Reference maps not computed: the connectome folder is read-only (build them in Connectome ▸ Manage…)"
 UNCONFIRMED_SCORE = "confirm the column role in Library ▸ Columns"
+UNCONFIRMED_SCORE_CLI = "confirm it with --score-columns {column}"
 NORM_NEEDS_REVIEW = "normalized; needs review in Library (norm_qc)"
 NATIVE_UNAVAILABLE = "native space: normalization not available in this build"
 NATIVE_SKIPPED = "native space: skipped (--native skip)"
 NATIVE_EXCLUDED = "native space: not normalized"
 CHANGED_SNAPSHOT = "changed during snapshot"
+#: Reason of the rows left out by PipelineConfig.participant_label (slicer-lnm --participant-label)
+NOT_SELECTED = "not selected (--participant-label)"
 CHANGED_RUN = "changed during the run"
 OUTSIDE_MASK = "no lesion voxel inside the connectome mask (its maps would be all zero)"
-QC_FAIL = "qc=fail"
+QC_FAIL = "qc=fail"  # study.EXCLUDED_QC: preflight and Study.analysis_rows exclude these lesions with this reason
 #: Sidecar "kind" of the nulls job's group maps (nulls.OUTPUT_DESCS): the excess is in signed percentage points
 NULL_MAP_KINDS = {"sensNullExcess": "stat", "sensNullP": "p", "sensNullQ": "p", "sensNullPFwe": "p", "sensNullBias": "fraction"}
 UNIVERSAL_NOTE = "Group maps of the pipeline are descriptive unless they carry a permutation p-value; specificity is never claimed from overlap maps."
 
 _DESC = re.compile(r"[^A-Za-z0-9]")
+
+
+READ_ONLY_STUDY = "The study folder is read-only ({path}): ask for write access, or open a copy of the study, or give an output folder (--out)."
+
+
+def study_read_only(path):
+    """True when this user cannot write results into the study folder (or its derivatives folder, when that exists)."""
+    folder = os.path.join(path, "derivatives")
+    folder = folder if os.path.isdir(folder) else path
+    return not os.access(folder, os.W_OK | os.X_OK)
 
 
 class PipelineError(jobs.JobError):
@@ -349,9 +369,10 @@ def rule_tag(rule):
 
 
 def score_label(column):
-    """CamelCase letters and digits of a column: "aphasia_score" gives "AphasiaScore"."""
-    words = [word for word in re.split(r"[^A-Za-z0-9]+", str(column)) if word]
-    return "".join(word[:1].upper() + word[1:] for word in words) or "Score"
+    """CamelCase letters and digits of a column: "aphasia_score" gives "AphasiaScore" (a name with other letters gets a tag of it, see glm._unicode_tag)."""
+    from . import glm
+
+    return glm._upper_first(glm._camel(column)) or "Score"
 
 
 def unique_labels(names, make=score_label):
@@ -359,9 +380,9 @@ def unique_labels(names, make=score_label):
     for name in names:
         label = make(name)
         base, counter = label, 2
-        while label in seen:
+        while label.casefold() in seen:  # file names: NIHSS and nihss are one folder on macOS
             label, counter = f"{base}{counter}", counter + 1
-        seen.add(label)
+        seen.add(label.casefold())
         out.append(label)
     return out
 
@@ -382,6 +403,16 @@ def _python_executable():
     return executable
 
 
+def _slicer_lnm_executable():
+    """The slicer-lnm command that is running this code or is on PATH ('' when there is none): the pip wheel, the container image or the application's bin folder."""
+    folder = os.path.dirname(sys.executable or "")
+    for candidate in ("slicer-lnm", "slicer-lnm.exe"):
+        path = os.path.join(folder, candidate) if folder else ""
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return shutil.which("slicer-lnm") or ""
+
+
 def _requires_slicer(origin):
     """True when a stage module declares ``REQUIRES_SLICER = True`` (read from its source, not imported)."""
     try:
@@ -393,6 +424,29 @@ def _requires_slicer(origin):
 
 def _slicer_executable(configured=None):
     return configured or os.environ.get(SLICER_ENV) or shutil.which("Slicer")
+
+
+PROGRESS_UNITS = {"maps": "subject passes", "specificity": "permutations", "slnm": "permutations", "normalize": "subjects"}
+# What a child job of the specificity / slnm stages counts, by the stage it reports (it loads the maps, then permutes)
+CHILD_PROGRESS_UNITS = {"maps": "maps", "permutations": "permutations"}
+
+
+def progress_fields(stage, child_stage, fields):
+    """The fields of a pipeline progress event relayed from a child job: ``unit`` names what ``done``/``total`` count.
+
+    A child of the specificity / slnm stages first loads the maps ("N/M maps"), then permutes ("N/M permutations"); the unit follows the
+    child's own stage, not the pipeline stage. slnm reports the analysis it permutes ("main", "control:age") as ``unit``; that stays
+    available as ``analysis_unit``.
+    """
+    fields = dict(fields)
+    unit = CHILD_PROGRESS_UNITS.get(child_stage) if stage in ("specificity", "slnm") else None
+    if unit:
+        if fields.get("unit") and fields["unit"] != unit:
+            fields["analysis_unit"] = fields["unit"]
+        fields["unit"] = unit
+    else:
+        fields.setdefault("unit", PROGRESS_UNITS.get(stage, "units"))
+    return fields
 
 
 # Providers
@@ -523,6 +577,7 @@ class PipelineConfig:
     alpha: float = 0.05
     fdr: bool = True
     tfce: bool = False
+    contrast: str = "two_sided"
     covariates: list = dataclasses.field(default_factory=lambda: ["volume_ml"])
     volume_off_reason: str | None = None
     scores: object = "auto"
@@ -553,9 +608,14 @@ class PipelineConfig:
     events: str = "auto"
     slicer: str | None = None
     accept_terms: bool = False
+    #: The recipe record the settings came from (``recipes.to_pipeline_config`` "recipe"); pipeline.json "recipe"
+    recipe: dict | None = None
+    #: The participant ids ("sub-<label>") a run is restricted to (slicer-lnm --participant-label); None: every subject.
+    #: Stored in pipeline.json "config" so that reproduce_pipeline.sh analyses the same subjects.
+    participant_label: list | None = None
 
     #: Keys that are about this invocation, not about the analysis (not stored in pipeline.json "config")
-    RUN_KEYS = ("out", "recompute", "parent_pid", "parent_run", "events", "accept_terms", "slicer", "nice", "keep_awake", "threads", "memory_budget_gb")
+    RUN_KEYS = ("out", "recompute", "parent_pid", "parent_run", "events", "accept_terms", "slicer", "nice", "keep_awake", "threads", "memory_budget_gb", "recipe")
     #: Path keys (stored relative to pipeline.json's folder)
     PATH_KEYS = ("study", "bundle", "out", "atlas", "atlas_labels", "template")
 
@@ -569,13 +629,23 @@ class PipelineConfig:
             self.preview_n = int(self.preview_n)
             if self.preview_n < 1:
                 raise ValueError("--preview must be at least 1")
+        # A negative seed would only fail inside a stage (numpy / the GLM design), after the earlier stages ran
+        for key, option in (("preview_seed", "--preview-seed"), ("null_seed", "--null-seed"), ("perm_seed", "--perm-seed")):
+            value = getattr(self, key)
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                raise ValueError(f"{option} must be a whole number (got {value!r})") from None
+            if value < 0:
+                raise ValueError(f"{option} must not be negative (got {value})")
+            setattr(self, key, value)
         self.rule = thresholds.normalize_rule(self.rule)
         self.extra_rules = [thresholds.normalize_rule(rule) for rule in (self.extra_rules or [])]
         self.sensitivity = float(self.sensitivity)
         if not 50.0 <= self.sensitivity <= 100.0:
             raise ValueError(f"The sensitivity must be between 50 and 100 %, got {self.sensitivity:g}")
         for key, allowed in (("sensitivity_population", POPULATIONS), ("specificity", SPECIFICITY_MODES), ("input", INPUTS), ("nulls", NULL_MODES), ("native", NATIVE_MODES),
-                             ("events", EVENT_MODES), ("keep_awake", KEEP_AWAKE_MODES), ("slnm_method", ("pearson", "spearman")), ("reference", ("auto", "off"))):
+                             ("events", EVENT_MODES), ("keep_awake", KEEP_AWAKE_MODES), ("contrast", CONTRASTS), ("slnm_method", ("pearson", "spearman")), ("reference", ("auto", "off"))):
             if getattr(self, key) not in allowed:
                 raise ValueError(f"{key} must be one of {', '.join(allowed)}, got {getattr(self, key)!r}")
         self.perm = int(self.perm)
@@ -590,7 +660,10 @@ class PipelineConfig:
         if isinstance(self.scores, str) and self.scores not in ("auto", "none"):
             self.scores = [name.strip() for name in self.scores.split(",") if name.strip()]
         if isinstance(self.null_relocations, str) and self.null_relocations != "auto":
-            self.null_relocations = int(self.null_relocations)
+            try:
+                self.null_relocations = int(self.null_relocations)
+            except ValueError:
+                raise ValueError(f"--null-relocations must be auto or a number (got {self.null_relocations!r})") from None
         if isinstance(self.null_relocations, int) and self.null_relocations < 0:
             raise ValueError("--null-relocations must be at least 0")
         if int(self.min_slnm_n) < 3:
@@ -601,6 +674,14 @@ class PipelineConfig:
             raise ValueError("--threads must be at least 1")
         if not isinstance(self.software, dict):
             raise ValueError("--software must be a JSON object")
+        if self.recipe is not None and not isinstance(self.recipe, dict):
+            raise ValueError("recipe must be a JSON object (a recipe record)")
+        if self.participant_label is not None:
+            items = self.participant_label.replace(",", " ").split() if isinstance(self.participant_label, str) else list(self.participant_label)
+            ids = {str(item).strip() for item in items if str(item).strip()}
+            self.participant_label = sorted(item if item.startswith("sub-") else f"sub-{item}" for item in ids)
+            if not self.participant_label:
+                raise ValueError("participant_label must name at least one participant")
         if isinstance(self.parent_run, str):
             self.parent_run = [self.parent_run]
         self.parent_run = [str(run_id) for run_id in (self.parent_run or []) if run_id]
@@ -618,6 +699,10 @@ class PipelineConfig:
             value = getattr(self, field.name)
             if analysis_only and field.name in self.RUN_KEYS:
                 continue
+            if field.name == "contrast" and value == "two_sided":
+                continue  # the default is left out, so configurations and stage fingerprints of earlier runs are unchanged
+            if field.name in ("recipe", "participant_label") and value is None:
+                continue  # left out by default, as above
             if base is not None and field.name in self.PATH_KEYS and isinstance(value, str) and os.path.isabs(value):
                 value = relpath(value, base)
             out[field.name] = value
@@ -627,7 +712,10 @@ class PipelineConfig:
     def from_json(cls, data, base=None):
         """A config from :meth:`to_json` content, or from a pipeline.json (its "config"); relative paths are resolved against ``base``."""
         if isinstance(data, dict) and data.get("format") == FORMAT_NAME:
+            recipe = data.get("recipe")
             data = data.get("config") or {}
+            if isinstance(recipe, dict) and "recipe" not in data:
+                data = {**data, "recipe": recipe}  # a rerun of a recipe run records the same recipe
         if not isinstance(data, dict):
             raise ValueError("A pipeline configuration must be a JSON object")
         names = {field.name for field in dataclasses.fields(cls)}
@@ -777,7 +865,7 @@ class Emitter:
         names = [name for name, _ in STAGES]
         head = f"[{names.index(stage) + 1}/{len(STAGES)} {STAGE_LABELS[stage]}]" if stage in STAGE_LABELS else ""
         if event == "start":
-            return f"Pipeline {fields.get('run_id') or ''}: {fields.get('n_rows')} subjects, {fields.get('n_compute')} to map, {fields.get('n_reuse')} reused, {fields.get('n_excluded')} excluded; about {_duration_text(fields.get('estimate_s'))}"
+            return f"Pipeline {fields.get('run_id') or ''}: {fields.get('n_rows')} subject{'' if fields.get('n_rows') == 1 else 's'}, {fields.get('n_compute')} to map, {fields.get('n_reuse')} reused, {fields.get('n_excluded')} excluded; about {_duration_text(fields.get('estimate_s'))}"
         if event == "stage":
             reason = fields.get("reason")
             return f"{head} {fields.get('status')}" + (f": {reason}" if reason else "")
@@ -936,6 +1024,7 @@ class Plan:
     preflight: dict | None
     budget_bytes: int
     elapsed: float = 0.0
+    design_sha256: str = ""  # design_fingerprint() of the rows to be mapped (pipeline.json "inputs"; the cards' "Design changed")
 
     @property
     def n_subjects(self):
@@ -988,9 +1077,27 @@ class Plan:
             "null_relocations": self.null_k,
             "specificity": {"mode": self.specificity, "reason": self.specificity_reason},
             "scores": self.scores,
+            "design_sha256": self.design_sha256,
             "estimate_s": round(self.estimate_s, 1),
             "elapsed": round(self.elapsed, 4),
         }
+
+
+def registry_root(study_path, out):
+    """Folder whose ``derivatives/lnm/runs.jsonl`` registers a pipeline run of ``study_path`` written to ``out``: the study
+    when ``out`` lies inside it, else ``out`` itself.
+
+    A run written outside the study (for example ``OUT=elsewhere sh reproduce_pipeline.sh``, or a BIDS app output folder)
+    must not join the study's registry, whose runs the methods, the checklist and the Report card cite and whose ``dir``
+    values stay relative to the study (no absolute local path in a shared file).
+    """
+    study = os.path.realpath(os.fspath(study_path))
+    folder = os.path.realpath(os.fspath(out))
+    try:
+        inside = os.path.commonpath([study, folder]) == study
+    except ValueError:  # different drives
+        inside = False
+    return study_path if inside else out
 
 
 def default_out(config, bundle_name):
@@ -1020,10 +1127,74 @@ def _overrides(config):
     return sorted(overrides)
 
 
+def _primary_rule_refused(config, n, v):
+    """The reason the primary threshold rule is refused for a connectome of ``n`` subjects (the |T| >= 7 convention on a
+    small connectome), or None. A run with such a rule would make no sensitivity maps for the stages after the overlap,
+    so the plan blocks it before any output changes (``--allow-rule-anyway`` or a rule with "override" applies it anyway).
+    """
+    from . import thresholds
+
+    try:
+        rule = thresholds.normalize_rule(config.rule)
+    except (ValueError, TypeError):
+        return None  # preflight reports an invalid rule
+    if config.allow_rule_anyway or rule.get("override") or rule["kind"] == "top_pct" or (rule["kind"] == "fwe_bonferroni" and n >= 2):
+        return None  # FWE is valid at any N >= 2 (skip resolving it, which imports scipy); a rank rule needs the map values
+    try:
+        resolved = thresholds.resolve(rule, n, v)
+    except (ValueError, TypeError):
+        return None
+    if resolved.allowed:
+        return None
+    return f"The threshold rule {thresholds.rule_label(rule)} cannot be used: {resolved.banner or f'it is not allowed for N = {n}.'}"
+
+
+def _reproduce_controlset_lines(study):
+    """reproduce_pipeline.sh lines that name the control-set registry of a run (the study's linked ``controlset:`` rows
+    resolve there) unless $SLICER_STUDIO_CONTROLSETS names another one; none for a study without linked sets.
+    """
+    from . import controlsets
+
+    if study is None or not controlsets.linked_rows(study):
+        return []
+    registry = controlsets.registry_root(getattr(study, "controlset_root", None))
+    variable = controlsets.ENV_ROOT
+    return [
+        f"# The study links control sets: their lesions are read from this control-set registry (${variable} names another one).",
+        f"DEFAULT_{variable}={shlex.quote(registry)}",
+        f'{variable}="${{{variable}:-$DEFAULT_{variable}}}"',
+        f"export {variable}",
+    ]
+
+
+def _unregistered_control_sets_block(study, selected=None):
+    """The run-level block of control sets that the study links but the control-set registry in use does not hold, or
+    None. Their rows would otherwise be excluded one by one ("lesion file missing") and the run would analyse another
+    cohort (no controls: no case-control GLM) with exit code 0, as a terminal run without the application's registry did.
+    """
+    from . import controlsets
+
+    try:
+        missing = controlsets.unregistered_sets(study, participants=selected)
+    except Exception:  # an unreadable registry: the row checks report the files
+        return None
+    if not missing:
+        return None
+    names = ", ".join(sorted(missing))
+    n = sum(len(sids) for sids in missing.values())
+    plural = len(missing) > 1
+    return {"id": "control_set_unregistered",
+            "message": (f"The control set{'s' if plural else ''} {names} linked by this study {'are' if plural else 'is'} not in the control-set registry "
+                        f"used by this run, so {n} control lesion{'s' if n != 1 else ''} would be left out. Name the registry the study was made with "
+                        f"(Slicer Studio: <Slicer Studio folder>/LNM/ControlSets) in the environment variable {controlsets.ENV_ROOT}, or register "
+                        f"the set{'s' if plural else ''} again."),
+            "fix": f"Set {controlsets.ENV_ROOT}"}
+
+
 def _builtin_row_checks(study, config):
     """{sid: reason} of the rows the plan's own checks exclude (the fallback of preflight.run_preflight)."""
     from . import nifti
-    from .study import EXCLUDED_INCLUDE, EXCLUDED_NORM_QC, EXCLUDED_REVIEW, is_missing
+    from .study import EXCLUDED_INCLUDE, EXCLUDED_NORM_QC, EXCLUDED_QC, EXCLUDED_REVIEW, is_missing, qc_failed
 
     excluded = {}
     review = study.review_required and not config.include_unreviewed
@@ -1031,6 +1202,9 @@ def _builtin_row_checks(study, config):
         sid = row["participant_id"]
         if row.get("include", "1") in ("0", "false", "no"):
             excluded[sid] = EXCLUDED_INCLUDE
+            continue
+        if qc_failed(row):
+            excluded[sid] = EXCLUDED_QC
             continue
         path = study.abspath(row.get("lesion"))
         if not path or not os.path.isfile(path):
@@ -1072,6 +1246,33 @@ def _builtin_row_checks(study, config):
     return excluded
 
 
+#: Covariates left out of the design fingerprint: the pipeline itself fills the missing lesion volumes from the lesion
+#: files (cohortmaps posts them to the study's inbox), and a changed lesion is already counted as a changed lesion.
+DESIGN_FINGERPRINT_SKIP = ("volume_ml",)
+#: Row statuses of a plan whose subjects make the design (mapped now or reused). A native lesion still to be normalized
+#: is not part of it: the cards count it as a new lesion, and a run adds it only when it maps it (--native include-unreviewed).
+ANALYSED_STATUSES = ("compute", "reuse")
+
+
+def design_fingerprint(study, rows, scores=(), covariates=()):
+    """sha256 of what the group statistics read from the study besides the lesions: the analysed subjects, their groups
+    and their values of the score and covariate columns (``rows``: plan rows with ``participant_id`` and ``group``).
+
+    A run records it in pipeline.json ("inputs"/"design_sha256"); a later plan that gives another value means that the
+    report and the group maps describe another design (a group, include flag, score or covariate changed).
+    """
+    columns = sorted({str(name) for name in [*(scores or ()), *(covariates or ())]} - set(DESIGN_FINGERPRINT_SKIP))
+    subjects = []
+    for row in sorted(rows, key=lambda item: item["participant_id"]):
+        sid = row["participant_id"]
+        try:
+            values = study.subject(sid)
+        except KeyError:
+            values = {}
+        subjects.append([sid, row.get("group") or "n/a", [values.get(column) for column in columns]])
+    return fingerprint({"columns": columns, "subjects": subjects})
+
+
 def _specificity_decision(config, groups):
     """("glm" | "skip" | "unavailable" | "legacy-...", reason) from the groups of the rows to be mapped."""
     counts = collections.Counter(groups)
@@ -1084,6 +1285,43 @@ def _specificity_decision(config, groups):
         return "glm", None
     reason = f"needs at least {MIN_PER_GROUP} cases and {MIN_PER_GROUP} controls (have {cases} and {controls})"
     return ("block" if config.specificity == "glm" else "skip"), reason
+
+
+def _normalize_outcome(config, entry):
+    """What a run does with one native lesion after its normalization result ``entry``: ``("map", None)`` (the normalized lesion is
+    mapped, ``--native include-unreviewed``), ``("exclude", reason)``, or ``("locked", None)`` (running elsewhere).
+    """
+    status = entry.get("status")
+    if status == "locked":
+        return "locked", None
+    if status in ("done", "reused", "normalized") and (entry.get("values") or {}).get("lesion"):
+        return ("map", None) if config.native == "include-unreviewed" else ("exclude", NORM_NEEDS_REVIEW)
+    return "exclude", f"normalization {status or 'failed'}: {entry.get('reason') or 'no lesion'}"
+
+
+def _settled_normalizations(config, out, providers, rows):
+    """``{participant_id: reason}`` of native lesions whose normalization an earlier run already finished and that the run then excluded
+    (not normalized, or normalized but awaiting review in Library): another run changes nothing for them, so the card must not call
+    them new or changed. Empty unless the stored normalize stage is the one this plan would reuse (same lesions, options and provider).
+    """
+    todo = [row for row in rows if row["status"] == "normalize"]
+    provider = providers.get("normalize")
+    if not todo or config.recompute or provider is None or not provider.available:
+        return {}
+    state = _read_json(os.path.join(out, PRIVATE_DIR, STAGES_DIR, "normalize.json"))
+    if not state or state.get("status") != "done":
+        return {}
+    params = {"subjects": [(row["participant_id"], _lesion_sha(row["path"]) if row["path"] else None) for row in todo], "native": config.native, "template": config.template or "auto"}
+    fp = fingerprint({"stage": "normalize", "provider": provider.module, "provider_sha256": provider.sha256, "parameters": params, "inputs": {}})
+    if state.get("fingerprint") != fp:
+        return {}
+    results = (state.get("result") or {}).get("subjects") or {}
+    settled = {}
+    for row in todo:
+        action, reason = _normalize_outcome(config, results.get(row["participant_id"]) or {"status": "failed", "reason": "no result"})
+        if action == "exclude":
+            settled[row["participant_id"]] = reason
+    return settled
 
 
 def plan(config, hash_lesions=True, providers=None):
@@ -1109,6 +1347,12 @@ def plan(config, hash_lesions=True, providers=None):
     overrides = _overrides(config)
     blocks, warnings, infos = [], [], []
     report = None
+    # --participant-label: the checks (and the design counts) cover only the selected participants; the others are
+    # only "not selected", never excluded for another reason
+    selected = None if config.participant_label is None else set(config.participant_label)
+    checked = study
+    if selected is not None:
+        checked = Study(study.path, dict(study.metadata), study.columns, [row for row in study.subjects if row["participant_id"] in selected], study.dictionary)
 
     # Rows: preflight (L-17), else the plan's own checks
     if providers["preflight"].kind == "preferred":
@@ -1116,10 +1360,10 @@ def plan(config, hash_lesions=True, providers=None):
 
         design_spec = None
         if config.specificity == "glm":
-            design_spec = {"test": "two_group", "group_column": "group", "levels": ["case", "control"], "contrast": "two_sided", "covariates": config.covariates,
+            design_spec = {"test": "two_group", "group_column": "group", "levels": ["case", "control"], "contrast": config.contrast, "covariates": config.covariates,
                            "input": "Fz" if config.input == "AvgFz" else "T", "inference": {"n_perm": config.perm, "seed": config.perm_seed, "tfce": config.tfce, "fdr": config.fdr},
                            "volume_off_reason": config.volume_off_reason}
-        report = preflight.run_preflight(study, bundle, recipe_rule=config.rule, design_spec=design_spec, accepted_terms=bool(config.accept_terms), strict=config.strict,
+        report = preflight.run_preflight(checked, bundle, recipe_rule=config.rule, design_spec=design_spec, accepted_terms=bool(config.accept_terms), strict=config.strict,
                                          overrides=overrides, n_subjects=len(subject_ids), out_dir=out)
         excluded = dict(report["excluded"])
         for check in preflight.blocking_checks(report):
@@ -1129,10 +1373,15 @@ def plan(config, hash_lesions=True, providers=None):
         for check in report["checks"]:
             if check["level"] == "warn" and check["scope"] == "run":
                 warnings.append({"code": check["id"], "message": check["message"]})
-            elif check["level"] == "info" and check["id"] not in ("include_off",):
+            elif check["level"] == "info" and check["id"] not in ("include_off", "qc_fail"):
                 infos.append({"code": check["id"], "message": check["message"]})
     else:
-        excluded = _builtin_row_checks(study, config)
+        excluded = _builtin_row_checks(checked, config)
+    if selected is not None:
+        excluded.update((sid, NOT_SELECTED) for sid in study.subject_ids if sid not in selected)
+    block = _unregistered_control_sets_block(study, selected)
+    if block:
+        blocks.append(block)
 
     rows = []
     for row in study.subjects:
@@ -1142,8 +1391,6 @@ def plan(config, hash_lesions=True, providers=None):
         item = {"participant_id": sid, "group": row.get("group") or "n/a", "lesion": lesion, "path": path, "space": row.get("space"), "sha256": None, "status": "compute", "reason": None,
                 "snapshot": None, "source_status": row.get("status")}
         reason = excluded.get(sid)
-        if reason is None and row.get("qc") == "fail":
-            reason = QC_FAIL
         if reason == NATIVE_EXCLUDED or (reason and reason.startswith("native space")):
             if config.native == "skip":
                 reason = NATIVE_SKIPPED
@@ -1161,6 +1408,13 @@ def plan(config, hash_lesions=True, providers=None):
             item["snapshot"] = os.path.join(out, *INPUTS_DIR, _snapshot_name(sid, path))
         rows.append(item)
 
+    for row in rows:
+        if row["status"] == "normalize":
+            row["settled"] = None
+    for sid, reason in _settled_normalizations(config, out, providers, rows).items():
+        for row in rows:
+            if row["participant_id"] == sid and row["status"] == "normalize":
+                row["settled"] = reason
     eligible = [row for row in rows if row["status"] == "compute"]
     n_future = len(eligible) + sum(1 for row in rows if row["status"] == "normalize")
     if config.null_relocations == "auto":
@@ -1174,10 +1428,11 @@ def plan(config, hash_lesions=True, providers=None):
     # Reuse: the map cache (cohortmaps.lookup), or the fallback's per-lesion fingerprints
     if eligible and hash_lesions:
         if providers["maps"].kind == "preferred" and not config.recompute:
-            from . import cohortmaps
+            from . import cohortmaps, controlsets
 
             found = cohortmaps.lookup([(row["participant_id"], row["path"], row["sha256"]) for row in eligible], bundle, subjects=config.preview_n, random_subset=bool(config.preview_n), seed=config.preview_seed,
-                                      study_path=study.path, out_dir=os.path.join(out, STAGES_DIR, "cohortmaps"), null_relocations=null_k, null_seed=config.null_seed, budget_bytes=budget)
+                                      study_path=study.path, out_dir=os.path.join(out, STAGES_DIR, "cohortmaps"), null_relocations=null_k, null_seed=config.null_seed, budget_bytes=budget,
+                                      shared_cache_roots=controlsets.study_maps_cache_roots(study))
             hits = {item["participant_id"]: item["hit"] and (item["qa_hit"] or not null_k) for item in found["lesions"]}
             for row in eligible:
                 if hits.get(row["participant_id"]):
@@ -1199,6 +1454,9 @@ def plan(config, hash_lesions=True, providers=None):
     specificity, specificity_reason = _specificity_decision(config, groups)
     if specificity == "glm" and not providers["specificity"].available:
         specificity, specificity_reason = "unavailable", NOT_AVAILABLE
+    refused = _primary_rule_refused(config, len(subject_ids), bundle.n_voxels)
+    if refused:
+        blocks.append({"id": "rule_refused", "message": refused, "fix": "Use FWE or effect size, or run with --allow-rule-anyway"})
     if specificity == "block":
         blocks.append({"id": "contrast_group_size", "message": f"Specificity is on (--specificity glm) but the GLM {specificity_reason}.", "fix": "Add subjects, or run with --specificity off"})
     score_columns = []
@@ -1207,11 +1465,11 @@ def plan(config, hash_lesions=True, providers=None):
             if confirmed:
                 score_columns.append(column)
             else:
-                infos.append({"code": "unconfirmed_score", "message": f"The column {column} is not used as a score: {UNCONFIRMED_SCORE}."})
+                infos.append({"code": "unconfirmed_score", "message": f"The column {column} is not used as a score: {UNCONFIRMED_SCORE if jobs.in_app_job() else UNCONFIRMED_SCORE_CLI.format(column=column)}."})
     elif isinstance(config.scores, list):
         for column in config.scores:
             if column not in study.columns:
-                blocks.append({"id": "unknown_score", "message": f"The score column {column} is not in participants.tsv.", "fix": "Check --scores"})
+                blocks.append({"id": "unknown_score", "message": f"The score column {column} is not in participants.tsv.", "fix": f"Check the score column name against the participants.tsv columns ({', '.join(str(c) for c in study.columns)}); it comes from --scores or from score_column in the --design file"})
             else:
                 score_columns.append(column)
 
@@ -1270,7 +1528,13 @@ def plan(config, hash_lesions=True, providers=None):
         "report": REPORT_S + REPORT_LESION_S * n_mapped,
         "finish": 0.2,
     }
-    nulls_mode, nulls_reason = _nulls_decision(config, providers, bundle, subject_ids, n_mapped, threads, budget)
+    # the nulls job keeps only the cases when the study has any (nulls.load_cohort)
+    n_cases_mapped = sum(1 for row in rows if row["status"] in ("compute", "reuse", "normalize") and row["group"] == "case")
+    nulls_mode, nulls_reason = _nulls_decision(config, providers, bundle, subject_ids, n_cases_mapped or n_mapped, threads, budget)
+    # --nulls auto in fast mode: what runs when the parity gate refuses fast mode for the cohort (decision D-A23)
+    nulls_fallback = None
+    if config.nulls == "auto" and isinstance(nulls_mode, tuple) and nulls_mode[0] == "fast":
+        nulls_fallback = _nulls_exact_decision(config, bundle, subject_ids, n_cases_mapped or n_mapped, threads, budget)
     estimates["nulls"] = nulls_mode[1] if isinstance(nulls_mode, tuple) else 0.0
     nulls_mode = nulls_mode[0] if isinstance(nulls_mode, tuple) else nulls_mode
     for name, label in STAGES:
@@ -1289,7 +1553,7 @@ def plan(config, hash_lesions=True, providers=None):
         elif name == "specificity" and specificity != "glm":
             status, reason = ("unavailable" if specificity == "unavailable" else "skip"), specificity_reason
         elif name == "slnm" and not score_columns:
-            status, reason = "skip", "no confirmed score column"
+            status, reason = "skip", _slnm_skip_reason(config)
         elif name == "lesionset" and n_mapped > 100:
             status, reason = "planned", None
         elif name == "report" and not config.report:
@@ -1300,8 +1564,17 @@ def plan(config, hash_lesions=True, providers=None):
     result = Plan(config, out, study, bundle, providers, subject_ids, subjects_sha, manifest_sha, rows, stages, blocks, warnings, infos, overrides, total, null_k, specificity, specificity_reason,
                   score_columns, report, budget)
     result.nulls_mode = nulls_mode  # "exact" | "fast" | "skip" | "unavailable"
+    result.nulls_fallback = nulls_fallback  # with --nulls auto in fast mode: (("exact", estimate_s) or "skip", reason) when the parity gate refuses fast mode
+    result.design_sha256 = design_fingerprint(study, [row for row in rows if row["status"] in ANALYSED_STATUSES], score_columns, config.covariates)
     result.elapsed = time.perf_counter() - started
     return result
+
+
+def _slnm_skip_reason(config):
+    """Why sLNM has no score column: not requested (--scores none, or a recipe without sLNM), or the study has none confirmed."""
+    if config.scores == "none":
+        return "not requested (scores: none)"
+    return "no confirmed score column"
 
 
 def _stage_mode(name):
@@ -1321,14 +1594,41 @@ def _nulls_decision(config, providers, bundle, subject_ids, n_lesions, threads, 
     top_pct = thresholds.normalize_rule(config.rule)["kind"] == "top_pct"
     if config.nulls in ("auto", "fast"):
         index = nulls.find_fast_index(bundle, subject_ids) if top_pct else None
-        if index is not None:
+        # auto takes fast mode only when its parity gate can pass: without reference maps (built only on request,
+        # D-A20) no stratum passes, and the exact pooled null within the budget is used instead
+        if index is not None and (config.nulls == "fast" or _references_for_parity(config, bundle, subject_ids)):
             return ("fast", nulls.estimate(n_lesions, bundle, mode="fast", subjects=list(subject_ids), threads=threads, rule=config.rule)), None
         if config.nulls == "fast":
             return "skip", "fast null models need the fast index of this connectome and a top-x% rule"
+    return _nulls_exact_decision(config, bundle, subject_ids, n_lesions, threads, budget)
+
+
+def _nulls_exact_decision(config, bundle, subject_ids, n_lesions, threads, budget):
+    """(("exact", estimate_s), None), or ("skip", reason) when --nulls auto and the exact pooled null exceeds the budget."""
+    from . import nulls
+
     seconds = nulls.estimate(n_lesions, bundle, mode="exact", subjects=list(subject_ids), threads=threads, budget_bytes=budget, rule=config.rule)
     if config.nulls == "auto" and seconds > config.nulls_budget_min * 60:
         return "skip", NULLS_TOO_LONG.format(_duration_text(seconds))
     return ("exact", seconds), None
+
+
+def _references_for_parity(config, bundle, subject_ids):
+    """Whether the nulls stage will find reference maps for the parity gate of fast mode: valid ones in the bundle now
+    (of these subjects, else any), or the run builds them (--build-references).
+    """
+    if config.build_references and config.reference != "off":
+        return True
+    from .connectome import subjects_sha256
+    from .reference import reference_status
+
+    for sha in (subjects_sha256(list(subject_ids)), None):
+        try:
+            if any(entry["status"] == "ok" for entry in reference_status(bundle, sha, verify=False, check_data=False)):
+                return True
+        except (OSError, ValueError, KeyError):
+            return False
+    return False
 
 
 def _lesion_fingerprint(sha256, manifest_sha, subjects_sha, null_k, null_seed, provider):
@@ -1362,28 +1662,40 @@ def _read_log_tail(path, lines=20):
 class Runner:
     """One pipeline run (:func:`run`)."""
 
-    def __init__(self, config, emit=None, cancel=None, argv=None):
+    def __init__(self, config, emit=None, cancel=None, argv=None, lock=None):
+        """:param lock: the output lock of the run folder, when the caller took it already (``slicer-lnm`` takes it before it
+        prepares the study of a BIDS input); the run then uses it instead of taking its own, and releases it.
+        """
         self.config = config
         self.emit = emit if emit is not None else Emitter(config.events)
+        self.held_lock = lock
         self.argv = list(argv or [])
         self.cancel_extra = cancel
         self.providers = resolve_providers()
         self.results = {}
         self.fps = {}
+        self.design_rows = []  # [{participant_id, group}] of the analysed subjects (design_fingerprint)
         self.stage_records = {}
         self.warnings = []
+        self.stage_warnings = None  # the warnings raised while a stage computes (saved in its state, raised again when it is reused)
         self.overrides = []
         self.failed = []
         self.current = "prepare"
         self.kept = []
         self.children = []
         self.run_id = None
+        self.registry_root_override = None  # a subclass may register its runs elsewhere (slicer-lnm: the study)
         self.started = time.monotonic()
         self.created = _now_iso()
         self.current_outputs = []
+        self.previous = {}  # stage name -> the top-level outputs its saved state listed before this run ran it
+        self.inputs = {}  # stage name -> the fingerprints of its input stages (saved in its state)
+        self.dropped = set()  # stages whose earlier outputs were removed in this run
         self.lock = None
         self.keep_awake = None
         self.plan = None
+        self.participants_tsv = None  # the frozen participants table of the child jobs (_freeze_participants)
+        self._selected = False  # _select() ran
 
     # Paths
 
@@ -1392,6 +1704,11 @@ class Runner:
 
     def private(self, *parts):
         return os.path.join(self.out, PRIVATE_DIR, *parts)
+
+    @property
+    def run_root(self):
+        """Folder of the run registry of this run: :attr:`registry_root_override` when set, else :func:`registry_root`."""
+        return self.registry_root_override or registry_root(self.study.path, self.out)
 
     def stage_dir(self, name):
         folder = self.path(STAGES_DIR, name)
@@ -1416,7 +1733,45 @@ class Runner:
 
     def warn(self, message, code="warning", **fields):
         self.warnings.append({"code": code, "message": message, **{key: value for key, value in fields.items() if key in ("participant_id", "stage")}})
+        if self.stage_warnings is not None:
+            try:
+                extra = json.loads(jobs.to_json({key: value for key, value in fields.items() if key != "stage"}))
+            except (TypeError, ValueError):
+                extra = {}
+            self.stage_warnings.append({**extra, "code": code, "message": self._portable(message)})
         self.emit("warning", stage=self.current, code=code, message=message, **fields)
+
+    def _warn_preflight(self):
+        """Report the subject-scope warnings of the plan's preflight, in every run (also when the preflight stage is reused).
+
+        They go through :meth:`warn` so that they reach ``pipeline.json`` and the card shows the same list after a second run
+        and after a reopen. One warning per check: its message is the cohort-level sentence that already names the subjects,
+        so one per subject would print the same sentence once per subject (as the standalone preflight job does, with a list).
+        """
+        report = self.plan.preflight
+        if self.providers["preflight"].kind != "preferred" or report is None:
+            return
+        for check in report["checks"]:
+            if check["level"] == "warn" and check["scope"] == "subject" and not check["excludes"]:
+                subjects = list(check["subjects"])
+                fields = {"participant_id": subjects[0]} if len(subjects) == 1 else {}
+                self.warn(check["message"], code=check["id"], participants=subjects, **fields)
+
+    def _warn_reused(self, saved):
+        """Raise again the warnings that a reused stage raised when it computed (a GLM design check, a refused rule...): they
+        still describe the reused results, so ``pipeline.json``, the report and the card keep them. A warning that this run
+        already raised (same code and message) is not repeated.
+        """
+        raised = {(item.get("code"), self._portable(item.get("message"))) for item in self.warnings}
+        for item in saved or ():
+            if not isinstance(item, dict) or not item.get("message"):
+                continue
+            key = (item.get("code") or "warning", str(item["message"]))
+            if key in raised:
+                continue
+            raised.add(key)
+            fields = {name: value for name, value in item.items() if name not in ("code", "message", "stage")}
+            self.warn(key[1], code=key[0], **fields)
 
     def info(self, message, code="info", **fields):
         self.emit("info", stage=self.current, code=code, message=message, **fields)
@@ -1443,13 +1798,22 @@ class Runner:
             self.emit("error", code="terms_not_accepted", message=f"The data use terms of the connectome {bundle.name} must be accepted (--accept-terms).", data_use_terms=bundle.data_use_terms, connectome=bundle.name)
             return EXIT_TERMS
         self.out = default_out(config, bundle.name)
-        os.makedirs(self.private(STAGES_DIR), exist_ok=True)
-        self.lock = jobs.OutputLock(self.private(LOCK_NAME))
+        if not config.out and study_read_only(config.study):
+            raise PipelineError(READ_ONLY_STUDY.format(path=config.study), code="read_only", exit_code=EXIT_USAGE)
         try:
-            self.lock.acquire()
-        except jobs.Locked as exc:
-            self.emit("error", code="locked", message=f"Another pipeline run writes to this folder: {exc.message}", holder=exc.holder)
-            return EXIT_LOCKED
+            os.makedirs(self.private(STAGES_DIR), exist_ok=True)
+        except OSError as exc:
+            raise PipelineError(f"The output folder cannot be written ({exc.strerror or exc}): {self.out}", code="read_only", exit_code=EXIT_USAGE) from None
+        held = self.held_lock
+        if held is not None and held.acquired and os.path.abspath(held.path) == os.path.abspath(self.private(LOCK_NAME)):
+            self.lock = held
+        else:
+            self.lock = jobs.OutputLock(self.private(LOCK_NAME))
+            try:
+                self.lock.acquire()
+            except jobs.Locked as exc:
+                self.emit("error", code="locked", message=f"Another pipeline run writes to this folder: {exc.message}", holder=exc.holder)
+                return EXIT_LOCKED
         try:
             return self._run_locked(bundle)
         finally:
@@ -1486,12 +1850,14 @@ class Runner:
                     except OSError:
                         pass
             self.stage_records.setdefault(self.current, {}).update({"status": "cancelled"})
+            self._drop_invalidated()
             self._write_pipeline_json("cancelled")
             self._update_run("cancelled")
             self.emit("cancelled", stage=self.current, kept=self.kept, done=exc.done, reason=exc.reason or self.cancel.reason)
             return EXIT_CANCELLED
         except PipelineError as exc:
             if self.run_id:
+                self._drop_invalidated()
                 self._write_pipeline_json("error", error={"code": exc.code, "message": exc.message, "stage": self.current})
                 self._update_run("failed")
             self.emit("error", code=exc.code, message=exc.message, stage=self.current, **exc.fields)
@@ -1501,6 +1867,7 @@ class Runner:
 
             tail = [line for line in traceback.format_exc().splitlines() if line.strip()][-5:]
             if self.run_id:
+                self._drop_invalidated()
                 self._write_pipeline_json("error", error={"code": "exception", "message": f"{type(exc).__name__}: {exc}", "stage": self.current})
                 self._update_run("failed")
             self.emit("error", code="exception", message=f"{type(exc).__name__}: {exc}", stage=self.current, traceback=tail)
@@ -1512,6 +1879,8 @@ class Runner:
         self.plan = plan_result = plan(config, providers=self.providers)
         self.bundle, self.study = plan_result.bundle, plan_result.study
         self.rows = plan_result.rows
+        # The design this run analyses (design_fingerprint): the planned rows, and the native rows its normalization maps
+        self.design_rows = [{"participant_id": row["participant_id"], "group": row["group"]} for row in self.rows if row["status"] in ANALYSED_STATUSES]
         self.overrides = [{"what": what, "reason": "requested on the command line"} for what in plan_result.overrides]
         if config.volume_off_reason and "volume_ml" not in config.covariates:
             self.overrides.append({"what": "no_volume_covariate", "reason": config.volume_off_reason})
@@ -1527,18 +1896,21 @@ class Runner:
         if plan_result.exit_code == EXIT_NO_LESION:
             raise PipelineError("No lesion can be analysed: every subject is excluded.", code="no_eligible", exit_code=EXIT_NO_LESION, excluded={row["participant_id"]: row["reason"] for row in self.rows})
         for row in self.rows:
-            if row["status"] == "excluded":
+            if row["status"] == "excluded" and row["reason"] != NOT_SELECTED:  # not selected: one info (_select)
                 self.warn(f"excluded: {row['reason']}", code="excluded", participant_id=row["participant_id"])
+        self._warn_preflight()
         self.subject_ids = plan_result.subject_ids
         self.null_k = plan_result.null_k
         self.threads = jobs.budget_threads(config.threads)
         self.label = self.bundle.name
         jobs.write_json_atomic(self.private(PLAN_JSON), plan_result.to_json())
+        self.participants_tsv = self._freeze_participants()
         if isinstance(self.emit, Emitter):
             self.emit.weights = {stage["name"]: max(stage["estimate_s"], 0.1) for stage in plan_result.stages}
 
-        # Snapshots of the analysed lesions
+        # Snapshots of the analysed lesions (of the selected participants only)
         self.cancel.raise_if_cancelled()
+        self._select()
         self._snapshot([row for row in self.rows if row["status"] in ("compute", "reuse")])
         mask_path = self.private(MASK_NAME)
         source_mask = os.path.join(self.bundle.path, "mask.nii.gz")
@@ -1551,7 +1923,9 @@ class Runner:
 
         runs.register_kind("pipeline")
         self.run_id = runs.new_run_id("pipeline")
-        runs.register(self.study.path, "pipeline", self.out, parents=config.parent_run, params=config.to_json(base=self.out, analysis_only=True), seeds={"preview": config.preview_seed, "permutation": config.perm_seed, "null": config.null_seed},
+        if getattr(self, "portable_registry", False):
+            runs.set_portable(self.run_root)
+        runs.register(self.run_root, "pipeline", self.out, parents=config.parent_run, params=config.to_json(base=self.out, analysis_only=True), seeds={"preview": config.preview_seed, "permutation": config.perm_seed, "null": config.null_seed},
                       run_id=self.run_id)
         if isinstance(self.emit, Emitter):
             self.emit.progress["run_id"] = self.run_id
@@ -1605,9 +1979,11 @@ class Runner:
         method = getattr(self, f"_stage_{name}")
         started, start_iso = time.monotonic(), _now_iso()
         record = {"name": name, "label": STAGE_LABELS[name], "provider": provider.module, "provider_kind": provider.kind, "provider_sha256": provider.sha256, "mode": _stage_mode(name), "start": start_iso}
+        self.previous[name] = self._saved_outputs(name)
         if not provider.available:
             record.update({"status": "unavailable", "reason": provider.reason, "reused": False})
             self.stage_records[name] = record
+            self._drop_stale(name, None)
             self.fps[name] = f"unavailable:{name}"
             self.stage_event(name, "unavailable", provider.reason)
             if name == "report":
@@ -1615,7 +1991,13 @@ class Runner:
             return
         self.current_outputs = []
         self.stage_event(name, "running")  # the current stage of progress.json (a GUI re-attaches to it)
-        outcome = method(planned)
+        self.stage_warnings = []
+        try:
+            outcome = method(planned)
+        finally:
+            self.stage_warnings = None
+        if outcome.get("reused"):
+            self._warn_reused(outcome.get("warnings"))
         status = outcome.get("status", "done")
         record.update({
             "status": status,
@@ -1629,6 +2011,8 @@ class Runner:
         })
         self.stage_records[name] = record
         self.results[name] = outcome.get("result") or {}
+        self._drop_stale(name, record["outputs"] if status in ("done", "reused") else None)
+        self.current_outputs = []  # a stop between stages must not delete the outputs of this completed stage
         if status in ("done", "reused"):
             self.kept.append(name)
         if status in ("failed", "blocked", "error"):
@@ -1653,7 +2037,8 @@ class Runner:
     def _cached(self, name, params, deps=()):
         """(fingerprint, reusable outcome or None) of a stage."""
         provider = self.providers[name]
-        fp = fingerprint({"stage": name, "provider": provider.module, "provider_sha256": provider.sha256, "parameters": params, "inputs": {dep: self.fps.get(dep) for dep in deps}})
+        self.inputs[name] = {dep: self.fps.get(dep) for dep in deps}
+        fp = fingerprint({"stage": name, "provider": provider.module, "provider_sha256": provider.sha256, "parameters": params, "inputs": self.inputs[name]})
         self.fps[name] = fp
         state = self._reusable(name, fp)
         if state is None:
@@ -1662,7 +2047,35 @@ class Runner:
             except OSError:
                 pass
             return fp, None
-        return fp, {"status": "done", "reused": True, "fingerprint": fp, "result": state.get("result") or {}, "outputs_rel": state.get("outputs") or {}, "child_run_id": state.get("child_run_id")}
+        return fp, {"status": "done", "reused": True, "fingerprint": fp, "result": state.get("result") or {}, "outputs_rel": state.get("outputs") or {}, "child_run_id": state.get("child_run_id"),
+                    "warnings": state.get("warnings") or []}
+
+    def _methods_runs(self):
+        """The run records the methods of this run cite: None (the study's registry) when the run registers in the study,
+        else the study's runs and the runs of this output folder's own registry (:attr:`run_root`), read side by side.
+        """
+        from . import runs
+
+        if os.path.realpath(self.run_root) == os.path.realpath(self.study.path):
+            return None
+        try:
+            study_runs = runs.load(self.study.path)
+        except OSError:
+            study_runs = {}
+        try:
+            own = runs.absolute_records(self.run_root, runs.load(self.run_root))
+        except OSError:
+            own = {}
+        return {**study_runs, **own}
+
+    def _run_done(self, run_id):
+        """Whether the registry records the pipeline run ``run_id`` as finished (status "done")."""
+        from . import runs
+
+        try:
+            return (runs.load(self.run_root).get(run_id) or {}).get("status") == "done"
+        except (OSError, ValueError):
+            return False
 
     def _save(self, name, fp, result, outputs, child_run_id=None, events=None, start=None):
         sizes = {}
@@ -1670,14 +2083,88 @@ class Runner:
             if path and os.path.isfile(path):
                 sizes[self.rel(path)] = os.path.getsize(path)
         provider = self.providers[name]
-        state = {"fingerprint": fp, "provider": provider.module, "provider_sha256": provider.sha256, "status": "done", "outputs": sizes, "start": start, "end": _now_iso(), "result": result,
-                 "child_run_id": child_run_id, "events_tail": [self._portable(jobs.to_json(event)) for event in (events or [])[-10:]]}
+        state = {"fingerprint": fp, "provider": provider.module, "provider_sha256": provider.sha256, "status": "done", "pipeline_run": self.run_id, "outputs": sizes, "inputs": self.inputs.get(name), "start": start, "end": _now_iso(), "result": result,
+                 "child_run_id": child_run_id, "events_tail": [self._portable(jobs.to_json(event)) for event in (events or [])[-10:]],
+                 "warnings": list(self.stage_warnings or [])}
         jobs.write_json_atomic(self._state_path(name), state)
         return {"status": "done", "fingerprint": fp, "result": result, "outputs_rel": sizes, "child_run_id": child_run_id}
 
     def _skip(self, name, reason, status="skipped"):
         self.fps[name] = f"{status}:{reason}"
         return {"status": status, "reason": reason, "result": {"reason": reason}}
+
+    # Stale outputs: files of an earlier run that this run did not make must never pass for its results
+
+    def _saved_outputs(self, name):
+        """The files directly in the output folder that the saved state of a stage lists (its group maps, tables, report...)."""
+        state = _read_json(self._state_path(name)) or {}
+        if state.get("status") != "done":
+            return []
+        return [path for path in state.get("outputs") or {} if isinstance(path, str) and path and "/" not in path and "\\" not in path and path not in (".", "..")]
+
+    def _drop_stale(self, name, keep):
+        """Remove the outputs of a stage's earlier run that this run neither wrote nor reused: all of them for a skipped,
+        unavailable, failed or stopped stage (``keep`` None; its saved state goes too), else those it no longer makes (``keep``:
+        this run's outputs; a map or a table of another design). Only files directly in the output folder: stage folders and
+        caches stay.
+        """
+        kept = set()
+        if keep is not None:
+            kept = {os.path.normcase(self.absp(path)) for path in keep} | {os.path.normcase(os.path.abspath(path)) for path in self.current_outputs}
+        else:
+            try:
+                os.remove(self._state_path(name))  # it would list outputs that are gone
+            except OSError:
+                pass
+        for path in self.previous.pop(name, None) or ():
+            full = self.absp(path)
+            if os.path.normcase(full) in kept:
+                continue
+            try:
+                os.remove(full)
+                self.dropped.add(name)
+            except OSError:
+                pass
+
+    def _drop_stale_results(self, folders, module):
+        """Remove the results that an earlier run left in stage folders where this run made none (a GLM or an sLNM score
+        that failed, was blocked or was skipped): ``module`` (glm or slnm) removes the files its JSON record lists, and
+        the record. Resume state and caches stay. Else the report would list them among this run's files.
+        """
+        for folder in folders:
+            try:
+                module._remove_previous_outputs(folder)
+            except OSError:
+                pass
+
+    def _drop_invalidated(self):
+        """After a stop or an error: drop the earlier outputs of the stopped stage and of the stages after it whose inputs changed
+        in this run (their saved fingerprints no longer match: a later run recomputes them). The other completed stages stay.
+        """
+        known = {name: fp for name, fp in self.fps.items() if name in self.stage_records}  # the fingerprints of this run
+        changed = any(not record.get("reused") and (record.get("status") not in ("skipped", "unavailable") or name in self.dropped)
+                      for name, record in self.stage_records.items() if name != "prepare")
+        for name, _label in STAGES[1:-1]:
+            if name in self.stage_records and name != self.current:
+                continue  # it ran in this run (stale outputs were dropped then)
+            state = _read_json(self._state_path(name)) or {}
+            if state.get("status") != "done":
+                if name == self.current:
+                    self._drop_stale(name, None)  # stopped while it computed: its saved state was not reusable
+                    changed = True
+                continue
+            inputs = state.get("inputs")
+            if isinstance(inputs, dict):
+                valid = all(dep not in known or known[dep] == fp for dep, fp in inputs.items())
+            else:
+                valid = not changed  # a state saved before the input fingerprints were kept: stale once anything earlier changed
+            if valid:
+                known[name] = state.get("fingerprint")
+                continue
+            known[name] = None
+            changed = True
+            self.previous[name] = self._saved_outputs(name)
+            self._drop_stale(name, None)
 
     # Child jobs
 
@@ -1695,8 +2182,7 @@ class Runner:
         env = dict(os.environ)
         env["PYTHONPATH"] = LIB_PARENT + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
         env["PYTHONIOENCODING"] = "utf-8"
-        if sys.platform.startswith("linux") and not any("UTF-8" in env.get(key, "").upper().replace("UTF8", "UTF-8") for key in ("LC_ALL", "LC_CTYPE", "LANG")):
-            env["LC_CTYPE"] = "C.UTF-8"  # the CTK launcher (PythonSlicer) drops non-ASCII arguments under the POSIX locale
+        env.update(jobs.utf8_locale_env(env))  # the CTK launcher (PythonSlicer) drops non-ASCII arguments under the POSIX locale
         os.makedirs(folder, exist_ok=True)
         log_path = os.path.join(folder, "job.log")
         events = collections.deque(maxlen=50)
@@ -1738,7 +2224,7 @@ class Runner:
                             run_id = event.get("run_id") or run_id
                         elif kind == "progress":
                             fields = {key: value for key, value in event.items() if key not in ("event", "t", "stage")}
-                            fields.setdefault("unit", {"maps": "subject passes", "specificity": "permutations", "slnm": "permutations", "normalize": "subjects"}.get(stage, "units"))
+                            fields = progress_fields(stage, event.get("stage"), fields)
                             self.emit("progress", stage=stage, child_stage=event.get("stage"), **fields)
                         elif kind == "warning":
                             fields = {key: value for key, value in event.items() if key not in ("event", "t", "message", "code", "stage")}
@@ -1769,7 +2255,9 @@ class Runner:
         message = (terminal or {}).get("message") or f"exit code {rc}"
         tail = _read_log_tail(log_path)
         if tail and code not in ("blocked", "design", "design_blocked"):
-            message += " | " + " / ".join(self._portable(line) for line in tail[-20:] if not line.startswith("#"))[-2000:]
+            detail = " / ".join(self._portable(line) for line in tail[-20:] if not line.startswith("#"))[-2000:]
+            if detail:
+                message += " | " + detail
         status = "blocked" if code in ("blocked", "design", "design_blocked") else "error"
         return ChildResult(rc, status, terminal, list(events), run_id, message)
 
@@ -1781,10 +2269,50 @@ class Runner:
             args += ["--cancel-file", self.private(STOP_NAME)]
         if resume and not self.config.recompute:
             args += ["--resume"]
-        args += ["--run-root", self.study.path, "--parent-run", self.run_id]
+        args += ["--run-root", self.run_root, "--parent-run", self.run_id]
         return args
 
     # Snapshots
+
+    def _freeze_participants(self):
+        """Write the participants table (and its data dictionary) of the planned study to ``.pipeline/participants/``; return its path.
+
+        The plan, pipeline.json and the stage fingerprints use the study as it was read when the run started; the child
+        jobs (GLM, sLNM, null models) read the groups, scores and covariates from this copy, not from the study, which
+        another writer may change while the run works. The folder holds no study.json: the jobs read it as a table.
+        """
+        from . import schema
+        from .study import PARTICIPANTS_JSON, PARTICIPANTS_TSV, _tsv_text
+
+        folder = self.private(PARTICIPANTS_DIR)
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, PARTICIPANTS_TSV)
+        schema.write_text_atomic(path, _tsv_text(self.study.columns, self.study.subjects))
+        dictionary = os.path.join(folder, PARTICIPANTS_JSON)
+        if self.study.dictionary:
+            schema.write_text_atomic(dictionary, schema.dictionary_text(self.study.dictionary))
+        elif os.path.exists(dictionary):
+            os.remove(dictionary)
+        return path
+
+    def _select(self):
+        """Exclude the rows of the participants that ``config.participant_label`` leaves out and say how many.
+
+        :func:`plan` already gives them the reason NOT_SELECTED (its checks cover only the selected participants);
+        a plan made without the selection is corrected here.
+        """
+        wanted = self.config.participant_label
+        if wanted is None or self._selected:
+            return
+        self._selected = True
+        wanted = set(wanted)
+        dropped = 0
+        for row in self.rows:
+            if row["participant_id"] not in wanted:
+                row["status"], row["reason"] = "excluded", NOT_SELECTED
+                dropped += 1
+        if dropped:
+            self.info(f"{dropped} subject{'' if dropped == 1 else 's'} not selected by --participant-label", code="not_selected")
 
     def _snapshot(self, rows):
         """Byte copies of the analysed lesions in inputs/lesions/ (verified against the planned sha256)."""
@@ -1843,10 +2371,6 @@ class Runner:
 
         start = _now_iso()
         path = preflight.save_report(self.study, report)
-        for check in report["checks"]:
-            if check["level"] == "warn" and check["scope"] == "subject" and not check["excludes"]:
-                for sid in check["subjects"][:50]:
-                    self.emit("warning", stage="preflight", participant_id=sid, code=check["id"], message=check["message"])
         result = {"report": relpath(path, self.study.path), "run_id": report.get("run_id"), "counts": report["counts"], "blocked": report["blocked"]}
         return self._save("preflight", fp, result, [], child_run_id=report.get("run_id"), start=start)
 
@@ -1876,23 +2400,21 @@ class Runner:
         normalized = []
         for row in rows:
             entry = results.get(row["participant_id"]) or {"status": "failed", "reason": "no result"}
-            status = entry.get("status")
             values = entry.get("values") or {}
-            if status == "locked":
+            action, reason = _normalize_outcome(self.config, entry)
+            if action == "locked":
                 self._exclude(row, "normalization running elsewhere")
-            elif status in ("done", "reused", "normalized") and values.get("lesion"):
-                if self.config.native == "include-unreviewed":
-                    row["path"] = self.study.abspath(values["lesion"])
-                    row["lesion"] = values["lesion"]
-                    row["status"] = "compute"
-                    row["snapshot"] = self.path(*INPUTS_DIR, _snapshot_name(row["participant_id"], row["path"]))
-                    row["sha256"] = None
-                    normalized.append(row)
-                    self.overrides.append({"what": "norm_qc", "participant_id": row["participant_id"], "reason": "--native include-unreviewed: the normalized lesion is mapped before review"})
-                else:
-                    self._exclude(row, NORM_NEEDS_REVIEW)
+            elif action == "map":
+                row["path"] = self.study.abspath(values["lesion"])
+                row["lesion"] = values["lesion"]
+                row["status"] = "compute"
+                row["snapshot"] = self.path(*INPUTS_DIR, _snapshot_name(row["participant_id"], row["path"]))
+                row["sha256"] = None
+                normalized.append(row)
+                self.overrides.append({"what": "norm_qc", "participant_id": row["participant_id"], "reason": "--native include-unreviewed: the normalized lesion is mapped before review"})
             else:
-                self._exclude(row, f"normalization {status or 'failed'}: {entry.get('reason') or 'no lesion'}")
+                self._exclude(row, reason)
+        self.design_rows += [{"participant_id": row["participant_id"], "group": row["group"]} for row in normalized]
         if normalized:
             self._snapshot(normalized)
         return outcome
@@ -1962,8 +2484,11 @@ class Runner:
     def _stage_maps(self, planned):
         rows = self.mapped_rows
         provider = self.providers["maps"]
+        # --recompute is not a parameter: it makes this run compute (``_reusable``) but the maps are the same, so a later run
+        # without it (the next "Run everything", or the resume after a Stop) reuses them and every stage built on them. The key
+        # stays, always False, so that the stages saved by earlier versions keep their fingerprints.
         params = {"lesions": sorted((row["participant_id"], row["sha256"]) for row in rows), "manifest": self.plan.manifest_sha256, "subjects": self.plan.subjects_sha256, "null_k": self.null_k,
-                  "null_seed": self.config.null_seed, "preview": self.config.preview_n, "recompute": bool(self.config.recompute)}
+                  "null_seed": self.config.null_seed, "preview": self.config.preview_n, "recompute": False}
         fp, reused = self._cached("maps", params, ("normalize",))
         if reused is not None:
             self._apply_maps(reused["result"])
@@ -1999,7 +2524,18 @@ class Runner:
         folder = self.stage_dir("cohortmaps")
         lesions_tsv = self._write_lesions_tsv(rows)
         cache = os.path.join(folder, "cache") if self.config.recompute else os.path.join(self.study.path, *cohortmaps.CACHE_RELPATH)
+        finished = os.path.join(folder, "cache.finished")
+        if self.config.recompute and os.path.isfile(finished):
+            # The private cache is what an earlier, finished --recompute left (the map files of its run point into it): recompute means
+            # every map is made again, so a later --recompute starts it empty. A stopped or failed run leaves no marker: its resume keeps it.
+            shutil.rmtree(cache, ignore_errors=True)
+            os.remove(finished)
         args = ["--lesions-tsv", lesions_tsv, "--bundle", self.bundle.path, "--out", folder, "--cache", cache, "--null-relocations", str(self.null_k), "--null-seed", str(self.config.null_seed)]
+        if not self.config.recompute:  # the maps of the study's linked control sets, mapped once in their own caches
+            from . import controlsets
+
+            for root in controlsets.study_maps_cache_roots(self.study):
+                args += ["--shared-cache", root]
         if self.config.preview_n:
             args += ["--subjects", str(self.config.preview_n), "--random", "--seed", str(self.config.preview_seed)]
         if self.config.memory_budget_gb:
@@ -2036,7 +2572,11 @@ class Runner:
         lesions = record.get("lesions") or {}
         result = {"maps_tsv": self.rel(maps_tsv), "maps": result_maps, "excluded": excluded, "computed": lesions.get("computed"), "cache_hits": lesions.get("cache_hits"), "provider": "cohortmaps",
                   "run_id": record.get("run_id")}
-        return self._save("maps", fp, result, outputs, child_run_id=child.run_id, events=child.events, start=start)
+        saved = self._save("maps", fp, result, outputs, child_run_id=child.run_id, events=child.events, start=start)
+        if self.config.recompute:
+            with open(finished, "w", encoding="utf-8") as f:
+                f.write("the maps of this run are in cache/\n")
+        return saved
 
     @staticmethod
     def _filter_maps_tsv(source, target, drop):
@@ -2227,7 +2767,9 @@ class Runner:
 
         # the nulls job takes the cases from --participants: the group of every mapped subject is a parameter
         population = self._population(self.mapped_rows)[0]
-        params = {"mode": mode, "kind": "rl_independent", "rule": self.config.rule, "overlap": self.config.sensitivity, "seed": self.config.null_seed, "k": 1000, "groups": self._groups_fp(),
+        # --allow-rule-anyway applies a rule that is refused for this N here too, as in the overlap stage
+        rule = {**self.config.rule, "override": True} if self.config.allow_rule_anyway else self.config.rule
+        params = {"mode": mode, "kind": "rl_independent", "rule": rule, "overlap": self.config.sensitivity, "seed": self.config.null_seed, "k": 1000, "groups": self._groups_fp(),
                   "population": population}
         fp, reused = self._cached("nulls", params, ("maps",))
         if reused:
@@ -2236,12 +2778,27 @@ class Runner:
             self.info("The null models compare the cases with their null cohorts; the overlap maps use all mapped lesions (--sensitivity-population all).", code="nulls_population")
         start = _now_iso()
         folder = self.stage_dir("nulls")
-        args = ["--maps", self.maps_tsv, "--bundle", self.bundle.path, "--kind", "rl_independent", "--mode", mode, "--k", "1000", "--rule", thresholds.rule_to_json(self.config.rule),
-                "--overlap", f"{self.config.sensitivity:g}", "--seed", str(self.config.null_seed), "--participants", os.path.join(self.study.path, "participants.tsv"), "--out", folder]
+        args = ["--maps", self.maps_tsv, "--bundle", self.bundle.path, "--kind", "rl_independent", "--mode", mode, "--k", "1000", "--rule", thresholds.rule_to_json(rule),
+                "--overlap", f"{self.config.sensitivity:g}", "--seed", str(self.config.null_seed), "--participants", self.participants_tsv, "--out", folder]
         if self.config.memory_budget_gb:
             args += ["--budget-gb", f"{float(self.config.memory_budget_gb):g}"]
         args += self._common_child_args()
         child = self._child("nulls", "nulls", args, folder)
+        fallback = getattr(self.plan, "nulls_fallback", None)
+        if child.status == "error" and mode == "fast" and fallback is not None and (child.terminal or {}).get("code") == "parity_gate":
+            # --nulls auto: the parity gate refuses fast mode for this cohort; run the exact pooled null instead (D-A23)
+            exact, reason = fallback
+            if not isinstance(exact, tuple):
+                self.warn(f"The parity gate refuses fast mode for this cohort. {reason}", code="nulls_fallback")
+                return self._skip("nulls", reason)
+            self.warn("The parity gate refuses fast mode for this cohort: the null models use the exact pooled null.", code="nulls_fallback")
+            mode, self.plan.nulls_mode = "exact", "exact"
+            params = {**params, "mode": mode}
+            fp, reused = self._cached("nulls", params, ("maps",))
+            if reused:
+                return reused
+            args[args.index("--mode") + 1] = mode
+            child = self._child("nulls", "nulls", args, folder)
         if child.status != "done":
             return {"status": "failed" if child.status == "error" else "blocked", "reason": child.message, "fingerprint": fp}
         from . import nulls
@@ -2253,7 +2810,7 @@ class Runner:
                 desc = re.search(r"_desc-([A-Za-z0-9]+)_map", name).group(1)
                 kind = NULL_MAP_KINDS.get(desc, "p" if desc.endswith(("P", "Q", "PFwe")) else "stat")
                 desc, target, side = self._copy_group(os.path.join(folder, name), kind, "nulls", statistic=record.get("statistic"), caption=record.get("caption"), mode=record.get("mode_label"),
-                                                      k=record.get("k"), k_pool=record.get("k_pool"), rule=self.config.rule, sign=record.get("sign"))
+                                                      k=record.get("k"), k_pool=record.get("k_pool"), rule=rule, sign=record.get("sign"))
                 groups.append(desc)
                 outputs += [target, side]
         result = {key: record.get(key) for key in ("kind", "mode", "mode_label", "approximate", "k", "k_pool", "min_attainable_p", "min_attainable_q", "fdr_floor_voxels", "caption", "classic_rule", "group_qa")}
@@ -2433,13 +2990,16 @@ class Runner:
         inference = {"fwe": True, "fdr": self.config.fdr, "tfce": self.config.tfce if test == "two_group" else False, "n_perm": self.config.perm, "seed": self.config.perm_seed}
         covariates = list(self.config.covariates)
         if test == "two_group":
-            return designlib.DesignSpec(test="two_group", group_column="group", levels=["case", "control"], contrast="two_sided", covariates=covariates, input="Fz" if self.config.input == "AvgFz" else "T",
+            return designlib.DesignSpec(test="two_group", group_column="group", levels=["case", "control"], contrast=self.config.contrast, covariates=covariates, input="Fz" if self.config.input == "AvgFz" else "T",
                                         inference=inference, volume_off_reason=self.config.volume_off_reason)
         return designlib.DesignSpec(test="continuous", score_column=score, contrast="two_sided", covariates=covariates, input="Fz" if self.config.input == "AvgFz" else "T", inference=inference,
                                     volume_off_reason=self.config.volume_off_reason)
 
     def _stage_specificity(self, planned):
         if planned["status"] in ("skip", "unavailable") or self.plan.specificity != "glm":
+            from . import glm
+
+            self._drop_stale_results([self.path(STAGES_DIR, "glm")], glm)
             return self._skip("specificity", planned["reason"] or self.plan.specificity_reason or "skipped", "unavailable" if self.plan.specificity == "unavailable" else "skipped")
         import numpy as np
 
@@ -2454,23 +3014,26 @@ class Runner:
         start = _now_iso()
         folder = self.stage_dir("glm")
         spec = self._design_spec()
+        from . import glm
+
         try:
             design = designlib.build_design(self._subset_study(rows), spec)
         except designlib.DesignError as exc:
+            self._drop_stale_results([folder], glm)
             return {"status": "blocked", "reason": f"The design cannot be built: {exc}", "fingerprint": fp}
         design_json, _matrix = designlib.save_design(design, folder)
         if design.blocking:
+            self._drop_stale_results([folder], glm)
             return {"status": "blocked", "reason": "The design is blocked: " + " | ".join(check.message for check in design.blocking), "fingerprint": fp, "result": {"design_type": design.design_type}}
-        args = ["--maps", self.maps_tsv, "--participants", os.path.join(self.study.path, "participants.tsv"), "--design", design_json, "--mask", self.mask_path, "--out", folder, "--perm", str(self.config.perm),
+        args = ["--maps", self.maps_tsv, "--participants", self.participants_tsv, "--design", design_json, "--mask", self.mask_path, "--out", folder, "--perm", str(self.config.perm),
                 "--seed", str(self.config.perm_seed), "--conn-label", self.bundle.name]
         if self.config.tfce:
             args.append("--tfce")
         args += self._common_child_args()
         child = self._child("specificity", "glm", args, folder)
         if child.status != "done":
+            self._drop_stale_results([folder], glm)
             return {"status": "blocked" if child.status == "blocked" else "failed", "reason": child.message, "fingerprint": fp}
-        from . import glm
-
         record = glm.read_record(os.path.join(folder, glm.GLM_JSON)) or {}
         label = (record.get("contrast") or {}).get("label") or glm.contrast_label(design)
         outputs, descs = [os.path.join(folder, glm.GLM_JSON)], {}
@@ -2490,7 +3053,7 @@ class Runner:
         fwe = {}
         if t is not None and p is not None:
             for sign, test in (("pos", t > 0), ("neg", t < 0)):
-                count = int(np.count_nonzero(test & (p < self.config.alpha)))
+                count = int(np.count_nonzero(test & glm.passes_alpha(p, self.config.alpha)))
                 fwe[sign] = {"voxels": count, "ml": round(count * voxel_ml, 3)}
         result = {"label": label, "descs": descs, "design_type": record.get("design_type"), "limitations": record.get("limitations"), "fwe": fwe, "min_p": record.get("min_attainable_p"),
                   "fdr_floor": (record.get("fdr") or {}).get("floor_voxels"), "n": record.get("n"), "n_per_level": record.get("n_per_level"), "excluded": record.get("excluded"), "run_id": record.get("run_id")}
@@ -2515,8 +3078,13 @@ class Runner:
     def _stage_slnm(self, planned):
         columns = list(self.plan.scores)
         if not columns or planned["status"] in ("skip", "unavailable"):
-            return self._skip("slnm", planned["reason"] or "no confirmed score column", "skipped")
+            from . import slnm
+
+            self._drop_stale_results(sorted(glob.glob(self.path(STAGES_DIR, "slnm-*"))), slnm)
+            return self._skip("slnm", planned["reason"] or _slnm_skip_reason(self.config), "skipped")
         import numpy as np
+
+        from . import glm
 
         rows = self.mapped_rows
         params = {"scores": columns, "values": self._participant_values([*columns, *self.config.covariates], rows), "perm": self.config.perm, "seed": self.config.perm_seed, "method": self.config.slnm_method,
@@ -2535,18 +3103,27 @@ class Runner:
             if len(scored) < self.config.min_slnm_n:
                 self.info(f"sLNM of {column} not run: {len(scored)} mapped subjects have a value (at least {self.config.min_slnm_n} needed).", code="slnm_min_n")
                 results[label] = {"column": column, "n": len(scored), "skipped": f"fewer than {self.config.min_slnm_n} values"}
+                self._drop_stale_results([self.path(STAGES_DIR, f"slnm-{label}")], slnm)
+                continue
+            if scored and len({value for _row, value in scored}) == 1:
+                shown = self.study.subject(scored[0][0]["participant_id"]).get(column)
+                reason = f"{column} has the same value ({shown}) for every mapped lesion: there is nothing to map"
+                self.info(f"sLNM of {column} not run: {reason}.", code="slnm_constant_score")
+                results[label] = {"column": column, "n": len(scored), "skipped": reason}
+                self._drop_stale_results([self.path(STAGES_DIR, f"slnm-{label}")], slnm)
                 continue
             folder = self.stage_dir(f"slnm-{label}")
-            args = ["--maps", self.maps_tsv, "--participants", os.path.join(self.study.path, "participants.tsv"), "--score", column, "--covariates", ",".join(self.config.covariates)]
+            args = ["--maps", self.maps_tsv, "--participants", self.participants_tsv, "--score", column, "--covariates", ",".join(self.config.covariates)]
             if self.config.volume_off_reason and "volume_ml" not in self.config.covariates:
                 args += ["--volume-off-reason", self.config.volume_off_reason]
             if self.config.slnm_method == "spearman":
                 args.append("--spearman")
             args += ["--perm", str(self.config.perm), "--seed", str(self.config.perm_seed), "--bundle", self.bundle.path, "--mask", self.mask_path, "--out", folder, "--conn-label", self.bundle.name,
-                     "--input", "Fz" if self.config.input == "AvgFz" else "T"]
+                     "--input", "Fz" if self.config.input == "AvgFz" else "T", "--desc", "slnm" + label]  # one desc per score: the group maps of all scores are copied to one folder
             args += self._common_child_args()
             child = self._child("slnm", "slnm", args, folder)
             if child.status != "done":
+                self._drop_stale_results([folder], slnm)  # the child stops before it replaces an earlier run's results (a blocked design)
                 failed.append(f"{column}: {child.message}")
                 results[label] = {"column": column, "n": len(scored), "failed": child.message}
                 continue
@@ -2571,10 +3148,13 @@ class Runner:
                 r_map = self._load_vector(self.path(os.path.basename(record["outputs"]["r"])))
                 if "p_fwe" in descs:
                     p_map = self._load_vector(self.path(os.path.basename(record["outputs"]["p_fwe"])))
-                    fwe_voxels = int(np.count_nonzero(p_map < self.config.alpha))
+                    fwe_voxels = int(np.count_nonzero(glm.passes_alpha(p_map, self.config.alpha)))
             results[label] = {"column": column, "n": record.get("n"), "method": self.config.slnm_method, "covariates": self.config.covariates, "max_abs_r": None if r_map is None else float(np.nanmax(np.abs(r_map))),
                               "fwe_voxels": fwe_voxels, "r_with_volume": None if r_volume is None or not math.isfinite(r_volume) else round(r_volume, 4), "descs": descs, "stem": desc_stem,
                               "folder": self.rel(folder), "run_id": record.get("run_id")}
+        if results and all("skipped" in value for value in results.values()):
+            # Nothing was run (every score constant or with too few values): a skipped stage with the reason, not a done one with no outputs
+            return self._skip("slnm", " | ".join(f"{value['column']}: {value['skipped']}" for value in results.values()), "skipped")
         status = "done"
         reason = None
         if failed and len(failed) == sum(1 for value in results.values() if "skipped" not in value):
@@ -2597,6 +3177,8 @@ class Runner:
             return self._skip("conjunction", "specificity did not run: the conjunction needs the GLM maps")
         import numpy as np
 
+        from . import glm
+
         params = {"alpha": self.config.alpha, "k": overlap.get("k")}
         fp, reused = self._cached("conjunction", params, ("overlap", "specificity"))
         if reused:
@@ -2605,9 +3187,12 @@ class Runner:
         from .export import group_map_path
 
         k = overlap.get("k", round(self.config.sensitivity))
+        primary = next((entry for entry in overlap.get("thresholds") or [] if entry.get("primary")), {})
+        if primary.get("refused"):
+            return self._skip("conjunction", f"the threshold rule was refused, so there is no sensitivity map: {primary['refused']}")
         t = self._load_vector(group_map_path(self.out, self.bundle.name, spec["descs"]["stat"]))
         p = self._load_vector(group_map_path(self.out, self.bundle.name, spec["descs"]["p_fwe"]))
-        significant = (p < self.config.alpha).astype(np.uint8)
+        significant = glm.passes_alpha(p, self.config.alpha).astype(np.uint8)
         voxel_ml = float(abs(np.linalg.det(self.bundle.affine[:3, :3]))) / 1000.0
         outputs, result = [], {"alpha": self.config.alpha, "sensitivity": k}
         for sign, suffix in (("pos", "Pos"), ("neg", "Neg")):
@@ -2623,7 +3208,7 @@ class Runner:
             count = int(np.count_nonzero(conj))
             result[f"{sign}_voxels"] = count
             result[f"{sign}_ml"] = round(count * voxel_ml, 3)
-            path, side = self._write_group(f"conj{suffix}", conj, "binary", "uint8", statistic=f"sens{k}{suffix} AND sign(t) AND PFwe < {self.config.alpha:g}", sign=sign, alpha=self.config.alpha,
+            path, side = self._write_group(f"conj{suffix}", conj, "binary", "uint8", statistic=f"sens{k}{suffix} AND sign(t) AND PFwe <= {self.config.alpha:g}", sign=sign, alpha=self.config.alpha,
                                            provider=self.providers["conjunction"].module, note="Conjunction of the classic sensitivity map with the GLM specificity map (sign-specific).")
             outputs += [path, side]
         return self._save("conjunction", fp, result, outputs, start=start)
@@ -2729,7 +3314,7 @@ class Runner:
     def _stage_clusters(self, planned):
         import numpy as np
 
-        from . import stats, thresholds
+        from . import glm, stats, thresholds
         from .export import group_map_path, write_peaks_tsv
 
         atlas_key = None if not self.config.atlas else (file_sha256(self.config.atlas) if os.path.isfile(self.config.atlas) else self.config.atlas)
@@ -2770,9 +3355,9 @@ class Runner:
             self.cancel.raise_if_cancelled()
             values = self._load_vector(group_map_path(self.out, self.bundle.name, desc)).astype(np.float64)
             p = self._load_vector(group_map_path(self.out, self.bundle.name, p_desc))
-            significant = p < self.config.alpha
+            significant = glm.passes_alpha(p, self.config.alpha)
             if not significant.any():
-                tables[desc] = {"clusters": 0, "note": f"no voxel with PFwe < {self.config.alpha:g}"}
+                tables[desc] = {"clusters": 0, "note": f"no voxel with PFwe <= {self.config.alpha:g}"}
                 continue
             masked = np.where(significant, values, np.nan)
             threshold = float(np.nanmin(np.abs(masked)))
@@ -2829,7 +3414,15 @@ class Runner:
         rows = self.mapped_rows
         sids = [row["participant_id"] for row in rows]
         params = {"config": self.config.to_json(analysis_only=True, base=self.out), "software": self.config.software, "rows": [(row["participant_id"], row["sha256"], row.get("lesion")) for row in rows]}
-        fp, reused = self._cached("export", params, tuple(name for name, _ in STAGES[1:13]))
+        # The methods, sidecars and provenance of the export name the pipeline run that wrote them. A saved export is reused
+        # only when that run finished ("done"); one made by a stopped (cancelled) or failed run is written again by this run,
+        # and the report that embeds its methods follows (its fingerprint depends on this one).
+        deps = tuple(name for name, _ in STAGES[1:13])
+        saved_run = (_read_json(self._state_path("export")) or {}).get("pipeline_run")
+        keep_run = saved_run if saved_run and saved_run != self.run_id and self._run_done(saved_run) else self.run_id
+        fp, reused = self._cached("export", {**params, "pipeline_run": keep_run}, deps)
+        if reused is None and keep_run != self.run_id:
+            fp, reused = self._cached("export", {**params, "pipeline_run": self.run_id}, deps)
         if reused:
             return reused
         start = _now_iso()
@@ -2877,7 +3470,7 @@ class Runner:
         written = None
         if self.providers["export"].kind == "preferred":
             try:
-                written = export.write_methods(self.study.path, self.out, formats=("md", "html", "txt"))
+                written = export.write_methods(self.study.path, self.out, formats=("md", "html", "txt"), runs=self._methods_runs())
             except jobs.Cancelled:
                 raise
             except Exception as exc:  # the data outputs are complete: keep write_run's methods.md
@@ -2928,29 +3521,51 @@ class Runner:
         return out
 
     def _write_reproduce_pipeline(self):
-        from .export import DISCLAIMER
+        from .export import DISCLAIMER, UTF8_LOCALE_SHELL_LINES
 
         pythonslicer = shutil.which("PythonSlicer") or "PythonSlicer"
+        slicer_lnm = _slicer_lnm_executable()
         path = self.path(REPRODUCE_PIPELINE)
         lines = [
             "#!/bin/sh",
             "# Re-run this lesion network mapping pipeline from its configuration (generated by Slicer Studio's LesionNetworkMappingLib).",
-            "# Usage: ACCEPT_TERMS=1 [PYTHONSLICER=/path/to/PythonSlicer] [OUT=output_folder] sh reproduce_pipeline.sh",
+            "# Usage: ACCEPT_TERMS=1 [SLICER_LNM=/path/to/slicer-lnm | PYTHONSLICER=/path/to/PythonSlicer] [OUT=output_folder] sh reproduce_pipeline.sh",
+            "# Entry point: 'slicer-lnm pipeline run' when slicer-lnm is on PATH (pip wheel, container image, Slicer Studio.app/Contents/bin), is $SLICER_LNM or is the one that wrote this script;",
+            "# otherwise 'PythonSlicer -m LesionNetworkMappingLib.pipeline run' with LNM_LIBRARY_DIR on PYTHONPATH; setting $PYTHONSLICER forces PythonSlicer (a Python interpreter with numpy works too).",
             "# The connectome's data use terms must be accepted explicitly: ACCEPT_TERMS=1 adds --accept-terms (without it the run stops with exit code 4).",
             "# The study, the connectome bundle and the configuration are read through pipeline.json, next to this script.",
             "# Windows (cmd.exe), from this folder:",
             '#   set PYTHONPATH=<LesionNetworkMapping module folder> && "C:\\path\\to\\PythonSlicer.exe" -m LesionNetworkMappingLib.pipeline run --config pipeline.json --out reproduced --recompute --accept-terms',
             f"# {DISCLAIMER}",
             "set -e",
+            *UTF8_LOCALE_SHELL_LINES,
             'HERE="$(cd "$(dirname "$0")" && pwd)"',
             f"DEFAULT_PYTHONSLICER={shlex.quote(pythonslicer)}",
-            'PYTHONSLICER="${PYTHONSLICER:-$DEFAULT_PYTHONSLICER}"',
+            f"DEFAULT_SLICER_LNM={shlex.quote(slicer_lnm)}",
             'OUT="${OUT:-reproduced}"',
+            *_reproduce_controlset_lines(getattr(self, "study", None)),
             f"DEFAULT_LNM_LIBRARY_DIR={shlex.quote(LIB_PARENT)}",
             'LNM_LIBRARY_DIR="${LNM_LIBRARY_DIR:-$DEFAULT_LNM_LIBRARY_DIR}"',
-            'PYTHONPATH="$LNM_LIBRARY_DIR${PYTHONPATH:+:$PYTHONPATH}"',
-            "export PYTHONPATH",
-            '"$PYTHONSLICER" -m LesionNetworkMappingLib.pipeline run --config "$HERE/pipeline.json" --out "$OUT" --recompute ${ACCEPT_TERMS:+--accept-terms}',
+            'LNM_ENTRY=""',
+            'if [ -z "${PYTHONSLICER:-}" ]; then',
+            '  if [ -n "${SLICER_LNM:-}" ]; then',
+            '    LNM_ENTRY="$SLICER_LNM"',
+            "  elif command -v slicer-lnm >/dev/null 2>&1; then",
+            '    LNM_ENTRY="slicer-lnm"',
+            '  elif [ -n "$DEFAULT_SLICER_LNM" ] && [ -x "$DEFAULT_SLICER_LNM" ]; then',
+            '    LNM_ENTRY="$DEFAULT_SLICER_LNM"',
+            "  fi",
+            "fi",
+            'if [ -n "$LNM_ENTRY" ]; then',
+            '  set -- "$LNM_ENTRY" pipeline',
+            "else",
+            '  PYTHONSLICER="${PYTHONSLICER:-$DEFAULT_PYTHONSLICER}"',
+            '  PYTHONPATH="$LNM_LIBRARY_DIR${PYTHONPATH:+:$PYTHONPATH}"',
+            "  export PYTHONPATH",
+            '  set -- "$PYTHONSLICER" -m LesionNetworkMappingLib.pipeline',
+            "fi",
+            'echo "reproduce_pipeline.sh: $*" >&2',
+            '"$@" run --config "$HERE/pipeline.json" --out "$OUT" --recompute ${ACCEPT_TERMS:+--accept-terms}',
             "",
         ]
         self.current_outputs.append(path)
@@ -3016,6 +3631,8 @@ class Runner:
                                         "inbox": relpath(inbox, self.study.path) if inbox else None}
         self.stage_event("finish", "done")
         self._write_pipeline_json(status)
+        self._refresh_final_documents()
+        self._write_pipeline_json(status)
         computed = sum(1 for row in self.mapped_rows if ((self.results.get("maps") or {}).get("maps") or {}).get(row["participant_id"], {}).get("cache") == "new")
         maps_result = self.results.get("maps") or {}
         if maps_result.get("provider") == "engine":
@@ -3030,6 +3647,43 @@ class Runner:
                   inbox=inbox, status=status)
         return EXIT_OK
 
+    def _refresh_final_documents(self):
+        """Rewrite methods.* and report.html once every stage is recorded as finished.
+
+        Both are written during the export and report stages, when pipeline.json still lists those stages and finish as
+        pending; the shared files of a finished run must not describe it that way.
+        """
+        from . import export
+
+        export_record = self.stage_records.get("export") or {}
+        if self.providers["export"].kind == "preferred" and export_record.get("status") in ("done", "reused") and os.path.isfile(self.path("methods.md")):
+            try:
+                export.write_methods(self.study.path, self.out, formats=("md", "html", "txt"), runs=self._methods_runs())
+            except jobs.Cancelled:
+                raise
+            except Exception as exc:
+                self.warn(f"The methods sections could not be refreshed ({type(exc).__name__}: {exc}).", code="methods_failed")
+        if (self.stage_records.get("report") or {}).get("status") in ("done", "reused") and os.path.isfile(self.path("report.html")):
+            try:
+                report = importlib.import_module(f"{PACKAGE}.report")
+                # no emit: Finish is already reported, so the second render must not print stage-15 progress again
+                report.render_report(self.out, None, self.cancel, atlas=self.config.atlas, atlas_labels=self.config.atlas_labels, template=self.config.template, convention=self.config.figure_convention)
+            except jobs.Cancelled:
+                raise
+            except Exception as exc:
+                self.warn(f"The report could not be refreshed ({type(exc).__name__}: {exc}).", code="report_failed")
+        for name in ("export", "report"):  # a later run reuses a stage only while its outputs keep the recorded sizes
+            state = _read_json(self._state_path(name))
+            if not state or state.get("status") != "done":
+                continue
+            outputs = state.get("outputs") or {}
+            resized = {path: os.path.getsize(self.absp(path)) for path in outputs if os.path.isfile(self.absp(path))}
+            if resized != outputs and set(resized) == set(outputs):
+                state["outputs"] = resized
+                jobs.write_json_atomic(self._state_path(name), state)
+                if name in self.stage_records:
+                    self.stage_records[name]["outputs"] = resized
+
     def _update_run(self, status, summary=None):
         if not self.run_id:
             return
@@ -3037,11 +3691,27 @@ class Runner:
 
         mapping = {"done": "done", "done_with_failures": "done", "cancelled": "cancelled", "error": "failed", "failed": "failed"}
         try:
-            runs.update(self.study.path, self.run_id, status=mapping.get(status, status), ended=_now_iso(), summary=summary or {"status": status, "failed_stages": self.failed})
+            runs.update(self.run_root, self.run_id, status=mapping.get(status, status), ended=_now_iso(), summary=summary or {"status": status, "failed_stages": self.failed})
         except OSError:
             pass
 
     # pipeline.json
+
+    def _current_outputs(self, status):
+        """Relative paths of the outputs of the stages that ran (or were reused) in this run; once the run has stopped or failed,
+        also those of the later stages whose saved results are still valid (:meth:`_drop_invalidated`). Never files of earlier
+        runs that this run made stale.
+        """
+        out = set()
+        for record in self.stage_records.values():
+            if record.get("status") in ("done", "reused"):
+                out |= set(record.get("outputs") or {})
+        if status in ("cancelled", "error"):
+            for name, _label in STAGES[1:-1]:
+                state = _read_json(self._state_path(name)) or {}
+                if state.get("status") == "done":
+                    out |= set(state.get("outputs") or {})
+        return out
 
     def _write_pipeline_json(self, status, error=None):
         if not getattr(self, "plan", None):
@@ -3063,9 +3733,9 @@ class Runner:
         groups = collections.Counter(row["group"] for row in mapped)
         overlap = self.results.get("overlap") or {}
         group_outputs = []
-        for name in sorted(os.listdir(self.out)) if os.path.isdir(self.out) else []:
+        for name in sorted(self._current_outputs(status)):
             match = re.match(r"group_conn-[A-Za-z0-9]+_desc-([A-Za-z0-9]+)_map\.nii\.gz$", name)
-            if not match:
+            if not match or not os.path.isfile(self.path(name)):
                 continue
             sidecar = _read_json(self.path(name[: -len(".nii.gz")] + ".json")) or {}
             group_outputs.append({"desc": match.group(1), "path": name, "sidecar": name[: -len(".nii.gz")] + ".json", "kind": sidecar.get("kind"), "sign": sidecar.get("sign"), "rule_tag": sidecar.get("rule_tag"),
@@ -3089,8 +3759,9 @@ class Runner:
             record.setdefault("reason", planned.get("reason"))
             record.setdefault("estimate_s", planned.get("estimate_s"))
             stages.append(record)
-        specificity = self.results.get("specificity") or {}
-        conj = self.results.get("conjunction") or {}
+        kept = {name for name, record in self.stage_records.items() if record.get("status") in ("done", "reused")}
+        specificity = (self.results.get("specificity") or {}) if "specificity" in kept else {}  # a skipped stage's result is only its reason
+        conj = (self.results.get("conjunction") or {}) if "conjunction" in kept else {}
         export_result = self.results.get("export") or {}
         package = export_result.get("package") or {}
         content = {
@@ -3106,9 +3777,11 @@ class Runner:
             "study": relpath(self.study.path, self.out),
             "bundle": relpath(self.bundle.path, self.out),
             "config": config.to_json(base=self.out, analysis_only=True),
+            **({"recipe": config.recipe} if config.recipe else {}),
             "inputs": {
                 "participants_tsv_sha256": _lesion_sha(os.path.join(self.study.path, "participants.tsv")),
                 "study_json_sha256": _lesion_sha(os.path.join(self.study.path, "study.json")),
+                "design_sha256": design_fingerprint(self.study, self.design_rows, self.plan.scores, config.covariates),
                 "rows": rows,
             },
             "subjects": {"n": len(self.subject_ids), "subject_ids_sha256": self.plan.subjects_sha256, "preview": config.preview_n, "seed": config.preview_seed},
@@ -3266,12 +3939,58 @@ def _read_table(path):
 
 
 def _group_map(text):
+    """Parse ``--group-map 'patient=case,HC=control'`` (keys case-insensitive); an item without '=', or a value given two different groups, is a ValueError."""
     mapping = {}
     for item in (text or "").split(","):
-        if "=" in item:
-            key, value = item.split("=", 1)
-            mapping[key.strip().lower()] = value.strip()
+        if not item.strip():
+            continue
+        if "=" not in item:
+            raise ValueError(f"--group-map item {item.strip()!r} is not 'value=case' or 'value=control'; write it like --group-map 'patient=case,HC=control'")
+        key, value = item.split("=", 1)
+        name, group = key.strip().lower(), value.strip()
+        if name in mapping and mapping[name] != group:
+            raise ValueError(f"--group-map gives the value {key.strip()!r} two groups ({mapping[name]!r} and {group!r}); each value maps to one group")
+        mapping[name] = group
     return mapping
+
+
+def _study_group_values(columns, rows, id_column, group_column, group_map):
+    """Rows of a participants table as study values, the group column mapped to case/control/n/a (a ValueError naming the option when it cannot be)."""
+    from .study import ALLOWED_VALUES, NA
+
+    mapping = _group_map(group_map)
+    source_group = group_column or "group"
+    if group_column and group_column not in columns:
+        raise ValueError(f"--group-column {group_column!r} is not a column of the participants table (columns: {', '.join(columns)})")
+    allowed = tuple(ALLOWED_VALUES.get("group") or ())
+    out_rows = []
+    for row in rows:
+        values = {column: (row[column] if row[column] != "" else NA) for column in columns if column != id_column}
+        values["participant_id"] = row[id_column]
+        if source_group in row:
+            raw = row[source_group]
+            values["group"] = mapping.get(raw.strip().lower(), raw if raw in ("case", "control") else NA) if (mapping or source_group != "group") else (raw or NA)
+            if allowed and values["group"] not in allowed:
+                bad = sorted({r[source_group] for r in rows if r.get(source_group) and r[source_group] not in allowed})
+                listed = ", ".join(repr(v) for v in bad)
+                raise ValueError(f"The group column {source_group!r} has value(s) {listed}, not {' / '.join(allowed)}; say which is which with --group-map "
+                                 f"'value=case,value=control' (one entry per value: {', '.join(f'{v}=case or {v}=control' for v in bad)})")
+        out_rows.append(values)
+    return out_rows
+
+
+def _check_score_columns(score_columns, available):
+    """Refuse a --score-columns value that is no column, or whose role is fixed otherwise, before a study is created or changed."""
+    from . import schema
+
+    available = list(dict.fromkeys(available))
+    for column in score_columns or ():
+        standard = schema.STANDARD_ROLES.get(column)
+        if standard is not None and standard.role != "score":
+            raise ValueError(f"--score-columns {column!r} is the {standard.role} column, not a score")
+        if column not in available:
+            listed = ", ".join(available) or "none"
+            raise ValueError(f"--score-columns {column!r} is not a column of the participants table (columns: {listed})")
 
 
 def init_study(source, study_path, participants=None, name=None, score_columns=(), group_column=None, group_map=None, lesion_rule=None, id_regex=None):
@@ -3284,29 +4003,35 @@ def init_study(source, study_path, participants=None, name=None, score_columns=(
 
     from .study import NA, Study, write_tsv
 
+    from .study import whole_word_rule
+
+    for option, pattern in (("--lesion-rule", lesion_rule), ("--id-regex", id_regex)):
+        if pattern:  # a pattern that does not compile must not leave a half-made study behind (re.error is no ValueError)
+            try:
+                re.compile(pattern)  # the positions in its message refer to the user's own text
+                if option == "--lesion-rule":
+                    whole_word_rule(pattern)
+            except re.error as exc:
+                raise PipelineError(f"Invalid {option}: {exc}", code="usage", exit_code=EXIT_USAGE) from exc
     study_path = os.path.abspath(os.fspath(study_path))
+    columns = out_rows = None
+    if participants:
+        # Checked before anything is created: a wrong --group-column or --group-map must not leave a half-made study
+        columns, rows = _read_table(participants)
+        id_column = "participant_id" if "participant_id" in columns else columns[0]
+        out_rows = _study_group_values(columns, rows, id_column, group_column, group_map)
     if Study.is_study(study_path):
         live = _session_live(study_path)
         if live:
             raise jobs.Locked(f"study open in Slicer (process {live.get('pid')} on {live.get('host')})", holder=live)
         study = Study.open(study_path)
+        _check_score_columns(score_columns, list(study.columns) + [c for c in (columns or ()) if c != id_column])
     else:
+        _check_score_columns(score_columns, [c for c in (columns or ()) if c != id_column])
         study = Study.create(study_path, name=name)
     report = study.add_files([source], lesion_rule=lesion_rule, id_regex=id_regex)
     imported = None
     if participants:
-        columns, rows = _read_table(participants)
-        id_column = "participant_id" if "participant_id" in columns else columns[0]
-        mapping = _group_map(group_map)
-        out_rows = []
-        for row in rows:
-            values = {column: (row[column] if row[column] != "" else NA) for column in columns if column != id_column}
-            values["participant_id"] = row[id_column]
-            source_group = group_column or "group"
-            if source_group in row:
-                raw = row[source_group]
-                values["group"] = mapping.get(raw.strip().lower(), raw if raw in ("case", "control") else NA) if (mapping or source_group != "group") else (raw or NA)
-            out_rows.append(values)
         out_columns = ["participant_id"] + [column for column in columns if column != id_column]
         if "group" not in out_columns and any("group" in row for row in out_rows):
             out_columns.append("group")
@@ -3360,6 +4085,7 @@ def _add_run_arguments(parser):
     parser.add_argument("--alpha", type=float, default=S, help="FWE alpha (default 0.05)")
     parser.add_argument("--no-fdr", dest="fdr", action="store_false", default=S, help="do not write the FDR maps")
     parser.add_argument("--tfce", action="store_true", default=S, help="add TFCE to the GLM (slow)")
+    parser.add_argument("--contrast", choices=CONTRASTS, default=S, help="contrast of the case-vs-control GLM: two_sided (default), A>B (case > control) or B>A (control > case)")
     parser.add_argument("--no-volume-covariate", dest="volume_off_reason", default=S, metavar="REASON", help="leave lesion volume out of the covariates (the reason is recorded)")
     parser.add_argument("--covariates", default=S, help="comma-separated covariate columns (default volume_ml)")
     parser.add_argument("--scores", default=S, help="auto (confirmed score columns), none, or a comma-separated list")
@@ -3383,6 +4109,7 @@ def _add_run_arguments(parser):
     parser.add_argument("--recompute", action="store_true", default=S, help="ignore every saved stage and the map cache")
     parser.add_argument("--accept-terms", action="store_true", default=S, help="accept the data use terms of the connectome")
     parser.add_argument("--software", default=S, help="JSON object recorded as the exporting software")
+    parser.add_argument("--recipe-record", dest="recipe", default=S, help="JSON recipe record recorded as pipeline.json \"recipe\" (recipes.pipeline_recipe; Run everything in Map)")
     parser.add_argument("--parent-pid", type=int, default=S, help="stop when this process is gone")
     parser.add_argument("--nice", type=int, default=S)
     parser.add_argument("--keep-awake", choices=KEEP_AWAKE_MODES, default=S)
@@ -3390,6 +4117,27 @@ def _add_run_arguments(parser):
     parser.add_argument("--events", choices=EVENT_MODES, default=S, help="auto (text on a terminal), json or text")
     parser.add_argument("--json", dest="plan_json", action="store_true", default=False, help="plan: print the plan as JSON")
     jobs.add_common_arguments(parser, threads_default=None)
+
+
+FIGURE_CONVENTIONS = ("neurological", "radiological")
+
+
+def figure_option_error(template=None, convention=None):
+    """The usage error of a figure/report option the report would only reject at its last stage, or None.
+
+    :param template: path of the display template NIfTI (an existing file is opened; a path that is no file is left to the caller).
+    :param convention: "neurological" or "radiological" (None or empty: the default).
+    """
+    if convention and convention not in FIGURE_CONVENTIONS:
+        return f"--figure-convention must be {' or '.join(FIGURE_CONVENTIONS)}, got {convention!r}"
+    if template and os.path.isfile(template):
+        from . import nifti
+
+        try:
+            nifti.read_nifti_header(template)
+        except Exception as exc:  # unreadable, not gzip, not NIfTI, wrong extension
+            return f"The file of --template cannot be read as a NIfTI image: {template} ({type(exc).__name__}: {exc})"
+    return None
 
 
 def _parser():
@@ -3421,6 +4169,7 @@ _CONFIG_PARSE = {
     "rule": lambda text: json.loads(text) if isinstance(text, str) else text,
     "extra_rules": lambda items: [json.loads(item) if isinstance(item, str) else item for item in items],
     "software": lambda text: json.loads(text) if isinstance(text, str) else text,
+    "recipe": lambda text: json.loads(text) if isinstance(text, str) else text,
     "covariates": lambda text: [name.strip() for name in text.split(",") if name.strip()] if isinstance(text, str) else text,
 }
 
@@ -3480,6 +4229,16 @@ def _main(argv):
         if importlib.util.find_spec(f"{PACKAGE}.report") is None:
             jobs.emit("error", code="unavailable", message="report not available in this build")
             return EXIT_ERROR
+        if args.template and not os.path.isfile(args.template):
+            jobs.emit("error", code="usage", message=f"The file of --template does not exist: {args.template}")
+            return EXIT_USAGE
+        problem = figure_option_error(args.template, args.figure_convention)
+        if problem:
+            jobs.emit("error", code="usage", message=problem)
+            return EXIT_USAGE
+        if not os.path.isfile(os.path.join(args.out, "pipeline.json")):
+            jobs.emit("error", code="usage", message=f"The --out folder has no pipeline.json (run the pipeline first, or check the path): {args.out}")
+            return EXIT_USAGE
         report = importlib.import_module(f"{PACKAGE}.report")
         path = report.render_report(os.path.abspath(args.out), jobs.emit, None, atlas=args.atlas, atlas_labels=args.atlas_labels, template=args.template, convention=args.figure_convention)
         jobs.emit("done", outputs=[path] if path else [], elapsed=round(jobs.elapsed(), 3))
@@ -3491,6 +4250,9 @@ def _main(argv):
         except jobs.Locked as exc:
             jobs.emit("error", code="locked", message=exc.message)
             return EXIT_LOCKED
+        except PipelineError as exc:
+            jobs.emit("error", code=exc.code, message=exc.message)
+            return exc.exit_code
         except (OSError, ValueError, KeyError) as exc:
             jobs.emit("error", code="input", message=f"{type(exc).__name__}: {exc}")
             return EXIT_ERROR
@@ -3501,6 +4263,10 @@ def _main(argv):
         config = config_from_args(args)
     except (OSError, ValueError, TypeError) as exc:
         jobs.emit("error", code="usage", message=f"Invalid configuration: {exc}")
+        return EXIT_USAGE
+    problem = figure_option_error(config.template, config.figure_convention)
+    if problem:
+        jobs.emit("error", code="usage", message=problem)
         return EXIT_USAGE
     if args.command == "plan":
         try:

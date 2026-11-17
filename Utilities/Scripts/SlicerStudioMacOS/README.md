@@ -147,7 +147,10 @@ Exit codes:
    [Choosing Qt](#choosing-qt).
 4. **Configure.** The superbuild is configured with these options:
    - `Release`, `BUILD_TESTING=OFF`, `Slicer_BUILD_DOCUMENTATION=OFF`;
-   - `Slicer_USE_VTK_DEBUG_LEAKS=OFF`, `Slicer_BUILD_QT_DESIGNER_PLUGINS=OFF`;
+   - `Slicer_USE_VTK_DEBUG_LEAKS=OFF`, `Slicer_BUILD_QT_DESIGNER_PLUGINS=ON`. The Qt Designer
+     plugins of CTK and MRML are needed at run time: `slicer.util.loadUI` creates the widgets of
+     scripted module `.ui` files (Line Profile, Surface Toolbox, extensions) with them. A build
+     directory configured with them off by an earlier version of the script is configured again;
    - `CMAKE_OSX_ARCHITECTURES=$(uname -m)`, `CMAKE_OSX_DEPLOYMENT_TARGET`, the SDK;
    - `Qt6_DIR` (or `Qt5_DIR`) and the matching `Slicer_REQUIRED_QT_VERSION`;
    - `Slicer_USE_SYSTEM_QT=OFF`, so that Qt is embedded in the package.
@@ -250,6 +253,13 @@ reference for the build steps. Build disk images on a Mac with this script (see
 - **The build stopped**: `~/SlicerStudio/logs/build.log` contains the error.
   Fix the cause and run the script again. With parallel jobs, the first error
   can be far above the end of the log, so search the log for `error:`.
+- **`PythonQt: missing generated wrapper sources`**: the PythonQt wrapper
+  generator (run while CTK builds) found no Qt headers. Homebrew installs Qt as
+  one package per module, so the script gives the generator a folder that links
+  all of them (`~/SlicerStudio/pythonqt-qt`, passed as `QTDIR`) and reruns it
+  when an earlier run left no wrappers: run the script again. If it still
+  stops, it prints the generator's own report; build with `--qt=official
+  --clean` instead.
 - **`configured with a different source, architecture, Qt or minimum macOS`**:
   Homebrew upgraded Qt, or a different `--qt` or `--macos-min` was given. Run
   again with `--clean`. The compiler cache keeps the rebuild short.

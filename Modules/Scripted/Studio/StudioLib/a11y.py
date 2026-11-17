@@ -267,6 +267,7 @@ class Accessibility:
         self._guard(new)
         previousCursor = self._focusCursor
         self._focusCursor = qt.QCursor.pos()
+        self._scrollInspectorToFocus(old, new, previousCursor)
         if not self.viewFrames:
             return
         for viewFrame in self.viewFrames.values():
@@ -277,6 +278,27 @@ class Accessibility:
                     viewFrame.show()
                 else:
                     viewFrame.hide()
+
+    def _scrollInspectorToFocus(self, old, new, previousCursor):
+        """Scroll the inspector to ``new`` when the keyboard moved the focus into it from outside.
+
+        ``QScrollArea::focusNextPrevChild`` scrolls to the new focus only when the move starts inside the scroll area. A
+        Tab from a view or the top bar, or a Shift+Tab from the status area, enters it without scrolling, and the focus
+        ring stays out of view when the inspector is scrolled (SPEC 2.11, USABILITY 9.2). Moves inside the inspector
+        are left to Qt, and a click is not scrolled.
+        """
+        scrollArea = getattr(self.shell, "_panelScrollArea", None)
+        if new is None or scrollArea is None or not _isAlive(scrollArea) or not _isAlive(new):
+            return
+        try:
+            if scrollArea.widget() is None or not scrollArea.isAncestorOf(new):
+                return
+            if old is not None and _isAlive(old) and scrollArea.isAncestorOf(old):
+                return
+            if isKeyboardFocusChange(new, old, previousCursor):
+                scrollArea.ensureWidgetVisible(new)
+        except Exception:
+            logging.error(f"Studio: cannot scroll the inspector to the focus:\n{traceback.format_exc()}")
 
     #
     # View focus frames

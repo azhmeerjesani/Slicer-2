@@ -18,11 +18,21 @@ maps go to a cache entry keyed by everything they depend on::
     key = sha256(canonical JSON of {lesion_sha256, manifest_sha256, subject_ids_sha256, supersample,
                                     probabilistic, engine: {library version, output keys, RMAX, MIN_WEIGHT}})
 
+    (probabilistic is true for a fractional seed, a ``desc-lesionProb`` file, whatever the run's flag:
+    ``engine.is_fractional_seed``; :func:`study_lesions` maps a fractionally extruded 2D tracing from that file)
+
 An entry is built in a temporary folder and published with one ``os.replace`` of the folder; its
 files are never modified afterwards (QA for other settings is a new file). Consumers copy the map
 files (D-A21). An entry whose files are missing or have another size is recomputed. The lesion
 sha256 is computed from the bytes that are mapped: each lesion file is read once into memory,
 hashed, and parsed from those bytes.
+
+Shared caches (``shared_cache_roots``, ``--shared-cache``) are other cache roots that are only read: the caches of
+the control-lesion sets linked to the study (``controlsets.study_maps_cache_roots``, the default with a study), where
+"Map controls with <connectome>" mapped the set once. A lesion that is not in the cache but has a valid entry under
+the same key in a shared cache is a cache hit: :func:`run` copies that entry into the cache (files copied, never
+hard-linked (D-A21); the lesion path made relative to the new entry folder), so the study keeps a complete cache of
+its own and no engine pass is needed for it.
 
 The run writes ``<out>/maps.tsv`` (one row per mapped lesion: participant_id, lesion (see below),
 lesion_sha256, key, AvgR, AvgFz and T (the cache files), volume_ml,
@@ -45,10 +55,16 @@ failed normalization QC are excluded, reported as warning events and in cohortma
 never writes participants.tsv: a lesion volume that the study does not have yet (volume_ml = n/a) is
 posted to the study inbox (``Study.post_results``, source "cohortmaps").
 
+Space: with a template (MNI) connectome, the lesions that may not be in MNI space (the study records a native space
+for the subject, or the file is not on a known template grid and its header does not say MNI;
+``engine.native_space_notice``) are mapped with a "native_space" warning event and listed in cohortmaps.json
+("native_space"): never silently treated as MNI.
+
 Command line (JSON events, see ``jobs``; exit codes 0 done, 1 error, 2 usage, 3 cancelled, 75 locked)::
 
     python -m LesionNetworkMappingLib.cohortmaps (--study DIR | --lesions-tsv F [--study DIR]) --bundle B --out DIR
-        [--subjects N [--random] [--seed S] | --subject-list SPEC] [--cache DIR] [--threads K] [--budget-gb G]
+        [--subjects N [--random] [--seed S] | --subject-list SPEC] [--cache DIR] [--shared-cache DIR ...]
+        [--threads K] [--budget-gb G]
         [--include-unreviewed] [--probabilistic] [--supersample K]
         [--null-relocations K [--null-seed S] [--null-voxels N] [--brain-mask MASK]]
         [--dry-run] [--cancel-file F] [--resume] [--run-root DIR] [--parent-run ID]
@@ -518,8 +534,35 @@ def read_lesions_tsv(path):
     return _normalize_lesions(out)
 
 
+def _fractional_seed(study, row):
+    """The ``desc-lesionProb`` file of a 2D tracing that the study extrudes fractionally, or None.
+
+    With the fractional 2D policy (``trace_policy.extrude_2d`` mode "fractional"), Slicer Studio writes the extruded slab
+    twice: ``desc-lesion`` (the slab binarized at 0.5, the mask that is displayed and opened in official 3D Slicer) and
+    ``desc-lesionProb`` (edge slices fractional, so that thickness x area is the exact total thickness). The analysis
+    maps the fractional slab, with its values as weights (``engine.is_fractional_seed``), as the methods text states.
+    The lesion sidecar (``SlicerStudio.extrude``, written with both files) names it.
+    """
+    from .schema import FORK_KEY
+
+    try:
+        sidecar = study.read_lesion_sidecar(row["participant_id"]) or {}
+    except (OSError, ValueError, KeyError):
+        return None
+    studio = sidecar.get(FORK_KEY) if isinstance(sidecar, dict) else None
+    extrude = studio.get("extrude") if isinstance(studio, dict) else None
+    if not isinstance(extrude, dict) or extrude.get("mode") != "fractional" or not isinstance(extrude.get("prob"), str):
+        return None
+    name = os.path.basename(extrude["prob"])
+    path = os.path.join(os.path.dirname(study.abspath(row["lesion"])), name)
+    return path if name and engine.is_fractional_seed(path) and os.path.isfile(path) else None
+
+
 def study_lesions(study, include_unreviewed=False, lesions=None):
     """The lesions of a study that an analysis may use, and the excluded subjects.
+
+    A 2D tracing extruded with the study's fractional policy is mapped from its ``desc-lesionProb`` file (with its values
+    as weights, :func:`_fractional_seed`) instead of the binarized ``desc-lesion``.
 
     :param study: a :class:`study.Study` or its folder.
     :param include_unreviewed: also use lesions that review has not approved when the study requires review.
@@ -537,7 +580,7 @@ def study_lesions(study, include_unreviewed=False, lesions=None):
         rows, excluded = study.analysis_rows(columns=("lesion",), require_review=require_review)
         out = []
         for row in rows:
-            path = study.abspath(row["lesion"])
+            path = _fractional_seed(study, row) or study.abspath(row["lesion"])
             if not os.path.isfile(path):
                 excluded.setdefault(EXCLUDED_MISSING, []).append(row["participant_id"])
                 continue
@@ -583,7 +626,7 @@ def _load_lesion(path, data):
 class _Context:
     """Everything a cohort run depends on, resolved once (subjects, hashes, cache folder, QA settings)."""
 
-    def __init__(self, bundle, subjects=None, random_subset=False, seed=0, subject_list=None, cache_root=None, study_path=None, out_dir=None, supersample=2, probabilistic=False, null_relocations=0, null_seed=0, null_voxels=engine.NULL_MAX_VOXELS, brain_mask=None, budget_bytes=None):
+    def __init__(self, bundle, subjects=None, random_subset=False, seed=0, subject_list=None, cache_root=None, study_path=None, out_dir=None, supersample=2, probabilistic=False, null_relocations=0, null_seed=0, null_voxels=engine.NULL_MAX_VOXELS, brain_mask=None, budget_bytes=None, shared_cache_roots=None):
         self.bundle = ConnectomeBundle.open(bundle) if isinstance(bundle, (str, os.PathLike)) else bundle
         if self.bundle.kind != "timeseries":
             raise ValueError(f"The connectome {self.bundle.name!r} is a {self.bundle.kind!r} bundle; network maps need a time series connectome")
@@ -607,6 +650,12 @@ class _Context:
             cache_root = default_cache_root(study_path) if study_path else os.path.join(os.fspath(out_dir or "."), "cache")
         self.cache_root = os.path.abspath(os.fspath(cache_root))
         self.cache_dir = cache_dir_for(self.cache_root, self.bundle.name, self.subject_ids_sha256)
+        # Read-only caches looked up after this one (a linked control set's cache): the same folder scheme and keys
+        self.shared_cache_dirs = []
+        for root in shared_cache_roots or ():
+            folder = cache_dir_for(os.path.abspath(os.fspath(root)), self.bundle.name, self.subject_ids_sha256)
+            if os.path.normcase(folder) != os.path.normcase(self.cache_dir) and folder not in self.shared_cache_dirs:
+                self.shared_cache_dirs.append(folder)
         self.null_k = int(null_relocations)
         self.null_seed = int(null_seed)
         self.brain_mask = os.path.abspath(brain_mask) if brain_mask else None
@@ -624,11 +673,12 @@ class _Context:
         self.budget_bytes = default_budget_bytes() if budget_bytes is None else int(budget_bytes)
         self.batch_size = batch_size(self.bundle.n_voxels, self.budget_bytes, self.null_k, None if self.null_voxels is None else len(self.null_voxels))
 
-    def key(self, lesion_sha256):
-        return cache_key(lesion_sha256, self.manifest_sha256, self.subject_ids_sha256, self.supersample, self.probabilistic)
+    def key(self, lesion_sha256, path=None):
+        """The cache key of a lesion; a fractional seed (``engine.is_fractional_seed``) is always mapped probabilistically."""
+        return cache_key(lesion_sha256, self.manifest_sha256, self.subject_ids_sha256, self.supersample, engine.seed_probabilistic(path, self.probabilistic))
 
-    def key_fields(self, lesion_sha256):
-        return cache_key_fields(lesion_sha256, self.manifest_sha256, self.subject_ids_sha256, self.supersample, self.probabilistic)
+    def key_fields(self, lesion_sha256, path=None):
+        return cache_key_fields(lesion_sha256, self.manifest_sha256, self.subject_ids_sha256, self.supersample, engine.seed_probabilistic(path, self.probabilistic))
 
 
 def _check_lesion_header(path):
@@ -640,6 +690,30 @@ def _check_lesion_header(path):
 
 def _unreadable_detail(path, exc):
     return {"reason": EXCLUDED_UNREADABLE, "path": path, "message": f"{type(exc).__name__}: {exc}"}
+
+
+def _native_space_lesions(items, bundle, study=None):
+    """Participant ids of the lesions that may not be in MNI space while the connectome is a template connectome
+    (``engine.native_space_notice``): the space the study records for the subject, else the space of the file's grid.
+    """
+    from .geometry import detect_space
+
+    template = engine.template_connectome(bundle)
+    if not template:
+        return []
+    native = []
+    for item in items:
+        sid, path = item["participant_id"], item["lesion"]
+        space = study.value(sid, "space") if study is not None and sid in study else None
+        if not space:
+            try:
+                detected = detect_space(path)
+            except (OSError, TypeError, ValueError):
+                detected = None
+            space = detected[0] if detected is not None else None
+        if engine.native_space_notice(space, path, template):
+            native.append(sid)
+    return native
 
 
 def _lookup_items(context, lesions):
@@ -664,8 +738,14 @@ def _lookup_items(context, lesions):
         if expected and expected != sha:
             excluded.setdefault(EXCLUDED_SHA, []).append(sid)
             continue
-        key = context.key(sha)
+        key = context.key(sha, path)
         entry = read_entry(context.cache_dir, key)
+        shared = False
+        for folder in context.shared_cache_dirs if entry is None else ():
+            entry = read_entry(folder, key)
+            if entry is not None:  # mapped into a shared cache (a control set): run() copies it into the cache
+                shared = True
+                break
         if entry is None:  # mapped before when it is in the cache
             try:
                 _check_lesion_header(path)
@@ -674,16 +754,69 @@ def _lookup_items(context, lesions):
                 details[sid] = _unreadable_detail(path, exc)
                 continue
         qa = read_entry_qa(entry, context.qa_key) if entry is not None else None
-        items.append({"participant_id": sid, "lesion": path, "lesion_sha256": sha, "key": key, "hit": entry is not None, "qa_hit": qa is not None, "entry": entry, "qa": qa})
+        items.append({"participant_id": sid, "lesion": path, "lesion_sha256": sha, "key": key, "hit": entry is not None, "qa_hit": qa is not None, "entry": entry, "qa": qa, "shared": shared})
     return items, excluded, details
+
+
+def _adopt_entry(cache_dir, entry):
+    """Publish a copy of a shared cache's entry (:func:`read_entry`'s dict) in ``cache_dir``; return the copy's entry.
+
+    The files are copied (never hard-linked: a file edited in one cache must not change the other, D-A21); the lesion
+    path of entry.json is made relative to the new entry folder.
+    """
+    key = entry["key"]
+
+    def build(folder):
+        for name in os.listdir(entry["dir"]):
+            source = os.path.join(entry["dir"], name)
+            if name == ENTRY_JSON or not os.path.isfile(source):
+                continue
+            shutil.copyfile(source, os.path.join(folder, name))
+        stored = _read_json(os.path.join(entry["dir"], ENTRY_JSON))
+        stored["lesion"] = portable_lesion_path(entry.get("lesion"), entry_dir(cache_dir, key))
+        with open(os.path.join(folder, ENTRY_JSON), "w", encoding="utf-8") as f:
+            f.write(jobs.to_json(stored) + "\n")
+
+    return _publish_entry(cache_dir, key, build)
+
+
+def _adopt_shared_items(context, items, emit):
+    """Copy the entries found in shared caches into the cache (:func:`_adopt_entry`); a lesion whose entry cannot be
+    copied is computed instead.
+    """
+    for item in items:
+        if not item.get("shared"):
+            continue
+        try:
+            item["entry"] = _adopt_entry(context.cache_dir, item["entry"])
+        except (OSError, ValueError, TypeError) as exc:
+            emit("warning", code="shared_cache", participant_id=item["participant_id"], message=f"The cached maps of {item['participant_id']} could not be copied from {item['entry']['dir']} ({exc}); they are computed again.")
+            item.update({"entry": None, "hit": False, "qa_hit": False, "qa": None})
+        item["shared"] = False
+        if item["entry"] is not None:
+            item["qa"] = read_entry_qa(item["entry"], context.qa_key)
+            item["qa_hit"] = item["qa"] is not None
 
 
 def _emit_unreadable(emit, sid, detail):
     emit("warning", code="unreadable", participant_id=sid, path=detail["path"], message=f"The lesion file of {sid} cannot be mapped and is excluded: {detail['message']} ({detail['path']})")
 
 
-def lookup(lesions, bundle, cache_root=None, subjects=None, random_subset=False, seed=0, subject_list=None, study_path=None, out_dir=None, supersample=2, probabilistic=False, null_relocations=0, null_seed=0, null_voxels=engine.NULL_MAX_VOXELS, brain_mask=None, budget_bytes=None):
+def _study_shared_roots(study):
+    """The map caches of a study's linked control sets (``controlsets.study_maps_cache_roots``); [] when they cannot be read."""
+    from .controlsets import study_maps_cache_roots
+
+    try:
+        return study_maps_cache_roots(study)
+    except (OSError, ValueError, KeyError):
+        return []
+
+
+def lookup(lesions, bundle, cache_root=None, subjects=None, random_subset=False, seed=0, subject_list=None, study_path=None, out_dir=None, supersample=2, probabilistic=False, null_relocations=0, null_seed=0, null_voxels=engine.NULL_MAX_VOXELS, brain_mask=None, budget_bytes=None, shared_cache_roots=None):
     """Look the lesions up in the cache without computing anything (A-04's plan: "N new or changed lesions").
+
+    An entry of a shared cache (``shared_cache_roots``, see the module docstring; default with ``study_path``: the caches
+    of the study's linked control sets) counts as a hit; nothing is copied.
 
     :return: dict with cache_dir, subject_ids_sha256, qa_key, budget_bytes, batch_size, "lesions" (one
       {participant_id, lesion, lesion_sha256, key, hit, qa_hit} per usable lesion), "excluded"
@@ -691,7 +824,9 @@ def lookup(lesions, bundle, cache_root=None, subjects=None, random_subset=False,
       files that cannot be read or parsed), and the counts n, hits, new (lesions without an entry),
       qa_missing and passes (engine passes needed).
     """
-    context = _Context(bundle, subjects, random_subset, seed, subject_list, cache_root, study_path, out_dir, supersample, probabilistic, null_relocations, null_seed, null_voxels, brain_mask, budget_bytes)
+    if shared_cache_roots is None and study_path:
+        shared_cache_roots = _study_shared_roots(study_path)
+    context = _Context(bundle, subjects, random_subset, seed, subject_list, cache_root, study_path, out_dir, supersample, probabilistic, null_relocations, null_seed, null_voxels, brain_mask, budget_bytes, shared_cache_roots)
     items, excluded, details = _lookup_items(context, lesions)
     new_keys = {item["key"] for item in items if not item["hit"]}
     qa_keys = {item["key"] for item in items if item["hit"] and not item["qa_hit"] and context.null_k > 0}
@@ -769,6 +904,42 @@ def read_maps_tsv(path, resolve_paths=True):
                 if column in row:
                     row[column] = resolve_lesion_path(row[column], folder) or row[column]
     return rows
+
+
+def _same_folder(a, b):
+    try:
+        return os.path.normcase(os.path.realpath(os.fspath(a))) == os.path.normcase(os.path.realpath(os.fspath(b)))
+    except (TypeError, ValueError):
+        return False
+
+
+def record_matches_bundle(record, bundle):
+    """Whether the cohortmaps.json ``record`` (as :func:`read_record` returns it) was computed with ``bundle`` (an open
+    ``ConnectomeBundle``, or its folder).
+
+    The maps are of this connectome when their record names the same connectome.json (its sha256: the same connectome in
+    any folder or on any computer) or the same bundle folder (its optional metadata edited in place). A record that names
+    neither (older files) is taken as the bundle's. The cohort folder ``conn-<label>`` is named after the connectome name
+    only, so two connectomes with the same name (or a full connectome and a subset of it) share it: the maps of one must
+    never be taken as the other's.
+    """
+    info = record.get("bundle") if isinstance(record, dict) else None
+    if not isinstance(info, dict):
+        return True
+    manifest, path = info.get("manifest_sha256"), info.get("path")
+    if not manifest and not path:
+        return True
+    bundle_path = getattr(bundle, "path", bundle)
+    if bundle_path is None:
+        return False
+    if path and _same_folder(path, bundle_path):
+        return True
+    if not manifest:
+        return False
+    try:
+        return manifest == file_sha256(os.path.join(os.fspath(bundle_path), "connectome.json"))
+    except OSError:
+        return False
 
 
 def read_record(path):
@@ -853,6 +1024,7 @@ def run(
     argv=None,
     emit=None,
     register=True,
+    shared_cache_roots=None,
 ):
     """Map a cohort of lesions with batched engine passes and the per-lesion cache; write maps.tsv and cohortmaps.json.
 
@@ -862,6 +1034,8 @@ def run(
       or ``subject_list`` (a subset name, a file of ids or ids; see ``ConnectomeBundle.resolve_subject_list``).
     :param cache_root: folder of the cache (the entries go to <cache_root>/conn-<label>_subj-<sha8>/);
       default <study>/derivatives/lnm/cache, or <out_dir>/cache without a study.
+    :param shared_cache_roots: read-only cache roots looked up after ``cache_root``; their entries are copied into the
+      cache. Default (None) with a ``study``: the caches of its linked control sets (``controlsets.study_maps_cache_roots``).
     :param study: optional ``Study`` or study folder: volumes missing from it are posted to its inbox.
     :param cancel: optional ``jobs.CancelToken`` (or any callable/Event); a stopped run raises ``jobs.Cancelled``
       after the batches already finished were published (a rerun or ``resume`` skips them).
@@ -883,6 +1057,8 @@ def run(
         from .study import Study
 
         study_obj = Study.open(study) if isinstance(study, (str, os.PathLike)) else study
+        if shared_cache_roots is None:
+            shared_cache_roots = _study_shared_roots(study_obj)
     context = _Context(
         bundle,
         subjects,
@@ -899,6 +1075,7 @@ def run(
         null_voxels,
         brain_mask,
         budget_bytes,
+        shared_cache_roots,
     )
     bundle = context.bundle
     lock = jobs.OutputLock(os.path.join(out_dir, LOCK_NAME))
@@ -915,6 +1092,7 @@ def run(
         sweep_stale_temporaries(context.cache_dir)
         excluded = {reason: list(sids) for reason, sids in (excluded or {}).items()}
         items, lookup_excluded, details = _lookup_items(context, lesions)
+        _adopt_shared_items(context, items, emit)
         for reason, sids in lookup_excluded.items():
             excluded.setdefault(reason, []).extend(sids)
         n_requested = len(items) + sum(len(sids) for sids in excluded.values())
@@ -979,6 +1157,13 @@ def run(
             _emit_unreadable(emit, sid, detail)
         for reason, sids in excluded.items():
             emit("warning", code="excluded", reason=reason, participants=sids, message=f"{len(sids)} lesion(s) excluded ({reason}): {', '.join(sids[:10])}{' ...' if len(sids) > 10 else ''}")
+        native = _native_space_lesions(items, bundle, study_obj)
+        record["native_space"] = native
+        if native:
+            emit("warning", code="native_space", participants=native, message=(
+                f"{len(native)} lesion(s) may not be in MNI space, but the connectome is: {', '.join(native[:10])}{' ...' if len(native) > 10 else ''}. "
+                "They are not on a known MNI template grid and their headers do not say MNI (or the study records a native space), "
+                "so they are mapped as if they were in MNI space. Normalize native lesions to MNI first."))
 
         # Work: lesions without a valid entry (computed), and entries without QA for these settings
         work, seen = [], set()
@@ -1140,7 +1325,7 @@ def _prepare_item(context, item):
         return None, (EXCLUDED_CHANGED, None)
     try:
         volume, affine, header = _load_lesion(item["lesion"], data)
-        weights, qc = engine.prepare_lesion((volume, affine), context.bundle, supersample=context.supersample, binarize=not context.probabilistic)
+        weights, qc = engine.prepare_lesion((volume, affine), context.bundle, supersample=context.supersample, binarize=not engine.seed_probabilistic(item["lesion"], context.probabilistic))
         qc["xform_disagreement_mm"] = float(xform_disagreement(header))  # reported by _lesion_warnings, not stored
     except LESION_ERRORS as exc:
         return None, (EXCLUDED_UNREADABLE, _unreadable_detail(item["lesion"], exc))
@@ -1255,7 +1440,7 @@ def _compute_batches(context, work, batches, state, cancel, emit, started):
                 build = functools.partial(
                     _write_entry_files,
                     key=item["key"],
-                    key_fields=context.key_fields(item["lesion_sha256"]),
+                    key_fields=context.key_fields(item["lesion_sha256"], item["lesion"]),
                     maps=maps,
                     index=column,
                     bundle=bundle,
@@ -1312,6 +1497,7 @@ def main(argv=None):
     parser.add_argument("--seed", type=int, default=0, help="random seed for --random")
     parser.add_argument("--subject-list", default=None, metavar="SPEC", help="a named subset of the bundle, a text file of subject ids or a comma-separated list of ids")
     parser.add_argument("--cache", default=None, help="cache folder (default: <study>/derivatives/lnm/cache, or <out>/cache without a study)")
+    parser.add_argument("--shared-cache", action="append", default=[], metavar="DIR", help="another cache folder whose entries are reused (copied into the cache); repeatable. With --study, the caches of the study's linked control sets are added")
     parser.add_argument("--budget-gb", type=float, default=None, help="memory budget of one engine pass in GB (default: min(25%% of the memory, 4 GB))")
     parser.add_argument("--include-unreviewed", action="store_true", help="also map lesions that review has not approved when the study requires review")
     parser.add_argument("--probabilistic", action="store_true", help="use lesion image values as weights instead of binarizing")
@@ -1339,9 +1525,10 @@ def main(argv=None):
 
             study = Study.open(args.study)
             lesions, excluded = study_lesions(study, args.include_unreviewed, lesions)
+            shared = [*_study_shared_roots(study), *args.shared_cache]
             review = {"required": study.review_required, "include_unreviewed": bool(args.include_unreviewed)}
         else:
-            study = None
+            study, shared = None, list(args.shared_cache)
     except (OSError, ValueError, KeyError) as exc:
         raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None
     options = {
@@ -1357,6 +1544,7 @@ def main(argv=None):
         "null_voxels": args.null_voxels,
         "brain_mask": args.brain_mask,
         "budget_bytes": _budget_bytes(args.budget_gb),
+        "shared_cache_roots": shared,
     }
     try:
         if args.dry_run:

@@ -63,6 +63,14 @@ public slots:
   void processEvents(qSlicerCoreApplication* app) { app->processEvents(); }
 
   //----------------------------------------------------------------------------
+  // Whether handleCommandLineArguments() passes the files and URLs given on the command line to
+  // handleURIArguments(). A module that loads them itself turns it off before the event loop starts.
+  bool isURIArgumentHandlingEnabled(qSlicerCoreApplication* app) { return app->isURIArgumentHandlingEnabled(); }
+
+  //----------------------------------------------------------------------------
+  void setURIArgumentHandlingEnabled(qSlicerCoreApplication* app, bool enabled) { app->setURIArgumentHandlingEnabled(enabled); }
+
+  //----------------------------------------------------------------------------
   // qSlicerUtils
 
   //----------------------------------------------------------------------------

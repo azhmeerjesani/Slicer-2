@@ -175,7 +175,7 @@ class Download:
             os.makedirs(os.path.dirname(os.path.abspath(self.dest)), exist_ok=True)
             self._file = open(self.partPath, "wb")
         except OSError as e:
-            self._fail(_("Cannot write {path}: {reason}").format(path=self.partPath, reason=e.strerror or str(e)))
+            self._fail(self._cannotWrite(e))
             return
         request = qt.QNetworkRequest(qt.QUrl(self.url))
         request.setAttribute(qt.QNetworkRequest.RedirectPolicyAttribute, qt.QNetworkRequest.NoLessSafeRedirectPolicy)
@@ -212,8 +212,11 @@ class Download:
 
     def _closeAndRemovePartFile(self):
         if self._file is not None:
-            self._file.close()
-            self._file = None
+            file, self._file = self._file, None
+            try:
+                file.close()
+            except OSError:
+                pass  # a full disk makes the last flush fail; the file is removed anyway
         if os.path.exists(self.partPath):
             try:
                 os.remove(self.partPath)
@@ -225,7 +228,14 @@ class Download:
             return
         data = self._reply.readAll()
         if data.size() > 0:
-            self._file.write(data.data())
+            try:
+                self._file.write(data.data())
+            except OSError as e:
+                # Disk full (or the folder went away): stop the transfer now instead of downloading the rest into a
+                # truncated file that would then be reported as "damaged (checksum mismatch)".
+                self._releaseReply(abort=True)
+                self._closeAndRemovePartFile()
+                self._fail(self._cannotWrite(e))
 
     def _onDownloadProgress(self, bytesReceived, bytesTotal):
         self.bytesReceived = int(bytesReceived)
@@ -237,15 +247,26 @@ class Download:
         if reply is None or self.state != "running":
             return
         self._onReadyRead()
+        if self.state != "running":
+            return  # writing the last data failed: already reported
         error = reply.error()
         errorString = reply.errorString()
         status = reply.attribute(qt.QNetworkRequest.HttpStatusCodeAttribute)
         self._releaseReply()
         if self._file is not None:
-            self._file.close()
-            self._file = None
+            file, self._file = self._file, None
+            try:
+                file.close()  # flushes the last buffered data, which fails on a full disk
+            except OSError as e:
+                self._closeAndRemovePartFile()
+                self._fail(self._cannotWrite(e))
+                return
         if error != qt.QNetworkReply.NoError:
             self._closeAndRemovePartFile()
+            if error in (qt.QNetworkReply.OperationCanceledError, qt.QNetworkReply.TimeoutError):
+                # cancel() disconnects finished() before it aborts, so the only way to get here is the transfer timeout
+                # (Qt reports that as "Operation canceled", which reads as if the user had cancelled).
+                errorString = _("the server did not answer (timed out)")
             self._fail(_("Download failed: {reason}").format(reason=errorString))
             return
         if status is not None and int(status) >= 400:
@@ -263,10 +284,16 @@ class Download:
             os.replace(self.partPath, self.dest)
         except OSError as e:
             self._closeAndRemovePartFile()
-            self._fail(_("Cannot write {path}: {reason}").format(path=self.dest, reason=e.strerror or str(e)))
+            self._fail(self._cannotWrite(e))
             return
         self.state = "done"
         self.finished.emit(self.dest)
+
+    def _cannotWrite(self, error):
+        """The failure in plain words, naming the folder: not the error number nor the internal ".part" file."""
+        folder = os.path.dirname(os.path.abspath(self.dest))
+        return _("Cannot save the download in the folder {folder}: {reason}").format(
+            folder=os.path.basename(folder) or folder, reason=(error.strerror or str(error)).strip())
 
     def _fail(self, message):
         self.state = "failed"

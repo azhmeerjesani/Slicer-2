@@ -32,6 +32,7 @@ This module imports neither numpy nor xml: ``autosave_io`` and ``recovery`` are 
 """
 
 import contextlib
+import json
 import logging
 import os
 import sys
@@ -41,12 +42,15 @@ import uuid
 
 import qt
 import slicer
+import vtk
 from slicer.i18n import tr as _
 
 #: Delay after startupCompleted before the menu actions, the settings panel and the poll timer are installed
 INSTALL_DELAY_MS = 1000
 #: Delay after startupCompleted before the autosave folder is scanned for sessions to recover
 SCAN_DELAY_MS = 1500
+#: project messages that are given once (``_announceLockedOnce``, ``_announceRootFailedOnce``): kept until there is an announcer
+_ANNOUNCED_ONCE = ("locked", "root-failed")
 POLL_INTERVAL_MS = 3000
 #: Poll interval while the scene is modified and the service waits for the user to be idle: changes and input are
 #: then timed to about 1 s, and the generation starts IdleSeconds after the last one (acceptance: within IdleSeconds + 3 s)
@@ -58,6 +62,18 @@ HEARTBEAT_S = 600
 #: Autosaving pauses this long after a disk error
 ERROR_RETRY_S = 600
 THUMBNAIL_INTERVAL_S = 300
+
+
+def _clock():
+    """Seconds on a clock that never goes back: for idle time, rate limits and retry delays.
+
+    ``time.time()`` jumps when the wall clock is corrected (NTP, a manual change, a resumed VM). After a jump back,
+    ``now - lastGenerationTime`` stays negative for as long as the jump, so no autosave would run. ``time.time()`` stays in use
+    only for times that are shown or stored (``lastSaveTime``, session and manifest files).
+    """
+    return time.monotonic()
+
+
 THUMBNAIL_SIZE = 240
 #: Main-thread budget left in a tick for a thumbnail
 THUMBNAIL_BUDGET_MS = 15
@@ -74,7 +90,11 @@ MAX_CLOSED_SLOTS = 2
 FINAL_GENERATION_BUDGET_MS = 300
 #: Estimated main-thread write speed, for that estimate (raw C++ NRRD writes run at 2-3 GB/s)
 _ESTIMATED_WRITE_BYTES_PER_MS = 500 * 1024
+#: The private recovery autosave (A-01) pauses while less than max(this, 2 x the estimate) is free on the disk
 MIN_FREE_BYTES = 1 << 30
+#: Saving a project is the user's actual saving (D-A16), so it never has that floor: it needs 2 x the estimate (atomic
+#: writes keep the old file until the new one is complete) plus this margin for the scene file and project.json
+PROJECT_FREE_MARGIN_BYTES = 1 << 20
 #: While the autosave folder is larger than MaxDiskMB, the retention rules run again at most this often
 RUNTIME_PRUNE_INTERVAL_S = 600
 #: A synchronous save of a project (Save now, closing, quitting) shows a progress dialog after this many seconds ...
@@ -102,6 +122,19 @@ def isDisabledByEnvironment():
     return slicer.util.mainWindow() is None
 
 
+#: Set to 1 by the web launcher's ``local`` mode, which stops Slicer with SIGTERM (Ctrl+C, ``stop``) like the container
+STOP_ON_SIGTERM_ENVIRONMENT = "SLICER_STUDIO_STOP_ON_SIGTERM"
+
+
+def quitsOnStopSignal():
+    """True when SIGTERM must quit as File > Exit does (the open project is saved): the web build (``docker stop``) and the
+    web launcher's ``local`` mode (``SLICER_STUDIO_STOP_ON_SIGTERM=1``).
+    """
+    from StudioLib import projects
+
+    return projects.isWebBuild() or os.environ.get(STOP_ON_SIGTERM_ENVIRONMENT) == "1"
+
+
 def onStartupCompleted():
     """Start the autosave service (called by the Studio module after the application started)."""
     global _service
@@ -109,6 +142,10 @@ def onStartupCompleted():
         return
     _service = AutosaveService()
     _service.start()
+    if quitsOnStopSignal():
+        # The web launcher (Ctrl+C, local or Docker) and the container (docker stop) stop Slicer with SIGTERM: quit as
+        # File > Exit does
+        _service.installStopSignalHandler()
     # The Studio surfaces were installed before the service existed (the folder chooser, A-09, or the update check came
     # first): connect them now
     for name in ("StudioLib.autosave_ui", "StudioLib.projects_ui"):
@@ -119,6 +156,115 @@ def onStartupCompleted():
                 plugin.attach()
             except Exception:
                 logging.error(f"Autosave: {name} could not be connected:\n" + traceback.format_exc())
+
+
+class StopSignalHandler:
+    """Calls ``onStop()`` on the main thread when the process receives SIGTERM (POSIX; nothing elsewhere).
+
+    Python runs a signal handler only when it next executes Python code, and the Qt event loop may run no Python code for
+    minutes: the signal number is therefore also written to a socket (``signal.set_wakeup_fd``) that a
+    ``QSocketNotifier`` watches, which wakes the event loop at once. Without a notifier (its signal cannot be connected),
+    a timer looks for the signal twice a second.
+    """
+
+    POLL_MS = 500
+
+    def __init__(self, onStop):
+        self._onStop = onStop
+        self._sockets = None
+        self._notifier = None
+        self._timer = None
+        self._previousHandler = None
+        self._previousWakeupFd = -1
+        self._pending = False
+        self._installed = False
+
+    def install(self):
+        """Return True if the handler is installed (False on Windows or outside the main thread)."""
+        import signal
+        import socket
+
+        if self._installed or not hasattr(signal, "SIGTERM") or not hasattr(socket, "socketpair") or os.name != "posix":
+            return self._installed
+        try:
+            reader, writer = socket.socketpair()
+            reader.setblocking(False)
+            writer.setblocking(False)
+            self._previousWakeupFd = signal.set_wakeup_fd(writer.fileno(), warn_on_full_buffer=False)
+            self._previousHandler = signal.signal(signal.SIGTERM, self._onSignal)
+        except (ValueError, OSError):  # not the main thread of the main interpreter
+            logging.warning("Slicer Studio: SIGTERM cannot be handled:\n" + traceback.format_exc())
+            return False
+        self._sockets = (reader, writer)
+        self._installed = True
+        try:
+            self._notifier = qt.QSocketNotifier(reader.fileno(), qt.QSocketNotifier.Read)
+            self._notifier.activated.connect(lambda *args: self._onReadable())
+        except Exception:
+            self._notifier = None
+            self._timer = qt.QTimer()
+            self._timer.setInterval(self.POLL_MS)
+            self._timer.connect("timeout()", self._onReadable)
+            self._timer.start()
+        return True
+
+    def uninstall(self):
+        import signal
+
+        if not self._installed:
+            return
+        self._installed = False
+        if self._notifier is not None:
+            self._notifier.setEnabled(False)
+            self._notifier = None
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+        try:
+            signal.signal(signal.SIGTERM, self._previousHandler if self._previousHandler is not None else signal.SIG_DFL)
+            signal.set_wakeup_fd(self._previousWakeupFd)
+        except (ValueError, OSError):
+            pass
+        for sock in self._sockets:
+            sock.close()
+        self._sockets = None
+
+    def _onSignal(self, signum, frame):
+        # Runs between two Python statements on the main thread: the stop itself is left to the event loop
+        self._pending = True
+
+    def _onReadable(self):
+        import signal
+
+        received = b""
+        try:
+            while True:
+                data = self._sockets[0].recv(256)
+                if not data:
+                    break
+                received += data
+        except (BlockingIOError, InterruptedError, OSError, TypeError):
+            pass
+        if not (self._pending or signal.SIGTERM in received):
+            return
+        self._pending = False
+        try:
+            self._onStop()
+        except Exception:
+            logging.error("Slicer Studio: stopping after SIGTERM failed:\n" + traceback.format_exc())
+
+
+# Holders (any hashable key) that keep the next poll from saving a scan that was just loaded: Studio's watcher of loads
+# in the DICOM module holds it until it has checked the scan (a damaged series is removed again, not saved as a project)
+_loadHolds = set()
+
+
+def holdNewLoad(key, held=True):
+    """Hold (``held``) or release project creation and autosave for ``key`` while a load is still being checked."""
+    if held:
+        _loadHolds.add(key)
+    else:
+        _loadHolds.discard(key)
 
 
 @contextlib.contextmanager
@@ -145,9 +291,33 @@ def unsavedSummary():
     return _service.unsavedSummary() if _service is not None else ""
 
 
+def ensureProject():
+    """Create the project of the user's data now if there is none yet. Return the open project, or None."""
+    return _service.ensureProject() if _service is not None else None
+
+
 def saveNow(reason="save", progress=True):
     """Save the open project now (Ctrl+S). Return True if everything is saved; False without a project or on failure."""
     return _service.saveNow(reason, progress=progress) if _service is not None else False
+
+
+def _relocateSavedLesions(oldFolder, newFolder):
+    """Draw's Save lesion follows a moved folder (only when Draw was loaded: else it saved nothing in this session)."""
+    draw = sys.modules.get("StudioLib.draw")
+    if draw is None or not hasattr(draw, "relocateSavedLesions"):
+        return
+    try:
+        draw.relocateSavedLesions(oldFolder, newFolder)
+    except Exception:
+        logging.error("Slicer Studio: following the moved folder for Save lesion failed:\n" + traceback.format_exc())
+
+
+def _followSavedLesions(movedPath):
+    """Draw's Save lesion follows the lesions that moved (``movedPath(path)`` is the new path of ``path``)."""
+    draw = sys.modules.get("StudioLib.draw")
+    if draw is None or not hasattr(draw, "followMovedLesions"):
+        return
+    draw.followMovedLesions(movedPath)
 
 
 def _io():
@@ -160,6 +330,62 @@ def _recovery():
     from StudioLib import recovery
 
     return recovery
+
+
+def _dataFileCutShort(storageNode):
+    """True if the file that ``storageNode`` read is a NIfTI, NRRD or MetaImage image whose data stops before the end that
+    its header announces (logged with the byte counts). The readers zero-fill the missing voxels and report success, so a
+    scene or project load would open the damaged image silently (a lesion with part of its volume missing).
+    """
+    try:
+        path = storageNode.GetFullNameFromFileName() or storageNode.GetFileName()
+    except Exception:
+        return False
+    if not path:
+        return False
+    try:
+        from StudioLib import importer
+
+        shortfall = importer._niftiDataShortfall(path) or importer._nrrdMhaDataShortfall(path)
+    except Exception:
+        logging.info(f"Slicer Studio: the data of {os.path.basename(path)} could not be checked:\n{traceback.format_exc()}")
+        return False
+    if shortfall is None:
+        return False
+    logging.warning(f"Slicer Studio: {os.path.basename(path)} is damaged: its image data stops after {shortfall[0]:,} of "
+                    f"the {shortfall[1]:,} bytes that its header announces; it is left out and the file is left as it is")
+    return True
+
+
+def _sceneFileParses(path):
+    """True if the scene file ``path`` is well-formed XML (or cannot be checked). A scene file that was cut short (an
+    interrupted save, a sync conflict) does not parse: vtkMRMLScene::Import then reads no node at all ("Syntax error in
+    scene file"), which is not a project without data. The same parser (expat) as vtkMRMLParser.
+    """
+    from xml.parsers import expat
+
+    try:
+        with open(path, "rb") as file:
+            expat.ParserCreate().ParseFile(file)
+    except expat.ExpatError:
+        return False
+    except Exception:
+        return True  # not readable now (gone, permissions): not known to be damaged
+    return True
+
+
+def _bundleIsReadable(path):
+    """False if the .mrb ``path`` exists but is not a zip archive (a text file, a cut-short download): Slicer's loader would
+    answer with raw "No URL specified" errors. True if it is a zip or cannot be checked.
+    """
+    import zipfile
+
+    try:
+        with open(path, "rb"):
+            pass
+        return zipfile.is_zipfile(path)
+    except Exception:
+        return True
 
 
 class AutosaveStatus:
@@ -205,11 +431,12 @@ class AutosaveService:
         self.plan = None
         self.slots = {}
         self._savedFingerprint = None
+        self._savedViewState = None
         self._lastPolledFingerprint = None
         self.dirty = False
         self.firstDirtyTime = None
-        self.lastChangeTime = time.time()
-        self.lastInputTime = time.time()
+        self.lastChangeTime = _clock()
+        self.lastInputTime = _clock()
         self.lastGenerationTime = None
         self._lastPollTime = None
         self._nextPollMs = None
@@ -221,13 +448,13 @@ class AutosaveService:
         self._protectedSlots = set()
         #: size of the other sessions of the autosave folder (measured by the retention rules)
         self._otherSessionsBytes = 0
-        self._lastRuntimePrune = 0.0
+        self._lastRuntimePrune = float("-inf")
         self._lastCursor = None
         self._modalSince = None
         self._pausedUntil = 0.0
         self._suspendCount = 0
         self._recovering = 0
-        self._lastThumbnailTime = 0.0
+        self._lastThumbnailTime = float("-inf")
         self._lastUnsavedAutosaved = False
         self._statusListeners = []
         self._contextProviders = []
@@ -238,19 +465,44 @@ class AutosaveService:
         self._planObservations = []
         self._installed = False
         self._quitting = False
+        #: True when SIGTERM stopped the application (``installStopSignalHandler()``)
+        self._stoppedBySignal = False
+        self._stopSignalHandler = None
         #: the open project (A-09) and its writer; None without a project
         self.project = None
         self.projectWriter = None
         self._projectPresenter = None
         self._pendingProjectRecoveries = []
+        #: {path the crash offer was made with: where that project is now} (Change folder > Move follows it)
+        self._recoveryPaths = {}
         self._lastProjectCheck = None
+        self._projectRetryAt = 0.0  # when a project whose creation failed (full disk) is tried again
+        #: projects (normalized paths) whose "open in another Slicer Studio" warning was shown while retrying to attach
+        self._lockedAnnounced = set()
+        #: projects (normalized paths) whose scene was read while another Slicer Studio had them open:
+        #: ``autosave_io.projectFileStats()`` of their files as they were then (see ``_projectReadStats``)
+        self._readStats = {}
+        #: Slicer Studio folders (normalized paths) whose "cannot be written" message was shown while projects could not be created
+        self._rootFailedAnnounced = set()
         self._projectPausedReason = ""
         #: tests: True/False replaces the "Studio is shown" condition of creating projects (None: ask the shell)
         self.studioActiveOverride = None
         self._closeSummaryConnected = False
         self._projectAnnouncer = None
+        #: warnings of the project engine given once (``_ANNOUNCED_ONCE``) before ``setProjectAnnouncer()`` (a scene opened
+        #: from the command line is loaded before the service installs its user interface): [(event, project, info)], shown
+        #: once it is set
+        self._pendingAnnouncements = []
         self._pendingSceneSource = None
+        #: (project folder, source scene file, its size and mtime) of the open project that is a copy of a scene file from
+        #: outside Projects; in memory only (no local path is written anywhere)
+        self._copySource = None
         self._forceProjectOpen = False
+        #: the user chose to replace the open project without saving it (its save failed): the next scene close does not save
+        self._discardOnClose = False
+        self._sceneUnread = None  # names of the nodes the running scene load left out (loadSceneLeavingOutUnread)
+        #: the scene file that the last scene load could not read (damaged): openProject does not open its project
+        self._unreadableScene = None
         self._lastProjectPlan = None
         #: (project folder, ``thumbnails.ProjectThumbnailSource.key``) of the last project thumbnail (V-02)
         self._projectThumbnailKey = None
@@ -281,27 +533,55 @@ class AutosaveService:
         qt.QTimer.singleShot(SCAN_DELAY_MS, self.scanAtStartup)
         slicer.app.connect("aboutToQuit()", self._onAboutToQuit)
 
+    def _installSettingsPanel(self):
+        from StudioLib import autosave_settings
+
+        autosave_settings.install(self)
+
+    def _attachProjectsUI(self):
+        from StudioLib import projects_ui
+
+        projects_ui.attachService(self)
+
     def _install(self):
-        try:
-            self.reloadSettings()
-            self.installActions()
-            self.registerPaletteProvider()
-            from StudioLib import autosave_settings
-
-            autosave_settings.install(self)
-            self.connectCloseSummary()
-            from StudioLib import projects_ui
-
-            projects_ui.attachService(self)
-        except Exception:
-            logging.error("Autosave: installing the user interface failed:\n" + traceback.format_exc())
+        # Each step on its own: one that fails (for example a Qt 6 binding difference) does not skip the others
+        for step in (self.reloadSettings, self.installActions, self.registerPaletteProvider, self._installSettingsPanel,
+                     self.connectCloseSummary, self._attachProjectsUI):
+            try:
+                step()
+            except Exception:
+                logging.error(f"Autosave: installing the user interface failed ({step.__name__}):\n" + traceback.format_exc())
         # Changes before the first poll are counted from now
-        self._lastPollTime = time.time()
+        self._lastPollTime = _clock()
         self._pollTimer.start()
         self._heartbeatTimer.start()
 
+    def installStopSignalHandler(self):
+        """SIGTERM quits the application as File > Exit does, so ``aboutToQuit`` saves the open project (web build: the
+        launcher's Ctrl+C and ``docker stop`` send SIGTERM). The private recovery session is left as after a crash (SPEC
+        9.9: ``docker stop`` counts as a crash). Return True if the handler is installed.
+        """
+        if self._stopSignalHandler is None:
+            self._stopSignalHandler = StopSignalHandler(self._onStopSignal)
+        return self._stopSignalHandler.install()
+
+    def _onStopSignal(self):
+        if self._quitting:
+            return
+        logging.info("Slicer Studio: SIGTERM received; quitting (the open project is saved).")
+        self._stoppedBySignal = True
+        self._exitApplication()
+
+    @staticmethod
+    def _exitApplication():
+        # exit(), not quit(): no window is asked to close (Qt 6 quit() would show the close prompt of the main window)
+        slicer.app.exit(0)
+
     def dispose(self):
         """Stop the timers and remove the observers (tests)."""
+        if self._stopSignalHandler is not None:
+            self._stopSignalHandler.uninstall()
+            self._stopSignalHandler = None
         for timer in (self._pollTimer, self._tickTimer, self._heartbeatTimer):
             timer.stop()
         if self.plan is not None and self._planWriter(self.plan) is not None:
@@ -312,7 +592,16 @@ class AutosaveService:
         if self._closeSummaryConnected:
             mainWindow = slicer.util.mainWindow()
             if mainWindow is not None:
-                mainWindow.disconnect("closeSummaryRequested()", self.flushForClose)
+                mainWindow.disconnect("closeSummaryRequested()", self._onCloseSummaryRequested)
+                if hasattr(mainWindow, "closeSceneSummaryRequested"):
+                    mainWindow.disconnect("closeSceneSummaryRequested()", self._onCloseSceneSummaryRequested)
+                if hasattr(mainWindow, "loadSceneRequested") and hasattr(mainWindow, "loadSceneFinished"):
+                    mainWindow.disconnect("loadSceneRequested()", self._onLoadSceneRequested)
+                    mainWindow.disconnect("loadSceneFinished()", self._onLoadSceneFinished)
+            ioManager = slicer.app.coreIOManager()
+            if hasattr(ioManager, "clearSceneRequested") and hasattr(ioManager, "clearSceneFinished"):
+                ioManager.disconnect("clearSceneRequested()", self._onClearSceneRequested)
+                ioManager.disconnect("clearSceneFinished()", self._onLoadSceneFinished)
             self._closeSummaryConnected = False
         self._removeObservers()
         self._removePlanObservers()
@@ -332,8 +621,10 @@ class AutosaveService:
         recoverAction.connect("triggered()", self.showRecoveryDialog)
         fileMenu = mainWindow.findChild(qt.QMenu, "FileMenu")
         if fileMenu is not None:
+            from . import shell as shellModule
+
             actions = list(fileMenu.actions())
-            recent = [action for action in actions if action.menu() is not None]
+            recent = [action for action in actions if shellModule.actionMenu(action) is not None]
             # After the "Recent" submenu (Add Data, Add DICOM Data, Recent, ...)
             before = None
             if recent:
@@ -451,7 +742,7 @@ class AutosaveService:
                 self._pollTimer.start(interval)
 
     def _poll(self):
-        now = time.time()
+        now = _clock()
         previousPoll = getattr(self, "_lastPollTime", None) or now
         self._lastPollTime = now
         # When a change or input happened: between the previous poll and this one. After the fast polls that run
@@ -488,7 +779,7 @@ class AutosaveService:
         if dirty != self.dirty:
             self.dirty = dirty
             self._updateStatus()
-        if not dirty or now < self._pausedUntil or self._suspendCount > 0:
+        if not dirty or now < self._pausedUntil or self._suspendCount > 0 or _loadHolds:
             return
         if not self._hasStorableData(scene):
             return
@@ -517,6 +808,7 @@ class AutosaveService:
         """True if the scene has data stored in files (not only views and cameras, which are storable nodes too)."""
         io = _io()
         nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         for index in range(nodes.GetNumberOfItems()):
             node = nodes.GetItemAsObject(index)
             if node.GetSaveWithScene() and not node.GetHideFromEditors() and (node.GetStorageNode() is not None or io.defaultStorageNodeClassName(node)):
@@ -611,11 +903,16 @@ class AutosaveService:
         options.update(self.writerOptionsOverride)
         return options
 
+    def _pauseForOSError(self, error):
+        """Pause with the reason in plain words (no error number, no session path): the autosave folder cannot be written."""
+        reason = plainOSErrorIn(error, self.root)
+        self._pause(_("Autosave paused: the autosave folder cannot be written ({reason}).").format(reason=reason))
+
     def _startGeneration(self, reason, fingerprint, synchronous=False, mainThreadOnly=False, ignoreBusy=False):
         if self.project is not None:
             return self._startProjectGeneration(reason, fingerprint, synchronous=synchronous, ignoreBusy=ignoreBusy, force=synchronous)
         io = _io()
-        now = time.time()
+        now = _clock()
         try:
             self._ensureSession()
             writer = self._slotWriter()
@@ -626,7 +923,7 @@ class AutosaveService:
         except io.GenerationAborted:
             return False
         except OSError as error:
-            self._pause(_("Autosave paused: {error}").format(error=error))
+            self._pauseForOSError(error)
             return False
         except Exception:
             logging.error("Autosave: planning failed:\n" + traceback.format_exc())
@@ -636,7 +933,7 @@ class AutosaveService:
         estimated = sum(job.entry.get("bytes") or 0 for job in plan.jobs if hasattr(job, "entry"))
         if not self._enoughSpace(estimated):
             writer.abort(plan, "not enough disk space")
-            self._pause(_("Autosave paused: less than {size} free on the disk.").format(size=_formatBytes(max(MIN_FREE_BYTES, 2 * estimated))))
+            self._pause(_("Autosave paused: less than {size} free on the disk.").format(size=_formatBytes(_requiredFreeBytes(estimated))))
             return False
         if mainThreadOnly:
             self._dropSnapshotJobs(plan)
@@ -680,10 +977,20 @@ class AutosaveService:
             writer.executor.drain(30.0)
             result = writer.finalize(plan)
             writer._finished(plan, result)
+        except OSError as error:
+            writer.abort(plan, str(error))
+            self.plan = None
+            self._removePlanObservers()
+            if isinstance(plan, _io().ProjectPlan):
+                self._projectFailed(plainOSError(error))
+            else:
+                self._pauseForOSError(error)
+            return False
         except Exception as error:
             writer.abort(plan, str(error))
             self.plan = None
             self._removePlanObservers()
+            self._setState("error", _("Autosave failed (see the error log)."))
             logging.error("Autosave: final generation failed:\n" + traceback.format_exc())
             return False
         self._generationDone(plan)
@@ -717,7 +1024,11 @@ class AutosaveService:
             return
         except OSError as error:
             self._abortGeneration(str(error))
-            self._pause(_("Autosave paused: {error}").format(error=error))
+            if isinstance(plan, io.ProjectPlan):
+                # A project that could not be saved (a full disk): "Not saved" with the reason, as for Save now
+                self._projectFailed(plainOSError(error))
+            else:
+                self._pauseForOSError(error)
             return
         except Exception:
             logging.error("Autosave: writing failed:\n" + traceback.format_exc())
@@ -767,7 +1078,7 @@ class AutosaveService:
             self._projectFailed(message)
             return
         if isinstance(error, OSError):
-            self._pause(_("Autosave paused: {error}").format(error=message))
+            self._pauseForOSError(error)
         else:
             logging.error(f"Autosave generation failed: {message}")
             self._setState("error", _("Autosave failed (see the error log)."))
@@ -792,7 +1103,7 @@ class AutosaveService:
         if not plan.incomplete:
             self._savedFingerprint = plan.fingerprint
         self.dirty = _io().sceneFingerprint(slicer.mrmlScene, _io().sentinelIds()) != self._savedFingerprint
-        self.firstDirtyTime = time.time() if self.dirty else None
+        self.firstDirtyTime = _clock() if self.dirty else None
         self._lastUnsavedAutosaved = plan.unsaved
         slot = self.slots.setdefault(self.slotName(), {"name": self.slotName(), "state": "current"})
         slot.update({
@@ -812,17 +1123,17 @@ class AutosaveService:
         if plan.wroteData:
             self._showClassicStatusMessage()
 
-    def _enoughSpace(self, estimatedBytes, folder=None):
+    def _enoughSpace(self, estimatedBytes, folder=None, project=False):
         import shutil
 
         try:
             free = shutil.disk_usage(folder or self.sessionDir or self.rootDirectory()).free
         except OSError:
             return True
-        return free >= max(MIN_FREE_BYTES, 2 * estimatedBytes)
+        return free >= _requiredFreeBytes(estimatedBytes, project)
 
-    def _pause(self, message):
-        self._pausedUntil = time.time() + ERROR_RETRY_S
+    def _pause(self, message, retrySeconds=ERROR_RETRY_S):
+        self._pausedUntil = _clock() + retrySeconds
         self._setState("paused", message)
         logging.warning(message)
 
@@ -857,11 +1168,11 @@ class AutosaveService:
             # Projects render their thumbnails from the image arrays in the background (``_queueProjectThumbnail()``)
             return False
         path = getattr(plan, "thumbnailPath", None) or os.path.join(plan.slotDir, _io().THUMBNAIL_FILE)
-        return time.time() - self._lastThumbnailTime >= THUMBNAIL_INTERVAL_S or not os.path.exists(path)
+        return _clock() - self._lastThumbnailTime >= THUMBNAIL_INTERVAL_S or not os.path.exists(path)
 
     def _updateThumbnail(self, plan):
         """Thumbnail of the first visible slice view: at most every 5 min, never a network map (LNM blinding)."""
-        now = time.time()
+        now = _clock()
         io = _io()
         path = getattr(plan, "thumbnailPath", None) or os.path.join(plan.slotDir, io.THUMBNAIL_FILE)
         try:
@@ -908,6 +1219,7 @@ class AutosaveService:
     #
 
     def _onSceneStartClose(self, caller=None, event=None):
+        self._readStats.clear()  # the scene that was read from those files is gone
         try:
             self._closeSlot()
         except Exception:
@@ -949,6 +1261,7 @@ class AutosaveService:
         entries = self.writer.entries if self.writer is not None else {}
         total = 0.0
         nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         for index in range(nodes.GetNumberOfItems()):
             node = nodes.GetItemAsObject(index)
             if not node.GetSaveWithScene() or not node.GetModifiedSinceRead():
@@ -981,7 +1294,7 @@ class AutosaveService:
         self.firstDirtyTime = None
         self.lastGenerationTime = None
         self._lastUnsavedAutosaved = False
-        self._lastThumbnailTime = 0.0
+        self._lastThumbnailTime = float("-inf")
         self._updateStatus()
 
     def _onSceneStartImport(self, caller=None, event=None):
@@ -1040,6 +1353,14 @@ class AutosaveService:
         if self.plan is not None:
             self._abortGeneration("exit")
         writer.drain(3.0)
+        if self._stoppedBySignal:
+            # SIGTERM (docker stop) counts as a crash for the private recovery session (SPEC 9.9): its session.json stays
+            # "running", so the next start offers its last autosave
+            self._removeObservers()
+            if self._lock is not None:
+                self._lock.unlock()
+                self._lock = None
+            return
         scene = slicer.mrmlScene
         unsaved = bool(scene.GetStorableNodesModifiedSinceRead()) and self._hasStorableData(scene)
         if unsaved and self.enabled():
@@ -1113,7 +1434,7 @@ class AutosaveService:
             sessions = recovery.scan(self.rootDirectory(), self.sessionId)
             self._pendingRecoveries = [s for s in sessions if s.presentable()]
             toPresent = [s for s in self._pendingRecoveries if s.presentedCount < 2]
-            self._lastRuntimePrune = time.time()
+            self._lastRuntimePrune = _clock()
             recovery.pruneInBackground(self.rootDirectory(), sessions, self.settings, onDone=self._onPruned,
                                        protectedPaths=self._protectedSlots)
             if toPresent:
@@ -1123,6 +1444,19 @@ class AutosaveService:
                 presenter(toPresent, startup=True)
         except Exception:
             logging.error("Autosave: scanning for recoverable sessions failed:\n" + traceback.format_exc())
+        try:
+            # Before the crash scan: the open project of an interrupted move is in the new folder
+            self.finishInterruptedMove()
+        except Exception:
+            logging.error("Slicer Studio: finishing an interrupted move failed:\n" + traceback.format_exc())
+        try:
+            self.removeInterruptedCopies()
+        except Exception:
+            logging.error("Slicer Studio: deleting the copies of interrupted Duplicates failed:\n" + traceback.format_exc())
+        try:
+            self.removeUnsavedProjects()
+        except Exception:
+            logging.error("Slicer Studio: deleting the project folders that never got a save failed:\n" + traceback.format_exc())
         try:
             self.scanProjectsAtStartup()
         except Exception:
@@ -1170,7 +1504,7 @@ class AutosaveService:
         if self.root is None:
             return
         cap = int(self.settings.get("MaxDiskMB", 2048)) << 20
-        now = time.time()
+        now = _clock()
         if self._status.bytes + self._otherSessionsBytes <= cap or now - self._lastRuntimePrune < RUNTIME_PRUNE_INTERVAL_S:
             return
         self._lastRuntimePrune = now
@@ -1218,23 +1552,104 @@ class AutosaveService:
         self._projectPresenter = presenter
 
     def setProjectAnnouncer(self, announcer):
-        """``announcer(event, project, **info)``: "created", "copy", "opened", "locked", "conflict", "failed", "saved"."""
+        """``announcer(event, project, **info)``: "created", "copy", "copy-incomplete", "opened", "locked", "read-only",
+        "conflict", "failed", "not-opened", "saved".
+
+        The warnings given once (``_ANNOUNCED_ONCE``: "locked" per project, "root-failed" per folder) before it was set (a
+        scene opened from the command line or by Open With is loaded within the first second, before ``_install()``) are
+        given to it now: dropped, they would never be seen.
+        """
         self._projectAnnouncer = announcer
+        pending, self._pendingAnnouncements = self._pendingAnnouncements, []
+        if announcer is not None:
+            for event, project, info in pending:
+                self._announce(event, project, **info)
 
     def pendingProjectRecoveries(self):
         """Projects of a session that closed unexpectedly (found at startup), as ``projects.ProjectInfo``."""
         return list(self._pendingProjectRecoveries)
+
+    def recoveryPath(self, path):
+        """Where the project that a crash offer named ``path`` is now: the offer outlives Change folder > Move, which
+        moves the project (maybe under another name) while the offer, the card or the box is still shown.
+        """
+        return self._recoveryPaths.get(os.path.normpath(str(path)), path)
+
+    def _followMovedRecoveries(self, oldRoot, newRoot, renamed):
+        """The projects that were offered after a crash follow a folder move (what ``recoveryPath`` answers)."""
+        projects = self._projects()
+        for key, current in list(self._recoveryPaths.items()):
+            newPath = projects.pathAfterMove(current, oldRoot, newRoot, renamed)
+            # Only a project that really moved (after a failed move it may still be in the old folder)
+            if os.path.normpath(newPath) != os.path.normpath(current) and os.path.isdir(newPath) and not os.path.isdir(current):
+                self._recoveryPaths[key] = newPath
+        self._pendingProjectRecoveries = [
+            projects.ProjectInfo(self._recoveryPaths.get(os.path.normpath(info.path), info.path)) if os.path.normpath(info.path) in self._recoveryPaths
+            else info for info in self._pendingProjectRecoveries]
 
     def _announce(self, event, project=None, **info):
         announcer = getattr(self, "_projectAnnouncer", None)
         if announcer is None:
             if event in ("failed", "conflict"):
                 logging.warning(f"Slicer Studio: {event} {info}")
+            # A warning given once (per project, per folder) is kept for the announcer: dropped now, it would never be
+            # shown (the last few only: a service that never gets an announcer does not grow it)
+            pending = getattr(self, "_pendingAnnouncements", None)
+            if pending is not None and event in _ANNOUNCED_ONCE:
+                pending.append((event, project if project is not None else self.project, dict(info)))
+                del pending[:-8]
             return
         try:
             announcer(event, project if project is not None else self.project, **info)
         except Exception:
             logging.error("Slicer Studio: project message failed:\n" + traceback.format_exc())
+
+    def _announceLockedOnce(self, project):
+        """The warning that another Slicer Studio has ``project`` open, once per project. The scene still names it, so
+        every new scene fingerprint retries to attach it (it is taken as soon as the other window lets go); the retries
+        stay silent, or each edit would show the warning again.
+        """
+        key = os.path.normcase(os.path.realpath(project.path))
+        if key in self._lockedAnnounced:
+            return
+        self._lockedAnnounced.add(key)
+        self._announce("locked", project)
+
+    def _projectReadStats(self, project, scene=None, fresh=False):
+        """The files of ``project`` as they were when the scene was read from them, while another Slicer Studio had it
+        open. That window may save the project again before it lets go: when this one continues the project then, its
+        files are recorded as they were when its scene was read, so the other window's later saves are another program's
+        changes (kept: Studio writes "<name> (Slicer Studio).<ext>" and says so), not overwritten by this older scene.
+
+        ``scene``: take them now if they were not taken yet (``fresh``: the scene was just read, take them again).
+        Return them, or None.
+        """
+        key = os.path.normcase(os.path.realpath(project.path))
+        if scene is not None and (fresh or key not in self._readStats):
+            try:
+                self._readStats[key] = _io().projectFileStats(project, scene)
+            except Exception:
+                logging.error("Slicer Studio: the files of the project could not be read:\n" + traceback.format_exc())
+        return self._readStats.get(key)
+
+    def _announceRootFailedOnce(self, reason, missing=False):
+        """The message that the Slicer Studio folder cannot be written (``missing``: cannot be found), once per folder. No
+        project exists then, so every new scene fingerprint tries to create one again (it is created as soon as the folder
+        can be written); the retries stay silent, or every edit would show the message again.
+        """
+        key = os.path.normcase(os.path.abspath(self._projects().root()))
+        if missing:
+            key = "missing:" + key  # not "cannot be written" (``rootUnwritable``) once the drive is connected again
+        if key in self._rootFailedAnnounced:
+            return
+        self._rootFailedAnnounced.add(key)
+        self._announce("root-failed", None, reason=reason, missing=missing)
+        self._projects().notifyChanged()  # the Library caption says that nothing is saved
+
+    def rootUnwritable(self):
+        """True if the Slicer Studio folder could not be written when a project was last created in it, or cannot be now."""
+        key = os.path.normcase(os.path.abspath(self._projects().root()))
+        return key in self._rootFailedAnnounced or self._projects().isRootReadOnly()
 
     def _studioActive(self):
         if self.studioActiveOverride is not None:
@@ -1262,32 +1677,88 @@ class AutosaveService:
         """Create a project as soon as the scene holds user data (Studio, no study); stop it when a study opens."""
         if self.project is not None:
             if self._studyOpen():
-                # A study saves its own files (journal, lesions, participants.tsv): the project is saved and stops here
-                self.saveNow("study", progress=False)
-                self.releaseProject()
+                self.releaseProjectForStudy()
             return
-        if fingerprint == self._lastProjectCheck or self._recovering or not self.projectsActive():
+        retry = self._projectRetryAt and _clock() >= self._projectRetryAt
+        if (fingerprint == self._lastProjectCheck and not retry) or self._recovering or _loadHolds or not self.projectsActive():
             return
+        self._startProjectForScene(scene, fingerprint)
+
+    def ensureProject(self):
+        """Create (or continue) the project of the user's data now, without waiting for the next poll (Ctrl+S right after
+        data was opened: "Ctrl+S saves now", D-A16). Return the open project, or None if there is none to save into: an empty
+        scene (no user data), a study, Classic, a folder that is not chosen or cannot be written, a scene that is loading.
+        """
+        if self.project is not None:
+            return self.project
+        scene = slicer.mrmlScene
+        if not self.enabled() or self._recovering or not self.projectsActive() or self._sceneBusy(scene):
+            return None
+        io = _io()
+        try:
+            self._startProjectForScene(scene, io.sceneFingerprint(scene, io.sentinelIds()))
+        except Exception:
+            logging.error("Slicer Studio: project handling failed:\n" + traceback.format_exc())
+        return self.project
+
+    def continueProjectBeforeScene(self):
+        """A study was closed to open a scene: the project open before the study (released for it, its data shown again)
+        continues now, as the next poll would, so that the scene replaces it as its own project (``opensSceneAsProject()``)
+        instead of being added to its data. Its "Continuing …" message is not shown (the scene replaces it at once). Return
+        the open project, or None.
+        """
+        announcer = getattr(self, "_projectAnnouncer", None)
+        if announcer is not None:
+            self._projectAnnouncer = lambda event, project, **info: None if event == "opened" else announcer(event, project, **info)
+        try:
+            return self.ensureProject()
+        finally:
+            if announcer is not None:
+                self._projectAnnouncer = announcer
+
+    def _startProjectForScene(self, scene, fingerprint):
+        """The scene holds user data and no project is open: continue the project of its scene file, or create a new one."""
         if self._sceneBusy(scene):
             return
         self._lastProjectCheck = fingerprint
+        self._projectRetryAt = 0.0
         projects = self._projects()
         if not projects.sceneHasUserData(scene):
             return
         url = scene.GetURL()
-        projectPath = projects.projectOfPath(url) if url and os.path.isfile(url) else None
-        if projectPath is not None and self._sceneReadFrom(scene, projectPath):
+        # Only the project's own scene file: another scene saved inside a project folder is not that project
+        projectPath = projects.projectOfSceneFile(url) if url and os.path.isfile(url) else None
+        if projectPath is not None and self._sceneReadFrom(scene, projectPath) and _sceneFileParses(url):
             # A project of the folder that was loaded in Classic (official Load Scene): it continues in place, never as
-            # a copy
+            # a copy. Not over a damaged scene file (nothing of it was read): the data then starts a new project.
             project = projects.Project(projectPath)
-            if not self.attachProject(project, inPlace=True):
-                self._announce("locked", project)
+            if not self.attachProject(project, inPlace=True, readStats=self._projectReadStats(project)):
+                if project.readOnly:
+                    self._copyReadOnlyProject(project)
+                else:
+                    self._projectReadStats(project, scene)
+                    self._announceLockedOnce(project)
                 return
             self._announce("opened", project)
             if self.dirty:
                 qt.QTimer.singleShot(0, lambda: self.autosaveNow("open"))
             return
         self.createProject(projects.defaultProjectName(scene))
+
+    def _copyReadOnlyProject(self, original, unread=()):
+        """The scene of ``original`` was loaded but its folder cannot be written (a read-only share or medium): it continues
+        as a new project that starts as a copy (as a folder from elsewhere does), so that changes are saved. Return the copy.
+        """
+        if not self.projectsActive():
+            self._announce("read-only", original, copy=None)
+            return None
+        project = self.createProject(original.name, announce=None)
+        if project is None:
+            return None  # the Slicer Studio folder cannot be written either: createProject said so
+        self._announce("read-only", original, copy=project, unread=list(unread))
+        # Copy the files now (in the background): the original cannot be changed
+        qt.QTimer.singleShot(0, lambda: self.autosaveNow("copy"))
+        return project
 
     @staticmethod
     def _sceneReadFrom(scene, projectPath):
@@ -1298,6 +1769,7 @@ class AutosaveService:
         projectDir = os.path.normcase(os.path.realpath(projectPath))
         rootDirectory = scene.GetRootDirectory()
         nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         for index in range(nodes.GetNumberOfItems()):
             node = nodes.GetItemAsObject(index)
             storageNode = node.GetStorageNode()
@@ -1313,11 +1785,35 @@ class AutosaveService:
         projects = self._projects()
         try:
             project = projects.createProject(name)
-        except OSError as error:
-            self._pause(_("Saving paused: the Slicer Studio folder cannot be written ({error}).").format(error=error))
-            self._announce("failed", None, reason=str(error))
+        except projects.RootMissingError:
+            # The chosen folder is on a drive that is not connected: never a new, empty folder at its path (Library
+            # says so; the project is created once the drive is back)
+            self._pause(_("Autosave paused: the Slicer Studio folder cannot be found. Connect the drive that holds it, or "
+                          "choose another folder."))
+            self._announceRootFailedOnce(None, missing=True)
             return None
+        except OSError as error:
+            # Plain words (no error number, no path), and the message only once: see _announceRootFailedOnce
+            reason = plainOSError(error)
+            self._pause(_("Autosave paused: the Slicer Studio folder cannot be written ({reason}).").format(reason=reason))
+            self._announceRootFailedOnce(reason)
+            return None
+        if self._rootFailedAnnounced:
+            self._rootFailedAnnounced.clear()  # a later failure is news again
+            projects.notifyChanged()
         if not self.attachProject(project):
+            # The new folder could not be taken (typically the lock file cannot be written on a full disk): it was made
+            # just above and holds only project.json, so it goes away (Library would list an "Empty" card, and every retry
+            # would add another). The creation is tried again soon, not after the long pause of a failed save.
+            projects.removeCreatedProject(project.path)
+            reason = plainOSError(project.lastError) if getattr(project, "lastError", None) else _("it cannot be written")
+            from StudioLib import ui
+
+            # The key as this platform shows it ("⌘S" on macOS)
+            self._pause(_("Autosave paused: the Slicer Studio folder cannot be written ({reason}). Press {key} to save "
+                          "once there is room.").format(reason=reason, key=ui.keyText("Ctrl+S")), retrySeconds=30.0)
+            self._projectRetryAt = _clock() + 30.0
+            self._announceRootFailedOnce(reason)
             return None
         if announce:
             self._announce(announce, project)
@@ -1330,6 +1826,7 @@ class AutosaveService:
         rootDirectory = scene.GetRootDirectory()
         projectDir = os.path.normcase(os.path.realpath(project.path))
         nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         for index in range(nodes.GetNumberOfItems()):
             node = nodes.GetItemAsObject(index)
             if not node.GetSaveWithScene() or node.GetHideFromEditors():
@@ -1346,16 +1843,25 @@ class AutosaveService:
                     return False
         return True
 
-    def attachProject(self, project, inPlace=False):
+    def attachProject(self, project, inPlace=False, readStats=None):
         """Save the current scene into ``project`` from now on (its lock is taken). ``inPlace``: the scene was just loaded
-        from the project's own scene file. Return False if another Slicer Studio has the project open.
+        from the project's own scene file. ``readStats``: its files as they were when the scene was read, if that was
+        earlier (``_projectReadStats``). Return False if another Slicer Studio has the project open, or if its folder
+        cannot be written (``project.readOnly``).
         """
         io = _io()
         projects = self._projects()
         if self.project is not None and self.project is not project:
             self.releaseProject()
+        if inPlace and not os.path.isfile(project.scenePath):
+            # The scene was loaded from a scene file not named after the folder (a scene folder from official 3D Slicer put
+            # into Projects/, a folder renamed outside, opened with File > Open): it becomes "<folder name>.mrml", which
+            # every save rewrites. Left as it was, it would keep naming the data files that the first save moves into the
+            # kind folders, and official 3D Slicer would fail to load it (BB-1).
+            projects.adoptRenamedScene(project.path, keepPrivate=True)
         if not project.lock():
             return False
+        self._lockedAnnounced.clear()  # a later loss of the lock is news again
         if self.plan is not None:
             self._abortGeneration("a project was opened")
         if self.writer is not None:
@@ -1370,8 +1876,10 @@ class AutosaveService:
         self.projectWriter = io.ProjectWriter(project, io.backgroundWriter())
         scene.SetURL(project.scenePath)
         scene.SetRootDirectory(project.path)
-        self.projectWriter.recordSceneFiles(scene)
+        self.projectWriter.recordSceneFiles(scene, readStats)
+        self._readStats.pop(os.path.normcase(os.path.realpath(project.path)), None)
         project.writeJson(state="open", executor=io.backgroundWriter())
+        self._noteOutsideProject(project)
         io.backgroundWriter().submit(projects.pruneRemoved, project.path)
         leftovers = projects.temporaryLeftovers(project.path)
         if leftovers:
@@ -1379,17 +1887,32 @@ class AutosaveService:
         fingerprint = io.sceneFingerprint(scene, io.sentinelIds())
         clean = inPlace and os.path.isfile(project.scenePath) and self._projectFilesInPlace(scene)
         self._savedFingerprint = fingerprint if clean else None
+        self._savedViewState = io.viewState(scene) if clean else None
         self._lastPolledFingerprint = fingerprint
         self.dirty = not clean
-        self.firstDirtyTime = time.time() if self.dirty else None
+        self.firstDirtyTime = _clock() if self.dirty else None
         self.lastGenerationTime = None
-        self._lastThumbnailTime = 0.0
+        self._lastThumbnailTime = float("-inf")
         self._lastUnsavedAutosaved = False
         self._projectPausedReason = ""
         self._status.lastSaveTime = os.path.getmtime(project.scenePath) if clean else None
         project.lastSaveTime = self._status.lastSaveTime
         projects.setCurrentProject(project)
         self._setState("idle")
+        return True
+
+    def releaseProjectForStudy(self):
+        """A study opens: the open project is saved and stops here (a study saves its own files: journal, lesions,
+        participants.tsv). ``study_ui.openStudy()`` calls this before it hides the project's lesions, so that the project is
+        saved as it was shown. Return True if a project was released.
+        """
+        if self.project is None:
+            return False
+        # The user chose to go on without saving (``confirmReplaceProject``: a copy holds the edits, or they are dropped)
+        discard, self._discardOnClose = self._discardOnClose, False
+        if not discard:
+            self.saveNow("study", progress=False)
+        self.releaseProject()
         return True
 
     def releaseProject(self, state="closed"):
@@ -1400,14 +1923,30 @@ class AutosaveService:
         io = _io()
         if self.plan is not None and isinstance(self.plan, io.ProjectPlan):
             self._abortGeneration("the project is closed")
+        # A project that never got its first save (a copy of an opened scene on a nearly full disk, where project.json and
+        # the lock fit but the scene did not) holds nothing of the user's: Library would list it as "Empty" until the next
+        # start (``removeUnsavedProjects`` runs only then), so it goes away now, as ``removeCreatedProject`` does.
+        neverSaved = False
         try:
-            project.writeJson(state=state, executor=io.backgroundWriter())
+            neverSaved = self._projects().isNeverSaved(project.path)
         except Exception:
-            logging.error("Slicer Studio: project.json could not be written:\n" + traceback.format_exc())
+            logging.error("Slicer Studio: could not check the project:\n" + traceback.format_exc())
+        if not neverSaved:
+            try:
+                project.writeJson(state=state, executor=io.backgroundWriter())
+            except Exception:
+                logging.error("Slicer Studio: project.json could not be written:\n" + traceback.format_exc())
         project.unlock()
+        if neverSaved:
+            try:
+                self._projects().removePaths([project.path])
+                self._projects().notifyChanged()
+            except Exception:
+                logging.error("Slicer Studio: the unsaved project could not be removed:\n" + traceback.format_exc())
         self.project = None
         self.projectWriter = None
         self._savedFingerprint = None
+        self._savedViewState = None
         self._lastPolledFingerprint = None
         self._lastProjectCheck = None
         self.dirty = False
@@ -1422,6 +1961,7 @@ class AutosaveService:
         io = _io()
         modified = []
         nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         for index in range(nodes.GetNumberOfItems()):
             node = nodes.GetItemAsObject(index)
             if not node.GetSaveWithScene() or node.GetHideFromEditors() or not node.GetModifiedSinceRead():
@@ -1431,8 +1971,31 @@ class AutosaveService:
             modified.append(node)
         return modified
 
+    def isProjectClean(self):
+        """True if the open project has nothing to save (the same test as ``projectNeedsSave``, without the migration)."""
+        return self.project is not None and self.projectWriter is not None and not self.projectNeedsSave()
+
+    def adoptFingerprintAfterExport(self, wasClean):
+        """An export (Save a copy as…) is not an edit. Writing a bundle changes and restores the storage nodes' file names,
+        which bumps their MTimes: if the project was up to date before the export, the new fingerprint is the saved one,
+        so that the next save or quit does not rewrite the project and move "Last edited".
+        """
+        if not wasClean or self.project is None or self.plan is not None or self._modifiedProjectNodes(slicer.mrmlScene):
+            return
+        io = _io()
+        fingerprint = io.sceneFingerprint(slicer.mrmlScene, io.sentinelIds())
+        self._savedFingerprint = fingerprint
+        self._savedViewState = io.viewState(slicer.mrmlScene)
+        self._lastPolledFingerprint = fingerprint
+
     def projectNeedsSave(self, fingerprint=None, includeScene=False):
-        """True if the open project is not up to date on disk (``includeScene``: also views, layout and other scene state)."""
+        """True if the open project is not up to date on disk. ``includeScene`` (Save now, leaving, quitting): also files of
+        the project that a save would bring up to date though nothing was edited (``ProjectWriter.needsMigration``).
+
+        What counts as an edit is the periodic autosave's (``sceneFingerprint``), never ``vtkMRMLScene::GetModifiedSinceRead``:
+        that is true after every open (the hierarchy is merged with new item numbers, the views' slice models appear),
+        so leaving a project that was only looked at would rewrite it and move "Last edited" to now.
+        """
         if self.project is None or self.projectWriter is None:
             return False
         if not self.projectWriter.hasContent():
@@ -1443,12 +2006,16 @@ class AutosaveService:
             fingerprint = io.sceneFingerprint(scene, io.sentinelIds())
         if fingerprint != self._savedFingerprint or self._modifiedProjectNodes(scene):
             return True
-        return bool(includeScene and scene.GetModifiedSinceRead())
+        if not includeScene:
+            return False
+        if self._savedViewState is not None and io.viewState(scene) != self._savedViewState:
+            return True  # what a view shows changed (background, overlay, layout): Save now writes it, as official Slicer does
+        return bool(self.projectWriter.needsMigration(scene))
 
     def _startProjectGeneration(self, reason, fingerprint, synchronous=False, ignoreBusy=False, force=False, progress=False,
                                 timeoutS=PROJECT_SAVE_TIMEOUT_S):
         io = _io()
-        now = time.time()
+        now = _clock()
         writer = self.projectWriter
         try:
             if synchronous:
@@ -1458,17 +2025,18 @@ class AutosaveService:
         except io.GenerationAborted:
             return False
         except OSError as error:
-            self._projectFailed(str(error))
+            self._projectFailed(plainOSError(error))
             return False
         except Exception:
             logging.error("Slicer Studio: planning the save failed:\n" + traceback.format_exc())
             self._projectFailed(_("see the error log"))
             return False
         plan.reason = reason
+        plan.viewState = io.viewState(slicer.mrmlScene)
         estimated = sum(entry.get("bytes") or 0 for entry in plan.entries.values() if entry.get("kind") in ("write", "import"))
-        if not self._enoughSpace(estimated, self.project.path):
+        if not self._enoughSpace(estimated, self.project.path, project=True):
             writer.abort(plan, "not enough disk space")
-            self._projectFailed(_("less than {size} free on the disk").format(size=_formatBytes(max(MIN_FREE_BYTES, 2 * estimated))))
+            self._projectFailed(_("less than {size} free on the disk").format(size=_formatBytes(_requiredFreeBytes(estimated, project=True))))
             return False
         plan.writerRef = writer
         self.plan = plan
@@ -1501,8 +2069,13 @@ class AutosaveService:
             writer.abort(plan, str(error))
             self.plan = None
             self._removePlanObservers()
-            logging.error("Slicer Studio: saving the project failed:\n" + traceback.format_exc())
-            self._projectFailed(str(error))
+            if isinstance(error, OSError):
+                # An anticipated I/O failure (a folder that cannot be written, a full disk, a timeout): plain words, no traceback
+                reason = plainOSError(error)
+            else:
+                logging.error("Slicer Studio: saving the project failed:\n" + traceback.format_exc())
+                reason = str(error)
+            self._projectFailed(reason)
             return False
         finally:
             if dialog is not None:
@@ -1528,7 +2101,7 @@ class AutosaveService:
         self._projectPausedReason = reason
         if self.project is not None:
             self.project.lastError = reason
-        self._pausedUntil = time.time() + 30.0
+        self._pausedUntil = _clock() + 30.0
         self._setState("error", _("Not saved: {reason}").format(reason=reason))
         logging.warning(f"Slicer Studio: the project could not be saved: {reason}")
         self._announce("failed", reason=reason)
@@ -1548,17 +2121,25 @@ class AutosaveService:
         logging.debug(f"Slicer Studio project generation {plan.generation}: {metrics}")
         if not plan.incomplete:
             self._savedFingerprint = plan.fingerprint
+            self._savedViewState = getattr(plan, "viewState", None)
         self.dirty = io.sceneFingerprint(slicer.mrmlScene, io.sentinelIds()) != self._savedFingerprint or plan.incomplete
-        self.firstDirtyTime = time.time() if self.dirty else None
+        self.firstDirtyTime = _clock() if self.dirty else None
         self._lastProjectPlan = plan
         now = time.time()
         self._status.lastSaveTime = now
         if self.project is not None:
             self.project.lastSaveTime = now
             self.project.lastError = ""
-        self._projectPausedReason = ""
-        self._pausedUntil = 0.0
-        self._setState("idle")
+        # A node that could not be written keeps its previous file (or none): the project is not saved, and the top bar
+        # must not say "Saved" while that node's edits are only in memory
+        unwritten = [entry.get("name") or nodeId for nodeId, entry in (getattr(plan, "entries", None) or {}).items()
+                     if entry.get("kind") == "error"]
+        if unwritten:
+            self._projectFailed(_("{names} could not be written").format(names=", ".join(sorted(unwritten)[:3])))
+        else:
+            self._projectPausedReason = ""
+            self._pausedUntil = 0.0
+            self._setState("idle")
         conflicts = self.projectWriter.takeConflicts() if self.projectWriter is not None else []
         if conflicts:
             self._announce("conflict", conflicts=conflicts)
@@ -1570,11 +2151,14 @@ class AutosaveService:
     def _queueProjectThumbnail(self, plan):
         """Render the thumbnails of the project in the background writer after a save that changed what they show (V-02):
         the axial, coronal and sagittal slices through the lesion, from the image arrays (not a view grab, so no
-        main-thread render and it works with Library shown). Skipped when nothing visible changed, and when quitting.
+        main-thread render and it works with Library shown). Skipped when nothing visible changed. When quitting, the
+        background writer may not run again, so the views are rendered at once (they come from arrays in a few
+        milliseconds) and the Library card shows what the quit flush saved.
         """
         project = self.project
-        if project is None or getattr(plan, "reason", "") == "quit":
+        if project is None:
             return
+        quitting = getattr(plan, "reason", "") == "quit"
         try:
             from StudioLib import thumbnails
 
@@ -1589,6 +2173,16 @@ class AutosaveService:
             self._projectThumbnailKey = key
         except Exception:
             logging.debug("Slicer Studio: project thumbnail source failed:\n" + traceback.format_exc())
+            return
+
+        if quitting:
+            try:
+                thumbnails.renderProjectViews(source, privateFolder)
+            except Exception:
+                self._projectThumbnailKey = None
+                logging.debug("Slicer Studio: project thumbnail at quit failed:\n" + traceback.format_exc())
+            finally:
+                source.release()
             return
 
         def done(paths, source=source):
@@ -1632,13 +2226,61 @@ class AutosaveService:
         mainWindow = slicer.util.mainWindow()
         if self._closeSummaryConnected or mainWindow is None or not hasattr(mainWindow, "closeSummaryRequested"):
             return False
-        mainWindow.connect("closeSummaryRequested()", self.flushForClose)
+        mainWindow.connect("closeSummaryRequested()", self._onCloseSummaryRequested)
+        if hasattr(mainWindow, "closeSceneSummaryRequested"):
+            mainWindow.connect("closeSceneSummaryRequested()", self._onCloseSceneSummaryRequested)
+        if hasattr(mainWindow, "loadSceneRequested") and hasattr(mainWindow, "loadSceneFinished"):
+            mainWindow.connect("loadSceneRequested()", self._onLoadSceneRequested)
+            mainWindow.connect("loadSceneFinished()", self._onLoadSceneFinished)
+        ioManager = slicer.app.coreIOManager()
+        if hasattr(ioManager, "clearSceneRequested") and hasattr(ioManager, "clearSceneFinished"):
+            ioManager.connect("clearSceneRequested()", self._onClearSceneRequested)
+            ioManager.connect("clearSceneFinished()", self._onLoadSceneFinished)
         self._closeSummaryConnected = True
         return True
 
+    def _onLoadSceneRequested(self):
+        """File > Load Scene (or a recently loaded scene) of the main window is about to replace the scene (Classic, or an
+        action triggered directly): the open project is saved first, and if that fails the user is asked as for Open scene
+        (``confirmReplaceProject``), instead of the scene close releasing the project and losing its edits silently.
+        Without a project open, the official behaviour is kept (the closed scene keeps its autosave slot).
+        """
+        mainWindow = slicer.util.mainWindow()
+        if mainWindow is None or self.project is None or self._recovering != 0 or not self.enabled():
+            return
+        try:
+            keep = not self.confirmReplaceProject(_("Open scene"))
+        except Exception:
+            logging.error("Slicer Studio: saving the project before Load Scene failed:\n" + traceback.format_exc())
+            keep = False
+        if keep:
+            mainWindow.setProperty("SlicerStudioLoadSceneAnswer", "cancel")
+
+    def _onClearSceneRequested(self):
+        """A scene file is about to be loaded with "clear" through the IO manager (Classic Add Data or a drop with "Clear
+        existing scene", a script's ``loadScene(..., {"clear": True})``): the open project is saved first, and if that fails
+        the user is asked as for Load Scene (``confirmReplaceProject``); "Keep working" loads nothing. A load that was already
+        confirmed (File > Load Scene, Open project, Open scene) saved the project, so nothing is asked again; after "Open
+        without saving" or "Save a copy…" the close does not save (``_discardOnClose``), and nothing is asked either.
+        """
+        if self.project is None or self._recovering != 0 or not self.enabled() or self._discardOnClose:
+            return
+        try:
+            keep = not self.confirmReplaceProject(_("Open scene"))
+        except Exception:
+            logging.error("Slicer Studio: saving the project before loading a scene failed:\n" + traceback.format_exc())
+            keep = False
+        if keep:
+            slicer.app.coreIOManager().setProperty("SlicerStudioClearSceneAnswer", "cancel")
+
+    def _onLoadSceneFinished(self):
+        # "Open without saving" / "Save a copy…" apply to that load only (its file dialog may have been cancelled)
+        self._discardOnClose = False
+
     def flushForClose(self):
         """The application is closing: save the project now (nothing is asked when this succeeds). Return the result."""
-        if self.project is None:
+        if self.ensureProject() is None:
+            # Data opened less than one poll ago has its project now (as for Ctrl+S): quitting asks nothing then
             self.closeFlushResult = None
             return None
         try:
@@ -1647,18 +2289,113 @@ class AutosaveService:
             logging.error("Slicer Studio: saving before quitting failed:\n" + traceback.format_exc())
             ok = False
         self.closeFlushResult = (ok, self._projectPausedReason)
+        if ok:
+            self._markProjectSavedForClose()
         return ok
+
+    def _onCloseSummaryRequested(self):
+        """The main window is about to ask whether to save before exit (``closeSummaryRequested()``)."""
+        self._askUnsavedProjectOnClose(self.flushForClose(), "quit")
+
+    def _onCloseSceneSummaryRequested(self):
+        """File > Close Scene is about to ask whether to save the scene (``closeSceneSummaryRequested()``)."""
+        self._askUnsavedProjectOnClose(self.flushForClose(), "close")
+
+    def _askUnsavedProjectOnClose(self, saved, verb):
+        """The open project could not be saved (a full disk, a folder that cannot be written) and the main window is about to
+        close the scene (``verb`` "close") or quit ("quit"). The official "Save before closing scene?" / "Save before exit?"
+        question would offer its Save Data dialog, which writes over the project's own files in place (no temporary file):
+        on a full disk that truncates the lesion saved before. In Classic (and for File > Close Scene in Studio) the user is
+        asked as for Load Scene instead: "Save a copy…" elsewhere, close or quit without saving, or keep working. Studio's
+        own close prompt (``firstrun``) asks the quit question itself.
+        """
+        project, reason = self.project, self._projectPausedReason
+        if saved is None and project is None:
+            # No project could be made: the Slicer Studio folder cannot be written. The scene's files are still those it was
+            # opened from (a project in that read-only folder): the official Save Data dialog would aim every row there, ask
+            # to replace them and fail, so the same Studio question is asked (as Ctrl+S explains instead of saving there)
+            reason = self.unsavedSceneOutsideUnwritableRoot()
+            if not reason:
+                return
+        elif saved is not False or project is None or self._recovering != 0 or not self.enabled() or self._studyOpen():
+            return
+        mainWindow = slicer.util.mainWindow()
+        if mainWindow is None or mainWindow.property("SlicerStudioCloseMode"):
+            return
+        from StudioLib import firstrun
+
+        if verb == "quit" and slicer.app.property(firstrun.DISCLAIMER_HANDLED_PROPERTY):
+            return
+        try:
+            from StudioLib import projects_ui
+
+            title = _("Quit") if verb == "quit" else _("Close scene")
+            answer = projects_ui.askReplaceUnsavedProject(title, project, reason, verb=verb)
+        except Exception:
+            logging.error("Slicer Studio: asking about the project that could not be saved failed:\n" + traceback.format_exc())
+            answer = "cancel"
+        if answer not in ("save", "discard"):
+            mainWindow.setProperty("SlicerStudioCloseMode", "cancel")
+            return
+        if verb == "quit":
+            mainWindow.setProperty("SlicerStudioCloseMode", "quit")
+            return
+        # A copy holds the edits, or the user chose to drop them: the close does not try (and fail) to save again
+        self._discardOnClose = True
+        mainWindow.setProperty("SlicerStudioCloseMode", "projectSaved")
+
+    def unsavedSceneOutsideUnwritableRoot(self):
+        """The reason the scene cannot be saved when it has unsaved user data, no project and the Slicer Studio folder cannot
+        be written (no project can be made, ``rootUnwritable``), else "". The close and quit questions then offer
+        "Save a copy…" elsewhere instead of the official Save Data dialog, which would aim at the read-only folder.
+        """
+        if self.project is not None or self._recovering != 0 or not self.projectsActive() or not self.rootUnwritable():
+            return ""
+        scene = slicer.mrmlScene
+        try:
+            modified = bool(scene.GetStorableNodesModifiedSinceRead()) or bool(scene.GetModifiedSinceRead())
+            if not modified or not self._projects().sceneHasUserData(scene):
+                return ""
+        except Exception:
+            logging.error("Slicer Studio: checking the scene for unsaved changes failed:\n" + traceback.format_exc())
+            return ""
+        return _("the Slicer Studio folder cannot be written")
+
+    def _markProjectSavedForClose(self):
+        """The project is up to date: the main window asks nothing about "unsaved" scene state (the views and the hierarchy
+        numbers that a project open changes are not edits, and ``saveNow`` writes nothing then), in Classic as well. Studio's
+        own close prompt (``firstrun``) sets its mode itself; a mode already set is kept.
+        """
+        mainWindow = slicer.util.mainWindow()
+        if mainWindow is None or mainWindow.property("SlicerStudioCloseMode"):
+            return
+        from StudioLib import firstrun
+
+        if slicer.app.property(firstrun.DISCLAIMER_HANDLED_PROPERTY):
+            return
+        mainWindow.setProperty("SlicerStudioCloseMode", "projectSaved")
 
     def _closeProjectOnSceneClose(self):
         """The scene is closed (New project, Close scene, loading another scene): save the project, then release it."""
         if self.plan is not None:
             self._abortGeneration("the scene is closed")
+        # Loading a scene sets the scene URL to the new file before it clears the scene (vtkSlicerSceneReader), and
+        # vtkMRMLScene::Connect then imports from that URL. Saving the project points the URL at the project scene file:
+        # the URL is restored afterwards, or the open project would be read again instead of the scene being loaded.
+        scene = slicer.mrmlScene
+        url = scene.GetURL()
+        rootDirectory = scene.GetRootDirectory()
+        discard, self._discardOnClose = self._discardOnClose, False
         try:
-            if self._recovering == 0 and self.enabled():
+            if self._recovering == 0 and self.enabled() and not discard:
                 self.saveNow("close", progress=True, ignoreBusy=True)
         except Exception:
             logging.error("Slicer Studio: saving the project before closing failed:\n" + traceback.format_exc())
         finally:
+            if scene.GetURL() != url:
+                scene.SetURL(url)
+            if scene.GetRootDirectory() != rootDirectory:
+                scene.SetRootDirectory(rootDirectory)
             self.releaseProject()
             self._nextSlot()
 
@@ -1674,23 +2411,260 @@ class AutosaveService:
         """The file a scene is about to be loaded from (a .mrb is unpacked first): names the project of a copy."""
         self._pendingSceneSource = str(path) if path else None
 
+    def confirmReplaceProject(self, title):
+        """Before another scene replaces the open project (open a project, open a scene file): save the project now. Return
+        True if it is saved (or there is nothing to save) or the user chose to go on without saving; False if the user keeps
+        working in it (the open must not go ahead). Loading a scene closes the project unasked (``_closeProjectOnSceneClose``),
+        so a save that fails here (disk full, folder not writable) would otherwise lose the edits silently; Ctrl+N and quit
+        fall back to the classic "Save before closing scene?" question in that case.
+
+        Without a project that saves the scene (saving is off in Settings, the projects folder is not chosen or cannot be
+        written, projects are off) the scene is not saved anywhere: unsaved data is asked about with that same question
+        (``_confirmCloseUnsavedScene``), as Ctrl+N asks in that state, instead of being dropped by the load.
+        """
+        if self._recovering != 0:
+            return True
+        if self.project is None and self.enabled():
+            # Data opened less than one poll ago becomes its project first (as for Ctrl+N and Ctrl+S)
+            self.ensureProject()
+        if self.project is None or not self.enabled():
+            return self._confirmCloseUnsavedScene()
+        try:
+            if self.saveNow("open", progress=True, ignoreBusy=True):
+                return True
+        except Exception:
+            logging.error("Slicer Studio: saving the project before opening another failed:\n" + traceback.format_exc())
+        from StudioLib import projects_ui
+
+        answer = projects_ui.askReplaceUnsavedProject(title, self.project, self._projectPausedReason)
+        if answer in ("save", "discard"):
+            # A copy holds the edits, or the user chose to drop them: the close does not try (and fail) to save again
+            self._discardOnClose = True
+            return True
+        return False
+
+    def _confirmCloseUnsavedScene(self):
+        """No project saves the scene: if it holds data of the user with changes that are not saved, ask the official
+        "Save before closing scene?" question (File > Close Scene, as Ctrl+N does without a project). Return True if there
+        is nothing to ask about or the scene was closed (saved, or the user chose to discard the changes); False if the user
+        cancelled (the open must not go ahead). A study saves its own files: nothing is asked while one is open.
+        """
+        if self._studyOpen():
+            return True
+        scene = slicer.mrmlScene
+        try:
+            modified = bool(scene.GetStorableNodesModifiedSinceRead()) or bool(scene.GetModifiedSinceRead())
+            if not modified or not self._projects().sceneHasUserData(scene):
+                return True
+        except Exception:
+            logging.error("Slicer Studio: checking the scene for unsaved changes failed:\n" + traceback.format_exc())
+            return True
+        mainWindow = slicer.util.mainWindow()
+        action = mainWindow.findChild(qt.QAction, "FileCloseSceneAction") if mainWindow is not None else None
+        if action is None:
+            return True
+        closed = []
+        tag = scene.AddObserver(slicer.vtkMRMLScene.EndCloseEvent, lambda caller, event: closed.append(True))
+        try:
+            action.trigger()
+        finally:
+            scene.RemoveObserver(tag)
+        return bool(closed)
+
     def openProject(self, path):
         """Open a project folder (its scene file): the current project is saved and closed first. Return True if loaded."""
         projects = self._projects()
         scenePath = projects.sceneFile(path)
         if scenePath is None:
-            self._announce("failed", None, reason=_("{name} has no scene file").format(name=os.path.basename(path)))
+            # Not a failed save: the folder is gone (renamed, moved or trashed by another window) or has no scene
+            name = os.path.basename(os.path.normpath(path))
+            if not os.path.isdir(path):
+                self._announce("not-opened", None, name=name, missing=True,
+                               reason=_("{name} was renamed or moved; the list is refreshed").format(name=name))
+            else:
+                self._announce("not-opened", None, name=name, missing=False, reason=_("{name} has no scene file").format(name=name))
             return False
         if projects.isLockedByOther(path):
-            self._announce("locked", projects.Project(path))
+            # Nothing is opened: the message says who has it (another computer: "Open here" takes the lock it left)
+            self._announce("locked", projects.Project(path), opened=False, holder=projects.lockHolder(path))
             return False
+        if not self.confirmReplaceProject(_("Open project")):
+            return False  # the open project could not be saved and the user keeps working in it
+        if self._studyOpen():
+            # Opening a project is an explicit choice of the user: the study is closed first (its subject's edits are written),
+            # as opening another study closes the open one. Left open, the project would be attached, announced as continued and
+            # released at the next poll (a study saves its own files, and no project is saved while one is open).
+            self._closeOpenStudy()
+        projectPath = projects.projectOfPath(path)
+        inRoot = projectPath is not None and os.path.normcase(os.path.realpath(projectPath)) == os.path.normcase(os.path.realpath(path))
+        if inRoot and projects.isWritable(path):
+            # A folder renamed outside Slicer Studio: its scene follows the name (saves write "<folder name>.mrml")
+            scenePath = projects.adoptRenamedScene(path) or scenePath
+            try:
+                if _io().repairBareAmpersands(scenePath):
+                    logging.warning(f"Slicer Studio: escaped the bare '&' of the file names in {os.path.basename(scenePath)}")
+            except Exception:
+                logging.error("Slicer Studio: repairing the project scene failed:\n" + traceback.format_exc())
+        else:
+            # A folder outside the Slicer Studio folder (a colleague's project, a copy on the Desktop) opens as a new project
+            # that starts as a copy (A-09): the original is never changed, so its scene is neither renamed nor repaired. The
+            # copy is named after the folder, as the scene would be after a rename. A project folder that cannot be written
+            # (a read-only share or medium) is left as it is too; it continues as a copy (_afterSceneImport).
+            self.setPendingSceneSource(os.path.join(path, os.path.basename(os.path.normpath(path)) + projects.SCENE_EXTENSION))
         self._forceProjectOpen = True
+        self._unreadableScene = None
         try:
             # The scene is replaced (Load Scene): the open project is saved and closed first (StartCloseEvent)
             slicer.util.loadScene(scenePath, {"clear": True})
+        except RuntimeError as error:
+            if self._unreadableScene is not None:
+                return False  # the scene file is damaged: _afterSceneImport said so and did not open the project
+            if self.project is None:
+                raise
+            # Some data files of the project could not be read (missing or damaged): the project opened with the rest, and
+            # _afterSceneImport left their nodes out and named them
+            logging.warning(f"Slicer Studio: {error}")
         finally:
             self._forceProjectOpen = False
+            self._discardOnClose = False
+            self._pendingSceneSource = None  # used by _afterSceneImport; not left over for a later load if this one failed
+        self._adoptMergedHierarchy()
         return self.project is not None
+
+    @staticmethod
+    def _closeOpenStudy():
+        """Close the open study (the current subject's edits are written first)."""
+        module = sys.modules.get("StudioLib.study_ui")
+        try:
+            if module is not None:
+                module.closeStudy()
+        except Exception:
+            logging.error("Slicer Studio: the study could not be closed before a project opened:\n" + traceback.format_exc())
+
+    def _adoptMergedHierarchy(self):
+        """The subject hierarchy of a project that was just opened is merged after the scene load ends, so the fingerprint
+        taken when the project was attached lacks it. That is not an edit: the project is up to date, and "Last edited"
+        stays (only the hierarchy differs; anything else that changed is kept as a change).
+        """
+        saved = self._savedFingerprint
+        if self.project is None or self.plan is not None or saved is None:
+            return
+        io = _io()
+        fingerprint = io.sceneFingerprint(slicer.mrmlScene, io.sentinelIds())
+        if fingerprint != saved and fingerprint[:3] == saved[:3] and fingerprint[4:] == saved[4:]:
+            self._savedFingerprint = fingerprint
+            self._lastPolledFingerprint = fingerprint
+
+    def opensSceneAsProject(self):
+        """True if a scene file opened now (Open…, drop, Open folder…) replaces the open project instead of being added to it.
+
+        In Studio with projects, every scene opens as its own project (A-09): a project of the Slicer Studio folder continues
+        in place, a scene from elsewhere opens as a new project that starts as a copy. Classic, a study and a scene without a
+        project keep 3D Slicer's behavior (the scene's data is added to the open scene).
+        """
+        return self.project is not None and self.projectsActive()
+
+    def isOpenCopyOf(self, path):
+        """True if the open project is the copy made from the scene file ``path`` (outside Projects) and the file is unchanged."""
+        record = self._copySource
+        current = self.project
+        if record is None or current is None:
+            return False
+        try:
+            same = os.path.normcase(os.path.realpath(current.path)) == record[0] and \
+                os.path.normcase(os.path.realpath(str(path))) == record[1]
+            stat = os.stat(str(path))
+        except OSError:
+            return False
+        return same and (stat.st_size, stat.st_mtime_ns) == record[2]
+
+    def isOpenProjectScene(self, path):
+        """True if ``path`` is the scene file of the open project (opening it again loads nothing)."""
+        current = self.project
+        if current is None:
+            return False
+        try:
+            scenePath = self._projects().sceneFile(current.path)
+            return scenePath is not None and os.path.normcase(os.path.realpath(scenePath)) == \
+                os.path.normcase(os.path.realpath(str(path)))
+        except OSError:
+            return False
+
+    def openSceneFile(self, path):
+        """Open a scene file (.mrml/.mrb) as its own project while a project is open (``opensSceneAsProject()``).
+
+        The open project is saved and closed first (Load Scene clears the scene). Opening the scene file of the open project
+        again keeps it as it is. Return True if the scene is open.
+        """
+        projects = self._projects()
+        path = os.path.abspath(str(path))
+        projectPath = projects.projectOfPath(path)
+        if projectPath is not None and os.path.normcase(os.path.realpath(os.path.dirname(path))) != os.path.normcase(os.path.realpath(projectPath)):
+            projectPath = None  # a scene in a subfolder of a project (Exports/...) is not the project: it opens as a copy
+        scenePath = projects.sceneFile(projectPath) if projectPath is not None else None
+        if scenePath is not None and os.path.normcase(os.path.realpath(scenePath)) != os.path.normcase(os.path.realpath(path)):
+            # The file opened is the old-named scene of a project folder renamed outside Slicer Studio
+            current = self.project
+            if current is None or os.path.normcase(os.path.realpath(current.path)) != os.path.normcase(os.path.realpath(projectPath)):
+                renamed = projects.adoptRenamedScene(projectPath)
+                if renamed is not None and os.path.dirname(renamed) == os.path.dirname(scenePath) and not os.path.exists(path):
+                    scenePath = renamed
+                    path = renamed
+        if scenePath is not None and os.path.normcase(os.path.realpath(scenePath)) == os.path.normcase(os.path.realpath(path)):
+            current = self.project
+            if current is not None and os.path.normcase(os.path.realpath(current.path)) == os.path.normcase(os.path.realpath(projectPath)):
+                return True  # the open project: nothing to load (adding it again would duplicate every node)
+            return self.openProject(projectPath)
+        if self.refuseDamagedSceneFile(path):
+            return False  # nothing was read: the open project stays open
+        if self.isOpenCopyOf(path):
+            return True  # the copy of this very file is open: a second drop keeps it (no "<name> 2")
+        if not self.confirmReplaceProject(_("Open scene")):
+            return False  # the open project could not be saved and the user keeps working in it
+        self.setPendingSceneSource(path)
+        try:
+            return self.loadSceneLeavingOutUnread(path, {"clear": True})
+        finally:
+            self._discardOnClose = False
+
+    def loadSceneLeavingOutUnread(self, path, properties):
+        """``slicer.util.loadScene(path, properties)``; return True if the scene (or a part of it) is open.
+
+        loadScene raises RuntimeError after the scene ended loading when a data file of it could not be read. When the load
+        handler (``_afterSceneImport``) already left those nodes out and announced it (toast: opened without them, or not
+        opened), that is a planned partial or refused load, not an error: a warning in the log, no traceback, and the caller
+        shows no error box that contradicts the toast. Any other failure is raised as before (also in Classic and in a
+        study, where the load handler does nothing).
+        """
+        self._sceneUnread = None
+        try:
+            slicer.util.loadScene(path, properties)
+        except RuntimeError:
+            unread = self._sceneUnread
+            if not unread:
+                raise
+            logging.warning("Slicer Studio: the scene {} was loaded without {} (the data could not be read)".format(
+                os.path.basename(str(path)), ", ".join(unread)))
+            return self.project is not None or self._projects().sceneHasUserData(slicer.mrmlScene)
+        finally:
+            self._sceneUnread = None
+        return True
+
+    def refuseDamagedSceneFile(self, path):
+        """True if ``path`` is a scene file (.mrml) that was cut short, or a bundle (.mrb) that is not a zip archive, (an interrupted save, a sync conflict) and projects are
+        on: it is announced ("not-opened") and left as it is. Checked before the scene is replaced, so the open project stays
+        open (Load Scene would clear it first and then fail) and the failed load adds no error dialog or traceback on top.
+        """
+        lower = str(path).lower()
+        if not lower.endswith((".mrml", ".mrb")) or not self._projects().isEnabled() or not self.projectsActive():
+            return False
+        if (_bundleIsReadable(path) if lower.endswith(".mrb") else _sceneFileParses(path)):
+            return False
+        name = self._projects().displayName(os.path.basename(path))
+        logging.warning(f"Slicer Studio: the scene file {os.path.basename(path)} is damaged and could not be read; it is left as it is")
+        self._announce("not-opened", None, name=name, missing=False, damaged=True, path=os.path.dirname(path), reason=_(
+            "{name} is damaged and could not be read: nothing was opened, and the file is left as it is.").format(name=name))
+        return True
 
     def _afterSceneImport(self):
         """A scene was loaded: a project of the folder continues in place; in Studio a scene from elsewhere is copied."""
@@ -1703,25 +2677,126 @@ class AutosaveService:
         url = scene.GetURL()
         if not url or self.project is not None:
             return
-        projectPath = projects.projectOfPath(url)
+        # The project's own scene file continues the project in place. Any other scene, also one saved inside a project
+        # folder (a subfolder such as Exports/, a second .mrml next to the project's), is not that project: attaching it
+        # would make the next save replace the project's scene with it.
+        projectPath = projects.projectOfSceneFile(url)
         if projectPath is not None:
+            if self._studyOpen():
+                return  # a study keeps 3D Slicer's behavior: no project is attached (it would be released at once) or announced
             if not (self._studioActive() or getattr(self, "_forceProjectOpen", False)) or not self.enabled():
                 return  # Classic loads a project like any scene (official behavior)
-            project = projects.Project(projectPath)
-            if not self.attachProject(project, inPlace=True):
-                self._announce("locked", project)
+            if not projects.sceneHasUserData(scene) and not _sceneFileParses(url):
+                # The scene file is damaged (cut short by an interrupted save or a sync conflict): nothing of it was read.
+                # Continuing the project would make the next save replace its scene with only what is added now, so the
+                # project's data would drop out of it. It is not opened, and its files are left as they are.
+                self._refuseUnreadableScene(os.path.basename(os.path.normpath(projectPath)), url, projectPath)
                 return
-            self._announce("opened", project)
+            project = projects.Project(projectPath)
+            # A data file of the project is missing or damaged (deleted in Finder, a partial copy): its node holds no data,
+            # could never be saved and would make quitting ask about it. It is left out before the project's files are
+            # recorded, so its file stays where it is (the scene file keeps naming it until the project is saved again).
+            unread = self._removeUnreadNodes(scene)
+            self._sceneUnread = unread
+            if not self.attachProject(project, inPlace=True):
+                if project.readOnly:
+                    self._copyReadOnlyProject(project, unread)
+                else:
+                    # Continued later, when the other window lets go: the files as they are now, when they were read
+                    self._projectReadStats(project, scene, fresh=True)
+                    self._announceLockedOnce(project)
+                return
+            if unread:
+                self._announce("opened", project, unread=unread)
+            else:
+                self._announce("opened", project)
             if self.dirty:
                 qt.QTimer.singleShot(0, lambda: self.autosaveNow("open"))
+            else:
+                qt.QTimer.singleShot(0, self._adoptMergedHierarchy)  # other ways to load the scene (openProject does it itself)
             return
         if not self.projectsActive():
             return
+        unread = self._removeUnreadNodes(scene)
+        self._sceneUnread = unread
+        if not projects.sceneHasUserData(scene):
+            # Nothing could be loaded: no empty project (A-09). A damaged scene file is named (its folder is left as it is)
+            if source is not None and not _sceneFileParses(url):
+                name = projects.displayName(os.path.basename(source))
+                self._refuseUnreadableScene(name, url, os.path.dirname(source), reason=_(
+                    "{name} is damaged and could not be read: nothing was opened, and the file is left as it is.").format(name=name))
+            elif unread:
+                # Its data files are missing or damaged (a file cut short reads as a zero-filled image): say so, or the
+                # drop would end with nothing open and no word
+                sceneFile = source or url
+                name = projects.displayName(os.path.basename(sceneFile))
+                self._announce("not-opened", None, name=name, missing=False, damaged=True, path=os.path.dirname(sceneFile), reason=_(
+                    "{name} was not opened: its data could not be loaded ({names}), the files are missing or damaged. The "
+                    "files are left as they are.").format(name=name, names=", ".join(unread)))
+            return
         name = projects.displayName(os.path.basename(source or url))
-        project = self.createProject(name, announce="copy")
+        project = self.createProject(name, announce=None if unread else "copy")
         if project is not None:
+            if source is not None and os.path.isfile(source):
+                stat = os.stat(source)
+                self._copySource = (os.path.normcase(os.path.realpath(project.path)), os.path.normcase(os.path.realpath(source)),
+                                    (stat.st_size, stat.st_mtime_ns))
+            if unread:
+                self._announce("copy-incomplete", project, unread=unread)
             # Copy the files now (in the background): the original is never changed
             qt.QTimer.singleShot(0, lambda: self.autosaveNow("copy"))
+
+    def _refuseUnreadableScene(self, name, scenePath, folder, reason=None):
+        """The scene file ``scenePath`` could not be read (damaged): say so, and keep anything from saving over it."""
+        self._unreadableScene = scenePath
+        # The scene still names the damaged file (Load Scene set its URL): a later save, or a project attached because
+        # data of its folder is added, would replace it. Data added now starts a new project instead.
+        slicer.mrmlScene.SetURL("")
+        logging.error(f"Slicer Studio: the scene file {os.path.basename(scenePath)} is damaged and could not be read; it is left as it is")
+        if reason is None:
+            reason = _("The scene file of {name} is damaged and could not be read: the project was not opened, and its files "
+                       "are left as they are.").format(name=name)
+        self._announce("not-opened", None, name=name, missing=False, damaged=True, path=folder, reason=reason)
+
+    @staticmethod
+    def _removeUnreadNodes(scene):
+        """Remove the nodes whose file could not be read by the scene load that just ended (a missing or broken file) and
+        return their names. They hold no data, so a project cannot save them and closing the scene would ask about them.
+        """
+        unread = []
+        nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
+        for index in range(nodes.GetNumberOfItems()):
+            node = nodes.GetItemAsObject(index)
+            for storageIndex in range(node.GetNumberOfStorageNodes()):
+                storageNode = node.GetNthStorageNode(storageIndex)
+                if storageNode is None:
+                    continue
+                if storageNode.GetStoredTime().GetMTime() != 0:
+                    # Read (a successful read sets the stored time). A NIfTI, NRRD or MetaImage file whose data stops
+                    # before the end that its header announces (an interrupted copy or sync) also "reads": the reader
+                    # zero-fills the missing voxels. It is left out like a damaged file, as opening it directly refuses it.
+                    if _dataFileCutShort(storageNode):
+                        unread.append(node)
+                        break
+                    continue
+                messages = storageNode.GetUserMessages()
+                if messages is not None and messages.GetNumberOfMessagesOfType(vtk.vtkCommand.ErrorEvent) > 0:
+                    unread.append(node)
+                    break
+        names = []
+        for node in unread:
+            names.append(node.GetName() or node.GetID())
+            related = [node.GetNthStorageNode(index) for index in range(node.GetNumberOfStorageNodes())]
+            if node.IsA("vtkMRMLDisplayableNode"):
+                related += [node.GetNthDisplayNode(index) for index in range(node.GetNumberOfDisplayNodes())]
+            scene.RemoveNode(node)
+            for other in related:
+                if other is not None and other.GetScene() is not None:
+                    scene.RemoveNode(other)
+        if names:
+            logging.warning("Slicer Studio: left out (their files could not be read): " + ", ".join(names))
+        return names
 
     def renameProject(self, newName):
         """Rename the open project: its folder, its scene file, project.json and every file path of the scene."""
@@ -1734,7 +2809,7 @@ class AutosaveService:
             return project.path
         parent = os.path.dirname(project.path)
         newPath = os.path.join(parent, newName)
-        if os.path.exists(newPath) and os.path.normcase(os.path.realpath(newPath)) != os.path.normcase(os.path.realpath(project.path)):
+        if projects.nameTaken(parent, newName, project.path):
             raise projects.ProjectError(_("A project named {name} already exists.").format(name=newName))
         self.saveNow("rename", progress=True)
         _io().backgroundWriter().drain(10.0)
@@ -1745,7 +2820,8 @@ class AutosaveService:
             os.rename(oldPath, newPath)
         except OSError as error:
             project.lock()
-            raise projects.ProjectError(_("The project could not be renamed: {error}").format(error=error))
+            raise projects.ProjectError(_("The project could not be renamed: {error}").format(
+                error=plainOSErrorIn(error, parent)))
         projects.renameSceneFile(newPath, oldScene)
         self._relocateProject(oldPath, newPath)
         return newPath
@@ -1756,6 +2832,10 @@ class AutosaveService:
         project.path = os.path.normpath(newPath)
         project.name = os.path.basename(project.path)
         project.lock()
+        record = self._copySource
+        if record is not None and record[0] == os.path.normcase(os.path.realpath(oldPath)):
+            # the open project is the copy of an outside scene file: it stays that copy under its new folder
+            self._copySource = (os.path.normcase(os.path.realpath(project.path)),) + tuple(record[1:])
         scene = slicer.mrmlScene
         oldNorm = os.path.normpath(oldPath)
         rootDirectory = scene.GetRootDirectory()
@@ -1769,6 +2849,7 @@ class AutosaveService:
             return path
 
         storageNodes = scene.GetNodesByClass("vtkMRMLStorageNode")
+        storageNodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         for index in range(storageNodes.GetNumberOfItems()):
             storageNode = storageNodes.GetItemAsObject(index)
             names = [storageNode.GetNthFileName(i) for i in range(storageNode.GetNumberOfFileNames())]
@@ -1781,82 +2862,407 @@ class AutosaveService:
                     storageNode.AddFileName(moved(name))
         scene.SetURL(project.scenePath)
         scene.SetRootDirectory(project.path)
+        _relocateSavedLesions(oldNorm, project.path)
         if self.projectWriter is not None:
             self.projectWriter.relocate(oldPath, project.path)
         project.writeJson(state="open", executor=_io().backgroundWriter())
         self._savedFingerprint = None  # the scene file is written again (same content, new name)
         self.dirty = True
-        self.firstDirtyTime = time.time()
+        self.firstDirtyTime = _clock()
         self._projects().setCurrentProject(project)
         self._updateStatus()
 
     def moveRoot(self, newRoot, moveContent=True, run=None):
-        """Change the Slicer Studio folder; with ``moveContent``, move Projects/, Studies/ and LNM/ there first.
+        """Change the Slicer Studio folder; with ``moveContent``, move Projects/, Studies/, LNM/ and Templates/ there first.
 
         The open project is saved first and followed. ``run(function)`` runs the move (for example in a thread with a
         progress dialog); by default it runs here. Return the list of moved items. Raise OSError when moving fails (what was
-        moved stays moved; the setting is then not changed).
+        moved stays moved; the setting is then not changed), and ``projects.OpenElsewhereError`` before anything is moved
+        when another running Slicer Studio has a project or a study of the folder open
+        (``projects.MoveRunningElsewhereError`` when it is moving the folder now).
         """
+        try:
+            return self._moveRoot(newRoot, moveContent, run)
+        finally:
+            # Held from the start of the move until the setting points at the new folder
+            self._projects().releaseMoveLock()
+
+    def _moveRoot(self, newRoot, moveContent, run):
         projects = self._projects()
         oldRoot = projects.root()
         newRoot = os.path.normpath(os.path.abspath(newRoot))
         moved = []
+        # What this move put under another name because the name was taken there (``{relative old: relative new}``): the
+        # message after the move names them (``projects_ui.changeRoot``)
+        self.lastMoveRenamed = {}
         if moveContent and os.path.normcase(os.path.realpath(oldRoot)) != os.path.normcase(os.path.realpath(newRoot)):
+            projects.checkMoveTarget(oldRoot, newRoot)  # before the open project is saved and unlocked
+            # A project or study that another Slicer Studio has open would move away from under it (it would go on saving there)
+            projects.checkNotOpenElsewhere(oldRoot)
+            # A running job (a connectome download into LNM/Connectomes...) would go on writing to the old paths
+            projects.checkNoJobsUsing(oldRoot)
+            # Marks this move as running until the setting points at the new folder: another Slicer Studio that starts
+            # meanwhile must not take its MovePending record for an interrupted move (``finishInterruptedMove``), nor
+            # offer the projects it moves (unlocked while they move) as crashed, nor move the folder at the same time
+            if not projects.takeMoveLock():
+                raise projects.MoveRunningElsewhereError(_("Slicer Studio is moving your projects and studies in another window. "
+                                                           "Wait until it finishes, then try again."))
             if self._studyOpen():
                 # The open study writes its journal and participants into Studies/ while it is open
                 raise OSError(_("Close the open study first."))
             project = self.project
             if project is not None:
                 self.saveNow("move", progress=True)
-                _io().backgroundWriter().drain(10.0)
+            # A Duplicate that is still copying (it runs in the background writer, also when no project is open) makes its
+            # copy under a hidden temporary name and renames it when complete: moving the folder meanwhile would copy that
+            # half-made folder and fail
+            if not _io().backgroundWriter().drain(10.0 if project is not None else 60.0):
+                raise OSError(_("Slicer Studio is still copying or saving a project. Wait until it is finished, then try again."))
+            if project is not None:
                 project.unlock()
+            # The open project's scene files as this Studio last wrote them: when the move makes them follow the moved
+            # templates' new ids, that change is Studio's own, not another program's ("<project> (Slicer Studio).mrml")
+            writer = self.projectWriter if project is not None else None
+            unchangedScenes = writer.unchangedSceneFiles() if writer is not None else []
             # Nothing is written into the old folder while it moves (poll, heartbeat of project.json)
             timers = [timer for timer in (self._pollTimer, self._heartbeatTimer) if timer.isActive()]
             for timer in timers:
                 timer.stop()
             self._suspendCount += 1
+            succeeded = False
+            failed = False  # failed with an error (reported); a kill leaves what moved to finishInterruptedMove
+            projectsBefore = studiesBefore = contentBefore = None
+            # Items that landed under another name (" 2") because the new folder already had one with that name: paths
+            # follow them there, never the other item that kept the name (a project of the new folder)
+            renamed = {}
+            # Moved templates that got another id because the new folder had a template with theirs
+            renamedIds = {}
+            # The same move as the one recorded as pending: it was interrupted (a kill), and this one finishes it
+            pending = projects.pendingMove()
+            resuming = (pending is not None and _canonicalPath(pending[0]) == _canonicalPath(oldRoot)
+                        and _canonicalPath(pending[1]) == _canonicalPath(newRoot))
             try:
-                function = lambda: projects.moveContent(oldRoot, newRoot)  # noqa: E731
+                projects.checkNotOpenElsewhere(oldRoot)  # again: one may have been opened elsewhere while this one saved
+                # What moves under another name, and the new template ids, are written down as the move goes: the move
+                # that finishes an interrupted one follows the items that moved before the kill as this one would
+                journal = projects.MoveJournal(projects.moveJournalPath(), oldRoot, newRoot, resume=resuming)
+                # Recorded until the setting points at the new folder: once the first original is deleted, a kill leaves
+                # the setting on an old folder that lacks it, and the next start finishes the move
+                # (``finishInterruptedMove``). A move that fails is reported, and the setting stays as it is.
+                projects.recordPendingMove(oldRoot, newRoot)
+                # What the new folder and the old one hold before the move: when it fails partway, what moved is told apart
+                # from the new folder's own projects and studies (``recordPartialMove``)
+                projectsBefore = journal.projectsBefore() if resuming else None
+                studiesBefore = None
+                partial = projects.partialMove() if not resuming else None
+                if projectsBefore is None and partial is not None and _canonicalPath(partial[1]) == _canonicalPath(newRoot):
+                    # This move finishes one that failed partway into the same folder: the projects and studies that the
+                    # failed attempt moved are not the new folder's own. Its record knows those, so the moved projects'
+                    # scenes follow the templates that move now under another id, as in a move that never stopped
+                    projectsBefore, studiesBefore = set(partial[2]), set(partial[3])
+                    journal.setProjectsBefore(projectsBefore)
+                if projectsBefore is None:
+                    projectsBefore = projects._visibleNames(os.path.join(newRoot, projects.PROJECTS_DIR))
+                if studiesBefore is None:
+                    studiesBefore = projects._visibleNames(os.path.join(newRoot, projects.STUDIES_DIR))
+                contentBefore = projects.contentNames(oldRoot)
+                function = lambda: projects.moveContent(oldRoot, newRoot, renamed=renamed, renamedIds=renamedIds, journal=journal)  # noqa: E731
                 moved = run(function) if run is not None else function()
+                succeeded = True
+                for relative in sorted(renamed, key=len, reverse=True):
+                    _relocateSavedLesions(os.path.join(oldRoot, relative), os.path.join(newRoot, renamed[relative]))
+                for name in moved:  # lesions saved in this session in a moved folder (outside the open project too)
+                    _relocateSavedLesions(os.path.join(oldRoot, name), os.path.join(newRoot, name))
+            except Exception:
+                failed = not succeeded
+                if not succeeded:
+                    projects.clearPendingMove()
+                    if not resuming:
+                        projects.discardMoveJournal()  # a failed move is reported; the one that finishes a kill tries again
+                    if contentBefore is not None:
+                        # What moved stays in the new folder while the setting stays on the old one: Library lists the projects
+                        # and studies that moved, and each start names that folder, until the folder changes (BB-1)
+                        try:
+                            if contentBefore - projects.contentNames(oldRoot):
+                                projects.recordPartialMove(oldRoot, newRoot, projectsBefore, studiesBefore)
+                        except Exception:
+                            logging.error("Slicer Studio: recording the move that failed partway failed:\n" + traceback.format_exc())
+                raise
             finally:
                 self._suspendCount -= 1
                 for timer in timers:
                     timer.start()
                 if project is not None:
-                    newPath = projects.pathAfterMove(project.path, oldRoot, newRoot)
-                    if os.path.isdir(newPath) and os.path.normpath(newPath) != os.path.normpath(project.path):
+                    newPath = projects.pathAfterMove(project.path, oldRoot, newRoot, renamed)
+                    # Follow the project only when it really moved: after a failed move its folder may still be in the
+                    # old folder (where Library lists it), whatever exists in the new one
+                    hasMoved = succeeded or not os.path.isdir(project.path)
+                    if hasMoved and os.path.isdir(newPath) and os.path.normpath(newPath) != os.path.normpath(project.path):
+                        if os.path.basename(os.path.normpath(newPath)) != project.name:
+                            # Moved as "<name> 2": its scene file follows the folder name, as Rename does
+                            projects.renameSceneFile(newPath, project.scenePath)
                         self._relocateProject(project.path, newPath)
+                        if writer is not None and writer is self.projectWriter:
+                            writer.followSceneFiles(unchangedScenes)
                     else:
                         project.lock()
-            _updateRecentStudies(oldRoot, newRoot)
+                if failed:
+                    self._followPartialMove(oldRoot, newRoot, renamed, renamedIds)
+            self._followMovedRecoveries(oldRoot, newRoot, renamed)
+            _updateRecentStudies(oldRoot, newRoot, renamed)
+            # A move that finishes an interrupted one: paths into the items moved before the interruption follow them too
+            movedKinds = list(moved)
+            if resuming:
+                movedKinds += [name for name in (projects.PROJECTS_DIR, projects.STUDIES_DIR, projects.LNM_DIR, projects.TEMPLATES_DIR)
+                               if name not in movedKinds]
+            _updateMovedPathSettings(oldRoot, newRoot, movedKinds, renamed)
+            self.lastMoveRenamed = dict(renamed)
+            if renamedIds:
+                from StudioLib import templates
+
+                templates.followRenamedIds(renamedIds)
         projects.setRoot(newRoot)
+        if self.project is not None:
+            self._noteOutsideProject(self.project)  # Keep: the open project stays in the old folder
         return moved
 
-    def newProject(self):
-        """New project (Ctrl+N): save and close the open project; the next data creates the next project."""
-        if self.project is not None:
-            self.saveNow("new project", progress=True)
+    def _noteOutsideProject(self, project):
+        try:
+            self._projects().noteOutsideProject(project.path)
+        except Exception:
+            logging.error("Slicer Studio: remembering the project outside the folder failed:\n" + traceback.format_exc())
+
+    def _followPartialMove(self, oldRoot, newRoot, renamed, renamedIds):
+        """After a move that failed partway (the new disk is full): what the settings and this session remember of the
+        items that did move follows them into the new folder, as the open project does, though the setting stays on the old
+        folder. Without this, the recent studies, the Cohort study and the registered connectomes would point at folders
+        that are gone, and a later move (after the user freed space) knows nothing of the " 2" names of this one: it would
+        point them at the new folder's own items that kept the names (BB-1).
+
+        Only a path whose item really moved follows: it is gone from the old folder and its new place exists. Never raises
+        (the move's own error is reported).
+        """
+        projects = self._projects()
+
+        def movedPath(path):
+            if not path:
+                return path
+            newPath = projects.pathAfterMove(path, oldRoot, newRoot, renamed)
+            if os.path.normpath(newPath) == os.path.normpath(path) or os.path.lexists(path) or not os.path.lexists(newPath):
+                return path
+            return newPath
+
+        steps = (
+            lambda: _followSavedLesions(movedPath),
+            lambda: self._followMovedRecoveries(oldRoot, newRoot, renamed),
+            lambda: _updateRecentStudies(oldRoot, newRoot, renamed, movedTo=movedPath),
+            lambda: _updateMovedPathSettings(oldRoot, newRoot, (), renamed, movedTo=movedPath),
+        )
+        for step in steps:
+            try:
+                step()
+            except Exception:
+                logging.error("Slicer Studio: following the items moved before the move failed:\n" + traceback.format_exc())
+        if renamedIds:
+            try:
+                from StudioLib import templates
+
+                # The moved templates have their new ids in the new folder: the default follows them, or a later move
+                # would make it the template of the new folder that kept the id
+                templates.followRenamedIds(renamedIds)
+            except Exception:
+                logging.error("Slicer Studio: following the moved templates failed:\n" + traceback.format_exc())
+
+    def newProject(self, title=None):
+        """New project (Ctrl+N): save and close the open project; the next data creates the next project. Return False if
+        the open project could not be saved and the user keeps working in it (the scene is not closed), else True.
+        """
+        # Data opened less than one poll ago becomes its project first (as for Ctrl+S), or it would be discarded or asked about
+        saved = self.ensureProject() is not None and self.saveNow("new project", progress=True)
+        answered = False
+        if not saved and self.project is not None and not self._studyOpen():
+            # The project could not be saved (a full disk, a folder that cannot be written). The official "Save before
+            # closing scene?" question would offer its Save Data dialog, which writes over the project's own files in
+            # place (no temporary file): on a full disk that truncates the lesion saved before. The user is asked as
+            # when another project is opened: "Save a copy…" elsewhere, close without saving, or keep working.
+            from StudioLib import projects_ui
+
+            answer = projects_ui.askReplaceUnsavedProject(title or _("New project"), self.project, self._projectPausedReason, verb="close")
+            if answer not in ("save", "discard"):
+                return False
+            # A copy holds the edits, or the user chose to drop them: the close does not try (and fail) to save again
+            self._discardOnClose = True
+            answered = True
+        # A study that is open is closed (its subject's edits are written first; a study saves its own files, and the
+        # project that was open before it was saved and released when it opened): what its scene still holds is saved
+        # work, so the scene is closed unasked as for a saved project
+        if self._studyOpen():
+            from StudioLib import study_ui
+
+            study_ui.closeStudy()
+            saved = True
+        scene = slicer.mrmlScene
         mainWindow = slicer.util.mainWindow()
         action = mainWindow.findChild(qt.QAction, "FileCloseSceneAction") if mainWindow is not None else None
-        if action is not None:
+        # What Close Scene would ask about (qSlicerMainWindowPrivate::isSceneContentModifiedSinceRead): the scene itself, or
+        # a storable node modified since read. With the project saved, such a node is one that is not saved with the scene
+        # on purpose (the temporary or partial map of a Map run in progress): it is not saved work either
+        modified = bool(scene.GetModifiedSinceRead()) or bool(scene.GetStorableNodesModifiedSinceRead())
+        if action is not None and not answered and not (saved and modified):
             action.trigger()
+            return True
+        scene.Clear(0)
+        if action is not None:
+            # The project is up to date, and what changed since its scene file was written is not saved as an edit (the
+            # views, the hierarchy's item numbers): Close Scene would still ask "Save before closing scene?" about it. The
+            # scene is closed as that action closes it (qSlicerMainWindow::on_FileCloseSceneAction_triggered), unasked.
+            from slicer.i18n import translate
+
+            scene.SetURL("")
+            slicer.app.coreIOManager().setDefaultSceneFileType(translate("qSlicerMainWindow", "MRML Scene") + " (.mrml)")
+        return True
+
+    def finishInterruptedMove(self, run=None, notify=None):
+        """Finish a move of the Slicer Studio folder that was interrupted (the app was closed or killed during ``moveRoot``).
+
+        Once a move deletes its first original the old folder lacks it, while the setting still points there: Library
+        would list half the projects, or none, and the open project's crash offer would be lost (its complete copy is in
+        the new folder). So the move goes on where it stopped (what it left is cleaned up by ``projects.moveContent``),
+        the setting then points at the new folder, and the user is told. Called at startup before the crash scan.
+        ``run`` runs the move (default: a progress dialog), ``notify(text, level)`` tells the user (default: a toast).
+        A move that another running Slicer Studio is doing now (its ``projects.takeMoveLock``) is left to it: nothing is
+        moved or changed, and the user is told. A move that failed partway with a reported error is not finished by
+        itself: the user is told where what moved is (``projects.partialMove``). Return "finished", "failed",
+        "unavailable", "running", "partial" or None (no interrupted move).
+        """
+        projects = self._projects()
+        if not projects.isEnabled() or projects.isRootFromEnvironment():
+            return None
+        if notify is None:
+            from StudioLib import projects_ui
+
+            def notify(text, level):
+                projects_ui.message(text, level=level, ms=15000)
+
+        pending = projects.pendingMove()
+        if pending is None:
+            return self._notifyPartialMove(notify)
+        oldRoot, newRoot = pending
+
+        def runningElsewhere():
+            notify(_("Slicer Studio is moving your projects and studies to {folder} in another window.").format(
+                folder=projects.shortPath(newRoot)), "info")
+            return "running"
+
+        if projects.isMoveRunningElsewhere():
+            return runningElsewhere()
+
+        def same(first, second):
+            return os.path.normcase(os.path.realpath(first)) == os.path.normcase(os.path.realpath(second))
+
+        current = projects.root()
+        if same(current, newRoot) or not same(current, oldRoot):
+            projects.clearPendingMove()  # the move finished, or another folder was chosen since
+            return None
+        if not os.path.isdir(newRoot):
+            # A drive that is not connected now: the move goes on at a later start
+            notify(_("Slicer Studio was closed while it moved your projects and studies to {folder}. That folder cannot be found now: "
+                     "connect the drive that holds it and start Slicer Studio again.").format(folder=projects.shortPath(newRoot)), "warning")
+            return "unavailable"
+        if run is None:
+            from StudioLib import projects_ui
+
+            def run(function):
+                return projects_ui._runWithProgress(function, _("Finishing the move of your projects and studies…"))
+
+        try:
+            self.moveRoot(newRoot, moveContent=True, run=run)
+        except projects.MoveRunningElsewhereError:
+            return runningElsewhere()  # started in another window since the check above: its record stays
+        except OSError as error:
+            if projects.hasContent(oldRoot):
+                projects.recordPendingMove(oldRoot, newRoot)  # tried again at the next start
+            else:
+                projects.setRoot(newRoot)  # nothing is left in the old folder: everything is in the new one
+            notify(_("Slicer Studio was closed while it moved your projects and studies to {folder}, and the move could not be "
+                     "finished: {error}").format(folder=projects.shortPath(newRoot), error=error), "warning")
+            projects.notifyChanged()
+            return "failed"
+        # moveRoot made the paths kept in the settings that pointed into the items moved before the interruption follow
+        # them too, under the names they moved as (its journal)
+        projects.notifyChanged()
+        notify(_("Slicer Studio was closed while it moved your projects and studies. The move is now finished: they are in {folder}.").format(
+            folder=projects.shortPath(newRoot)), "info")
+        return "finished"
+
+    def _notifyPartialMove(self, notify):
+        """At startup, after a move of the folder that failed partway (``projects.partialMove``): name the folder that holds
+        what moved, and how to finish the move. Return "partial", or None when there is no such move.
+        """
+        projects = self._projects()
+        partial = projects.partialMove()
+        if partial is None:
+            return None
+        newRoot = partial[1]
+        if not os.path.isdir(newRoot):
+            notify(_("Some of your projects and studies were moved to {folder}, and that folder cannot be found now: connect "
+                     "the drive that holds it.").format(folder=projects.shortPath(newRoot)), "warning")
         else:
-            slicer.mrmlScene.Clear(0)
+            notify(_("Some of your projects and studies are in {folder}: moving them there could not finish. Library lists "
+                     "them. To finish, choose that folder again in Settings › Saving and move.").format(  # noqa: RUF001
+                folder=projects.shortPath(newRoot)), "warning")
+        return "partial"
+
+    def removeInterruptedCopies(self):
+        """Delete the partial copies ("<name>.studio-copy") that a Duplicate killed midway left in Projects/ (background)."""
+        projects = self._projects()
+        if not projects.isEnabled():
+            return
+        rootPath = projects.root()
+        _io().backgroundWriter().submit(projects.removeCopyLeftovers, rootPath)
+
+    def removeUnsavedProjects(self):
+        """Delete the project folders that a killed Slicer Studio (or a full disk) left before their first save: no scene,
+        no scan, only .studio and temporary files. They are not a project to offer after a crash, and not one to list.
+        """
+        projects = self._projects()
+        if not projects.isEnabled() or projects.isMoveRunningElsewhere():
+            return []  # a folder that another Slicer Studio moves now is not cleaned up from here
+        return projects.removeUnsavedProjects()
 
     def scanProjectsAtStartup(self):
         """Offer the projects that were open when Slicer Studio closed unexpectedly (each one once)."""
         projects = self._projects()
         if not projects.isEnabled():
             return []
+        if projects.isMoveRunningElsewhere():
+            # Another Slicer Studio moves the folder now: its open project is unlocked while it moves, not crashed (a
+            # project that did crash is offered at a later start, from the new folder)
+            return []
         io = _io()
         crashed = []
-        for info in projects.listProjects():
+        candidates = projects.listProjects()
+        listed = {os.path.normcase(os.path.realpath(info.path)) for info in candidates}
+        remembered = projects.outsideProjectPaths()
+        for path in remembered:
+            # A project that was open outside the folder (left there by Change folder > Keep, opened from elsewhere)
+            key = os.path.normcase(os.path.realpath(path))
+            if key not in listed and os.path.isfile(projects.projectFile(path)):
+                listed.add(key)
+                candidates.append(projects.ProjectInfo(path))
+        for info in candidates:
             if info.state != "open" or info.isCurrent() or projects.isLockedByOther(info.path):
                 continue
+            if info.scene is None:
+                continue  # nothing was saved (the folder of a first save that never came is not offered as "saved")
             crashed.append(info)
             data = dict(info.data, state="crashed")
             io.backgroundWriter().submit(io.atomicWriteJson, projects.projectFile(info.path), data)
+        if remembered:
+            # Still open elsewhere (locked by another Slicer Studio) stays remembered; the rest is offered now or no longer open
+            projects.forgetOutsideProjects([info.path for info in candidates if info.state == "open" and projects.isLockedByOther(info.path)])
         self._pendingProjectRecoveries = crashed
+        self._recoveryPaths = {os.path.normpath(info.path): info.path for info in crashed}
         if crashed:
             presenter = self._projectPresenter
             if presenter is None:
@@ -1931,7 +3337,7 @@ class AutosaveService:
 
 
 def showAutosaveSettings():
-    """Open the application settings at the Autosave panel."""
+    """Open the application settings at the Saving panel."""
     dialog = slicer.app.settingsDialog()
     mainWindow = slicer.util.mainWindow()
     if dialog is None or mainWindow is None:
@@ -1944,8 +3350,12 @@ def showAutosaveSettings():
         action.trigger()
 
 
-def _updateRecentStudies(oldRoot, newRoot):
-    """Recent studies that moved with the Slicer Studio folder point at their new place (fork-only key)."""
+def _updateRecentStudies(oldRoot, newRoot, renamed=None, movedTo=None):
+    """Recent studies that moved with the Slicer Studio folder point at their new place (fork-only key).
+
+    ``movedTo(path)``, when given, is the new path of ``path`` instead of ``projects.pathAfterMove`` (after a failed move,
+    only the items that did move follow: ``AutosaveService._followPartialMove``).
+    """
     try:
         from StudioLib import projects, study_ui
     except ImportError:
@@ -1961,12 +3371,95 @@ def _updateRecentStudies(oldRoot, newRoot):
     changed = False
     for record in records:
         path = record.get("path") if isinstance(record, dict) else None
-        newPath = projects.pathAfterMove(path, oldRoot, newRoot) if path else path
+        if not path:
+            newPath = path
+        elif movedTo is not None:
+            newPath = movedTo(path)
+        else:
+            newPath = projects.pathAfterMove(path, oldRoot, newRoot, renamed)
         if newPath != path:
+            if record.get("name") == os.path.basename(os.path.normpath(path)) != os.path.basename(os.path.normpath(newPath)):
+                record["name"] = os.path.basename(os.path.normpath(newPath))  # the study follows its folder (moveContent)
             record["path"] = newPath
             changed = True
     if changed:
         qt.QSettings().setValue(study_ui.RECENT_STUDIES_KEY, json.dumps(records))
+
+
+#: Fork-only settings that hold local paths the user registered or chose (one path or a list). Those inside an item that
+#: moved with the Slicer Studio folder follow it: a connectome kept in LNM/ (where Convert and "Get a connectome…" put
+#: it), the Cohort study in Studies/, the download and data folders, recipe folders (keys of LesionNetworkMapping)
+MOVED_PATH_KEYS = (
+    "Studio/LNM/Connectomes",
+    "Studio/LNM/CohortStudy",
+    "Studio/LNM/FetchDestination",
+    "Studio/LNM/DataDirectory",
+    "Studio/LNM/RecipeFolders",
+    "Studio/LNM/LastExportFolder",
+    "Studio/NiftiExport/LastFolder",
+)
+#: Fork-only settings that hold a JSON object with such a path: the Nulls card's control set ("path") and the request of
+#: an unfinished connectome download ("dest", ``manager_catalog.ACTIVE_FETCH_SETTING``: a paused download is still offered
+#: for Resume at its new place)
+MOVED_JSON_PATH_KEYS = ("Studio/LNM/NullsControlSet", "Studio/LNM/ActiveFetch")
+#: The field of a ``MOVED_JSON_PATH_KEYS`` object that holds the path, when it is not "path"
+MOVED_JSON_PATH_FIELDS = {"Studio/LNM/ActiveFetch": "dest"}
+
+
+def _updateMovedPathSettings(oldRoot, newRoot, moved, renamed=None, movedTo=None):
+    """Paths of ``MOVED_PATH_KEYS`` inside the moved items point at their new place; the open Map follows them too.
+
+    Only paths inside an item that moved (``moved``, as ``projects.moveContent`` returns it) change: anything else in
+    the old folder stayed there. ``movedTo(path)``, when given, is the new path of ``path`` instead (after a failed move,
+    only the items that did move follow: ``AutosaveService._followPartialMove``).
+    """
+    from StudioLib import projects
+
+    movedNames = {os.path.normcase(name) for name in moved or ()}
+
+    def movedPath(path):
+        if movedTo is not None:
+            return movedTo(path) if path and projects.isInside(path, oldRoot) else path
+        if not path or not movedNames or not projects.isInside(path, oldRoot):
+            return path
+        relative = os.path.relpath(os.path.realpath(path), os.path.realpath(oldRoot))
+        if os.path.normcase(relative.split(os.sep)[0]) not in movedNames:
+            return path
+        return projects.pathAfterMove(path, oldRoot, newRoot, renamed)
+
+    settings = qt.QSettings()
+    for key in MOVED_PATH_KEYS:
+        value = settings.value(key)
+        if value is None or value == "":
+            continue
+        if isinstance(value, str):
+            newValue = movedPath(value)
+        else:
+            newValue = [movedPath(str(item)) for item in value if item]
+            if newValue == [str(item) for item in value if item]:
+                continue
+        if newValue != value:
+            settings.setValue(key, newValue)
+    for key in MOVED_JSON_PATH_KEYS:
+        try:
+            raw = settings.value(key)
+            data = json.loads(str(raw)) if raw else None
+            field = MOVED_JSON_PATH_FIELDS.get(key, "path")
+            if isinstance(data, dict) and isinstance(data.get(field), str) and data[field]:
+                newPath = movedPath(data[field])
+                if newPath != data[field]:
+                    data[field] = newPath
+                    settings.setValue(key, json.dumps(data))
+        except (TypeError, ValueError):
+            continue
+    # What is already open in this session (the Map module's remembered bundles, its connectome, run and Cohort study)
+    module = sys.modules.get("LesionNetworkMapping")
+    follow = getattr(module, "followMovedPaths", None) if module is not None else None
+    if follow is not None:
+        try:
+            follow(movedPath)
+        except Exception:
+            logging.exception("Slicer Studio: Map could not follow the moved folder")
 
 
 def _mouseButtonsPressed():
@@ -1982,7 +3475,32 @@ def _canonicalPath(path):
 
 
 def _isoTime(seconds=None):
-    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(seconds if seconds is not None else time.time()))
+    """UTC ("...Z"): the heartbeat and session times stay right after a time zone change (``recovery._parseTime`` reads them)."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds if seconds is not None else time.time()))
+
+
+def _requiredFreeBytes(estimatedBytes, project=False):
+    """Free space a generation needs: a project save needs room for its data only, the private autosave keeps 1 GB free."""
+    if project:
+        return 2 * estimatedBytes + PROJECT_FREE_MARGIN_BYTES
+    return max(MIN_FREE_BYTES, 2 * estimatedBytes)
+
+
+def plainOSError(error):
+    """An I/O error in plain words: "Permission denied", without the error number and the (temporary) file path."""
+    return (getattr(error, "strerror", None) or str(error)).strip()
+
+
+def plainOSErrorIn(error, folder):
+    """``plainOSError`` that names ``folder`` ("Permission denied (in the folder Projects)") when the error is about a file
+    inside it, so a read-only folder is recognised without its full path or the temporary names.
+    """
+    reason = plainOSError(error)
+    folder = os.path.normpath(str(folder or ""))
+    names = [os.path.normpath(str(n)) for n in (getattr(error, "filename", None), getattr(error, "filename2", None)) if n]
+    if folder and any(n == folder or n.startswith(folder + os.sep) for n in names):
+        return _("{reason} (in the folder {folder})").format(reason=reason, folder=os.path.basename(folder))
+    return reason
 
 
 def _formatBytes(size):

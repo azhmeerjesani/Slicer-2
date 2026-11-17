@@ -133,8 +133,9 @@ def _absolute_strings(value):
     if not isinstance(value, str):
         return []
     option, has_value, option_value = value.partition("=")
-    # A whole absolute path, or the value of a "--opt=/abs/path" command-line token
-    return [value] if os.path.isabs(value) or (has_value and option.startswith("-") and os.path.isabs(option_value)) else []
+    # A whole absolute path, a comma-separated list of them, or the value of a "--opt=/abs/path" command-line token
+    candidate = option_value if has_value and option.startswith("-") else value
+    return [value] if any(os.path.isabs(part) for part in candidate.split(",")) else []
 
 
 class PortableRecordTest(unittest.TestCase):
@@ -149,6 +150,22 @@ class PortableRecordTest(unittest.TestCase):
         self.assertEqual(_absolute_strings(stored), [])
         self.assertEqual(_absolute_strings(record), [bundle, bundle, f"--maps={bundle}"])
         self.assertEqual(record["argv"][2], f"--maps={bundle}")  # the input record is not changed
+
+    def test_comma_separated_path_lists_are_relative_in_every_entry(self):
+        # validation.json: "--refmaps a.nii.gz,b.nii.gz" (card_validate joins the reference maps with a comma)
+        folder = os.path.abspath(os.path.join(os.sep, "data", "study", "derivatives", "lnm", "conn-X", "validation", "y"))
+        first = os.path.abspath(os.path.join(os.sep, "data", "refmaps", "condA.nii.gz"))
+        second = os.path.abspath(os.path.join(os.sep, "home", "someone", "refmaps", "const.nii.gz"))
+        joined = f"{first},{second}"
+        relative = f"{export._portable_file(first, folder)},{export._portable_file(second, folder)}"
+        record = {"argv": ["--refmaps", joined, f"--refmaps={joined}", "--refmaps", first, "--label=a,b", "--names", "x,y"]}
+        stored = export.portable_record_paths(record, folder, ())
+        self.assertEqual(stored["argv"], ["--refmaps", relative, f"--refmaps={relative}", "--refmaps", export._portable_file(first, folder), "--label=a,b", "--names", "x,y"])
+        self.assertEqual(_absolute_strings(stored), [])
+        self.assertEqual(_absolute_strings(record), [joined, f"--refmaps={joined}", first])
+        # One absolute path that merely contains a comma is still a single path
+        odd = os.path.abspath(os.path.join(os.sep, "data", "a,b", "c.nii.gz"))
+        self.assertEqual(export.portable_record_paths({"argv": ["--maps", odd]}, folder, ())["argv"][1], export._portable_file(odd, folder))
 
 
 class BatchPlanTest(unittest.TestCase):
@@ -621,6 +638,44 @@ class StudyGatingTest(CohortMapsTestBase):
         lesions, excluded = cohortmaps.study_lesions(study, lesions=rows)
         self.assertEqual([sid for sid, _, _ in lesions], self.sids[:5])
         self.assertEqual(excluded, {EXCLUDED_REVIEW: ["sub-06", "sub-07"], cohortmaps.EXCLUDED_NO_STUDY_ROW: ["sub-99"]})
+
+    def test_fractional_extrusion_maps_desc_lesionProb_with_weights(self):
+        """A 2D tracing extruded with the fractional policy is mapped from desc-lesionProb with its fractional weights
+        (WP L-13: exact total thickness), not from the desc-lesion slab binarized at 0.5; other lesions are unchanged.
+        """
+        study = self._study(approved=N_LESIONS)
+        lesion = study.abspath(study.subject("sub-01")["lesion"])
+        prob = lesion.replace("desc-lesion_mask", "desc-lesionProb_mask")
+        data, affine, _header = nifti.read_nifti(lesion)
+        nifti.write_nifti(prob, (np.asarray(data) > 0).astype(np.float32) * 0.5, affine)  # every voxel half a voxel
+        study.write_lesion_sidecar("sub-01", studio={"extrude": {"mode": "fractional", "total_mm": 2.0, "prob": os.path.basename(prob)}})
+        # sub-02 has a stale desc-lesionProb but a binary extrusion, sub-03 one with no sidecar (a normalized lesion): both keep desc-lesion
+        for sid, extrude in (("sub-02", {"mode": "binary", "total_mm": 2.0, "prob": None}), ("sub-03", None)):
+            other = study.abspath(study.subject(sid)["lesion"])
+            shutil.copyfile(prob, other.replace("desc-lesion_mask", "desc-lesionProb_mask"))
+            if extrude:
+                study.write_lesion_sidecar(sid, studio={"extrude": extrude})
+        lesions, excluded = cohortmaps.study_lesions(study)
+        self.assertEqual(excluded, {})
+        paths = {sid: path for sid, path, _ in lesions}
+        self.assertEqual(paths["sub-01"], prob)
+        self.assertEqual(paths["sub-02"], study.abspath(study.subject("sub-02")["lesion"]))
+        self.assertEqual(paths["sub-03"], study.abspath(study.subject("sub-03")["lesion"]))
+        self.assertTrue(engine.is_fractional_seed(prob))
+        self.assertFalse(engine.is_fractional_seed(lesion))
+        record = cohortmaps.run(lesions[:3], self.bundle, self.path("out"), study=study, budget_bytes=self.budget3, emit=_Events())
+        rows = {row["participant_id"]: row for row in cohortmaps.read_maps_tsv(self.path("out", "maps.tsv"))}
+        weighted = engine.prepare_lesion(prob, self.bundle, binarize=False)[1]["weight_total"]
+        binary = engine.prepare_lesion(lesion, self.bundle, binarize=True)[1]["weight_total"]
+        self.assertAlmostEqual(weighted, binary / 2, places=4)
+        self.assertAlmostEqual(float(rows["sub-01"]["fractional_sum"]), weighted, places=4)
+        # sub-03's stray desc-lesionProb is not used: its seed is its binary lesion
+        self.assertAlmostEqual(float(rows["sub-03"]["fractional_sum"]), engine.prepare_lesion(paths["sub-03"], self.bundle)[1]["weight_total"], places=4)
+        # The cache key of the fractional seed is the probabilistic one (shared with a --probabilistic run)
+        self.assertFalse(record["probabilistic"])
+        context = cohortmaps._Context(self.bundle, cache_root=record["cache_dir"].rsplit(os.sep, 1)[0])
+        self.assertEqual(rows["sub-01"]["key"], cohortmaps.cache_key(rows["sub-01"]["lesion_sha256"], context.manifest_sha256, context.subject_ids_sha256, 2, True))
+        self.assertEqual(rows["sub-03"]["key"], cohortmaps.cache_key(rows["sub-03"]["lesion_sha256"], context.manifest_sha256, context.subject_ids_sha256, 2, False))
 
     def test_missing_volume_posts_inbox_and_never_writes_participants(self):
         study = self._study(approved=N_LESIONS, volumes={"sub-01": 9.5, "sub-02": 7})

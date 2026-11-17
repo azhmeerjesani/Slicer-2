@@ -144,7 +144,7 @@ def isStale(row):
 
 
 def _included(row):
-    return str(row.get("include", "1")).strip() == "1"
+    return _lnm("study").is_included(row)
 
 
 def needsNormalization(row):
@@ -652,6 +652,7 @@ class _Manager:
         self.runs = []
         self.history = []
         self.unmerged = set()
+        self.waiting = set()
         self.stopped = False
         self.failures = {}
         self.lastSummary = ""
@@ -738,7 +739,7 @@ class _Manager:
             if not qualifies:
                 continue
             if sid == session.current() and session.isDirty():
-                notes.append(_("{sid} has edits that are not saved yet: finish it first (Done or Alt+→)").format(sid=sid))
+                notes.append(_("{sid} has edits that are not saved yet: finish it first (Done or {key})").format(sid=sid, key=ui.keyText("Alt+Right")))
                 continue
             chosen.append(sid)
         if not chosen:
@@ -771,11 +772,17 @@ class _Manager:
         if not auto and not redo:
             self._writeQueue(run)
         run.job = jobrunner.instance().submit(spec)
+        # A subject that was left out says why (the button counts it): the reason is part of the toast, not lost
+        skipped = " · ".join(notes) if notes and not auto else ""
         if note:
-            _toast(note, 6000, level="warning")
+            _toast(" · ".join(part for part in (note, skipped) if part), 6000, level="warning")
         elif not auto:
-            _toast(_("Normalizing {n} subjects in the background").format(n=len(chosen)) if len(chosen) > 1
-                   else _("Normalizing {sid} in the background").format(sid=chosen[0]), 3000)
+            started = (_("Normalizing {n} subjects in the background").format(n=len(chosen)) if len(chosen) > 1
+                       else _("Normalizing {sid} in the background").format(sid=chosen[0]))
+            if skipped:
+                _toast(" · ".join((started, skipped)), 6000, level="warning")
+            else:
+                _toast(started, 3000)
         _refreshLists()
         self.scheduleUi()
         return run.job
@@ -816,8 +823,18 @@ class _Manager:
         current = session.current()
         affected = current is not None and current in self.unmerged
         if affected and session.isDirty():
+            # Only the open subject's own result waits (the session holds it in the inbox, and its edits are written by
+            # Done): the results of the other subjects are merged now
             self._mergeTimer.start(MERGE_RETRY_MS)
-            return []
+            applied = session.applyInbox()
+            merged = {sid for _path, sids in applied for sid in sids}
+            self.unmerged -= merged
+            self.waiting = {current}
+            if applied:
+                self._snapshotQc()
+                _checker().schedule()
+            return applied
+        self.waiting = set()
         edited = {}
         for sid in self.unmerged:
             run = next((run for run in self._newestFirst() if sid in run.lesionAtStart), None)
@@ -828,7 +845,8 @@ class _Manager:
             applied = session.applyInbox()
         merged = {sid for _path, sids in applied for sid in sids}
         self.unmerged -= merged
-        kept = {sid: path for sid, path in edited.items() if sid in merged}
+        # The session keeps a lesion written while its result waited (StudySession.applyInbox) itself: not twice
+        kept = {sid: path for sid, path in edited.items() if sid in merged and session.study.subject(sid).get("lesion_native") != path}
         if kept:
             self._keepEditedLesions(kept)
         self._snapshotQc()
@@ -877,6 +895,11 @@ class _Manager:
                 _toast(self.lastSummary + (f": {reason}" if reason else ""), 8000, level="warning")
             elif not run.auto or review:
                 _toast(self.lastSummary, 4000)
+            waiting = sorted(sid for sid in self.waiting if sid in run.sids and sid in self.unmerged)
+            if waiting:
+                note = _("{sids}: waiting until you finish it (Done)").format(sids=", ".join(waiting))
+                self.lastSummary += " · " + note
+                _toast(note, 6000, level="consequence")
         _refreshLists()
         self.scheduleUi()
 
@@ -1177,7 +1200,9 @@ def setNormQc(sid, verdict, via="button"):
     _lnm("study").Study.post_result(session.study.path, sid, {"norm_qc": verdict}, "normalize-review", audit=audit)
     current._expectQc[sid] = verdict
     try:
-        session.applyInbox()
+        # In the 'Normalization to review' queue the judged row leaves the list: go on with the next one, as P / X do
+        with library.keepQueuePlace([sid]):
+            session.applyInbox()
     finally:
         current._expectQc.pop(sid, None)
     current._snapshotQc()
@@ -1496,7 +1521,7 @@ class NormalizationCard:
         self.autoCheck = _checkBox(_("Normalize native lesions automatically after Done → next"), "StudioNormalizeAutoCheck", self._onAuto)
         self.autoCheck.setToolTip(_("After Done, a native lesion is normalized in the background (one at a time, with a lower priority); "
                                     "the result waits for your review"))
-        layout.addWidget(self.autoCheck)
+        layout.addWidget(library.ui.wrapCheckBox(self.autoCheck))
         from LesionNetworkMappingUI import widgets
 
         self.progress = widgets.ProgressRow(_("Stop"), "StudioNormalize")
@@ -1607,7 +1632,9 @@ class NormalizationCard:
         self.resumeRow.setVisible(pending is not None)
         if pending is not None:
             label = _("Stopped") if current.stopped else _("Interrupted")
-            self.resumeLabel.setText(_("{label} · {n} subjects left").format(label=label, n=len(pending[0])))
+            n = len(pending[0])
+            text = _("{label} · 1 subject left") if n == 1 else _("{label} · {n} subjects left")
+            self.resumeLabel.setText(text.format(label=label, n=n))
         failures = {sid: reason for sid, reason in (current.failures if current is not None else {}).items() if sid in self.session.study}
         self.failureLabel.setVisible(bool(failures) and not busy)
         if failures:

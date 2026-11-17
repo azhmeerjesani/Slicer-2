@@ -25,7 +25,9 @@ Coordinates
   on the plane without rotation (:meth:`CutPlane.to_plane`, :meth:`CutPlane.to_ras`).
 - **Fit**: a 3x3 homogeneous 2D matrix from mirrored figure pixels to plane coordinates:
   :func:`umeyama_similarity` (4 DOF, at least 2 pairs) or :func:`affine_2d` (6 DOF, at least
-  :data:`MIN_AFFINE_PAIRS` = 4 pairs, because 3 pairs fit exactly with RMS 0 and prove nothing).
+  :data:`MIN_AFFINE_PAIRS` = 4 pairs, because 3 pairs fit exactly with RMS 0 and prove nothing). The
+  minimum counts distinct figure points (:func:`distinct_count`): a pair placed again on the same figure
+  point adds no information, so 3 points and a repeat are refused like 3 pairs.
 - :func:`figure_ijk_to_ras` composes plane frame, fit and convention into the figure volume's 4x4
   IJK-to-RAS matrix (the parent transform when the volume's own IJKToRAS is the identity, see
   :func:`parent_transform`).
@@ -57,6 +59,8 @@ MODELS = ("similarity", "affine")
 #: Minimum landmark pairs per model (an affine fit of 3 pairs is exact and has RMS 0)
 MIN_PAIRS = {"similarity": 2, "affine": 4}
 MIN_AFFINE_PAIRS = MIN_PAIRS["affine"]
+#: Figure landmarks closer than this fraction of the landmarks' extent count as one point
+COINCIDENT_FRACTION = 0.02
 #: Pitch and roll of the cut plane are limited to this many degrees
 MAX_TILT_DEG = 20.0
 #: Typical brain width in mm used for the initial pixel size
@@ -171,6 +175,40 @@ def _pairs(src, dst, min_pairs, what):
     return src, dst
 
 
+def distinct_count(points):
+    """Number of distinct points among (n, 2) ``points``.
+
+    Points closer than :data:`COINCIDENT_FRACTION` of the largest distance between any two points
+    count as one, so a landmark placed again a pixel off its first click does not count twice.
+    """
+    points = np.asarray(points, dtype=float).reshape(-1, 2)
+    if not len(points):
+        return 0
+    extent = float(np.max(np.linalg.norm(points[:, None, :] - points[None, :, :], axis=2)))
+    tolerance = COINCIDENT_FRACTION * extent
+    kept = []
+    for point in points:
+        if extent <= 0 and kept:
+            continue
+        if all(float(np.linalg.norm(point - other)) > tolerance for other in kept):
+            kept.append(point)
+    return len(kept)
+
+
+def _template_degenerate(dst):
+    """Message when the template (destination) landmarks coincide or lie on one line, else None.
+
+    Such landmarks make a fit come out with scale <= 0 or determinant <= 0, which is not an L/R problem.
+    """
+    centered = dst - dst.mean(axis=0)
+    singular = np.linalg.svd(centered, compute_uv=False)
+    if singular[0] <= 1e-9 * max(1.0, float(np.abs(dst).max())):
+        return "the template landmarks coincide: place them again at distinct points"
+    if singular[1] <= 1e-6 * singular[0]:
+        return "the template landmarks lie on one line: place them again at distinct points"
+    return None
+
+
 def umeyama_similarity(src_xy, dst_xy):
     """Least-squares 2D similarity (scale, rotation, translation; 4 DOF) from src to dst (Umeyama 1991).
 
@@ -193,6 +231,9 @@ def umeyama_similarity(src_xy, dst_xy):
     rotation = u @ sign @ vt
     scale = float(np.trace(np.diag(singular) @ sign)) / variance
     if scale <= 0:
+        degenerate = _template_degenerate(dst)
+        if degenerate:
+            raise ValueError(f"similarity fit: {degenerate}")
         raise ValueError("similarity fit: no proper rotation matches the landmarks (check the L/R convention)")
     matrix = np.eye(3)
     matrix[:2, :2] = scale * rotation
@@ -203,12 +244,19 @@ def umeyama_similarity(src_xy, dst_xy):
 def affine_2d(src, dst):
     """Least-squares 2D affine (6 DOF) from src to dst.
 
-    Raises ValueError with fewer than :data:`MIN_AFFINE_PAIRS` (4) pairs, because 3 pairs fit exactly
-    with RMS 0, when the source points are collinear, or when the best fit contains a reflection
+    Raises ValueError with fewer than :data:`MIN_AFFINE_PAIRS` (4) pairs at distinct source points
+    (:func:`distinct_count`), because 3 points fit exactly with RMS 0, when the source points are collinear, or when the best fit contains a reflection
     (determinant <= 0): like :func:`umeyama_similarity`, the fit never decides the L/R convention.
 
     :return: 3x3 homogeneous matrix.
     """
+    src, dst = _pairs(src, dst, MIN_AFFINE_PAIRS, "affine fit")
+    distinct = distinct_count(src)
+    if distinct < MIN_AFFINE_PAIRS:
+        raise ValueError(
+            f"affine fit needs at least {MIN_AFFINE_PAIRS} landmark pairs at distinct figure points, got {distinct} "
+            f"({len(src) - distinct} pair{'' if len(src) - distinct == 1 else 's'} repeat{'s' if len(src) - distinct == 1 else ''} another figure point)",
+        )
     return _affine_lstsq(src, dst, MIN_AFFINE_PAIRS)
 
 
@@ -222,6 +270,9 @@ def _affine_lstsq(src, dst, min_pairs):
     matrix = np.eye(3)
     matrix[:2, :] = solution.T
     if np.linalg.det(matrix[:2, :2]) <= 0:
+        degenerate = _template_degenerate(dst)
+        if degenerate:
+            raise ValueError(f"affine fit: {degenerate}")
         raise ValueError("affine fit: the landmarks need a reflection (check the L/R convention)")
     return matrix
 
@@ -310,8 +361,11 @@ class ResidualLevel(NamedTuple):
     text: str
 
 
-def residual_level(rms_mm):
-    """Green below 2 mm, amber 2 to 4 mm, red above 4 mm ("none" when no residual is available)."""
+def residual_level(rms_mm, label="RMS"):
+    """Green below 2 mm, amber 2 to 4 mm, red above 4 mm ("none" when no residual is available).
+
+    ``label`` names the value in the text ("RMS" or "LOO").
+    """
     if rms_mm is None or not math.isfinite(float(rms_mm)):
         return ResidualLevel("none", f"No residual yet; the residual {RESIDUAL_NOTE}.")
     # classify the value as displayed (one decimal), so that "2.0 mm" is never green
@@ -322,17 +376,23 @@ def residual_level(rms_mm):
         level = "amber"
     else:
         level = "red"
-    return ResidualLevel(level, f"RMS {value:.1f} mm — the residual {RESIDUAL_NOTE}.")
+    return ResidualLevel(level, f"{label} {value:.1f} mm — the residual {RESIDUAL_NOTE}.")
 
 
 def residual_chip(rms_mm, loo_rms_mm, n_pairs):
     """Chip text and level, for example ("RMS 1.6 mm · LOO 2.3 mm (5 pairs)", ResidualLevel).
 
-    The level follows the larger of RMS and LOO RMS, because the LOO RMS is the honest estimate.
+    The level follows the larger of RMS and LOO RMS, because the LOO RMS is the honest estimate. Without
+    a LOO RMS (too few distinct pairs, for example an exact fit) a small RMS proves nothing, so the
+    level is "none" rather than green; a large RMS still shows amber or red.
     """
     parts = ["RMS n/a" if rms_mm is None else f"RMS {float(rms_mm):.1f} mm", "LOO n/a" if loo_rms_mm is None else f"LOO {float(loo_rms_mm):.1f} mm"]
     known = [float(value) for value in (rms_mm, loo_rms_mm) if value is not None]
-    level = residual_level(max(known) if known else None)
+    # the tooltip names the value that decides the level
+    graded_is_loo = loo_rms_mm is not None and float(loo_rms_mm) > (float(rms_mm) if rms_mm is not None else -math.inf)
+    level = residual_level(max(known) if known else None, "LOO" if graded_is_loo else "RMS")
+    if loo_rms_mm is None and level.level == "green":
+        level = ResidualLevel("none", f"{level.text[:-1]}; no leave-one-out RMS: add landmark pairs at other points to check the fit.")
     return f"{' · '.join(parts)} ({int(n_pairs)} pair{'' if int(n_pairs) == 1 else 's'})", level
 
 

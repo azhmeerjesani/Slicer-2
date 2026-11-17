@@ -226,7 +226,7 @@ class DrawNormalizeCard:
             result = self.controller.result
             if result is not None and result.nativeSegmentationNode is not None and segmentationNode is result.nativeSegmentationNode and self._drawIsCurrent():
                 self.controller.showNative(result)
-            ownResult = self._ownsResult(result, segmentationNode, sourceVolumeNode)
+            ownResult = self._ownsResult(result, segmentationNode, sourceVolumeNode, segmentId)
             native = not nc.isNormalizationResult(sourceVolumeNode) and nc.spaceOf(sourceVolumeNode) is None and not nc.isNormalizationResult(segmentationNode)
             visible = native or ownResult or self.controller.isBusy()
         self.widget.setVisible(visible)
@@ -236,14 +236,42 @@ class DrawNormalizeCard:
             self._lesionEmpty = nc.lesionIsEmpty(segmentationNode, segmentId) if segmentationNode is not None else True
         self._showState()
 
-    def _ownsResult(self, result, segmentationNode, sourceVolumeNode):
-        """True when the editor shows what the result was made from (or the result itself)."""
+    def _ownsResult(self, result, segmentationNode, sourceVolumeNode, segmentId=None):
+        """True when the editor shows what the result was made from (or the result itself).
+
+        The native lesion is a segment: another segment of the same segmentation (``segmentId``, the editor's
+        current one) has no MNI copy in this result, so the card offers Normalize to MNI for it, never this
+        result's Use for Map.
+        """
         if result is None:
             return False
-        if segmentationNode is not None and segmentationNode in (result.nativeSegmentationNode, result.segmentationNode):
+        if segmentationNode is not None and segmentationNode is result.segmentationNode:
             return True
+        if segmentationNode is not None and segmentationNode is result.nativeSegmentationNode:
+            return not result.nativeSegmentId or (segmentId or None) == result.nativeSegmentId
         # Scan only: no native lesion was normalized; the editor still holds the segmentation and scan of the run
-        return self._origin is not None and self._origin == (segmentationNode, sourceVolumeNode) and sourceVolumeNode is result.scanNode
+        return (result.nativeSegmentationNode is None and self._origin is not None and self._origin == (segmentationNode, sourceVolumeNode)
+                and sourceVolumeNode is result.scanNode)
+
+    @staticmethod
+    def _showsMniResult(result, segmentationNode, sourceVolumeNode):
+        """True when the editor shows the result's warped scan or MNI lesion (after "Trace on the MNI scan"), not the native ones."""
+        if result is None:
+            return False
+        return ((sourceVolumeNode is not None and sourceVolumeNode is result.volumeNode)
+                or (segmentationNode is not None and segmentationNode is result.segmentationNode))
+
+    @staticmethod
+    def _nativeSources(result):
+        """(native scan, native lesion, segment id) the result came from, or None when the request's nodes are not in the scene."""
+        request = result.request
+        scan = request.scanNode if request is not None else None
+        if scan is None or not slicer.mrmlScene.IsNodePresent(scan):
+            return None
+        lesion = request.segmentationNode
+        if lesion is not None and not slicer.mrmlScene.IsNodePresent(lesion):
+            return None
+        return scan, lesion, request.segmentId
 
     def _templateName(self, templateId):
         """The name of the target template: the user's name of their own template (A-10), else its id."""
@@ -263,7 +291,7 @@ class DrawNormalizeCard:
         busy = controller.isBusy()
         result = controller.result
         segmentationNode = self.ctx.get("segmentationNode")
-        showingResult = controller.state == "done" and self._ownsResult(result, segmentationNode, self.ctx.get("sourceVolumeNode"))
+        showingResult = controller.state in ("done", "cancelled") and self._ownsResult(result, segmentationNode, self.ctx.get("sourceVolumeNode"), self.ctx.get("segmentId"))
         if self._lesionEmpty and not showingResult:
             self.button.setText(_("Normalize scan only"))
         else:
@@ -278,12 +306,16 @@ class DrawNormalizeCard:
         self.useForMapButton.setEnabled(showingResult and result.segmentationNode is not None and bool(result.segmentId) and not self.nc.lesionIsEmpty(result.segmentationNode, result.segmentId))
         if self._qcPanel is not None:
             self._qcPanel.setVisible(showingResult)
+        # An edit notice (Update MNI lesion, Re-register) is about the result's lesion: hidden while another segment is current
+        editNotice = self.message is not None and bool(self.message.property("editNotice"))
+        if editNotice:
+            self.message.setVisible(showingResult)
         # Nothing running, no result and no message: the list row alone
-        rowMode = not busy and not showingResult and self.message is None
+        rowMode = not busy and not showingResult and (self.message is None or editNotice)
         self._setRowMode(rowMode)
         if rowMode:
             ui.setListRowValue(self.listRow, _("Native space"))
-            self.listRow.findChild("QLabel", "StudioListRowText").setText(str(self.button.text))
+            ui.setListRowText(self.listRow, str(self.button.text))
             self.listRow.setAccessibleName(str(self.button.text))
             tip = str(self.button.toolTip)
             if self._lesionEmpty:
@@ -409,8 +441,21 @@ class DrawNormalizeCard:
                 if sid:
                     libcard_normalize.normalizeSubjects([sid])
                     return True
-        scanOnly = scanOnly or self._lesionEmpty
-        request = self.nc.NormalizeRequest(scanNode=source, segmentationNode=None if scanOnly else segmentationNode, segmentId=None if scanOnly else segmentId)
+        result = self.controller.result
+        if self._showsMniResult(result, segmentationNode, source):
+            # "Trace on the MNI scan" put the result's warped scan and MNI lesion in the editor: Normalize again redoes the
+            # native scan and lesion the result came from (the engine refuses a scan that is already on the template grid)
+            native = self._nativeSources(result)
+            if native is None:
+                self._showMessage(_("The native scan of this result is no longer open: open it to normalize again."), ())
+                return False
+            source, segmentationNode, segmentId = native
+            scanOnly = scanOnly or segmentationNode is None or self.nc.lesionIsEmpty(segmentationNode, segmentId)
+        else:
+            scanOnly = scanOnly or self._lesionEmpty
+        # The options remembered in the Map card (template incl. the user's own, quality, modality, margin) apply here too
+        request = self.nc.NormalizeRequest(scanNode=source, segmentationNode=None if scanOnly else segmentationNode, segmentId=None if scanOnly else segmentId,
+                                           **self.nc.rememberedRequestOptions())
         self._clearMessage()
         self._clearQc()
         try:
@@ -428,12 +473,18 @@ class DrawNormalizeCard:
         """Show the Map card (options: template, quality, modality, margin, rough alignment)."""
         ctx = self._context()
         if self.nc is not None:
-            self.nc.offerNormalize(ctx.get("segmentationNode"), ctx.get("segmentId"), None)
+            # preferMap: from Draw, offerNormalize() would otherwise just focus this Draw card again
+            return bool(self.nc.offerNormalize(ctx.get("segmentationNode"), ctx.get("segmentId"), self.shell, preferMap=True))
+        return False
 
     def useForMap(self):
-        """Make the MNI lesion the Map seed, then switch to Map."""
+        """Make the MNI lesion the Map seed, then switch to Map (only the MNI copy of the lesion the editor shows)."""
         result = self.controller.result if self.controller is not None else None
         if result is None or result.segmentationNode is None:
+            return False
+        shown = self._context()
+        if not self._ownsResult(result, shown.get("segmentationNode"), shown.get("sourceVolumeNode"), shown.get("segmentId")):
+            self.refresh(None, checkEmpty=False)
             return False
         widget = getattr(slicer.modules, "LesionNetworkMappingWidget", None)
         ctx = getattr(widget, "ctx", None)
@@ -496,6 +547,11 @@ class DrawNormalizeCard:
                 self.nc.setRowProgress(self.progress, 1.0, _("Loading the result…"))
         if state == nc.CANCELLED:
             self._showMessage(_("Normalization stopped. Nothing was changed."), (), level="neutral")
+            if self.controller.result is not None:  # a stopped "Normalize again" gives the previous result back, with its QC
+                self._clearQc()
+                self._buildQc(self.controller.result)
+                if self.controller.edited:
+                    self._showEditState()
         elif state == nc.IDLE:  # the scene was closed: its result is gone
             self._origin = None
             self._clearMessage()
@@ -509,9 +565,7 @@ class DrawNormalizeCard:
     def _onResult(self, result):
         self._clearMessage()
         self._clearQc()
-        width = self.widget.width - 24 if self.widget.width > 100 else 260
-        self._qcPanel = self.controller.buildQcWidget(result, width=min(width, 360), onRedo=self._redo, maxHeight=110)
-        self.qcHost.addWidget(self._qcPanel)
+        self._buildQc(result)
         qt.QTimer.singleShot(0, self._revealDoneRow)
         if self.shell is not None:
             try:
@@ -523,6 +577,11 @@ class DrawNormalizeCard:
             except Exception:
                 pass
         self.refresh(None, checkEmpty=False)
+
+    def _buildQc(self, result):
+        width = self.widget.width - 24 if self.widget.width > 100 else 260
+        self._qcPanel = self.controller.buildQcWidget(result, width=min(width, 360), onRedo=self._redo, maxHeight=110)
+        self.qcHost.addWidget(self._qcPanel)
 
     def _revealDoneRow(self):
         """Scroll the inspector so that Use for Map is visible (without moving the focus)."""
@@ -562,6 +621,7 @@ class DrawNormalizeCard:
         else:
             self._showMessage(_("Lesion edited after normalization."), ((_("Update MNI lesion"), self.updateMniLesion),))
         self.message.setProperty("editNotice", True)
+        self._showState()
 
     def updateMniLesion(self):
         self._showMessage(_("Updating the MNI lesion…"), (), level="busy")

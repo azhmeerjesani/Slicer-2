@@ -37,7 +37,7 @@ cancelled, 75 locked)::
         [--covariates a,b] [--block COL] [--spearman] [--flip] [--perm 5000] [--lodo]
         [--control-scores c1,c2] [--bundle B] --mask M --out DIR [--cancel-file F] [--resume]
         [--seed S] [--compare-perm 1000] [--input Fz|T] [--volume-off-reason TEXT] [--batch B]
-        [--conn-label L] [--threads K] [--run-root DIR] [--parent-run ID]
+        [--conn-label L] [--desc D] [--threads K] [--run-root DIR] [--parent-run ID]
 
 ``--covariates`` replaces the default (volume_ml); ``--covariates ""`` with ``--volume-off-reason`` turns
 volume off. ``--bundle`` (default: the bundle path recorded in cohortmaps.json next to maps.tsv) gives
@@ -761,9 +761,9 @@ def _unique_labels(names, make):
     for index, name in enumerate(names):
         label = make(name) or f"X{index + 1}"
         base, suffix = label, 2
-        while label in seen:
+        while label.casefold() in seen:  # file names: NIHSS and nihss are one file on macOS
             label, suffix = f"{base}{suffix}", suffix + 1
-        seen.add(label)
+        seen.add(label.casefold())
         out.append(label)
     return out
 
@@ -817,6 +817,7 @@ def _parser():
     parser.add_argument("--out", required=True, help="output folder")
     parser.add_argument("--batch", type=jobs.positive_int, default=None, help="GLM permutations per GEMM (default: chosen from memory)")
     parser.add_argument("--conn-label", default=None, help="connectome name of the output names (default: from cohortmaps.json next to maps.tsv)")
+    parser.add_argument("--desc", default=None, help="desc stem of the output names (letters and digits; default: slnm + the score in camel case)")
     jobs.add_common_arguments(parser)
     return parser
 
@@ -833,6 +834,8 @@ def main(argv=None):
     args = _parser().parse_args(argv)
     if args.seed < 0:
         raise jobs.JobError(f"--seed must not be negative, got {args.seed}", code="usage", exit_code=jobs.EXIT_USAGE)
+    if args.desc is not None and not re.fullmatch(r"[A-Za-z0-9]+", args.desc):
+        raise jobs.JobError(f"--desc must contain only letters and digits, got {args.desc!r}", code="usage", exit_code=jobs.EXIT_USAGE)
     controls = _columns(args.control_scores) or []
     if len(set(controls)) != len(controls):
         raise jobs.JobError(f"--control-scores lists a column twice: {args.control_scores}", code="usage", exit_code=jobs.EXIT_USAGE)
@@ -840,6 +843,7 @@ def main(argv=None):
     for column in controls:
         if column == args.score or column in (covariates if covariates is not None else [designlib.VOLUME_COLUMN]):
             raise jobs.JobError(f"The control score {column} is the main score or a covariate", code="usage", exit_code=jobs.EXIT_USAGE)
+    jobs.check_input_files(args, "maps", "participants", "mask")
     return _run_cli(args, argv, controls, covariates)
 
 
@@ -872,8 +876,27 @@ def _prepare_permutations(sdesign, n_perm, what):
     return count, exhaustive
 
 
-def _reference_for(args, cohort, subjects_sha, indices, mask_shape):
-    """(Reference or None, reason, info dict) for the partial comparison."""
+#: Where to build the missing reference maps, for reasons that people read in the app (same text as validate.REFERENCE_BUILD_HINT)
+REFERENCE_BUILD_HINT = "build them in the Connectome card: Manage… > Build reference maps"
+_REFERENCE_COMMAND = re.compile(r"\((?:python -m LesionNetworkMappingLib\.|slicer-lnm )reference build\)")
+
+
+def app_reason(text):
+    """``text`` with the command-line pointer of the "no valid reference maps" reason replaced by the app's own wording.
+
+    For records that a command line run wrote (slnm.json) and that the app shows; the record keeps the command.
+    """
+    if not isinstance(text, str):
+        return text
+    return _REFERENCE_COMMAND.sub(f"({REFERENCE_BUILD_HINT})", text)
+
+
+def _reference_for(args, cohort, subjects_sha, indices, mask_shape, build_hint=None):
+    """(Reference or None, reason, info dict) for the partial comparison.
+
+    ``build_hint`` replaces the command-line pointer of the "no valid reference maps" reason, for callers whose reason is
+    shown to people in the app (the validation record keeps it): a plain sentence, no terminal command.
+    """
     from . import connectome, reference
 
     path = args.bundle or ((cohort or {}).get("bundle") or {}).get("path")
@@ -891,7 +914,9 @@ def _reference_for(args, cohort, subjects_sha, indices, mask_shape):
         if hasattr(bundle, "close"):
             bundle.close()
     if ref is None:
-        return None, "no valid reference maps for this connectome and subject list (python -m LesionNetworkMappingLib.reference build)", None
+        if build_hint:
+            return None, f"no valid reference maps for this connectome and subject list ({build_hint})", None
+        return None, jobs.command_text("no valid reference maps for this connectome and subject list (python -m LesionNetworkMappingLib.reference build)"), None
     info = {"definition": ref.definition, "path": ref.path, "sha256": ref.sha256, "subjects_sha256": ref.subjects_sha256, "covariates": list(REFERENCE_COVARIATES)}
     return ref, None, info
 
@@ -1192,7 +1217,7 @@ def _run_cli(args, argv, controls, covariates):
         # Outputs
         next_stage("write")
         tic = time.monotonic()
-        desc = score_label(args.score)
+        desc = args.desc or score_label(args.score)
         fwe = bool(design.spec.inference.get("fwe", True))
         fdr = bool(design.spec.inference.get("fdr", True))
         flip_text = " (score x -1)" if args.flip else ""

@@ -2,7 +2,8 @@
 
 Both are *states* of Draw, like review (``StudioLib.review``), not workspaces. Each has an inspector notice ("where am
 I", with **Exit**), a footer in place of "Done → next" (Ctrl+Enter), and ends at the end of its queue, on Exit, when
-Draw is left or when a subject outside the queue is opened (Alt+←/→, the switcher). The decisions are kept.
+Draw is left or when a subject outside the queue is opened (the switcher). Alt+←/→ step through the pass (L-45: they
+follow the active queue), without wrapping. The decisions are kept.
 
 **Second tracing** (``startSecondTracing()``; Library "Second tracing N →", Search, the case strip's "Second tracing"
 queue): the subjects assigned a second tracing (``LesionNetworkMappingLib.agreement.assign``) open one by one *blind*:
@@ -15,7 +16,11 @@ queue): the subjects assigned a second tracing (``LesionNetworkMappingLib.agreem
   hidden in the same event and its nodes removed;
 - **Save second tracing → next** (Ctrl+Enter) writes ``lesions/rater-<initials>/<sub>_space-<sp>_desc-lesion_mask.nii.gz``
   and its sidecar (``agreement.save_second_tracing``: blinding and the intra-rater interval of 7 days are checked there);
-  the agreement is not shown to the second rater.
+  the agreement is not shown to the second rater;
+- the tracing in progress is journaled 2 s after the last edit (``journal.SecondTracingJournal``,
+  ``.studio/journal/rater-<initials>/<sub>.nii.gz``): after a crash, the subject reopened in this state offers it in the
+  state's notice (Recover | Discard), and the autosave names the state and its subject, so that the recovery card
+  reopens this second tracing (``study_ui._recover``), never the first tracing.
 
 **Adjudication** (``startAdjudication()``; Library "Adjudicate N →", Search, the case strip's "Adjudicate" queue): the
 pairs whose Dice is below the study's threshold (0.5 by default) show both tracings as outlines in two colours, A (the
@@ -58,12 +63,37 @@ COLOR_A = (0.949, 0.329, 0.357)  # the lesion red of Draw (#F2545B)
 COLOR_B = (0.231, 0.510, 0.965)  # blue (#3B82F6)
 COLOR_CONSENSUS = (0.133, 0.773, 0.369)  # green (#22C55E)
 CHOICE_LABELS = {"A": "A", "B": "B", "union": "Union", "intersection": "Intersection", "edit": "Edit…"}
+#: Segment tag of the Consensus segment of Edit…: the Segment Editor's undo (Ctrl+Z) can bring a removed one back
+CONSENSUS_TAG = "Studio.AdjudicationConsensus"
 
 
 def _rules():
     import importlib
 
     return importlib.import_module("LesionNetworkMappingLib.agreement")
+
+
+def noticeTitle(title, sid, index, total):
+    """The notice title '<title> · <sid> · <index> of <total>'. The position uses no-break spaces, so that the
+    word-wrapped title label never leaves a lone total on a line of its own.
+    """
+    position = _("{index} of {total}").format(index=index, total=total).replace(" ", "\u00a0")
+    return f"{title} · {sid} · {position}"
+
+
+def jump_center(maskA, maskB, affine):
+    """World point to centre the views on when a pair opens: the centroid of both tracings when it lies
+    on one of them, else the centroid of the first tracing (the second when A is empty), so that an outline
+    is visible even for two tracings that do not overlap. maskB is on the grid of maskA.
+    """
+    rules = _rules()
+    union = maskA | maskB
+    center = rules.centroid_mm(union, affine)
+    if center is not None:
+        ijk = np.rint(np.linalg.solve(np.asarray(affine, dtype=np.float64), np.append(center, 1.0))[:3]).astype(int)
+        if all(0 <= ijk[i] < union.shape[i] for i in range(3)) and union[tuple(ijk)]:
+            return center
+    return rules.centroid_mm(maskA, affine) if maskA.any() else center
 
 
 def _studyUi():
@@ -82,6 +112,13 @@ def _importer():
     from . import importer
 
     return importer
+
+
+def left_out_text(n, reason):
+    """The toast when some second tracings are refused: "1 second tracing left out: ..." / "{n} second tracings left out: ..."."""
+    if n == 1:
+        return _("1 second tracing left out: {reason}").format(reason=reason)
+    return _("{n} second tracings left out: {reason}").format(n=n, reason=reason)
 
 
 def _toast(text, ms=3000, **kwargs):
@@ -141,6 +178,11 @@ def releaseSession(session):
     session._openStamp = None
     session._dirty = False
     session._markedDirty = False
+    # The subject is closed: the views that follow the study (the case strip, which hides without a subject) are told,
+    # so that they never keep showing the closed case during a second tracing or an adjudication
+    studyUi = _studyUi()
+    if studyUi is not None:
+        studyUi._notify(session)
     return True
 
 
@@ -188,6 +230,36 @@ def _addSegment(segmentationNode, array_ijk, affine, name, color):
         return segmentId
     finally:
         slicer.mrmlScene.RemoveNode(labelmap)
+
+
+def _readOnlyText():
+    """Draw's hint while the two tracings are shown read-only (before Edit…)."""
+    return _("A and B are read-only: pick a result below, or Edit… to correct the union")
+
+
+def _saveFailureReason(session, error):
+    """The plain reason of an ``OSError`` from a save, with the first-tracing wording for a study folder that cannot be
+    written ("the study folder is read-only (Permission denied)"): never the error number or the absolute path. A
+    permission error also marks the session read-only (its notice is shown once; the top bar says so).
+    """
+    reason = _studyUi()._plainOSError(error)
+    if isinstance(error, PermissionError):
+        if hasattr(session, "_markReadOnly"):
+            session._markReadOnly()
+        return _("the study folder is read-only ({reason})").format(reason=reason)
+    return reason
+
+
+def _setReadOnly(segmentationNode, reason):
+    """Show ``segmentationNode`` read-only in Draw while ``reason`` is set (``draw.READ_ONLY_ATTRIBUTE``), editable without."""
+    draw = review._draw()
+    if draw is None or segmentationNode is None:
+        return
+    if reason:
+        segmentationNode.SetAttribute(draw.READ_ONLY_ATTRIBUTE, reason)
+    else:
+        segmentationNode.RemoveAttribute(draw.READ_ONLY_ATTRIBUTE)
+    draw.syncReadOnly()
 
 
 def _segmentMask(segmentationNode, segmentId):
@@ -315,7 +387,36 @@ class _AgreementState:
             if self.shell.currentWorkspace() != "draw":
                 self.shell.switchTo("draw")
         self.install()
+        _autosaveSoon(self.title())
         return True
+
+    def stepTarget(self, delta):
+        """The subject Alt+→ (``delta`` 1) or Alt+← (-1) opens in this pass: the next or previous subject of its order that is
+        still to do, without wrapping (None at the ends).
+        """
+        remaining = self.remaining()
+        if self.current in self.sids:
+            index = self.sids.index(self.current) + delta
+        else:
+            index = 0 if delta > 0 else len(self.sids) - 1
+        while 0 <= index < len(self.sids):
+            if self.sids[index] != self.current and self.sids[index] in remaining:
+                return self.sids[index]
+            index += delta
+        return None
+
+    def step(self, delta):
+        """Alt+←/→ while this state is active (``StudySession.next()``/``previous()``): they follow this pass (L-45), so
+        that a blind second tracing never opens a subject of the table (and its first tracing) by accident. Work in
+        progress is kept, as with Skip. Return the subject opened, or None.
+        """
+        target = self.stepTarget(delta)
+        if target is None:
+            text = _("Last case in {queue}") if delta > 0 else _("First case in {queue}")
+            _toast(text.format(queue=self.title()), ms=2000)
+            return None
+        self.saveQuietly()
+        return target if self.open(target) else None
 
     def openNext(self, message):
         following = self.following()
@@ -369,6 +470,9 @@ class _AgreementState:
             volume.SetAttribute(NODE_ATTRIBUTE, sid)
             self._nodeIds.append(volume.GetID())
             return volume, scan
+        if scan and not figure:
+            # A scan named but not on disk (moved, renamed, a drive not connected) is never replaced by the template
+            raise FileNotFoundError(_("the scan {file} is missing").format(file=row.get("scan")))
         volume = self.session.templateNode()
         studyUi = _studyUi()
         reference = self.session._templateFiles.get(volume.GetID()) or studyUi._storagePath(volume)
@@ -384,6 +488,10 @@ class _AgreementState:
         editor = widget.editor if widget is not None else None
         if editor is not None and editor.segmentationNode() is not None and editor.segmentationNode().GetID() in self._nodeIds:
             editor.setSegmentationNode(None)
+            draw = review._draw()
+            if draw is not None:
+                # The tracings shown read-only (adjudication) do not leave the editor read-only
+                draw.syncReadOnly(editor)
         if self._figureShown:
             figure = review._figure()
             if figure is not None:
@@ -488,7 +596,7 @@ class _AgreementState:
         if self.notice is None or not _isAlive(self.notice):
             self._buildNotice()
         index, total = self.position()
-        self.titleLabel.setText(_("{title} · {sid} · {index} of {total}").format(title=self.title(), sid=self.current, index=index, total=total))
+        self.titleLabel.setText(noticeTitle(self.title(), self.current, index, total))
         self.detailLabel.setText("\n".join(self.lines))
         if self.shell.inspectorNotice() is not self.notice:
             self.shell.setInspectorNotice(self.notice, NOTICE_KEY, "draw")
@@ -526,6 +634,17 @@ class _AgreementState:
             _toast(_("{title} ended").format(title=self.title()), ms=2000)
 
 
+def _autosaveSoon(reason):
+    """Autosave once the state's subject is shown, so that the newest autosave names this state and its subject (the
+    study's context, ``study_ui._autosaveContext``), not the subject the study session had before (A-01).
+    """
+    try:
+        from . import autosave
+    except ImportError:
+        return
+    qt.QTimer.singleShot(0, lambda: autosave.autosaveNow(reason))
+
+
 @contextlib.contextmanager
 def _renderPaused():
     pause = getattr(slicer.app, "pauseRender", None)
@@ -557,9 +676,72 @@ class SecondTracingState(_AgreementState):
         self.segmentationId = None
         self._stamp = None
         self._figureFit = None
+        # Crash safety (SPEC 5.5, D-A7): the second tracing's own journal, written 2 s after the last edit
+        self._journal = None
+        self._edited = False
+        self._placedJournalNotice = None
+        studyUi = _studyUi()
+        self._observer = studyUi._SegmentObserver(self._onSegmentModified) if studyUi is not None else None
 
     def title(self):
         return _("Second tracing")
+
+    # Journal
+
+    def journal(self):
+        """The journal of this rater's second tracings (``journal.SecondTracingJournal``), or None."""
+        if self._journal is None:
+            try:
+                from . import journal
+
+                self._journal = journal.SecondTracingJournal(self.session, self.rater, onNoticeChanged=self._placeJournalNotice)
+            except (ImportError, ValueError):
+                logging.warning(f"Studio agreement: the second tracing cannot be journaled:\n{traceback.format_exc()}")
+                self._journal = None
+        return self._journal
+
+    def _onSegmentModified(self):
+        if not self.active or self.current is None or self._journal is None:
+            return
+        if not self._edited:
+            node = self.segmentationNode()
+            if node is None or _studyUi()._contentStamp(node) == self._stamp:
+                return
+            self._edited = True
+        self._journal.schedule()
+
+    def _placeJournalNotice(self):
+        """The journal's "Recover unsaved second tracing" line goes in this state's notice (the slot holds one notice)."""
+        widget = self._journal.noticeWidget() if self._journal is not None else None
+        if widget is not None and not _isAlive(widget):
+            widget = None
+        placed = self._placedJournalNotice
+        if placed is not None and placed is not widget:
+            self._placedJournalNotice = None
+            if _isAlive(placed):
+                if self.notice is not None and _isAlive(self.notice):
+                    self.notice.layout().removeWidget(placed)
+                placed.hide()
+        if widget is None or self.notice is None or not _isAlive(self.notice) or self._placedJournalNotice is widget:
+            return
+        layout = widget.layout()
+        if layout is not None:
+            layout.setContentsMargins(0, 2, 0, 0)
+        self.notice.layout().addWidget(widget)
+        widget.show()
+        self._placedJournalNotice = widget
+
+    def refreshNotice(self):
+        _AgreementState.refreshNotice(self)
+        self._placeJournalNotice()
+
+    def _clearNodes(self):
+        if self._observer is not None:
+            self._observer.dispose()
+        if self._journal is not None:
+            # Saved (the journal was removed then), skipped or left: a journal on disk is offered when the subject comes back
+            self._journal.detach()
+        _AgreementState._clearNodes(self)
 
     def load(self, sid):
         rules = _rules()
@@ -590,6 +772,13 @@ class SecondTracingState(_AgreementState):
         if fits:
             figureText = self._showFigure(fits[0], level)
         self._stamp = studyUi._contentStamp(segmentationNode)
+        self._edited = False
+        if self._observer is not None:
+            self._observer.observe(segmentationNode)
+        journal = self.journal()
+        if journal is not None:
+            # A journal newer than the rater's own tracing file (Slicer stopped before it was saved) is offered
+            journal.attach(sid, segmentationNode)
         lines = [_("Blind: the first tracing is not loaded, and the agreement is shown only in the Library"),
                  _("Rater: {rater} · {mode}").format(rater=self.rater, mode=_("intra-rater (same rater, 7 days later)") if mode == "intra" else _("inter-rater"))]
         if figureText:
@@ -683,10 +872,18 @@ class SecondTracingState(_AgreementState):
         rules = _rules()
         try:
             result = rules.save_second_tracing(self.session.study, sid, mask[0], mask[1], self.reference, self.rater, extra=self._figureExtra(sid), final=final)
-        except (rules.AgreementError, ValueError, OSError) as e:
+        except (rules.AgreementError, ValueError) as e:
             _toast(str(e), ms=6000, level="warning")
             return False
+        except OSError as e:
+            _toast(_("The second tracing of {sid} could not be saved: {reason}").format(sid=sid, reason=_saveFailureReason(self.session, e)),
+                   ms=6000, level="warning")
+            return False
         self._stamp = _studyUi()._contentStamp(node)
+        self._edited = False
+        if self._journal is not None:
+            # The tracing is written: its journal is out of date
+            self._journal.discard(sid)
         self.session.setValues([], {})
         self.session.flush()
         if not quiet:
@@ -800,9 +997,11 @@ class AdjudicationState(_AgreementState):
         displayNode.SetOpacity2DOutline(1.0)
         importer = _importer()
         importer.selectInSegmentEditor(segmentationNode, volume)
+        # The tracings are read-only until Edit…: no tool armed on A, no stroke that the choice would not use
+        _setReadOnly(segmentationNode, _readOnlyText())
         importer.setViewLayers(background=volume, fit=True)
         with contextlib.suppress(Exception):
-            center = rules.centroid_mm((a >= 0.5) | (rules._to_grid(b, affineB, rules.geometry.Grid(a.shape, affineA))), affineA)
+            center = jump_center(a >= 0.5, rules._to_grid(b, affineB, rules.geometry.Grid(a.shape, affineA)) >= 0.5, affineA)
             if center is not None:
                 slicer.modules.markups.logic().JumpSlicesToLocation(float(center[0]), float(center[1]), float(center[2]), True)
         self.editing = False
@@ -896,8 +1095,12 @@ class AdjudicationState(_AgreementState):
                 record = rules.adjudicate(studyObject, sid, choice, self.who, array_kji=mask[0], ijk_to_ras=mask[1])
             else:
                 record = rules.adjudicate(studyObject, sid, choice, self.who)
-        except (rules.AgreementError, ValueError, OSError) as e:
+        except (rules.AgreementError, ValueError) as e:
             _toast(str(e), ms=6000, level="warning")
+            return False
+        except OSError as e:
+            _toast(_("The consensus of {sid} could not be saved: {reason}").format(sid=sid, reason=_saveFailureReason(self.session, e)),
+                   ms=6000, level="warning")
             return False
         _afterConsensus(self.session, sid)
         self.finished.append(sid)
@@ -914,18 +1117,35 @@ class AdjudicationState(_AgreementState):
             shell.toast(label, 6000, action=lambda: undo(sid), actionText=_("Undo"), level="consequence")
         return True
 
+    def _consensusSegmentId(self, node):
+        """The Consensus segment shown in ``node``, or None. The Segment Editor's undo (Ctrl+Z) after Cancel edit brings
+        a removed one back with its edits, untracked: Edit… resumes it rather than adding a second "Consensus".
+        """
+        segmentation = node.GetSegmentation()
+        segmentId = self.segmentIds.get("consensus")
+        if segmentId and segmentation.GetSegment(segmentId) is not None:
+            return segmentId
+        for index in range(segmentation.GetNumberOfSegments()):
+            if segmentation.GetNthSegment(index).HasTag(CONSENSUS_TAG):
+                return segmentation.GetNthSegmentID(index)
+        return None
+
     def startEdit(self):
         node = self.segmentationNode()
         if node is None:
             return
-        rules = _rules()
-        row = self.session.study.subject(self.current)
-        paths = rules.pair_paths(self.session.study, row)
-        a, affineA = rules.load_mask(paths[0])
-        b, affineB = rules.load_mask(paths[1])
-        union = rules.consensus_mask(a, rules._to_grid(b, affineB, rules.geometry.Grid(a.shape, affineA)), "union")
-        if "consensus" not in self.segmentIds:
-            self.segmentIds["consensus"] = _addSegment(node, union, affineA, _("Consensus"), COLOR_CONSENSUS)
+        segmentId = self._consensusSegmentId(node)
+        if segmentId is None:
+            rules = _rules()
+            row = self.session.study.subject(self.current)
+            paths = rules.pair_paths(self.session.study, row)
+            a, affineA = rules.load_mask(paths[0])
+            b, affineB = rules.load_mask(paths[1])
+            union = rules.consensus_mask(a, rules._to_grid(b, affineB, rules.geometry.Grid(a.shape, affineA)), "union")
+            segmentId = _addSegment(node, union, affineA, _("Consensus"), COLOR_CONSENSUS)
+            node.GetSegmentation().GetSegment(segmentId).SetTag(CONSENSUS_TAG, "1")
+        self.segmentIds["consensus"] = segmentId
+        _setReadOnly(node, None)
         displayNode = node.GetDisplayNode()
         displayNode.SetSegmentVisibility2DFill(self.segmentIds["consensus"], True)
         displayNode.SetVisibility2DFill(True)
@@ -934,10 +1154,10 @@ class AdjudicationState(_AgreementState):
         widget = getattr(slicer.modules, "SegmentEditorWidget", None)
         if widget is not None and widget.editor is not None:
             widget.editor.setCurrentSegmentID(self.segmentIds["consensus"])
+        # Esc does not cancel the edit (it is not an overlay of the Esc ladder): it deselects the tool (rung 4) and
+        # never throws the manual edit away. Cancel edit is the explicit way out.
         self.editing = True
         self.refreshFooter()
-        if self.shell is not None and hasattr(self.shell, "registerEscapeOverlay") and self.notice is not None:
-            self.shell.registerEscapeOverlay(self.notice, self.cancelEdit)
 
     def cancelEdit(self):
         node = self.segmentationNode()
@@ -945,9 +1165,8 @@ class AdjudicationState(_AgreementState):
         if node is not None and segmentId:
             node.GetSegmentation().RemoveSegment(segmentId)
             node.GetDisplayNode().SetVisibility2DFill(False)
+        _setReadOnly(node, _readOnlyText())
         self.editing = False
-        if self.shell is not None and hasattr(self.shell, "unregisterEscapeOverlay") and self.notice is not None:
-            self.shell.unregisterEscapeOverlay(self.notice)
         self.refreshFooter()
 
     def saveEdit(self):
@@ -962,8 +1181,6 @@ class AdjudicationState(_AgreementState):
         if mask is None:
             _toast(_("The consensus is empty: nothing was saved"), ms=4000, level="warning")
             return False
-        if self.shell is not None and hasattr(self.shell, "unregisterEscapeOverlay") and self.notice is not None:
-            self.shell.unregisterEscapeOverlay(self.notice)
         return self.decide("edit", mask)
 
     def skip(self):
@@ -971,12 +1188,6 @@ class AdjudicationState(_AgreementState):
         if following:
             self.sids = [sid for sid in self.sids if sid != self.current] + [self.current]
             self.open(following[0])
-
-    def exit(self, message=None, quiet=False, fromFooter=False, keepScene=False):
-        if self.shell is not None and hasattr(self.shell, "unregisterEscapeOverlay") and self.notice is not None:
-            with contextlib.suppress(Exception):
-                self.shell.unregisterEscapeOverlay(self.notice)
-        _AgreementState.exit(self, message, quiet, fromFooter, keepScene)
 
 
 def _afterConsensus(session, sid):
@@ -1055,7 +1266,7 @@ def _start(queue, sid=None, sids=None, shell=None):
             _toast(refused[0] if refused else _("Nothing is waiting in {queue}").format(queue=label), ms=6000, level="warning")
             return None
         if refused:
-            _toast(_("{n} second tracing(s) left out: {reason}").format(n=len(refused), reason=refused[0]), ms=5000)
+            _toast(left_out_text(len(refused), refused[0]), ms=5000)
         order = allowed
     if review.state() is not None:
         review.exitReview()

@@ -67,6 +67,7 @@ if __name__ == "__main__":
     set_blas_threads(sys.argv[1:])  # before numpy is imported: BLAS reads these variables once
 
 import dataclasses
+import json
 import math
 import time
 
@@ -448,8 +449,8 @@ def empirical_fwer(study, spec, Y, sids, k=DEFAULT_K, inner_perm=DEFAULT_INNER_P
     }
 
 
-def _design_info(design):
-    spec = design.spec
+def _design_info(design, spec=None):
+    spec = design.spec if spec is None else designlib.as_spec(spec)
     method = slnm_settings(spec)[0] if spec.test == "continuous" else None
     return {
         "test": spec.test,
@@ -460,13 +461,55 @@ def _design_info(design):
         "tails": design.tails,
         "contrast": spec.contrast,
         "label": glm.contrast_label(design),
+        **tested_columns(design, spec),
         "exchange": design.exchange,
         "permute": design.permute,
         "block_column": design.block_column,
         "covariates": list(spec.covariates),
+        "transforms": dict(spec.transforms),
         "input": spec.input,
         "method": method,
     }
+
+
+def tested_columns(design, spec=None):
+    """{"group_column", "levels", "score_column"}: what a design tests (the group factor and its levels of a group
+    test, the score of a continuous test; None where the test has none). glm.json stores the same fields.
+    """
+    spec = design.spec if spec is None else designlib.as_spec(spec)
+    group = spec.test in designlib.GROUP_TESTS
+    levels = getattr(design, "levels", None)
+    return {
+        "group_column": spec.group_column if group else None,
+        "levels": [str(level) for level in levels] if group and levels is not None else None,
+        "score_column": spec.score_column if spec.test == "continuous" else None,
+    }
+
+
+#: The fields of a record's "design" that identify the configured analysis. The run folder is named by the contrast
+#: label only, so a covariate, transform (log volume), statistic (Aspin-Welch v), permutation or block change reuses
+#: it: these fields tell the designs apart. Every calibration folder is searched, so the tested factor or score and
+#: the levels are compared too (a case vs control calibration is not one of side L vs R with the same n). A record
+#: written before "transforms" or "group_column" was stored has None there, so it is out of date rather than assumed
+#: to match.
+DESIGN_IDENTITY = ("test", "design_type", "n", "stat", "contrast", "group_column", "levels", "score_column", "exchange", "permute", "block_column", "covariates", "transforms",
+                   "input", "method")
+
+
+def design_identity(info):
+    """The identity of a design (a ``_design_info`` dict, or a ``design.Design``), JSON-normalised for comparison."""
+    if info is not None and not isinstance(info, dict):
+        info = _design_info(info)
+    info = info or {}
+    return json.loads(json.dumps({key: info.get(key) for key in DESIGN_IDENTITY}, sort_keys=True, default=str))
+
+
+def matches_design(record, design, spec=None):
+    """True when a calibration record was computed for ``design`` (a ``design.Design``, with the ``spec`` that was
+    saved for the run, or a ``_design_info`` dict); a record of another design is out of date for it.
+    """
+    current = design if isinstance(design, dict) else _design_info(design, spec)
+    return design_identity((record or {}).get("design")) == design_identity(current)
 
 
 # Sensitivity route
@@ -795,24 +838,77 @@ def estimate_seconds(n, n_voxels, p=6, k=DEFAULT_K, inner_perm=DEFAULT_INNER_PER
 # Checklist
 
 
-def latest_record(root, run_records=None):
-    """(run id, calibration.json record with absolute paths) of the newest finished calibration of a run root, or (None, None)."""
-    record = runs.latest(root, "calibration", status="done", runs=run_records)
-    if record is None:
-        return None, None
-    folder = runs.run_dir(root, record)
-    data = read_record(os.path.join(folder, CALIBRATION_JSON)) if folder else None
-    return record.get("id"), data
+def finished_records(root, run_records=None):
+    """[(run id, calibration.json record with absolute paths)] of the finished calibrations of a run root, newest first.
 
-
-def checklist_evidence(root, run_records=None):
-    """(status, value, evidence) of the newest calibration for the reporting checklist (item F8, design and
-    correction): "done" when the empirical FWER is consistent with alpha, "flagged" when it is inflated or the
-    calibration was partial, "not_run" without a calibration.
+    The record in a run's folder must be that run's own finished record: a folder calibrated again holds the newer
+    run's record, so an older run whose record was replaced does not count.
     """
-    run_id, data = latest_record(root, run_records)
-    if data is None:
-        return "not_run", "no pipeline calibration", []
+    out = []
+    for record in reversed(runs.list_runs(root, kind="calibration", status="done", runs=run_records)):
+        folder = runs.run_dir(root, record)
+        data = read_record(os.path.join(folder, CALIBRATION_JSON)) if folder else None
+        if data is None or data.get("run_id", record.get("id")) != record.get("id") or data.get("status", "done") != "done":
+            continue
+        out.append((record.get("id"), data))
+    return out
+
+
+def latest_record(root, run_records=None, design=None):
+    """(run id, calibration.json record with absolute paths) of the newest finished calibration of a run root, or (None, None).
+
+    With ``design`` (a ``_design_info`` dict or a ``design.Design``), only a calibration of that design counts.
+    """
+    for run_id, data in finished_records(root, run_records):
+        if design is None or matches_design(data, design):
+            return run_id, data
+    return None, None
+
+
+def group_design(data, kind="glm"):
+    """The design identity fields (:data:`DESIGN_IDENTITY`) that a group record stores: glm.json (``kind`` "glm") or
+    slnm.json ("slnm"). Fields a record does not store are left out, so the result is a partial identity.
+    """
+    data = data or {}
+    permutation = data.get("permutation") or {}
+    inputs = data.get("inputs") or {}
+    out = {}
+    if kind == "slnm":
+        out["test"] = "continuous"
+        if "method" in data:
+            out["method"] = data["method"]
+    elif "test" in data:
+        out["test"] = data["test"]
+    for key in ("design_type", "n", "covariates", "transforms", "stat", "group_column", "levels", "score_column"):
+        if key in data:
+            out[key] = data[key]
+    if kind == "slnm" and "score" in data:
+        out["score_column"] = data["score"]
+    contrast = data.get("contrast")
+    if kind != "slnm" and isinstance(contrast, dict) and "spec" in contrast:
+        out["contrast"] = contrast["spec"]
+    if "scheme" in permutation:
+        out["permute"] = permutation["scheme"]
+    for key in ("exchange", "block_column"):
+        if key in permutation:
+            out[key] = permutation[key]
+    if "input" in inputs:
+        out["input"] = inputs["input"]
+    return json.loads(json.dumps(out, sort_keys=True, default=str))
+
+
+def matches_group(record, data, kind="glm"):
+    """True when a calibration record was computed for the design of a group record (glm.json or slnm.json, see
+    :func:`group_design`). Only the fields both store are compared; a record without a design cannot be compared and
+    counts as matching.
+    """
+    if not (record or {}).get("design"):
+        return True
+    identity = design_identity(record["design"])
+    return all(identity.get(key) == value for key, value in group_design(data, kind).items())
+
+
+def _evidence(run_id, data):
     fwer = data.get("fwer") or {}
     parts = []
     status = "done"
@@ -828,6 +924,34 @@ def checklist_evidence(root, run_records=None):
     for effect in planted.get("effects") or []:
         parts.append(f"power at beta={effect['beta']:g}: {rate_text(effect['power'])}")
     return status, "; ".join(parts), [run_id] if run_id else []
+
+
+def checklist_evidence(root, run_records=None, design=None):
+    """(status, value, evidence) of the newest calibration for the reporting checklist (item F8, design and
+    correction): "done" when the empirical FWER is consistent with alpha, "flagged" when it is inflated or the
+    calibration was partial, "not_run" without a calibration (of ``design`` when it is given).
+    """
+    run_id, data = latest_record(root, run_records, design)
+    if data is None:
+        return "not_run", "no pipeline calibration", []
+    return _evidence(run_id, data)
+
+
+def group_checklist_evidence(root, groups, run_records=None):
+    """(status, value, evidence) of the calibration of a run root's group analyses for checklist item F8, or None
+    without a finished calibration.
+
+    :param groups: [(kind "glm" | "slnm", glm.json or slnm.json record)] of the group analyses.
+    The newest calibration of the design of one of the analyses counts (the newest calibration when there is no
+    analysis); when every calibration was run for another design, it is "flagged" as out of date.
+    """
+    found = finished_records(root, run_records)
+    if not found:
+        return None
+    for run_id, data in found:
+        if not groups or any(matches_group(data, group, kind) for kind, group in groups):
+            return _evidence(run_id, data)
+    return "flagged", "out of date (calibrated for another design than the group analyses; calibrate this analysis again)", [found[0][0]]
 
 
 # Files
@@ -870,7 +994,7 @@ def _parser():
     parser.add_argument("--no-fwer", action="store_true", help="skip the empirical FWER")
     parser.add_argument("--target", default=None, help="target network mask on the connectome grid (non-zero voxels)")
     parser.add_argument("--target-lesion", default=None, help="participant whose Fz map's top voxels are the target network (default: the lesion of median volume)")
-    parser.add_argument("--target-top-pct", type=float, default=DEFAULT_TARGET_TOP_PCT, help=f"top % of the lesion's Fz map that makes the target (default {DEFAULT_TARGET_TOP_PCT:g})")
+    parser.add_argument("--target-top-pct", type=float, default=DEFAULT_TARGET_TOP_PCT, help=f"top %% of the lesion's Fz map that makes the target (default {DEFAULT_TARGET_TOP_PCT:g})")
     parser.add_argument("--effects", default=",".join(f"{beta:g}" for beta in DEFAULT_EFFECTS), help="planted effect sizes (correlations), comma-separated (default 0.1,0.2,0.3)")
     parser.add_argument("--sims", type=jobs.positive_int, default=DEFAULT_SIMS, help=f"simulations per effect size (default {DEFAULT_SIMS})")
     parser.add_argument("--no-planted", action="store_true", help="skip the planted-network recovery")
@@ -878,7 +1002,7 @@ def _parser():
     parser.add_argument("--sensitivity", action="store_true", help="also calibrate the sensitivity route on relocated lesion sets (needs the bundle)")
     parser.add_argument("--rule", default=None, help="threshold rule of the sensitivity route (JSON; default FWE)")
     parser.add_argument("--sign", choices=("both", "pos", "neg"), default="both", help="sign of the sensitivity route (default both)")
-    parser.add_argument("--overlap", type=float, default=90.0, help="classic overlap rule, % of the maps (default 90)")
+    parser.add_argument("--overlap", type=float, default=90.0, help="classic overlap rule, %% of the maps (default 90)")
     parser.add_argument("--k-pool", type=jobs.positive_int, default=DEFAULT_K_POOL, help=f"relocations per lesion of the sensitivity route (default {DEFAULT_K_POOL})")
     parser.add_argument("--estimate", action="store_true", help="only report the estimated run time (an 'estimate' event)")
     jobs.add_common_arguments(parser)
@@ -907,10 +1031,25 @@ def main(argv=None):
         raise jobs.JobError(f"--alpha must be between 0 and 0.5, got {args.alpha}", code="usage", exit_code=jobs.EXIT_USAGE)
     if not 0.0 < args.target_top_pct < 100.0:
         raise jobs.JobError(f"--target-top-pct must be between 0 and 100, got {args.target_top_pct}", code="usage", exit_code=jobs.EXIT_USAGE)
+    if args.sensitivity:
+        from . import nulls
+
+        low, high = nulls.OVERLAP_RANGE
+        if not low <= args.overlap <= high:  # also refuses nan
+            raise jobs.JobError(f"--overlap must be between {low:g} and {high:g} %, got {args.overlap}", code="usage", exit_code=jobs.EXIT_USAGE)
+        from . import thresholds
+
+        try:  # before any work: the sensitivity stage runs last, after the empirical FWER
+            thresholds.normalize_rule(args.rule)
+        except ValueError as exc:
+            raise jobs.JobError(f"Invalid --rule: {exc}", code="usage", exit_code=jobs.EXIT_USAGE) from None
     if args.target and args.target_lesion:
         raise jobs.JobError("Give --target or --target-lesion, not both", code="usage", exit_code=jobs.EXIT_USAGE)
     if args.no_fwer and args.no_planted and not args.sensitivity:
         raise jobs.JobError("Nothing to calibrate (--no-fwer and --no-planted without --sensitivity)", code="usage", exit_code=jobs.EXIT_USAGE)
+    jobs.check_input_files(args, "maps", "participants", "mask", "pool_maps", "target")
+    if args.target:
+        _check_target_grid(args.target, args.mask)  # before any work: the target is read after the empirical FWER stage
     return _run_cli(args, argv, _floats(args.effects))
 
 
@@ -944,6 +1083,22 @@ def _median_volume_lesion(study, sids):
     return volumes[len(volumes) // 2][1]
 
 
+def _check_target_grid(target, mask_path):
+    """Refuse a --target that is not a NIfTI image on the grid of the connectome mask (headers only, so it is cheap)."""
+    try:
+        header = nifti.read_nifti_header(target)
+        mask_header = nifti.read_nifti_header(mask_path)
+    except (OSError, ValueError, EOFError) as exc:
+        raise jobs.JobError(f"The target {target} cannot be read: {exc}", code="usage", exit_code=jobs.EXIT_USAGE) from None
+    shape = tuple(header["shape"])
+    if len(shape) > 3 and int(np.prod(shape[3:])) != 1:
+        shape = None
+    elif shape:
+        shape = shape[:3]
+    if shape != tuple(mask_header["shape"][:3]) or not np.allclose(header["affine"], mask_header["affine"], atol=1e-4, rtol=0):
+        raise jobs.JobError(f"The target {target} is not on the grid of the connectome mask (shape {tuple(header['shape'])})", code="usage", exit_code=jobs.EXIT_USAGE)
+
+
 def _read_mask(path, mask_shape, mask_affine, indices):
     data, affine, header = nifti.read_nifti(path)
     data = np.asarray(data)
@@ -958,7 +1113,7 @@ def _reference(args, cohort, subjects_sha, indices, mask_shape):
     """(covariate maps (2, V) or None, info dict or None, reason or None) from the bundle's reference maps."""
     if not (args.bundle or ((cohort or {}).get("bundle") or {}).get("path")):
         return None, None, "no connectome bundle (--bundle)"
-    ref, reason, info = slnm._reference_for(args, cohort, subjects_sha, indices, mask_shape)
+    ref, reason, info = slnm._reference_for(args, cohort, subjects_sha, indices, mask_shape, build_hint=slnm.REFERENCE_BUILD_HINT if jobs.in_app_job() else None)
     if ref is None:
         return None, None, reason
     return ref.covariates(slnm.REFERENCE_COVARIATES), info, None
@@ -1059,9 +1214,7 @@ def _run_cli(args, argv, effects):
         state.data.setdefault("fwer", [])
         state.data.setdefault("planted", {})
         state.save()
-        previous_json = os.path.join(out_dir, CALIBRATION_JSON)
-        if os.path.exists(previous_json):
-            os.remove(previous_json)
+        # The previous finished calibration.json stays until this run finishes: a stopped or failed run keeps it
 
         # Maps
         emit("stage", name="maps", index=1, total=4)
@@ -1162,7 +1315,10 @@ def _run_cli(args, argv, effects):
     except jobs.Cancelled as exc:
         if record is not None:
             record.update({"status": "cancelled", "end": now_iso(), "stop_reason": exc.reason})
-            write_record(os.path.join(out_dir, CALIBRATION_JSON), record)
+            json_path = os.path.join(out_dir, CALIBRATION_JSON)
+            previous = read_record(json_path) if os.path.exists(json_path) else None
+            if not previous or previous.get("status") != "done":  # never replace a finished result with a stopped run
+                write_record(json_path, record)
         if run_id:
             runs.update(run_root, run_id, status="cancelled", ended=now_iso())
         raise

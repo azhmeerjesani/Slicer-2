@@ -103,6 +103,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 return self._send(416, headers=[("Content-Range", f"bytes */{len(body)}")])
             status = 206
         payload = body[start:]
+        if behavior.get("content_encoding"):  # a misconfigured server: the stored .gz file is labelled as an encoding
+            self.send_response(status)
+            self.send_header("Content-Encoding", behavior["content_encoding"])
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return None
         self.send_response(status)
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Accept-Ranges", "bytes")
@@ -241,6 +248,87 @@ class FetchTest(_Base):
         self.assertEqual(read_bytes(path), self.body)
         self.assertEqual(self.requests_for("/file.bin")[-1][1], f"bytes={kept}-")
 
+    def test_failure_messages_are_short_and_true_about_the_partial_file(self):
+        # No connection: one short sentence naming the host, no urllib3 chain, and no partial file to speak of
+        entry = entry_for(dead_url(), self.body)
+        with self.assertRaises(fetch.OfflineError) as caught:
+            fetch.fetch(entry, self.cache, retries=1)
+        message = str(caught.exception)
+        self.assertEqual(message, "No connection to 127.0.0.1. Check the network and try again.")
+        for raw in ("HTTPConnectionPool", "Max retries", "NewConnectionError", "Errno", "partial"):
+            self.assertNotIn(raw, message)
+        self.assertFalse(os.path.exists(fetch.download_path(entry, self.cache) + ".part"))
+        # A dropped connection after some bytes: the partial file exists, so it is said to be kept (and no raw exception text)
+        url = self.serve("/file.bin", self.body, cut=[300_000])
+        entry = entry_for(url, self.body)
+        with self.assertRaises(fetch.FetchError) as caught:
+            fetch.fetch(entry, self.cache, retries=0)
+        message = str(caught.exception)
+        self.assertEqual(caught.exception.code, "interrupted")
+        self.assertIn("partial download is kept", message)
+        self.assertNotIn("IncompleteRead", message)
+        self.assertNotIn("Connection broken", message)
+        self.assertGreater(os.path.getsize(fetch.download_path(entry, self.cache) + ".part"), 0)
+        # An error answer: no partial file, and none is claimed
+        entry = entry_for(self.server.base + "/missing.bin", self.body)
+        with self.assertRaises(fetch.FetchError) as caught:
+            fetch.fetch(entry, self.cache)
+        self.assertNotIn("partial", str(caught.exception))
+
+    def test_network_problem_sentences(self):
+        import requests
+        import urllib3
+
+        url = "https://neurovault.org/api/images/63/?format=json"
+        chain = requests.exceptions.ProxyError("HTTPSConnectionPool(host='neurovault.org', port=443): Max retries exceeded (Caused by ProxyError)")
+        for exc, expected in (
+            (chain, "No connection to neurovault.org: the proxy server cannot be reached. Check the network and try again."),
+            (requests.exceptions.ConnectionError("Max retries exceeded"), "No connection to neurovault.org. Check the network and try again."),
+            (requests.exceptions.ReadTimeout("Read timed out."), "neurovault.org stopped sending data. Check the network and try again."),
+            (requests.exceptions.ConnectionError(urllib3.exceptions.ReadTimeoutError(None, url, "Read timed out.")),
+             "neurovault.org stopped sending data. Check the network and try again."),  # a stalled body, as iter_content raises it
+            (requests.exceptions.ChunkedEncodingError("Connection broken: IncompleteRead(1000 bytes read)"),
+             "The connection to neurovault.org dropped. Check the network and try again."),
+            (requests.exceptions.ConnectTimeout("Connect timed out."), "No answer from neurovault.org. Check the network and try again."),
+        ):
+            self.assertEqual(fetch.network_problem(exc, url), expected)
+
+    def test_proxy_refusal_is_not_reported_as_unreachable(self):
+        import requests
+
+        url = "https://neurovault.org/api/images/63/?format=json"
+        for status, reason, expected in (
+            (407, "Proxy Authentication Required", "The proxy server asks for a login (407)"),
+            (403, "Forbidden", "The proxy server refused the connection to neurovault.org (403)"),
+        ):
+            inner = OSError(f"Tunnel connection failed: {status} {reason}")
+            exc = requests.exceptions.ProxyError(f"HTTPSConnectionPool(host='neurovault.org', port=443): Max retries exceeded (Caused by ProxyError('Unable to connect to proxy', {inner!r}))", inner)
+            self.assertEqual(fetch.proxy_refusal_status(exc), status)
+            message = fetch.network_problem(exc, url)
+            self.assertIn(expected, message)
+            self.assertNotIn("cannot be reached", message)
+        self.assertIsNone(fetch.proxy_refusal_status(requests.exceptions.ProxyError("Cannot connect to proxy.")))
+
+    def test_short_message_and_user_message_for_labels(self):
+        long_text = "No connection to host.example: " + " ".join(["word"] * 80)
+        short = fetch.short_message(long_text, 100)
+        self.assertLessEqual(len(short), 100)
+        self.assertTrue(short.endswith("\u2026"))
+        self.assertTrue(short[:-1].endswith("word"), short)  # cut between words
+        # URLs are replaced by their host, only the first line is kept, and short texts stay as they are
+        text = "HTTP 404 for https://templateflow.s3.amazonaws.com/tpl-X/file.nii.gz (see log)\nsecond line"
+        self.assertEqual(fetch.short_message(text), "HTTP 404 for templateflow.s3.amazonaws.com (see log)")
+        self.assertEqual(fetch.short_message(""), "")
+        self.assertEqual(fetch.short_message(None), "")
+        # a single token longer than the limit is still cut, with an ellipsis
+        self.assertEqual(fetch.short_message("x" * 50, 10), "x" * 9 + "\u2026")
+        # a download failure: the text of a FetchError, a plain notice for anything else (no class name, no raw text)
+        self.assertEqual(fetch.user_message(fetch.OfflineError("No connection to a.example. Check the network and try again.")),
+                         "No connection to a.example. Check the network and try again.")
+        other = fetch.user_message(ValueError("HTTPSConnectionPool(host='a.example', port=443): Max retries exceeded"))
+        for raw in ("ValueError", "HTTPSConnectionPool", "Max retries"):
+            self.assertNotIn(raw, other)
+
     def test_server_that_ignores_range_restarts_cleanly(self):
         url = self.serve("/file.bin", self.body, ignore_range=True)
         entry = entry_for(url, self.body)
@@ -250,6 +338,15 @@ class FetchTest(_Base):
             f.write(b"junk" * 1000)  # a stale partial file
         path = fetch.fetch(entry, self.cache)
         self.assertEqual(read_bytes(path), self.body)
+
+    def test_content_encoding_gzip_is_stored_as_sent(self):
+        stored = gzip.compress(bytes(2_000_000))  # far smaller compressed than decoded
+        url = self.serve("/real.nii.gz", stored, content_encoding="gzip")
+        entry = entry_for(url, stored, filename="real.nii.gz")
+        path = fetch.fetch(entry, self.cache)
+        self.assertEqual(read_bytes(path), stored)
+        self.assertEqual(len(self.requests_for("/real.nii.gz")), 1)
+        self.assertFalse(os.path.exists(path + ".part"))
 
     def test_checksum_mismatch_retries_once_then_raises(self):
         url = self.serve("/file.bin", self.body)
@@ -742,6 +839,23 @@ class CatalogTest(unittest.TestCase):
             else:
                 os.environ[fetch.CACHE_ENV] = saved
 
+    def test_app_cache_dir(self):
+        """The application's one cache folder: $SLICER_LNM_CACHE, else <application cache>/LNM, else the library default."""
+        import types
+        from unittest import mock
+
+        with mock.patch.dict(os.environ), mock.patch.dict(sys.modules):
+            os.environ.pop(fetch.CACHE_ENV, None)
+            sys.modules["slicer"] = types.SimpleNamespace(app=types.SimpleNamespace(cachePath="/tmp/app cache"))
+            self.assertEqual(fetch.app_cache_dir(), os.path.abspath(os.path.join("/tmp/app cache", "LNM")))
+            os.environ[fetch.CACHE_ENV] = "/tmp/lnm-env-cache"
+            self.assertEqual(fetch.app_cache_dir(), os.path.abspath("/tmp/lnm-env-cache"))
+            os.environ.pop(fetch.CACHE_ENV)
+            sys.modules["slicer"] = types.SimpleNamespace(app=None)  # a worker: no application
+            self.assertEqual(fetch.app_cache_dir(), fetch.cache_dir())
+            sys.modules.pop("slicer")
+            self.assertEqual(fetch.app_cache_dir(), fetch.cache_dir())
+
 
 # Synthetic atlases
 
@@ -777,6 +891,23 @@ class NetworkNameTest(unittest.TestCase):
         self.assertIsNone(atlases.network_of("Left Thalamus"))
         self.assertIsNone(atlases.network_of(""))
         self.assertIsNone(atlases.network_of(None))
+
+    def test_schaefer17_limbic_is_two_networks(self):
+        # TemplateFlow's 17-network tables name Yeo-17 networks 9 and 10 "Limbic_TempPole" and "Limbic_OFC": two networks
+        self.assertEqual(atlases.network_of("17Networks_LH_Limbic_TempPole_1"), "LimbicA")
+        self.assertEqual(atlases.network_of("17Networks_RH_Limbic_TempPole_6"), "LimbicA")
+        self.assertEqual(atlases.network_of("17Networks_LH_Limbic_OFC_1"), "LimbicB")
+        self.assertEqual(atlases.network_of("17Networks_RH_Limbic_OFC_6", "schaefer"), "LimbicB")
+        self.assertEqual(atlases.network_of("17Networks_LH_LimbicA_TempPole_1"), "LimbicA")  # newer CBIG names
+        self.assertEqual(atlases.network_of("17Networks_LH_LimbicB_OFC_1"), "LimbicB")
+        self.assertEqual(atlases.network_of("7Networks_RH_Limbic_TempPole_1"), "Limbic")  # one network in Yeo-7
+        self.assertEqual(atlases.to_yeo7("LimbicA"), "Limbic")
+        self.assertEqual(atlases.to_yeo7("LimbicB"), "Limbic")
+        names = ["VisCent_ExStr", "VisPeri_StriCal", "SomMotA", "SomMotB_Aud", "DorsAttnA_TempOcc", "DorsAttnB_PostC", "SalVentAttnA_Ins", "SalVentAttnB_PFCl", "Limbic_TempPole", "Limbic_OFC"]
+        names += ["ContA_IPS", "ContB_PFCl", "ContC_pCun", "DefaultA_PFCm", "DefaultB_Temp", "DefaultC_PHC", "TempPar"]
+        labels = {index + 1: f"17Networks_LH_{name}_1" for index, name in enumerate(names)}
+        networks = {atlases.network_of(name) for name in labels.values()}
+        self.assertEqual(len(networks), 17, sorted(networks))
 
     def test_yeo7_of_17_network_names(self):
         self.assertEqual(atlases.to_yeo7("DefaultB"), "Default")

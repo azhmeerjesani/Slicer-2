@@ -445,7 +445,10 @@ def evaluate(metrics, method=None, thresholds=None):
         levels[key] = level
         if level == LEVEL_AMBER:
             reasons.append(text.format(value=float(value), low=low or 0.0, high=high or 0.0))
-    if method.get("masking") is False or (_finite(method.get("dilate_mm")) and float(method["dilate_mm"]) < 0):
+    # Scan-only runs have no lesion mask to use in the cost function, so the user disabled nothing: the
+    # scan-only reason below says it.
+    masking_off = method.get("masking") is False or (_finite(method.get("dilate_mm")) and float(method["dilate_mm"]) < 0)
+    if masking_off and not method.get("scan_only"):
         reasons.append("cost-function masking was disabled")
     if method.get("cross_modality") and not method.get("two_step"):
         reasons.append("cross-modality registration without a T1-weighted scan (--anat)")

@@ -92,6 +92,9 @@ public:
   /// that connects the current and last brush position, to ensure a smooth and continuous brush stroke.
   void paintAddPoint(qMRMLWidget* viewWidget, double pixelPositionWorld[3], double* lastBrushPosition_World = nullptr);
 
+  /// True when the brush model has been built (it is built at the first mouse move), so that the brush can be shown
+  bool brushModelAvailable() const;
+
   /// Update paint circle glyph
   void updateBrush(qMRMLWidget* viewWidget, BrushPipeline* brush);
 

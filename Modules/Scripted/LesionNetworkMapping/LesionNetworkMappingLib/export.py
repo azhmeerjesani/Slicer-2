@@ -46,6 +46,19 @@ DISCLAIMER = (
     "Siddiqi et al., 2026, bioRxiv, doi:10.64898/2026.02.24.707529; "
     "Zalesky & Cash, 2026, Nat Neurosci, doi:10.1038/s41593-026-02259-3)."
 )
+# Lines for the generated POSIX shell scripts (reproduce.sh, reproduce_pipeline.sh): under the C or POSIX locale (cron,
+# ssh, containers) the PythonSlicer launcher drops every non-ASCII character of its arguments, so a study folder with an
+# accented letter would be passed on without it. Same rule as jobs.utf8_locale_env: LC_ALL replaces a non-UTF-8 LC_ALL,
+# otherwise LC_CTYPE is set; macOS and other systems are left alone (no C.UTF-8 locale there).
+UTF8_LOCALE_SHELL_LINES = (
+    "# The PythonSlicer launcher drops non-ASCII characters from its arguments (a study folder with accents) under the C or POSIX locale.",
+    'if [ "$(uname -s 2>/dev/null)" = Linux ]; then',
+    '  case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in',
+    "    *[Uu][Tt][Ff]-8* | *[Uu][Tt][Ff]8*) ;;",
+    '    *) if [ -n "${LC_ALL:-}" ]; then LC_ALL=C.UTF-8; export LC_ALL; else LC_CTYPE=C.UTF-8; export LC_CTYPE; fi ;;',
+    "  esac",
+    "fi",
+)
 CITATIONS = {
     "boes2015": "Boes AD, Prasad S, Liu H, et al. Network localization of neurological symptoms from focal brain lesions. Brain. 2015;138(10):3061-3075. doi:10.1093/brain/awv228",
     "fox2018": "Fox MD. Mapping symptoms to brain networks with the human connectome. N Engl J Med. 2018;379(23):2237-2245. doi:10.1056/NEJMra1706158",
@@ -231,6 +244,25 @@ def data_sha256(metadata):
 
     data = {key: metadata.get(key) for key in REQUIRED_KEYS if key != "name"}
     return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def identity_sha256(metadata):
+    """Hex sha256 that tells connectomes apart by their data, from connectome.json alone (no data file is read).
+
+    It is :func:`data_sha256` (grid, subjects, format) when connectome.json does not record the time series
+    fingerprint ``subjectsNormsSha256`` (bundles written before that key, downloaded bundles), so their
+    identity is unchanged. When it does, the time series fingerprint (``connectome.norms_fingerprint``) is
+    included as well: two bundles with the same grid and subjects but different data (for example converted
+    with and without global signal regression) then differ. The same bundle in another folder or on another
+    computer keeps its value.
+    """
+    from .connectome import norms_fingerprint
+
+    data = data_sha256(metadata)
+    norms = norms_fingerprint(metadata)
+    if norms is None:
+        return data
+    return hashlib.sha256(f"{data}\n{norms}".encode()).hexdigest()
 
 
 def bundle_info(bundle):
@@ -556,15 +588,29 @@ def _record_fields(record, field, convert):
         node[keys[-1]] = [convert(item) if isinstance(item, str) and item else item for item in value]
 
 
+def _portable_argv_value(value, folder):
+    """A command-line value with its absolute path(s) made relative to ``folder``: one path, or a comma-separated
+    list of paths ("--refmaps /a.nii.gz,/b.nii.gz"; every absolute entry is converted). A value that is not a list
+    of absolute paths (a single path that contains a comma, for example) is treated as one path.
+    """
+    if not os.path.isabs(value):
+        return value
+    parts = value.split(",")
+    if len(parts) > 1 and all(os.path.isabs(part) for part in parts):
+        return ",".join(_portable_file(part, folder) for part in parts)
+    return _portable_file(value, folder)
+
+
 def _portable_argv_token(token, folder):
-    """A command-line token with its absolute path made relative to ``folder``: a whole path ("--opt", "/a/b")
-    or the value of the "--opt=/a/b" form (argparse accepts both); other tokens are kept.
+    """A command-line token with its absolute path(s) made relative to ``folder``: a whole path ("--opt", "/a/b"),
+    a comma-separated list of paths ("/a,/b") or the value of the "--opt=/a/b" form (argparse accepts both);
+    other tokens are kept.
     """
     if os.path.isabs(token):
-        return _portable_file(token, folder)
+        return _portable_argv_value(token, folder)
     option, has_value, value = token.partition("=")
     if has_value and option.startswith("-") and os.path.isabs(value):
-        return f"{option}={_portable_file(value, folder)}"
+        return f"{option}={_portable_argv_value(value, folder)}"
     return token
 
 
@@ -599,8 +645,124 @@ def resolve_record_paths(record, folder, fields):
     return out
 
 
-def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=None, run_meta=None, preview_n=None, software=None):
+def _export_suffix(run_meta, preview_n=None):
+    """The desc suffix of a run's exported files: "PreviewN<k>", a named subset's "Subset<Name>", or ""."""
+    if preview_n is None:
+        preview_n = _preview_from_suffix(run_meta.get("desc_suffix"))
+    suffix = preview_suffix(preview_n)
+    if not suffix and _subject_list(run_meta)["name"]:
+        suffix = run_meta.get("desc_suffix") or ""  # a named-subset run keeps its "Subset<Name>" label
+    return suffix
+
+
+def foreign_lesions(out_dir, run_meta):
+    """Names of the run's lesions whose exported files in ``out_dir`` belong to another lesion.
+
+    Exporting the run there (:func:`write_run`) would replace the maps and sidecar of that other lesion, which has the
+    same name (two segmentations both called "Lesion", files with the same name...). A lesion's own earlier export (its
+    sidecar records the same lesion file sha256) is not foreign: exporting it again updates it. Files whose lesion cannot
+    be told (no or unreadable sidecar next to existing maps) count as foreign.
+    """
+    run_meta = dict(run_meta or {})
+    bundle_name = bundle_info(run_meta.get("bundle") or {}).get("name")
+    if not bundle_name or not os.path.isdir(out_dir):
+        return []
+    suffix = _export_suffix(run_meta)
+    foreign = []
+    for entry in run_meta.get("lesions") or []:
+        if not isinstance(entry, dict) or not entry.get("name"):
+            continue
+        name = entry["name"]
+        sidecar = sidecar_path(out_dir, name, bundle_name, desc_suffix=suffix)
+        maps = map_paths(out_dir, name, bundle_name, desc_suffix=suffix)
+        if not os.path.exists(sidecar):
+            if any(os.path.exists(path) for path in maps.values()):
+                foreign.append(name)
+            continue
+        try:
+            with open(sidecar, encoding="utf-8") as f:
+                recorded = (json.load(f).get("lesion") or {}).get("sha256")
+        except (OSError, ValueError, AttributeError):
+            recorded = None
+        if not recorded or recorded != entry.get("sha256"):
+            foreign.append(name)
+    return foreign
+
+
+# Fields of provenance.json that describe one run: an earlier export's record in "earlier_runs"
+_RUN_RECORD_KEYS = ("created", "software", "versions", "host", "connectome", "N", "df", "subject_ids_sha256", "subject_list", "subset", "threshold",
+                    "null", "lesions", "run", "terms", "acknowledgement")
+
+
+def _earlier_runs(out_dir, replaced):
+    """Records of the earlier exports into ``out_dir`` whose lesions keep their files after this export (oldest first).
+
+    Another lesion exported earlier into the same folder (``conn-<label>``) keeps its maps and sidecar, so the folder's
+    provenance.json, methods.md and reproduce.sh keep describing it: its run record is read from the provenance.json
+    there (its own run and its "earlier_runs"), with only the lesions whose sidecar is still in the folder and none of
+    whose files is in ``replaced`` (the file names this export writes).
+    """
+    try:
+        with open(os.path.join(out_dir, "provenance.json"), encoding="utf-8") as f:
+            previous = json.load(f)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(previous, dict) or previous.get("format") != PROVENANCE_FORMAT:
+        return []
+    records = [record for record in previous.get("earlier_runs") or [] if isinstance(record, dict)]
+    records.append({key: previous[key] for key in _RUN_RECORD_KEYS if key in previous})
+    out = []
+    for record in records:
+        kept = []
+        for lesion in record.get("lesions") or []:
+            if not isinstance(lesion, dict) or not isinstance(lesion.get("sidecar"), str) or not lesion.get("sidecar"):
+                continue
+            maps = lesion.get("maps") if isinstance(lesion.get("maps"), dict) else {}
+            names = [os.path.basename(lesion["sidecar"])] + [os.path.basename(name) for name in maps.values() if isinstance(name, str) and name]
+            if any(name in replaced for name in names) or not os.path.isfile(os.path.join(out_dir, names[0])):
+                continue
+            kept.append(lesion)
+        if kept:
+            files = [os.path.basename(name) for lesion in kept for name in [*(lesion.get("maps") or {}).values(), lesion["sidecar"]]]
+            out.append({**record, "lesions": kept, "files": files})
+    return out
+
+
+def _earlier_run_meta(record):
+    """The run record (run.json-like) of an earlier export's provenance record, for its methods and engine command line."""
+    subset = record.get("subset") or {}
+    run_meta = {key: value for key, value in (record.get("run") or {}).items() if key in ("argv", "cwd")}
+    run_meta.update({
+        "n": record.get("N"),
+        "cancelled": bool(subset.get("partial")),
+        "subject_list": record.get("subject_list"),
+        "null": record.get("null"),
+        "subjects": {"random": subset.get("random"), "seed": subset.get("seed", 0)},
+        "software": record.get("software"),
+        "versions": record.get("versions"),
+    })
+    return run_meta
+
+
+def _earlier_methods_text(record, info, index):
+    """methods.md part of an earlier export in the folder (:func:`_earlier_runs`)."""
+    from . import methods
+
+    names = " ".join(", ".join(str(lesion.get("name")) for lesion in record["lesions"]).split())
+    title = f"Methods: earlier export {index} in this folder ({names})"
+    try:
+        sections = methods.run_sections(record.get("connectome") or info, int(record.get("N") or 0), record["subset"], record["threshold"], record["lesions"],
+                                        _earlier_run_meta(record), software=record.get("software"))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return f"# {title}\n\nN = {record.get('N')}; exported {record.get('created') or NOT_RECORDED}; see provenance.json \"earlier_runs\".\n"
+    return methods.render(sections, "md", title=title)
+
+
+def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=None, run_meta=None, preview_n=None, software=None, sign=None):
     """Export a network-mapping run: maps, one sidecar per lesion, provenance.json, methods.md and reproduce.sh.
+
+    Lesions exported earlier into ``out_dir`` by other runs keep their maps and sidecars: provenance.json lists their
+    run records in "earlier_runs" (and their files in "files"), methods.md and reproduce.sh cover them too.
 
     :param out_dir: destination folder (created if needed).
     :param maps: ``engine.NetworkMaps`` (the maps are written), or {lesion name: {"AvgR", "AvgFz", "T": path}}
@@ -615,6 +777,8 @@ def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=
       lesion files, timings and the command line; may be None.
     :param preview_n: number of subjects of a preview (subset) run: adds "PreviewN<k>" to the desc labels.
     :param software: optional {"slicer": version, "fork_revision": revision} of the exporting application.
+    :param sign: the display sign "pos" or "neg" when one tail of the rule was shown and binarized (recorded in the threshold
+      block, the derived text and methods.md); None or "both" for the two-tailed |value| rule. Ignored for top-x% rules.
     :return: {"maps": [paths], "sidecars": [paths], "provenance": path, "methods": path, "reproduce": path}.
     """
     from .engine import OUTPUT_KEYS, write_maps
@@ -625,9 +789,7 @@ def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=
     lesion_names = list(lesion_names)
     if preview_n is None:
         preview_n = _preview_from_suffix(run_meta.get("desc_suffix"))
-    suffix = preview_suffix(preview_n)
-    if not suffix and _subject_list(run_meta)["name"]:
-        suffix = run_meta.get("desc_suffix") or ""  # a named-subset run keeps its "Subset<Name>" label
+    suffix = _export_suffix(run_meta, preview_n)
 
     # Maps
     written_maps = {}
@@ -661,6 +823,11 @@ def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=
         "seed": run_meta.get("seed", (run_meta.get("subjects") or {}).get("seed", 0)),
     }
     threshold = {"rule": rule, "resolved": resolved.to_dict(), "derived": derived}
+    if sign in ("pos", "neg") and rule.get("kind") != "top_pct":
+        from . import thresholds
+
+        threshold["sign"] = sign
+        threshold["derived"] = thresholds.describe(resolved, resolved.fraction, sign)
     lesion_meta = {entry.get("name"): entry for entry in run_meta.get("lesions", []) if isinstance(entry, dict)}
     timestamp = now_iso()
     software = _software(run_meta, software)
@@ -685,6 +852,9 @@ def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=
             "fractional_sum": meta.get("weight_total"),
             "volume_mm3": meta.get("volume_mm3"),
             "outside_connectome_fraction": meta.get("weight_outside_fraction"),
+            # The lesion's template space and the note for a lesion on another template family than the connectome
+            "space": meta.get("space", ((qa or {}).get(name) or {}).get("lesion_space")),
+            "space_notice": meta.get("space_notice", ((qa or {}).get(name) or {}).get("space_notice")),
         }
         sidecar = {
             "format": SIDECAR_FORMAT,
@@ -714,6 +884,8 @@ def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=
     provenance_path = os.path.join(out_dir, "provenance.json")
     methods_path = os.path.join(out_dir, "methods.md")
     reproduce_path = os.path.join(out_dir, "reproduce.sh")
+    files = [os.path.basename(p) for name in lesion_names for p in written_maps[name].values()] + [os.path.basename(p) for p in sidecars]
+    earlier = _earlier_runs(out_dir, set(files))
     provenance = {
         "format": PROVENANCE_FORMAT,
         "version": 1,
@@ -731,15 +903,20 @@ def write_run(out_dir, maps, lesion_names, bundle, rule=None, resolved=None, qa=
         "null": run_meta.get("null"),
         "lesions": lesions,
         "run": {key: run_meta.get(key) for key in ("argv", "cwd", "threads", "start", "end", "elapsed", "engine_elapsed", "status", "desc_suffix") if key in run_meta},
-        "files": [os.path.basename(p) for name in lesion_names for p in written_maps[name].values()] + [os.path.basename(p) for p in sidecars] + ["methods.md", "reproduce.sh"],
+        "files": files + [name for record in earlier for name in record["files"]] + ["methods.md", "reproduce.sh"],
         "citations": [CITATIONS["boes2015"], CITATIONS["fox2018"], *([info["citation"]] if info.get("citation") else []), *(CITATIONS[key] for key in DEBATE_CITATIONS)],
         "terms": licence,
         "acknowledgement": acknowledgement,
         "disclaimer": DISCLAIMER,
     }
+    if earlier:
+        provenance["earlier_runs"] = earlier  # other lesions exported earlier into this folder, oldest first
+    methods = methods_text(info, n, subset, threshold, lesions, run_meta, software=software)
+    for index, record in enumerate(earlier, 1):
+        methods += "\n" + _earlier_methods_text(record, info, index)
     write_json_atomic(provenance_path, _clean(provenance))
-    _write_text_atomic(methods_path, methods_text(info, n, subset, threshold, lesions, run_meta, software=software))
-    _write_text_atomic(reproduce_path, reproduce_script(run_meta, info, lesions, preview_n), mode=0o755)
+    _write_text_atomic(methods_path, methods)
+    _write_text_atomic(reproduce_path, reproduce_script(run_meta, info, lesions, preview_n, earlier=earlier), mode=0o755)
     return {
         "maps": [p for name in lesion_names for p in written_maps[name].values()],
         "sidecars": sidecars,
@@ -895,17 +1072,26 @@ def _engine_arguments(run_meta, info, lesions, preview_n):
     return out
 
 
-def reproduce_script(run_meta, info, lesions, preview_n=None):
+def reproduce_script(run_meta, info, lesions, preview_n=None, earlier=()):
     """reproduce.sh: the engine command line that recomputes the run's maps into $OUT.
 
+    ``earlier``: provenance records of other lesions exported earlier into the same folder (:func:`_earlier_runs`);
+    their runs are recomputed too, each into $OUT/earlier-<k> (the engine writes run.json and qa.json in its folder).
+
     The script runs ``slicer-lnm engine`` when the ``slicer-lnm`` command (the wheel, the container image or
-    ``Slicer Studio.app/Contents/bin/slicer-lnm``) is on PATH or named by $SLICER_LNM, otherwise
-    ``PythonSlicer -m LesionNetworkMappingLib.engine`` with the library folder on PYTHONPATH. $PYTHONSLICER
-    forces the PythonSlicer route. Both run the same engine with the same arguments.
+    ``Slicer Studio.app/Contents/bin/slicer-lnm``) is named by $SLICER_LNM, is on PATH or is the one that wrote
+    the script, otherwise ``PythonSlicer -m LesionNetworkMappingLib.engine`` with the library folder on
+    PYTHONPATH: the PythonSlicer on PATH, else the PythonSlicer (or Python interpreter) that wrote the script.
+    $PYTHONSLICER forces the PythonSlicer route. Both run the same engine with the same arguments. The writing
+    commands are baked in so that ``sh reproduce.sh`` works from a plain terminal (a venv that is not activated,
+    or an export of the application, whose PythonSlicer is not on PATH).
     """
     from .connectome import MANIFEST_NAME
+    from .pipeline import _python_executable, _slicer_lnm_executable
 
     library_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    default_pythonslicer = shutil.which("PythonSlicer") or _python_executable()
+    default_slicer_lnm = _slicer_lnm_executable()
     arguments = _engine_arguments(run_meta or {}, info, lesions, preview_n)
     lines = [
         "#!/bin/sh",
@@ -913,13 +1099,29 @@ def reproduce_script(run_meta, info, lesions, preview_n=None):
         "# Usage: [OUT=output_folder] [SLICER_LNM=/path/to/slicer-lnm | PYTHONSLICER=/path/to/Slicer/bin/PythonSlicer] sh reproduce.sh",
         f"# The connectome bundle and the lesion files must be available at the paths below; their sha256 are in provenance.json ({MANIFEST_NAME} sha256 {info.get('manifest_sha256') or 'n/a'}).",
         f"# {DISCLAIMER}",
-        "# Entry point: 'slicer-lnm engine' when slicer-lnm is on PATH (pip wheel, container image, Slicer Studio.app/Contents/bin) or $SLICER_LNM is set,",
-        "# otherwise 'PythonSlicer -m LesionNetworkMappingLib.engine' with LNM_LIBRARY_DIR on PYTHONPATH; setting $PYTHONSLICER forces PythonSlicer.",
+        "# Entry point: 'slicer-lnm engine' when slicer-lnm is $SLICER_LNM, is on PATH (pip wheel, container image, Slicer Studio.app/Contents/bin) or is the one that wrote this script,",
+        "# otherwise 'PythonSlicer -m LesionNetworkMappingLib.engine' with LNM_LIBRARY_DIR on PYTHONPATH (the PythonSlicer on PATH, else the one that wrote this script);",
+        "# setting $PYTHONSLICER forces PythonSlicer (a Python interpreter with numpy works too).",
         "# Both run the same engine; compare its library version with provenance.json when the maps differ.",
         "set -e",
+        *UTF8_LOCALE_SHELL_LINES,
+        f"DEFAULT_SLICER_LNM={shlex.quote(default_slicer_lnm or '')}",
+        f"DEFAULT_PYTHONSLICER={shlex.quote(default_pythonslicer or '')}",
         'OUT="${OUT:-reproduced}"',
-        'if [ -z "${PYTHONSLICER:-}" ] && { [ -n "${SLICER_LNM:-}" ] || command -v slicer-lnm >/dev/null 2>&1; }; then',
-        '  set -- "${SLICER_LNM:-slicer-lnm}" engine',
+        'LNM_ENTRY=""',
+        'if [ -z "${PYTHONSLICER:-}" ]; then',
+        '  if [ -n "${SLICER_LNM:-}" ]; then',
+        '    LNM_ENTRY="$SLICER_LNM"',
+        "  elif command -v slicer-lnm >/dev/null 2>&1; then",
+        '    LNM_ENTRY="slicer-lnm"',
+        '  elif [ -n "$DEFAULT_SLICER_LNM" ] && [ -x "$DEFAULT_SLICER_LNM" ]; then',
+        '    LNM_ENTRY="$DEFAULT_SLICER_LNM"',
+        '  elif ! command -v PythonSlicer >/dev/null 2>&1 && [ -n "$DEFAULT_PYTHONSLICER" ] && [ -x "$DEFAULT_PYTHONSLICER" ]; then',
+        '    PYTHONSLICER="$DEFAULT_PYTHONSLICER"',
+        "  fi",
+        "fi",
+        'if [ -n "$LNM_ENTRY" ]; then',
+        '  set -- "$LNM_ENTRY" engine',
         "else",
         '  PYTHONSLICER="${PYTHONSLICER:-PythonSlicer}"',
         f'  LNM_LIBRARY_DIR="${{LNM_LIBRARY_DIR:-{library_dir}}}"',
@@ -933,7 +1135,18 @@ def reproduce_script(run_meta, info, lesions, preview_n=None):
     if (run_meta or {}).get("cancelled"):
         lines.insert(5, f"# The run was stopped after {run_meta.get('n')} subjects: this command recomputes the complete run.")
     lines += [f"  {shlex.quote(token)} \\" for token in arguments]
-    lines += ['  --out "$OUT" --run-json "$OUT/run.json"', ""]
+    lines += ['  --out "$OUT" --run-json "$OUT/run.json"']
+    for index, record in enumerate(earlier or (), 1):
+        earlier_meta = _earlier_run_meta(record)
+        earlier_info = record.get("connectome") or info
+        names = " ".join(", ".join(str(lesion.get("name")) for lesion in record["lesions"]).split())  # one comment line
+        subset = record.get("subset") or {}
+        lines.append(f"# Earlier export {index} in this folder ({names}), recomputed into $OUT/earlier-{index}" + (" (it was a partial run: this recomputes the complete run)" if subset.get("partial") else ""))
+        lines.append('"$@" \\')
+        earlier_arguments = _engine_arguments(earlier_meta, earlier_info, record["lesions"], (subset.get("n_requested") or record.get("N")) if subset.get("preview") else None)
+        lines += [f"  {shlex.quote(token)} \\" for token in earlier_arguments]
+        lines.append(f'  --out "$OUT/earlier-{index}" --run-json "$OUT/earlier-{index}/run.json"')
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -946,8 +1159,11 @@ METHODS_FORMATS = ("md", "html", "txt")
 # Desc suffixes of p-value maps (plain p, 1 outside the mask); other group maps are unthresholded statistics
 P_MAP_SUFFIXES = ("PUnc", "PFwe", "PFdr", "TfcePFwe")
 # Files listed by the publication manifest, by kind (``required`` kinds are reported as missing when absent)
-PUBLICATION_KINDS = ("unthresholded_map", "p_map", "design", "palm_export", "reproduce", "checklist", "neurovault", "methods")
+PUBLICATION_KINDS = ("unthresholded_map", "p_map", "design", "palm_export", "reproduce", "checklist", "neurovault", "methods", "seeds")
 _SKIPPED_FOLDERS = ("cache", ".studio")
+# Files of a seed-set run folder (coordinates, atrophy or stimulation seeds: coords.write_seed_set's seeds.json) that
+# describe its seeds; with seeds/<id>_seed.nii.gz they let a reader re-map the run
+_SEED_RUN_FILES = ("seeds.json", "foci.tsv", "lesions.tsv", "maps.tsv")
 _GROUP_MAP = re.compile(r"_desc-([A-Za-z0-9]+)_map\.nii(?:\.gz)?$")
 _LESION_MAP = re.compile(r"_desc-([A-Za-z0-9]+)_funcmap\.nii(?:\.gz)?$")
 
@@ -1013,7 +1229,7 @@ def supplementary_lesions_tsv(study, out, order=None):
       in participants.tsv, and repeats, are skipped.
     :return: the TSV path.
     """
-    from .study import Study, is_missing
+    from .study import Study, is_missing, typographic_quotes
 
     if not hasattr(study, "subjects"):
         study = Study.open(study)
@@ -1027,7 +1243,7 @@ def supplementary_lesions_tsv(study, out, order=None):
         for column in columns:
             text = row.get(column)
             if not is_missing(text) and str(text).strip():
-                return str(text).replace("\t", " ").replace("\n", " ")
+                return typographic_quotes(str(text).replace("\t", " ").replace("\n", " "))  # official Slicer misreads straight quotes
         return NOT_RECORDED
 
     lines = ["\t".join(SUPPLEMENTARY_COLUMNS)]
@@ -1077,9 +1293,46 @@ def _publication_kind(name, folder_names):
     return None
 
 
+def seed_run_files(folder, names, root):
+    """[(path, kind)] to publish of a seed-set run ``folder`` (one holding seeds.json, ``names`` its file names), or [].
+
+    A seed-set run started without a study keeps its per-seed maps in its own cache folder (``<run>/cache``), which the
+    publication walk skips; the maps that its maps.tsv lists below ``root`` are therefore listed here (unthresholded
+    maps), with the run's seeds.json, foci.tsv, lesions.tsv, maps.tsv and seed images ("seeds"). The relative paths of
+    maps.tsv and lesions.tsv still resolve in a bundle that keeps the run folder's layout.
+    """
+    if "seeds.json" not in names:
+        return []
+    found = [(os.path.join(folder, name), "seeds") for name in _SEED_RUN_FILES if name in names]
+    seed_folder = os.path.join(folder, "seeds")
+    try:
+        seed_names = sorted(os.listdir(seed_folder))
+    except OSError:
+        seed_names = []
+    found += [(os.path.join(seed_folder, name), "seeds") for name in seed_names if name.endswith("_seed.nii.gz") and os.path.isfile(os.path.join(seed_folder, name))]
+    if "maps.tsv" in names:
+        from .cohortmaps import MAP_KEYS, read_maps_tsv
+
+        top = os.path.realpath(root)
+        try:
+            rows = read_maps_tsv(os.path.join(folder, "maps.tsv"))
+        except (OSError, ValueError):
+            rows = []
+        for row in rows:
+            for key in MAP_KEYS:
+                path = row.get(key)
+                if not path or not os.path.isabs(path) or not _LESION_MAP.search(os.path.basename(path)) or not os.path.isfile(path):
+                    continue
+                real = os.path.realpath(path)
+                if os.path.commonpath([top, real]) == top:  # never a file outside the study (no absolute path in the bundle)
+                    found.append((path, "unthresholded_map"))
+    return found
+
+
 def publication_manifest(root, out=None, hashes=True):
     """List the files to publish under ``root`` (a study or output folder): unthresholded maps and p maps,
-    design files, the PALM export, reproduce scripts, checklist.md, methods and neurovault/images.json.
+    design files, the PALM export, reproduce scripts, checklist.md, methods and neurovault/images.json, and the seeds and
+    maps of seed-set runs (:func:`seed_run_files`, even when those maps are in the run's own cache folder).
 
     Paths are relative to ``root`` with "/" separators (no absolute local paths). Kinds that the runs
     should have produced but are absent are listed in "missing" (design, p maps and the PALM export
@@ -1104,6 +1357,14 @@ def publication_manifest(root, out=None, hashes=True):
                     group_analysis = True
                 kind = "neurovault" if name == "images.json" and os.path.basename(folder) == "neurovault" else _publication_kind(name, names)
                 if kind is None:
+                    continue
+                seen.add(os.path.realpath(path))
+                entry = {"path": os.path.relpath(path, root).replace(os.sep, "/"), "kind": kind, "bytes": os.path.getsize(path)}
+                if hashes:
+                    entry["sha256"] = file_sha256(path)
+                files.append(entry)
+            for path, kind in seed_run_files(folder, names, root):
+                if path == out_abs or os.path.realpath(path) in seen:
                     continue
                 seen.add(os.path.realpath(path))
                 entry = {"path": os.path.relpath(path, root).replace(os.sep, "/"), "kind": kind, "bytes": os.path.getsize(path)}
@@ -1206,6 +1467,12 @@ def study_connectomes(root):
     return found
 
 
+def _vlsm_sign_coding(record):
+    from . import vlsm  # noqa: PLC0415 (a vlsm.json written before it recorded "sign_coding")
+
+    return vlsm.sign_coding(record)
+
+
 def neurovault_image(item, connectome=None):
     """NeuroVault metadata of one map (see :func:`neurovault_metadata`).
 
@@ -1222,8 +1489,34 @@ def neurovault_image(item, connectome=None):
     fallback = _connectome_source(item["connectome"] if item.get("connectome") is not None else connectome)
     licence, connectome = item.get("licence"), {}
     df, n_subjects, sign, description = item.get("df"), item.get("number_of_subjects", item.get("n_lesions")), item.get("sign_coding"), item.get("description")
+    # A VLSM result folder (vlsm.json): maps of lesion location, not of connectivity
+    vlsm_record = _read_json_or_none(os.path.join(folder, "vlsm.json")) if not lesion and (not desc or desc.startswith("vlsm")) else None
+    vlsm_record = vlsm_record if isinstance(vlsm_record, dict) else None
     if name.endswith(("_mask.nii.gz", "_mask.nii")):
         map_type = "R"
+    elif vlsm_record is not None:
+        connectome = {}
+        is_p = desc.endswith(P_MAP_SUFFIXES)
+        is_t = desc.endswith("Tstat")
+        map_type = "T" if is_t else "Other"
+        if n_subjects is None:
+            n_subjects = vlsm_record.get("n")
+        if is_t and df is None:
+            df = vlsm_record.get("df")
+        n_text = vlsm_record.get("n") if vlsm_record.get("n") is not None else NOT_RECORDED
+        if desc == "vlsmCoverage":
+            sign = sign or "Counts (0 to n): the number of analysed lesions that cover each voxel; not a signed statistic."
+            description = description or f"Lesion coverage map: number of the n = {n_text} analysed lesions covering each voxel (a lesion count, not a statistic)."
+        else:
+            if sign is None:
+                sign = "Plain p-values (not 1 - p, not -log10 p); 1 outside the tested voxels." if is_p else vlsm_record.get("sign_coding") or _vlsm_sign_coding(vlsm_record)
+            kind = "p-value map" if is_p else "unthresholded statistic" if desc.endswith(("Tstat", "Fstat")) else "unthresholded effect size"
+            contrast = vlsm_record.get("contrast") if isinstance(vlsm_record.get("contrast"), dict) else {}
+            label = contrast.get("label") or NOT_RECORDED
+            if contrast.get("spec") and contrast.get("spec") != label:
+                label += f" ({contrast['spec']})"
+            description = description or (f"Voxel-based lesion-symptom map ({desc}): relation of lesion location (binary lesion masks) to the "
+                                          f"{'score' if vlsm_record.get('test') == 'continuous' else 'group'}, contrast {label}, n = {n_text}; {kind}.")
     elif lesion:
         sidecar = _lesion_sidecar_for(path) or {}
         provenance = _read_json_or_none(os.path.join(folder, "provenance.json")) or {}
@@ -1268,12 +1561,12 @@ def neurovault_image(item, connectome=None):
             else:
                 sign = NOT_RECORDED
         description = description or f"Group lesion network map ({desc}); {'p-value map' if is_p else 'unthresholded statistic'}."
-    space = str(connectome.get("space") or "")
+    space = str(connectome.get("space") or (vlsm_record or {}).get("space") or "")
     image = {
         "name": item.get("name") or re.sub(r"\.nii(\.gz)?$", "", name),
         "file": item.get("file") or name,
         "map_type": item.get("map_type") or map_type,
-        "modality": "fMRI-BOLD",
+        "modality": "Other" if vlsm_record is not None else "fMRI-BOLD",  # VLSM: lesion location, not resting-state BOLD
         "analysis_level": "G",
         "is_thresholded": False,
         "number_of_subjects": n_subjects,
@@ -1291,7 +1584,7 @@ def neurovault_image(item, connectome=None):
 
 def neurovault_metadata(maps, out=None, connectome=None, root=None):
     """NeuroVault metadata of maps (nothing is uploaded): map_type "T" (T maps), "R" (ROI/mask files) or
-    "Other"; modality fMRI-BOLD; analysis_level G; number_of_subjects = the number of lesions (1 for a
+    "Other"; modality fMRI-BOLD (Other for VLSM maps, which map lesion location); analysis_level G; number_of_subjects = the number of lesions (1 for a
     per-lesion map, the design n for a group map); statistic_parameters = df of T maps (connectome N - 1
     for a per-lesion T map, n - p for a group GLM T map); an explicit sign coding; the data use terms and
     the GSP acknowledgement for GSP-DUT-2014 maps.

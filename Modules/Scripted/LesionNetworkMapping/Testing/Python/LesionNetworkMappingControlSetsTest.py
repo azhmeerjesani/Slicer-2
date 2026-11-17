@@ -7,9 +7,11 @@ Run without Slicer's GUI:
 """
 
 import contextlib
+import glob
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -117,6 +119,18 @@ class ControlSetsTestBase(unittest.TestCase):
 
 
 class RegistryTest(ControlSetsTestBase):
+    def test_register_folder_refuses_a_name_that_differs_only_in_case(self):
+        self.register("BidsCtl")
+        for twin in ("bidsctl", "BIDSCTL"):
+            with self.assertRaises(FileExistsError):
+                self.register(twin)
+            with self.assertRaises(FileExistsError):
+                self.register(twin, replace=True)
+        self.assertEqual(controlsets.case_twin("bidsctl", self.root), "BidsCtl")
+        self.assertIsNone(controlsets.case_twin("BidsCtl", self.root))
+        self.assertEqual([entry["name"] for entry in controlsets.list_sets(self.root)], ["BidsCtl"])
+        self.assertEqual(self.register("BidsCtl", replace=True)["name"], "BidsCtl")
+
     def test_register_folder_records_the_set(self):
         entry = self.register()
         folder = os.path.join(self.root, "Ferguson490")
@@ -155,6 +169,57 @@ class RegistryTest(ControlSetsTestBase):
         with self.assertRaises(FileExistsError):
             self.register()
         self.assertEqual(self.register(replace=True)["content_sha256"], entry["content_sha256"])
+
+    def test_damaged_lesion_is_reported_without_a_local_path(self):
+        folder = os.path.join(self.tmp, "damaged")
+        for name, center, radius in CONTROLS[:2]:
+            _sphere(os.path.join(folder, name), NLIN6, center, radius)
+        bad = _sphere(os.path.join(folder, "ctl_009_lesion.nii.gz"), NLIN6, (0.0, 0.0, 0.0), 5.0)
+        with open(bad, "rb") as f:
+            raw = f.read()
+        with open(bad, "wb") as f:
+            f.write(raw[: len(raw) // 2])
+        entry = controlsets.register_folder(folder, "Damaged", root=self.root)
+        self.assertEqual(entry["n"], 2)
+        reasons = {item["rel"]: item["reason"] for item in entry["skipped"]}
+        reason = reasons["ctl_009_lesion.nii.gz"]
+        self.assertTrue(reason.startswith(controlsets.SKIPPED_UNREADABLE + ": "), reasons)
+        self.assertNotIn(os.sep, reason)  # no directory, no path: the sidecar is shared
+        self.assertFalse(reason.rstrip().endswith(":"), reason)
+        with open(os.path.join(self.root, "Damaged", controlsets.CONTROLSET_JSON), encoding="utf-8") as f:
+            sidecar = f.read()
+        self.assertNotIn(self.tmp, sidecar)
+        self.assertNotIn(os.path.basename(folder) + os.sep, sidecar)
+        # The reason never depends on the order the path forms are stripped in (hash randomization).
+        path = os.path.join(self.tmp, "a b", "ctl_001_lesion.nii.gz")
+        for message in (f"Truncated NIfTI image data (1 of 2 bytes): {path}", f"Invalid number of dimensions (9) in {path}",
+                        f"[Errno 2] No such file or directory: {path!r}", f"Corrupt compressed data (bad crc): {path}"):
+            cleaned = controlsets._unreadable(ValueError(message), path)
+            self.assertNotIn(os.sep, cleaned, cleaned)
+            self.assertNotIn("a b", cleaned, cleaned)
+            self.assertTrue(cleaned.startswith(controlsets.SKIPPED_UNREADABLE + ": "), cleaned)
+            self.assertGreater(len(cleaned), len(controlsets.SKIPPED_UNREADABLE) + 10, cleaned)
+
+    def test_scan_skips_a_gzip_file_cut_short_in_its_header(self):
+        # An interrupted download cut inside the 348-byte header: gzip raises EOFError (not an OSError). The scan
+        # must list that one file as skipped by name, not refuse the whole folder.
+        folder = os.path.join(self.tmp, "cut-header")
+        for name, center, radius in CONTROLS[:2]:
+            _sphere(os.path.join(folder, name), NLIN6, center, radius)
+        bad = _sphere(os.path.join(folder, "ctl_009_lesion.nii.gz"), NLIN6, (0.0, 0.0, 0.0), 5.0)
+        with open(bad, "rb") as f:
+            raw = f.read()
+        with open(bad, "wb") as f:
+            f.write(raw[:60])
+        scan = controlsets.scan_folder(folder)
+        self.assertEqual(len(scan["lesions"]), 2, scan)
+        reasons = {item["rel"]: item["reason"] for item in scan["skipped"]}
+        self.assertIn("ctl_009_lesion.nii.gz", reasons)
+        self.assertTrue(reasons["ctl_009_lesion.nii.gz"].startswith(controlsets.SKIPPED_UNREADABLE + ": "), reasons)
+        self.assertNotIn(os.sep, reasons["ctl_009_lesion.nii.gz"])
+        entry = controlsets.register_folder(folder, "CutHeader", root=self.root)
+        self.assertEqual(entry["n"], 2)
+        self.assertIn("ctl_009_lesion.nii.gz", {item["rel"] for item in entry["skipped"]})
 
     def test_names_are_validated(self):
         for name in ("", "../x", "a/b", ".hidden", "x" * 65, "with space"):
@@ -198,6 +263,13 @@ class RegistryTest(ControlSetsTestBase):
         with self.assertRaises(ValueError) as raised:
             controlsets.register_folder(folder, "Mixed", root=self.root)
         self.assertIn("families", str(raised.exception))
+        message = str(raised.exception)
+        self.assertIn("1 in MNI152NLin6Asym", message)
+        self.assertIn("1 in MNI152NLin2009a/cAsym", message)
+        self.assertNotIn("fsl6", message)
+        # the scan warns before Register, with the same wording
+        warning = controlsets.scan_mixed_families(controlsets.scan_folder(folder))
+        self.assertIn("1 in MNI152NLin6Asym", warning)
 
     def test_unrecognised_names_take_every_image(self):
         folder = self.path("plain")
@@ -252,6 +324,13 @@ class StudyLinkTest(ControlSetsTestBase):
         self.assertEqual(row["hemisphere"], "L")
         self.assertEqual(float(row["volume_ml"]), entry["lesions"][0]["volume_ml"])
         self.assertEqual(reopened.subject("sub-Ferguson490ctl006")["dimensionality"], "2D")
+        # The linked rows carry the file stamp, so a run does not measure the control lesions again
+        from LesionNetworkMappingLib import preflight
+
+        crows = [r for r in reopened.subjects if r["group"] == "control"]
+        self.assertEqual(len(crows), self.n_usable)
+        for crow in crows:
+            self.assertTrue(preflight.metrics_fresh(crow, os.stat(reopened.abspath(crow["lesion"]))), crow["participant_id"])
         with open(os.path.join(study.path, "participants.tsv"), encoding="utf-8") as f:
             self.assertNotIn(self.data, f.read())  # no absolute local path in the shared table
         # The control lesions are found by the analyses (cohortmaps' study rows)
@@ -312,6 +391,40 @@ class StudyLinkTest(ControlSetsTestBase):
         self.assertEqual(study.control_sets, [{"name": "Shrinking", "sha256": changed["content_sha256"]}])
         self.assertTrue(os.path.isfile(os.path.join(self.folder, "masks", "ctl_005_lesion.nii.gz")))  # files are never removed
 
+    def test_a_set_folder_renamed_by_hand_stays_linked(self):
+        """A registry folder renamed in the file manager still records the name its studies link: the set keeps that name,
+        the linked rows resolve to its files and its maps cache, and Link again works (BB-1).
+        """
+        entry = self.register("Ctl")
+        study = self.study("A", cases=[((-8.0, 0.0, 0.0), 5.0)])
+        study.link_control_set("Ctl")
+        study.save()
+        os.rename(os.path.join(self.root, "Ctl"), os.path.join(self.root, "CtlRenamed"))
+        reopened = Study.open(study.path)
+        sets = controlsets.list_sets(self.root)
+        self.assertEqual([(item["name"], os.path.basename(item["dir"])) for item in sets], [("Ctl", "CtlRenamed")])
+        self.assertEqual(len(controlsets.linked_rows(reopened, sets[0]["name"])), self.n_usable)  # what the card counts
+        lesions, excluded = cohortmaps.study_lesions(reopened)
+        self.assertEqual((len(lesions), excluded), (self.n_usable + 1, {}))
+        self.assertTrue(all(os.path.isfile(reopened.abspath(row["lesion"])) for row in controlsets.linked_rows(reopened)))
+        self.assertEqual(controlsets.study_maps_cache_roots(reopened, self.root), [os.path.join(self.root, "CtlRenamed", controlsets.CACHE_DIR)])
+        again = reopened.link_control_set("Ctl", root=self.root)
+        self.assertEqual((len(again["added"]), len(again["updated"])), (0, self.n_usable))
+        self.assertEqual(controlsets.load("CtlRenamed", self.root)["content_sha256"], entry["content_sha256"])
+        # Registering the old name again does not take the renamed set's studies away from it
+        with self.assertRaises(FileExistsError):
+            self.register("Ctl")
+        self.assertFalse(os.path.exists(os.path.join(self.root, "Ctl")))
+        # A new folder that has the old name: each set is named after its own folder, and the rows link the folder "Ctl"
+        shutil.copytree(os.path.join(self.root, "CtlRenamed"), os.path.join(self.root, "Ctl"))
+        self.assertEqual(sorted((item["name"], os.path.basename(item["dir"])) for item in controlsets.list_sets(self.root)),
+                         [("Ctl", "Ctl"), ("CtlRenamed", "CtlRenamed")])
+        self.assertEqual(controlsets.load("Ctl", self.root)["dir"], os.path.join(self.root, "Ctl"))
+        # Unregistering by the linked name removes the renamed folder
+        shutil.rmtree(os.path.join(self.root, "Ctl"))
+        controlsets.unregister("Ctl", self.root)
+        self.assertEqual(controlsets.list_sets(self.root), [])
+
     def test_a_link_without_rows_is_not_recorded(self):
         self.register("Set1")
         self.register("Set-1")  # its participant ids collide with Set1's
@@ -345,6 +458,27 @@ class StudyLinkTest(ControlSetsTestBase):
         report = controlsets.mismatch_report("Ferguson490", similar)
         self.assertFalse(report["family"]["differ"])
         self.assertFalse(report["covariates"]["volume_ml"]["flagged"])
+
+    def test_qc_failed_cases_are_left_out_of_the_balance(self):
+        # Cases matching the set, plus a mis-traced lesion marked "QC fail": every analysis leaves it out
+        # (Study.analysis_rows), so the balance with a control set must leave it out too.
+        entry = self.register()
+        study = self.study("Q", cases=[(center, radius) for _name, center, radius in CONTROLS])
+        study.link_control_set("Ferguson490")
+        study.add_subject("sub-bad", {"group": "case", "status": "traced", "space": "MNI152NLin6Asym", "qc": "fail", "volume_ml": 250, "dimensionality": "3D", "hemisphere": "L"})
+        study.add_subject("sub-other", {"group": "", "status": "traced", "space": "MNI152NLin6Asym", "volume_ml": 3.0, "dimensionality": "3D", "hemisphere": "R"})
+        analysed = {row["participant_id"] for row in study.analysis_rows(require_review=False, require_norm_qc=False)[0] if row.get("group") == "case"}
+        self.assertNotIn("sub-bad", analysed)
+        self.assertEqual({row["participant_id"] for row in controlsets.case_rows(study)}, analysed)
+        self.assertNotIn("sub-bad", controlsets.study_case_covariates(study))
+        report = controlsets.mismatch_report(entry, study)
+        self.assertEqual(report["n_cases"], len(CONTROLS))
+        self.assertFalse(report["covariates"]["volume_ml"]["flagged"])
+        self.assertNotIn("sub-bad", controlsets.matched_subsample(entry, study)["sids"])
+        # When every case fails QC, the balance has no cases (it does not fall back to the rows without a group)
+        for sid in analysed:
+            study.set(sid, {"qc": "fail"})
+        self.assertEqual(controlsets.case_rows(study), [])
 
     def test_case_values_are_read_ahead_for_a_worker(self):
         entry = self.register()
@@ -431,6 +565,118 @@ class CacheTest(ControlSetsTestBase):
         args = controlsets.map_job_args(entry, self.bundle.path)
         self.assertEqual(args[args.index("--cache") + 1], cache_root)
         self.assertEqual(args[args.index("--lesions-tsv") + 1], os.path.join(entry["dir"], controlsets.LESIONS_TSV))
+
+    def test_linked_study_reuses_the_set_maps(self):
+        """"Map controls with <connectome>" maps a set once; a linked study's own mapping (Map > Cohort's job, with the
+        study's default cache) and Run everything reuse those maps instead of mapping every control again.
+        """
+        entry = self.register()
+        with counting_engine() as passes:
+            controlsets.map_controls(entry, self.bundle, emit=_quiet)
+        self.assertEqual(sum(passes), self.n_usable)
+        cases = [((-8.0, 0.0, 0.0), 5.0), ((8.0, 0.0, 0.0), 5.0), ((0.0, 8.0, 0.0), 5.0)]
+
+        def linked(name):
+            study = self.study(name, cases=cases)
+            study.link_control_set("Ferguson490")
+            study.save()
+            return Study.open(study.path)
+
+        # The library: the study's linked sets give their caches; a set that is no longer registered is skipped
+        study = linked("A")
+        self.assertEqual(controlsets.study_maps_cache_roots(study), [controlsets.maps_cache_root(entry)])
+        self.assertEqual(controlsets.study_maps_cache_roots(study.path), [controlsets.maps_cache_root(entry)])
+        self.assertEqual(controlsets.study_maps_cache_roots(study, root=self.path("elsewhere")), [])
+        lesions, _excluded = cohortmaps.study_lesions(study)
+        self.assertEqual(len(lesions), len(cases) + self.n_usable)
+        plan = cohortmaps.lookup(lesions, self.bundle, study_path=study.path)
+        self.assertEqual((plan["hits"], plan["new"]), (self.n_usable, len(cases)))
+        self.assertEqual(plan["cache_dir"], cohortmaps.cache_dir_for(cohortmaps.default_cache_root(study.path), self.bundle.name, plan["subject_ids_sha256"]))
+        self.assertFalse(os.path.isdir(plan["cache_dir"]))  # a lookup copies nothing
+        self.assertEqual(cohortmaps.lookup(lesions, self.bundle, study_path=study.path, shared_cache_roots=[])["hits"], 0)
+
+        # Map > Cohort's job: cohortmaps --study --lesions-tsv (no --cache): only the cases are computed
+        out = os.path.join(study.path, "derivatives", "lnm", "cohort-maps")
+        os.makedirs(out)
+        tsv = os.path.join(out, "lesions.tsv")
+        with open(tsv, "w", encoding="utf-8") as f:
+            f.write("participant_id\tlesion\n" + "".join(f"{sid}\t{os.path.relpath(path, out)}\n" for sid, path, _sha in lesions))
+        set_files = {name: os.stat(name) for name in glob.glob(os.path.join(controlsets.maps_cache_dir(entry, self.bundle), "*", "*"))}
+        with counting_engine() as passes, mock.patch.object(jobs, "emit", _quiet):
+            code = cohortmaps.main(["--study", study.path, "--lesions-tsv", tsv, "--bundle", self.bundle.path, "--out", out, "--resume"])
+        self.assertEqual(code, jobs.EXIT_OK)
+        self.assertEqual(sum(passes), len(cases))
+        record = cohortmaps.read_record(os.path.join(out, cohortmaps.COHORTMAPS_JSON))
+        self.assertEqual(record["lesions"]["cache_hits"], self.n_usable)
+        self.assertEqual(record["lesions"]["computed"], len(cases))
+        self.assertEqual(record["cache_dir"], plan["cache_dir"])  # the study keeps a complete cache of its own ...
+        rows = cohortmaps.read_maps_tsv(os.path.join(out, cohortmaps.MAPS_TSV))
+        for row in rows:
+            self.assertTrue(row["T"].startswith(plan["cache_dir"] + os.sep), row["T"])
+            entry_json = os.path.join(os.path.dirname(row["T"]), cohortmaps.ENTRY_JSON)
+            with open(entry_json, encoding="utf-8") as f:
+                stored = json.load(f)["lesion"]
+            self.assertFalse(os.path.isabs(stored))  # ... with relative lesion paths that still lead to the lesion
+            self.assertTrue(os.path.samefile(cohortmaps.read_entry(plan["cache_dir"], row["key"])["lesion"], {sid: path for sid, path, _sha in lesions}[row["participant_id"]]))
+            self.assertEqual(os.stat(row["T"]).st_nlink, 1)  # copied, never hard-linked (D-A21)
+        for name, stat in set_files.items():  # the set's cache is only read
+            self.assertEqual((os.stat(name).st_mtime_ns, os.stat(name).st_size), (stat.st_mtime_ns, stat.st_size), name)
+
+        # Run everything (a pipeline job, which passes the set's cache to its cohortmaps child): only the cases are computed
+        study = linked("B")
+        env = dict(os.environ, PYTHONPATH=MODULE_DIR + os.pathsep + os.environ.get("PYTHONPATH", ""), SLICER_LNM_OFFLINE="1")
+        env[controlsets.ENV_ROOT] = self.root
+        with mock.patch.dict(os.environ, {controlsets.ENV_ROOT: self.root}):
+            from LesionNetworkMappingLib import pipeline
+
+            config = pipeline.config_from_args(pipeline._parser().parse_args(["run", "--study", study.path, "--bundle", self.bundle.path, "--accept-terms", "--null-relocations", "0"]))
+            planned = pipeline.plan(config)
+        self.assertEqual((planned.count("reuse"), planned.count("compute")), (self.n_usable, len(cases)))
+        result = subprocess.run([sys.executable, "-m", "LesionNetworkMappingLib.pipeline", "run", "--study", study.path, "--bundle", self.bundle.path, "--accept-terms", "--perm", "1000",
+                                 "--events", "json", "--nulls", "off", "--no-report", "--null-relocations", "0"], cwd=MODULE_DIR, env=env, capture_output=True, text=True, encoding="utf-8", timeout=900, check=False)
+        record = cohortmaps.read_record(os.path.join(pipeline.default_out(config, self.bundle.name), pipeline.STAGES_DIR, "cohortmaps", cohortmaps.COHORTMAPS_JSON))
+        self.assertIsNotNone(record, result.stdout[-2000:] + result.stderr[-2000:])
+        self.assertEqual((record["lesions"]["cache_hits"], record["lesions"]["computed"]), (self.n_usable, len(cases)), result.stderr[-2000:])
+        # reproduce_pipeline.sh names the registry the linked controls were read from (unless $SLICER_STUDIO_CONTROLSETS is set)
+        with open(os.path.join(pipeline.default_out(config, self.bundle.name), pipeline.REPRODUCE_PIPELINE), encoding="utf-8") as f:
+            script = f.read()
+        self.assertIn(f"DEFAULT_{controlsets.ENV_ROOT}={self.root}\n", script)
+        self.assertIn(f'{controlsets.ENV_ROOT}="${{{controlsets.ENV_ROOT}:-$DEFAULT_{controlsets.ENV_ROOT}}}"\nexport {controlsets.ENV_ROOT}\n', script)
+
+    def test_run_without_the_studys_registry_stops(self):
+        """Bug headless-pipeline-reproduce-controlset-registry-default-differs-drops-all-controls: a study made in the
+        application, run from a terminal (or its reproduce_pipeline.sh) where the registry was not named, excluded every
+        linked control ("lesion file missing"), skipped the GLM and ended with exit code 0. The run now stops.
+        """
+        from LesionNetworkMappingLib import pipeline
+
+        self.register("Ferguson490")
+        study = self.study("A", cases=[((-8.0, 0.0, 0.0), 5.0), ((8.0, 0.0, 0.0), 5.0), ((0.0, 8.0, 0.0), 5.0)])
+        study.link_control_set("Ferguson490")
+        study.save()
+        home = self.path("home")
+        env = {key: value for key, value in os.environ.items() if key not in (controlsets.ENV_ROOT, controlsets.STUDIO_ROOT_ENV, "XDG_CONFIG_HOME")}
+        env.update(HOME=home, SLICER_LNM_OFFLINE="1", PYTHONPATH=MODULE_DIR + os.pathsep + os.environ.get("PYTHONPATH", ""))
+        Study.controlset_root = None
+        self.addCleanup(controlsets.set_data_directory_resolver, controlsets._data_directory_resolver)
+        controlsets.set_data_directory_resolver(None)
+        args = ["run", "--study", study.path, "--bundle", self.bundle.path, "--accept-terms", "--null-relocations", "0"]
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(controlsets.unregistered_sets(Study.open(study.path)), {"Ferguson490": [row["participant_id"] for row in controlsets.linked_rows(study)]})
+            planned = pipeline.plan(pipeline.config_from_args(pipeline._parser().parse_args(args)))
+        self.assertEqual(planned.exit_code, pipeline.EXIT_BLOCKED)
+        self.assertEqual([block["id"] for block in planned.blocks], ["control_set_unregistered"])
+        self.assertIn("Ferguson490", planned.blocks[0]["message"])
+        self.assertIn(controlsets.ENV_ROOT, planned.blocks[0]["message"])
+        self.assertNotIn(self.tmp, planned.blocks[0]["message"])
+        result = subprocess.run([sys.executable, "-m", "LesionNetworkMappingLib.pipeline", *args, "--events", "json", "--nulls", "off", "--no-report"],
+                                cwd=MODULE_DIR, env=env, capture_output=True, text=True, encoding="utf-8", timeout=900, check=False)
+        self.assertEqual(result.returncode, pipeline.EXIT_BLOCKED, result.stdout[-2000:] + result.stderr[-2000:])
+        self.assertNotIn('"event": "done"', result.stdout)
+        # With the registry named, the same plan maps every linked control
+        with mock.patch.dict(os.environ, dict(env, **{controlsets.ENV_ROOT: self.root}), clear=True):
+            planned = pipeline.plan(pipeline.config_from_args(pipeline._parser().parse_args(args)))
+        self.assertEqual((planned.blocks, planned.count("excluded")), ([], 0))
 
 
 if __name__ == "__main__":

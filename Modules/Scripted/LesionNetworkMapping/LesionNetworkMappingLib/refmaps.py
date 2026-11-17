@@ -1,7 +1,7 @@
 """Reference-map library and comparison matrix (SR-17, DE-20; addendum §3.6, §3.7 and §4.4).
 
 Researchers check whether the network found for one condition repeats across conditions (van den Heuvel et al.
-2026b): if a clinically unrelated condition gives nearly the same map, the map follows the connectome rather than the
+2026): if a clinically unrelated condition gives nearly the same map, the map follows the connectome rather than the
 disease. This module keeps a local library of reference maps the user chose to fetch, puts them on the connectome grid
 and compares any set of maps with honest statistics.
 
@@ -22,6 +22,8 @@ folder ("/" separators), so the folder can be moved; no entry holds an absolute 
 - :func:`add_neurovault` reads the public NeuroVault API (image id, or every image of a collection) when the user
   clicks; NeuroVault shares public images under CC0, which the entry states.
 - :func:`add_url` and :func:`add_file` add any NIfTI map with the licence the user states (default "unknown", grey).
+  A file that is not a complete, readable NIfTI-1 image (also a truncated download) is refused, here and in
+  :func:`add_neurovault`; a refused download is deleted with its fetch-manifest record.
 - :func:`add_vdh` fetches a file of the van den Heuvel 2026 repository at the pinned commit ``ca410e6`` (the voxel
   degree map by default), verified against its git blob id. The repository has no LICENSE, so its files are kept on
   this computer, shown with their attribution and never redistributed (``redistribute: false``; nothing in this module
@@ -50,7 +52,7 @@ Comparison
 Command line (downloads run as a light job of the Map module)::
 
     python -m LesionNetworkMappingLib.refmaps list [--root DIR]
-    python -m LesionNetworkMappingLib.refmaps add-neurovault (--image ID | --collection ID) [--condition TEXT] [--root DIR]
+    python -m LesionNetworkMappingLib.refmaps add-neurovault (--image ID | --collection ID [--file NAME]) [--condition TEXT] [--root DIR]
     python -m LesionNetworkMappingLib.refmaps add-url --url URL [--title T] [--licence L] [--citation C] [--condition TEXT]
     python -m LesionNetworkMappingLib.refmaps add-vdh --accepted-terms-sha256 SHA [--entry degree] [--commit ca410e6]
     python -m LesionNetworkMappingLib.refmaps remove --id ID
@@ -58,6 +60,7 @@ Command line (downloads run as a light job of the Map module)::
 numpy only (Pillow for the figure, requests for downloads); no Slicer, VTK or Qt.
 """
 
+import contextlib
 import datetime
 import hashlib
 import json
@@ -66,6 +69,7 @@ import os
 import re
 import shutil
 import sys
+import zlib
 from typing import NamedTuple
 
 if __name__ == "__main__":
@@ -98,6 +102,7 @@ TOP_K = 10
 #: Covariates of the partial r (addendum §3.7)
 PARTIAL_COVARIATES = ("mu_r", "pc1")
 MIN_COVERAGE = 0.5
+RESAMPLE_RULE = "z1"  # in the resampled cache names: "z1" = zeros are values off the bundle grid too (older caches dropped them)
 DEFAULT_PERMUTATIONS = 1000
 #: Voxels of the permutation test: a fixed seeded sample (the observed and every null r use the same voxels)
 PERMUTATION_MAX_VOXELS = 50_000
@@ -118,7 +123,7 @@ VDH_NOTE = ("The van den Heuvel repository states no licence: the file is downlo
 VDH_DEFAULT_ENTRY = "degree"
 
 CROSS_CONDITION_NOTE = ("A map that also matches clinically unrelated conditions is more likely to reflect the connectome's own structure "
-                        "(hubs, mean connectivity) than a condition-specific network (van den Heuvel et al. 2026b). Partial r given "
+                        "(hubs, mean connectivity) than a condition-specific network (van den Heuvel et al. 2026). Partial r given "
                         "μC_r and PC1 shows the similarity left after these connectome axes.")
 NO_P_EXTERNAL = ("r only: a p-value needs the raw inputs of both maps (per-lesion maps with labels or scores from this study). "
                  "Spatial autocorrelation invalidates parametric p, and spin or BrainSMASH nulls are not used for volumetric maps.")
@@ -233,8 +238,19 @@ def _unique_id(base, existing):
     return candidate
 
 
-def _register(entry, root=None, replace=True):
-    """Add (or replace, by id) an entry; return it."""
+def _same_map(entry, entries):
+    """The existing entry (with another id) that holds the same file bytes, space and kind as ``entry``, or None."""
+    digest = entry.get("sha256")
+    if not digest:
+        return None
+    for item in entries:
+        if item.get("id") != entry.get("id") and item.get("sha256") == digest and item.get("space") == entry.get("space") and item.get("kind") == entry.get("kind"):
+            return item
+    return None
+
+
+def _register(entry, root=None, replace=True, dedupe=False):
+    """Add (or replace, by id) an entry; return it. With ``dedupe`` (a default, not an explicit, id), an entry already holding the same file is reused."""
     from .fetch import badge_for
 
     data = load_registry(root)
@@ -242,6 +258,23 @@ def _register(entry, root=None, replace=True):
     entry.setdefault("badge", badge_for(entry.get("licence")))
     entry.setdefault("redistribute", entry.get("source", {}).get("type") != "vdh" and entry.get("badge") == "green")
     entry.setdefault("added", _now())
+    same = _same_map(entry, data["entries"]) if replace and dedupe else None
+    if same is not None:
+        # The same bytes added by another route (NeuroVault id, download link, local file) are one map: keep the existing entry, fill what it
+        # lacks (licence, citation, condition) from the new one, and drop the duplicate file, so the map is not listed twice or compared with itself.
+        for key in ("citation", "condition", "licence_note"):
+            if not same.get(key) and entry.get(key):
+                same[key] = entry[key]
+        if str(same.get("licence") or "unknown") == "unknown" and str(entry.get("licence") or "unknown") != "unknown":
+            same["licence"] = entry["licence"]
+            same["badge"] = entry.get("badge", same.get("badge"))
+            same["redistribute"] = entry.get("redistribute", same.get("redistribute"))
+            if entry.get("source"):
+                same["source"] = entry["source"]
+        if _file_folder(entry) != _file_folder(same):
+            _remove_entry_folder(entry, data["entries"], root)
+        save_registry(data, root)
+        return same
     kept = [item for item in data["entries"] if item.get("id") != entry["id"]]
     if not replace and len(kept) != len(data["entries"]):
         raise RefmapsError(f"A reference map {entry['id']!r} is already in the library")
@@ -290,6 +323,142 @@ def _remove_entry_folder(entry, remaining, root):
         fetch._drop_record(cache, relpath)
 
 
+# Moving the library
+
+
+def _free_name(name, taken):
+    """``name``, else "<name>-2", "<name>-3"... (before the extension of a file name) when it is in ``taken``."""
+    if name not in taken:
+        return name
+    stem, dot, extension = name[1:].partition(".")
+    stem = name[0] + stem
+    suffix = 2
+    while f"{stem}-{suffix}{dot}{extension}" in taken:
+        suffix += 1
+    return f"{stem}-{suffix}{dot}{extension}"
+
+
+def _listdir(folder):
+    try:
+        return sorted(os.listdir(folder))
+    except OSError:
+        return []
+
+
+def merge_into(source_root, destination_root, move):
+    """Merge the library in ``source_root`` into the library in ``destination_root``, so that the maps of both stay listed
+    (Change folder > Move into a Slicer Studio folder whose LNM/ has its own library: ``StudioLib.projects.moveContent``).
+
+    ``move(source, destination)`` moves one file or folder to a free ``destination`` (a rename on the same volume, else a
+    checked copy, and the original is deleted). A file folder whose name is taken in the destination moves under another
+    name ("<name>-2"), an entry whose id is taken gets another id, and the entry's ``file`` and the fetch-manifest records
+    follow its folder. Resampled caches move with their entry; one whose name is taken is dropped (it is made again
+    when needed). Raise RefmapsError, before anything moves, when either registry cannot be read.
+
+    When ``move`` fails (OSError, raised again), the entries whose files moved are listed in the destination library and
+    the others stay in the source library. Return ``{source path: destination path}`` of what moved under another name.
+    """
+    from . import fetch
+
+    source_root = registry_root(source_root)
+    destination_root = registry_root(destination_root)
+    source = load_registry(source_root)
+    destination = load_registry(destination_root)
+    source_manifest = fetch.read_manifest(source_root)
+    taken_ids = {item.get("id") for item in destination["entries"]}
+    new_ids = []
+    for entry in source["entries"]:
+        new_ids.append(_unique_id(str(entry.get("id") or "map"), taken_ids))
+        taken_ids.add(new_ids[-1])
+    moved = {}  # registry-relative "files/<name>" or "<name>" in the source: the one it has in the destination
+    renamed = {}
+    complete = False
+
+    def move_item(relative, target_folder, target_name):
+        source_path = os.path.join(source_root, *relative.split("/"))
+        target = os.path.join(target_folder, target_name)
+        move(source_path, target)
+        moved[relative] = os.path.relpath(target, destination_root).replace(os.sep, "/")
+        if os.path.basename(source_path) != target_name:
+            renamed[source_path] = target
+
+    def mapped(relative):
+        """``relative`` (registry-relative) in the destination, or None while it has not moved."""
+        for key in sorted(moved, key=len, reverse=True):
+            if relative == key or relative.startswith(key + "/"):
+                return moved[key] + relative[len(key):]
+        return None
+
+    files_source = os.path.join(source_root, FILES_DIR)
+    files_destination = os.path.join(destination_root, FILES_DIR)
+    lock_name = os.path.basename(fetch.manifest_path(source_root)) + ".lock"
+    try:
+        os.makedirs(destination_root, exist_ok=True)
+        if os.path.isdir(files_source):
+            os.makedirs(files_destination, exist_ok=True)
+            for name in _listdir(files_source):
+                if name != RESAMPLED_DIR:
+                    move_item(f"{FILES_DIR}/{name}", files_destination, _free_name(name, set(_listdir(files_destination))))
+            caches_source = os.path.join(files_source, RESAMPLED_DIR)
+            if os.path.isdir(caches_source):
+                caches_destination = os.path.join(files_destination, RESAMPLED_DIR)
+                os.makedirs(caches_destination, exist_ok=True)
+                cache_names = {_slug(entry.get("id"), 64): _slug(new_id, 64) for entry, new_id in zip(source["entries"], new_ids, strict=True)}
+                for name in _listdir(caches_source):
+                    target = cache_names.get(name, name)
+                    if os.path.exists(os.path.join(caches_destination, target)):
+                        shutil.rmtree(os.path.join(caches_source, name), ignore_errors=True)  # a cache: made again when needed
+                    else:
+                        move(os.path.join(caches_source, name), os.path.join(caches_destination, target))
+                with contextlib.suppress(OSError):
+                    os.rmdir(caches_source)
+            with contextlib.suppress(OSError):
+                os.rmdir(files_source)
+        for name in _listdir(source_root):
+            if name not in (REGISTRY_JSON, fetch.MANIFEST_NAME, FILES_DIR, lock_name):
+                move_item(name, destination_root, _free_name(name, set(_listdir(destination_root))))
+        complete = True
+    finally:
+        carried, kept = [], []
+        for entry, new_id in zip(source["entries"], new_ids, strict=True):
+            relative = str(entry.get("file") or "")
+            target = mapped(relative) if relative else ""
+            if target is None and not complete:
+                kept.append(entry)  # its file is still in the source library
+                continue
+            entry = dict(entry, id=new_id)
+            if target:
+                entry["file"] = target
+            carried.append(entry)
+        if carried:
+            destination["entries"] = list(destination["entries"]) + carried
+            save_registry(destination, destination_root)
+        records, kept_records = {}, {}
+        for relative, record in source_manifest["files"].items():
+            target = mapped(relative)
+            if target is None and not complete:
+                kept_records[relative] = record
+            else:
+                records[target or relative] = record
+        if records:
+            with fetch._ManifestLock(destination_root):
+                manifest = fetch.read_manifest(destination_root)
+                for relative, record in records.items():
+                    manifest["files"].setdefault(relative, record)
+                fetch._write_json_atomic(fetch.manifest_path(destination_root), manifest)
+        if complete:
+            for name in (REGISTRY_JSON, fetch.MANIFEST_NAME, lock_name):
+                with contextlib.suppress(OSError):
+                    os.remove(os.path.join(source_root, name))
+            with contextlib.suppress(OSError):
+                os.rmdir(source_root)
+        else:
+            save_registry(dict(source, entries=kept), source_root)
+            if records:
+                fetch._write_json_atomic(fetch.manifest_path(source_root), dict(source_manifest, files=kept_records))
+    return renamed
+
+
 def _image_info(path):
     """(space label or None, family) of a NIfTI file from its header (a standard template grid, else "unknown")."""
     from .geometry import detect_space, space_family
@@ -300,6 +469,70 @@ def _image_info(path):
         found = None
     space = found[0] if found else None
     return space, space_family(space) if space else "unknown"
+
+
+def _image_problem(path):
+    """Why ``path`` is not a complete, readable NIfTI-1 image (a short reason), else None.
+
+    The header is parsed and the whole file is read: a .nii.gz must decompress to its end-of-stream marker (CRC
+    checked) and the image data must be as long as the header says, so a truncated download, a gzip of something else
+    or a web page saved under a .nii.gz name is caught before it gets into the library.
+    """
+    from . import nifti
+
+    path = os.fspath(path)
+    try:
+        nifti._check_extension(path)
+        with nifti._open(path, "rb") as f:
+            header = nifti._parse_header(f.read(nifti.HEADER_SIZE), path)
+            expected = int(np.prod(header["shape"], dtype=np.int64)) * header["dtype"].itemsize
+            offset = int(header["vox_offset"])
+            if offset < nifti.HEADER_SIZE:
+                offset = nifti.HEADER_SIZE + 4
+            f.seek(offset)
+            data = 0
+            for block in iter(lambda: f.read(1 << 20), b""):
+                data += len(block)
+    except (OSError, EOFError, ValueError, zlib.error) as exc:
+        reason = str(exc).replace(f": {path}", "").strip() or type(exc).__name__
+        return reason[:1].lower() + reason[1:]
+    if data < expected:
+        return f"the image data is incomplete, {data} of {expected} bytes"
+    volumes = int(np.prod(header["shape"][3:], dtype=np.int64))
+    if volumes > 1:
+        return f"it has {volumes} volumes; give a single 3D map"
+    return None
+
+
+def _check_map(path, label):
+    """Raise RefmapsError unless ``path`` is a complete, readable NIfTI-1 image (``label`` names it in the message)."""
+    problem = _image_problem(path)
+    if problem:
+        if problem.startswith("it has "):
+            raise RefmapsError(f"{label} {problem[3:]}. Nothing was added to the reference library.")
+        raise RefmapsError(f"{label} is not a complete, readable NIfTI image: {problem}. Nothing was added to the reference library.")
+
+
+def _check_download(path, root, label):
+    """Like :func:`_check_map` for a downloaded file: a bad file is deleted with its record in the fetch manifest, so
+    no checksum of it is kept as trusted and adding the same URL again downloads it again.
+    """
+    from . import fetch
+
+    try:
+        _check_map(path, label)
+    except RefmapsError:
+        cache = registry_root(root)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        fetch._drop_record(cache, fetch._relpath(cache, path))
+        try:
+            os.rmdir(os.path.dirname(path))
+        except OSError:
+            pass
+        raise
 
 
 def _base_entry(path, root, **fields):
@@ -316,6 +549,18 @@ def _base_entry(path, root, **fields):
 # Adding maps (each is a user action; nothing runs on its own)
 
 
+def _library_error_text(exc, folder):
+    """A sentence for an OSError while writing the reference library ``folder`` (no errno, no temporary file name)."""
+    import errno
+
+    number = getattr(exc, "errno", None)
+    if number in (errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)):
+        return f"The disk of {folder} is full. Free some space or choose another folder."
+    if number in (errno.EROFS, errno.EACCES, errno.EPERM):
+        return f"The folder {folder} cannot be written (read-only or not allowed). Choose another folder."
+    return f"The reference library in {folder} cannot be written ({exc.strerror or 'the folder is not usable'}). Choose another folder."
+
+
 def add_file(path, title=None, licence="unknown", citation="", condition=None, space=None, kind="map", entry_id=None, root=None, licence_note=""):
     """Copy a NIfTI map into the library and register it; return the entry."""
     path = os.fspath(path)
@@ -323,17 +568,24 @@ def add_file(path, title=None, licence="unknown", citation="", condition=None, s
         raise RefmapsError(f"No such file: {path}")
     name = os.path.basename(path)
     stem = re.sub(r"\.nii(\.gz)?$", "", name)
-    existing = {item.get("id") for item in entries(root)}
-    entry_id = entry_id or _unique_id(f"file-{_slug(stem, 32)}-{_sha256(path)[:8]}", existing)
+    _check_map(path, name)
+    # The default id carries the file's hash, so adding the same file again replaces its entry (as a NeuroVault image added
+    # twice does) instead of listing it twice and comparing it with itself.
+    dedupe = not entry_id
+    entry_id = entry_id or f"file-{_slug(stem, 32)}-{_sha256(path)[:8]}"
     folder = os.path.join(registry_root(root), FILES_DIR, _slug(entry_id, 64))
-    os.makedirs(folder, exist_ok=True)
     target = os.path.join(folder, name)
-    if os.path.abspath(target) != os.path.abspath(path):
-        shutil.copyfile(path, target + ".tmp")
-        os.replace(target + ".tmp", target)
-    entry = _base_entry(target, root, id=entry_id, title=title or stem, source={"type": "file", "name": name}, licence=licence or "unknown",
-                        licence_note=licence_note, citation=citation or "", condition=condition or None, kind=kind, space=space)
-    return _register(entry, root)
+    try:
+        os.makedirs(folder, exist_ok=True)
+        if os.path.abspath(target) != os.path.abspath(path):
+            shutil.copyfile(path, target + ".tmp")
+            os.replace(target + ".tmp", target)
+        entry = _base_entry(target, root, id=entry_id, title=title or stem, source={"type": "file", "name": name}, licence=licence or "unknown",
+                            licence_note=licence_note, citation=citation or "", condition=condition or None, kind=kind, space=space)
+        return _register(entry, root, dedupe=dedupe)
+    except OSError as exc:
+        # A data folder that cannot be written (read-only, full) is said in a sentence, not as "[Errno 13] ... '<temporary name>'".
+        raise RefmapsError(_library_error_text(exc, registry_root(root))) from exc
 
 
 def _fetch_into_registry(resource, root, session=None, progress=None, cancel=None, offline=None):
@@ -341,8 +593,46 @@ def _fetch_into_registry(resource, root, session=None, progress=None, cancel=Non
 
     try:
         return fetch.fetch(resource, cache=registry_root(root), progress=progress, cancel=cancel, offline=offline, session=session)
+    except fetch.DiskFullError:
+        # The library sentence of every other write error: not the internal content-hash sub-folder the fetch message names.
+        raise RefmapsError(f"{resource.title}: The disk of {registry_root(root)} is full. Free some space or choose another folder.") from None
     except fetch.FetchError as exc:
-        raise RefmapsError(f"{resource.title}: {exc.message}") from None
+        message = exc.message
+        raise RefmapsError(message if message.startswith(f"{resource.title}:") else f"{resource.title}: {message}") from None
+    except OSError as exc:
+        # Any other write problem of the library folder (no errno, no absolute path, no temporary name in the text).
+        raise RefmapsError(f"{resource.title}: {_library_error_text(exc, registry_root(root))}") from None
+
+
+def _name_by_content(path, root):
+    """Rename a download made under a neutral name to ``.nii.gz`` (gzip magic bytes) or ``.nii``, keeping its fetch record."""
+    from . import fetch
+
+    with open(path, "rb") as f:
+        gzipped = f.read(2) == b"\x1f\x8b"
+    target = path[: -len(".download")] + (".nii.gz" if gzipped else ".nii")
+    cache = registry_root(root)
+    old, new = fetch._relpath(cache, path), fetch._relpath(cache, target)
+    record = fetch.read_manifest(cache)["files"].get(old)
+    os.replace(path, target)
+    if record is not None:
+        fetch._record_file(cache, new, record)
+        fetch._drop_record(cache, old)
+    return target
+
+
+def _short_file_name(name, limit=100):
+    """``name`` cut to at most ``limit`` UTF-8 bytes, keeping a .nii/.nii.gz suffix (file systems refuse names over 255 bytes,
+    and the library adds '.part' and '.lock' to them).
+    """
+    if len(name.encode("utf-8")) <= limit:
+        return name
+    suffix = re.search(r"\.nii(\.gz)?$", name)
+    suffix = suffix.group(0) if suffix else ""
+    stem = name[: len(name) - len(suffix)]
+    while stem and len((stem + suffix).encode("utf-8")) > limit:
+        stem = stem[:-1]
+    return (stem or "map") + suffix
 
 
 def add_url(url, title=None, licence="unknown", citation="", condition=None, space=None, kind="map", entry_id=None, root=None, session=None,
@@ -353,21 +643,50 @@ def add_url(url, title=None, licence="unknown", citation="", condition=None, spa
     url = str(url or "").strip()
     if not re.match(r"^https?://", url):
         raise RefmapsError("Give an http(s) URL of a NIfTI map")
-    filename = os.path.basename(url.split("?")[0]) or "map.nii.gz"
-    if not re.search(r"\.nii(\.gz)?$", filename):
-        filename += ".nii.gz"
-    resource = fetch.Resource({"id": f"refmap-url/{url}", "title": title or filename, "urls": [url], "filename": filename,
+    # URL-decoded like the NeuroVault link names: 'r%C3%A9al%20map.nii.gz' is the file 'réal map.nii.gz' (title, id and stored name).
+    filename = os.path.basename(_neurovault_file_name(url).replace("\\", "/")).strip()
+    if filename in ("", ".", ".."):
+        filename = "map.nii.gz"
+    # A link without a .nii/.nii.gz name (figshare, OSF) says nothing about compression: the file is downloaded under a
+    # neutral name and named by what it is (gzip magic bytes or not) once it is here.
+    shown_name = filename
+    filename = _short_file_name(filename)
+    sniffed = not re.search(r"\.nii(\.gz)?$", filename)
+    if sniffed:
+        filename += ".download"
+    # Failure texts start with the resource title: the internal '.download' name is never shown, the link (without its query) is.
+    shown = title or (re.sub(r"^https?://", "", url.split("?")[0].split("#")[0]) if sniffed else shown_name)
+    resource = fetch.Resource({"id": f"refmap-url/{url}", "title": shown, "urls": [url], "filename": filename,
                                "checksum": fetch.RECORD_ON_FIRST_DOWNLOAD, "licence": licence or "unknown"})
     path = _fetch_into_registry(resource, root, session, progress, cancel, offline)
-    existing = {item.get("id") for item in entries(root)}
-    entry_id = entry_id or _unique_id(f"url-{_slug(re.sub(r'.nii(.gz)?$', '', filename), 32)}-{hashlib.sha256(url.encode()).hexdigest()[:8]}", existing)
-    entry = _base_entry(path, root, id=entry_id, title=title or filename, source={"type": "url", "url": url}, licence=licence or "unknown",
+    if sniffed:
+        path = _name_by_content(path, root)
+        filename = os.path.basename(path)
+    _check_download(path, root, f"{title or filename} (from {url})")
+    # The default id carries the URL's hash, so adding the same URL again refreshes its entry instead of listing it twice.
+    dedupe = not entry_id
+    entry_id = entry_id or f"url-{_slug(re.sub(r'.nii(.gz)?$', '', filename), 32)}-{hashlib.sha256(url.encode()).hexdigest()[:8]}"
+    entry = _base_entry(path, root, id=entry_id, title=title or shown_name, source={"type": "url", "url": url}, licence=licence or "unknown",
                         licence_note=licence_note, citation=citation or "", condition=condition or None, kind=kind, space=space)
-    return _register(entry, root)
+    return _register(entry, root, dedupe=dedupe)
 
 
 def _https(url):
     return re.sub(r"^http://", "https://", str(url or ""))
+
+
+def _neurovault_problem(what, exc, url=None):
+    """The ``RefmapsError`` of a failed NeuroVault read: one short sentence (what went wrong, never the urllib3 chain)."""
+    import requests
+
+    from . import fetch
+
+    if isinstance(exc, requests.HTTPError) and getattr(exc, "response", None) is not None:
+        status = exc.response.status_code
+        return RefmapsError(f"{what} could not be read: NeuroVault answered HTTP {status}" + (" (no such item)." if status == 404 else "."))
+    if isinstance(exc, requests.RequestException):
+        return RefmapsError(fetch.network_problem(exc, url or NEUROVAULT_API))
+    return RefmapsError(f"{what} could not be read: {exc}")
 
 
 def neurovault_image(image_id, session=None, timeout=30.0):
@@ -382,7 +701,7 @@ def neurovault_image(image_id, session=None, timeout=30.0):
     except (ValueError, TypeError) as exc:
         raise RefmapsError(f"NeuroVault image {image_id}: {exc}") from None
     except Exception as exc:
-        raise RefmapsError(f"NeuroVault image {image_id} could not be read: {exc}") from None
+        raise _neurovault_problem(f"NeuroVault image {image_id}", exc) from None
 
 
 def neurovault_collection(collection_id, session=None, timeout=30.0):
@@ -400,8 +719,12 @@ def neurovault_collection(collection_id, session=None, timeout=30.0):
     except (ValueError, TypeError) as exc:
         raise RefmapsError(f"NeuroVault collection {collection_id}: {exc}") from None
     except Exception as exc:
-        raise RefmapsError(f"NeuroVault collection {collection_id} could not be read: {exc}") from None
+        raise _neurovault_problem(f"NeuroVault collection {collection_id}", exc) from None
     collection["images"] = images.get("results", images) if isinstance(images, dict) else images
+    total = images.get("count") if isinstance(images, dict) else None
+    if not isinstance(total, int):
+        total = collection.get("number_of_images")
+    collection["image_total"] = total if isinstance(total, int) else len(collection["images"])
     return collection
 
 
@@ -420,15 +743,30 @@ def _known_space(label):
     return space_family(label) not in ("unknown", "native")
 
 
-def add_neurovault(image_id=None, collection_id=None, condition=None, root=None, session=None, progress=None, cancel=None, offline=None):
+def _neurovault_file_name(url):
+    """The file name of a NeuroVault image file link (``.../media/images/<collection>/<name>``), URL-decoded."""
+    from urllib.parse import unquote
+
+    return unquote(os.path.basename(str(url or "").split("?")[0].split("#")[0].rstrip("/")))
+
+
+def add_neurovault(image_id=None, collection_id=None, condition=None, root=None, session=None, progress=None, cancel=None, offline=None,
+                   file_name=None, info=None):
     """Download NeuroVault image(s) through the public API (on the user's click); return the new entries.
 
-    Give ``image_id`` (one image) or ``collection_id`` (its images, at most 100). The licence is NeuroVault's CC0.
+    ``info`` (a dict, optional) receives ``listed`` and ``total`` when a collection has more images than the 100 that are
+    listed, so the caller can say that only the first ``listed`` of ``total`` were added.
+
+    Give ``image_id`` (one image) or ``collection_id`` (its images, at most 100). With ``collection_id``, ``file_name``
+    keeps only the image whose file has that name: a NeuroVault download link (``/media/images/<collection>/<name>``)
+    names the collection and the file, not the image id. The licence is NeuroVault's CC0.
     """
     from . import fetch
 
     if (image_id is None) == (collection_id is None):
         raise RefmapsError("Give a NeuroVault image id or a collection id")
+    if file_name and collection_id is None:
+        raise RefmapsError("A NeuroVault file name needs its collection id")
     session = session or fetch.make_session()
     if image_id is not None:
         images = [neurovault_image(image_id, session)]
@@ -440,8 +778,35 @@ def add_neurovault(image_id=None, collection_id=None, condition=None, root=None,
     else:
         collection = neurovault_collection(collection_id, session)
         images = list(collection.get("images") or [])
+        if info is not None and not file_name and collection.get("image_total", 0) > len(images):
+            info.update(listed=len(images), total=collection["image_total"])
+        if file_name:
+            wanted = _neurovault_file_name(file_name)
+            images = [image for image in images if _neurovault_file_name(image.get("file")) == wanted]
+            if not images:
+                raise RefmapsError(f"NeuroVault collection {collection_id} has no image with the file {wanted} (only its first "
+                                   f"{NEUROVAULT_MAX_COLLECTION} images are listed). Paste the image's page link (neurovault.org/images/<id>/) instead.")
     citation = _neurovault_citation(collection) if collection else ""
     out = []
+    known = {item.get("id") for item in entries(root)}
+    try:
+        _add_neurovault_images(images, collection_id, citation, condition, root, session, progress, cancel, offline, out)
+    except BaseException:  # Stop or a failure part-way: the add is all or nothing, so the maps this call registered go again
+        for entry in out:
+            if entry["id"] not in known:
+                try:
+                    remove_entry(entry["id"], root)
+                except Exception:  # noqa: BLE001 - keep the original error
+                    pass
+        raise
+    if not out:
+        raise RefmapsError("No volumetric NIfTI image was found")
+    return out
+
+
+def _add_neurovault_images(images, collection_id, citation, condition, root, session, progress, cancel, offline, out):
+    from . import fetch
+
     for index, image in enumerate(images):
         fetch._raise_if_cancelled(cancel, index)
         url = _https(image.get("file"))
@@ -452,16 +817,14 @@ def add_neurovault(image_id=None, collection_id=None, condition=None, root=None,
                                    "filename": os.path.basename(url.split("?")[0]), "size": image.get("file_size"),
                                    "checksum": fetch.RECORD_ON_FIRST_DOWNLOAD, "licence": NEUROVAULT_LICENCE})
         path = _fetch_into_registry(resource, root, session, progress, cancel, offline)
+        _check_download(path, root, f"NeuroVault image {nv_id}")
         template = str(image.get("target_template_image") or "")
         entry = _base_entry(path, root, id=f"nv-{nv_id}", title=image.get("name") or f"NeuroVault image {nv_id}",
                             source={"type": "neurovault", "image_id": nv_id, "collection_id": str(image.get("collection_id") or collection_id or ""),
                                     "url": f"{NEUROVAULT_SITE}/images/{nv_id}/", "map_type": image.get("map_type"), "template": template or None},
                             licence=NEUROVAULT_LICENCE, licence_note=NEUROVAULT_LICENCE_NOTE, citation=citation, condition=condition or None,
                             kind="map", space=template if _known_space(template) else None)
-        out.append(_register(entry, root))
-    if not out:
-        raise RefmapsError("No volumetric NIfTI image was found")
-    return out
+        out.append(_register(entry, root, dedupe=True))
 
 
 def vdh_catalog(path=None):
@@ -469,6 +832,16 @@ def vdh_catalog(path=None):
     from .leaddbs import load_parity_catalog
 
     return load_parity_catalog(path)
+
+
+def _vdh_licence_note(catalog_note):
+    """Join the catalog note and VDH_NOTE into clear sentences, without saying 'states no licence' twice."""
+    note = str(catalog_note or "").strip()
+    for clause in ("; the repository states no licence", ", the repository states no licence"):
+        if note.endswith(clause):
+            note = note[: -len(clause)].rstrip()
+    note = note.rstrip(".")
+    return ". ".join(text for text in (note, VDH_NOTE) if text)
 
 
 def add_vdh(commit=VDH_COMMIT, entry=VDH_DEFAULT_ENTRY, accepted_terms_sha256=None, condition=None, root=None, catalog_path=None, session=None,
@@ -494,7 +867,7 @@ def add_vdh(commit=VDH_COMMIT, entry=VDH_DEFAULT_ENTRY, accepted_terms_sha256=No
     expected = resource.get("git_blob")
     if expected and git_blob_sha1(path) != expected:
         raise RefmapsError(f"{resource.title} does not match the pinned repository file (git blob {expected[:12]})")
-    licence_note = " ".join(text for text in (resource.get("licence_note") or "", VDH_NOTE) if text)
+    licence_note = _vdh_licence_note(resource.get("licence_note"))
     kind = "degree" if resource.kind == "degree" else "map"
     record = _base_entry(path, root, id=f"vdh-{_slug(entry.replace('/', '-'), 48)}", title=resource.title,
                          source={"type": "vdh", "repository": source.get("repository") or VDH_REPOSITORY, "commit": pinned[:7],
@@ -522,8 +895,10 @@ def _cache_dir(entry, root):
 
 def map_on_grid(path, bundle, min_coverage=MIN_COVERAGE):
     """A NIfTI map on the bundle voxels ((V,) float64): its values when it is on the bundle grid, else resampled with
-    ``geometry.resample_to_grid`` in fraction mode over its finite non-zero voxels (as ``reference.external_on_grid``),
-    NaN where less than ``min_coverage`` of a voxel is covered. ``bundle`` needs ``grid``, ``mask_indices`` and ``n_voxels``.
+    ``geometry.resample_to_grid`` in fraction mode over its finite voxels, NaN where less than ``min_coverage`` of a voxel
+    is covered (by the file's field of view, minus its NaN voxels). Zero is a value on both paths, so a binary ROI or a
+    thresholded map gives the same vector whatever grid its file is on. ``bundle`` needs ``grid``, ``mask_indices`` and
+    ``n_voxels``.
     """
     from .geometry import resample_to_grid, to_masked_vector
     from .nifti import read_nifti
@@ -539,7 +914,7 @@ def map_on_grid(path, bundle, min_coverage=MIN_COVERAGE):
     if tuple(data.shape) == tuple(grid.shape) and np.allclose(affine, grid.affine, atol=1e-4, rtol=0):
         out = data.reshape(-1)[indices]
         return np.where(np.isfinite(out), out, np.nan)
-    inside = np.isfinite(data) & (data != 0)
+    inside = np.isfinite(data)  # zeros are values (as on the bundle grid above); only NaN and the field of view's outside are not
     total = to_masked_vector(resample_to_grid(np.where(inside, data, 0.0), affine, grid, mode="fraction"), indices).astype(np.float64)
     coverage = to_masked_vector(resample_to_grid(inside.astype(np.float64), affine, grid, mode="fraction"), indices).astype(np.float64)
     out = np.full(indices.size, np.nan)
@@ -555,7 +930,7 @@ def resample_to(entry, bundle, root=None, min_coverage=MIN_COVERAGE, cache=True)
     path = entry_path(entry, root)
     if not os.path.isfile(path):
         raise RefmapsError(f"The file of {entry.get('title') or entry.get('id')} is missing; add it again")
-    cache_file = os.path.join(_cache_dir(entry, root), f"{_grid_key(bundle, min_coverage)}-{str(entry.get('sha256') or '')[:12]}.npy")
+    cache_file = os.path.join(_cache_dir(entry, root), f"{_grid_key(bundle, min_coverage)}-{str(entry.get('sha256') or '')[:12]}-{RESAMPLE_RULE}.npy")
     if cache and os.path.isfile(cache_file):
         try:
             values = np.load(cache_file, allow_pickle=False)
@@ -580,7 +955,7 @@ def family_warning(entry, bundle_space):
     from .geometry import space_family
 
     mine, theirs = entry.get("family") or "unknown", space_family(bundle_space) if bundle_space else "unknown"
-    if mine == "unknown" or theirs == "unknown" or mine == theirs:
+    if mine in ("unknown", "native") or theirs in ("unknown", "native") or mine == theirs:
         return ""
     return f"{entry.get('title')}: template family {mine} differs from the connectome's ({theirs}); resampled without a template-family transform (offsets of a few mm)."
 
@@ -957,7 +1332,9 @@ def unrelated(condition, other, related=()):
     return theirs not in {normalize_condition(item) for item in related or ()}
 
 
-def _note(row, condition, threshold):
+def _note(row, condition, threshold, anchor_name=None):
+    if anchor_name:
+        return ""  # the anchor is itself a connectome axis: neither note applies
     if row["kind"] in ("connectome", "degree") and math.isfinite(row["r"]) and abs(row["r"]) > threshold:
         return (f"|r| = {abs(row['r']):.2f} with {row['name']}: the map follows the connectome's own structure; "
                 f"see the partial r given μC_r and PC1.")
@@ -969,11 +1346,12 @@ def _note(row, condition, threshold):
     return ""
 
 
-def top_similar(current, candidates, k=TOP_K, condition=None, related=(), threshold=NOTE_THRESHOLD, reference=None, covariate_keys=PARTIAL_COVARIATES):
+def top_similar(current, candidates, k=TOP_K, condition=None, related=(), threshold=NOTE_THRESHOLD, reference=None, covariate_keys=PARTIAL_COVARIATES, anchor_name=None):
     """The ``k`` maps most similar to ``current`` (by |Pearson r|), each with a note when needed.
 
     :param current: (V,) map.
     :param candidates: [{"name", "values" (V,), "condition" (optional), "kind" (optional: "map", "connectome", "degree", ...)}].
+    :param anchor_name: set when ``current`` is a connectome axis (mu_C_r, PC1, degree): no condition or structure notes are made.
     :param condition: the current map's condition; candidates of another (not ``related``) condition are "unrelated".
     :return: rows {name, r, rho, partial_r, condition, kind, unrelated, note} sorted by |r| (largest first).
     """
@@ -988,7 +1366,7 @@ def top_similar(current, candidates, k=TOP_K, condition=None, related=(), thresh
         partial = similarity.partial_spatial_correlation(current, values, covariates) if covariates is not None else None
         row = {"name": item["name"], "r": r, "rho": rho, "partial_r": partial, "condition": item.get("condition"), "kind": item.get("kind", "map"),
                "unrelated": unrelated(condition, item.get("condition"), related)}
-        row["note"] = _note(row, condition, threshold)
+        row["note"] = _note(row, condition, threshold, anchor_name)
         rows.append(row)
     rows.sort(key=lambda row: -abs(row["r"]) if math.isfinite(row["r"]) else 1.0)
     return rows[: int(k)]
@@ -1112,7 +1490,8 @@ def heatmap_figure(names, lower, upper=None, title="Map comparison", dpi=150, fo
     top = int(legend_y + 16 * scale + small_px)
     left = int(margin + label_w)
     bar_h = int(9 * scale)
-    width = max(left + k * cell + margin, int(380 * scale))
+    bar_w = min(max(k * cell, int(160 * scale)), int(240 * scale))
+    width = max(left + k * cell + margin, left + bar_w + margin, int(380 * scale))
     height = top + k * cell + int(58 * scale)
     lut = figures.diverging_lut()
     pixels = np.full((height, width, 3), 255, dtype=np.uint8)
@@ -1153,7 +1532,6 @@ def heatmap_figure(names, lower, upper=None, title="Map comparison", dpi=150, fo
                     items.append(figures.Annotation("text", left + j * cell + cell / 2 + gap / 2, top + i * cell + cell / 2 + gap / 2,
                                                     text=f"{values[i, j]:.2f}", size=small_px * (0.9 if cell < 36 * scale else 1.0),
                                                     anchor="mm", color="#FFFFFF" if dark else "#1A1A1A", role="value"))
-    bar_w = min(max(k * cell, int(160 * scale)), int(240 * scale))
     items.extend(figures._colorbar({"kind": "diverging", "window": 1.0, "label": "r"}, left, top + k * cell + int(24 * scale), bar_w, bar_h, fonts, text_px, small_px))
     meta = {"format": figures.FORMAT, "version": figures.VERSION, "preset": "compare-matrix", "title": title, "maps": list(names),
             "lower": lower_label, "upper": upper_text, "dpi": int(dpi), "size_px": list(base.size),
@@ -1267,7 +1645,9 @@ def _root_argument(parser):
     parser.add_argument("--condition", default=None, help="condition of the map(s), for the cross-condition note")
 
 
-def _emit_entries(added):
+def _emit_entries(added, info=None):
+    if info:
+        jobs.emit("result", kind="refmap_limit", listed=info.get("listed"), total=info.get("total"))
     for entry in added:
         jobs.emit("result", kind="refmap", entry=_entry_summary(entry))
 
@@ -1304,6 +1684,7 @@ def _add_main(command, argv):
         group = parser.add_mutually_exclusive_group(required=True)
         group.add_argument("--image", type=int, default=None, help="NeuroVault image id")
         group.add_argument("--collection", type=int, default=None, help="NeuroVault collection id (its images, at most 100)")
+        parser.add_argument("--file", default=None, help="with --collection: only the image with this file name (from a NeuroVault download link)")
     elif command == "add-url":
         parser.add_argument("--url", required=True)
     elif command == "add-file":
@@ -1322,8 +1703,10 @@ def _add_main(command, argv):
     cancel = jobs.CancelToken(args.cancel_file)
     jobs.emit("start", job=f"refmaps-{command}", argv=argv)
     progress = _cli_progress()
+    info = {}
     if command == "add-neurovault":
-        added = _wrap(add_neurovault, image_id=args.image, collection_id=args.collection, condition=args.condition, root=args.root, progress=progress, cancel=cancel)
+        added = _wrap(add_neurovault, image_id=args.image, collection_id=args.collection, condition=args.condition, root=args.root, progress=progress, cancel=cancel,
+                      file_name=args.file, info=info)
     elif command == "add-url":
         added = [_wrap(add_url, args.url, title=args.title, licence=args.licence, citation=args.citation, condition=args.condition, space=args.space, root=args.root,
                        progress=progress, cancel=cancel)]
@@ -1332,7 +1715,7 @@ def _add_main(command, argv):
     else:
         added = [_wrap(add_vdh, commit=args.commit, entry=args.entry, accepted_terms_sha256=args.accepted_terms_sha256, condition=args.condition, root=args.root,
                        progress=progress, cancel=cancel)]
-    _emit_entries(added)
+    _emit_entries(added, info)
     jobs.emit("done", outputs=[], elapsed=round(jobs.elapsed(), 3), run_id=None)
     return 0
 

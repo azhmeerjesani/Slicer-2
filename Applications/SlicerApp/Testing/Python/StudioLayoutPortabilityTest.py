@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 
+import qt
 import slicer
 
 CONVENTIONAL_LAYOUT = 2  # vtkMRMLLayoutNode.SlicerLayoutConventionalView
@@ -105,6 +106,49 @@ class StudioLayoutPortabilityTest(unittest.TestCase):
             sliceWidget = layoutManager.sliceWidget(name)
             self.assertIsNotNone(sliceWidget, f"slice view {name} does not exist")
             self.assertTrue(sliceWidget.isVisibleTo(viewport), f"slice view {name} is not shown")
+
+    def _assertSliceViewsLaidOut(self, layoutManager, names):
+        """Check that the slice views are in the layout (not left at the corner of the view area) and do not overlap."""
+        slicer.app.processEvents()
+        viewport = layoutManager.viewport()
+        rects = {}
+        for name in names:
+            sliceWidget = layoutManager.sliceWidget(name)
+            self.assertIsNotNone(sliceWidget, f"slice view {name} does not exist")
+            self.assertTrue(sliceWidget.isVisibleTo(viewport), f"slice view {name} is not shown")
+            # A view of a set up layout is in a container (splitter or widget), never a direct child of the view area
+            self.assertFalse(sliceWidget.parentWidget() == viewport, f"slice view {name} is not in the layout")
+            topLeft = sliceWidget.mapTo(viewport, qt.QPoint(0, 0))
+            rects[name] = qt.QRect(topLeft.x(), topLeft.y(), sliceWidget.width, sliceWidget.height)
+        for first in names:
+            for second in names:
+                if first < second:
+                    self.assertFalse(rects[first].intersects(rects[second]), f"slice views {first} and {second} overlap")
+
+    def test_LoadSceneWithSameLayoutSetsUpViews(self):
+        """Loading a scene ("clear" the scene first) whose layout is the one shown must lay out the views again.
+
+        The views are removed from the layout when the scene is closed; the scene loaded next has the same layout,
+        and its views must not be left on top of each other at the corner of the view area.
+        """
+        layoutManager = self._requireLayoutManager()
+        for layoutId in (7001, CONVENTIONAL_LAYOUT):
+            with self.subTest(layout=layoutId):
+                slicer.mrmlScene.Clear(0)
+                layoutManager.setLayout(layoutId)
+                slicer.app.processEvents()
+                self._assertSliceViewsLaidOut(layoutManager, ("Red", "Green", "Yellow"))
+                scenePath = os.path.join(self.tempDir, f"SameLayout{layoutId}.mrml")
+                self.assertTrue(slicer.util.saveScene(scenePath))
+                slicer.util.loadScene(scenePath, {"clear": True})
+                slicer.app.processEvents()
+                self.assertEqual(layoutManager.layout, layoutId)
+                self._assertSliceViewsLaidOut(layoutManager, ("Red", "Green", "Yellow"))
+                # Closing the scene (File > Close Scene) and showing the same layout again
+                slicer.mrmlScene.Clear(0)
+                layoutManager.setLayout(layoutId)
+                slicer.app.processEvents()
+                self._assertSliceViewsLaidOut(layoutManager, ("Red", "Green", "Yellow"))
 
     def test_StudioLayoutsRegisteredInCpp(self):
         _, _, layoutNode = self._standaloneLayout()

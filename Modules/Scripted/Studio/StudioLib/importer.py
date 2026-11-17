@@ -10,15 +10,23 @@ Unambiguous files load directly, without the Add Data dialog:
   keep their names, colors and terminology, whatever their number (SPEC 9.7: a file saved again after it was
   opened in Studio has the same content);
 - other NIfTI, NRRD and MetaImage files are loaded as scalar volumes and shown in all slice views;
+- a 4D NIfTI image (fMRI, a 4D mask: ``isNifti4D()``), which the volume reader refuses, is loaded as a sequence (as
+  3D Slicer's Add Data does), whatever its name; the volume that shows its current time point is the scan. So is a
+  NRRD volume sequence (``.seq.nrrd`` as 3D Slicer saves it, or a 4D NRRD with a list or time axis:
+  ``isNrrdSequence()``), which the volume reader would read as one colour (vector) volume;
 - ``.mrb`` and ``.mrml`` files are loaded as scenes. They keep their own layout and views; a scene opened in
-  Library is shown in Draw (the Library page covers the views).
+  Library is shown in Draw (the Library page covers the views). In Studio with a project open, a scene opens as its
+  own project instead of being added to the open one (A-09: the open project is saved and closed first).
 
 In Studio, a scan or lesion file that is already loaded (same real path as the file of a node in the scene) is
 not loaded a second time: it becomes current again, with the toast "<name> is already open". Classic keeps the
 official behavior (the file is loaded again).
 
 Anything else (other file types, several folders, Shift+drop) opens the classic Add Data dialog with the
-dropped paths. A DICOM folder goes to the DICOM module; a folder with several NIfTI files is offered as
+dropped paths. In Studio, a load that mixes files of other types with scans or lesions sends only those files to the
+dialog: the scans and lesions load directly, and a scan that the dialog loads (a ``.mgz``) is a scan of the load.
+A DICOM folder goes to the DICOM module (in Studio, so do the DICOM files of a series dropped or opened without their
+folder, ``importDicomFiles()``); a folder with several NIfTI files is offered as
 a card in the Library, whose primary action is "Create study" (W3-07, ``StudioLib.study_ui``); a study folder
 (with a ``study.json``) opens the study. While a study is open, "Start on MNI template" adds a case to the study on
 its template, and ``loadedSet()`` is None (the study replaces the loaded set). In Studio, loading a scan switches to Draw, on the lesion loaded with it or on a new
@@ -31,11 +39,14 @@ Studio import routes (USABILITY 2, 6.4, 7, 8, 13; U-07). Nothing here hides a fo
   layout (7005), next to the template (Red, where you draw). It is tagged ``Studio.Role`` = "figure", never becomes
   the Segment Editor source, cannot be painted into (interactor guard) and never follows linked views or the
   wheel off its single slice. A notice asks on which side of the figure the patient's right is; "Right" mirrors the
-  figure pane. Removing the figure restores the previous layout and the Yellow view. On a template the figure also
+  figure pane. Segmentations and models are not drawn in a figure view (the lesion's cut through the figure's plane
+  would be at a place that means nothing on the picture; ``Studio.ViewsBeforeFigure`` keeps their own view IDs).
+  Removing the figure restores the previous layout and the Yellow view. On a template the figure also
   opens for tracing (``StudioLib.figure``, L-29): the Figure card of Draw crops it, fits it to a cut plane of the
   template with landmarks and shows it over the template; on a scan in scan space it stays this reference only;
 - a **statistical map** (``*_statmap``, ``*_desc-T_*``... or a NIfTI intent code TTEST, ZSCORE, CORREL) is shown as a
-  thresholded two-sided overlay with a colour legend on the anatomy, with one threshold control in a notice;
+  thresholded two-sided overlay with a colour legend on the anatomy, with one threshold control in a notice. A name
+  that ends in ``_funcmap`` or ``_statmap`` is a map even if it names its lesion, as the maps that Map exports do;
 - a **lesion without a scan** is shown on the template only when it is on an MNI grid (``space.spaceOf()``), on its
   own grid (the template is only the source); a lesion in scan space offers its scan instead (the ``Source`` of its
   BIDS-style sidecar). Several lesions loaded at once are a **loaded set** (``loadedSet()``), shown one at a time;
@@ -50,15 +61,18 @@ The loading functions also work in Classic (``shell=None``): they only load the 
 tables go to the Add Data dialog, as in 3D Slicer).
 """
 
+import csv
 import gzip
 import json
 import logging
+import math
 import os
 import re
 import struct
 import sys
 import time
 import traceback
+import zlib
 
 import qt
 import slicer
@@ -81,12 +95,19 @@ FIGURE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
 TABLE_EXTENSIONS = (".tsv", ".csv")
 #: Names of statistical maps (BIDS-derivative and LNM outputs): "sub-05_desc-T_funcmap.nii.gz", "x_statmap.nii"...
 STATMAP_NAME_PATTERN = re.compile(r"(?i)(_statmap|_funcmap|(^|_)desc-(T|Z|AvgR|AvgRFz|Fz|tmap|zmap)(_|\.))")
+#: BIDS suffixes of statistical maps. A NIfTI name that ends in one is a map even if it names its lesion, as Map names its
+#: outputs after the lesion ("Lesions-Lesion_conn-<label>_desc-T_funcmap.nii.gz", "sub-01_lesion_conn-..._funcmap.nii.gz")
+STATMAP_SUFFIX_PATTERN = re.compile(r"(?i)(^|_)(statmap|funcmap)$")
 #: NIfTI-1 intent codes of statistical maps: CORREL, TTEST, ZSCORE
 STATMAP_INTENT_CODES = (2, 3, 5)
 #: BIDS subject entity of a file name ("sub-05")
 BIDS_SUBJECT_PATTERN = re.compile(r"(?i)(?:^|[_\-./\\])(sub-[a-z0-9]+)")
 #: Segmentation files that store segment names and colors: they are kept as they are
 SEGMENTATION_FILE_EXTENSIONS = (".seg.nrrd", ".seg.nhdr", ".seg.vtm")
+#: Volume sequences as 3D Slicer saves them (the Sequences reader's own extensions)
+SEQUENCE_FILE_EXTENSIONS = (".seq.nrrd", ".seq.nhdr")
+#: NRRD extensions, of a volume or of a volume sequence
+NRRD_EXTENSIONS = (".nrrd", ".nhdr")
 #: Field of a segment in the header of a NRRD file written by Slicer ("Segment0_Name:=Tumor")
 SEGMENT_FIELD_PATTERN = re.compile(rb"^Segment\d+_(ID|Name|Color|Tags|LabelValue):=", re.MULTILINE)
 #: At most this many bytes of a NRRD file are read to find segment fields
@@ -98,6 +119,10 @@ LESION_COLOR = (0.949, 0.329, 0.357)  # #F2545B (SPEC 4.12)
 LESION_FILL_OPACITY = 0.4
 LESION_OUTLINE_OPACITY = 1.0
 LESION_SLICE_INTERSECTION_THICKNESS = 2
+#: Largest voxel value (in magnitude) of a lesion image that is read as a segmentation. The segmentation reader counts
+#: every integer between the lowest and the highest value: values beyond the int range crash it, values near it make it
+#: fail to allocate (std::bad_alloc). 2**24 is also the largest integer that a float32 file stores exactly.
+LESION_LABEL_VALUE_LIMIT = 1 << 24
 
 #: Sample data of "Start on MNI template" (SampleData module, "MNI152 (neuro)" category)
 TEMPLATE_SAMPLE_2MM = "MNI152NLin2009cAsym 2mm brain"
@@ -157,6 +182,11 @@ MAX_RECENT_FOLDERS = 10
 
 #: Node attribute: the reference image geometry of a lesion when it was loaded (W2-05 saves on it)
 LESION_GRID_ATTRIBUTE = "Studio.LesionGrid"
+#: Node attribute: the lesion was read from a file with fractional values (a probabilistic mask), as "<min> <max>"
+LESION_FRACTIONAL_ATTRIBUTE = "Studio.LesionFractional"
+#: Keys of a lesion's sidecar that Draw's Lesion card edits, and their node attributes (``draw.NOTES_ATTRIBUTE``,
+#: ``draw.SOURCE_REFERENCE_ATTRIBUTE``)
+LESION_SIDECAR_TEXT_ATTRIBUTES = (("Notes", "Studio.LesionNotes"), ("SourceReference", "Studio.LesionSourceReference"))
 
 #: Statistical map overlay: name of its colour table, opacity, and the default threshold (fraction of the window)
 STATMAP_COLOR_NODE_NAME = "StudioStatMapDiverging"
@@ -183,9 +213,9 @@ def _currentShell(shell=None):
 
 
 def _extension(path):
-    """Lowercase extension of a file, including the compound extensions .nii.gz and .seg.nrrd."""
+    """Lowercase extension of a file, including the compound extensions .nii.gz, .seg.nrrd and .seq.nrrd."""
     name = os.path.basename(path).lower()
-    for compound in (".nii.gz", *SEGMENTATION_FILE_EXTENSIONS):
+    for compound in (".nii.gz", *SEGMENTATION_FILE_EXTENSIONS, *SEQUENCE_FILE_EXTENSIONS):
         if name.endswith(compound):
             return compound
     return os.path.splitext(name)[1]
@@ -204,9 +234,13 @@ def isLesionName(path):
 
 
 def fileKind(path):
-    """How a dropped or opened path is loaded: "folder", "scene", "lesion", "statmap", "volume", "figure", "table" or "other".
+    """How a dropped or opened path is loaded: "folder", "scene", "sequence", "lesion", "statmap", "volume", "figure", "table"
+    or "other".
 
-    Lesion names have priority over statistical map names.
+    A 4D NIfTI image (fMRI, a 4D mask) is a "sequence" whatever its name: the volume reader cannot read it. So is a NRRD
+    volume sequence (``isNrrdSequence()``), which the volume reader would read as one vector volume. Lesion names have
+    priority over statistical map names ("sub-05_desc-T_lesion.nii.gz" is a lesion), except for a NIfTI file whose name
+    ends in a statistical map suffix (``hasStatMapSuffix()``): Map names its maps after their lesion.
     """
     if os.path.isdir(path):
         return "folder"
@@ -215,8 +249,12 @@ def fileKind(path):
         return "scene"
     if extension in SEGMENTATION_FILE_EXTENSIONS:
         return "lesion"
+    if extension in NIFTI_EXTENSIONS and isNifti4D(path):
+        return "sequence"
+    if isNrrdSequence(path):
+        return "sequence"
     if extension in VOLUME_EXTENSIONS:
-        if isLesionName(path):
+        if isLesionName(path) and not hasStatMapSuffix(path):
             return "lesion"
         if extension in NIFTI_EXTENSIONS and isStatMap(path):
             return "statmap"
@@ -232,20 +270,92 @@ def isNiftiFile(path):
     return _extension(path) in NIFTI_EXTENSIONS
 
 
+def _isGzipFile(path):
+    """True for a ``.gz`` file that starts with the gzip magic bytes (1f 8b).
+
+    The ITK NIfTI reader (znzlib) reads a ``.nii.gz`` saved without compression (a browser or server that unpacked a
+    download and kept the name, or a tool that writes it so) as plain data, so 3D Slicer opens it, and it must open here.
+    A gzip file named ``.nii`` is not read by ITK, so it stays plain data here too (and is refused as not NIfTI).
+    """
+    if not str(path).lower().endswith(".gz"):
+        return False
+    try:
+        with open(path, "rb") as f:
+            return f.read(2) == b"\x1f\x8b"
+    except OSError:
+        return False
+
+
+def _niftiHeader(path, size):
+    """The first ``size`` bytes of a NIfTI file (gzip or not, see ``_isGzipFile``), None if unreadable.
+
+    A damaged file is unreadable, never an exception: gzip raises ``EOFError`` for a truncated stream and ``zlib.error``
+    for a corrupt deflate stream.
+    """
+    try:
+        opener = gzip.open if _isGzipFile(path) else open
+        with opener(path, "rb") as f:
+            return f.read(size)
+    except (OSError, EOFError, zlib.error):
+        return None
+
+
+def niftiDimensions(path):
+    """The ``dim`` field of a NIfTI-1 or NIfTI-2 header (``dim[0]`` is the number of dimensions), None if unreadable."""
+    header = _niftiHeader(path, 540)
+    if header is None or len(header) < 348:
+        return None
+    for byteOrder in ("<", ">"):
+        sizeOfHeader = struct.unpack(byteOrder + "i", header[0:4])[0]
+        if sizeOfHeader == 348:
+            return list(struct.unpack(byteOrder + "8h", header[40:56]))
+        if sizeOfHeader == 540 and len(header) >= 540:
+            return list(struct.unpack(byteOrder + "8q", header[16:80]))
+    return None
+
+
+def isNifti4D(path):
+    """True for a NIfTI image with several time points (``dim[4] > 1``): a time series such as fMRI, read as a sequence."""
+    if _extension(path) not in NIFTI_EXTENSIONS or not os.path.isfile(path):
+        return False
+    dims = niftiDimensions(path)
+    return dims is not None and 4 <= dims[0] <= 7 and dims[4] > 1
+
+
+def isNrrdSequence(path):
+    """True for a NRRD volume sequence, which 3D Slicer loads with its Sequences reader ("SequenceFile").
+
+    A ``.seq.nrrd`` or ``.seq.nhdr`` file (as 3D Slicer saves a sequence) is one by its name. For another NRRD file, 3D
+    Slicer's choice of reader decides (``coreIOManager().fileType()``): a 4D NRRD with a list or time axis is a sequence,
+    while a segmentation or a diffusion (DWI) NRRD keeps its own reader.
+    """
+    extension = _extension(path)
+    if extension in SEQUENCE_FILE_EXTENSIONS:
+        return True
+    if extension not in NRRD_EXTENSIONS or not os.path.isfile(path):
+        return False
+    try:
+        return slicer.app.coreIOManager().fileType(str(path)) == "SequenceFile"
+    except Exception:
+        return False
+
+
 def niftiIntentCode(path):
     """The intent code of a NIfTI-1 file (header bytes 68-69, in the byte order given by ``sizeof_hdr``), None if unreadable."""
-    try:
-        opener = gzip.open if _extension(path) == ".nii.gz" or str(path).lower().endswith(".gz") else open
-        with opener(path, "rb") as f:
-            header = f.read(348)
-    except (OSError, EOFError):
-        return None
-    if len(header) < 348:
+    header = _niftiHeader(path, 348)
+    if header is None or len(header) < 348:
         return None
     for byteOrder in ("<", ">"):
         if struct.unpack(byteOrder + "i", header[0:4])[0] == 348:
             return struct.unpack(byteOrder + "h", header[68:70])[0]
     return None
+
+
+def hasStatMapSuffix(path):
+    """True for a NIfTI file whose name ends in ``_statmap`` or ``_funcmap`` (the BIDS suffix of a statistical map), such
+    as the maps that Map writes ("<lesion>_conn-<label>_desc-T_funcmap.nii.gz").
+    """
+    return isNiftiFile(path) and STATMAP_SUFFIX_PATTERN.search(_baseName(path)) is not None
 
 
 def isStatMap(path):
@@ -265,8 +375,22 @@ def bidsSubject(text):
     return match.group(1) if match else None
 
 
+def tableDelimiter(header, path):
+    """The separator of the table ``path`` whose header line is ``header``: a tab for a .tsv, else the most frequent of
+    comma, semicolon and tab outside double quotes in the header (Excel in a decimal-comma locale, such as German or French,
+    saves "CSV (semicolon separated)"). A header without any of them is a comma table with one column.
+    """
+    if _extension(path) == ".tsv":
+        return "\t"
+    bare = re.sub(r'"[^"]*"', "", header)
+    if not any(char in bare for char in (",", ";", "\t")):
+        return ","
+    return max((",", ";", "\t"), key=bare.count)
+
+
 def readTableHeader(path, countRows=True):
-    """``(columns, rowCount)`` of a TSV or CSV file (its first non-empty line is the header), None if it cannot be read.
+    """``(columns, rowCount)`` of a TSV or CSV file (its first non-empty line is the header; a CSV may be separated by
+    commas or semicolons, see ``tableDelimiter()``), None if it cannot be read (or is not UTF-8 text).
 
     Rows are counted up to ``MAX_TABLE_ROWS_COUNTED`` (a large file dropped by mistake is not read to its end); without
     ``countRows`` only the header is read and ``rowCount`` is None.
@@ -274,7 +398,7 @@ def readTableHeader(path, countRows=True):
     header = None
     rowCount = 0
     try:
-        with open(path, encoding="utf-8-sig", errors="replace") as f:
+        with open(path, encoding="utf-8-sig") as f:
             for line in f:
                 if not line.strip():
                     continue
@@ -286,12 +410,14 @@ def readTableHeader(path, countRows=True):
                 rowCount += 1
                 if rowCount >= MAX_TABLE_ROWS_COUNTED:
                     break
-    except OSError:
-        return None
+    except (OSError, UnicodeDecodeError):
+        return None  # unreadable, or not UTF-8 text (Excel's Windows-1252 and UTF-16): no garbled column names
     if header is None:
         return None
-    delimiter = "\t" if "\t" in header or _extension(path) == ".tsv" else ","
-    columns = [column.strip().strip('"') for column in header.split(delimiter)]
+    delimiter = tableDelimiter(header, path)
+    columns = [column.strip() for column in next(csv.reader([header], delimiter=delimiter), [])]  # quoted names keep their separators
+    while columns and not columns[-1]:
+        columns.pop()  # empty names after the last column (spreadsheets write trailing tabs)
     return columns, (rowCount if countRows else None)
 
 
@@ -328,6 +454,8 @@ class LoadResult:
         self.addDataPaths = []
         self.errors = []
         self.alreadyOpen = []
+        #: names of scene files whose copy is the open project: not opened again
+        self.alreadyOpenScenes = []
         self.figures = []
         self.statmaps = []
         self.tables = []
@@ -405,32 +533,934 @@ def _applyLesionNaming(segmentationNode, path):
     styleLesionSegment(segmentationNode, segmentId)
 
 
+#: Lesions whose voxels ``loadLesion()`` set after the reader (a fractional file): {node ID: (weak reference, voxel stamp, file)}.
+#: The storage node's read time is older than these voxels, which are still the file as read (``unchangedSinceLoad()``).
+_convertedOnLoad = {}
+
+
+def _voxelStamp(segmentationNode):
+    """(segment count, newest binary labelmap MTime): changes when any segment's voxels change (``draw._contentStamp``)."""
+    segmentation = segmentationNode.GetSegmentation()
+    binaryName = slicer.vtkSegmentationConverter.GetBinaryLabelmapRepresentationName()
+    newest = 0
+    for index in range(segmentation.GetNumberOfSegments()):
+        representation = segmentation.GetNthSegment(index).GetRepresentation(binaryName)
+        if representation is not None:
+            newest = max(newest, representation.GetMTime())
+    return segmentation.GetNumberOfSegments(), newest
+
+
+def unchangedSinceLoad(segmentationNode):
+    """True when ``loadLesion()`` set the voxels of this lesion from its fractional file and they were not changed since."""
+    if segmentationNode is None:
+        return False
+    record = _convertedOnLoad.get(segmentationNode.GetID())
+    if record is None or record[0].Get() is not segmentationNode:
+        return False
+    return record[1] == _voxelStamp(segmentationNode)
+
+
+def fractionalSourceFile(segmentationNode):
+    """The fractional lesion file (a probabilistic mask) that this lesion is unchanged from (``unchangedSinceLoad()``), else None.
+
+    The storage node's file name is not it once the lesion is saved elsewhere (a project autosave writes a .seg.nrrd):
+    Map reads the file's values from here (``LesionNetworkMappingLogic.fractionalSeedWeights``).
+    """
+    if not unchangedSinceLoad(segmentationNode):
+        return None
+    return _convertedOnLoad[segmentationNode.GetID()][2]
+
+
+def _fractionalMask(path):
+    """``(mask, (low, high))`` for a NIfTI lesion file with fractional values (a probabilistic mask), else None.
+
+    ``mask`` is the bool array [i, j, k] of the voxels above 0, in file voxel order; ``low``/``high`` the value range.
+    Slicer's readers cast an image to an integer type by truncation, so such a file would open empty (all values below
+    1) or with only its voxels equal to 1. Only float (or scaled) images are read here: an integer mask costs a header.
+    """
+    if not str(path).lower().endswith(NIFTI_EXTENSIONS):
+        return None
+    try:
+        import importlib
+
+        import numpy as np
+
+        nifti = importlib.import_module("LesionNetworkMappingLib.nifti")
+        header = nifti.read_nifti_header(path)
+        slope, inter = header["scl_slope"], header["scl_inter"]
+        scaled = np.isfinite(slope) and slope != 0 and (slope != 1 or (np.isfinite(inter) and inter != 0))
+        if header["dtype"].kind != "f" and not scaled:
+            return None
+        data, _affine, _header = nifti.read_nifti(path)
+    except Exception:
+        logging.warning(f"Studio: the values of {path} could not be checked:\n{traceback.format_exc()}")
+        return None
+    if data.ndim > 3 and all(n == 1 for n in data.shape[3:]):
+        data = data.reshape(data.shape[:3])
+    if data.ndim != 3:
+        return None
+    values = data[np.isfinite(data) & (data != 0)]
+    if not values.size or np.array_equal(values, np.round(values)):
+        return None
+    return np.isfinite(data) & (data > 0), (float(values.min()), float(values.max()))
+
+
+def _setFractionalMask(segmentationNode, mask):
+    """Make the segmentation one segment (Segment_1, label 1) of the voxels of ``mask`` on its reference geometry.
+
+    Return False (nothing changed) when the reference geometry of the segmentation is not the grid of ``mask``.
+    """
+    import vtk.util.numpy_support
+
+    segmentation = segmentationNode.GetSegmentation()
+    geometry = segmentation.GetConversionParameter(slicer.vtkSegmentationConverter.GetReferenceImageGeometryParameterName())
+    labelmap = slicer.vtkOrientedImageData()
+    if not geometry or not slicer.vtkSegmentationConverter.DeserializeImageGeometry(geometry, labelmap, True, vtk.VTK_UNSIGNED_CHAR, 1):
+        return False
+    if tuple(labelmap.GetDimensions()) != tuple(mask.shape):
+        return False
+    scalars = vtk.util.numpy_support.vtk_to_numpy(labelmap.GetPointData().GetScalars())
+    scalars[:] = mask.transpose(2, 1, 0).ravel()
+    labelmap.Modified()
+    segmentation.RemoveAllSegments()
+    if mask.any():
+        segment = slicer.vtkSegment()
+        segment.SetName(LESION_SEGMENT_NAME)
+        segment.SetColor(*LESION_COLOR)
+        segment.SetLabelValue(1)
+        segment.AddRepresentation(slicer.vtkSegmentationConverter.GetBinaryLabelmapRepresentationName(), labelmap)
+        segmentation.AddSegment(segment, "Segment_1")
+    return True
+
+
+def _nameSegmentationAfterFile(segmentationNode, path):
+    """Name a segmentation node that was read from a volume file (``x.nii.gz``) after the file without its extension.
+
+    The segmentation reader keeps ".nii" in the node name of "x.nii.gz". Used by ``loadLesion()`` and by
+    ``loadRecentFile()``, so that a lesion has the same name (and project file name) however it was opened.
+    """
+    baseName = _baseName(path)
+    if baseName and segmentationNode.GetName() != baseName and _extension(path) in VOLUME_EXTENSIONS:
+        segmentationNode.SetName(slicer.mrmlScene.GenerateUniqueName(baseName))
+
+
+def _sceneNodeIds(className):
+    collection = slicer.mrmlScene.GetNodesByClass(className)
+    return {collection.GetItemAsObject(index).GetID() for index in range(collection.GetNumberOfItems())}
+
+
+def _removeNodesNotIn(existingIds, classNames):
+    """Remove the nodes of ``classNames`` whose IDs are not in ``existingIds`` (what a failed load left behind)."""
+    for className in classNames:
+        collection = slicer.mrmlScene.GetNodesByClass(className)
+        for index in range(collection.GetNumberOfItems()):
+            node = collection.GetItemAsObject(index)
+            if node.GetID() not in existingIds:
+                displayNode = node.GetDisplayNode() if node.IsA("vtkMRMLDisplayableNode") else None
+                slicer.mrmlScene.RemoveNode(node)
+                if displayNode is not None:
+                    slicer.mrmlScene.RemoveNode(displayNode)
+
+
+def _imageValueRange(path):
+    """``(low, high)`` of the voxel values of an image file whose voxel type can hold values beyond
+    ``LESION_LABEL_VALUE_LIMIT`` (float, 32 or 64 bit integers, scaled NIfTI), as ITK (Slicer's readers) reads them.
+
+    None for a file of a smaller type (its header is enough to know), with no value other than NaN, or that ITK cannot
+    read (the reader that follows reports it).
+    """
+    try:
+        import warnings
+
+        import numpy as np
+        import SimpleITK as sitk
+
+        reader = sitk.ImageFileReader()
+        reader.SetFileName(str(path))
+        reader.ReadImageInformation()
+        small = {sitk.sitkUInt8, sitk.sitkInt8, sitk.sitkUInt16, sitk.sitkInt16,
+                 sitk.sitkVectorUInt8, sitk.sitkVectorInt8, sitk.sitkVectorUInt16, sitk.sitkVectorInt16}
+        if reader.GetPixelID() in small:
+            return None
+        image = reader.Execute()
+        values = sitk.GetArrayViewFromImage(image)  # a view: ``image`` must outlive it
+        if values.dtype.kind not in "iuf" or not values.size:
+            return None
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)  # all NaN
+            low, high = float(np.nanmin(values)) + 0.0, float(np.nanmax(values)) + 0.0  # + 0.0: no "-0"
+        if np.isnan(low) or np.isnan(high):
+            return None
+    except Exception:
+        logging.info(f"Studio: the value range of {path} could not be checked:\n{traceback.format_exc()}")
+        return None
+    return low, high
+
+
+def _niftiHasInvalidDataOffset(path):
+    """True if the NIfTI-1 header of ``path`` gives a data offset (``vox_offset``) that is not a number (NaN) or is
+    infinite or absurdly large.
+    """
+    header = _niftiHeader(path, 348) if isNiftiFile(path) and os.path.isfile(path) else None
+    if header is None or len(header) < 348:
+        return False
+    for byteOrder in ("<", ">"):
+        if struct.unpack(byteOrder + "i", header[0:4])[0] == 348:
+            voxOffset = struct.unpack(byteOrder + "f", header[108:112])[0]
+            return not math.isfinite(voxOffset) or voxOffset > 2 ** 62
+    return False
+
+
+def _niftiDataShortfall(path, _trailerResult=None):
+    """``(have, need)`` in bytes if the data of the NIfTI file ``path`` is shorter than its header says, None if it is
+    complete or cannot be judged (not NIfTI, unreadable header: the readers report those). The ITK reader zero-fills the
+    missing voxels and reports success, so a file cut short opened as a whole image. A ``.nii.gz`` whose compressed
+    stream itself is cut off (no gzip end marker) counts the data it holds. With a list as ``_trailerResult`` the pass
+    goes on to the end of the gzip stream (the trailer) and appends True to the list if the stream is damaged inside,
+    False if not: one decompression for both checks (see ``_niftiScan``).
+    """
+    if not isNiftiFile(path) or not os.path.isfile(path):
+        return None
+    header = _niftiHeader(path, 540)
+    if header is None or len(header) < 348:
+        return None
+    for byteOrder in ("<", ">"):
+        sizeOfHeader = struct.unpack(byteOrder + "i", header[0:4])[0]
+        if sizeOfHeader == 348:
+            dims = struct.unpack(byteOrder + "8h", header[40:56])
+            bitsPerVoxel = _niftiBitsPerVoxel(struct.unpack(byteOrder + "2h", header[70:74]))
+            voxOffset = struct.unpack(byteOrder + "f", header[108:112])[0]
+            if not math.isfinite(voxOffset) or voxOffset > 2 ** 62:
+                return None  # _niftiHasInvalidDataOffset reports it
+            offset = max(int(voxOffset), 352)
+            break
+        if sizeOfHeader == 540 and len(header) >= 540:
+            dims = struct.unpack(byteOrder + "8q", header[16:80])
+            bitsPerVoxel = _niftiBitsPerVoxel(struct.unpack(byteOrder + "2h", header[12:16]))
+            offset = max(struct.unpack(byteOrder + "q", header[168:176])[0], 544)
+            break
+    else:
+        return None
+    if not 1 <= dims[0] <= 7 or bitsPerVoxel is None or any(size < 1 for size in dims[1:dims[0] + 1]):
+        return None
+    voxels = 1
+    for size in dims[1:dims[0] + 1]:
+        voxels *= size
+    need = offset + (voxels * bitsPerVoxel + 7) // 8
+    if not _isGzipFile(path):
+        have = os.path.getsize(path)
+    else:
+        have = 0
+        try:
+            with gzip.open(path, "rb") as f:
+                while have < need:
+                    # read1: one decompression step per call, so a stream that is cut off (a stopped copy or download,
+                    # no end marker) raises EOFError only after all of its data was counted
+                    chunk = f.read1(min(1 << 22, need - have))
+                    if not chunk:
+                        break
+                    have += len(chunk)
+                if _trailerResult is not None and have >= need:
+                    while f.read1(1 << 22):
+                        pass  # on to the trailer: its CRC and length are checked at the end of the stream
+                    _trailerResult.append(False)
+        except EOFError:
+            if _trailerResult is not None and have >= need:
+                _trailerResult.append(False)  # only the trailer is cut off: not this check's business
+        except (OSError, zlib.error):
+            if _trailerResult is not None and have >= need:
+                _trailerResult.append(True)  # damaged inside, after all of the announced data
+            return None  # damaged in another way: the reader reports it
+    return (have, need) if have < need else None
+
+
+def _niftiGzipChecksumFails(path):
+    """True if the gzip stream of the ``.nii.gz`` file ``path`` is damaged inside (a flipped bit: the CRC or the length
+    in the gzip trailer does not match, or the deflate data is invalid). The data check above stops once it has counted
+    the voxels, so it never reaches the trailer, and the ITK reader does not check the CRC: such a file opened silently
+    with changed voxels. A stream that is merely cut off (EOFError) is the shortfall check's business, not this one's.
+    """
+    if not isNiftiFile(path) or not os.path.isfile(path) or not _isGzipFile(path):
+        return False
+    try:
+        with gzip.open(path, "rb") as f:
+            while f.read1(1 << 22):
+                pass
+    except EOFError:
+        return False
+    except (OSError, zlib.error):
+        return True
+    return False
+
+
+def _niftiScan(path):
+    """``(shortfall, checksumFails)`` of the NIfTI file ``path``, as ``_niftiDataShortfall`` and ``_niftiGzipChecksumFails``
+    give them, but with a single decompression of a ``.nii.gz`` (a highly compressed file of several GB of voxels took
+    seconds per pass on the GUI thread).
+    """
+    trailer = []
+    shortfall = _niftiDataShortfall(path, trailer)
+    if shortfall is not None:
+        return shortfall, False  # cut off: the shortfall is the finding, the CRC of a missing trailer is not
+    if trailer:
+        return None, trailer[0]
+    # not a gzip file, or damaged before the announced data ended: the separate check decides (it ends at the damage)
+    return None, _niftiGzipChecksumFails(path)
+
+
+#: A ``.nii.gz`` whose header announces at least this many bytes of voxels is checked in a worker thread (decompressing
+#: it takes about a second per GB), so the window is not frozen meanwhile. Smaller files are checked directly.
+NIFTI_SCAN_THREAD_BYTES = 512 * 1024**2
+#: So is a ``.nii.gz`` of at least this many compressed bytes whatever its header says: deflate expands at most about
+#: 1030:1, so this much can hold 512 MiB or more, and the check reads the stream to its end, also data after the image.
+NIFTI_SCAN_THREAD_FILE_BYTES = 512 * 1024
+
+
+def _niftiScanResponsive(path):
+    """``_niftiScan(path)``, but for a large ``.nii.gz`` the decompression runs in a worker thread (it reads the file
+    only: no MRML, VTK or Qt) while this thread keeps the window painted behind a "Checking…" dialog. A highly
+    compressed file of several GB of voxels froze the window for many seconds before its reader even started.
+    """
+    import threading
+
+    try:
+        large = _isGzipFile(path) and (
+            (_niftiImageBytes(path) or 0) >= NIFTI_SCAN_THREAD_BYTES
+            or os.path.getsize(path) >= NIFTI_SCAN_THREAD_FILE_BYTES)
+    except Exception:
+        large = False
+    if not large or threading.current_thread() is not threading.main_thread() or qt.QApplication.instance() is None:
+        return _niftiScan(path)
+    result = {}
+
+    def run():
+        try:
+            result["value"] = _niftiScan(path)
+        except BaseException as error:
+            result["error"] = error
+
+    thread = threading.Thread(target=run, name="StudioNiftiCheck", daemon=True)
+    dialog = qt.QProgressDialog(
+        _("Checking {name}…").format(name=os.path.basename(str(path))), "", 0, 0, slicer.util.mainWindow())
+    dialog.setObjectName("StudioImportCheckProgress")
+    dialog.setCancelButton(None)
+    dialog.setMinimumDuration(500)
+    dialog.setWindowModality(qt.Qt.ApplicationModal)
+    thread.start()
+    try:
+        while thread.is_alive():
+            slicer.app.processEvents(qt.QEventLoop.ExcludeUserInputEvents)
+            thread.join(0.02)
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+    if "error" in result:
+        raise result["error"]
+    return result["value"]
+
+
+class RefusedFileError(RuntimeError):
+    """A file that Studio refuses on purpose, with a message for the user: it is announced, and logged without a traceback."""
+
+
+def _niftiVoxelHeaderSize(path):
+    """348 or 540 if ``path`` starts with a NIfTI-1 or NIfTI-2 header (either byte order), None if it does not (or is unreadable)."""
+    header = _niftiHeader(path, 540)
+    if header is None or len(header) < 348:
+        return None
+    for byteOrder in ("<", ">"):
+        size = struct.unpack(byteOrder + "i", header[0:4])[0]
+        if size == 348 or (size == 540 and len(header) >= 540):
+            return size
+    return None
+
+
+def _niftiHasInvalidSize(path):
+    """True if the NIfTI header of ``path`` announces an image size below 1 in one of its dimensions (``dim[1..dim[0]]``):
+    the ITK reader refuses such a header without saying why.
+    """
+    header = _niftiHeader(path, 540)
+    if header is None or len(header) < 348:
+        return False
+    for byteOrder in ("<", ">"):
+        size = struct.unpack(byteOrder + "i", header[0:4])[0]
+        if size == 348:
+            dims = struct.unpack(byteOrder + "8h", header[40:56])
+        elif size == 540 and len(header) >= 540:
+            dims = struct.unpack(byteOrder + "8q", header[16:80])
+        else:
+            continue
+        return 1 <= dims[0] <= 7 and any(n < 1 for n in dims[1:dims[0] + 1])
+    return False
+
+
+def _niftiHasInvalidGeometry(path):
+    """True if a value of the NIfTI header of ``path`` that places the image in space is not finite (NaN or infinite):
+    a voxel size ``pixdim[1..3]`` of the dimensions it has, the quaternion and offset when ``qform_code`` > 0, or a row
+    of the affine (``srow_x/y/z``) when ``sform_code`` > 0. Such an image has no valid position or orientation, and the
+    Segment Editor aborts the app on a segmentation read from it (``std::bad_alloc`` on its NaN extent).
+    """
+    header = _niftiHeader(path, 540)
+    if header is None or len(header) < 348:
+        return False
+    for byteOrder in ("<", ">"):
+        size = struct.unpack(byteOrder + "i", header[0:4])[0]
+        if size == 348:
+            dims = struct.unpack(byteOrder + "8h", header[40:56])
+            pixdim = struct.unpack(byteOrder + "8f", header[76:108])
+            qformCode, sformCode = struct.unpack(byteOrder + "2h", header[252:256])
+            quatern = struct.unpack(byteOrder + "6f", header[256:280])
+            srow = struct.unpack(byteOrder + "12f", header[280:328])
+        elif size == 540 and len(header) >= 540:
+            dims = struct.unpack(byteOrder + "8q", header[16:80])
+            pixdim = struct.unpack(byteOrder + "8d", header[104:168])
+            qformCode, sformCode = struct.unpack(byteOrder + "2i", header[344:352])
+            quatern = struct.unpack(byteOrder + "6d", header[352:400])
+            srow = struct.unpack(byteOrder + "12d", header[400:496])
+        else:
+            continue
+        used = list(pixdim[1:1 + max(1, min(3, dims[0]))])
+        if qformCode > 0:
+            used += quatern
+        if sformCode > 0:
+            used += srow
+        return not all(math.isfinite(value) for value in used)
+    return False
+
+
+def _niftiHasDegenerateGeometry(path):
+    """True if the NIfTI header of ``path`` gives an image no extent in space: a voxel size of 0 along one of its axes
+    (``pixdim[1..3]`` of the dimensions it has), or, when ``sform_code`` > 0 (the affine that the readers use first), an
+    affine whose columns for those axes are zero. The ITK reader refuses such a header without saying why.
+    """
+    header = _niftiHeader(path, 540)
+    if header is None or len(header) < 348:
+        return False
+    for byteOrder in ("<", ">"):
+        size = struct.unpack(byteOrder + "i", header[0:4])[0]
+        if size == 348:
+            dims = struct.unpack(byteOrder + "8h", header[40:56])
+            pixdim = struct.unpack(byteOrder + "8f", header[76:108])
+            sformCode = struct.unpack(byteOrder + "h", header[254:256])[0]
+            srow = struct.unpack(byteOrder + "12f", header[280:328])
+        elif size == 540 and len(header) >= 540:
+            dims = struct.unpack(byteOrder + "8q", header[16:80])
+            pixdim = struct.unpack(byteOrder + "8d", header[104:168])
+            sformCode = struct.unpack(byteOrder + "i", header[348:352])[0]
+            srow = struct.unpack(byteOrder + "12d", header[400:496])
+        else:
+            continue
+        if not 1 <= dims[0] <= 7:
+            return False
+        axes = range(max(1, min(3, dims[0])))
+        if not all(math.isfinite(value) for value in list(pixdim[1:4]) + list(srow)):
+            return False  # reported by _niftiHasInvalidGeometry
+        if sformCode > 0:
+            # srow_x/y/z are the rows of the 3x4 affine: column ``axis`` is the voxel step along that axis
+            return any(all(srow[4 * row + axis] == 0 for row in range(3)) for axis in axes)
+        return any(pixdim[1 + axis] == 0 for axis in axes)
+    return False
+
+
+#: The ``datatype`` codes that the NIfTI standard defines (a header with another code cannot be read)
+_NIFTI_DATATYPE_CODES = frozenset((1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 768, 1024, 1280, 1536, 1792, 2048, 2304))
+
+#: Bytes per voxel of each NIfTI ``datatype`` code, as the NIfTI reader sizes the image data (``nifti_datatype_sizes``
+#: in niftilib): the reader ignores ``bitpix``, so a header whose ``bitpix`` disagrees with its ``datatype`` is still
+#: read with this many bytes per voxel. Binary (1) has no byte size there.
+_NIFTI_DATATYPE_BYTES = {
+    2: 1, 256: 1, 4: 2, 512: 2, 128: 3, 2304: 4, 8: 4, 16: 4, 768: 4, 32: 8, 64: 8, 1024: 8, 1280: 8,
+    1536: 16, 1792: 16, 2048: 32,
+}
+
+
+def _niftiBitsPerVoxel(datatypeAndBitpix):
+    """The bits per voxel of a NIfTI header given its ``(datatype, bitpix)``: from ``datatype`` as the readers do, from
+    ``bitpix`` only when the datatype has no byte size (binary or unknown), None if neither gives a size.
+    """
+    datatype, bitpix = datatypeAndBitpix
+    if datatype in _NIFTI_DATATYPE_BYTES:
+        return 8 * _NIFTI_DATATYPE_BYTES[datatype]
+    return bitpix if bitpix > 0 else None
+
+
+def _nrrdHasDegenerateDirections(path):
+    """True if the ``space directions`` line of the NRRD file ``path`` has a value that is not a number or a vector of
+    zeros (the image would have no size in space), False if it is fine, absent or cannot be judged.
+    """
+    if _extension(path) not in (".nrrd", ".nhdr", ".seg.nrrd", ".seg.nhdr") or not os.path.isfile(path):
+        return False
+    parsed = _readTextHeader(path, endsAtBlankLine=True)
+    if parsed is None or "space directions" not in parsed[0]:
+        return False
+    for vector in re.findall(r"\(([^)]*)\)", parsed[0]["space directions"]):
+        try:
+            values = [float(v) for v in vector.split(",")]
+        except ValueError:
+            return True
+        if not all(math.isfinite(v) for v in values) or not any(values):
+            return True
+    return False
+
+
+#: Memory that a load needs as a multiple of the image bytes: a volume is held about twice (NIfTI library, then image);
+#: a lesion (segmentation route: reader, labelmap, segment copies) peaks at about 3.7 times
+_VOLUME_MEMORY_FACTOR = 2
+_LESION_MEMORY_FACTOR = 4
+
+
+def _checkNiftiComplete(path, memoryFactor=_VOLUME_MEMORY_FACTOR):
+    """Raise ``RuntimeError`` (a message for the user) if the data of the NIfTI file ``path`` stops before the end that its
+    header promises: the voxels that are missing would be read as 0, and a lesion would lose part of its volume.
+    A file whose voxels need more than ``memoryFactor`` times less than the memory that is left is refused as too large.
+    """
+    if isNiftiFile(path):
+        name = os.path.basename(str(path))
+        if not os.path.isfile(path):
+            raise RefusedFileError(_("{name} was not opened: the file no longer exists.").format(name=name))
+        if os.path.getsize(path) == 0:
+            raise RefusedFileError(_("{name} is empty (0 bytes), so it was not opened.").format(name=name))
+        if _niftiVoxelHeaderSize(path) is None:
+            raise RefusedFileError(
+                _("{name} is not a NIfTI image (it may be a web page or another file saved under this name, or a damaged "
+                  "file), so it was not opened.").format(name=name))
+        if _niftiHasInvalidSize(path):
+            raise RefusedFileError(
+                _("{name} is damaged: its header gives an invalid image size (a dimension below 1), so it was not "
+                  "opened.").format(name=name))
+        if _niftiHasInvalidGeometry(path):
+            raise RefusedFileError(
+                _("{name} is damaged: its header gives an invalid position or orientation (a voxel size or a "
+                  "position value that is not a number), so it was not opened.").format(name=name))
+        if _niftiHasDegenerateGeometry(path):
+            raise RefusedFileError(
+                _("{name} is damaged: its header gives a voxel size of 0 (or an affine with no extent), so the image "
+                  "has no size in space and it was not opened.").format(name=name))
+        datatype = _niftiDatatype(path)
+        if datatype is not None and datatype not in _NIFTI_DATATYPE_CODES:
+            raise RefusedFileError(
+                _("{name} is damaged: its header gives a voxel type that NIfTI does not define (code {code}), so the "
+                  "voxels cannot be read and it was not opened.").format(name=name, code=datatype))
+    _checkNrrdMhaComplete(path)
+    if isNiftiFile(path):
+        # Refuse an image whose header already shows that it cannot fit in memory before any data is read: counting the
+        # data of a highly compressed file would otherwise decompress all of it on the GUI thread first.
+        need, have = _niftiImageBytes(path), _availableMemoryBytes()
+        if need is not None and have is not None and need * memoryFactor > have:
+            raise RefusedFileError(_tooLargeMessage(path))
+    if _niftiHasInvalidDataOffset(path):
+        raise RefusedFileError(
+            _("{name} is damaged: its header gives an invalid data offset (where the image data starts is not a "
+              "number), so it was not opened.").format(name=os.path.basename(str(path))))
+    shortfall, checksumFails = _niftiScanResponsive(path)
+    if shortfall is not None:
+        raise RefusedFileError(
+            _("{name} is damaged: its image data stops after {have:,} of the {need:,} bytes that its header announces "
+              "(the file was probably cut short by a failed copy or download). It was not opened; copy it again from "
+              "its source.").format(name=os.path.basename(str(path)), have=shortfall[0], need=shortfall[1]))
+    if checksumFails:
+        raise RefusedFileError(
+            _("{name} is damaged: its compressed data does not pass the check of the gzip format (a bit was changed, "
+              "probably by a faulty copy or download), so the voxels would be wrong. It was not opened; copy it again "
+              "from its source.").format(name=os.path.basename(str(path))))
+
+
+#: Bytes per voxel of the NRRD ``type`` names and of the MetaImage ``ElementType`` names that the check below understands
+_NRRD_TYPE_BYTES = {
+    "signed char": 1, "int8": 1, "int8_t": 1, "uchar": 1, "unsigned char": 1, "uint8": 1, "uint8_t": 1,
+    "short": 2, "short int": 2, "signed short": 2, "signed short int": 2, "int16": 2, "int16_t": 2,
+    "ushort": 2, "unsigned short": 2, "unsigned short int": 2, "uint16": 2, "uint16_t": 2,
+    "int": 4, "signed int": 4, "int32": 4, "int32_t": 4, "uint": 4, "unsigned int": 4, "uint32": 4, "uint32_t": 4,
+    "longlong": 8, "long long": 8, "long long int": 8, "signed long long": 8, "int64": 8, "int64_t": 8,
+    "ulonglong": 8, "unsigned long long": 8, "unsigned long long int": 8, "uint64": 8, "uint64_t": 8,
+    "float": 4, "double": 8,
+}
+_META_TYPE_BYTES = {
+    "MET_CHAR": 1, "MET_UCHAR": 1, "MET_SHORT": 2, "MET_USHORT": 2, "MET_INT": 4, "MET_UINT": 4, "MET_LONG": 4,
+    "MET_ULONG": 4, "MET_LONG_LONG": 8, "MET_ULONG_LONG": 8, "MET_FLOAT": 4, "MET_DOUBLE": 8,
+}
+
+
+def _readTextHeader(path, endsAtBlankLine, stopAtKey=None):
+    """``(fields, headerLength)`` of the text header of an NRRD or MetaImage file: ``fields`` maps the lower-case key to
+    the value, ``headerLength`` is the number of bytes up to and including the line that ends the header. None if the
+    header cannot be read (the readers report that).
+    """
+    fields = {}
+    length = 0
+    try:
+        with open(path, "rb") as f:
+            for _index in range(2000):
+                line = f.readline(1 << 16)
+                if not line:
+                    break
+                length += len(line)
+                text = line.decode("latin-1").strip()
+                if endsAtBlankLine and not text:
+                    break
+                if text.startswith("#") or not text:
+                    continue
+                for separator in (":=", ": ", "=", ":"):
+                    if separator in text:
+                        key, value = text.split(separator, 1)
+                        key = key.strip().lower()
+                        fields.setdefault(key, value.strip())
+                        break
+                if stopAtKey is not None and stopAtKey in fields:
+                    break
+    except OSError:
+        return None
+    return fields, length
+
+
+def _countedDataBytes(path, offset, need, decompress):
+    """Number of data bytes, up to ``need``, that the file ``path`` holds from ``offset`` on: its size for ``decompress``
+    None, else the decompressed size (``"gzip"`` or ``"zlib"``; a stream that is cut off counts the data it holds).
+    None if it cannot be judged.
+    """
+    if decompress is None:
+        return max(os.path.getsize(path) - offset, 0)
+    have = 0
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            if decompress == "gzip":
+                with gzip.GzipFile(fileobj=f) as stream:
+                    while have < need:
+                        chunk = stream.read1(min(1 << 22, need - have))
+                        if not chunk:
+                            break
+                        have += len(chunk)
+            else:
+                inflater = zlib.decompressobj()
+                while have < need:
+                    block = f.read(1 << 20)
+                    if not block:
+                        break
+                    have += len(inflater.decompress(block, need - have + 1))
+    except EOFError:
+        pass
+    except (OSError, zlib.error):
+        return None
+    return have
+
+
+def _nrrdMhaDataShortfall(path):
+    """``(have, need)`` in bytes if the data of the NRRD or MetaImage file ``path`` (not NIfTI) is shorter than its header
+    announces, None if it is complete or cannot be judged (the readers report those). The readers fail for such a file
+    with an allocation error or a raw decoder message, or zero-fill the rest.
+    """
+    extension = _extension(path)
+    if extension not in (".nrrd", ".nhdr", ".seg.nrrd", ".seg.nhdr", ".mha", ".mhd") or not os.path.isfile(path):
+        return None
+    isMeta = extension in (".mha", ".mhd")
+    parsed = _readTextHeader(path, endsAtBlankLine=not isMeta, stopAtKey="elementdatafile" if isMeta else None)
+    if parsed is None:
+        return None
+    fields, headerLength = parsed
+    try:
+        if isMeta:
+            sizes = [int(v) for v in fields["dimsize"].split()]
+            perVoxel = _META_TYPE_BYTES[fields["elementtype"].strip().upper()] * int(fields.get("elementnumberofchannels", 1))
+            dataFile = fields["elementdatafile"]
+            compression = "zlib" if fields.get("compresseddata", "false").strip().lower() == "true" else None
+            skip = max(int(fields.get("headersize", 0)), 0)
+            if int(fields.get("ndims", len(sizes))) != len(sizes):
+                return None
+            if dataFile.upper() == "LOCAL":
+                dataFile = None
+        else:
+            sizes = [int(v) for v in fields["sizes"].split()]
+            if int(fields["dimension"]) != len(sizes):
+                return None
+            perVoxel = _NRRD_TYPE_BYTES[fields["type"].strip().lower()]
+            encoding = fields["encoding"].strip().lower()
+            compression = {"raw": None, "gzip": "gzip", "gz": "gzip"}[encoding]
+            dataFile = fields.get("data file", fields.get("datafile"))
+            skip = int(fields.get("byte skip", 0))
+            if skip < 0 or int(fields.get("line skip", fields.get("lineskip", 0))) != 0:
+                return None
+    except (KeyError, ValueError):
+        return None
+    if not sizes or any(size < 1 for size in sizes):
+        return None
+    if dataFile is not None:
+        if any(mark in dataFile for mark in (" ", "%", "*")):
+            return None  # several files (a list or a pattern): not judged
+        dataFile = os.path.join(os.path.dirname(os.path.abspath(path)), dataFile)
+        if not os.path.isfile(dataFile):
+            return None
+        offset = skip
+        counted = dataFile
+    else:
+        offset = headerLength + (skip if not isMeta else 0)
+        counted = path
+    voxels = 1
+    for size in sizes:
+        voxels *= size
+    need = voxels * perVoxel
+    have = _countedDataBytes(counted, offset, need, compression)
+    if have is None:
+        return None
+    return (have, need) if have < need else None
+
+
+def _isAllocationFailure(error):
+    """True if the reader failed because it could not allocate the memory for the image."""
+    seen = set()
+    while error is not None and id(error) not in seen:  # a fallback that fails after the first error hides it in __context__
+        seen.add(id(error))
+        text = str(error)
+        if isinstance(error, MemoryError) or "MemoryAllocationError" in text or "Failed to allocate memory" in text:
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
+def _niftiImageBytes(path):
+    """The size in bytes of the voxels that the header of the NIfTI file ``path`` announces, None if not known."""
+    dims = niftiDimensions(path)
+    header = _niftiHeader(path, 540)
+    if dims is None or header is None or not 1 <= dims[0] <= 7 or any(size < 1 for size in dims[1:dims[0] + 1]):
+        return None
+    for byteOrder in ("<", ">"):
+        sizeOfHeader = struct.unpack(byteOrder + "i", header[0:4])[0]
+        if sizeOfHeader in (348, 540):
+            bitsPerVoxel = _niftiBitsPerVoxel(
+                struct.unpack(byteOrder + "2h", header[70:74] if sizeOfHeader == 348 else header[12:16]))
+            voxels = 1
+            for size in dims[1:dims[0] + 1]:
+                voxels *= size
+            return voxels * max(bitsPerVoxel, 8) // 8 if bitsPerVoxel is not None else None
+    return None
+
+
+def _cgroupMemoryHeadroomBytes(procCgroup="/proc/self/cgroup", root="/sys/fs/cgroup"):
+    """The memory that the control groups of this process still allow (a container's ``--memory``, a Slurm job, a
+    systemd ``MemoryMax``), None if no limit is set or it is not known. The limit can be set on this group or on any
+    group above it, so every group up to the root is asked and the smallest room is kept. The room of a group is its
+    limit minus its use, not counting the file cache that the kernel can free (``inactive_file``).
+    """
+    try:
+        with open(procCgroup) as f:
+            lines = [line.rstrip("\n").split(":", 2) for line in f]
+    except OSError:
+        return None
+    groups = []  # (directory of the hierarchy, path of this process in it, limit file, usage file, cache field)
+    for fields in lines:
+        if len(fields) != 3:
+            continue
+        hierarchy, controllers, path = fields
+        if hierarchy == "0" and controllers == "":
+            for mount in (root, os.path.join(root, "unified")):
+                groups.append((mount, path, "memory.max", "memory.current", "inactive_file"))
+        elif "memory" in controllers.split(","):
+            groups.append((os.path.join(root, "memory"), path, "memory.limit_in_bytes", "memory.usage_in_bytes",
+                           "total_inactive_file"))
+    rooms = []
+    for mount, path, limitName, usageName, cacheField in groups:
+        path = "/" + path.strip("/")
+        while True:
+            directory = os.path.join(mount, path.lstrip("/"))
+            try:
+                with open(os.path.join(directory, limitName)) as f:
+                    limit = f.read().strip()
+                if limit != "max" and int(limit) < 2**60:  # cgroup v1 writes a huge number when there is no limit
+                    with open(os.path.join(directory, usageName)) as f:
+                        usage = int(f.read().strip())
+                    cache = 0
+                    try:
+                        with open(os.path.join(directory, "memory.stat")) as f:
+                            for line in f:
+                                name, _sep, value = line.partition(" ")
+                                if name == cacheField:
+                                    cache = int(value)
+                    except (OSError, ValueError):
+                        pass
+                    rooms.append(max(int(limit) - max(usage - cache, 0), 0))
+            except (OSError, ValueError):
+                pass
+            if path == "/":
+                break
+            path = os.path.dirname(path)
+    return min(rooms) if rooms else None
+
+
+def _availableMemoryBytes():
+    """The memory that this process can still use (free RAM and swap, the room that its control groups still allow, and
+    the address-space limit if one is set), None if not known (only Linux is asked).
+    """
+    limits = []
+    cgroupRoom = _cgroupMemoryHeadroomBytes()
+    if cgroupRoom is not None:
+        limits.append(cgroupRoom)
+    try:
+        with open("/proc/meminfo") as f:
+            fields = {line.split(":")[0]: int(line.split(":")[1].split()[0]) * 1024 for line in f if ":" in line}
+        limits.append(fields["MemAvailable"] + fields.get("SwapFree", 0))
+    except (OSError, ValueError, KeyError, IndexError):
+        pass
+    try:
+        import resource
+
+        soft = resource.getrlimit(resource.RLIMIT_AS)[0]
+        if soft != resource.RLIM_INFINITY:
+            with open("/proc/self/statm") as f:
+                limits.append(soft - int(f.read().split()[0]) * resource.getpagesize())
+    except (ImportError, OSError, ValueError, IndexError):
+        pass
+    return min(limits) if limits else None
+
+
+def _isNiftiTooLargeForMemory(path, error):
+    """True if the NIfTI reader failed (``nifti_image_load failed``, which does not say why) on an intact file whose voxels
+    are more than the memory that is left: the reader could not allocate them. The readers hold the voxels twice or more
+    (the NIfTI library, then the image), so half of the memory that is left is the most that a file can need.
+    """
+    if "nifti_image_load failed" not in str(error) or not isNiftiFile(path):
+        return False
+    need, have = _niftiImageBytes(path), _availableMemoryBytes()
+    return need is not None and have is not None and need * 2 > have
+
+
+def _tooLargeMessage(path):
+    return _("{name} is too large for this computer's memory, so it was not opened. Open a smaller or cropped copy of "
+             "it, or use a computer with more memory.").format(name=os.path.basename(str(path)))
+
+
+def _checkNrrdMhaComplete(path):
+    """Raise ``RefusedFileError`` (a message for the user) if the data of the NRRD or MetaImage file ``path`` stops before
+    the end that its header announces.
+    """
+    shortfall = _nrrdMhaDataShortfall(path)
+    name = os.path.basename(str(path))
+    if _nrrdHasDegenerateDirections(path):
+        raise RefusedFileError(
+            _("{name} is damaged: its header gives a voxel size of 0 or a value that is not a number for the image "
+              "directions, so the image has no size in space and it was not opened.").format(name=name))
+    if shortfall is not None:
+        raise RefusedFileError(
+            _("{name} is damaged: its image data stops after {have:,} of the {need:,} bytes that its header announces "
+              "(the file was probably cut short by a failed copy or download). It was not opened; copy it again from "
+              "its source.").format(name=name, have=shortfall[0], need=shortfall[1]))
+
+
+# NIfTI datatype codes of 64-bit integer voxels (int64, uint64): nibabel writes int64 by default for a numpy integer array
+_NIFTI_64BIT_INTEGER_DATATYPES = {1024: "int64", 1280: "uint64"}
+
+
+def _niftiDatatype(path):
+    """The ``datatype`` code of a NIfTI-1 or NIfTI-2 header, None if not NIfTI or unreadable (the readers report those)."""
+    if not isNiftiFile(path) or not os.path.isfile(path):
+        return None
+    header = _niftiHeader(path, 540)
+    if header is None or len(header) < 348:
+        return None
+    for byteOrder in ("<", ">"):
+        sizeOfHeader = struct.unpack(byteOrder + "i", header[0:4])[0]
+        if sizeOfHeader == 348:
+            return struct.unpack(byteOrder + "h", header[70:72])[0]
+        if sizeOfHeader == 540 and len(header) >= 540:
+            return struct.unpack(byteOrder + "h", header[12:14])[0]
+    return None
+
+
+def _checkScanVoxelType(path):
+    """Raise ``RefusedFileError`` (a message for the user) if the NIfTI scan ``path`` is NIfTI-2 (not supported) or
+    stores 64-bit integer voxels: the
+    reader reads them as VTK_LONG / VTK_LONG_LONG, which the image filters of the slice views and histograms are not
+    compiled for, and the first slice render ends the application (3D Slicer does the same). It runs before the file is
+    read, so no node is created. Lesions are read by the segmentation reader, which converts the type, and are not checked.
+    """
+    if _niftiVoxelHeaderSize(path) == 540:
+        # the volume reader refuses NIfTI-2 with a developer text (and the generic handler would log a traceback)
+        raise RefusedFileError(
+            _("{name} cannot be opened: NIfTI-2 files are not supported. Convert it to NIfTI-1 or NRRD and open it "
+              "again.").format(name=os.path.basename(str(path))))
+    typeName = _NIFTI_64BIT_INTEGER_DATATYPES.get(_niftiDatatype(path))
+    if typeName is None:
+        return
+    raise RefusedFileError(
+        _("{name} cannot be opened: its voxels are stored as 64-bit integers ({type}), which the slice views cannot "
+          "show. Save it again with 16-bit or 32-bit integer or floating-point voxels (for example "
+          "data.astype(\"int32\") in nibabel) and open it again.").format(name=os.path.basename(str(path)), type=typeName))
+
+
+def _checkLesionValueRange(path):
+    """Raise ``RuntimeError`` (a message for the user) if the voxel values of the label image ``path`` are beyond what the
+    segmentation reader reads (``LESION_LABEL_VALUE_LIMIT``): it would crash (values beyond the int range) or fail to
+    allocate, and the labelmap route counts the values the same way. Files that store segments are not checked.
+    """
+    if _extension(path) not in VOLUME_EXTENSIONS or storesSegments(path):
+        return
+    valueRange = _imageValueRange(path)
+    if valueRange is None:
+        return
+    low, high = valueRange
+    if -LESION_LABEL_VALUE_LIMIT <= low and high <= LESION_LABEL_VALUE_LIMIT:
+        return
+    raise RefusedFileError(
+        _("{name} cannot be opened as a lesion: its voxel values ({low:g} to {high:g}) are beyond the label values a "
+          "segmentation can hold (-{limit} to {limit}). Save the mask with 1 for the lesion and 0 elsewhere.").format(
+            name=os.path.basename(str(path)), low=low, high=high, limit=LESION_LABEL_VALUE_LIMIT))
+
+
 def loadLesion(path):
     """Load a lesion file as a segmentation (see ``_applyLesionNaming()`` for the "Lesion" segment).
 
-    Image files that the segmentation reader cannot read are loaded as a labelmap volume and converted.
+    Image files that the segmentation reader cannot read are loaded as a labelmap volume and converted. A NIfTI file
+    with fractional values (a probabilistic mask, ``desc-lesionProb``) is shown with every voxel above 0 as the lesion,
+    not truncated to integers by the reader; the node gets ``LESION_FRACTIONAL_ATTRIBUTE`` and the file is unchanged.
+    An image whose values are beyond ``LESION_LABEL_VALUE_LIMIT`` is refused (``RuntimeError``) before it is read.
+    A failed load leaves no node in the scene.
     """
+    _checkNiftiComplete(path, _LESION_MEMORY_FACTOR)
+    _checkLesionValueRange(path)
+    segmentationClasses = ("vtkMRMLSegmentationNode", "vtkMRMLSegmentationStorageNode")
+    existing = set().union(*(_sceneNodeIds(className) for className in segmentationClasses))
     try:
         segmentationNode = slicer.util.loadSegmentation(path, {})
-    except RuntimeError:
+    except Exception:
+        # The reader of a damaged file (truncated, header only) raises (RuntimeError, or MemoryError for a
+        # std::bad_alloc) but leaves a half-created node and its storage node in the scene: they would count as data (an
+        # empty "Untitled project" would be started for them)
+        _removeNodesNotIn(existing, segmentationClasses)
         if _extension(path) not in VOLUME_EXTENSIONS:
             raise
         logging.info(f"Studio: {path} is not readable as a segmentation, loading it as a labelmap volume")
-        labelmapNode = slicer.util.loadLabelVolume(path, {"singleFile": True, "show": False})
-        segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", labelmapNode.GetName())
-        # The geometry of the mask is kept even if it is empty (no node reference: the labelmap is removed below)
-        segmentationNode.GetSegmentation().SetConversionParameter(
-            slicer.vtkSegmentationConverter.GetReferenceImageGeometryParameterName(), _volumeGeometry(labelmapNode))
-        if not slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(labelmapNode, segmentationNode):
-            slicer.mrmlScene.RemoveNode(segmentationNode)
-            slicer.mrmlScene.RemoveNode(labelmapNode)
-            raise RuntimeError(_("Failed to convert {path} to a segmentation").format(path=path))
+        labelmapClasses = ("vtkMRMLLabelMapVolumeNode", "vtkMRMLVolumeArchetypeStorageNode")
+        existingLabelmaps = set().union(*(_sceneNodeIds(className) for className in labelmapClasses))
+        try:
+            labelmapNode = slicer.util.loadLabelVolume(path, {"singleFile": True, "show": False})
+            segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", labelmapNode.GetName())
+            # The geometry of the mask is kept even if it is empty (no node reference: the labelmap is removed below)
+            segmentationNode.GetSegmentation().SetConversionParameter(
+                slicer.vtkSegmentationConverter.GetReferenceImageGeometryParameterName(), _volumeGeometry(labelmapNode))
+            if not slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(labelmapNode, segmentationNode):
+                raise RuntimeError(_("Failed to convert {path} to a segmentation").format(path=path))
+        except Exception as e:
+            _removeNodesNotIn(existing, segmentationClasses)
+            _removeNodesNotIn(existingLabelmaps, labelmapClasses)
+            if _isAllocationFailure(e):
+                # too large for the memory: a plain refusal, not the reader's text (paths, source file and line)
+                raise RefusedFileError(_tooLargeMessage(path)) from e
+            raise
         slicer.mrmlScene.RemoveNode(labelmapNode)
-    baseName = _baseName(path)
-    if baseName and segmentationNode.GetName() != baseName and _extension(path) in VOLUME_EXTENSIONS:
-        # The segmentation reader keeps ".nii" in the node name of "x.nii.gz"
-        segmentationNode.SetName(slicer.mrmlScene.GenerateUniqueName(baseName))
+    fractional = None if storesSegments(path) else _fractionalMask(path)
+    if fractional is not None:
+        mask, (low, high) = fractional
+        if _setFractionalMask(segmentationNode, mask):
+            segmentationNode.SetAttribute(LESION_FRACTIONAL_ATTRIBUTE, f"{low:g} {high:g}")
+            logging.info(f"Studio: {path} has fractional values ({low:g} to {high:g}): the voxels above 0 are the lesion")
+        else:
+            logging.warning(f"Studio: {path} has fractional values but its grid is not the segmentation's: values below 1 are lost")
+    _nameSegmentationAfterFile(segmentationNode, path)
     _applyLesionNaming(segmentationNode, path)
+    if segmentationNode.GetAttribute(LESION_FRACTIONAL_ATTRIBUTE):
+        # The mask is how the file reads as a lesion, not an edit: Draw says "Saved · <file>" as for a 0/1 file
+        reference = vtk.vtkWeakReference()
+        reference.Set(segmentationNode)
+        _convertedOnLoad[segmentationNode.GetID()] = (reference, _voxelStamp(segmentationNode), os.path.abspath(str(path)))
     return segmentationNode
 
 
@@ -455,10 +1485,41 @@ def _isBoundTo(segmentationNode, volumeNode):
     return segmentationNode.GetNodeReferenceID(role) == volumeNode.GetID() and _referenceGeometryMatches(segmentationNode, volumeNode)
 
 
-def isSegmentationEmpty(segmentationNode):
-    """True if no segment of the segmentation has any voxel (or the segmentation has no segment)."""
+# Result of the last voxel scans of isSegmentationEmpty(), keyed by the modification times of the labelmap and of its
+# scalars (vtkTimeStamp values are unique in the process): the scan is O(voxels), the answer is asked on every refresh.
+_labelValueScanCache = {}
+_LABEL_VALUE_SCAN_CACHE_SIZE = 64
+_LABEL_VALUE_SCAN_BLOCK_VOXELS = 1 << 22
+
+
+def _labelmapHasLabelValue(labelmap, labelValue):
+    """True if ``labelmap`` has a voxel with ``labelValue``.
+
+    The scan runs in blocks and stops at the first hit, so it allocates no full-size temporary array and a lesion
+    costs a fraction of the image. The answer is cached until the labelmap or its scalars are modified.
+    """
     import vtk.util.numpy_support
 
+    scalars = labelmap.GetPointData().GetScalars()
+    key = (labelmap.GetMTime(), scalars.GetMTime(), labelValue)
+    cached = _labelValueScanCache.get(key)
+    if cached is not None:
+        return cached
+    array = vtk.util.numpy_support.vtk_to_numpy(scalars)
+    found = False
+    blockSize = max(1, _LABEL_VALUE_SCAN_BLOCK_VOXELS)
+    for start in range(0, array.shape[0], blockSize):
+        if (array[start:start + blockSize] == labelValue).any():
+            found = True
+            break
+    if len(_labelValueScanCache) >= _LABEL_VALUE_SCAN_CACHE_SIZE:
+        _labelValueScanCache.clear()
+    _labelValueScanCache[key] = found
+    return found
+
+
+def isSegmentationEmpty(segmentationNode):
+    """True if no segment of the segmentation has any voxel (or the segmentation has no segment)."""
     segmentation = segmentationNode.GetSegmentation()
     for index in range(segmentation.GetNumberOfSegments()):
         segmentId = segmentation.GetNthSegmentID(index)
@@ -471,8 +1532,7 @@ def isSegmentationEmpty(segmentationNode):
             return False
         if labelmap.IsEmpty() or labelmap.GetPointData().GetScalars() is None:
             continue
-        labelValue = segmentation.GetSegment(segmentId).GetLabelValue()
-        if (vtk.util.numpy_support.vtk_to_numpy(labelmap.GetPointData().GetScalars()) == labelValue).any():
+        if _labelmapHasLabelValue(labelmap, segmentation.GetSegment(segmentId).GetLabelValue()):
             return False
     return True
 
@@ -507,6 +1567,29 @@ def _lesionSegmentationFor(volumeNode, name):
     return createLesionSegmentation(volumeNode, name)
 
 
+def _boundLesionOf(volumeNode):
+    """A lesion bound to ``volumeNode`` (see ``_isBoundTo()``) whatever its name, None if there is none.
+
+    Segmentations hidden from the editors are skipped. A shown lesion comes before a hidden one (a finished lesion that
+    "New lesion" hid), and the scan's own "Lesions (<scan name>)" before another one; else the first in the scene.
+    """
+    name = scanLesionSegmentationName(volumeNode)
+    candidates = []
+    for index, segmentationNode in enumerate(slicer.util.getNodesByClass("vtkMRMLSegmentationNode")):
+        if segmentationNode.GetHideFromEditors() or not _isBoundTo(segmentationNode, volumeNode):
+            continue
+        displayNode = segmentationNode.GetDisplayNode()
+        shown = displayNode is not None and bool(displayNode.GetVisibility()) and bool(displayNode.GetVisibility2D())
+        candidates.append(((not shown, segmentationNode.GetName() != name, index), segmentationNode))
+    if not candidates:
+        return None
+    segmentationNode = min(candidates, key=lambda candidate: candidate[0])[1]
+    if segmentationNode.GetSegmentation().GetNumberOfSegments() == 0:
+        segmentId = segmentationNode.GetSegmentation().AddEmptySegment("", LESION_SEGMENT_NAME, LESION_COLOR)
+        styleLesionSegment(segmentationNode, segmentId)
+    return segmentationNode
+
+
 def segmentEditorWidget():
     """The Segment Editor module widget (created if needed), or None if the module is not loaded."""
     if not hasattr(slicer.modules, "segmenteditor"):
@@ -521,6 +1604,14 @@ def selectInSegmentEditor(segmentationNode, sourceVolumeNode):
     if widget is None or widget.editor is None:
         return
     editor = widget.editor
+    if segmentationNode is not None and editor.mrmlSegmentEditorNode() is None:
+        # The editor follows no Segment Editor node (a scene was loaded or closed while Draw was not shown; Draw's
+        # SegmentEditor.enter() attaches it again). Selecting now would do nothing and log an error ("SetSegmentationNode:
+        # need to set segment editor node first"), so the selection waits for Draw (takePendingSelection()).
+        _pendingSelection["segmentation"] = segmentationNode
+        _pendingSelection["source"] = sourceVolumeNode
+        return
+    _pendingSelection.clear()
     editor.setSegmentationNode(segmentationNode)
     if sourceVolumeNode is not None and _referenceKind(sourceVolumeNode) is None:
         # A figure or a statistical map is never the source (USABILITY P12)
@@ -528,6 +1619,22 @@ def selectInSegmentEditor(segmentationNode, sourceVolumeNode):
     segmentation = segmentationNode.GetSegmentation()
     if segmentation.GetNumberOfSegments() > 0:
         editor.setCurrentSegmentID(segmentation.GetNthSegmentID(0))
+
+
+#: The selection that ``selectInSegmentEditor()`` could not apply because the editor had no Segment Editor node
+_pendingSelection = {}
+
+
+def takePendingSelection():
+    """The ``(segmentationNode, sourceVolumeNode)`` that ``selectInSegmentEditor()`` kept for Draw, or None without one
+    (or when the segmentation left the scene). Draw applies it when it enters, once the editor has its node.
+    """
+    segmentationNode, sourceNode = _pendingSelection.get("segmentation"), _pendingSelection.get("source")
+    _pendingSelection.clear()
+    scene = slicer.mrmlScene
+    if segmentationNode is None or not scene.IsNodePresent(segmentationNode):
+        return None
+    return segmentationNode, (sourceNode if sourceNode is not None and scene.IsNodePresent(sourceNode) else None)
 
 
 def _isReference(node):
@@ -595,21 +1702,32 @@ def _figureCompositeNodes():
             if node.GetBackgroundVolumeID() and space.isFigure(slicer.mrmlScene.GetNodeByID(node.GetBackgroundVolumeID()))]
 
 
-def setViewLayers(background=None, foreground=None, foregroundOpacity=None, fit=False):
+def setViewLayers(background=None, foreground=None, foregroundOpacity=None, fit=False, keepAfterMap=True):
     """``slicer.util.setSliceViewerLayers()`` for every slice view except figure views: a figure stays where it is shown.
 
-    Only the given layers change. With ``fit``, the slice views of the layout (not the figure views) are fitted.
+    Only the given layers change. With ``fit``, the slice views of the layout (not the figure views) are fitted. While
+    Map is shown, a new ``background`` is also the background that leaving Map puts back (``keepAfterMap``): the volume
+    shown to draw on (Start on template, an opened scan) stays when the caller then switches to Draw.
     """
     figureIds = {node.GetID() for node in _figureCompositeNodes()}
+    changedIds = set()
     for compositeNode in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode"):
         if compositeNode.GetID() in figureIds:
             continue
+        changedIds.add(compositeNode.GetID())
         if background is not None:
             compositeNode.SetBackgroundVolumeID(background.GetID())
         if foreground is not None:
             compositeNode.SetForegroundVolumeID(foreground.GetID())
         if foregroundOpacity is not None:
             compositeNode.SetForegroundOpacity(foregroundOpacity)
+    if background is not None and keepAfterMap:
+        try:
+            from . import mappage
+        except ImportError:
+            mappage = None
+        if mappage is not None and callable(getattr(mappage, "setCapturedBackground", None)):
+            mappage.setCapturedBackground(background.GetID(), changedIds)
     if fit:
         layoutManager = slicer.app.layoutManager()
         if layoutManager is not None:
@@ -623,24 +1741,115 @@ def _normalizedPath(path):
     return os.path.normcase(os.path.realpath(os.path.abspath(str(path))))
 
 
-def openNodeForFile(path):
+def openNodeForFile(path, exclude=None):
     """The scan or segmentation of the scene that was loaded from ``path`` (same real path), or None.
 
+    ``exclude``: a node that is never returned (the node just loaded from ``path``, when looking for an older one).
+
     Only nodes shown to the user are considered: scans (not label maps) and segmentations whose storage node
-    reads that file.
+    reads that file. A node whose file the open project took over (its storage node now names the copy in the project) is
+    found by the file it was read from (``_projectSourceNodes()``).
     """
     if not path:
         return None
     target = _normalizedPath(path)
     for className in ("vtkMRMLScalarVolumeNode", "vtkMRMLSegmentationNode"):
         for node in slicer.util.getNodesByClass(className):
-            if node.GetHideFromEditors() or (className == "vtkMRMLScalarVolumeNode" and not _isScan(node)):
+            if _shownNodeForFile(node) is None or (exclude is not None and node.GetID() == exclude.GetID()):
                 continue
             storageNode = node.GetStorageNode()
             fileName = storageNode.GetFileName() if storageNode is not None else None
             if fileName and _normalizedPath(fileName) == target:
                 return node
+    for sequenceNode in slicer.util.getNodesByClass("vtkMRMLSequenceNode"):
+        # A 4D image (``loadSequence()``): the volume that shows its current item
+        storageNode = sequenceNode.GetStorageNode()
+        fileName = storageNode.GetFileName() if storageNode is not None else None
+        if fileName and _normalizedPath(fileName) == target:
+            proxyNode = _shownNodeForFile(sequenceNode)
+            if proxyNode is not None:
+                return proxyNode
+    for node in _projectSourceNodes(path):
+        shown = _shownNodeForFile(node)
+        if shown is not None and not (exclude is not None and shown.GetID() == exclude.GetID()):
+            return shown
     return None
+
+
+def openLabelMapAsLesion(path):
+    """The lesion for a lesion file that is open as a label map, else None.
+
+    3D Slicer's Add Data (Classic) reads a ``*_lesion`` (mask, roi) file as a label map volume. In Studio that file is
+    already open: the label map becomes the lesion that Draw edits (``library.labelMapToLesion()``, as "Continue in
+    Draw" does) instead of a second copy being loaded. The label map is found by the file it reads, or, when the open
+    project took that file over, by the file it was read from (``_projectSourceNodes()``).
+    """
+    if not path:
+        return None
+    target = _normalizedPath(path)
+    labelMaps = []
+    for node in slicer.util.getNodesByClass("vtkMRMLLabelMapVolumeNode"):
+        storageNode = node.GetStorageNode()
+        fileName = storageNode.GetFileName() if storageNode is not None else None
+        if fileName and _normalizedPath(fileName) == target:
+            labelMaps.append(node)
+    labelMaps.extend(node for node in _projectSourceNodes(path) if node.IsA("vtkMRMLLabelMapVolumeNode"))
+    labelMap = next((node for node in labelMaps if not node.GetHideFromEditors()), None)
+    if labelMap is None:
+        return None
+    from . import library
+
+    return library.labelMapToLesion(labelMap)
+
+
+def _shownNodeForFile(node):
+    """The node shown to the user for ``node`` read from a file: a scan (not a label map) or a segmentation, the proxy scan
+    of a sequence; None for anything else.
+    """
+    if node is None:
+        return None
+    if node.IsA("vtkMRMLSequenceNode"):
+        proxyNode = _sequenceProxy(node)
+        return proxyNode if proxyNode is not None and _isScan(proxyNode) else None
+    if node.GetHideFromEditors():
+        return None
+    if node.IsA("vtkMRMLScalarVolumeNode"):
+        return node if _isScan(node) else None
+    return node if node.IsA("vtkMRMLSegmentationNode") else None
+
+
+def _projectSourceNodes(path):
+    """Nodes of the scene read from ``path``, a file outside the open project that the project took over (A-09: the project
+    copies or writes it into its own folders and its storage node names that file from then on).
+    """
+    try:
+        from . import autosave
+
+        service = autosave.instance()
+    except ImportError:
+        return []
+    writer = getattr(service, "projectWriter", None) if service is not None else None
+    if writer is None or not hasattr(writer, "nodeIdsForSource"):
+        return []
+    nodes = (slicer.mrmlScene.GetNodeByID(nodeId) for nodeId in writer.nodeIdsForSource(path))
+    return [node for node in nodes if node is not None]
+
+
+def _sequenceProxy(sequenceNode):
+    """The node that shows the current item of ``sequenceNode`` (its first sequence browser's proxy), None if none."""
+    browserNode = slicer.modules.sequences.logic().GetFirstBrowserNodeForSequenceNode(sequenceNode)
+    return browserNode.GetProxyNode(sequenceNode) if browserNode is not None else None
+
+
+def loadSequence(path):
+    """Load a 4D image (fMRI, a 4D mask) as a sequence, as 3D Slicer's Add Data does, and return the volume that shows its
+    current time point (the sequence browser's proxy node).
+    """
+    sequenceNode = slicer.util.loadNodeFromFile(path, "SequenceFile")
+    proxyNode = _sequenceProxy(sequenceNode)
+    if proxyNode is None or not proxyNode.IsA("vtkMRMLVolumeNode"):
+        raise RuntimeError(_("{path} was loaded as a sequence but has no volume to show").format(path=path))
+    return proxyNode
 
 
 def _openReference(path, role):
@@ -654,6 +1863,9 @@ def _openReference(path, role):
         storageNode = node.GetStorageNode()
         fileName = storageNode.GetFileName() if storageNode is not None else None
         if fileName and _normalizedPath(fileName) == target:
+            return node
+    for node in _projectSourceNodes(path):
+        if node.IsA("vtkMRMLVolumeNode") and node.GetAttribute(space.ROLE_ATTRIBUTE) == role:
             return node
     return None
 
@@ -740,7 +1952,7 @@ def _deleteNow(widget):
 
 def _disposeOnQuit():
     """Release what the importer holds before the application quits: notice widgets, overlays, observers, the offer."""
-    global _figureController, _transientWatcher, _loadedSet
+    global _figureController, _transientWatcher, _loadedSet, _figureViewExclusion
     for widget in list(_pendingNotices.values()):
         _deleteNow(widget)
     _pendingNotices.clear()
@@ -762,6 +1974,9 @@ def _disposeOnQuit():
     if _figureController is not None:
         _figureController.dispose()
         _figureController = None
+    if _figureViewExclusion is not None:
+        _figureViewExclusion.dispose()
+        _figureViewExclusion = None
 
 
 def _withdrawNotice(key, shell=None, delete=True):
@@ -898,25 +2113,212 @@ def _noticeButton(frame, text):
 #
 
 
+_addDataDialogs = 0
+
+#: The module of Draw (the Segment Editor): a scan that the Add Data dialog loads there is opened for drawing
+_DRAW_MODULE = "SegmentEditor"
+
+
+def _addDataFiles(paths):
+    """``paths`` with each folder replaced by the files in it and its subfolders (sorted, hidden entries left out), as 3D
+    Slicer's Add Data dialog lists a dropped folder. The dialog's own ``fileName``/``fileNames`` take files only: a folder
+    given there added no row, so a folder with one scan (or only NRRD/MGZ scans) opened an empty dialog (BB-1).
+    """
+    files = []
+    for path in paths:
+        if not os.path.isdir(path):
+            files.append(path)
+            continue
+        for folder, subfolders, names in os.walk(path):
+            subfolders[:] = sorted(name for name in subfolders if not name.startswith("."))
+            files.extend(os.path.join(folder, name) for name in sorted(names)
+                         if not name.startswith(".") and os.path.isfile(os.path.join(folder, name)))
+    return files
+
+
+def _leaveOutDamagedNifti(paths):
+    """``paths`` without the NIfTI files that a drop, Open... or Recent refuses (cut short, bad header, too large): the
+    dialog would load them silently (missing voxels read as 0) and a project would be started around them. The refused
+    files are announced with their reasons. Return None when files were given and all of them were refused.
+    """
+    kept, refused = [], []
+    for path in paths:
+        try:
+            _checkNiftiComplete(path)
+        except RuntimeError as e:
+            logging.warning(f"Studio: {path} was not opened: {e}")  # planned refusal: no traceback
+            _noteLoadResult(path, False)
+            name = os.path.basename(path)
+            refused.append((path, str(e) if str(e).startswith(name) else f"{name}: {e}"))
+            continue
+        kept.append(path)
+    if refused:
+        slicer.util.warningDisplay(_("Some files could not be loaded:") + "\n\n" + "\n".join(m for _p, m in refused),
+                                   detailedText="\n".join(f"{p}\n{m}" for p, m in refused))
+    return kept if kept or not refused else None
+
+
 def openAddDataDialog(paths):
     """Open the classic Add Data dialog with ``paths`` (files or folders) already listed."""
-    paths = [str(path) for path in paths]
+    global _addDataDialogs
+    paths = _addDataFiles([str(path) for path in paths])
+    paths = _leaveOutDamagedNifti(paths)
+    if paths is None:
+        return False  # every file was refused (announced): an empty dialog would only confuse
     ioManager = slicer.app.ioManager()
-    if not paths:
-        return ioManager.openAddDataDialog()
-    if len(paths) == 1:
-        return ioManager.openAddDataDialog(paths[0])
-    return ioManager.openDialog("NoFile", slicer.qSlicerFileDialog.Read, {"fileNames": paths})
+    # While the dialog is open, a scan that it loads is also opened for drawing when Draw is shown (the transient module
+    # watcher): otherwise Draw kept saying "Open a scan" over a scan, with no lesion and every tool disabled
+    _addDataDialogs += 1
+    try:
+        if not paths:
+            return ioManager.openAddDataDialog()
+        if len(paths) == 1:
+            return ioManager.openAddDataDialog(paths[0])
+        return ioManager.openDialog("NoFile", slicer.qSlicerFileDialog.Read, {"fileNames": paths})
+    finally:
+        _addDataDialogs -= 1
+
+
+#: Kinds of file whose load Draw edits a lesion of (a scene, a scan, a 4D image, a lesion)
+_TRACED_KINDS = ("scene", "volume", "sequence", "lesion")
+
+#: Kinds of file that Studio opens itself, without the Add Data dialog
+_DIRECT_KINDS = ("scene", "volume", "sequence", "lesion", "figure", "statmap")
+
+
+def _openAddDataDialogForScans(paths):
+    """Open the Add Data dialog with ``paths`` and return the scans that it added to the scene.
+
+    The scans are shown by the load they belong to: the transient module watcher leaves them alone.
+    """
+    before = {node.GetID() for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")}
+    with _ownLoad():
+        openAddDataDialog(paths)
+    return [node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
+            if node.GetID() not in before and _isScan(node) and not node.GetHideFromEditors()]
+
+
+def _studySubjectOfFile(studySession, path):
+    """The subject of the open study whose scan or lesion is ``path`` (also its open node), else None."""
+    subjectOfFile = getattr(studySession, "subjectOfFile", None)
+    sid = subjectOfFile(path) if callable(subjectOfFile) else None
+    if sid is None:
+        openNode = openNodeForFile(path)
+        if openNode is not None and (_sameNode(openNode, studySession.volumeNode()) or _sameNode(openNode, studySession.segmentationNode())):
+            sid = studySession.current()
+    return sid
+
+
+def _continueProjectAfterStudy():
+    """A scene load closed the study: the work that was open before it (shown again) continues as its project now, as the
+    next autosave poll would, so that the scene replaces that project as its own project (A-09: a scene from outside becomes
+    a copy). Left released, the scene was added on top of the earlier project's nodes, and the next poll saved both as a
+    new "<project> 2" (BB-1).
+    """
+    try:
+        from . import autosave
+
+        service = autosave.instance()
+        if service is not None and hasattr(service, "continueProjectBeforeScene"):
+            service.continueProjectBeforeScene()
+    except Exception:
+        logging.error(f"Studio: the project open before the study could not be continued:\n{traceback.format_exc()}")
+
+
+def _routeStudyLoad(paths, kinds, shell):
+    """With a study open (Studio), route the scenes, scans and lesions of a load before it: Draw edits one lesion, and
+    Done → next writes the study's subject.
+
+    A file of a subject of the study (its scan or lesion) opens that subject in the study instead of being loaded again. Any
+    other one closes the study first (the current subject's edits are written, as when another study or a project
+    opens; a scene then opens as its own project, ``_continueProjectAfterStudy()``): left open, Draw would trace the loaded scan under the study's breadcrumb, Done → next would write the hidden
+    subject, and the tracing would be saved nowhere (no project is saved while a study is open). A toast offers to reopen
+    the study. Return ``(paths, kinds)`` left to load, or None when nothing is loaded (the current subject's edits could
+    not be written: a toast says why, and the study stays open).
+    """
+    studySession = _studySession()
+    if studySession is None or not any(kind in _TRACED_KINDS for kind in kinds):
+        return paths, kinds
+    traced = [path for path, kind in zip(paths, kinds, strict=True) if kind in _TRACED_KINDS]
+    sids = [_studySubjectOfFile(studySession, path) for path in traced]
+    if all(sids):
+        studySession.open(sids[0], switchToDraw=True)
+        kept = [(path, kind) for path, kind in zip(paths, kinds, strict=True) if kind not in _TRACED_KINDS]
+        return [path for path, _kind in kept], [kind for _path, kind in kept]
+    outside = traced[sids.index(None)]
+    message = _("Study {study} closed: {file} is not one of its subjects").format(study=studySession.name, file=os.path.basename(outside))
+    if not _closeStudyForOutsideLoad(studySession, shell, message, scene="scene" in kinds):
+        return None
+    return paths, kinds
+
+
+def _closeStudyForOutsideLoad(studySession, shell, message, scene=False):
+    """Close the open study before data from outside it is loaded or started (``_routeStudyLoad()``: Open..., a drop, a
+    recent file, a DICOM folder; Start on template with another template): its current subject's edits are written first,
+    a scene then opens as its own project (``scene``), and a consequence toast ``message`` offers to reopen the study. Left
+    open, Draw would trace that data under the study's breadcrumb and it would be saved nowhere. Return False when the
+    current subject's edits could not be written (a toast says why, and the study stays open): nothing is loaded then.
+    """
+    if not studySession.writeCurrent():
+        return False
+    from . import study_ui
+
+    studyPath, sid = studySession.path, studySession.current()
+    study_ui.closeStudy()
+    if scene:
+        _continueProjectAfterStudy()
+    if shell is not None:
+        shell.toast(message, level="consequence", action=lambda: study_ui.openStudy(studyPath, shell, subject=sid),
+                    actionText=_("Reopen study"))
+    return True
+
+
+def _headerDataFiles(paths):
+    """The paths that are the data file of a detached header dropped with them (a ``.raw`` of a ``.nhdr`` or ``.mhd``, an
+    ``.img`` of a ``.hdr``): the header loads the scan, so the data file is not a file to open by itself.
+    """
+    present = {os.path.normcase(os.path.abspath(str(path))) for path in paths}
+    dataFiles = set()
+    for path in paths:
+        extension = _extension(str(path))
+        if extension not in (".nhdr", ".mhd", ".hdr"):
+            continue
+        folder = os.path.dirname(os.path.abspath(str(path)))
+        names = []
+        if extension == ".hdr":
+            names.append(os.path.splitext(os.path.basename(str(path)))[0] + ".img")
+        else:
+            separator = ":" if extension == ".nhdr" else "="
+            wanted = ("data file", "datafile") if extension == ".nhdr" else ("elementdatafile",)
+            try:
+                with open(path, "rb") as f:
+                    text = f.read(65536).decode("latin-1")
+            except OSError:
+                continue
+            for line in text.splitlines():
+                key, found, value = line.partition(separator)
+                if found and key.strip().lower() in wanted and value.split():
+                    names.append(value.split()[0])
+                    break
+        for name in names:
+            key = os.path.normcase(os.path.normpath(os.path.join(folder, name)))
+            if key in present and key != os.path.normcase(os.path.abspath(str(path))):
+                dataFiles.add(key)
+    return dataFiles
 
 
 def loadFiles(paths, shell=None, pairedLesion=None):
     """Load files directly (see the module documentation) and return a ``LoadResult``.
 
     If a path is a folder or a file of another type, nothing is loaded and the Add Data dialog opens with
-    all the paths. In Studio, the first scan becomes the background of the slice views, the Segment Editor
+    all the paths. In Studio, a scan of another format (a FreeSurfer .mgz) that is already open is not loaded again (its node
+    becomes current again), and only the files of another type go to the Add Data dialog when the load also has scans or
+    lesions (and no scene): those are loaded here, with the scans that the dialog loaded. In Studio, the first scan
+    becomes the background of the slice views, the Segment Editor
     is prepared on it (with the lesion file of the same load, if any) and Draw is shown. Figures, statistical maps
     and participants tables take their own routes (module documentation). ``pairedLesion``: a lesion that the scan
-    of this load belongs to ("Open with patient_T1.nii.gz"): Draw edits it on the scan.
+    of this load belongs to ("Open with patient_T1.nii.gz"): Draw edits it on the scan. With a study open, a subject's own
+    scan or lesion opens that subject, and any other scan, lesion or scene closes the study first (``_routeStudyLoad()``).
     """
     shell = _currentShell(shell)
     result = LoadResult()
@@ -924,15 +2326,28 @@ def loadFiles(paths, shell=None, pairedLesion=None):
     paths = [os.path.abspath(str(path)) for path in paths]
     if not paths:
         return result
+    dataFiles = _headerDataFiles(paths)
+    if dataFiles:
+        # The data file of a header dropped with it (.nhdr + .raw) is read by the header, not on its own
+        paths = [path for path in paths if os.path.normcase(path) not in dataFiles]
     kinds = [fileKind(path) for path in paths]
     if shell is None:
         # Classic: 3D Slicer's routes (a picture or a table goes to Add Data, a statistical map is a volume)
         kinds = ["volume" if kind == "statmap" else kind for kind in kinds]
-        if any(kind not in ("scene", "volume", "lesion") for kind in kinds):
+        if any(kind not in ("scene", "volume", "sequence", "lesion") for kind in kinds):
             result.addDataPaths = paths
             openAddDataDialog(paths)
             return result
     else:
+        projectFolder = _closedProjectHoldingAll(paths, kinds) if pairedLesion is None else None
+        if projectFolder is not None:
+            # Scans and lesions of a Slicer Studio project that is not open (dropped, Open...): open that project in place
+            # with its lesion (A-09), never a second project or the open one with copies of its files
+            loadFolder(projectFolder, shell)
+            from . import projects
+
+            result.scenes.append(projects.sceneFile(projectFolder) or projectFolder)
+            return result
         tables = [path for path, kind in zip(paths, kinds, strict=True) if kind == "table" and isParticipantsTable(path)]
         if tables:
             # A participants table never opens the Add Data dialog (its "Color" reader would read it as a colour table)
@@ -943,19 +2358,67 @@ def loadFiles(paths, shell=None, pairedLesion=None):
             paths, kinds = [path for path, _kind in kept], [kind for _path, kind in kept]
             if not paths:
                 return result
-        if any(kind not in ("scene", "volume", "lesion", "figure", "statmap") for kind in kinds):
+        if all(kind == "other" for kind in kinds) and all(isDicomFile(path) for path in paths):
+            # The files of a DICOM series (selected instead of their folder) take the route of their dropped folder: the
+            # default database is created if there is none, and one series opens in Draw. The Add Data dialog's DICOM
+            # reader found no database on a fresh profile: nothing was imported, and SQL errors lit the error badge
+            importDicomFiles(paths, shell)
+            return result
+        # A scan of another format (a FreeSurfer .mgz) that is already open is not loaded again by the Add Data dialog: its
+        # node becomes current again, as for a NIfTI or NRRD scan
+        reopened = {}
+        if "scene" not in kinds:
+            for path, kind in zip(paths, kinds, strict=True):
+                openNode = openNodeForFile(path) if kind == "other" else None
+                if openNode is not None and _isScan(openNode):
+                    reopened[path] = openNode
+        if reopened:
+            result.alreadyOpen.extend(reopened.values())
+            recordOpenTimes(list(reopened))
+            kept = [(path, kind) for path, kind in zip(paths, kinds, strict=True) if path not in reopened]
+            paths, kinds = [path for path, _kind in kept], [kind for _path, kind in kept]
+            if not paths:
+                _afterLoad(result, shell)
+                return result
+        others = [path for path, kind in zip(paths, kinds, strict=True) if kind not in _DIRECT_KINDS]
+        if others and (len(others) == len(paths) or "scene" in kinds):
+            # Nothing that Studio opens itself, or a scene (it may replace what the dialog loads): all go to Add Data
             result.addDataPaths = paths
             openAddDataDialog(paths)
             return result
+        if others:
+            # Only the files Studio does not open itself go to Add Data: the scans and lesions of the load take Studio's
+            # route (left in the dialog, a lesion would be read as a label map that Draw does not edit)
+            kept = [(path, kind) for path, kind in zip(paths, kinds, strict=True) if kind in _DIRECT_KINDS]
+            paths, kinds = [path for path, _kind in kept], [kind for _path, kind in kept]
+        routed = _routeStudyLoad(paths, kinds, shell)
+        if routed is None:
+            return result
+        paths, kinds = routed
+        if others:
+            result.addDataPaths = others
+            addedScans = _openAddDataDialogForScans(others)
+            if paths:
+                # A scan that the dialog loaded (for example a FreeSurfer .mgz) is a scan of this load: its lesion is
+                # shown and edited on it
+                result.volumes.extend(addedScans)
+        if not paths:
+            return result
 
     loadedPaths = []
+    refused = []
+    topBar = getattr(shell, "topBar", None) if shell is not None else None
     with slicer.util.WaitCursor():
-        # Scenes first (they may replace nodes), then scans, then lesions (shown over the scans)
-        for wantedKind in ("scene", "volume", "lesion"):
+        # Scenes first (they may replace nodes), then scans (a 4D image is a sequence), then lesions (shown over the scans)
+        for wantedKind in ("scene", "volume", "sequence", "lesion"):
             for path, kind in zip(paths, kinds, strict=True):
                 if kind != wantedKind:
                     continue
+                logMark = topBar.logRowMark() if hasattr(topBar, "logRowMark") else None
                 openNode = openNodeForFile(path) if shell is not None and kind != "scene" else None
+                if openNode is None and shell is not None and kind == "lesion":
+                    # A lesion file that Classic's Add Data opened as a label map: that label map becomes the lesion
+                    openNode = openLabelMapAsLesion(path)
                 if openNode is not None:
                     # In Studio, a file is not loaded twice: its node becomes current again
                     result.alreadyOpen.append(openNode)
@@ -963,24 +2426,60 @@ def loadFiles(paths, shell=None, pairedLesion=None):
                     continue
                 try:
                     if kind == "scene":
-                        _announceSceneSource(path)
-                        slicer.util.loadScene(path, {})
+                        service = _sceneProjectService(shell)
+                        if service is not None and (service.isOpenCopyOf(path) or service.isOpenProjectScene(path)):
+                            result.alreadyOpenScenes.append(service.project.name)
+                            loadedPaths.append(path)
+                            continue
+                        if not _loadScene(path, shell):
+                            continue  # not opened (for example a project locked by another computer): already announced
                         result.scenes.append(path)
                     elif kind == "volume":
+                        _checkNiftiComplete(path)
+                        _checkScanVoxelType(path)
                         result.volumes.append(slicer.util.loadVolume(path, {"singleFile": True}))
+                    elif kind == "sequence":
+                        _checkNiftiComplete(path)
+                        _checkScanVoxelType(path)
+                        result.volumes.append(loadSequence(path))
                     else:
-                        result.segmentations.append(loadLesion(path))
+                        segmentationNode = loadLesion(path)
+                        restoreSidecarText(segmentationNode, path)
+                        result.segmentations.append(segmentationNode)
                     loadedPaths.append(path)
+                    _noteLoadResult(path, True)
+                except RefusedFileError as e:
+                    refused.append(path)
+                    _noteLoadResult(path, False)
+                    logging.warning(f"Studio: {path} was not opened: {e}")  # planned refusal: no traceback
+                    result.errors.append((path, str(e)))
                 except Exception as e:
+                    if _isAllocationFailure(e) or _isNiftiTooLargeForMemory(path, e):
+                        # a file too large for the memory: planned refusal, plain words (no reader text, no traceback)
+                        refused.append(path)
+                        _noteLoadResult(path, False)
+                        if logMark is not None:
+                            topBar.ignoreErrorRowsSince(logMark)  # the reader's raw Error rows: already explained
+                        logging.warning(f"Studio: {path} was not opened: too large for the memory ({str(e)[:200]!r})")
+                        result.errors.append((path, _tooLargeMessage(path)))
+                        continue
                     logging.error(f"Studio: cannot load {path}:\n{traceback.format_exc()}")
+                    _noteLoadResult(path, False)
                     result.errors.append((path, str(e)))
     _afterLoad(result, shell)
     if shell is not None:
         statmapPaths = [path for path, kind in zip(paths, kinds, strict=True) if kind == "statmap"]
         figurePaths = [path for path, kind in zip(paths, kinds, strict=True) if kind == "figure"]
         for path in statmapPaths:
-            if _routeStatMap(path, shell, result):
-                loadedPaths.append(path)
+            try:
+                if _routeStatMap(path, shell, result):
+                    loadedPaths.append(path)
+            except RefusedFileError as e:
+                # A damaged map (header that lies, data cut short, too large): the same plain refusal as a scan's
+                refused.append(path)
+                _noteLoadResult(path, False)
+                logging.warning(f"Studio: {path} was not opened: {e}")  # planned refusal: no traceback
+                result.errors.append((path, str(e)))
         if figurePaths:
             if _openFigure(figurePaths[0], shell, result):
                 loadedPaths.append(figurePaths[0])
@@ -989,8 +2488,13 @@ def loadFiles(paths, shell=None, pairedLesion=None):
     if loadedPaths:
         recordOpenTimes(loadedPaths)
     if result.errors:
-        slicer.util.errorDisplay(
-            _("Some files could not be loaded:") + "\n\n" + "\n".join(os.path.basename(path) for path, error in result.errors),
+        # A planned refusal says why in the box and is a warning (errorDisplay would log an ERROR and light the error badge)
+        refusedOnly = all(path in refused for path, error in result.errors)
+        # A refusal message that starts with the file name is shown alone ("x.nii is empty", not "x.nii: x.nii is empty")
+        lines = "\n".join((error if str(error).startswith(os.path.basename(path)) else f"{os.path.basename(path)}: {error}")
+                          if path in refused else os.path.basename(path) for path, error in result.errors)
+        (slicer.util.warningDisplay if refusedOnly else slicer.util.errorDisplay)(
+            _("Some files could not be loaded:") + "\n\n" + lines,
             detailedText="\n\n".join(f"{path}\n{error}" for path, error in result.errors))
     return result
 
@@ -1084,20 +2588,42 @@ def _forgetLoadedSetFor(segmentationNode):
 
 def _showLoaded(result, shell, scans, openScans, openLesions):
     """Studio part of ``_afterLoad()``: the scans and lesions of a load in Draw."""
+    for lesion in result.segmentations:
+        recordLesionGrid(lesion)
+    lesions = result.segmentations or openLesions
+    if result.pairedLesion is not None and not lesions and slicer.mrmlScene.IsNodePresent(result.pairedLesion):
+        lesions = [result.pairedLesion]
+    if scans and not lesions:
+        # A scan dropped after its lesion (opened alone, so unbound): the lesion is bound to it and Draw edits it, as when
+        # both are dropped together (never a new empty lesion next to it)
+        lesions = _adoptOpenLesions(scans)
+    # Every lesion of the load is bound to the scan whose grid it is on (several subjects may be opened at once), and
+    # Draw shows the first lesion on its own scan
+    _bindLoadedLesions(result.segmentations, scans + [node for node in openScans if not any(_sameNode(node, scan) for scan in scans)])
+    if lesions and (scans or openScans):
+        shownScans = scans or openScans
+        own = next((scan for scan in shownScans if _isBoundTo(lesions[0], scan)), None)
+        if own is not None and not _sameNode(own, shownScans[0]):
+            shownScans = [own] + [scan for scan in shownScans if not _sameNode(scan, own)]
+            if scans:
+                scans = shownScans
+            else:
+                openScans = shownScans
     if scans:
         setViewLayers(background=scans[0], fit=True)
     elif openScans and not _sameNode(_backgroundVolume(), openScans[0]):
         setViewLayers(background=openScans[0], fit=True)
-    for lesion in result.segmentations:
-        recordLesionGrid(lesion)
     editedSegmentation, editedSource = _editedNodes()
-    lesions = result.segmentations or openLesions
-    if result.pairedLesion is not None and not lesions and slicer.mrmlScene.IsNodePresent(result.pairedLesion):
-        lesions = [result.pairedLesion]
-    if not scans and not openScans and lesions and _userScanShown() is None and not (
-            _sameNode(lesions[0], editedSegmentation) and editedSource is not None and not _isTemplate(editedSource)):
-        # A lesion without a scan of its own: shown on the template only when it is on an MNI grid
+    shownScan = _userScanShown()
+    if not scans and not openScans and lesions and (
+            shownScan is None or _mniLesionOffScan(lesions[0], shownScan) or _otherSubjectScan(lesions[0], shownScan)) and not (
+            _sameNode(lesions[0], editedSegmentation) and editedSource is not None and not _isTemplate(editedSource)
+            and not _mniLesionOffScan(lesions[0], editedSource)):
+        # A lesion without a scan of its own: shown on the template only when it is on an MNI grid (also while a scan of
+        # the user in scan space is shown: an MNI lesion drawn over it would be at a wrong place). A lesion of another BIDS
+        # subject than the scan in scan space shown has no scan of its own either: never drawn on it, even on its grid
         _showLesionsWithoutScan(lesions, shell, newlyLoaded=bool(result.segmentations))
+        _otherSubjectToast(lesions, shownScan, shell)
         _loadToast(result, shell)
         return
     if scans:
@@ -1108,7 +2634,21 @@ def _showLoaded(result, shell, scans, openScans, openLesions):
         sourceVolume = editedSource
     else:
         sourceVolume = _backgroundVolume()
-    if sourceVolume is not None and (scans or lesions or openScans):
+    otherSubject = []
+    if sourceVolume is not None and lesions and (scans or openScans):
+        # A lesion of another BIDS subject is never drawn on the scan in scan space shown (scans of different subjects may
+        # share a grid): it stays loaded, unbound and hidden, and Draw edits a lesion of the scan (a lesion that the user
+        # paired with this scan, or that is bound to it, is kept)
+        otherSubject = [lesion for lesion in lesions if _otherSubjectScan(lesion, sourceVolume)
+                        and not _sameNode(lesion, result.pairedLesion) and not _isBoundTo(lesion, sourceVolume)]
+        lesions = [lesion for lesion in lesions if not any(_sameNode(lesion, other) for other in otherSubject)]
+        for lesion in otherSubject:
+            _setLesionVisible(lesion, False)
+    if sourceVolume is not None and sourceVolume.IsA("vtkMRMLVectorVolumeNode") and not lesions:
+        # A 3D colour image is shown but never traced (SegmentEditor.isEditableSourceVolume): no empty lesion is created
+        # for it, and Draw says why
+        shell.switchTo("draw")
+    elif sourceVolume is not None and (scans or lesions or openScans):
         # Draw edits the loaded lesion, else a segmentation bound to the scan (never the segmentation of a previous
         # scan or of the template, which may hold another subject's lesion)
         if segmentEditorWidget() is not None:
@@ -1118,7 +2658,11 @@ def _showLoaded(result, shell, scans, openScans, openLesions):
                 # The scan was already open and Draw edits its lesion: keep it (and the selected segment)
                 lesion = editedSegmentation
             else:
-                lesion = _lesionSegmentationFor(sourceVolume, scanLesionSegmentationName(sourceVolume))
+                # The scan was already open and Draw edits nothing on it (for example after its project was reopened):
+                # Draw continues the lesion bound to it, whatever its name (as Library's "Open in Draw" does)
+                lesion = _boundLesionOf(sourceVolume) if not scans else None
+                if lesion is None:
+                    lesion = _lesionSegmentationFor(sourceVolume, scanLesionSegmentationName(sourceVolume))
             if scans or openScans:
                 # A scan of the user: the lesions of a loaded set (MNI masks) are not shown over it
                 _forgetLoadedSetFor(lesion)
@@ -1126,7 +2670,9 @@ def _showLoaded(result, shell, scans, openScans, openLesions):
                 # A lesion opened with its scan is shown (it may have been hidden while it had no scan), and bound to it
                 # when it is on the scan's grid (its own grid is never changed)
                 _setLesionVisible(lesion, True)
-                _bindToScanGrid(lesion, sourceVolume)
+                if not _otherSubjectLesion(lesion, sourceVolume) or _sameNode(lesion, result.pairedLesion):
+                    # A lesion of another BIDS subject (on a scan on an MNI grid) is shown there but never bound to it
+                    _bindToScanGrid(lesion, sourceVolume)
                 _withdrawNotice("native-lesion", shell)
                 _updateLesionSpaceNotice(lesion, sourceVolume, shell)
             if not (_sameNode(lesion, editedSegmentation) and _sameNode(sourceVolume, editedSource)):
@@ -1140,7 +2686,123 @@ def _showLoaded(result, shell, scans, openScans, openLesions):
     elif result.scenes and shell.currentWorkspace() == "library":
         # The Library page covers the views: Draw shows the scene, in the scene's own layout
         shell.switchTo("draw", keepLayout=True)
+    _otherSubjectToast(otherSubject, sourceVolume, shell)
     _loadToast(result, shell)
+
+
+def _nodeSubject(node):
+    """The BIDS subject of a lesion or scan: in its file name, else in its node name (None if there is none)."""
+    return bidsSubject(os.path.basename(_lesionFilePath(node) or "")) or bidsSubject(node.GetName())
+
+
+def _otherSubjectLesion(segmentationNode, volumeNode):
+    """True when the lesion and the scan both name a BIDS subject, and not the same one."""
+    if segmentationNode is None or volumeNode is None:
+        return False
+    subject, scanSubject = _nodeSubject(segmentationNode), _nodeSubject(volumeNode)
+    return bool(subject and scanSubject and subject.lower() != scanSubject.lower())
+
+
+def _otherSubjectScan(segmentationNode, volumeNode):
+    """True when the scan is of another BIDS subject than the lesion and in scan space: the lesion is never drawn on it.
+
+    A scan on an MNI grid (a normalized scan) is in a common space, as the template: a lesion of any subject is shown there.
+    """
+    return _otherSubjectLesion(segmentationNode, volumeNode) and not space.isMni(volumeNode)
+
+
+def _otherSubjectToast(lesions, volumeNode, shell):
+    """Tell the user that a loaded lesion of another BIDS subject is not drawn on the scan shown."""
+    lesions = [lesion for lesion in lesions if _otherSubjectScan(lesion, volumeNode)]
+    if not lesions or shell is None:
+        return
+    shell.toast(_("{name} is a lesion of {subject}: it is not shown on {scan} ({scanSubject})").format(
+        name=lesions[0].GetName(), subject=_nodeSubject(lesions[0]), scan=volumeNode.GetName(), scanSubject=_nodeSubject(volumeNode)),
+        level="consequence")
+
+
+def _mniLesionOffScan(segmentationNode, volumeNode):
+    """True when a lesion on an MNI grid would be shown on a scan in scan space (not on an MNI grid, the lesion not
+    bound to it): its MNI coordinates are not the scan's anatomy, so it is shown on the template instead.
+    """
+    if segmentationNode is None or volumeNode is None or _isTemplate(volumeNode):
+        return False
+    return space.isMni(segmentationNode) and not space.isMni(volumeNode) and not _isBoundTo(segmentationNode, volumeNode)
+
+
+def _bindLoadedLesions(lesions, scans):
+    """Bind each loaded lesion that is not bound to a scan yet to the scan of ``scans`` whose grid it is on.
+
+    A scan of the lesion's own BIDS subject is tried first, and a scan of another BIDS subject is never chosen (scans of
+    different subjects may share a grid). Then the scan whose file is nearest to the lesion's file is tried first (in its
+    folder, else in the deepest common folder): with generic names (``patient01/T1.nii.gz`` and ``patient01/lesion.nii.gz``)
+    the folder is the only pairing of a lesion with its scan. A lesion on none of the grids stays unbound.
+    """
+    role = slicer.vtkMRMLSegmentationNode.GetReferenceImageGeometryReferenceRole()
+    for lesion in lesions:
+        if lesion is None or lesion.GetNodeReference(role) is not None:
+            continue
+        subject = _nodeSubject(lesion)
+        lesionFolder = _fileFolder(_lesionFilePath(lesion))
+        candidates = []
+        for scan in scans:
+            if _otherSubjectLesion(lesion, scan):
+                continue
+            candidates.append(((0 if subject and _nodeSubject(scan) else 1, -_commonFolderDepth(lesionFolder, _fileFolder(_lesionFilePath(scan)))), scan))
+        # sorted() is stable: scans of the same rank keep the load order
+        for _rank, scan in sorted(candidates, key=lambda item: item[0]):
+            if _bindToScanGrid(lesion, scan):
+                break
+
+
+def _adoptOpenLesions(scans):
+    """Bind the open lesions that are not bound to a scan to the newly loaded scan of ``scans`` that is their own.
+
+    A lesion is the own lesion of a scan when it is on the scan's grid and both name the same BIDS subject, or, when the
+    lesion names no subject (generic names such as ``patient01/lesion.nii.gz`` and ``patient01/T1.nii.gz``), when both
+    files are in the same folder. A lesion of a loaded set is adopted only by its BIDS subject; a lesion hidden from the
+    editors, or with no file, never. Return the adopted lesions, in scene order.
+    """
+    role = slicer.vtkMRMLSegmentationNode.GetReferenceImageGeometryReferenceRole()
+    adopted = []
+    for lesion in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):
+        if lesion.GetHideFromEditors() or lesion.GetNodeReference(role) is not None or not _lesionFilePath(lesion):
+            continue
+        subject = _nodeSubject(lesion)
+        lesionFolder = _fileFolder(_lesionFilePath(lesion))
+        own = []
+        for scan in scans:
+            scanSubject = _nodeSubject(scan)
+            if subject:
+                if scanSubject and subject.lower() == scanSubject.lower():
+                    own.append(scan)
+            elif not scanSubject and lesionFolder is not None and lesionFolder == _fileFolder(_lesionFilePath(scan)) and not (
+                    _loadedSet is not None and _loadedSet.contains(lesion)):
+                own.append(scan)
+        if own:
+            _bindLoadedLesions([lesion], own)
+            if any(_isBoundTo(lesion, scan) for scan in own):
+                adopted.append(lesion)
+    return adopted
+
+
+def _fileFolder(path):
+    """The normalized absolute folder of a file (None for no file)."""
+    if not path:
+        return None
+    return os.path.normcase(os.path.dirname(os.path.abspath(path)))
+
+
+def _commonFolderDepth(folder, otherFolder):
+    """The number of path components two folders have in common (0 when one is unknown or they share no root)."""
+    if not folder or not otherFolder:
+        return 0
+    try:
+        common = os.path.commonpath([folder, otherFolder])
+    except ValueError:
+        # Different drives (Windows), or an absolute and a relative path
+        return 0
+    return len([part for part in common.replace("\\", "/").split("/") if part])
 
 
 def _bindToScanGrid(segmentationNode, volumeNode, tolerance=1e-3):
@@ -1165,7 +2827,50 @@ def _bindToScanGrid(segmentationNode, volumeNode, tolerance=1e-3):
     return True
 
 
+def irregularGeometryVolumes(nodes):
+    """The volumes of ``nodes`` under a non-linear (grid) transform.
+
+    The DICOM scalar volume plugin adds such a "acquisition transform" to a series with a missing slice or an uneven
+    slice spacing: the image is loaded and shown straight, but its slices are not where the file says.
+    """
+    found = []
+    for node in nodes:
+        if not node.IsA("vtkMRMLScalarVolumeNode"):
+            continue
+        parent = node.GetParentTransformNode()
+        if parent is not None and not parent.IsTransformToWorldLinear():
+            found.append(node)
+    return found
+
+
+def _irregularGeometryToast(nodes, shell):
+    """Say that a volume of ``nodes`` has a missing slice or an uneven slice spacing; return True if one has."""
+    irregular = irregularGeometryVolumes(nodes)
+    if not irregular:
+        return False
+    # The series has a missing slice or an uneven spacing (Slicer corrected the geometry with a grid transform): a
+    # consequence of an automatic action (USABILITY 6.3), it stays until the next input, so the "Saving to
+    # Projects/x" of the project that the load creates does not replace it before it is read
+    shell.toast(_("{name}: a slice is missing or the slice spacing is uneven. The image is shown corrected: "
+                  "check measurements and the lesion on it.").format(name=irregular[0].GetName()),
+                ms=7000, level="warning", sticky=True)
+    return True
+
+
 def _loadToast(result, shell):
+    fractional = [node for node in result.segmentations if node.GetAttribute(LESION_FRACTIONAL_ATTRIBUTE)]
+    if fractional:
+        # A probabilistic mask is not an ordinary 0/1 lesion: say how it is shown (a study offers Binarize at 0.5)
+        shell.toast(_("{name} has fractional values (a probabilistic mask): every voxel above 0 is shown as the lesion. "
+                      "The file is unchanged.").format(name=fractional[0].GetName()), ms=6000, level="warning")
+        return
+    if _irregularGeometryToast(result.nodes(), shell):
+        return
+    held = getattr(shell, "consequenceHeld", None)
+    if callable(held) and held():
+        # A consequence of the load ("Opened a copy in Projects/x. The original is not changed.") is on screen: a
+        # plain "Loaded x" would replace it at once, and the user would never read it
+        return
     loaded = result.nodes()
     if loaded:
         name = loaded[0].GetName()
@@ -1175,8 +2880,35 @@ def _loadToast(result, shell):
             shell.toast(_("Loaded {name} and {count} more").format(name=name, count=len(loaded) - 1))
     elif result.alreadyOpen:
         shell.toast(_("{name} is already open").format(name=result.alreadyOpen[0].GetName()))
+    elif result.alreadyOpenScenes:
+        shell.toast(_("{name} is already open").format(name=result.alreadyOpenScenes[0]))
     elif result.scenes:
+        if _isOpenProjectScene(result.scenes[0]):
+            # A Studio project's scene opened as the project ("Continuing Projects/x" says so): its internal scene file is
+            # not something the user opened (they dropped a scan, or the project folder), and "Loaded x.mrml" would replace
+            # that message at once
+            return
         shell.toast(_("Loaded {name}").format(name=os.path.basename(result.scenes[0])))
+
+
+def _isOpenProjectScene(path):
+    """True if ``path`` is the scene file of the project that is open now."""
+    try:
+        from . import autosave
+
+        service = autosave.instance()
+        return service is not None and bool(service.isOpenProjectScene(path))
+    except (ImportError, AttributeError):
+        return False
+
+
+def _recordedFileType(properties):
+    """The file type of a recent file entry: the recorded ``fileType``, else the type 3D Slicer gives to its file name."""
+    properties = properties or {}
+    fileType = properties.get("fileType")
+    if not fileType and properties.get("fileName"):
+        fileType = slicer.app.coreIOManager().fileType(str(properties["fileName"]))
+    return str(fileType or "")
 
 
 def loadRecentFile(properties, action=None, shell=None):
@@ -1184,15 +2916,42 @@ def loadRecentFile(properties, action=None, shell=None):
 
     The file is loaded with its recorded properties (by triggering ``action`` if given). In Studio, a
     loaded scan is shown in Draw, as for ``loadFiles()``, and a scan or lesion that is already open is not
-    loaded again (it becomes current). A scene keeps its own views.
+    loaded again (it becomes current). A scene keeps its own views; with a project open, it opens as its own project as
+    with Open... (A-09: the open project is saved and closed first; a scene from outside the folder opens as a copy). A
+    lesion recorded as a segmentation, a figure and a statistical map are opened as with ``loadFiles()`` (Open...).
     """
     shell = _currentShell(shell)
     fileName = str((properties or {}).get("fileName", ""))
+    if fileName and not os.path.exists(fileName):
+        # A recent file that was moved or deleted since: say so plainly (not a generic "Failed to load")
+        result = LoadResult()
+        result.errors.append((fileName, _("moved or deleted")))
+        slicer.util.warningDisplay(
+            _("{name} was moved or deleted, so it cannot be opened.").format(name=os.path.basename(fileName) or fileName),
+            windowTitle=_("File not found"), detailedText=fileName)
+        return result
     isScene = (properties or {}).get("fileType") == "SceneFile" or _extension(fileName) in SCENE_EXTENSIONS
     if shell is not None and not isScene and os.path.isfile(fileName) and fileKind(fileName) in ("figure", "statmap"):
         # A figure or a statistical map takes its own route (never a scan of Draw); an open one is shown again
         return loadFiles([fileName], shell)
+    if shell is not None and not isScene and os.path.isfile(fileName) and fileKind(fileName) == "lesion" and _recordedFileType(properties) == "SegmentationFile":
+        # A lesion opens as with Open...: a probabilistic mask is not truncated to integers by the reader (it would
+        # open empty), and the notes of its sidecar are restored (loadLesion, restoreSidecarText)
+        return loadFiles([fileName], shell)
+    if shell is not None and fileName and os.path.exists(fileName):
+        # With a study open, as with Open... and a drop (loadFiles): a subject's own scan or lesion opens that subject, and
+        # any other scan, lesion or scene closes the study first. Triggered with the study open, the recent file's scan
+        # was traced under the study's breadcrumb and saved nowhere (BB-1)
+        kind = "scene" if isScene else fileKind(fileName)
+        if kind not in _TRACED_KINDS and _recordedFileType(properties) in ("VolumeFile", "SequenceFile", "SegmentationFile", "LabelMapVolumeFile"):
+            kind = "volume"  # a scan of another format (a FreeSurfer .mgz) recorded as a volume
+        routed = _routeStudyLoad([fileName], [kind], shell)
+        if routed is None or not routed[0]:
+            # The study stays open (its subject's edits could not be written), or the file opened its subject
+            return LoadResult()
     openNode = openNodeForFile(fileName) if shell is not None and not isScene else None
+    if openNode is None and shell is not None and not isScene and os.path.isfile(fileName) and fileKind(fileName) == "lesion":
+        openNode = openLabelMapAsLesion(fileName)
     if openNode is not None:
         result = LoadResult()
         result.alreadyOpen.append(openNode)
@@ -1203,7 +2962,39 @@ def loadRecentFile(properties, action=None, shell=None):
     nodeIdsBefore = {scene.GetNthNode(index).GetID() for index in range(scene.GetNumberOfNodes())}
     loaded = True
     if isScene:
+        service = _sceneProjectService(shell)
+        if service is not None and os.path.isfile(fileName):
+            # As Open... and drop (_loadScene): the scene opens as its own project (A-09), the open project is saved and
+            # closed first; triggering the recent file action would add the scene's data to the open project instead
+            result = LoadResult()
+            try:
+                opened = bool(service.openSceneFile(fileName))
+            except Exception as e:
+                logging.error(f"Studio: cannot load {fileName}:\n{traceback.format_exc()}")
+                result.errors.append((fileName, str(e)))
+                slicer.util.errorDisplay(_("Failed to load {path}").format(path=fileName), detailedText=str(e))
+                opened = False
+            if opened:
+                result.scenes.append(fileName)
+                recordOpenTimes([fileName])
+            _afterLoad(result, shell)
+            return result
         _announceSceneSource(fileName)
+    elif fileName and os.path.isfile(fileName):
+        # As with a drop or Open... (loadFiles): a file damaged since it was last opened (cut short by a failed copy, a
+        # bad header) is refused with its reason; the reader would fill the missing voxels with 0 without a word
+        try:
+            _checkNiftiComplete(fileName)
+        except RefusedFileError as e:
+            logging.warning(f"Studio: {fileName} was not opened: {e}")  # planned refusal: no traceback
+            _noteLoadResult(fileName, False)
+            result = LoadResult()
+            result.errors.append((fileName, str(e)))
+            name = os.path.basename(fileName)
+            message = str(e) if str(e).startswith(name) else f"{name}: {e}"
+            slicer.util.warningDisplay(_("Some files could not be loaded:") + "\n\n" + message,
+                                       detailedText=f"{fileName}\n{e}")
+            return result
     if action is not None:
         action.trigger()
     else:
@@ -1227,6 +3018,8 @@ def loadRecentFile(properties, action=None, shell=None):
         if node.IsA("vtkMRMLScalarVolumeNode"):
             result.volumes.append(node)
         elif node.IsA("vtkMRMLSegmentationNode"):
+            if fileName:
+                _nameSegmentationAfterFile(node, fileName)
             if fileName and isLesionName(fileName):
                 _applyLesionNaming(node, fileName)
             result.segmentations.append(node)
@@ -1236,17 +3029,38 @@ def loadRecentFile(properties, action=None, shell=None):
     return result
 
 
+def _isStudioFolder(path):
+    """True if ``path`` is the Slicer Studio folder or its Projects, Studies or Templates subfolder."""
+    try:
+        from . import projects
+
+        rootPath = projects.root()
+        candidates = [rootPath, projects.projectsFolder(rootPath), projects.studiesFolder(rootPath),
+                      os.path.join(rootPath, getattr(projects, "TEMPLATES_DIR", "Templates"))]
+        target = os.path.normcase(os.path.realpath(path))
+        return any(os.path.normcase(os.path.realpath(candidate)) == target for candidate in candidates)
+    except Exception:
+        return False
+
+
 def loadFolder(path, shell=None):
     """Load a folder: a study folder opens the study, DICOM goes to the DICOM module, several NIfTI files are offered in a
     card (with Create study), else the Add Data dialog.
 
-    Return "study", "dicom", "nifti" or "addData".
+    The Slicer Studio folder itself (or its Projects, Studies or Templates folder) shows the Library with a short hint.
+
+    Return "study", "library", "dicom", "nifti" or "addData".
     """
     shell = _currentShell(shell)
     studyUi = _studyUiModule()
     if studyUi is not None and os.path.isfile(os.path.join(path, "study.json")):
         studyUi.openStudy(path, shell)
         return "study"
+    if shell is not None and _isStudioFolder(path):
+        shell.switchTo("library")
+        shell.toast(_("This is the Slicer Studio folder. Open a project from the Library, or drag a project's folder or "
+                      "scene file into the window."), 8000)
+        return "library"
     sceneFile = _folderScene(path)
     if sceneFile is not None:
         # A scene folder (a Slicer Studio project, or a scene that 3D Slicer saved with its data): open its scene
@@ -1265,6 +3079,50 @@ def loadFolder(path, shell=None):
             return "nifti"
     openAddDataDialog([path])
     return "addData"
+
+
+def _loadScene(path, shell):
+    """Load a scene file; return True if it is open.
+
+    In Studio with a project open, the scene opens as its own project (A-09: the open project is saved and closed first; a
+    scene from outside the Slicer Studio folder becomes a new project that starts as a copy). Otherwise its data is added
+    to the open scene, as 3D Slicer's Add Data does.
+    """
+    service = _sceneProjectService(shell)
+    if service is not None:
+        return bool(service.openSceneFile(path))
+    if shell is not None:
+        try:
+            from . import autosave
+
+            service = autosave.instance()
+        except ImportError:
+            service = None
+        if service is not None and service.refuseDamagedSceneFile(path):
+            return False  # damaged: announced there; no error dialog or traceback on top of it
+    _announceSceneSource(path)
+    if shell is not None and service is not None and hasattr(service, "loadSceneLeavingOutUnread"):
+        # Unreadable data that the project service left out and announced is not an error (no traceback, no error box)
+        return bool(service.loadSceneLeavingOutUnread(path, {}))
+    slicer.util.loadScene(path, {})
+    return True
+
+
+def _sceneProjectService(shell):
+    """The autosave service if a scene opened now in Studio opens as its own project (``opensSceneAsProject()``), else None
+    (Classic, a study or no open project: the scene's data is added to the open scene, as in 3D Slicer).
+    """
+    if shell is None:
+        return None
+    try:
+        from . import autosave
+
+        service = autosave.instance()
+    except ImportError:
+        return None
+    if service is not None and hasattr(service, "opensSceneAsProject") and service.opensSceneAsProject():
+        return service
+    return None
 
 
 def _announceSceneSource(path):
@@ -1337,16 +3195,151 @@ def _folderFiles(path, limit=FOLDER_SCAN_MAX_FILES):
     return files
 
 
+def _dicomPixelDataShortfall(filePath):
+    """``(have, need)`` bytes if the pixel data of the DICOM file ``filePath`` does not have the length that its header
+    (Rows, Columns, samples, bits, frames) announces, else None (also when it cannot tell: compressed, no pixel data,
+    unreadable). One byte more than an odd ``need`` (the padding to an even length that DICOM requires), or trailing zeros
+    of at most one row, are padding, not a mismatch.
+
+    The reader fills missing voxels with 0 without a word, so a series whose header announces more than the file holds
+    would open as a mostly black scan of the size that the header gives. When the header announces less, the reader takes
+    the first Rows x Columns values of each frame: the scan opens striped or sheared, without a word either (BB-1).
+    """
+    try:
+        import pydicom
+
+        size = os.path.getsize(filePath)
+        header = pydicom.dcmread(filePath, stop_before_pixels=True, force=True)
+        if "Rows" not in header or "Columns" not in header or "BitsAllocated" not in header:
+            return None
+        syntax = getattr(getattr(header, "file_meta", None), "TransferSyntaxUID", None)
+        if syntax is not None and syntax.is_compressed:
+            return None
+        frames = int(header.get("NumberOfFrames", 1) or 1)
+        samples = int(header.get("SamplesPerPixel", 1) or 1)
+        if str(header.get("PhotometricInterpretation", "")).strip() == "YBR_FULL_422" and samples == 3:
+            samples = 2  # uncompressed YBR_FULL_422: Y Y Cb Cr for each pair of pixels
+        need = (int(header.Rows) * int(header.Columns) * samples * frames * int(header.BitsAllocated) + 7) // 8
+        # The length of the pixel data without reading it (deferred): the length that its element announces, or what
+        # the file holds after the element's start when it is cut short
+        full = pydicom.dcmread(filePath, force=True, defer_size=4096)
+        if "PixelData" not in full:
+            return None
+        try:
+            element = full.get_item("PixelData", keep_deferred=True)  # the raw element: its length and file position
+        except TypeError:  # pydicom < 2.4
+            element = full.get_item("PixelData")
+        length = getattr(element, "length", None)
+        valueStart = getattr(element, "value_tell", None)
+        if getattr(syntax, "is_deflated", False):
+            valueStart = None  # positions in the inflated data, not in the file
+        if length is None or valueStart is None:
+            valueStart = None
+            have = len(full.PixelData)
+        elif length == 0xFFFFFFFF:
+            return None  # encapsulated (undefined length): compressed frames
+        else:
+            have = max(0, min(int(length), size - int(valueStart)))
+        if have in (need, need + need % 2):
+            return None
+        rowBytes = (int(header.Columns) * samples * int(header.BitsAllocated) + 7) // 8
+        if need < have <= need + max(rowBytes, 1) + 1:
+            # Trailing zeros of at most one row: padding that some writers add (pydicom drops it too), not a header that
+            # lies (one row fewer loses a row of the image; one column fewer leaves an excess of about Rows values)
+            if valueStart is None:
+                tail = bytes(full.PixelData[need:have])
+            else:
+                with open(filePath, "rb") as file:
+                    file.seek(int(valueStart) + need)
+                    tail = file.read(have - need)
+            if not tail.strip(b"\0"):
+                return None
+        return (have, need)
+    except Exception:
+        logging.debug(f"Studio: {traceback.format_exc()}")
+        return None
+
+
+def _checkDicomSeriesComplete(seriesUID, database):
+    """Raise ``RefusedFileError`` if an instance of the DICOM series ``seriesUID`` has less or more pixel data than its header says."""
+    try:
+        files = list(database.filesForSeries(seriesUID))
+    except Exception:
+        logging.debug(f"Studio: {traceback.format_exc()}")
+        return
+    _checkDicomFilesComplete(files)
+
+
+def _checkDicomVolumeComplete(node, database=None):
+    """Raise ``RefusedFileError`` if a DICOM file that the volume ``node`` was loaded from (its ``DICOM.instanceUIDs``
+    attribute) has less or more pixel data than its header says: a series loaded from the DICOM browser gets the check of a drop.
+    """
+    uids = (node.GetAttribute("DICOM.instanceUIDs") or "").split() if node is not None else []
+    database = database if database is not None else getattr(slicer, "dicomDatabase", None)
+    if not uids or database is None or not database.isOpen:
+        return
+    files = []
+    for uid in uids:
+        try:
+            filePath = database.fileForInstance(uid)
+        except Exception:
+            logging.debug(f"Studio: {traceback.format_exc()}")
+            continue
+        if filePath:
+            files.append(filePath)
+    _checkDicomFilesComplete(files)
+
+
+def _checkDicomFilesComplete(files):
+    """Raise ``RefusedFileError`` if one of the DICOM ``files`` has less or more pixel data than its header says."""
+    for filePath in files:
+        shortfall = _dicomPixelDataShortfall(filePath)
+        if shortfall is None:
+            continue
+        have, need = shortfall
+        if have < need:
+            text = _("This DICOM series is damaged: {name} holds {have:,} bytes of image data, but its header (image "
+                     "size) announces {need:,}. It was not opened, because the missing part would show as black. Export "
+                     "the series again from its source.")
+        else:
+            text = _("This DICOM series is damaged: {name} holds {have:,} bytes of image data, but its header (image "
+                     "size) announces only {need:,}. It was not opened, because the image would show scrambled. Export "
+                     "the series again from its source.")
+        raise RefusedFileError(text.format(name=os.path.basename(filePath), have=have, need=need))
+
+
 def importDicomFolder(path, shell=None):
     """Import a DICOM folder into the DICOM database; in Studio, a folder of one series opens in Draw.
 
+    In Studio, a series is not loaded twice (dropped again, or its Recent folder row): the scan already loaded from it
+    becomes current again and Draw keeps its lesion (``openNodesForDicomSeries()``, as ``openNodeForFile()`` for files).
     Without a database, the default one is created as 3D Slicer does when a DICOM folder is dropped on it. A folder of
     several series is shown in the DICOM browser (a series loaded there opens in Draw too). Without the DICOM module,
     the Add Data dialog opens with the folder.
     """
+    return _importDicom(path, None, shell)
+
+
+def importDicomFiles(paths, shell=None):
+    """Import DICOM files (the files of a series, dropped or chosen in Open... instead of their folder) as
+    ``importDicomFolder()`` imports a folder: the default database is created if there is none, and in Studio one series
+    opens in Draw. Without it, the Add Data dialog's DICOM reader found no database on a fresh profile: nothing was
+    imported and dozens of SQL errors lit the error badge (BB-1).
+    """
+    return _importDicom(None, [os.path.abspath(str(path)) for path in paths], shell)
+
+
+def _importDicom(path, files, shell):
+    """Import the DICOM folder ``path``, or the DICOM ``files`` when ``path`` is None (``importDicomFolder()``)."""
     shell = _currentShell(shell)
+    source = path if path is not None else os.path.dirname(files[0])
+    if shell is not None:
+        # With a study open, a DICOM series is not one of its subjects: the study is closed first, as with Open... and a
+        # file drop (``_routeStudyLoad()``). Left open, Draw traced the series under the study's breadcrumb, saved nowhere
+        if _routeStudyLoad([source], ["volume"], shell) is None:
+            return False
     if not hasattr(slicer.modules, "dicom"):
-        openAddDataDialog([path])
+        openAddDataDialog([path] if path is not None else files)
         return False
     from DICOMLib import DICOMUtils
 
@@ -1357,28 +3350,41 @@ def importDicomFolder(path, shell=None):
 
             DICOM.DICOMFileDialog.createDefaultDatabase()
         except Exception:
-            logging.error(f"Studio: cannot create the DICOM database:\n{traceback.format_exc()}")
+            # Expected when the default folder cannot be written: the official dialog explains it, so no error badge
+            logging.warning("Studio: cannot create the DICOM database")
+            logging.debug(traceback.format_exc())
         database = getattr(slicer, "dicomDatabase", None)
     if database is None or not database.isOpen:
         slicer.util.selectModule("DICOM")
-        slicer.util.errorDisplay(_("The DICOM database is not set up. Choose a database folder in the DICOM module, then import the folder again."))
+        slicer.util.warningDisplay(_("The DICOM database is not set up. Choose a database folder in the DICOM module, then import the folder again."))
         return False
     with slicer.util.WaitCursor():
-        if not DICOMUtils.importDicom(path):
+        if not (DICOMUtils.importDicom(path) if path is not None else _importDicomFileList(files, database)):
             slicer.util.selectModule("DICOM")
             return False
         seriesUIDs = []
         if shell is not None:
             try:
-                seriesUIDs = sorted(DICOMUtils.seriesUIDsForFiles(_folderFiles(path)))
+                seriesUIDs = sorted(DICOMUtils.seriesUIDsForFiles(_folderFiles(path) if path is not None else files))
             except Exception:
-                logging.error(f"Studio: cannot list the DICOM series of {path}:\n{traceback.format_exc()}")
+                logging.error(f"Studio: cannot list the DICOM series of {source}:\n{traceback.format_exc()}")
     if shell is not None and len(seriesUIDs) == 1:
+        openNodes = openNodesForDicomSeries(seriesUIDs[0], database)
+        if openNodes:
+            result = LoadResult()
+            result.alreadyOpen.extend(openNodes)
+            _afterLoad(result, shell)
+            return True
         try:
+            _checkDicomSeriesComplete(seriesUIDs[0], database)
             with _ownLoad(), slicer.util.WaitCursor():
                 nodeIds = DICOMUtils.loadSeriesByUID(seriesUIDs)
+        except RefusedFileError as e:
+            logging.warning(f"Studio: {source} was not opened: {e}")  # planned refusal: no traceback
+            slicer.util.warningDisplay(str(e), detailedText=f"{source}\n{e}")
+            return False
         except Exception:
-            logging.error(f"Studio: cannot load the DICOM series of {path}:\n{traceback.format_exc()}")
+            logging.error(f"Studio: cannot load the DICOM series of {source}:\n{traceback.format_exc()}")
             nodeIds = []
         result = LoadResult()
         for nodeId in nodeIds or []:
@@ -1391,6 +3397,47 @@ def importDicomFolder(path, shell=None):
     # Several series (or none loadable): the DICOM browser lists them
     slicer.util.selectModule("DICOM")
     return True
+
+
+def _importDicomFileList(files, database):
+    """Index the DICOM ``files`` into ``database`` (``DICOMUtils.importDicom()`` takes a folder); return True if done."""
+    try:
+        import ctk
+
+        indexer = ctk.ctkDICOMIndexer()
+        indexer.addListOfFiles(database, files)
+        indexer.waitForImportFinished()
+    except Exception:
+        logging.error(f"Studio: cannot import the DICOM files of {os.path.dirname(files[0])}:\n{traceback.format_exc()}")
+        return False
+    return True
+
+
+def openNodesForDicomSeries(seriesUID, database=None):
+    """The scans of the scene loaded from the DICOM series ``seriesUID`` (in scene order), [] if none.
+
+    A scan loaded by the DICOM module names the instances it was read from in its "DICOM.instanceUIDs" attribute (kept in
+    the scene, also after its project took the file over): it belongs to the series when all of them are instances of
+    that series in the DICOM database. Only scans shown to the user are considered (not label maps or hidden nodes).
+    """
+    database = database if database is not None else getattr(slicer, "dicomDatabase", None)
+    if not seriesUID or database is None or not database.isOpen:
+        return []
+    try:
+        seriesInstances = set(database.instancesForSeries(seriesUID))
+    except Exception:
+        logging.debug(f"Studio: {traceback.format_exc()}")
+        return []
+    if not seriesInstances:
+        return []
+    nodes = []
+    for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
+        if _shownNodeForFile(node) is None or _isReference(node) or _isTemplate(node):
+            continue
+        instanceUIDs = [uid for uid in (node.GetAttribute("DICOM.instanceUIDs") or "").split() if uid != "Unknown"]
+        if instanceUIDs and all(uid in seriesInstances for uid in instanceUIDs):
+            nodes.append(node)
+    return nodes
 
 
 def _studyUiModule():
@@ -1415,6 +3462,106 @@ def handleDrop(paths, addData=False, shell=None):
     return loadFiles(paths, shell)
 
 
+def openCommandLineArguments(arguments, shell=None):
+    """Open the files and folders given on the command line (``Slicer scan.nii.gz lesion.nii.gz``) as a drop would.
+
+    3D Slicer reads them with its core loader (``qSlicerCoreApplication::handleURIArguments()``), which reads every image
+    as a plain volume: in Studio a lesion would become a grey scan over its scan, a statistical map or a figure a scan, a
+    4D image one frame, and a folder an error box. The Studio module takes them over when Studio applies at startup
+    (``Studio.takeOverCommandLineArguments()``) and opens them here: the existing paths with ``handleDrop()``, and the
+    other arguments (``slicer://`` URLs, which the DICOM module receives) with the core handler; an argument that is not
+    an existing path (moved file, typo) is also reported with a "moved or deleted" message and a web address (http, https, ftp)
+    with a "cannot open web addresses" message, all in one box. In Classic (no live shell) all of them take the core route, as in 3D Slicer. Return what ``handleDrop()`` returned,
+    or None.
+    """
+    arguments = [str(argument) for argument in arguments if argument]
+    if not arguments:
+        return None
+    shell = _currentShell(shell)
+    if shell is None:
+        slicer.app.handleURIArguments(arguments)
+        return None
+    scheme = str(slicer.app.applicationName).lower()
+    paths, others, missing, webAddresses = [], [], [], []
+    for argument in arguments:
+        urlScheme = str(qt.QUrl(argument).scheme()).lower()
+        isUrl = urlScheme == scheme
+        if not isUrl and os.path.exists(argument):
+            paths.append(argument)
+        else:
+            others.append(argument)
+            if urlScheme in ("http", "https", "ftp") and "://" in argument:
+                webAddresses.append(argument)
+            elif not isUrl:
+                missing.append(argument)
+    if others:
+        slicer.app.handleURIArguments(others)
+    # The core handler only logs an ignored argument: say once what cannot be opened (a web address is not a moved file)
+    messages, details = [], []
+    if missing:
+        names = ", ".join(os.path.basename(argument) or argument for argument in missing)
+        if len(missing) == 1:
+            messages.append(_("{name} was moved or deleted, so it cannot be opened.").format(name=names))
+        else:
+            messages.append(_("These files were moved or deleted, so they cannot be opened: {names}.").format(names=names))
+        details.extend(missing)
+    if webAddresses:
+        messages.append(_("Slicer Studio cannot open web addresses given on the command line. Download the file first, then open it: {names}.").format(
+            names=", ".join(webAddresses)))
+        details.extend(webAddresses)
+    if messages:
+        slicer.util.warningDisplay(
+            "\n\n".join(messages),
+            windowTitle=_("File not found") if not webAddresses else _("Cannot open"), detailedText="\n".join(details))
+    if not paths:
+        return None
+    paths = [os.path.abspath(path) for path in paths]
+    projectFolder = _projectHoldingAll(paths)
+    if projectFolder is not None:
+        # Files of one Slicer Studio project (a double-click on its scan or lesion): open that project, as its folder or
+        # scene file does, never a second project with copies of its files
+        return loadFolder(projectFolder, shell)
+    return handleDrop(paths, shell=shell)
+
+
+def _projectHoldingAll(paths):
+    """The project folder (with a scene file) that holds every file of ``paths``, or None."""
+    if not paths or any(os.path.isdir(path) for path in paths):
+        return None
+    try:
+        from . import projects
+
+        folders = [projects.projectOfPath(path) for path in paths]
+        if None in folders or len({os.path.normcase(os.path.realpath(folder)) for folder in folders}) != 1:
+            return None
+        return folders[0] if projects.sceneFile(folders[0]) is not None else None
+    except (ImportError, OSError):
+        return None
+
+
+def _closedProjectHoldingAll(paths, kinds):
+    """The project folder that holds every scan and lesion of ``paths`` when it is not the open project, or None.
+
+    Only scans and lesions count (what autosave would copy into a project); a scene file opens its project itself
+    (``_loadScene()``), and the files of the open project are not loaded again (``openNodeForFile()``).
+    """
+    if not paths or any(kind not in ("volume", "sequence", "lesion") for kind in kinds):
+        return None
+    projectFolder = _projectHoldingAll(paths)
+    if projectFolder is None:
+        return None
+    try:
+        from . import autosave
+
+        service = autosave.instance()
+    except ImportError:
+        service = None
+    current = service.currentProject() if service is not None else None
+    if current is not None and os.path.normcase(os.path.realpath(current.path)) == os.path.normcase(os.path.realpath(projectFolder)):
+        return None
+    return projectFolder
+
+
 #
 # Recent files and folders (Studio/RecentOpenTimes, Studio/RecentFolders)
 #
@@ -1429,6 +3576,53 @@ def _jsonSetting(key, default):
     except ValueError:
         return default
     return parsed if isinstance(parsed, type(default)) else default
+
+
+_failedLoadPaths = set()  # real paths of the files that could not be loaded (not listed as recent files)
+
+
+def _failedKey(path):
+    return os.path.normcase(os.path.realpath(str(path)))
+
+
+def isFailedLoad(path):
+    """True when ``path`` could not be loaded in this session (its load failed and no later load succeeded)."""
+    return _failedKey(path) in _failedLoadPaths
+
+
+def _noteLoadResult(path, loaded):
+    """The IO manager lists every file it was asked to load in RecentlyLoadedFiles, even when the load failed. A file
+    that failed is therefore left out of Library > Opened from elsewhere (``isFailedLoad()``) and removed from the stored
+    list (a setting that official installations share; only the entry of this file is dropped, so the list stays valid).
+    """
+    key = _failedKey(path)
+    if loaded:
+        _failedLoadPaths.discard(key)
+        return
+    _failedLoadPaths.add(key)
+    try:
+        settings = qt.QSettings()
+        count = settings.beginReadArray("RecentlyLoadedFiles/RecentFiles")
+        kept = []
+        for index in range(count):
+            settings.setArrayIndex(index)
+            value = settings.value("file")
+            if not value:
+                continue
+            properties = dict(value)
+            name = str(properties.get("fileName", ""))
+            if name and _failedKey(slicer.app.toSlicerHomeAbsolutePath(name)) == key:
+                continue
+            kept.append(value)
+        settings.endArray()
+        if len(kept) != count:
+            settings.beginWriteArray("RecentlyLoadedFiles/RecentFiles", len(kept))
+            for index, value in enumerate(kept):
+                settings.setArrayIndex(index)
+                settings.setValue("file", value)
+            settings.endArray()
+    except Exception:
+        logging.debug("Studio: could not update the recent files after a failed load", exc_info=True)
 
 
 def recentOpenTimes():
@@ -1476,13 +3670,20 @@ def _openParticipantsTable(path, shell):
     if handler is not None:
         try:
             handler(path, shell)
-            return
-        except Exception:
-            logging.error(f"Studio: cannot open {path} as a study table:\n{traceback.format_exc()}")
+        except Exception as exc:
+            # Studies are available: the toast says why this table was not imported (a ValueError or OSError is about the
+            # user's table or file, anything else is a defect and is logged with its traceback)
+            if isinstance(exc, (ValueError, OSError)):
+                logging.warning(f"Studio: cannot open {path} as a study table: {exc}")
+            else:
+                logging.error(f"Studio: cannot open {path} as a study table:\n{traceback.format_exc()}")
+            shell.toast(_("{name} was not imported: {reason}").format(name=os.path.basename(path), reason=exc), ms=8000, level="warning")
+        return
     columns, rowCount = readTableHeader(path) or ([], 0)
     shown = [column for column in columns if column != "participant_id"][:4]
     columnText = ", ".join(shown) + ("…" if len(columns) - 1 > len(shown) else "")
-    shell.toast(_("{name}: {n} participants ({columns}). Studies are not available in this build.").format(
+    shell.toast((_("{name}: {n} participant ({columns}). Studies are not available in this build.") if rowCount == 1
+                 else _("{name}: {n} participants ({columns}). Studies are not available in this build.")).format(
         name=os.path.basename(path), n=rowCount, columns=columnText or "participant_id"), 6000)
 
 
@@ -1511,21 +3712,40 @@ def sidecarPath(lesionPath):
     return os.path.join(os.path.dirname(lesionPath), _baseName(lesionPath) + ".json")
 
 
+def readSidecar(lesionPath):
+    """The content of the sidecar of a lesion file (a dict), or None when there is none or it is not a JSON object."""
+    if not lesionPath:
+        return None
+    try:
+        with open(sidecarPath(lesionPath), encoding="utf-8") as f:
+            sidecar = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return sidecar if isinstance(sidecar, dict) else None
+
+
+def restoreSidecarText(segmentationNode, lesionPath):
+    """The ``Notes`` and ``SourceReference`` of a lesion file's sidecar (written by Draw's Save lesion) on the lesion
+    loaded from it: the Lesion card shows them and the next Save lesion keeps them. A value already on the node wins.
+    """
+    sidecar = readSidecar(lesionPath)
+    if segmentationNode is None or sidecar is None:
+        return
+    for key, attribute in LESION_SIDECAR_TEXT_ATTRIBUTES:
+        value = sidecar.get(key)
+        if isinstance(value, str) and segmentationNode.GetAttribute(attribute) is None:
+            segmentationNode.SetAttribute(attribute, value)
+
+
 def sidecarSource(lesionPath):
     """The scan that the sidecar of a lesion file names, if that file exists: ``Source`` (D-U3), else the BIDS keys
     ``Sources`` (a list) and ``SpatialReference`` of study lesions. Paths are relative to the sidecar; BIDS URIs and
     URLs are not resolved.
     """
-    if not lesionPath:
+    sidecar = readSidecar(lesionPath)
+    if sidecar is None:
         return None
     path = sidecarPath(lesionPath)
-    try:
-        with open(path, encoding="utf-8") as f:
-            sidecar = json.load(f)
-    except (OSError, ValueError):
-        return None
-    if not isinstance(sidecar, dict):
-        return None
     candidates = [sidecar.get("Source"), sidecar.get("source")]
     sources = sidecar.get("Sources")
     candidates.extend(sources if isinstance(sources, list) else [sources])
@@ -1686,6 +3906,13 @@ def _showLesion(segmentationNode, shell):
         _updateLesionSpaceNotice(segmentationNode, template, shell)
     else:
         _showNativeLesion(segmentationNode, shell)
+
+
+def showLesionWithoutScan(segmentationNode, shell=None):
+    """Show a lesion whose scan is not open (Library "Open in Draw" after the scan was closed): on the template when it is on
+    an MNI grid, else Draw's native-lesion state that offers to open its scan (which pairs the lesion with it).
+    """
+    _showLesion(segmentationNode, _currentShell(shell))
 
 
 def _nameAfterSubject(segmentationNode):
@@ -1913,12 +4140,21 @@ def newLesionSegmentation(volumeNode=None, name=None, shell=None):
     It is named by the next free "Lesion 2", "Lesion 3"... (the node and its single segment), the previous lesion is
     hidden in the slice views, and a consequence toast offers Undo (removes the new lesion and shows the previous one).
     Return the new segmentation node, None without a volume.
+
+    Refused (None, with a toast) on the scan of the open study's subject: a study keeps one lesion per subject, the one
+    that Done writes and that leaving the subject saves and removes. A second lesion there would be saved nowhere and
+    stay shown over the next subject's scan.
     """
     shell = _currentShell(shell)
     previousSegmentation, previousSource = _editedNodes()
     if volumeNode is None:
         volumeNode = previousSource if previousSource is not None else _backgroundVolume()
     if volumeNode is None or _isReference(volumeNode):
+        return None
+    studySession = _studySession()
+    if studySession is not None and _sameNode(volumeNode, studySession.volumeNode()):
+        if shell is not None:
+            shell.toast(_("New lesion is not available in a study: each subject has one lesion"), level="warning")
         return None
     name = name or _nextLesionName()
     segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", name)
@@ -1938,17 +4174,26 @@ def newLesionSegmentation(volumeNode=None, name=None, shell=None):
         previousSourceId = previousSource.GetID() if previousSource is not None else None
 
         def undo():
-            undoNewLesion(segmentationNode.GetID(), previousId, previousSourceId, hidden)
+            undoNewLesion(segmentationNode.GetID(), previousId, previousSourceId, hidden, shell=shell)
 
         shell.toast(_("New lesion {name}; the previous one is hidden").format(name=name), action=undo, actionText=_("Undo"), level="consequence")
     return segmentationNode
 
 
-def undoNewLesion(newId, previousId=None, previousSourceId=None, hiddenId=None):
-    """Undo ``newLesionSegmentation()``: remove the new lesion and edit (and show) the previous one again."""
+def undoNewLesion(newId, previousId=None, previousSourceId=None, hiddenId=None, shell=None):
+    """Undo ``newLesionSegmentation()``: remove the new lesion and edit (and show) the previous one again.
+
+    Refused (False, with a warning toast) once the new lesion has strokes: Undo never deletes work silently (the toast
+    stays for a minimum time, so strokes can be painted while it is still offered). Return True when it was undone.
+    """
     scene = slicer.mrmlScene
     node = scene.GetNodeByID(newId) if newId else None
     if node is not None:
+        if not isSegmentationEmpty(node):
+            shell = _currentShell(shell)
+            if shell is not None:
+                shell.toast(_("{name} has strokes now, so Undo keeps it").format(name=node.GetName()), level="warning")
+            return False
         scene.RemoveNode(node)
     hidden = scene.GetNodeByID(hiddenId) if hiddenId else None
     if hidden is not None and hidden.GetDisplayNode() is not None:
@@ -1956,6 +4201,7 @@ def undoNewLesion(newId, previousId=None, previousSourceId=None, hiddenId=None):
     previous = scene.GetNodeByID(previousId) if previousId else None
     if previous is not None:
         selectInSegmentEditor(previous, scene.GetNodeByID(previousSourceId) if previousSourceId else None)
+    return True
 
 
 #
@@ -1973,6 +4219,53 @@ FILE_DIALOG_FILTERS = ";;".join((
 def _lastDirectory():
     directory = str(slicer.util.settingsValue("Studio/LastOpenDirectory", "") or "")
     return directory if directory and os.path.isdir(directory) else qt.QDir.homePath()
+
+
+_webStartFolderGiven = False
+
+
+def dialogStartFolder(fallback=""):
+    """The folder a file dialog that has no folder of its own starts in (``fallback`` is what it passed before).
+
+    Qt starts a dialog given "" in the folder of the last file dialog, and in the working folder when none has been shown yet;
+    ``"~"`` starts in the home folder. In the web build that is the container HOME, not /data, which is where its dialogs are
+    meant to start until another folder is chosen (the start-up script sets ``Studio/LastOpenDirectory``). So in the web build
+    the first call gives that folder (``Studio/LastOpenDirectory``, else /data) when it exists; later calls give "" and leave
+    the folder of the last dialog to Qt, so a folder that was chosen stays. Everywhere else ``fallback`` is returned unchanged.
+    """
+    global _webStartFolderGiven
+    if not _isWebBuild():
+        return fallback
+    if _webStartFolderGiven:
+        return ""
+    directory = webStartFolder()
+    if directory:
+        _webStartFolderGiven = True
+        return directory
+    return fallback
+
+
+def _isWebBuild():
+    try:
+        from . import projects
+
+        return bool(projects.isWebBuild())
+    except Exception:
+        return False
+
+
+def webStartFolder():
+    """In the web build, the folder its file dialogs start in (``Studio/LastOpenDirectory``, else /data) when it exists, else "".
+
+    Unlike ``dialogStartFolder()`` this gives the folder on every call: for a dialog of Studio's own that proposes a folder
+    (for example the NIfTI export) rather than leaving it to Qt. "" outside the web build.
+    """
+    if not _isWebBuild():
+        return ""
+    for directory in (str(slicer.util.settingsValue("Studio/LastOpenDirectory", "") or ""), "/data"):
+        if directory and os.path.isdir(directory):
+            return directory
+    return ""
 
 
 def _rememberDirectory(path):
@@ -2059,6 +4352,28 @@ def _tagTemplate(volumeNode, sampleName):
     return volumeNode
 
 
+def _loadBundledTemplate(logic, source):
+    """Load a template that is bundled with the application (a ``file://`` source) from where it is installed.
+
+    Used when SampleData could not copy it into its cache (a read-only or full cache folder): the bundled template
+    works offline, so it must not need a writable cache. A template that has to be downloaded cannot be loaded this
+    way: a plain message says what is wrong (``user_problem``: a problem with the user's setup, not a program error).
+    """
+    uri = source.uris[0] if source.uris else ""
+    if str(uri).startswith("file:"):
+        path = qt.QUrl(uri).toLocalFile()
+        if os.path.isfile(path):
+            return logic.loadNode(path, source.nodeNames[0], None, dict(source.loadFileProperties or {}))
+    cacheFolder = slicer.mrmlScene.GetCacheManager().GetRemoteCacheDirectory()
+    error = RuntimeError(
+        _("The template {sampleName} could not be downloaded or saved. Check that you are online and that the folder {folder} can be written (it must have free space).").format(
+            sampleName=source.sampleName, folder=cacheFolder,
+        ),
+    )
+    error.user_problem = True
+    raise error
+
+
 def _templateVolume(sampleName, path=None, show=True):
     """The template volume already in the scene, else load it (from ``path``, else from SampleData).
 
@@ -2077,7 +4392,11 @@ def _templateVolume(sampleName, path=None, show=True):
             return _tagTemplate(slicer.util.loadVolume(path, {"name": nodeName, "singleFile": True, "show": False}), sampleName)
         import SampleData
 
-        volumeNode = SampleData.SampleDataLogic().downloadSample(sampleName)
+        logic = SampleData.SampleDataLogic()
+        # downloadSamples() (not downloadSample(), which raises IndexError) returns [] when the file cannot be copied into
+        # the cache (a read-only or full cache folder) or downloaded
+        nodes = logic.downloadSamples(sampleName)
+        volumeNode = nodes[0] if nodes else _loadBundledTemplate(logic, source)
     if volumeNode is None:
         raise RuntimeError(_("Failed to load {sampleName}").format(sampleName=sampleName))
     return _tagTemplate(volumeNode, sampleName)
@@ -2189,6 +4508,9 @@ def _chosenTemplate(templateId):
     template = templates.templateById(templateId)
     if template is None or (template.id != templates.BUILTIN_DEFAULT and not template.isAvailable()):
         # Never the SampleData download of a built-in whose cached file is gone: templates are downloaded only on request
+        if template is not None and template.isUser:
+            raise RuntimeError(_("The image of {name} is missing. Add the template again in Settings > Templates, or remove it.").format(
+                name=template.name))
         raise RuntimeError(_("The template {id} is not on this computer").format(id=templateId))
     return template
 
@@ -2206,10 +4528,18 @@ def loadTemplateVolume(template):
     ``Studio.Space`` and ``Studio.TemplateId``; the 3D brain surfaces of your template are loaded with it.
     """
     templates = _templatesModule()
+    stale = []
     for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
         if node.GetAttribute(_TEMPLATE_ID_ATTRIBUTE) == template.id and not node.IsA("vtkMRMLLabelMapVolumeNode"):
+            if templates is not None and not templates.isNodeOnTemplateGrid(node, template):
+                # The volume of a removed template with the same id (added again under the same name, another image; for
+                # example in a project reopened after the change): never drawn on as the new one
+                stale.append(node)
+                continue
             _loadTemplateSurfaces(template)
             return node
+    if stale and templates is not None:
+        templates.forgetTemplateNodes(template.id, stale + list(slicer.util.getNodesByClass("vtkMRMLModelNode")))
     sampleName = templates.sampleNameOf(template) if templates is not None else None
     if sampleName in (TEMPLATE_SAMPLE_2MM, TEMPLATE_SAMPLE_1MM):
         volumeNode = _templateVolume(sampleName, (cachedTemplatePath(sampleName) or template.imagePath) if sampleName == TEMPLATE_SAMPLE_1MM else None)
@@ -2218,6 +4548,16 @@ def loadTemplateVolume(template):
     path = template.imagePath
     if not path or not os.path.isfile(path):
         raise RuntimeError(_("The image of the template {name} is missing").format(name=template.name))
+    if templates is not None:
+        # A template added before the check (or a folder put into Templates/ by hand) whose sform and qform disagree, or
+        # without a qform and with voxel sizes (pixdim) that do not match the sform: Slicer would load it at the qform or
+        # the pixdim voxel sizes, away from the grid that was checked and registered as its space (the sform)
+        try:
+            refusal = templates.xformRefusal(templates.readHeader(path))
+        except Exception:
+            refusal = ""
+        if refusal:
+            raise RuntimeError(_("The template {name} cannot be used.").format(name=template.name) + " " + refusal)
     with _ownLoad():
         # Tagged before it enters the scene (the Draw cards and space checks that react to the new node see a template), and
         # read by its storage node: a template is not a recently loaded file of the user (no RecentlyLoadedFiles entry)
@@ -2254,7 +4594,7 @@ def _loadTemplateSurfaces(template):
             continue
         try:
             with _ownLoad():
-                modelNode = slicer.modules.models.logic().AddModel(path)
+                modelNode = slicer.modules.models.logic().AddModel(path, templates.SURFACE_COORDINATE_SYSTEM)
             if modelNode is None:
                 raise RuntimeError(name)
         except Exception:
@@ -2336,6 +4676,14 @@ def startOnTemplate(res=2, shell=None, volumeNode=None, templateId=None):
         # re-targeted: the case is a new subject whose lesion is written by Done -> next.
         studySession.newCase()
         return studySession.volumeNode(), studySession.segmentationNode()
+    if studySession is not None and volumeNode is None:
+        # Another template starts a case outside the study: the study is closed first, as with Open... and a file drop.
+        # Left open, the lesion was traced under the study's breadcrumb and saved nowhere (BB-1)
+        chosen = _chosenTemplate(templateId)
+        message = _("Study {study} closed: {template} is not its template").format(
+            study=studySession.name, template=getattr(chosen, "name", None) or templateId)
+        if not _closeStudyForOutsideLoad(studySession, shell, message):
+            return None, None
     forced2mm = False
     if volumeNode is None:
         template = _chosenTemplate(templateId)
@@ -2471,21 +4819,28 @@ def _onTemplateDownloadProgress(bytesReceived, bytesTotal):
 _TEMPLATE_CHIP_PATTERN = re.compile(r"^1 mm template \d+%$")
 
 
+def _statusChipText(topBar, chip):
+    """The whole text of the status chip (it shows a long text elided)."""
+    return str(topBar.statusChipText() if hasattr(topBar, "statusChipText") else chip.text)
+
+
 def _statusChipFree(shell):
     """True when the top bar shows no status chip, or the 1 mm template progress."""
-    chip = getattr(getattr(shell, "topBar", None), "statusChip", None)
+    topBar = getattr(shell, "topBar", None)
+    chip = getattr(topBar, "statusChip", None)
     if chip is None:
         return False
     try:
-        return not chip.isVisible() or _TEMPLATE_CHIP_PATTERN.match(str(chip.text)) is not None
+        return not chip.isVisible() or _TEMPLATE_CHIP_PATTERN.match(_statusChipText(topBar, chip)) is not None
     except Exception:
         return False
 
 
 def _clearTemplateChip(*args):
     shell = _currentShell()
-    chip = getattr(getattr(shell, "topBar", None), "statusChip", None) if shell is not None else None
-    if chip is not None and chip.isVisible() and _TEMPLATE_CHIP_PATTERN.match(str(chip.text)):
+    topBar = getattr(shell, "topBar", None) if shell is not None else None
+    chip = getattr(topBar, "statusChip", None)
+    if chip is not None and chip.isVisible() and _TEMPLATE_CHIP_PATTERN.match(_statusChipText(topBar, chip)):
         shell.setStatusChip(None)
 
 
@@ -2671,7 +5026,8 @@ def switchTemplateTo1mm(path, shell=None):
         # The 1 mm volume is not shown when the user's own scan is the background
         volume1mm = _templateVolume(TEMPLATE_SAMPLE_1MM, path, show=shown)
         if shown:
-            setViewLayers(background=volume1mm, fit=True)
+            # Shown in Map, it is not the background that leaving Map puts back (the views seen before Map may hold a scan)
+            setViewLayers(background=volume1mm, fit=True, keepAfterMap=False)
         if segmentationNode is not None:
             segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(volume1mm)
         _trackTemplate(volume1mm, segmentationNode)
@@ -2832,6 +5188,9 @@ class _FigureReference(VTKObservationMixin):
         self._installGuard()
         self._layoutChanged = False
         self._lastSourceId = self._editorSourceId()
+        if _figureViewExclusion is not None:
+            # The lesion is not drawn over the figure (it is not even shown there for a moment)
+            _figureViewExclusion.update()
 
     @staticmethod
     def _editorSourceId():
@@ -2841,9 +5200,10 @@ class _FigureReference(VTKObservationMixin):
         return source.GetID() if source is not None else None
 
     def _refit(self):
+        # Only the pane and the figure are sized here: the scan or template view keeps the slice and zoom the user was
+        # on (USABILITY P4), a narrower view only shows less of the same scale
         if self.isShown():
-            if self._sizePane():
-                setViewLayers(fit=True)
+            self._sizePane()
             self._fit()
 
     @staticmethod
@@ -3151,6 +5511,179 @@ class _FigureReference(VTKObservationMixin):
                 pass
 
 
+#: Display node attribute: the view node IDs a segmentation or model had before the figure views were taken out of them
+#: (space-separated; empty: all views). Kept in the scene so that a scene saved while a figure is shown gets them back.
+VIEWS_BEFORE_FIGURE_ATTRIBUTE = "Studio.ViewsBeforeFigure"
+
+
+def _settledMTime(node):
+    """The modification time of ``node`` as the autosave sees it (an earlier settled change counts as not made)."""
+    try:
+        from . import autosave_io
+
+        return autosave_io.settledMTime(node)
+    except Exception:
+        return node.GetMTime()
+
+
+def _settleNode(node, mtimeBefore):
+    """Tell the autosave that the bookkeeping just done to ``node`` is not an edit (see ``autosave_io.settleNode``)."""
+    try:
+        from . import autosave_io
+
+        autosave_io.settleNode(node, mtimeBefore)
+    except Exception:
+        logging.debug("Studio: could not settle a display node:\n" + traceback.format_exc())
+
+
+class _FigureViewExclusion(VTKObservationMixin):
+    """Segmentations and models are not drawn in a figure view (a slice view whose background is a figure).
+
+    A figure is a 2D reference picture: its slice view shows the picture only (the Compare view of U-07, Green of the
+    trace views of L-29). Its single slice lies at the RAS position its file gives it (z = 0, x and y from the pixel
+    size), so a template-space lesion cut by that plane would be drawn over the picture at a place that means nothing.
+    While a figure view is shown, the view node IDs of every segmentation and model display node leave it out (all the
+    other views keep showing them); they are given back when no figure view is left and in Classic. Views the user chooses
+    meanwhile become the node's own views. ``VIEWS_BEFORE_FIGURE_ATTRIBUTE`` keeps the original IDs in the scene (official 3D Slicer shows such a scene as
+    it was saved, with the figure view left out).
+    """
+
+    DISPLAY_CLASSES = ("vtkMRMLSegmentationDisplayNode", "vtkMRMLModelDisplayNode")
+
+    def __init__(self):
+        VTKObservationMixin.__init__(self)
+        self._suspended = False
+        #: display node ID -> view node IDs set here (a different value means the user changed them)
+        self._applied = {}
+        self._timer = qt.QTimer()
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(0)
+        self._timer.connect("timeout()", self.update)
+        scene = slicer.mrmlScene
+        for event in (scene.NodeAddedEvent, scene.NodeRemovedEvent, scene.EndImportEvent, scene.EndRestoreEvent, scene.EndBatchProcessEvent):
+            self.addObserver(scene, event, self._onSceneChanged)
+        self.addObserver(scene, scene.EndCloseEvent, self._onSceneClosed)
+        self.update()
+
+    def _onSceneChanged(self, caller=None, event=None):
+        self._timer.start()
+
+    def _onSceneClosed(self, caller=None, event=None):
+        self._applied = {}
+        self._timer.start()
+
+    def _onCompositeModified(self, caller=None, event=None):
+        self._timer.start()
+
+    def _observeCompositeNodes(self):
+        for compositeNode in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode"):
+            if not self.hasObserver(compositeNode, vtk.vtkCommand.ModifiedEvent, self._onCompositeModified):
+                self.addObserver(compositeNode, vtk.vtkCommand.ModifiedEvent, self._onCompositeModified)
+
+    @staticmethod
+    def figureViewNodeIds():
+        """IDs of the slice nodes whose view shows a figure as its background."""
+        ids = []
+        for compositeNode in _figureCompositeNodes():
+            sliceNode = space._sliceNode(compositeNode.GetLayoutName())
+            if sliceNode is not None:
+                ids.append(sliceNode.GetID())
+        return ids
+
+    @classmethod
+    def _displayNodes(cls):
+        for className in cls.DISPLAY_CLASSES:
+            for displayNode in slicer.util.getNodesByClass(className):
+                displayable = displayNode.GetDisplayableNode()
+                if displayable is None or displayable.GetHideFromEditors():
+                    continue  # display nodes are hidden from editors; their displayable node is not (slice models are)
+                if displayable.GetAttribute("StudioFigure") or displayNode.GetAttribute("StudioFigure"):
+                    continue  # the figure's own nodes (L-29) stay in the figure views
+                yield displayNode
+
+    @staticmethod
+    def _viewIds(displayNode):
+        return [str(nodeId) for nodeId in displayNode.GetViewNodeIDs()]
+
+    def update(self):
+        """Take the figure views out of the views of segmentations and models, or give them back."""
+        self._timer.stop()
+        scene = slicer.mrmlScene
+        if scene.IsImporting() or scene.IsClosing() or scene.IsRestoring() or scene.IsBatchProcessing():
+            return
+        try:
+            self._observeCompositeNodes()
+            figureIds = [] if self._suspended else self.figureViewNodeIds()
+            otherIds = [node.GetID() for node in slicer.util.getNodesByClass("vtkMRMLAbstractViewNode") if node.GetID() not in figureIds]
+            liveIds = set()
+            for displayNode in self._displayNodes():
+                liveIds.add(displayNode.GetID())
+                self._updateDisplayNode(displayNode, figureIds, otherIds)
+            for nodeId in [nodeId for nodeId in self._applied if nodeId not in liveIds]:
+                del self._applied[nodeId]
+        except Exception:
+            logging.error(f"Studio: figure view exclusion failed:\n{traceback.format_exc()}")
+
+    def _updateDisplayNode(self, displayNode, figureIds, otherIds):
+        nodeId = displayNode.GetID()
+        before = displayNode.GetAttribute(VIEWS_BEFORE_FIGURE_ATTRIBUTE)
+        current = self._viewIds(displayNode)
+        if before is not None and nodeId in self._applied and current != self._applied[nodeId]:
+            # The user chose the views of this node while a figure was shown: they are its own views now
+            self._applied.pop(nodeId, None)
+            displayNode.RemoveAttribute(VIEWS_BEFORE_FIGURE_ATTRIBUTE)
+            before = None
+        original = before.split() if before is not None else current
+        if original:
+            # Views chosen by the user: only the figure views leave (a node shown only in figure views keeps them)
+            wanted = [viewId for viewId in original if viewId not in figureIds] or original
+        else:
+            # All views: every view but the figure views
+            wanted = list(otherIds) if figureIds and otherIds else []
+        if wanted == original:
+            # Nothing to take out: the node has (or gets back) its own views
+            if before is not None:
+                self._applied.pop(nodeId, None)
+                mtimeBefore = _settledMTime(displayNode)
+                wasModifying = displayNode.StartModify()
+                if current != original:
+                    displayNode.SetViewNodeIDs(original)
+                displayNode.RemoveAttribute(VIEWS_BEFORE_FIGURE_ATTRIBUTE)
+                displayNode.EndModify(wasModifying)
+                _settleNode(displayNode, mtimeBefore)  # bookkeeping, not an edit
+            return
+        mtimeBefore = _settledMTime(displayNode)
+        wasModifying = displayNode.StartModify()
+        if before is None:
+            displayNode.SetAttribute(VIEWS_BEFORE_FIGURE_ATTRIBUTE, " ".join(original))
+        if current != wanted:
+            displayNode.SetViewNodeIDs(wanted)
+        displayNode.EndModify(wasModifying)
+        _settleNode(displayNode, mtimeBefore)  # bookkeeping, not an edit: opening a project must not rewrite it
+        self._applied[nodeId] = wanted
+
+    def suspend(self):
+        """Classic: the views of segmentations and models are given back (the views are the user's there)."""
+        self._suspended = True
+        self.update()
+
+    def resume(self):
+        self._suspended = False
+        self.update()
+
+    def dispose(self):
+        self._timer.stop()
+        self.removeObservers()
+
+
+_figureViewExclusion = None
+
+
+def figureViewExclusion():
+    """The object that keeps segmentations and models out of the figure views (None outside Studio)."""
+    return _figureViewExclusion
+
+
 def _figureConventionNotice(figureNode, shell):
     """The question "In this figure, the patient's right is on the [Left] [Right] [Not sure]" (stays until answered)."""
     figureId = figureNode.GetID()
@@ -3179,6 +5712,17 @@ def answerFigureConvention(convention, figureId=None):
     if controller is not None and controller.figureId == figure.GetID():
         controller.mirror(convention == "neurological")
     _withdrawNotice("figure-convention")
+    module = _figureModule()
+    # A panel of the Figure card: the answer is the card's (the paper's side for every panel, a sagittal panel's own
+    # anterior side, and the fits recomputed). The notice is withdrawn first, so the card does not answer it again.
+    tracing = module.session() if module is not None else None
+    panel = next((item for item in tracing.panels if item.figureId == figure.GetID()), None) if tracing is not None else None
+    if panel is not None and convention != "unknown":
+        tracing.setConvention(convention, panel)
+    # The Draw Figure card shows the confirmation state (read from the attribute): refresh it now
+    card = getattr(module, "_card", None) if module is not None else None
+    if card is not None:
+        card.refresh()
     return True
 
 
@@ -3213,6 +5757,145 @@ def adoptShownFigure(shell=None):
     return background
 
 
+def loadFigureVolume(path):
+    """Load a picture as a figure volume. A grey+alpha picture loads as a 2-component vector volume that the views
+    would show as false colours (and log errors on every render): it is reduced to a 1-component grey volume.
+    """
+    node = slicer.util.loadVolume(path, {"singleFile": True, "show": False})
+    image = node.GetImageData() if node is not None else None
+    if node is None or not node.IsA("vtkMRMLVectorVolumeNode") or image is None or image.GetNumberOfScalarComponents() != 2:
+        return node
+    extract = vtk.vtkImageExtractComponents()
+    extract.SetInputData(image)
+    extract.SetComponents(0)
+    extract.Update()
+    grey = vtk.vtkImageData()
+    grey.DeepCopy(extract.GetOutput())
+    scalar = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", node.GetName())
+    matrix = vtk.vtkMatrix4x4()
+    node.GetIJKToRASMatrix(matrix)
+    scalar.SetIJKToRASMatrix(matrix)
+    scalar.SetAndObserveImageData(grey)
+    scalar.CreateDefaultDisplayNodes()
+    slicer.mrmlScene.RemoveNode(node)
+    return scalar
+
+
+def _pngIsComplete(path):
+    """True when the file is a whole PNG: signature, every chunk with a valid CRC, ending with IEND. Reads the file
+    in Python so nothing is logged (QImage.load logs a CRITICAL libpng row for a cut file, which lights the error badge).
+    """
+    import struct
+    import zlib
+
+    size = os.path.getsize(path)
+    with open(path, "rb") as stream:
+        if stream.read(8) != b"\x89PNG\r\n\x1a\n":
+            return False
+        position = 8
+        first = True
+        while position + 12 <= size:
+            header = stream.read(8)
+            if len(header) < 8:
+                return False
+            length, kind = struct.unpack(">I4s", header)
+            if position + 12 + length > size or (first and kind != b"IHDR"):
+                return False
+            first = False
+            crc = zlib.crc32(kind)
+            remaining = length
+            while remaining > 0:
+                block = stream.read(min(remaining, 1 << 20))
+                if not block:
+                    return False
+                crc = zlib.crc32(block, crc)
+                remaining -= len(block)
+            tail = stream.read(4)
+            if len(tail) < 4 or struct.unpack(">I", tail)[0] != (crc & 0xFFFFFFFF):
+                return False
+            position += 12 + length
+            if kind == b"IEND":
+                return True
+    return False
+
+
+def _tiffIsConsistent(path):
+    """False when a classic TIFF is cut or its directory lies (strips/tiles outside the file, or an uncompressed picture
+    far larger than the file). The ITK reader logs CRITICAL/ERROR rows for such a file. Anything not understood
+    (BigTIFF, odd layouts) passes to the reader.
+    """
+    import struct
+
+    size = os.path.getsize(path)
+    with open(path, "rb") as stream:
+        head = stream.read(8)
+        if len(head) < 8 or head[:2] not in (b"II", b"MM"):
+            return False
+        end = "<" if head[:2] == b"II" else ">"
+        if struct.unpack(end + "H", head[2:4])[0] != 42:
+            return True
+        offset = struct.unpack(end + "I", head[4:8])[0]
+        if offset < 8 or offset + 2 > size:
+            return False
+        stream.seek(offset)
+        count = struct.unpack(end + "H", stream.read(2))[0]
+        entries = stream.read(12 * count)
+        if len(entries) < 12 * count:
+            return False
+        sizes = {1: 1, 3: 2, 4: 4, 6: 1, 7: 1, 8: 2, 9: 4}
+        codes = {1: "B", 3: "H", 4: "I", 6: "b", 7: "B", 8: "h", 9: "i"}
+        tags = {}
+        for index in range(count):
+            tag, kind, n, raw = struct.unpack(end + "HHI4s", entries[12 * index : 12 * index + 12])
+            width = sizes.get(kind)
+            if width is None or n > 1 << 24 or tag not in (256, 257, 258, 259, 273, 277, 279, 324, 325):
+                continue
+            if width * n <= 4:
+                data = raw[: width * n]
+            else:
+                where = struct.unpack(end + "I", raw)[0]
+                if where + width * n > size:
+                    return False
+                stream.seek(where)
+                data = stream.read(width * n)
+                if len(data) < width * n:
+                    return False
+            tags[tag] = struct.unpack(end + str(n) + codes[kind], data)
+    offsets = tags.get(324 if 324 in tags else 273)
+    counts = tags.get(325 if 325 in tags else 279)
+    if offsets is None or counts is None:
+        return True
+    if len(offsets) != len(counts) or any(o + c > size for o, c in zip(offsets, counts, strict=True)):
+        return False
+    width, height = tags.get(256, (0,))[0], tags.get(257, (0,))[0]
+    if tags.get(259, (1,))[0] == 1 and width and height:
+        samples = tags.get(277, (1,))[0]
+        bits = tags.get(258, (8,))[0]
+        if width * height * samples * bits // 8 > sum(counts) + size:
+            return False
+    return True
+
+
+def _checkPlainImageReadable(path):
+    """Refuse a damaged .png/.jpg/.bmp/.tif before a reader runs on it: the volume readers (and QImage) log ERROR or
+    CRITICAL rows (and light the error badge) for a file that is cleanly refused here. PNG and TIFF are checked in Python
+    without logging; other formats are left to the volume readers.
+    """
+    extension = os.path.splitext(str(path))[1].lower()
+    if extension not in (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"):
+        return
+    if extension == ".png":
+        damaged = not _pngIsComplete(path)
+    elif extension in (".tif", ".tiff"):
+        damaged = not _tiffIsConsistent(path)
+    else:
+        image = qt.QImage()
+        damaged = not image.load(str(path)) or image.isNull()
+    if damaged:
+        raise RefusedFileError(_("{name} could not be read as an image (it may be damaged, or another kind of file saved under "
+                                 "this name), so it was not opened.").format(name=os.path.basename(str(path))))
+
+
 def _routeFigure(path, shell, result, figureNode=None):
     """Show a figure next to the template (module documentation). On error, the Add Data dialog opens with it (3D Slicer's route).
 
@@ -3225,14 +5908,34 @@ def _routeFigure(path, shell, result, figureNode=None):
         figureNode = reopened
         result.alreadyOpen.append(figureNode)
     loaded = figureNode is None
+    if figureNode is None:
+        # Read the figure before anything is started: a file that cannot be read is refused with its reason and leaves
+        # no template or lesion behind (and no bare Add Data dialog)
+        try:
+            if not os.path.isfile(path):
+                raise RefusedFileError(_("{name} was not opened: the file no longer exists.").format(name=os.path.basename(str(path))))
+            if os.path.getsize(path) == 0:
+                raise RefusedFileError(_("{name} is empty (0 bytes), so it was not opened.").format(name=os.path.basename(path)))
+            _checkPlainImageReadable(path)
+            with slicer.util.WaitCursor():
+                figureNode = loadFigureVolume(path)
+        except Exception as e:
+            if isinstance(e, RefusedFileError):
+                reason = str(e)
+            else:
+                reason = _("{name} could not be read as an image (it may be damaged, or another kind of file saved under "
+                           "this name), so it was not opened.").format(name=os.path.basename(str(path)))
+            logging.warning(f"Studio: {path} was not opened as a figure: {e}")
+            _noteLoadResult(path, False)
+            slicer.util.warningDisplay(reason, windowTitle=_("Figure not opened"), detailedText=str(path))
+            return False
     try:
-        if _backgroundVolume() is None:
+        # Tag the figure first: untagged it is itself the background of the views, so no template would be started for it
+        figureNode.SetAttribute(space.ROLE_ATTRIBUTE, space.ROLE_FIGURE)
+        templateOnLeft = _backgroundVolume() is None
+        if templateOnLeft:
             # Something to draw on: the template (an existing template lesion is reused)
             startOnTemplate(shell=shell)
-        if figureNode is None:
-            with slicer.util.WaitCursor():
-                figureNode = slicer.util.loadVolume(path, {"singleFile": True, "show": False})
-        figureNode.SetAttribute(space.ROLE_ATTRIBUTE, space.ROLE_FIGURE)
         if figureNode.GetAttribute(space.FIGURE_CONVENTION_ATTRIBUTE) not in space.CONVENTIONS:
             figureNode.SetAttribute(space.FIGURE_CONVENTION_ATTRIBUTE, "unknown")
         if shell.currentWorkspace() != "draw":
@@ -3261,7 +5964,11 @@ def _routeFigure(path, shell, result, figureNode=None):
         return True
     _withdrawNotice("figure-convention", shell)
     _postNotice("figure-convention", _figureConventionNotice(figureNode, shell), shell)
-    shell.toast(_("Figure shown on the right; the template on the left is where you draw"), level="consequence")
+    if templateOnLeft:
+        shell.toast(_("Figure shown on the right; the template on the left is where you draw"), level="consequence")
+    else:
+        # A scan is already open and stays on the left: it is what is drawn on
+        shell.toast(_("Figure shown on the right; the scan on the left is where you draw"), level="consequence")
     return True
 
 
@@ -3429,7 +6136,8 @@ def _routeStatMap(path, shell, result, mapNode=None):
 
     ``mapNode``: the map is already loaded (by a route of 3D Slicer). A map whose file is already open is not loaded
     again: its overlay is shown again. If the overlay cannot be made, the map is shown as a plain overlay: it never
-    becomes a scan of Draw (no segmentation is bound to it).
+    becomes a scan of Draw (no segmentation is bound to it). A map file that is damaged or too large raises
+    ``RefusedFileError`` before anything is loaded (``loadFiles`` announces it).
     """
     reopened = None if mapNode is not None else _openReference(path, space.ROLE_STATMAP)
     if mapNode is None:
@@ -3444,6 +6152,10 @@ def _routeStatMap(path, shell, result, mapNode=None):
             if shell is not None:
                 shell.toast(_("{name} is already open").format(name=shown.GetName()))
             return True
+        if reopened is None:
+            # A map file whose header lies (voxel size 0 or not a number, a dimension below 1, more data than the file
+            # holds) or that is too large is refused before anything is loaded, as a scan is: raises RefusedFileError
+            _checkNiftiComplete(path)
         if reopened is None and mappage is not None and callable(getattr(mappage, "loadMap", None)):
             volume = mappage.loadMap(path, shell)
             if volume is not None:
@@ -3514,9 +6226,52 @@ def _ownLoad():
     return _OwnLoad()
 
 
+def _sameLoadedScan(node):
+    """The scan already open that ``node`` is a second load of, else None.
+
+    The Sample Data module removes the storage node of what it loads, so the file cannot tell: the scene named the new node
+    ``<name>_<n>`` after the open scan ``<name>``, and both hold the same grid and voxels.
+    """
+    import re
+
+    import numpy as np
+
+    match = re.fullmatch(r"(.*)_\d+", node.GetName())
+    if match is None:
+        return None
+    for other in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
+        if other.GetID() == node.GetID() or other.GetName() != match.group(1) or _shownNodeForFile(other) is None:
+            continue
+        if other.GetImageData() is None or node.GetImageData() is None:
+            continue
+        if other.GetImageData().GetDimensions() != node.GetImageData().GetDimensions():
+            continue
+        matrices = []
+        for volume in (other, node):
+            matrix = vtk.vtkMatrix4x4()
+            volume.GetIJKToRASMatrix(matrix)
+            matrices.append(slicer.util.arrayFromVTKMatrix(matrix))
+        if not np.allclose(matrices[0], matrices[1]):
+            continue
+        if np.array_equal(slicer.util.arrayFromVolume(other), slicer.util.arrayFromVolume(node)):
+            return other
+    return None
+
+
+def _removeVolumeAndHelpers(node):
+    """Remove the volume ``node`` with its display and storage nodes."""
+    related = [node.GetNthDisplayNode(i) for i in range(node.GetNumberOfDisplayNodes())]
+    related.append(node.GetStorageNode())
+    slicer.mrmlScene.RemoveNode(node)
+    for other in related:
+        if other is not None and slicer.mrmlScene.IsNodePresent(other):
+            slicer.mrmlScene.RemoveNode(other)
+
+
 class _TransientLoadWatcher(VTKObservationMixin):
     """A scan added while the Sample Data or DICOM module is shown opens in Draw (with a "Lesion" segment), as if it was
-    opened from Library. Scene imports and multi-volume loads (more than one volume within 500 ms) are left alone.
+    opened from Library. Scene imports are left alone; multi-volume loads (more than one volume within 500 ms) stay
+    where they are, but a damaged DICOM series among them is refused and an uneven slice spacing is named.
     """
 
     def __init__(self, shell):
@@ -3542,30 +6297,80 @@ class _TransientLoadWatcher(VTKObservationMixin):
         scene = slicer.mrmlScene
         if scene.IsImporting() or scene.IsClosing() or scene.IsRestoring() or node.GetHideFromEditors():
             return
-        if not self.shell.isActive() or self.shell.currentModuleName() not in TRANSIENT_LOADER_MODULES:
+        if not self.shell.isActive():
+            return
+        module = self.shell.currentModuleName()
+        if module not in TRANSIENT_LOADER_MODULES and not (module == _DRAW_MODULE and _addDataDialogs):
             return
         self.added.append(node.GetID())
+        self._holdAutosave(True)  # no project is created from the scan before _onTimeout() has checked it
         self.timer.start()
+
+    def _holdAutosave(self, held):
+        try:
+            from . import autosave
+
+            autosave.holdNewLoad(self, held)
+        except Exception:
+            logging.debug(f"Studio: {traceback.format_exc()}")
 
     def _onTimeout(self):
         added, self.added = self.added, []
         try:
+            self._checkAdded(added)
+        finally:
+            self._holdAutosave(False)
+
+    def _checkAdded(self, added):
+        try:
             nodes = [slicer.mrmlScene.GetNodeByID(nodeId) for nodeId in added]
             nodes = [node for node in nodes if node is not None and _referenceKind(node) is None]
-            if len(nodes) != 1 or not self.shell.isActive() or self.shell.currentModuleName() not in TRANSIENT_LOADER_MODULES:
+            if not nodes or not self.shell.isActive() or self.shell.currentModuleName() not in (*TRANSIENT_LOADER_MODULES, _DRAW_MODULE):
+                return
+            # A damaged series loaded from the DICOM browser (or imported with its Import button), alone or with other
+            # series: refused as on a drop, so the zero-filled or scrambled scan is neither opened nor saved as a project
+            refusals = []
+            for node in list(nodes):
+                try:
+                    _checkDicomVolumeComplete(node)
+                except RefusedFileError as e:
+                    logging.warning(f"Studio: {node.GetName()} was not opened: {e}")  # planned refusal: no traceback
+                    _removeVolumeAndHelpers(node)
+                    nodes.remove(node)
+                    refusals.append(str(e))
+            if refusals:
+                slicer.util.warningDisplay("\n\n".join(refusals))
+            if not nodes:
+                return
+            if len(nodes) > 1:
+                # Several volumes (a multi-volume sample, several series of the browser) are left where they are, but a
+                # series with a missing slice or an uneven spacing is still named
+                _irregularGeometryToast(nodes, self.shell)
                 return
             if _isTemplate(nodes[0]):
                 # The MNI template of the Sample Data module: "Start on MNI template" on it (its "Lesions" is reused)
                 startOnTemplate(shell=self.shell, volumeNode=nodes[0])
                 return
             result = LoadResult()
-            result.volumes.append(nodes[0])
+            storageNode = nodes[0].GetStorageNode()
+            fileName = storageNode.GetFileName() if storageNode is not None else None
+            openNode = openNodeForFile(fileName, exclude=nodes[0]) if fileName else None
+            if openNode is None:
+                openNode = _sameLoadedScan(nodes[0])
+            if openNode is not None and _isScan(openNode):
+                # The same sample loaded a second time: the Sample Data module read its cache file again. The new copy
+                # goes, and the scan that is already open becomes current again ("<name> is already open")
+                _removeVolumeAndHelpers(nodes[0])
+                result.alreadyOpen.append(openNode)
+            else:
+                result.volumes.append(nodes[0])
             _afterLoad(result, self.shell)
         except Exception:
             logging.error(f"Studio: cannot open the loaded scan in Draw:\n{traceback.format_exc()}")
 
     def dispose(self):
         self.timer.stop()
+        self._holdAutosave(False)
         self.removeObservers()
 
 
@@ -3593,9 +6398,17 @@ class _DropHandler(qt.QObject):
     def __init__(self, shell):
         qt.QObject.__init__(self)
         self.shell = shell
+        # Files dropped on a text field are opened too
+        self.textFieldRouter = _TextFieldDropRouter(self)
+        self.textFieldRouter.watch(shell.mainWindow)
+
+    def dispose(self):
+        self.textFieldRouter.dispose()
 
     def eventFilter(self, obj, event):
         try:
+            if event.type() in (qt.QEvent.Show, qt.QEvent.WinIdChange):
+                self.textFieldRouter.watch(self.shell.mainWindow)
             return self._handleEvent(event)
         except Exception:
             logging.error(f"Studio drop handler failed:\n{traceback.format_exc()}")
@@ -3631,8 +6444,141 @@ class _DropHandler(qt.QObject):
     def _load(self, paths, addData):
         try:
             handleDrop(paths, addData, self.shell)
-        except Exception:
+        except Exception as error:
             logging.error(f"Studio: cannot load the dropped files:\n{traceback.format_exc()}")
+            self._reportFailure(error)
+
+    def _reportFailure(self, error):
+        """Tell the user that the drop did nothing, in plain words (a damaged study.json says so), without a traceback."""
+        shell = _currentShell(self.shell)
+        if shell is None:
+            return
+        studyUi = _studyUiModule()
+        if studyUi is not None and isinstance(error, studyUi.StudyFileError):
+            text = str(error)
+        else:
+            text = _("The dropped files could not be loaded. The reason is in the log.")
+        try:
+            shell.toast(text, ms=12000, level="consequence")
+        except Exception:
+            logging.error(f"Studio: cannot show the drop failure:\n{traceback.format_exc()}")
+
+
+# Text fields that take a drag themselves before the main window sees it (a multi-line field: on its viewport)
+_TEXT_FIELD_CLASSES = ("QLineEdit", "QTextEdit", "QPlainTextEdit")
+# Fields that are meant to take a dragged path as text: a path field and the Python console
+_PATH_TEXT_OWNERS = ("ctkPathLineEdit", "ctkConsole")
+
+
+def _textFieldOf(obj):
+    """The text field that a drag event sent to ``obj`` is for (the field, or the viewport of a multi-line field), else None."""
+    if obj is None or not obj.isWidgetType():
+        return None
+    for className in _TEXT_FIELD_CLASSES:
+        if obj.inherits(className):
+            return obj
+    parent = obj.parentWidget()
+    if parent is not None and (parent.inherits("QTextEdit") or parent.inherits("QPlainTextEdit")) and parent.viewport() == obj:
+        return parent
+    return None
+
+
+class _TextFieldDropFilter(qt.QObject):
+    """Application event filter, installed only while a drag of files is over the main window: the drag events of a text
+    field of the main window go to the Studio drop handler, so the files are opened and not typed in as their path.
+    """
+
+    def __init__(self, dropHandler):
+        qt.QObject.__init__(self)
+        self.dropHandler = dropHandler
+
+    def eventFilter(self, obj, event):
+        try:
+            if event.type() not in (qt.QEvent.DragEnter, qt.QEvent.DragMove, qt.QEvent.DragLeave, qt.QEvent.Drop):
+                return False
+            field = _textFieldOf(obj)
+            if field is None or not self._routed(field):
+                return False
+            return self.dropHandler._handleEvent(event)
+        except Exception:
+            logging.error(f"Studio text field drop filter failed:\n{traceback.format_exc()}")
+        return False
+
+    def _routed(self, field):
+        mainWindow = self.dropHandler.shell.mainWindow
+        if not _isAlive(mainWindow) or field.window() != mainWindow:
+            return False
+        widget = field
+        while widget is not None:
+            if any(widget.inherits(className) for className in _PATH_TEXT_OWNERS):
+                return False
+            widget = widget.parentWidget()
+        return True
+
+
+class _TextFieldDropRouter(qt.QObject):
+    """Files dropped on a text field of the main window are opened like anywhere else on the window (SPEC: drops are caught
+    by the event filter of ``mw`` while Studio is on).
+
+    Qt gives a drag to the deepest widget under the cursor that accepts drops, and the main window's filter sees it only
+    when that widget ignores it; but a line edit takes any drag that offers text, and a multi-line field any drag with
+    URLs (typing the path in). The router watches the main window's QWindow, which receives every drag before Qt picks the
+    widget: while a drag of local files is over the window, ``_TextFieldDropFilter`` is installed on the application.
+    It is not installed otherwise, so that no Python filter runs for every event of the application.
+    """
+
+    def __init__(self, dropHandler):
+        qt.QObject.__init__(self)
+        self.window = None
+        self.fieldFilter = _TextFieldDropFilter(dropHandler)
+        self.armed = False
+        self.generation = 0
+
+    def watch(self, mainWindow):
+        """Watch the current QWindow of ``mainWindow`` (it has none before it is first shown)."""
+        window = mainWindow.windowHandle() if _isAlive(mainWindow) else None
+        if window is not None and self.window is not None and window == self.window:
+            return
+        self._unwatchWindow()
+        if window is not None:
+            window.installEventFilter(self)
+            self.window = window
+
+    def dispose(self):
+        self._unwatchWindow()
+        self._disarm(self.generation)
+
+    def _unwatchWindow(self):
+        if self.window is not None and _isAlive(self.window):
+            self.window.removeEventFilter(self)
+        self.window = None
+
+    def eventFilter(self, obj, event):
+        try:
+            eventType = event.type()
+            if eventType in (qt.QEvent.DragEnter, qt.QEvent.DragMove):
+                if self.armed:
+                    self.generation += 1  # the drag goes on: a pending disarm is stale
+                elif localPaths(event.mimeData()):
+                    self._arm()
+            elif eventType in (qt.QEvent.DragLeave, qt.QEvent.Drop) and self.armed:
+                # After the widget under the cursor has received the event
+                generation = self.generation
+                qt.QTimer.singleShot(0, lambda: self._disarm(generation))
+        except Exception:
+            logging.error(f"Studio text field drop router failed:\n{traceback.format_exc()}")
+        return False
+
+    def _arm(self):
+        self.generation += 1
+        slicer.app.installEventFilter(self.fieldFilter)
+        self.armed = True
+
+    def _disarm(self, generation):
+        if not self.armed or generation != self.generation:
+            return
+        slicer.app.removeEventFilter(self.fieldFilter)
+        self.armed = False
 
 
 def _setDropHighlight(active):
@@ -3651,7 +6597,7 @@ def install(shell):
     """Handle the files dropped on the main window while Studio is shown; open scans loaded by the Sample Data and DICOM
     modules in Draw; guard a figure view; show the importer's notices.
     """
-    global _dropHandler, _uninstallOnQuit, _transientWatcher
+    global _dropHandler, _uninstallOnQuit, _transientWatcher, _figureViewExclusion
     uninstall(shell)
     _dropHandler = _DropHandler(shell)
     shell.mainWindow.installEventFilter(_dropHandler)
@@ -3667,6 +6613,11 @@ def install(shell):
     _watchTemplate()
     if _figureController is not None:
         _figureController.resume(shell)
+    # Segmentations and models are not drawn over a figure (its view shows the picture only)
+    if _figureViewExclusion is None:
+        _figureViewExclusion = _FigureViewExclusion()
+    else:
+        _figureViewExclusion.resume()
     figure = _figureModule()
     if figure is not None:
         try:
@@ -3699,6 +6650,9 @@ def uninstall(shell):
         _transientWatcher = None
     if _figureController is not None:
         _figureController.suspend()
+    if _figureViewExclusion is not None and shell is not None:
+        # Classic (not when the application quits: the scene is not changed then)
+        _figureViewExclusion.suspend()
     figure = sys.modules.get("StudioLib.figure")
     if figure is not None:
         try:
@@ -3712,6 +6666,7 @@ def uninstall(shell):
     mainWindow = _dropHandler.shell.mainWindow
     if _isAlive(mainWindow):
         mainWindow.removeEventFilter(_dropHandler)
+    _dropHandler.dispose()
     _dropHandler = None
     _setDropHighlight(False)
 

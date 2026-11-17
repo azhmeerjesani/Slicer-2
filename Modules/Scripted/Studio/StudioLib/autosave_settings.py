@@ -101,7 +101,7 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
         self.intervalSpinBox = self._spinBox(1, 60, "IntervalMinutes", _(" min"))
         layout.addWidget(ui.settingsRow(_("And at least every"), self.intervalSpinBox, last=True))
         layout.addWidget(ui.label(_("Large scans (over 100 MB to write) are saved every 10 minutes, and always when you switch projects, "
-                                    "press Ctrl+S or quit."), "caption", "text3", "StudioSavingLargeNote", wrap=True))
+                                    "press {key} or quit.").format(key=ui.keyText("Ctrl+S")), "caption", "text3", "StudioSavingLargeNote", wrap=True))
         layout.addSpacing(16)
 
         # Recovery of the scenes that are not projects
@@ -114,6 +114,9 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
         self.directoryButton.setMaximumWidth(420)
         self.directoryButton.toolTip = _("Folder of new autosaves. It should be a private folder, not a synchronized or shared one.")
         self.directoryButton.connect("directoryChanged(QString)", self.onDirectoryChanged)
+        # The Lucide folder line icon (not the platform's coloured bitmap), re-tinted with the palette
+        self._refreshFolderIcon()
+        ui.addPaletteListener(self._refreshFolderIcon)
         self.resetDirectoryButton = qt.QPushButton(_("Reset"))
         self.resetDirectoryButton.toolTip = _("Use the default folder (in the application data folder)")
         self.resetDirectoryButton.connect("clicked()", self.onResetDirectory)
@@ -189,14 +192,15 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
 
         root = projects.root()
         # The home folder is written "~" (the full path is the tooltip)
-        self.rootLabel.setText(projects.shortPath(root))
-        self.rootLabel.setToolTip(root)
+        ui.setElidedText(self.rootLabel, projects.shortPath(root), root)
         fromEnvironment = projects.isRootFromEnvironment()
         self.changeRootButton.enabled = not fromEnvironment and projects.isEnabled()
         if fromEnvironment:
             note = _("Set by the {variable} environment variable.").format(variable=projects.ROOT_ENVIRONMENT)
         elif not projects.isEnabled():
             note = _("Projects are turned off ({variable}=0).").format(variable=projects.ENABLED_ENVIRONMENT)
+        elif projects.isRootMissing():
+            note = _("This folder cannot be found: connect the drive that holds it, or choose another folder.")
         else:
             projectCount, studyCount = projects.folderSummary(root) if os.path.isdir(root) else (0, 0)
             note = " · ".join([_("1 project") if projectCount == 1 else _("{n} projects").format(n=projectCount),
@@ -241,6 +245,16 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
         else:
             self.locationNote.text = _("A new location applies to new autosaves.")
 
+    def _refreshFolderIcon(self):
+        button = getattr(self, "directoryButton", None)
+        if button is None:
+            return
+        try:
+            button.icon = ui.icon("folder", 16)
+        except RuntimeError:
+            # The settings dialog (and the button with it) was deleted
+            ui.removePaletteListener(self._refreshFolderIcon)
+
     def onDirectoryChanged(self, directory):
         if self._updatingDirectory:
             return
@@ -255,8 +269,18 @@ class AutosaveSettingsPanel(ctk.ctkSettingsPanel):
 
     def onOpenDirectory(self):
         path = io.defaultRoot()
-        if os.path.isdir(path):
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(path))
+        if not os.path.isdir(path):
+            # Nothing was autosaved there yet (work in Studio projects does not use it): create the folder, as the first
+            # autosave does, so that Open always shows it instead of doing nothing.
+            try:
+                io.ensureRoot(path)
+            except OSError:
+                qt.QMessageBox.information(self, _("Recovery location"),
+                                           _("Nothing has been autosaved yet, and the folder could not be created:") + "\n" + path)
+                return
+        from . import projects
+
+        projects.showInFileManager(path)
 
     def onRecover(self):
         from . import recovery
@@ -303,7 +327,7 @@ _panel = None
 
 
 def install(service=None):
-    """Add the Autosave panel to the application settings (idempotent; never under --testing)."""
+    """Add the Saving panel to the application settings (idempotent; never under --testing)."""
     global _panel
     if slicer.app.testingEnabled() and not getattr(service, "force", False):
         return None

@@ -18,6 +18,9 @@ faster, auditable and free of silent left-right flips, with standard MRML nodes 
      left) is assumed until it is confirmed, once per source record (``record_id``): the answer is
      ``Studio.FigureConvention`` (U-07's attribute and semantics; "unknown" until confirmed). The figure views show
      the side tag and R/L letters (``orientation.py``).
+     A sagittal figure does not show the patient's right: a sagittal panel asks "Anterior is on the [Left | Right] of the
+     figure" for itself alone (``Panel.ownSide``; "radiological" is anterior on the left, as in ``figurefit``). It
+     starts from the paper's answer, and answering it never changes another panel.
   4. *Landmarks*: two markups point lists, ``FigureLandmarks`` (on the figure, Green view) and ``TemplateLandmarks``
      (on the template, Red view), placed in pairs with suggested names (``figurefit.suggested_landmarks``).
   5. *Fit*: ``figurefit`` similarity by default; affine only with at least 4 pairs. The residual chip reads
@@ -41,13 +44,18 @@ faster, auditable and free of silent left-right flips, with standard MRML nodes 
   ``trace_method`` += figure through the ``StudySession`` (``record_id`` is never written); a draft
   (``.studio/figure/<sid>/``) is written while you work, for recovery. ``showSource(json)`` rebuilds the overlay from a
   fit file (≤ 300 ms).
+- **Reopen** (``resumeFromScene()``): a project or scene opened again with figure nodes resumes the tracing when Draw is
+  shown (or when the same figure is dropped again): the panels are rebuilt from the saved nodes (``Studio.FigureState``
+  and the figure volume's node references to its placement transform and landmark lists), nothing is loaded again, and
+  the trace views come back when they were shown. "Close figure" keeps the nodes but they are not resumed.
 - **Done** (a study Done hook, order 20): a figure whose convention is not confirmed blocks Done with an inline required
   choice in the Figure card, never a modal; otherwise the fit is saved and the columns are returned. The plane normals go
   to later hooks as ``ctx["figure_plane_normal"]`` / ``ctx["figure_plane_normals"]`` (L-28's dimensionality).
 - **Classic**: ``showClassicCard()`` hosts the same card in a non-modal window ("Trace from figure…").
 
 Settings (fork-only): ``Studio/Figure/LastFolder``. Node attributes: ``StudioFigure``, ``Studio.Role`` = figure,
-``Studio.FigureConvention``, ``Studio.FigurePanel``, ``Studio.FigureState`` (JSON without any path).
+``Studio.FigureConvention``, ``Studio.FigurePanel``, ``Studio.FigureState`` (JSON without any path). Node references of
+the figure volume: ``StudioFigureTransform``, ``StudioFigureLandmarks``, ``StudioFigureTemplateLandmarks``.
 """
 
 import contextlib
@@ -72,6 +80,11 @@ from . import space
 FIGURE_ATTRIBUTE = "StudioFigure"
 PANEL_ATTRIBUTE = "Studio.FigurePanel"
 STATE_ATTRIBUTE = "Studio.FigureState"
+#: Node references of a panel's figure volume to its other nodes (saved with the scene: a reopened project or scene
+#: resumes the panel with them, ``resumeFromScene()``)
+TRANSFORM_REFERENCE = "StudioFigureTransform"
+FIGURE_LANDMARKS_REFERENCE = "StudioFigureLandmarks"
+TEMPLATE_LANDMARKS_REFERENCE = "StudioFigureTemplateLandmarks"
 #: Markups lists of a panel
 FIGURE_LANDMARKS_NAME = "FigureLandmarks"
 TEMPLATE_LANDMARKS_NAME = "TemplateLandmarks"
@@ -112,6 +125,11 @@ PLANE_TITLES = {"axial": _("Axial"), "coronal": _("Coronal"), "sagittal": _("Sag
 #: The orthogonal view of each plane: the one where pitch tilts the cut plane's line
 ORTHO_ORIENTATION = {"axial": "Sagittal", "coronal": "Sagittal", "sagittal": "Coronal"}
 LANDMARK_COLORS = {"figure": (0.98, 0.75, 0.18), "template": (0.25, 0.80, 0.95)}
+
+
+def pairsText(n):
+    """"1 pair" / "{n} pairs" (the landmark count on the Figure card)."""
+    return _("1 pair") if n == 1 else _("{n} pairs").format(n=n)
 
 
 def _figurefit():
@@ -260,6 +278,19 @@ def _temporaryPng(stem):
     return path
 
 
+def _pngPixels(pixels):
+    """Pixels Pillow can write as PNG: 8 and 16 bit data stay; float and other integer data scale (min..max) to 8 bit."""
+    pixels = np.ascontiguousarray(pixels)
+    if pixels.dtype in (np.uint8, np.uint16):
+        return pixels
+    data = pixels.astype(np.float64)
+    finite = data[np.isfinite(data)]
+    low, high = (float(finite.min()), float(finite.max())) if finite.size else (0.0, 0.0)
+    data = np.nan_to_num(data, nan=low, posinf=high, neginf=low)
+    scale = 255.0 / (high - low) if high > low else 0.0
+    return np.clip(np.rint((data - low) * scale), 0, 255).astype(np.uint8)
+
+
 def _atomicCopy(source, target):
     temporary = f"{target}.{os.getpid()}.tmp"
     try:
@@ -308,6 +339,16 @@ def canTrace(sourceVolumeNode=None):
 #
 
 
+def sideAnswerFromState(panel, state):
+    """Whether a rebuilt ``panel`` has its own side answer: the saved "side_answered" when it is there (a sagittal panel
+    that only took the paper's side is not answered), else (files saved before it was kept) a confirmed sagittal side.
+    """
+    if not (panel.ownSide and panel.confirmed):
+        return False
+    answered = state.get("side_answered") if isinstance(state, dict) else None
+    return bool(answered) if isinstance(answered, bool) else True
+
+
 class Panel:
     """One figure panel: its crop volume, placement transform, landmark lists, cut plane and fit."""
 
@@ -327,6 +368,9 @@ class Panel:
         self.model = "similarity"
         self.fit = None
         self.fitError = None
+        #: A sagittal panel's own side answer ("Anterior is on the … of the figure") was given: the paper's left-right
+        #: answer no longer changes it (a sagittal figure does not show the patient's right)
+        self.sideAnswered = False
         self.label = ""
         self.panelLabel = ""
         self.sourceName = ""
@@ -386,6 +430,11 @@ class Panel:
         return self.convention in ("radiological", "neurological")
 
     @property
+    def ownSide(self):
+        """True for a sagittal panel: its side is where anterior is, asked per panel, not the paper's left-right side."""
+        return self.plane == "sagittal"
+
+    @property
     def fitConvention(self):
         """The convention the fit uses: the confirmed one, else the radiological default (SPEC_LNM_ADDENDUM 3.10)."""
         return self.convention if self.confirmed else _figurefit().DEFAULT_CONVENTION
@@ -428,6 +477,10 @@ class Panel:
     def pairCount(self):
         return len(self.pairs()[0])
 
+    def distinctPairCount(self):
+        """Pairs at distinct figure points (a pair placed again on the same figure point counts once)."""
+        return _figurefit().distinct_count(self.pairs()[1])
+
     def ijkToRas(self):
         """The figure's IJK to RAS: the fit, or the initial placement before it (a brain about 140 mm wide)."""
         figurefit = _figurefit()
@@ -441,7 +494,7 @@ class Panel:
         """Fit the landmark pairs (similarity, or affine with at least 4 pairs). Return the fit or None."""
         figurefit = _figurefit()
         names, pixels, points = self.pairs()
-        model = self.model if len(names) >= figurefit.MIN_PAIRS.get(self.model, 2) else "similarity"
+        model = self.model if figurefit.distinct_count(pixels) >= figurefit.MIN_PAIRS.get(self.model, 2) else "similarity"
         self.fit = None
         self.fitError = None
         if len(names) >= figurefit.MIN_PAIRS["similarity"]:
@@ -449,6 +502,12 @@ class Panel:
                 self.fit = figurefit.fit_figure(pixels, points, self.cut(), convention=self.fitConvention, model=model)
             except ValueError as error:
                 self.fitError = str(error)
+                if model != "similarity":
+                    # Keep the last valid kind of fit so the overlay the user is tracing over does not jump back
+                    try:
+                        self.fit = figurefit.fit_figure(pixels, points, self.cut(), convention=self.fitConvention, model="similarity")
+                    except ValueError:
+                        pass
         return self.fit
 
     def place(self, attach=False):
@@ -475,15 +534,20 @@ class Panel:
             "plane": self.plane, "z_mm": self.z, "pitch_deg": self.pitch, "roll_deg": self.roll, "model": self.model,
             "convention": self.convention, "crop_px": list(self.cropPx), "figure": self.label, "panel": self.panelLabel,
             "source_name": self.sourceName,
+            # A sagittal panel that only took the paper's side keeps following it after a reopen (``sideAnswerFromState``)
+            "side_answered": bool(self.sideAnswered),
             "landmarks": [{"name": name, "fig_px": [float(value) for value in pixel], "tpl_ras": [float(value) for value in point]}
                           for name, pixel, point in zip(names, pixels, points, strict=True)],
         }
 
-    def storeState(self):
+    def storeState(self, tracing=None):
+        """``tracing``: whether the trace views are shown (default: the session's)."""
         figureNode = self.figure()
         if figureNode is not None:
             state = self.state()
             state.pop("landmarks")
+            # A reopened project or scene shows the trace views again when they were shown (``resumeFromScene()``)
+            state["tracing"] = bool(self.session.tracing if tracing is None else tracing)
             figureNode.SetAttribute(STATE_ATTRIBUTE, json.dumps(state, ensure_ascii=False))
 
 
@@ -579,9 +643,13 @@ class FigureSession:
         self._observations = []
         self._viewObservations = []
         self._updating = False
+        #: A landmark is being removed together with its partner (pairs match by position in the two lists)
+        self._pairSync = False
         self._placing = None
         self._interactionObservation = None
         self._pendingTemplate = None
+        #: (scene, tag): a landmark list removed from the scene gets replaced (``_onNodeRemoved``)
+        self._sceneObservation = None
         self._guard = _ViewGuard(FIGURE_VIEW)
         self._refitTimer = qt.QTimer()
         self._refitTimer.setSingleShot(True)
@@ -628,23 +696,11 @@ class FigureSession:
         transform = scene.AddNewNodeByClass("vtkMRMLLinearTransformNode", scene.GenerateUniqueName(f"{name} placement"))
         _tag(transform, panel.index)
         panel.transformId = transform.GetID()
-        suffix = "" if panel.index == 1 else f"_{panel.index}"
-        for kind, baseName in (("figure", FIGURE_LANDMARKS_NAME), ("template", TEMPLATE_LANDMARKS_NAME)):
-            markups = scene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", baseName + suffix)
-            _tag(markups, panel.index)
-            markups.CreateDefaultDisplayNodes()
-            display = markups.GetDisplayNode()
-            wasModifying = display.StartModify()
-            display.SetSelectedColor(*LANDMARK_COLORS[kind])
-            display.SetColor(*LANDMARK_COLORS[kind])
-            display.SetGlyphScale(2.0)
-            display.SetTextScale(2.5)
-            display.EndModify(wasModifying)
-            if kind == "figure":
-                markups.SetAndObserveTransformNodeID(transform.GetID())
-                panel.figureLandmarksId = markups.GetID()
-            else:
-                panel.templateLandmarksId = markups.GetID()
+        for kind in ("figure", "template"):
+            self._makeLandmarkList(panel, kind)
+        for role, nodeId in ((TRANSFORM_REFERENCE, panel.transformId), (FIGURE_LANDMARKS_REFERENCE, panel.figureLandmarksId),
+                             (TEMPLATE_LANDMARKS_REFERENCE, panel.templateLandmarksId)):
+            figureNode.SetNodeReferenceID(role, nodeId)
         # The convention confirmed for this record (or this session) is not asked again
         confirmed = self.confirmedConvention()
         if confirmed is not None and not panel.confirmed:
@@ -657,6 +713,29 @@ class FigureSession:
             self.selectPanel(len(self.panels) - 1)
         self.changed()
         return panel
+
+    @staticmethod
+    def _makeLandmarkList(panel, kind):
+        """A new, empty landmark list of ``panel`` ("figure": under its placement transform, or "template")."""
+        scene = slicer.mrmlScene
+        suffix = "" if panel.index == 1 else f"_{panel.index}"
+        baseName = FIGURE_LANDMARKS_NAME if kind == "figure" else TEMPLATE_LANDMARKS_NAME
+        markups = scene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", baseName + suffix)
+        _tag(markups, panel.index)
+        markups.CreateDefaultDisplayNodes()
+        display = markups.GetDisplayNode()
+        wasModifying = display.StartModify()
+        display.SetSelectedColor(*LANDMARK_COLORS[kind])
+        display.SetColor(*LANDMARK_COLORS[kind])
+        display.SetGlyphScale(2.0)
+        display.SetTextScale(2.5)
+        display.EndModify(wasModifying)
+        if kind == "figure":
+            markups.SetAndObserveTransformNodeID(panel.transformId)
+            panel.figureLandmarksId = markups.GetID()
+        else:
+            panel.templateLandmarksId = markups.GetID()
+        return markups
 
     def _initialZ(self, plane, template):
         """The plane coordinate of Red's current slice, inside the template."""
@@ -707,9 +786,12 @@ class FigureSession:
     # Convention
 
     def confirmedConvention(self):
-        """The convention confirmed for this source record (saved fit files) or, without a study, in this session."""
+        """The convention confirmed for this source record (saved fit files) or, without a study, in this session.
+
+        Sagittal panels do not count: their side (where anterior is) is their own (``Panel.ownSide``).
+        """
         for panel in self.panels:
-            if panel.confirmed:
+            if panel.confirmed and not panel.ownSide:
                 return panel.convention
         folder = self.sourcesFolder()
         if folder and os.path.isdir(folder):
@@ -721,6 +803,8 @@ class FigureSession:
                         record = json.load(f)
                 except (OSError, ValueError):
                     continue
+                if record.get("plane") == "sagittal":
+                    continue
                 if record.get("convention_confirmed") and record.get("convention") in ("radiological", "neurological"):
                     return record["convention"]
         return None
@@ -728,10 +812,21 @@ class FigureSession:
     def setConvention(self, convention, panel=None):
         """Confirm the convention ("radiological": the patient's right is on the left of the figure): every panel of
         this record takes it (it is confirmed once per paper), and the fits are recomputed.
+
+        A sagittal figure does not show the patient's right: for a sagittal ``panel`` (the current one by default) the
+        answer is where anterior is ("radiological": on the left of the figure), for that panel only. The paper's answer
+        also sets the sagittal panels that have no answer of their own yet, as their default.
         """
         if convention not in ("radiological", "neurological", "unknown"):
             raise ValueError(f"Unknown figure convention: {convention}")
-        targets = self.panels if convention != "unknown" else [panel or self.panel()]
+        answering = panel or self.panel()
+        if convention == "unknown":
+            targets = [answering]
+        elif answering is not None and answering.ownSide:
+            answering.sideAnswered = True
+            targets = [answering]
+        else:
+            targets = [target for target in self.panels if not (target.ownSide and target.sideAnswered)]
         for target in targets:
             if target is not None and target.figure() is not None:
                 target.figure().SetAttribute(space.FIGURE_CONVENTION_ATTRIBUTE, convention)
@@ -741,12 +836,23 @@ class FigureSession:
         importer = _importer()
         if importer.noticeWidget("figure-convention") is not None and convention != "unknown":
             controller = importer.figureController()
-            if controller is not None and any(controller.figureId == target.figureId for target in self.panels):
+            if controller is not None and any(target is not None and controller.figureId == target.figureId for target in targets):
                 importer.answerFigureConvention(convention, controller.figureId)
         for target in self.panels:
             target.refit()
             target.place()
         self.changed()
+
+    def withdrawSideQuestion(self, panel):
+        """Withdraw U-07's question ("the patient's right is on the …", Compare) when it asks about a sagittal ``panel``:
+        a sagittal figure does not show the patient's right, the card asks where anterior is.
+        """
+        importer = _importer()
+        if panel is None or importer.noticeWidget("figure-convention") is None:
+            return
+        controller = importer.figureController()
+        if controller is not None and controller.figureId == panel.figureId and panel.ownSide:
+            importer._withdrawNotice("figure-convention", self.shell)
 
     def unconfirmedPanels(self):
         return [panel for panel in self.panels if not panel.confirmed]
@@ -784,7 +890,74 @@ class FigureSession:
 
     # Observation
 
+    def _observeScene(self):
+        if self._sceneObservation is None:
+            scene = slicer.mrmlScene
+            self._sceneObservation = (scene, scene.AddObserver(scene.NodeRemovedEvent, self._onNodeRemoved))
+
+    def _unobserveScene(self):
+        if self._sceneObservation is not None:
+            with contextlib.suppress(Exception):
+                self._sceneObservation[0].RemoveObserver(self._sceneObservation[1])
+            self._sceneObservation = None
+
+    @vtk.calldata_type(vtk.VTK_OBJECT)
+    def _onNodeRemoved(self, caller, event, node=None):
+        """A landmark list removed from the scene behind the card's back (the view menu's "Delete Point List").
+
+        The panel would keep a fit of points that are gone and could get no landmarks any more: once the removal is
+        over, it gets new, empty lists (pairs need both lists, so the other one is emptied) and its fit is reset.
+        """
+        nodeId = node.GetID() if node is not None else None
+        if not nodeId:
+            return
+        for panel in self.panels:
+            if nodeId in (panel.figureLandmarksId, panel.templateLandmarksId):
+                qt.QTimer.singleShot(0, lambda panel=panel: self._restoreLandmarkLists(panel))
+                return
+
+    def restoreLandmarkLists(self, panel=None):
+        """Give ``panel`` new landmark lists for those that are no longer in the scene (see ``_onNodeRemoved``)."""
+        return self._restoreLandmarkLists(panel or self.panel())
+
+    def _restoreLandmarkLists(self, panel):
+        if panel is None or panel not in self.panels or panel.figure() is None:
+            return False
+        missing = [kind for kind, markups in (("figure", panel.figureLandmarks()), ("template", panel.templateLandmarks()))
+                   if markups is None or not slicer.mrmlScene.IsNodePresent(markups)]
+        if not missing:
+            return False
+        self._unobservePanel(panel)
+        if self._placing is not None and self._placing[0] is panel:
+            self._placing = None
+            interactionNode = slicer.app.applicationLogic().GetInteractionNode()
+            if interactionNode is not None and interactionNode.GetCurrentInteractionMode() == interactionNode.Place:
+                interactionNode.SetCurrentInteractionMode(interactionNode.ViewTransform)
+        if self._pendingTemplate is panel:
+            self._pendingTemplate = None
+        with self._syncingPairs():
+            for kind in ("figure", "template"):
+                if kind in missing:
+                    self._makeLandmarkList(panel, kind)
+                else:
+                    survivor = panel.figureLandmarks() if kind == "figure" else panel.templateLandmarks()
+                    survivor.RemoveAllControlPoints()
+        figureNode = panel.figure()
+        for role, nodeId in ((FIGURE_LANDMARKS_REFERENCE, panel.figureLandmarksId), (TEMPLATE_LANDMARKS_REFERENCE, panel.templateLandmarksId)):
+            figureNode.SetNodeReferenceID(role, nodeId)
+        self._observePanel(panel)
+        if self.tracing:
+            self._showLandmarksIn(self.panel())
+        else:
+            for markups in (panel.figureLandmarks(), panel.templateLandmarks()):
+                display = markups.GetDisplayNode()
+                if display is not None:
+                    display.SetVisibility(False)
+        self.updateFit(panel)
+        return True
+
     def _observePanel(self, panel):
+        self._observeScene()
         for node in (panel.figureLandmarks(), panel.templateLandmarks()):
             if node is None:
                 continue
@@ -792,6 +965,8 @@ class FigureSession:
                 tag = node.AddObserver(event, self._onLandmarksModified)
                 self._observations.append((panel, node, tag))
             tag = node.AddObserver(node.PointPositionDefinedEvent, lambda caller, event, panel=panel: self._onPointDefined(panel, caller))
+            self._observations.append((panel, node, tag))
+            tag = node.AddObserver(node.PointRemovedEvent, self._onLandmarkRemoved)
             self._observations.append((panel, node, tag))
 
     def _unobservePanel(self, panel):
@@ -803,6 +978,37 @@ class FigureSession:
             else:
                 kept.append((owner, node, tag))
         self._observations = kept
+
+    @contextlib.contextmanager
+    def _syncingPairs(self):
+        previous, self._pairSync = self._pairSync, True
+        try:
+            yield
+        finally:
+            self._pairSync = previous
+
+    @vtk.calldata_type(vtk.VTK_INT)
+    def _onLandmarkRemoved(self, caller, event, index=None):
+        """A landmark removed on its own (the view's "Delete control point") takes its partner in the other list with it.
+
+        Pairs match by position in the two lists, so removing one point alone would pair every later point with the
+        wrong partner. A list emptied on its own (index unknown) empties its partner too.
+        """
+        if self._pairSync or caller is None:
+            return
+        nodeId = caller.GetID()
+        panel = next((panel for panel in self.panels if nodeId in (panel.figureLandmarksId, panel.templateLandmarksId)), None)
+        if panel is None:
+            return
+        other = panel.templateLandmarks() if nodeId == panel.figureLandmarksId else panel.figureLandmarks()
+        if other is None:
+            return
+        with self._syncingPairs():
+            if index is None:
+                if caller.GetNumberOfControlPoints() == 0 and other.GetNumberOfControlPoints():
+                    other.RemoveAllControlPoints()
+            elif 0 <= index < other.GetNumberOfControlPoints():
+                other.RemoveNthControlPoint(index)
 
     def _onLandmarksModified(self, caller=None, event=None):
         if not self._updating:
@@ -837,6 +1043,8 @@ class FigureSession:
             return
         if not self.tracing:
             self.enterTrace()
+        # A landmark list deleted from a view menu is replaced at once (else on the next event loop pass)
+        self._restoreLandmarkLists(panel)
         self._startPlacing(panel, "figure")
 
     def _nextName(self, panel):
@@ -852,9 +1060,15 @@ class FigureSession:
             return
         if kind == "figure":
             # A figure point left without its template point (Esc) would pair with the next template point
-            templateCount = panel.templateLandmarks().GetNumberOfControlPoints()
-            while markups.GetNumberOfControlPoints() > templateCount:
-                markups.RemoveNthControlPoint(markups.GetNumberOfControlPoints() - 1)
+            templateList = panel.templateLandmarks()
+            if templateList is None:
+                return
+            with self._syncingPairs():
+                while markups.GetNumberOfControlPoints() > templateList.GetNumberOfControlPoints():
+                    markups.RemoveNthControlPoint(markups.GetNumberOfControlPoints() - 1)
+                # ... and so would a template point whose figure point was removed while it was being placed
+                while templateList.GetNumberOfControlPoints() > markups.GetNumberOfControlPoints():
+                    templateList.RemoveNthControlPoint(templateList.GetNumberOfControlPoints() - 1)
         if self._interactionObservation is None:
             tag = interactionNode.AddObserver(interactionNode.InteractionModeChangedEvent, self._onInteractionModeChanged)
             self._interactionObservation = (interactionNode, tag)
@@ -931,13 +1145,21 @@ class FigureSession:
             return
         self._placing = None
         self._pendingTemplate = None
-        for markups in (panel.figureLandmarks(), panel.templateLandmarks()):
-            if markups is not None and markups.GetNumberOfControlPoints():
-                markups.RemoveNthControlPoint(markups.GetNumberOfControlPoints() - 1)
+        pending, tplList = panel.figureLandmarks(), panel.templateLandmarks()
+        if pending is not None and tplList is not None and pending.GetNumberOfControlPoints() > tplList.GetNumberOfControlPoints():
+            # A figure point is waiting for its template point: "Remove last" drops only that, never a complete pair
+            while pending.GetNumberOfControlPoints() > tplList.GetNumberOfControlPoints():
+                pending.RemoveNthControlPoint(pending.GetNumberOfControlPoints() - 1)
+            self.updateFit(panel)
+            return
         figureList, templateList = panel.figureLandmarks(), panel.templateLandmarks()
-        # A figure point without its template point goes too
-        while figureList.GetNumberOfControlPoints() > templateList.GetNumberOfControlPoints():
-            figureList.RemoveNthControlPoint(figureList.GetNumberOfControlPoints() - 1)
+        with self._syncingPairs():
+            for markups in (figureList, templateList):
+                if markups is not None and markups.GetNumberOfControlPoints():
+                    markups.RemoveNthControlPoint(markups.GetNumberOfControlPoints() - 1)
+            # A figure point without its template point goes too
+            while figureList.GetNumberOfControlPoints() > templateList.GetNumberOfControlPoints():
+                figureList.RemoveNthControlPoint(figureList.GetNumberOfControlPoints() - 1)
         self.updateFit(panel)
 
     # Plane
@@ -946,9 +1168,19 @@ class FigureSession:
         panel = self.panel()
         if panel is None or plane not in PLANE_TITLES or plane == panel.plane:
             return
+        # A sagittal panel's anterior side is its own: leaving sagittal, the panel takes the paper's left-right side again
+        # (an anterior answer never becomes the paper's left-right answer: without one, the side is asked again)
+        leaving = panel.ownSide and plane != "sagittal"
+        paper = self.confirmedConvention() if leaving else None
+        answered = panel.sideAnswered
         panel.plane = plane
+        if not panel.ownSide:
+            panel.sideAnswered = False
+            if leaving and panel.figure() is not None and (paper is not None or answered):
+                panel.figure().SetAttribute(space.FIGURE_CONVENTION_ATTRIBUTE, paper or "unknown")
         panel.z = self._initialZ(plane, self.templateNode())
         panel.pitch = panel.roll = 0.0
+        self.withdrawSideQuestion(panel)
         self._planeChanged(panel)
 
     def setCut(self, z=None, pitch=None, roll=None, fromView=False):
@@ -1361,7 +1593,7 @@ class FigureSession:
         figureNode = panel.figure()
         array = slicer.util.arrayFromVolume(figureNode)
         pixels = array[0]
-        image = Image.fromarray(np.ascontiguousarray(pixels))
+        image = Image.fromarray(_pngPixels(pixels))
         cropped = image.crop((x, y, x + width, y + height))
         path = _temporaryPng(f"figure-{panel.index}")
         cropped.save(path, format="PNG")
@@ -1442,7 +1674,7 @@ class FigureSession:
             z_mm=panel.z, pitch_deg=panel.pitch, roll_deg=panel.roll)
         # Unknown keys are kept by the fit file format: the confirmation, the labels and the source's file name (no path)
         record.update({"convention_confirmed": panel.confirmed, "figure": panel.label, "panel": panel.panelLabel,
-                       "source_name": panel.sourceName, "panel_index": panel.index})
+                       "source_name": panel.sourceName, "panel_index": panel.index, "side_answered": bool(panel.sideAnswered)})
         if self.sid:
             record["participant_id"] = self.sid
         return record
@@ -1495,7 +1727,7 @@ class FigureSession:
         from PIL import Image
 
         path = _temporaryPng(f"figure-{panel.index}")
-        Image.fromarray(np.ascontiguousarray(slicer.util.arrayFromVolume(panel.figure())[0])).save(path, format="PNG")
+        Image.fromarray(_pngPixels(slicer.util.arrayFromVolume(panel.figure())[0])).save(path, format="PNG")
         panel.cropPath = path
         return path
 
@@ -1514,7 +1746,8 @@ class FigureSession:
         panelLabels = [panel.panelLabel for panel in self.panels if panel.panelLabel]
         if panelLabels:
             values["panel"] = ";".join(panelLabels)
-        conventions = {panel.convention for panel in self.panels}
+        # The paper's left-right side (a sagittal panel's side is where anterior is)
+        conventions = {panel.convention for panel in self.panels if not panel.ownSide} or {panel.convention for panel in self.panels}
         values["fig_convention"] = conventions.pop() if len(conventions) == 1 else "unknown"
         values["planes"] = ";".join(dict.fromkeys(panel.plane for panel in self.panels))
         residuals = [panel.fit.rms_mm for panel in self.panels if panel.fit is not None]
@@ -1581,6 +1814,7 @@ class FigureSession:
         panel = self.addPanel(figureNode, select=False)
         panel.cropPath = pngPath
         panel.plane = state.get("plane", "axial")
+        panel.sideAnswered = sideAnswerFromState(panel, state)
         cut = state.get("cut_plane") or state
         panel.z = float(cut.get("z_mm", 0.0))
         panel.pitch = float(cut.get("pitch_deg", 0.0))
@@ -1612,6 +1846,79 @@ class FigureSession:
             self.selectPanel(self.panels.index(panel))
         return panel
 
+    def panelFromNodes(self, figureNode, state, claimed):
+        """A panel rebuilt from the nodes of the scene (a reopened project or scene): the figure volume, its placement
+        transform and landmark lists are reused, nothing is loaded. ``claimed``: IDs of nodes that other panels use.
+        """
+        references = {role: figureNode.GetNodeReference(role) for role in (TRANSFORM_REFERENCE, FIGURE_LANDMARKS_REFERENCE, TEMPLATE_LANDMARKS_REFERENCE)}
+        savedIndex = figureNode.GetAttribute(PANEL_ATTRIBUTE)
+
+        def candidates(className, test=lambda node: True):
+            # Scenes saved before the node references: the nodes tagged with the same panel number
+            return [node for node in slicer.util.getNodesByClass(className)
+                    if isFigureNode(node) and node.GetID() not in claimed and node.GetAttribute(PANEL_ATTRIBUTE) == savedIndex and test(node)]
+
+        transform = references[TRANSFORM_REFERENCE]
+        if transform is None:
+            parent = figureNode.GetParentTransformNode()
+            if parent is not None and isFigureNode(parent) and parent.GetID() not in claimed:
+                transform = parent
+            else:
+                found = candidates("vtkMRMLLinearTransformNode")
+                transform = next((node for node in found if node.GetName().startswith(figureNode.GetName())), found[0] if found else None)
+        if transform is None:
+            return None
+        figureList = references[FIGURE_LANDMARKS_REFERENCE]
+        if figureList is None:
+            found = candidates("vtkMRMLMarkupsFiducialNode", lambda node: node.GetName().startswith(FIGURE_LANDMARKS_NAME))
+            figureList = next((node for node in found if node.GetTransformNodeID() == transform.GetID()), found[0] if found else None)
+        templateList = references[TEMPLATE_LANDMARKS_REFERENCE]
+        if templateList is None:
+            found = candidates("vtkMRMLMarkupsFiducialNode", lambda node: node.GetName().startswith(TEMPLATE_LANDMARKS_NAME))
+            suffix = figureList.GetName()[len(FIGURE_LANDMARKS_NAME):] if figureList is not None else ""
+            templateList = next((node for node in found if node.GetName() == TEMPLATE_LANDMARKS_NAME + suffix), found[0] if found else None)
+        if figureList is None or templateList is None:
+            return None
+        index = int(savedIndex) if savedIndex and savedIndex.isdigit() and int(savedIndex) > 0 else 0
+        if index <= 0 or index in {panel.index for panel in self.panels}:
+            index = self._nextIndex()
+        panel = Panel(self, index, figureNode)
+        panel.transformId = transform.GetID()
+        panel.figureLandmarksId = figureList.GetID()
+        panel.templateLandmarksId = templateList.GetID()
+        for node in (transform, figureList, templateList):
+            _tag(node, panel.index)
+        for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
+            # The edge image of the figure (a crop ROI is not kept: "Crop" makes a new one)
+            if isFigureNode(node) and node is not figureNode and node.GetID() not in claimed and node.GetTransformNodeID() == transform.GetID():
+                panel.edgesId = node.GetID()
+                _tag(node, panel.index)
+                break
+        for role, nodeId in ((TRANSFORM_REFERENCE, panel.transformId), (FIGURE_LANDMARKS_REFERENCE, panel.figureLandmarksId),
+                             (TEMPLATE_LANDMARKS_REFERENCE, panel.templateLandmarksId)):
+            figureNode.SetNodeReferenceID(role, nodeId)
+        panel.plane = state.get("plane") if state.get("plane") in PLANE_TITLES else "axial"
+        panel.sideAnswered = sideAnswerFromState(panel, state)
+        panel.z = float(state.get("z_mm", 0.0))
+        panel.pitch = float(state.get("pitch_deg", 0.0))
+        panel.roll = float(state.get("roll_deg", 0.0))
+        panel.model = str(state.get("model") or "similarity")
+        if isinstance(state.get("crop_px"), list) and len(state["crop_px"]) == 4:
+            panel.cropPx = [int(value) for value in state["crop_px"]]
+        panel.label = str(state.get("figure") or "")
+        panel.panelLabel = str(state.get("panel") or "")
+        panel.sourceName = str(state.get("source_name") or panel.sourceName)
+        self._updating = True
+        try:
+            panel.refit()
+            panel.place()
+        finally:
+            self._updating = False
+        self.panels.append(panel)
+        self._observePanel(panel)
+        claimed.update(node.GetID() for node in panel.nodes())
+        return panel
+
     # Changes
 
     def changed(self):
@@ -1622,6 +1929,7 @@ class FigureSession:
             card.refresh()
 
     def dispose(self, removeNodes=False):
+        self._unobserveScene()
         self._refitTimer.stop()
         if self._interactionObservation is not None:
             with contextlib.suppress(Exception):
@@ -1653,14 +1961,78 @@ def session(create=False, shell=None):
     return _session
 
 
-def closeFigure(removeNodes=False):
-    """Leave the trace views and forget the panels (``removeNodes``: remove the figure nodes from the scene too)."""
+def closeFigure(removeNodes=False, resumable=False):
+    """Leave the trace views and forget the panels (``removeNodes``: remove the figure nodes from the scene too).
+
+    Figure nodes that stay in the scene are not resumed by ``resumeFromScene()`` unless ``resumable`` (the scene closes).
+    """
     global _session
     current, _session = _session, None
     if current is not None:
+        if not removeNodes and not resumable:
+            for panel in current.panels:
+                figureNode = panel.figure()
+                if figureNode is not None:
+                    figureNode.RemoveAttribute(STATE_ATTRIBUTE)
         current.dispose(removeNodes=removeNodes)
     if _card is not None:
         _card.refresh()
+
+
+def resumeFromScene(shell=None, enterTrace=True):
+    """Resume the figure tracing saved with the scene (a reopened project or scene): the panels are rebuilt from the
+    figure nodes that have a saved state (``Studio.FigureState``), nothing is loaded again, and the trace views are shown
+    again when they were shown at the save (``enterTrace``). Return the number of panels resumed.
+    """
+    current = session()
+    if current is not None and current.panels:
+        return 0
+    figures = []
+    for node in slicer.util.getNodesByClass("vtkMRMLVolumeNode"):
+        if not isFigureNode(node) or not node.GetAttribute(STATE_ATTRIBUTE) or node.GetImageData() is None:
+            continue
+        try:
+            state = json.loads(node.GetAttribute(STATE_ATTRIBUTE))
+        except ValueError:
+            continue
+        if isinstance(state, dict):
+            figures.append((node, state))
+    if not figures:
+        return 0
+
+    def panelNumber(item):
+        value = item[0].GetAttribute(PANEL_ATTRIBUTE) or ""
+        return int(value) if value.isdigit() else 0
+
+    figures.sort(key=panelNumber)
+    current = session(create=True, shell=shell)
+    claimed = set()
+    tracing = False
+    for figureNode, state in figures:
+        try:
+            if current.panelFromNodes(figureNode, state, claimed) is not None:
+                tracing = tracing or bool(state.get("tracing"))
+        except Exception:
+            logging.error(f"Studio: the figure {figureNode.GetName()} could not be resumed:\n{traceback.format_exc()}")
+    if not current.panels:
+        return 0
+    current.selectPanel(0)
+    if enterTrace and tracing and current.templateNode() is not None:
+        try:
+            current.enterTrace()
+        except Exception:
+            logging.error(f"Studio: the figure trace views could not be shown again:\n{traceback.format_exc()}")
+    _ensureCard()
+    return len(current.panels)
+
+
+def _resumedPanelOf(path):
+    """The panel (not traced in the views) whose figure was opened from a file with the name of ``path``, or None."""
+    current = session()
+    if current is None or not path:
+        return None
+    name = os.path.basename(path)
+    return next((panel for panel in current.panels if panel.sourceName == name and panel.figure() is not None), None)
 
 
 #
@@ -1678,11 +2050,21 @@ def openFigure(path, shell=None, result=None):
     importer = _importer()
     if result is None:
         result = importer.LoadResult()
+    if shell is not None and canTrace():
+        # A figure saved with a reopened project or scene is resumed first: the same figure is not loaded again
+        resumeFromScene(shell)
     current = session()
+    existing = _resumedPanelOf(path) if current is not None and not current.tracing else None
+    if existing is not None:
+        current.selectPanel(current.panels.index(existing))
+        result.alreadyOpen.append(existing.figure())
+        _toast(shell, _("{name} is already open").format(name=existing.figure().GetName()))
+        _ensureCard()
+        return existing.figure()
     if current is not None and current.tracing and current.panels:
         try:
             with importer._ownLoad(), slicer.util.WaitCursor():
-                figureNode = slicer.util.loadVolume(path, {"singleFile": True, "show": False})
+                figureNode = importer.loadFigureVolume(path)
         except Exception:
             logging.error(f"Studio: cannot open the figure {path}:\n{traceback.format_exc()}")
             result.errors.append((path, _("Cannot load the figure")))
@@ -1723,9 +2105,23 @@ def pasteFigure(shell=None):
     return openFigure(path, shell)
 
 
+def _lastFigureFolder():
+    """Where a figure file dialog starts: the folder of the last figure chosen, else (web build) ``/data`` or the folder of the last file dialog."""
+    folder = str(slicer.util.settingsValue(LAST_FOLDER_KEY, "") or "")
+    if folder and os.path.isdir(folder):
+        return folder
+    if isWebBuild():
+        webFolder = _importer().webStartFolder()
+        if webFolder:
+            return webFolder
+        if os.path.isdir(WEB_DATA_FOLDER):
+            return WEB_DATA_FOLDER
+    return ""
+
+
 def openFigureDialog(shell=None):
     """"Open figure…": a file dialog (in ``/data`` in the web build). Return the figure node or None."""
-    start = WEB_DATA_FOLDER if isWebBuild() and os.path.isdir(WEB_DATA_FOLDER) else str(slicer.util.settingsValue(LAST_FOLDER_KEY, "") or "")
+    start = _lastFigureFolder()
     path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Open figure"), start, _(FIGURE_FILTER))
     if not path:
         return None
@@ -1819,9 +2215,15 @@ class FigureCard:
         slotLayout = qt.QVBoxLayout(self.slot)
         slotLayout.setContentsMargins(0, 0, 0, 0)
         slotLayout.setSpacing(4)
-        self.row = ui.listRow("image", _("Trace from a figure"), ui.keyText(PASTE_SHORTCUT), self._onRowClicked, "StudioFigureRow")
-        self.row.setToolTip(ui.tooltip(_("Trace from a figure"), PASTE_SHORTCUT,
-                                       _("trace a lesion from a published figure: open the picture, drop it on the window or paste it")))
+        # The web build has no image clipboard and no drop from the computer: no Ctrl+V hint, and the tooltip points to "Open figure…"
+        web = isWebBuild()
+        self.row = ui.listRow("image", _("Trace from a figure"), "" if web else ui.keyText(PASTE_SHORTCUT), self._onRowClicked, "StudioFigureRow")
+        if web:
+            self.row.setToolTip(ui.tooltip(_("Trace from a figure"), None,
+                                           _("trace a lesion from a published figure: open the picture with Open figure… (in /data)")))
+        else:
+            self.row.setToolTip(ui.tooltip(_("Trace from a figure"), PASTE_SHORTCUT,
+                                           _("trace a lesion from a published figure: open the picture, drop it on the window or paste it")))
         slotLayout.addWidget(self.row)
         #: The card is shown without a figure (its entry points) after a click on the row
         self.expanded = False
@@ -1829,7 +2231,11 @@ class FigureCard:
         self.widget = qt.QFrame()
         self.widget.setObjectName("StudioFigureCard")
         ui.setRole(self.widget, "card")
-        self.widget.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Maximum)
+        # Preferred, not Maximum: the card has word-wrapped notes, so its height depends on its width; a Maximum policy caps
+        # the card at its non-wrapped size hint and cuts the second line of the notes.
+        policy = qt.QSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        policy.setHeightForWidth(True)
+        self.widget.setSizePolicy(policy)
         slotLayout.addWidget(self.widget)
         layout = qt.QVBoxLayout(self.widget)
         layout.setContentsMargins(10, 8, 10, 8)
@@ -1896,6 +2302,11 @@ class FigureCard:
         steps.setHorizontalSpacing(8)
         steps.setVerticalSpacing(6)
         steps.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
+        # The Plane control (Axial / Coronal / Sagittal) is a fixed-width row that does not fit next to the step labels
+        # at the default 340 px inspector: without wrapping, the form is wider than the card, so the label column is
+        # squeezed ('4 Landr') and the wrapped notes are measured for a wider card (their second line is cut). A row
+        # that does not fit puts its label above its field instead.
+        steps.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
 
         labels = qt.QHBoxLayout()
         self.figureLabelEdit = qt.QLineEdit()
@@ -1959,11 +2370,13 @@ class FigureCard:
         self.removePairButton.connect("clicked()", lambda: session().removeLastPair() if session() is not None else None)
         landmarkRow.addWidget(self.removePairButton)
         landmarkRow.addStretch(1)
+        steps.addRow(_("4 Landmarks"), landmarkRow)
+        # Own wrapped row: "placing “<landmark>”…" is long and was cut mid-word beside the buttons
         self.pairLabel = qt.QLabel()
         self.pairLabel.setObjectName("StudioFigurePairLabel")
+        self.pairLabel.setWordWrap(True)
         self.pairLabel.setProperty("slicerRole", "secondaryText")
-        landmarkRow.addWidget(self.pairLabel)
-        steps.addRow(_("4 Landmarks"), landmarkRow)
+        steps.addRow(self._wrapped(self.pairLabel))
 
         self.modelFrame, self.modelGroup = ui.segmented([_("Similarity"), _("Affine")])
         self.modelFrame.setObjectName("StudioFigureModel")
@@ -1972,7 +2385,10 @@ class FigureCard:
         steps.addRow(_("5 Fit"), self.modelFrame)
         self.residualChip = ui.chip("")
         self.residualChip.setObjectName("StudioFigureResidualChip")
-        self.residualChip.setSizePolicy(qt.QSizePolicy.Maximum, qt.QSizePolicy.Fixed)
+        # The chip never wraps: with its own width hint (wider than a narrow card at larger fonts) it made the form
+        # layout give the wrapped labels below less height than their lines need, and their last lines were cut.
+        # It is elided to the card's width instead (the whole text is in its tooltip) and stays a pill around its text
+        ui.elideLabel(self.residualChip, hug=True)
         steps.addRow(self.residualChip)
         self.residualNote = qt.QLabel(_("The residual measures landmark consistency, not lesion accuracy"))
         self.residualNote.setObjectName("StudioFigureResidualNote")
@@ -2116,11 +2532,26 @@ class FigureCard:
         convention = panel.convention
         for index, value in enumerate(("radiological", "neurological")):
             self.conventionGroup.button(index).setChecked(convention == value or (convention == "unknown" and value == "radiological"))
-        if panel.confirmed:
-            self.conventionState.setText(_("Confirmed for this paper"))
-        else:
+        # A sagittal figure does not show the patient's right: its side is where anterior is, asked for each panel
+        sideTexts = (_("Anterior is on the … of the figure"), _("Anterior (the face) is on the left of the figure"),
+                     _("Anterior (the face) is on the right of the figure")) if panel.ownSide else (
+                     _("Patient's right is on the … of the figure"),
+                     _("Radiological: the patient's right is on the left of the figure (most clinical figures)"),
+                     _("Neurological: the patient's right is on the right of the figure"))
+        if self.conventionText.text != sideTexts[0]:
+            self.conventionText.setText(sideTexts[0])
+        for index in range(2):
+            self.conventionGroup.buttons()[index].setToolTip(sideTexts[index + 1])
+        if not panel.confirmed:
             self.conventionState.setText(_("Required: confirm the side") if current.requiredConvention
-                                         else _("Not confirmed (radiological assumed)"))
+                                         else (_("Not confirmed (anterior on the left assumed)") if panel.ownSide
+                                               else _("Not confirmed (radiological assumed)")))
+        elif not panel.ownSide:
+            self.conventionState.setText(_("Confirmed for this paper"))
+        elif panel.sideAnswered:
+            self.conventionState.setText(_("Confirmed for this panel"))
+        else:
+            self.conventionState.setText(_("Taken from the paper's side: check where anterior is"))
         required = "true" if (current.requiredConvention or not panel.confirmed) else "false"
         if self.conventionState.property("required") != required:
             self.conventionState.setProperty("required", required)
@@ -2129,24 +2560,29 @@ class FigureCard:
         # Landmarks and fit
         pairs = panel.pairCount()
         placing = current._placing is not None and current._placing[0] is panel
-        self.pairLabel.setText(_("{n} pairs").format(n=pairs) if not placing else _("placing “{name}”…").format(name=current._placing[2]))
+        self.pairLabel.setText(pairsText(pairs) if not placing else _("placing “{name}”…").format(name=current._placing[2]))
         self.removePairButton.setEnabled(pairs > 0 or (panel.figureLandmarks() is not None and panel.figureLandmarks().GetNumberOfControlPoints() > 0))
         affineButton = self.modelGroup.button(1)
-        affineButton.setEnabled(pairs >= figurefit.MIN_AFFINE_PAIRS)
-        model = panel.fit.model if panel.fit is not None else ("affine" if panel.model == "affine" and pairs >= figurefit.MIN_AFFINE_PAIRS else "similarity")
+        distinct = panel.distinctPairCount()
+        affineButton.setEnabled(distinct >= figurefit.MIN_AFFINE_PAIRS)
+        model = panel.fit.model if panel.fit is not None else ("affine" if panel.model == "affine" and distinct >= figurefit.MIN_AFFINE_PAIRS else "similarity")
         self.modelGroup.button(0 if model == "similarity" else 1).setChecked(True)
         if panel.fit is not None:
             text, level = figurefit.residual_chip(panel.fit.rms_mm, panel.fit.loo_rms_mm, panel.fit.n_pairs)
+        elif panel.fitError:
+            text, level = _("No fit: see the warning below"), figurefit.residual_level(None)
         else:
             text, level = _("No fit yet: {n} of 2 pairs").format(n=pairs), figurefit.residual_level(None)
-        self.residualChip.setText(text)
-        self.residualChip.setToolTip(level.text)
+        ui.setElidedText(self.residualChip, text, toolTip=f"{text}\n{level.text}")
         ui.setChipLevel(self.residualChip, {"green": "ok", "amber": "warn", "red": "danger"}.get(level.level, "neutral"))
         warnings = []
         if panel.fitError:
             warnings.append(_("Fit failed: {error}").format(error=panel.fitError))
+        if distinct < pairs:
+            warnings.append(_("{n} landmark pair(s) repeat another pair's figure point and add nothing to the fit").format(n=pairs - distinct))
         if panel.fit is not None and panel.fit.mirror_suspected:
-            warnings.append(_("The mirrored figure fits much better: check the side"))
+            warnings.append(_("The mirrored figure fits much better: check which side anterior is on") if panel.ownSide
+                            else _("The mirrored figure fits much better: check the side"))
         if panel.fit is not None and len(panel.fit.out_of_plane_mm) and float(np.max(panel.fit.out_of_plane_mm)) > OFF_PLANE_WARNING_MM:
             warnings.append(_("Some template landmarks are off the cut plane ({mm:.1f} mm): place them again").format(mm=float(np.max(panel.fit.out_of_plane_mm))))
         self.fitWarning.setText("\n".join(warnings))
@@ -2241,7 +2677,7 @@ class FigureCard:
 
     def _showSourceDialog(self):
         current = session()
-        start = (current.sourcesFolder() if current is not None else None) or str(slicer.util.settingsValue(LAST_FOLDER_KEY, "") or "")
+        start = (current.sourcesFolder() if current is not None else None) or _lastFigureFolder()
         path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Show source"), start, _("Figure fit (*_fit.json)"))
         if path:
             try:
@@ -2376,6 +2812,8 @@ def doneHook(sid, labelmapArray, ijkToRas, ctx):
         _ensureCard()
         if _card is not None:
             _card.conventionFrame.setFocus(qt.Qt.OtherFocusReason)
+        if all(panel.ownSide for panel in current.unconfirmedPanels()):
+            raise study_ui.Blocking(_("Confirm on which side of the figure anterior is (Figure card), then Done again"))
         raise study_ui.Blocking(_("Confirm on which side of the figure the patient's right is (Figure card), then Done again"))
     ctx["figure_plane_normals"] = current.planeNormals()
     ctx["figure_plane_normal"] = ctx["figure_plane_normals"][0]
@@ -2482,6 +2920,8 @@ def _onModuleSelected(moduleName):
 
 def _afterDrawShown():
     _updatePasteShortcut()
+    if canTrace():
+        resumeFromScene(_installedShell)
     _ensureCard()
 
 
@@ -2516,14 +2956,31 @@ def install(shell):
     except Exception:
         logging.error(f"Studio: the figure Done hook could not be installed:\n{traceback.format_exc()}")
     scene = slicer.mrmlScene
-    global _sceneObserver
+    global _sceneObserver, _importObserver
     if _sceneObserver is None:
         _sceneObserver = scene.AddObserver(scene.StartCloseEvent, _onSceneClosing)
+    if _importObserver is None:
+        _importObserver = scene.AddObserver(scene.EndImportEvent, _onSceneImported)
     _updatePasteShortcut()
     _ensureCard()
 
 
 _sceneObserver = None
+_importObserver = None
+
+
+def _onSceneImported(caller=None, event=None):
+    # A scene opened while Draw is shown: its figure tracing is resumed once the load has finished (else on Draw entry)
+    qt.QTimer.singleShot(0, _resumeInDraw)
+
+
+def _resumeInDraw():
+    shell = _installedShell
+    try:
+        if shell is not None and shell.currentWorkspace() == "draw" and canTrace():
+            resumeFromScene(shell)
+    except Exception:
+        logging.error(f"Studio: the figure tracing could not be resumed:\n{traceback.format_exc()}")
 
 
 def _onSceneClosing(caller=None, event=None):
@@ -2534,9 +2991,12 @@ def _onSceneClosing(caller=None, event=None):
         # with their nodes
         if current.tracing:
             current.leaveTrace()
+            # A project saves its scene once more when it closes: it is reopened in the trace views (resumeFromScene)
+            for panel in current.panels:
+                panel.storeState(tracing=True)
         current.tracing = False
         current.saved = None
-        closeFigure()
+        closeFigure(resumable=True)
 
 
 def uninstall(shell):
@@ -2545,6 +3005,9 @@ def uninstall(shell):
     current = session()
     if current is not None and current.tracing:
         current.leaveTrace()
+        # Saved (when quitting) as traced: the project is reopened in the trace views (resumeFromScene)
+        for panel in current.panels:
+            panel.storeState(tracing=True)
     if shell is not None:
         with contextlib.suppress(Exception):
             shell.removeWorkspaceShortcut("draw", PASTE_SHORTCUT)

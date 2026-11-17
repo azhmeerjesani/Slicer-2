@@ -39,6 +39,11 @@ NETWORK_SCHEMES = ("schaefer", "yeo7", "tian")
 UNLABELLED = "unlabelled"
 
 _SCHAEFER_NAME = re.compile(r"^(?:\d+Networks_)?(?:LH|RH)_([A-Za-z]+)(?:_|$)")
+#: Older Schaefer 17-network tables (TemplateFlow) name the two Yeo-17 limbic networks "Limbic_TempPole" (network 9)
+#: and "Limbic_OFC" (network 10); newer CBIG tables call them "LimbicA_TempPole" and "LimbicB_OFC". In 7-network
+#: tables the same suffixes are regions of the one Limbic network.
+_SCHAEFER17_LIMBIC = re.compile(r"^17Networks_(?:LH|RH)_Limbic_(TempPole|OFC)(?:_|$)")
+_SCHAEFER17_LIMBIC_NAMES = {"TempPole": "LimbicA", "OFC": "LimbicB"}
 _TRAILING_NUMBER = re.compile(r"(\d+)\s*$")
 _INTEGER = re.compile(r"[-+]?\d+")
 
@@ -50,7 +55,8 @@ def network_of(name, scheme=None):
     """Network (or structure) a label name belongs to, or None.
 
     Without ``scheme``, Schaefer names are parsed ("7Networks_LH_Vis_1" -> "Vis", "17Networks_RH_DefaultA_PFCd_2"
-    -> "DefaultA") and then Tian names ("aHIP-rh" -> "HIP", "THA-DP-lh" -> "THA", "NAc-shell-rh" -> "NAc").
+    -> "DefaultA"; the 17-network "17Networks_LH_Limbic_TempPole_1" and "17Networks_LH_Limbic_OFC_1" -> "LimbicA" and
+    "LimbicB", two networks, as in newer CBIG tables) and then Tian names ("aHIP-rh" -> "HIP", "THA-DP-lh" -> "THA", "NAc-shell-rh" -> "NAc").
     ``scheme`` "schaefer", "tian" or "yeo7" restricts the parse; "yeo7" takes the number at the end of the name
     ("Network3", "Network_3") as a Yeo 2011 network number (Buckner2011 cerebellum and Yeo2011 labels).
     """
@@ -58,6 +64,9 @@ def network_of(name, scheme=None):
         return None
     text = str(name).strip()
     if scheme in (None, "schaefer"):
+        match = _SCHAEFER17_LIMBIC.match(text)
+        if match:
+            return _SCHAEFER17_LIMBIC_NAMES[match.group(1)]
         match = _SCHAEFER_NAME.match(text)
         if match:
             return match.group(1)
@@ -349,6 +358,8 @@ class LabelResult(list):
     :ivar allowed_cross_family: dicts of the atlases used across families on request (recorded in provenance).
     :ivar details: for :func:`label_mask`, a dict per row with label_id, network, volume_mm3 and region_mm3 too.
     :ivar unlabelled: {atlas id: percentage of the mask outside every label of that atlas}.
+    :ivar networks: {atlas id: {network: percentage of the mask inside that network's labels}}, over every label of
+      the atlas (not only the rows kept by ``top`` and ``min_pct``); atlases without networks are left out.
     :ivar mask_family: family of the labelled mask ("unknown" when it could not be told).
     :ivar peak: for :func:`label_cluster` with ``peak``, the (atlas, label, network) rows of the peak coordinate.
     """
@@ -359,6 +370,7 @@ class LabelResult(list):
         self.allowed_cross_family = []
         self.details = []
         self.unlabelled = {}
+        self.networks = {}
         self.mask_family = "unknown"
         self.mask_space = None
         self.peak = None
@@ -494,6 +506,13 @@ def _label_atlas(occ, affine, total, atlas, top, min_pct, result):
     volumes = np.bincount(inverse, weights=weights[inside], minlength=len(values)) * voxel
     counts = atlas.region_counts()
     result.unlabelled[atlas.id] = max(0.0, 100.0 * (1.0 - float(volumes.sum()) / total))
+    shares = {}
+    for value, volume in zip(values, volumes, strict=True):
+        network = atlas.network(value)
+        if network and volume > 0:
+            shares[network] = shares.get(network, 0.0) + 100.0 * float(volume) / total
+    if shares:
+        result.networks[atlas.id] = shares
     order = sorted(range(len(values)), key=lambda index: (-volumes[index], int(values[index])))
     rows = []
     for index in order:
@@ -503,6 +522,8 @@ def _label_atlas(occ, affine, total, atlas, top, min_pct, result):
             continue
         region = counts[value] * voxel
         name = atlas.label_name(value)
+        if atlas.id in _CEREBELLAR_ATLASES:  # the provider's table misspells "Netowrk6": name it as the Result card does
+            name = _cerebellar_text(atlas, value, name)
         row = LabelRow(atlas.id, name, pct_mask, 100.0 * float(volumes[index]) / region)
         rows.append(row)
         result.details.append(
@@ -581,6 +602,8 @@ def cache_status(cache=None, catalog="atlases"):
 
 #: Atlases that name the region of a peak, in order of preference: anatomical names first (Harvard-Oxford subcortical,
 #: then cortical), then the finer and the network atlases. Only cached atlases are used (nothing is downloaded).
+#: Neither Harvard-Oxford atlas covers the cerebellum: the Buckner2011 cerebellum atlases (which Get atlases of the
+#: Clusters card downloads) name a cerebellar peak when no anatomical atlas does (see :data:`_CEREBELLAR_ATLASES`).
 PEAK_REGION_ATLASES = (
     "harvard-oxford-subcortical-th25-2mm",
     "harvard-oxford-cortical-th25-2mm",
@@ -589,6 +612,8 @@ PEAK_REGION_ATLASES = (
     "aal3v1",
     "harvard-aan-v2",
     "hcp-mmp1-volumetric",
+    "buckner2011-cerebellum-7n-1mm",
+    "buckner2011-cerebellum-17n-1mm",
     "tian-s1-2mm",
     "tian-s1-2mm-2009c",
     "schaefer2018-400-7n-2mm",
@@ -604,6 +629,9 @@ _GENERIC_REGION = re.compile(r"(?i)^(left |right )?(cerebral (white matter|corte
 _MIDLINE_REGION = re.compile(r"(?i)brain-?stem|vermis|corpus callosum|(3rd|4th|third|fourth) ventricle")
 _SIDE_PREFIX = re.compile(r"(?i)^(left|right|lh|rh|l|r)[ _-]+")
 _SIDE_SUFFIX = re.compile(r"(?i)[ _-]+(left|right|lh|rh|l|r)$")
+#: Atlases of cerebellar networks only (their labels are network numbers, "Network6"): a peak they label is named
+#: "R cerebellum (Cont network)" (the Yeo 2011 network) or "R cerebellum (network 12)"
+_CEREBELLAR_ATLASES = frozenset(("buckner2011-cerebellum-7n-1mm", "buckner2011-cerebellum-17n-1mm"))
 #: {(cache folder, atlas id): Atlas} of the atlases loaded for peak regions (an atlas file is read once, when needed)
 _region_atlases = {}
 
@@ -677,18 +705,32 @@ def region_text(label, x=None):
     return text[:1].upper() + text[1:]
 
 
+def _cerebellar_text(atlas, value, label, x=None):
+    """The region name of a cerebellar network label: "R cerebellum (Cont network)", "Cerebellum (network 12)" at x = 0."""
+    network = atlas.network(value)
+    if network:
+        detail = f"{network} network"
+    else:
+        number = _TRAILING_NUMBER.search(str(label or ""))
+        detail = f"network {int(number.group(1)) if number else int(value)}"
+    return region_text("Cerebellum", x) + f" ({detail})"
+
+
 def peak_regions(points, space=None, cache=None, atlases=None):
     """Region names of peaks (world RAS mm, (N, 3)) for the Peak region column.
 
     Each point gets the label of the first usable atlas (in :data:`PEAK_REGION_ATLASES` order) that names a region there
     other than a broad one (cerebral cortex or white matter, a lateral ventricle), as :func:`region_text`. When the atlases
     give only broad labels, the first broad label is shown; :data:`OUTSIDE_ATLAS` only when no usable atlas labels the
-    point. ``space`` (the template space of the map) skips the atlases of another space family. The cached atlases are
-    read only while some point has no specific name yet.
+    point. ``space`` (the template space of the map, a label or the (space, resolution) pair of
+    ``geometry.detect_space(grid)``) skips the atlases of another space family. The cached atlases are read only while some
+    point has no specific name yet.
 
     :return: a list of texts, one per point, or None when no usable atlas is cached (nothing can be said).
     """
     points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    if isinstance(space, (tuple, list)):  # (space, resolution) of geometry.detect_space(grid)
+        space = space[0] if space else None
     family = space_family(space) if space else None
     if atlases is None:
         folder = fetch.cache_dir(cache)
@@ -716,6 +758,8 @@ def peak_regions(points, space=None, cache=None, atlases=None):
             if _GENERIC_REGION.match(str(label).replace("_", " ").strip()):
                 if fallback[index] is None:
                     fallback[index] = region_text(label, points[index][0])
+            elif atlas.id in _CEREBELLAR_ATLASES:
+                names[index] = _cerebellar_text(atlas, value, label, points[index][0])
             else:
                 names[index] = region_text(label, points[index][0])
     if not usable:

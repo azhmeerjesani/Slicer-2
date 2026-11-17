@@ -137,6 +137,7 @@ DEFAULT_TOP_PCT = 10.0
 ON_DEMAND_ROWS = 16  # approximate_maps converts at most this many (or R / 8) touched rows of P per call, else keeps float32 P
 SIZE_BINS_ML = (1.0, 10.0, 50.0)  # bin edges in ml: < 1, 1-10, 10-50, >= 50
 SIZE_BIN_NAMES = ("lt1ml", "1to10ml", "10to50ml", "ge50ml")
+SIZE_BIN_TEXT = {"lt1ml": "< 1 mL", "1to10ml": "1–10 mL", "10to50ml": "10–50 mL", "ge50ml": "≥ 50 mL"}  # noqa: RUF001  # shown to users
 
 GSP_PARCEL_MATRIX = "GSP1000_FCz_Schaefer1000Melbourne54.mat"
 
@@ -608,9 +609,9 @@ def build_tiling(bundle, atlas_entries=None, cache=None, cell_mm=DEFAULT_CELL_MM
             continue
         loaded.append((entry, atlas, digest))
     if unknown:
-        raise ValueError(f"Unknown tiling atlas id(s): {', '.join(unknown)}; they are not in the atlas catalog (python -m LesionNetworkMappingLib.fetch list --catalog atlases).")
+        raise ValueError(jobs.command_text(f"Unknown tiling atlas id(s): {', '.join(unknown)}; they are not in the atlas catalog (python -m LesionNetworkMappingLib.fetch list --catalog atlases)."))
     if missing:
-        raise fetch.NotCachedError(f"The fast index needs these atlases, which are not cached: {', '.join(missing)}. Download them first (python -m LesionNetworkMappingLib.fetch get --catalog atlases --id <id>).", resource_id=missing[0])
+        raise fetch.NotCachedError(jobs.command_text(f"The fast index needs these atlases, which are not cached: {', '.join(missing)}. Download them first (python -m LesionNetworkMappingLib.fetch get --catalog atlases --id <id>)."), resource_id=missing[0])
     for entry, atlas, digest in loaded:
         stratum = entry["stratum"]
         known = family not in ("unknown", "native") and atlas.family not in ("unknown", "native")
@@ -1046,17 +1047,55 @@ def build_index(
         lock.release()
 
 
-def load_index(path, bundle=None, verify=True):
+def stale_data_reason(metadata, bundle, subject_ids=None, verify=False):
+    """Why a fast index (its index.json ``metadata``) was built from other time series of ``bundle``'s subjects, or None.
+
+    The index records ``subjects.data_sha256`` (``reference.subjects_data_sha256`` of its subjects). It is compared
+    with the bundle's current fingerprint: read from connectome.json (``connectome.norms_fingerprint``, no data file
+    read) when the bundle records it, else with ``verify`` by hashing the subjects' norms files. Without either, or
+    when the index's subjects are unknown, nothing can be told and None is returned.
+
+    :param subject_ids: the index's subjects (default: all of the bundle's when the index's subject sha256 says so).
+    """
+    from .connectome import norms_fingerprint, subjects_sha256
+
+    subjects = (metadata or {}).get("subjects") or {}
+    recorded = subjects.get("data_sha256")
+    if not recorded:
+        return None
+    ids = list(subject_ids) if subject_ids is not None else list(subjects["ids"]) if isinstance(subjects.get("ids"), list) else None
+    if ids is None and subjects.get("sha256") == subjects_sha256(bundle.subject_ids):
+        ids = list(bundle.subject_ids)
+    if ids is None:
+        return None
+    current = norms_fingerprint(bundle.metadata, ids)
+    if current is None and verify:
+        from .reference import subjects_data_sha256
+
+        current = subjects_data_sha256(bundle, ids)
+    if current is None or current == recorded:
+        return None
+    return f"The fast index was built from other data of {bundle.name!r}: its subjects were converted again since; build the fast index again"
+
+
+def load_index(path, bundle=None, verify=True, subject_ids=None):
     """Read a parcel index folder (or its index.json); return a :class:`FastIndex`.
 
-    :param bundle: when given, the index must belong to this connectome (same mask and voxels).
+    :param bundle: when given, the index must belong to this connectome (same mask and voxels) and to its current
+      data (:func:`stale_data_reason`).
     :param verify: check every file against the sha256 recorded in index.json.
-    :raise ValueError: not an index, a file that does not match, or another connectome.
+    :param subject_ids: the index's subjects when they are not all of the bundle's (for the data check).
+    :raise ValueError: not an index, a file that does not match, another connectome, or replaced data.
     """
     folder = os.path.dirname(path) if os.path.basename(os.fspath(path)) == INDEX_JSON else os.fspath(path)
     json_path = os.path.join(folder, INDEX_JSON)
     with open(json_path, encoding="utf-8") as f:
-        metadata = json.load(f)
+        try:
+            metadata = json.load(f)
+        except ValueError:  # includes JSONDecodeError and UnicodeDecodeError
+            metadata = None
+    if not isinstance(metadata, dict):
+        raise ValueError(f"The fast index is damaged ({INDEX_JSON} cannot be read): rebuild it.")
     if metadata.get("format") != FORMAT_NAME:
         raise ValueError(f"{json_path} is not a fast index ({FORMAT_NAME})")
     if int(metadata.get("version", 0)) > FORMAT_VERSION:
@@ -1065,7 +1104,7 @@ def load_index(path, bundle=None, verify=True):
     if verify:
         for item in files.values():
             if _file_sha256(os.path.join(folder, item["file"])) != item.get("sha256"):
-                raise ValueError(f"{item['file']} does not match the sha256 recorded in {INDEX_JSON}")
+                raise ValueError(f"The fast index is damaged (a file changed after it was built: {item['file']}): rebuild it.")
     tiling = Tiling.load(folder)
     p = np.load(os.path.join(folder, files.get("P", {}).get("file", P_NAME)), allow_pickle=False)
     c = np.load(os.path.join(folder, files.get("C", {}).get("file", C_NAME)), allow_pickle=False)
@@ -1075,6 +1114,9 @@ def load_index(path, bundle=None, verify=True):
         bundle = _open_bundle(bundle)
         if bundle.n_voxels != tiling.n_voxels or not np.array_equal(bundle.mask_indices, tiling.mask_indices) or (metadata.get("bundle") or {}).get("mask_sha256") not in (None, bundle.mask_sha256):
             raise ValueError(f"The fast index belongs to another connectome ({(metadata.get('bundle') or {}).get('name')!r}) than {bundle.name!r}")
+        stale = stale_data_reason(metadata, bundle, subject_ids, verify)
+        if stale:
+            raise ValueError(stale)
     return FastIndex(p, c, tiling, metadata, folder, _file_sha256(json_path))
 
 
@@ -1231,6 +1273,11 @@ def lesion_volumes_ml(occ, index):
     return [float(weights.sum() * voxel_ml) for _, weights in _lesion_columns(occ, tiling.n_voxels)]
 
 
+def size_bin_text(name):
+    """The user-facing name of a size-bin id ("lt1ml" -> "< 1 mL"); unknown ids are returned unchanged."""
+    return SIZE_BIN_TEXT.get(name, name)
+
+
 def size_bin(volume_ml, edges=SIZE_BINS_ML, names=SIZE_BIN_NAMES):
     """Size bin name of a lesion volume in ml (None for an unknown volume)."""
     if volume_ml is None or not np.isfinite(volume_ml):
@@ -1346,6 +1393,18 @@ def parity(exact_fz, approx, reference, strata, sizes_ml=None, names=None, top_p
     return report
 
 
+def format_below(value, constant):
+    """Format ``value`` (known to be below ``constant``) with two decimals, or with more when two decimals would round it
+    up to the constant ("0.796" rather than "0.80" for a gate of 0.80), so a failing value never reads as equal.
+    """
+    value = float(value)
+    for digits in range(2, 8):
+        text = f"{value:.{digits}f}"
+        if float(text) < constant:
+            return text
+    return f"{value:.8f}"
+
+
 def _group_verdict(members, constants, min_group):
     n = len(members)
     partial = _median([m["partial_r"] for m in members])
@@ -1356,9 +1415,9 @@ def _group_verdict(members, constants, min_group):
     elif partial is None:
         verdict["reason"] = "the partial r is not available (no reference maps)"
     elif partial < constants["partial_r"]:
-        verdict["reason"] = f"median partial r {partial:.2f} < {constants['partial_r']:.2f}"
+        verdict["reason"] = f"median partial r {format_below(partial, constants['partial_r'])} < {constants['partial_r']:.2f}"
     elif dice is None or dice < constants["top10_dice"]:
-        verdict["reason"] = f"median top-10% Dice {'n/a' if dice is None else f'{dice:.2f}'} < {constants['top10_dice']:.2f}"
+        verdict["reason"] = f"median top-10% Dice {'n/a' if dice is None else format_below(dice, constants['top10_dice'])} < {constants['top10_dice']:.2f}"
     else:
         verdict["passed"] = True
         verdict["reason"] = "passed"
@@ -1400,7 +1459,7 @@ def gate(report, constants=None, min_lesions=None, min_group=None):
     if not size_axis:
         messages.append("No lesion volumes were given: the gate is applied per stratum only.")
     if report.get("reference") is None:
-        messages.append("No reference maps: the partial r (mu_r and PC1 partialled out) cannot be computed, so no stratum passes. Build them with 'python -m LesionNetworkMappingLib.reference build'.")
+        messages.append(jobs.command_text("No reference maps: the partial r (mu_r and PC1 partialled out) cannot be computed, so no stratum passes. Build them with 'python -m LesionNetworkMappingLib.reference build'."))
     allowed_strata = sorted(s for s, v in strata.items() if v["passed"] and enough)
     allowed_bins = [b for b in SIZE_BIN_NAMES if b in bins and bins[b]["passed"] and enough]
     excluded = []
@@ -1418,7 +1477,7 @@ def gate(report, constants=None, min_lesions=None, min_group=None):
             if size_axis and m.get("size_bin") is None:
                 reasons.append("the lesion volume is unknown")
             elif size_axis and (not bin_verdict or not bin_verdict["passed"]):
-                reasons.append(f"the {m.get('size_bin')} size bin failed the parity gate ({bin_verdict['reason'] if bin_verdict else 'not evaluated'})")
+                reasons.append(f"the {size_bin_text(m.get('size_bin'))} size bin failed the parity gate ({bin_verdict['reason'] if bin_verdict else 'not evaluated'})")
         if reasons:
             excluded.append({"name": m.get("name"), "stratum": m.get("stratum"), "size_bin": m.get("size_bin"), "message": "Excluded from fast-mode statistics: " + "; ".join(reasons) + "."})
     for stratum, verdict in strata.items():
@@ -1426,7 +1485,7 @@ def gate(report, constants=None, min_lesions=None, min_group=None):
             messages.append(f"Fast mode is not allowed for {stratum} lesions: {verdict['reason']}.")
     for name, verdict in bins.items():
         if not verdict["passed"]:
-            messages.append(f"Fast mode is not allowed for lesions of size {name}: {verdict['reason']}.")
+            messages.append(f"Fast mode is not allowed for lesions of size {size_bin_text(name)}: {verdict['reason']}.")
     return {
         "constants": constants,
         "min_lesions": min_lesions,
@@ -1465,7 +1524,7 @@ def lesion_allowed(report, stratum, volume_ml=None, size=None):
         if size is None:
             return False, "Fast mode is not allowed for this lesion: its volume is unknown, so its size bin cannot be checked."
         verdict = result["size_bins"].get(size)
-        return False, f"Fast mode is not allowed for lesions of size {size}: {verdict['reason'] if verdict else 'no exact lesion of this size was checked'}."
+        return False, f"Fast mode is not allowed for lesions of size {size_bin_text(size)}: {verdict['reason'] if verdict else 'no exact lesion of this size was checked'}."
     return True, "allowed by the parity gate"
 
 
@@ -1644,8 +1703,13 @@ def _build_main(argv):
     except fetch.NotCachedError as exc:
         raise jobs.JobError(str(exc), code="not_cached") from None
     except (OSError, ValueError, KeyError, fetch.FetchError) as exc:
-        raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None
+        raise jobs.JobError(_input_message(exc, args), code="input") from None
     return jobs.EXIT_OK
+
+
+def _input_message(exc, args=None):
+    """The text of an input error for the command line: a plain sentence for a ValueError and for a missing or unreadable file, other errors keep their class."""
+    return jobs.input_message(exc, args)
 
 
 def _parity_main(argv):
@@ -1687,7 +1751,7 @@ def _parity_main(argv):
     except (jobs.Cancelled, jobs.JobError):
         raise
     except (OSError, ValueError, KeyError) as exc:
-        raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None
+        raise jobs.JobError(_input_message(exc, args), code="input") from None
     cover = coverage(weights, index)
     for lesion, lesion_qc, lesion_cover, (_, exact_path) in zip(report["lesions"], qc, cover, pairs, strict=True):
         lesion.update({"file": lesion_qc["file"], "sha256": lesion_qc["sha256"], "exact_map": os.path.basename(exact_path), "coverage": lesion_cover})
@@ -1737,12 +1801,17 @@ def _apply_main(argv):
         if args.parity:
             with open(args.parity, encoding="utf-8") as f:
                 report = json.load(f)
-            if (report.get("index") or {}).get("sha256") not in (None, index.sha256):
+            gate_keys = ("constants", "min_lesions", "enough_lesions", "strata", "size_bins", "allowed_strata", "allowed_size_bins")
+            if not isinstance(report, dict) or not isinstance(report.get("gate"), dict) or any(key not in report["gate"] for key in gate_keys):
+                raise jobs.JobError(f"{os.path.basename(args.parity)} is not a parity report of this fast index", code="input")
+            if (report.get("index") if isinstance(report.get("index"), dict) else {}).get("sha256") not in (None, index.sha256):
                 jobs.emit("warning", code="parity_index", message="The parity report belongs to another fast index; its gate is not applied.")
                 report = None
         maps = approximate_maps(weights, index)
+    except jobs.JobError:
+        raise
     except (OSError, ValueError, KeyError) as exc:
-        raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None
+        raise jobs.JobError(_input_message(exc, args), code="input") from None
     os.makedirs(args.out, exist_ok=True)
     bundle_name = (index.metadata.get("bundle") or {}).get("name") or "connectome"
     strata = lesion_strata(weights, index)

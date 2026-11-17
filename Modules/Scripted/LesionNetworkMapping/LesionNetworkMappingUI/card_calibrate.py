@@ -16,8 +16,9 @@ permutations, measured on 4 cores; the addendum planned 25 min):
 - Optionally the **sensitivity route** (classic overlap rule and its null-referenced version) on relocated lesion sets.
 
 The run's folder is ``<connectome folder>/calibration/<contrast label>`` (calibration.json without absolute paths, the
-target and truth maps); it is registered (kind "calibration"). The card shows the newest calibration again after a
-restart and states its checklist evidence (item 8). Nothing is computed until the button is pressed. It works in
+target and truth maps); it is registered (kind "calibration"). The card shows the newest calibration of the current
+design again after a restart and states its checklist evidence (item 8). A calibration of another design (a covariate,
+permutation or block change reuses the folder) is marked "Out of date" and does not count for the checklist. Nothing is computed until the button is pressed. It works in
 Classic and without the Studio shell. Search: "Calibrate this analysis".
 """
 
@@ -70,6 +71,12 @@ def _updateProgress(progressRow, force=False):
     updateProgressQuietly(progressRow, force)
 
 
+def calibrate_resume_name():
+    from LesionNetworkMappingLib import calibrate
+
+    return calibrate.RESUME_NAME
+
+
 def _readJson(path):
     from LesionNetworkMappingLib import calibrate
 
@@ -106,6 +113,39 @@ def _statusText(job):
         text += f" {int(job.progress * 100)}%"
     eta = jobrunner.formatEta(job.eta)
     return f"{text} · {eta}" if eta else text
+
+
+def designText(covariates, transforms=None, stat=None):
+    """The covariates of a design for the card's design and out-of-date lines: a transformed covariate is named with
+    its transform ("volume_ml (log)") and the Aspin-Welch v statistic is named, so these design changes are visible.
+    """
+    transforms = transforms or {}
+    text = ", ".join(f"{name} ({transforms[name]})" if transforms.get(name) else name for name in covariates or []) or _("none")
+    if stat == "v":
+        text += " · " + _("statistic: Aspin-Welch v")
+    return text
+
+
+def designDifferences(design, identity):
+    """The tested factor of a calibrated design (``design``, a record's design) that differs from the current design's
+    ``identity``, as text ("test: continuous (this design: two group) · score column: aphasia_score (this design: none)"), or
+    "" when the test, columns and levels agree. Covariates and permutation are named by the caller, so a calibration of
+    another analysis with the same covariates still says why it is out of date.
+    """
+    design, identity = design or {}, identity or {}
+    labels = (("test", _("test")), ("group_column", _("group column")), ("score_column", _("score column")), ("levels", _("levels")), ("design_type", _("design type")), ("contrast", _("contrast")))
+
+    def show(value):
+        if isinstance(value, (list, tuple)):
+            value = ", ".join(str(item) for item in value)
+        return str(value).replace("_", " ") if value not in (None, "") else _("none")
+
+    parts = []
+    for key, name in labels:
+        if design.get(key) != identity.get(key):
+            parts.append(_("{label}: {was} (this design: {now})").format(label=name, was=show(design.get(key)) if key not in ("group_column", "score_column") else (design.get(key) or _("none")),
+                                                                         now=show(identity.get(key)) if key not in ("group_column", "score_column") else (identity.get(key) or _("none"))))
+    return " · ".join(parts)
 
 
 def powerChart(effects, width=CHART_SIZE[0], height=CHART_SIZE[1], palette=None):
@@ -175,6 +215,29 @@ def powerChart(effects, width=CHART_SIZE[0], height=CHART_SIZE[1], palette=None)
     return pixmap
 
 
+_CURRENT = object()
+
+
+def _formGrid():
+    """A two-column form (label, field) on a QGridLayout, which handles the height of word-wrapped rows correctly."""
+    grid = qt.QGridLayout()
+    grid.setHorizontalSpacing(6)
+    grid.setVerticalSpacing(6)
+    grid.setColumnStretch(1, 1)
+    return grid
+
+
+def _addFormRow(grid, text, field):
+    """Add a row to ``grid``: ``text`` in the first column (none for a caption), ``field`` (widget or layout) in the second."""
+    row = grid.rowCount()
+    if text:
+        grid.addWidget(qt.QLabel(text), row, 0, qt.Qt.AlignLeft | qt.Qt.AlignVCenter)
+    if field.isWidgetType():
+        grid.addWidget(field, row, 1)
+    else:
+        grid.addLayout(field, row, 1)
+
+
 class CalibrateCard:
     """Controller of the Calibrate card (``widget`` is a collapsible card)."""
 
@@ -182,25 +245,31 @@ class CalibrateCard:
         self.ctx = ctx
         self.job = None
         self.notice = ""
+        self._noticeFor = None  # the design identity a stop/failure notice belongs to (None: no design)
+        self._runFor = None  # the design identity of the running (or last) job
         self.targetPath = None
         self.result = None  # (folder, record) on show
+        self.resultCurrent = True  # False when the shown record was calibrated for another design
+        self._shownFor = None  # the design identity the shown result was chosen for
         self._cleanedUp = False
+        self._restoredFolders = set()  # run folders whose settings were restored into the card once
         self.widget = widgets.card(_("Calibrate"), objectName="LNMCalibrateCard", collapsed=True)
         layout = qt.QVBoxLayout(self.widget)
         layout.setSpacing(6)
         layout.addWidget(label(INTRO, "LNMCalibrateIntro", "secondaryText"))
 
-        form = qt.QFormLayout()
-        form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
+        # A grid, not a QFormLayout: a QFormLayout gave the word-wrapped rows (the captions, the wrapped check box) heights
+        # computed for another width: blank lines in the captions and a band of about 110 px above the Calibrate button.
+        form = _formGrid()
         self.sourceCombo = qt.QComboBox()
         self.sourceCombo.setObjectName("LNMCalibrateSourceCombo")
         for key, title in SOURCES:
             self.sourceCombo.addItem(title, key)
         self.sourceCombo.setToolTip(_("The analysis to calibrate: the current settings of the Cohort card's Contrast or Symptom tab"))
         self.sourceCombo.connect("currentIndexChanged(int)", self.refresh)
-        form.addRow(_("Analysis:"), self.sourceCombo)
+        _addFormRow(form, _("Analysis:"), self.sourceCombo)
         self.designLabel = label("", "LNMCalibrateDesign", "secondaryText")
-        form.addRow("", self.designLabel)
+        _addFormRow(form, "", self.designLabel)
 
         self.kSpin = self._spin("LNMCalibrateKSpin", 20, 1000, DEFAULT_K, _("Null datasets: each is your design run on permuted labels or scores (100 gives a CI of about ±5 points at \u03b1 = 0.05)"))
         self.innerSpin = self._spin("LNMCalibrateInnerSpin", 100, 5000, DEFAULT_INNER, _("Permutations of each null dataset and simulation, identity included"))
@@ -209,7 +278,7 @@ class CalibrateCard:
         nullRow.addWidget(qt.QLabel("\u00d7"))
         nullRow.addWidget(self.innerSpin)
         nullRow.addStretch(1)
-        form.addRow(_("Null datasets:"), nullRow)
+        _addFormRow(form, _("Null datasets:"), nullRow)
 
         self.simsSpin = self._spin("LNMCalibrateSimsSpin", 5, 500, DEFAULT_SIMS, _("Simulations per effect size of the planted network"))
         self.effectsEdit = qt.QLineEdit("0.1, 0.2, 0.3")
@@ -220,7 +289,7 @@ class CalibrateCard:
         plantRow.addWidget(self.simsSpin)
         plantRow.addWidget(qt.QLabel(_("sims at β")))
         plantRow.addWidget(self.effectsEdit, 1)
-        form.addRow(_("Planted:"), plantRow)
+        _addFormRow(form, _("Planted:"), plantRow)
 
         targetRow = qt.QHBoxLayout()
         self.targetCombo = qt.QComboBox()
@@ -230,14 +299,15 @@ class CalibrateCard:
         self.targetCombo.setToolTip(_("The planted truth is a network: the top 5% of one lesion's Fz map (the lesion of median volume), or a mask on the connectome grid"))
         self.targetCombo.connect("activated(int)", self._onTargetChosen)
         targetRow.addWidget(self.targetCombo, 1)
-        form.addRow(_("Target network:"), targetRow)
+        _addFormRow(form, _("Target network:"), targetRow)
         self.targetLabel = label("", "LNMCalibrateTargetText", "secondaryText")
-        form.addRow("", self.targetLabel)
+        _addFormRow(form, "", self.targetLabel)
 
         self.sensitivityCheckBox = qt.QCheckBox(_("Also the sensitivity route (relocated lesions; slower)"))
         self.sensitivityCheckBox.setObjectName("LNMCalibrateSensitivityCheckBox")
         self.sensitivityCheckBox.setToolTip(_("False-positive rate of the classic overlap rule and of its null-referenced version on relocated lesion sets"))
-        form.addRow("", self.sensitivityCheckBox)
+        # A QCheckBox draws its text on one line (367 px): it made the card, and so the Map inspector, wider for good.
+        _addFormRow(form, "", widgets.wrapCheckBox(self.sensitivityCheckBox))
         layout.addLayout(form)
 
         runRow = qt.QHBoxLayout()
@@ -268,6 +338,11 @@ class CalibrateCard:
         self.fwerChip = widgets.chip(_("FWER"), "neutral")
         self.fwerChip.setObjectName("LNMCalibrateFwerChip")
         fwerRow.addWidget(self.fwerChip, 0, qt.Qt.AlignTop)
+        self.staleChip = widgets.chip(_("Out of date"), "warn")
+        self.staleChip.setObjectName("LNMCalibrateStaleChip")
+        self.staleChip.setToolTip(_("This calibration was run for another design; calibrate this analysis again to measure the current one"))
+        self.staleChip.hide()
+        fwerRow.addWidget(self.staleChip, 0, qt.Qt.AlignTop)
         self.fwerLabel = label("", "LNMCalibrateFwerText")
         fwerRow.addWidget(self.fwerLabel, 1)
         results.addLayout(fwerRow)
@@ -398,6 +473,24 @@ class CalibrateCard:
         except Exception as exc:
             return None, design, str(exc)
 
+    def designIdentity(self, spec, design):
+        """The identity of the current design (``calibrate.design_identity``), or None without a design."""
+        from LesionNetworkMappingLib import calibrate
+
+        if design is None:
+            return None
+        try:
+            return calibrate.design_identity(calibrate._design_info(design, spec))
+        except Exception:
+            logging.debug("Lesion network mapping: the design to calibrate has no identity", exc_info=True)
+            return None
+
+    def isCurrent(self, record, identity):
+        """True when ``record`` was calibrated for the design of ``identity`` (or there is no design to compare)."""
+        from LesionNetworkMappingLib import calibrate
+
+        return identity is None or calibrate.design_identity((record or {}).get("design")) == identity
+
     def mapsTsv(self):
         tab = self.tab()
         try:
@@ -477,7 +570,7 @@ class CalibrateCard:
             return
         spec, design, error = self.currentSpec() if self.ctx.study is not None else (None, None, None)
         if design is not None:
-            covariates = ", ".join(design.spec.covariates) or _("none")
+            covariates = designText(design.spec.covariates, design.spec.transforms, design.stat)
             kind = design.spec.test.replace("_", " ")
             if design.design_type != design.spec.test:
                 kind += " · " + design.design_type.replace("_", " ")
@@ -495,22 +588,64 @@ class CalibrateCard:
         self.etaLabel.setText(_("About {time}").format(time=duration(seconds)) if seconds is not None else "")
         self.stateLabel.setText(reason)
         self.stateLabel.setVisible(bool(reason))
-        self.noticeLabel.setText(self.notice)
-        self.noticeLabel.setVisible(bool(self.notice))
-        if self.result is None and not self.running():
-            self.showLatestResult()
+        identity = self.designIdentity(spec, design)
+        # The notice and the Stopped progress row of a run belong to the design of that run.
+        other = self._noticeFor is not None and identity != self._noticeFor
+        self.noticeLabel.setText("" if other else self.notice)
+        self.noticeLabel.setVisible(bool(self.notice) and not other)
+        if self._noticeFor is not None and not self.running():
+            self.progress.widget.setVisible(not other)
+        if not self.running() and (self.result is None or identity != self._shownFor):
+            self.showLatestResult(identity)
+        if not self.running() and design is not None:
+            self._restoreSettings(self.folder(design))
+
+    def _restoreSettings(self, folder):
+        """After a reopen, show the settings of the stopped run of ``folder`` (so Calibrate continues it), else those of its calibration.
+
+        Done once per folder: the card forgets its settings when the app closes, and the defaults would silently discard
+        the saved progress of a stopped run (``--resume`` continues only with identical settings).
+        """
+        if not folder or folder in self._restoredFolders:
+            return
+        self._restoredFolders.add(folder)
+        record = _readJson(os.path.join(folder, "calibration.json")) or {}
+        resume = _readJson(os.path.join(folder, calibrate_resume_name())) or {}
+        data = resume.get("data") if isinstance(resume.get("data"), dict) else {}
+        params = data.get("params")
+        stopped = isinstance(params, dict) and bool(resume.get("done") or data.get("fwer") or data.get("planted"))
+        if stopped:
+            k, inner, sims, effects = params.get("k"), params.get("inner_perm"), params.get("sims"), params.get("effects")
+        else:
+            fwer, planted = record.get("fwer") or {}, record.get("planted") or {}
+            k, inner, sims = fwer.get("k"), fwer.get("inner_perm") or planted.get("inner_perm"), planted.get("n_sims")
+            effects = [item.get("beta") for item in planted.get("effects") or [] if isinstance(item, dict) and item.get("beta") is not None]
+        for spin, value in ((self.kSpin, k), (self.innerSpin, inner), (self.simsSpin, sims)):
+            if isinstance(value, int) and not isinstance(value, bool):
+                spin.setValue(value)
+        if isinstance(effects, list) and effects and all(isinstance(item, (int, float)) for item in effects):
+            self.effectsEdit.blockSignals(True)
+            self.effectsEdit.setText(", ".join(f"{value:g}" for value in effects))
+            self.effectsEdit.blockSignals(False)
+        if stopped and not self.notice:
+            self._setNotice(_("A stopped calibration of this analysis is saved ({k} null datasets \u00d7 {perm} permutations). The settings above are its settings: "
+                              "Calibrate this analysis continues it, and changing them starts again from zero.").format(k=params.get("k"), perm=params.get("inner_perm")))
 
     def _onTargetChosen(self, index=None):
         if self.targetCombo.currentData == "mask":
-            path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Target network mask"), self.connectomeDir() or "", _("NIfTI (*.nii *.nii.gz)"))
+            path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Target network mask"), self.connectomeDir() or widgets.dialogStartFolder(), _("NIfTI (*.nii *.nii.gz)"))
             if path:
                 self.targetPath = path
             elif not self.targetPath:
                 self.targetCombo.setCurrentIndex(0)
         self.refresh()
 
-    def _setNotice(self, text):
+    def _setNotice(self, text, identity=_CURRENT):
+        """Show ``text``; it belongs to the design of ``identity`` (default: the design shown now) and is hidden for another."""
+        if identity is _CURRENT:
+            identity = self.designIdentity(*self.currentSpec()[:2])
         self.notice = text or ""
+        self._noticeFor = identity if text else None
         self.noticeLabel.setText(self.notice)
         self.noticeLabel.setVisible(bool(self.notice))
 
@@ -557,6 +692,7 @@ class CalibrateCard:
         spec = jobrunner.JobSpec("LesionNetworkMappingLib.calibrate", args, title=_("Calibrate"), heavy=True, kind="calibration", name="calibration", runRoot=os.path.dirname(out),
                                  onEvent=self._onEvent, onDone=lambda job, out=out: self._onDone(job, out), statusText=_statusText,
                                  nice=JOB_NICE)
+        self._runFor = self.designIdentity(*self.currentSpec()[:2])
         self.job = self.ctx.submit(spec)
         self.progress.setJob(self.job)
         self.progress.widget.show()
@@ -573,9 +709,9 @@ class CalibrateCard:
             return
         _updateProgress(self.progress, force=True)
         if job.state == "failed":
-            self._setNotice(_("The calibration failed: {reason}").format(reason=job.failureReason))
+            self._setNotice(_("The calibration failed: {reason}").format(reason=job.failureReason), self._runFor)
         elif job.state == "cancelled":
-            self._setNotice(_("Stopped. Calibrate again with the same settings to continue from where it stopped."))
+            self._setNotice(_("Stopped. Calibrate again with the same settings to continue from where it stopped."), self._runFor)
         else:
             self.progress.widget.hide()
             self._setNotice("")
@@ -594,28 +730,43 @@ class CalibrateCard:
         folders = [os.path.join(root, name) for name in os.listdir(root) if os.path.isfile(os.path.join(root, name, "calibration.json"))]
         return sorted(folders, key=lambda folder: os.path.getmtime(os.path.join(folder, "calibration.json")))
 
-    def showLatestResult(self):
+    def showLatestResult(self, identity=None):
+        """Show the newest calibration of the current design, else the newest one marked out of date."""
         folders = self.resultFolders()
-        if folders:
-            self.loadResult(folders[-1])
-        else:
+        if not folders:
             self.results.hide()
+            return
+        if identity is not None:
+            for folder in reversed(folders):
+                record = _readJson(os.path.join(folder, "calibration.json"))
+                if record and record.get("status") == "done" and self.isCurrent(record, identity):
+                    self.loadResult(folder, identity)
+                    return
+        self.loadResult(folders[-1], identity)
 
-    def loadResult(self, folder):
+    def loadResult(self, folder, identity=None):
         record = _readJson(os.path.join(folder, "calibration.json"))
         if not record or record.get("status") != "done":
             self.results.hide()
             return None
         self.result = (folder, record)
-        self.showResult(folder, record)
+        self.showResult(folder, record, identity)
         return record
 
-    def showResult(self, folder, record):
+    def showResult(self, folder, record, identity=None):
         from LesionNetworkMappingLib import calibrate
 
+        if identity is None and self.ctx.study is not None:
+            spec, design, _error = self.currentSpec()
+            identity = self.designIdentity(spec, design)
+        self._shownFor = identity
+        self.resultCurrent = self.isCurrent(record, identity)
+        self.staleChip.setVisible(not self.resultCurrent)
         fwer = record.get("fwer") or {}
         level = fwer.get("chip") or calibrate.LEVELS.get(fwer.get("level"), "neutral")
         chipText = {"inflated": _("FWER inflated"), "consistent": _("FWER ok"), "conservative": _("FWER conservative")}.get(fwer.get("level"), _("FWER"))
+        if not self.resultCurrent:
+            level = "neutral"  # it does not vouch for the current design
         widgets.setChipLevel(self.fwerChip, level if level in ("ok", "warn", "danger", "neutral", "busy") else "neutral", chipText)
         design = record.get("design") or {}
         lead = _("{label} ({test}, n = {n}): ").format(label=design.get("label") or "", test=str(design.get("test") or "").replace("_", " "), n=design.get("n"))
@@ -651,8 +802,15 @@ class CalibrateCard:
             self.chart.setPixmap(powerChart(effects))
         self.chart.setVisible(bool(effects))
         self._fillTable(effects)
-        status, value, _evidence = calibrate.checklist_evidence(self.ctx.study.path) if self.ctx.study is not None else ("not_run", "", [])
-        self.evidenceLabel.setText(_("Checklist (item 8, design and correction): {value}").format(value=value) if status != "not_run" else "")
+        if not self.resultCurrent:
+            covariates = designText(design.get("covariates"), design.get("transforms"), design.get("stat"))
+            differs = designDifferences(design, identity)
+            self.evidenceLabel.setText(_("Out of date: this calibration was run for another design (covariates: {covariates} · permute: {permute}). "
+                                         "It does not count for the checklist; calibrate this analysis again.").format(covariates=covariates, permute=design.get("permute") or "—")
+                                       + (" " + _("It differs in {differences}.").format(differences=differs) if differs else ""))
+        else:
+            status, value, _evidence = calibrate.checklist_evidence(self.ctx.study.path, design=identity) if self.ctx.study is not None else ("not_run", "", [])
+            self.evidenceLabel.setText(_("Checklist (item 8, design and correction): {value}").format(value=value) if status != "not_run" else "")
         self.results.show()
 
     def _fillTable(self, effects):
@@ -681,7 +839,7 @@ class CalibrateCard:
     def showFolder(self):
         if self.result is None:
             return
-        qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(self.result[0]))
+        widgets.showInFileManager(self.result[0])
 
 
 #

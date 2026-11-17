@@ -8,6 +8,7 @@ They need the Slicer application and run the real pipeline (A-04) on the synthet
 Under a plain PythonSlicer (the library test glob) the module is skipped.
 """
 
+import json
 import os
 import shutil
 import signal
@@ -190,6 +191,12 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
         self.assertEqual(widget.computeButton.text, "Run everything · 12 lesions")
         self.assertTrue(widget.mapsOnlyButton.visible and widget.mapsOnlyButton.enabled)
         self.assertTrue(card.runButton.enabled, card.runButton.toolTip)
+        # The Report card and the battery strip before the run: no pipeline report, the null reference not run
+        report, battery = widget.ctx.card("report"), widget.ctx.card("battery")
+        _pump(200)
+        self.assertFalse(report.reportButton.enabled)
+        self.assertEqual({item["id"]: item["status"] for item in report.state.items}.get("E7"), "not_run")
+        self.assertEqual({dot["id"]: dot["colour"] for dot in battery.state.dots}.get("null_reference"), "grey")
         probe = _GapProbe()
         probe.start()
         card.applyMaxSeconds = 0.0
@@ -237,6 +244,11 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
             self.assertEqual(f.read(), self.participantsBytes, "participants.tsv was changed")
         self.assertEqual(card.noteLabel.text, "Statuses will update when the study is opened in Library.")
         self.assertEqual(self.cp.modelFor(job).statusText(), "Cohort · Report 100%")
+        # The Report card and the battery strip follow the end of the run by themselves (no refresh() call)
+        self.assertTrue(_wait(lambda: report.reportButton.enabled, 5), "the Report card did not refresh when Run everything finished")
+        self.assertEqual({item["id"]: item["status"] for item in report.state.items}.get("E7"), "done")
+        self.assertNotIn("Pipeline: not recorded", report.methodsView.toPlainText())
+        self.assertEqual({dot["id"]: dot["colour"] for dot in battery.state.dots}.get("null_reference"), "green", "the battery strip did not refresh when Run everything finished")
 
     def test_2_open_report_fallbacks(self):
         """Open report: the URL opener with report.html; when it refuses (or SLICER_STUDIO_WEB=1), the in-app viewer, else the path."""
@@ -336,6 +348,126 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
         start = job.startEvent
         self.assertEqual(start["n_compute"], 1, start)
         self.assertEqual(start["n_reuse"], 11, start)
+
+    def test_4b_design_change_is_not_up_to_date(self):
+        """A group or include change after a run: the card and the Library card say the design changed, never 'Up to date'."""
+        from LesionNetworkMappingLib.study import read_tsv, write_tsv
+
+        card = self.card
+        self._settle()
+        self.assertTrue(card.stateLabel.text.startswith("Up to date"), card.stateLabel.text)
+        with open(self.participants, "rb") as f:
+            before = f.read()
+        columns, rows = read_tsv(self.participants)
+        columns = columns if "include" in columns else [*columns, "include"]
+        cases = [row for row in rows if row["group"] == "case"]
+        cases[0]["group"] = "control"
+        cases[1]["include"] = "0"
+        try:
+            write_tsv(self.participants, columns, rows)
+            self._settle()
+            self.assertIn("11 lesions", card.summaryLabel.text)
+            self.assertIn("6 cases / 5 controls", card.summaryLabel.text)
+            self.assertEqual(card.stateLabel.text, "Design changed since the last run")
+            try:
+                from StudioLib import libcard_analysis
+            except ImportError:
+                libcard_analysis = None
+            if libcard_analysis is not None:
+                text, level = libcard_analysis.stateLine(libcard_analysis.latestAnalysis(self.fx["study"]), card.plan)
+                self.assertEqual((text, level), ("Cohort analysis: design changed since the last run", "warning"))
+        finally:
+            with open(self.participants, "wb") as f:
+                f.write(before)
+        self._settle()
+        self.assertTrue(card.stateLabel.text.startswith("Up to date"), card.stateLabel.text)
+
+    def test_4c_design_change_after_a_run_of_an_earlier_build(self):
+        """A pipeline.json of an earlier build has no inputs/design_sha256 (only its rows): a group or include change is
+        still a design change, and the unchanged study is still up to date.
+        """
+        from LesionNetworkMappingLib.study import read_tsv, write_tsv
+
+        card = self.card
+        self._settle()
+        record = os.path.join(card.outDir(), "pipeline.json")
+        with open(record, "rb") as f:
+            recordBytes = f.read()
+        with open(self.participants, "rb") as f:
+            before = f.read()
+        data = json.loads(recordBytes.decode("utf-8"))
+        del data["inputs"]["design_sha256"]  # as written by 827d5b1
+        try:
+            with open(record, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=1)
+            self._settle()
+            self.assertTrue(card.stateLabel.text.startswith("Up to date"), card.stateLabel.text)
+            try:
+                from StudioLib import libcard_analysis
+            except ImportError:
+                libcard_analysis = None
+            for change in ("group", "include"):
+                columns, rows = read_tsv(self.participants)
+                columns = columns if "include" in columns else [*columns, "include"]
+                cases = [row for row in rows if row["group"] == "case"]
+                if change == "group":
+                    cases[0]["group"] = "control"
+                else:
+                    cases[1]["include"] = "0"
+                write_tsv(self.participants, columns, rows)
+                self._settle()
+                self.assertEqual(card.stateLabel.text, "Design changed since the last run", change)
+                if libcard_analysis is not None:
+                    text, level = libcard_analysis.stateLine(libcard_analysis.latestAnalysis(self.fx["study"]), card.plan)
+                    self.assertEqual((text, level), ("Cohort analysis: design changed since the last run", "warning"), change)
+                with open(self.participants, "wb") as f:
+                    f.write(before)
+            self._settle()
+            self.assertTrue(card.stateLabel.text.startswith("Up to date"), card.stateLabel.text)
+        finally:
+            with open(self.participants, "wb") as f:
+                f.write(before)
+            with open(record, "wb") as f:
+                f.write(recordBytes)
+        self._settle()
+        self.assertTrue(card.stateLabel.text.startswith("Up to date"), card.stateLabel.text)
+
+    def test_4d_settings_change_is_not_up_to_date(self):
+        """An analysis setting of the next run that is not the last run's (a recipe or a locked plan sets the one-sided
+        contrast A>B after a two-sided run, whose pipeline.json "config" has no contrast; fewer permutations): the card says
+        the settings changed, never 'Up to date'; the same settings as the run (a recorded A>B, numbers as 5000.0) are up to date.
+        """
+        card = self.card
+        self._settle()
+        self.assertTrue(card.stateLabel.text.startswith("Up to date"), card.stateLabel.text)
+        record = os.path.join(card.outDir(), "pipeline.json")
+        with open(record, "rb") as f:
+            recordBytes = f.read()
+        data = json.loads(recordBytes.decode("utf-8"))
+        self.assertNotIn("contrast", data["config"], "a two-sided run records no contrast (as 827d5b1)")
+        config = card.config()
+        self.assertEqual(self.cp.settingsChanged(config, data), [])
+        self.assertEqual(self.cp.settingsChanged(dict(config, contrast="A>B", perm=1000), data), ["contrast", "perm"])
+        self.assertEqual(self.cp.settingsChanged(dict(config, contrast="A>B"), {"status": "done"}), [], "a record without config cannot be compared")
+        try:
+            for options, changed in (({"contrast": "A>B"}, ["contrast"]), ({"perm": 1000}, ["perm"]), ({"tfce": True}, ["tfce"])):
+                self._setOptions(options)
+                self._settle()
+                self.assertEqual(self.cp.settingsChanged(card.config(), card.record), changed, options)
+                self.assertEqual(card.stateLabel.text, "Settings changed since the last run", options)
+                self.assertEqual(card.stateLine()[1], "warn", options)
+            # A run that recorded the one-sided contrast, and the same perm written as a float: up to date
+            self._setOptions({"contrast": "A>B"})
+            with open(record, "w", encoding="utf-8") as f:
+                json.dump(dict(data, config=dict(data["config"], contrast="A>B", perm=float(data["config"]["perm"]))), f, indent=1)
+            self._settle()
+            self.assertTrue(card.stateLabel.text.startswith("Up to date"), card.stateLabel.text)
+        finally:
+            with open(record, "wb") as f:
+                f.write(recordBytes)
+            qt.QSettings().remove(self.cp.OPTIONS_SETTING)
+        self._settle()
+        self.assertTrue(card.stateLabel.text.startswith("Up to date"), card.stateLabel.text)
 
     def test_5_stop_and_resume(self):
         """With one lesion per pass: Stop shows 'Stopped · k of 12 maps kept' within 3 s; the next run reuses at least k and completes."""
@@ -463,6 +595,7 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
     def test_9_options_dialog_and_settings(self):
         """The options dialog is non-modal, at most 420 px wide, and stores its values in Studio/LNM/Pipeline/Options only."""
         card = self.card
+        self.cp.saveOptions(dict(self.cp.DEFAULT_OPTIONS, contrast="A>B"))  # a recipe's one-sided contrast (no control in the dialog)
         options = card.showOptions()
         dialog = options.dialog
         self.assertEqual(dialog.objectName, "LNMPipelineOptionsDialog")
@@ -476,12 +609,15 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
         values = options.values()
         self.assertEqual(values["volume_off_reason"], "volume is matched by design")
         self.assertEqual(values["sensitivity"], 80.0)
+        self.assertEqual(values["contrast"], "A>B", "the dialog keeps the recipe's contrast")
         self.assertFalse(options.ruleChecks["t7"].enabled, "|T| >= 7 needs N close to 1000")
         self.cp.saveOptions(values)
         config = card.config(values, forRun=True)
         args = self.cp.commandArguments(config)
         self.assertIn("--no-volume-covariate", args)
         self.assertEqual(args[args.index("--sensitivity") + 1], "80")
+        self.assertEqual(args[args.index("--contrast") + 1], "A>B")
+        self.assertNotIn("--contrast", self.cp.commandArguments(card.config(dict(values, contrast="two_sided"), forRun=True)))
         dialog.close()
         qt.QSettings().remove(self.cp.OPTIONS_SETTING)
         added = set(qt.QSettings().allKeys()) - self.settingsBefore
@@ -507,6 +643,51 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
         self.assertEqual(level, "success")
         self.assertEqual(libcard_analysis.allTraced(self.widget.cohortStudy)[0], 12)
 
+    def test_a1_library_card_plans_again_after_a_library_design_change(self):
+        """A QC fail or a score edit made in the Library (saved by the study session) is a design change on the
+        Library Analysis card too, without reopening the study (bug bash BB-1).
+        """
+        try:
+            from StudioLib import libcard_analysis, study_ui
+        except ImportError:
+            self.skipTest("the Studio module is not part of this build")
+        session = study_ui.openStudy(self.fx["study"], showLibrary=False)
+        self.assertIsNotNone(session)
+        card = libcard_analysis.AnalysisCard(session)
+        card.timer.stop()  # the test refreshes as the 5 s timer and the save listener do
+
+        def settle():
+            card.refresh()
+            _pump(libcard_analysis.PLAN_DELAY_MS + 100)
+            card.worker.waitForIdle(30)
+            _pump(50)
+            return card.lineText()
+
+        sid = next(row["participant_id"] for row in session.study.subjects if row.get("group") == "case")
+        try:
+            self.assertTrue(settle().startswith("Cohort analysis: up to date"), card.lineText())
+            session.setQc([sid], "fail")  # the X key of the study list
+            session.flush()
+            self.assertEqual(settle(), "Cohort analysis: design changed since the last run")
+            session.setQc([sid], "unreviewed")
+            session.flush()
+            self.assertTrue(settle().startswith("Cohort analysis: up to date"), card.lineText())
+            score = list(card.plan["scores"])  # the confirmed score columns of the plan (aphasia_score)
+            self.assertTrue(score, card.plan)
+            if score:
+                before = session.study.subject(sid).get(score[0])
+                session.setValues([sid], {score[0]: "99"})  # the Case section
+                session.flush()
+                self.assertEqual(settle(), "Cohort analysis: design changed since the last run")
+                session.setValues([sid], {score[0]: before if before is not None else ""})
+                session.flush()
+        finally:
+            card.dispose()
+            card.widget.deleteLater()
+            study_ui.closeStudy()
+            with open(self.participants, "wb") as f:
+                f.write(self.participantsBytes)
+
     def test_b_foreign_compute_block(self):
         """A Compute block of another Map plug-in (e.g. Preflight) refuses Run everything: card button, primary override and Ctrl+Enter."""
         card, widget = self.card, self.widget
@@ -520,6 +701,7 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
             self.assertEqual(card.runState(), (False, reason))
             self.assertFalse(card.runButton.enabled)
             self.assertFalse(widget.computeButton.enabled, "the primary override follows the block")
+            self.assertEqual(widget.computeReasonLabel.text, reason, "the reason is shown under the primary button")
             self.assertIsNone(card.run())
             widget.onPrimary()  # the Ctrl+Enter path
             card.runButton.click()
@@ -529,6 +711,80 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
             widget.ctx.setComputeEnabled(True, key="test-block")
         _pump(self.cp.APPLY_MS + 50)
         self.assertTrue(card.canRun(), card.runButton.toolTip)
+
+    def test_b1_disabled_primary_shows_the_card_reason(self):
+        """A disabled Run everything shows the card's reason under the primary button, not a bare 'Not ready' (in Studio the
+        card's own Run button, whose tooltip holds the reason, is hidden).
+        """
+        from unittest import mock
+
+        card, widget = self.card, self.widget
+        self._settle()
+        self.assertTrue(card.canRun(), card.runButton.toolTip)
+        with mock.patch.object(card, "eligibleCount", return_value=1):
+            self._settle()
+            enabled, reason = card.runState()
+            self.assertFalse(enabled)
+            self.assertEqual(reason, "The analysis needs at least 2 lesions that can be mapped.")
+            self.assertFalse(widget.computeButton.enabled)
+            self.assertEqual(widget.computeState(), (False, reason))
+            self.assertEqual(widget.computeReasonLabel.text, reason)
+        self._settle()
+        self.assertTrue(card.canRun(), card.runButton.toolTip)
+        self.assertTrue(widget.computeButton.enabled, widget.computeReasonLabel.text)
+        self.assertEqual(widget.computeReasonLabel.text, "")
+
+    def test_b1b_options_button_is_right_aligned_when_the_card_run_button_is_hidden(self):
+        """With the pinned footer button (Studio) the card's own Run and Stop buttons are hidden: the options button then
+        stays at the right edge of the card instead of floating alone in the middle of the row.
+        """
+        card, widget = self.card, self.widget
+        self._settle()
+        widget.ctx.primaryPinned = True
+        try:
+            card.widget.setFixedWidth(420)
+            card.widget.show()
+            card.apply()
+            _pump(200)
+            self.assertFalse(card.runButton.isVisible())
+            self.assertTrue(card.optionsButton.isVisible())
+            right = card.optionsButton.mapTo(card.widget, qt.QPoint(card.optionsButton.width, 0)).x()
+            self.assertGreaterEqual(right, card.widget.width - 8, f"options button ends at {right} of {card.widget.width}")
+        finally:
+            widget.ctx.primaryPinned = False
+            card.widget.setMinimumWidth(0)
+            card.widget.setMaximumWidth(16777215)
+            card.apply()
+            _pump(100)
+
+    def test_b2_refused_rule_is_refused_before_the_run(self):
+        """A primary rule refused for the connectome's N (|T| >= 7 convention, N = 20) disables Run everything with the rule's
+        banner (as the Map card refuses it); a click starts no run, so the last run's report stays.
+        """
+        from unittest import mock
+
+        card = self.card
+        self._settle()
+        self.assertTrue(card.canRun(), card.runButton.toolTip)
+        report = os.path.join(self._out(), "report.html")
+        self.assertTrue(os.path.isfile(report))
+        t7 = {"kind": "t_convention", "value": 7.0, "reference_n": 1000}
+        with mock.patch.object(card, "rule", return_value=t7):
+            self._settle()
+            enabled, reason = card.runState()
+            self.assertFalse(enabled)
+            self.assertIn("N≈1000", reason)
+            self.assertIn("N=20", reason)
+            self.assertFalse(card.runButton.enabled)
+            self.assertIsNone(card.run())
+            _pump(200)
+            self.assertEqual(self.cp.pipelineJobs(), [], "Run everything started with a refused rule")
+            with mock.patch.object(card, "rule", return_value=dict(t7, override=True)):  # "Use anyway" in the Map card
+                self._settle()
+                self.assertTrue(card.canRun(), card.runButton.toolTip)
+        self._settle()
+        self.assertTrue(card.canRun(), card.runButton.toolTip)
+        self.assertTrue(os.path.isfile(report))
 
     def test_c_other_study_never_run(self):
         """After a run on study A, a never-run study B shows 'Never run' (no glyph, warning or result of A's run)."""
@@ -561,6 +817,203 @@ class LesionNetworkMappingPipelineUITest(unittest.TestCase):
             qt.QSettings().remove(self.cp.OPTIONS_SETTING)
         self._settle()
         self.assertTrue(card.stateLabel.text.startswith("Up to date"), card.stateLabel.text)
+
+    def test_c2_other_study_while_running(self):
+        """While study A runs, the card of study B neither shows A's run as its own nor stops it; back on A it follows the run again."""
+        import lnm_pipeline_fixture as fixture
+
+        card, widget = self.card, self.widget
+        self._setOptions(dict(ONE_PER_PASS, perm=50000))
+        self._settle()
+        job = card.run()
+        self.assertIsNotNone(job, card.stateLabel.text)
+        outA = job.spec.lnmOut
+        other = fixture.make_fixture(os.path.join(self.tmp, "f4"), extra_rows=False, study_name="Study B2")
+        try:
+            self.assertTrue(_wait(lambda: job.startEvent is not None, 30))
+            widget.openCohortStudy(other["study"])
+            self.cp.setCohortSeed(widget)
+            _pump(self.cp.APPLY_MS + 50)
+            states = []
+            for _tick in range(5):
+                _pump(200)
+                states.append(card.stateLabel.text)
+            self.assertFalse(job.isFinished(), "study A's run ended before the check (inconclusive)")
+            self.assertIn("Study B2", card.outDir())
+            self.assertFalse(self.cp._samePath(card.outDir(), outA))
+            self.assertIsNot(card.job, job, "study B's card adopted study A's run")
+            self.assertFalse(any(text.startswith("Running") for text in states), states)
+            self.assertFalse(card.stopButton.isVisible(), "study B's card offers Stop for study A's run")
+            self.assertFalse(card.progressBar.isVisible())
+            self.assertFalse(card.canRun(), "Run everything waits for the running analysis")
+            card.stop()  # Stop of study B's card (button, shortcut) must not reach study A's run
+            _pump(300)
+            self.assertFalse(job.stopRequested, "Stop in study B's card cancelled study A's run")
+            self.assertFalse(job.isFinished() and job.state == "cancelled", job.state)
+            widget.openCohortStudy(self.fx["study"])
+            self.cp.setCohortSeed(widget)
+            _pump(self.cp.APPLY_MS + 50)
+            if not job.isFinished():
+                self.assertTrue(_wait(lambda: card.job is job, 5), "back on study A, the card follows its run again")
+                self.assertTrue(_wait(lambda: card.stateLabel.text.startswith("Running") or job.isFinished(), 5), card.stateLabel.text)
+        finally:
+            job.stop()
+            job.waitForFinished(30)
+            widget.openCohortStudy(self.fx["study"])
+            self.cp.setCohortSeed(widget)
+            qt.QSettings().remove(self.cp.OPTIONS_SETTING)
+        self._settle()
+
+    def test_d_settled_native_lesion_is_not_new_or_changed(self):
+        """A native lesion that a finished run normalized (awaiting review) or could not normalize stays out of "new or changed" and of the lesion count."""
+        import lnm_pipeline_fixture as fixture
+        from LesionNetworkMappingLib import pipeline
+
+        card = self.card
+        other = fixture.make_fixture(os.path.join(self.tmp, "f3"), study_name="Study C")  # with the native-space row
+        stub = fixture.make_normalizer_stub(self.tmp, other["bundle"])
+        previous = os.environ.get(pipeline.NORMALIZER_ENV)
+        os.environ[pipeline.NORMALIZER_ENV] = stub
+        saved = (card.plan, card.planKey, card.record)
+        try:
+            planned = pipeline.plan(pipeline.PipelineConfig(study=other["study"], bundle=other["bundle"], accept_terms=True, nulls="off"))
+            fresh = self.cp.summarizePlan(planned)
+            self.assertEqual(fresh["counts"]["normalize"], 1)
+            self.assertEqual(fresh["counts"]["settled"], 0)
+            for row in planned.rows:
+                if row["status"] == "normalize":
+                    row["settled"] = pipeline.NORM_NEEDS_REVIEW  # what plan() reports once the run excluded it
+            settled = self.cp.summarizePlan(planned)
+            self.assertEqual((settled["counts"]["normalize"], settled["counts"]["settled"], settled["review"]), (0, 1, 1))
+            self.assertEqual(settled["eligible"], fresh["eligible"] - 1)
+            self.assertEqual(sum(settled["groups"].values()), settled["eligible"])
+            settled["counts"].update(reuse=settled["counts"]["compute"] + settled["counts"]["reuse"], compute=0)  # as after a finished run
+            card.plan, card.planKey, card.record = settled, card._currentPlanKey(), {"status": "done", "updated": None}
+            text, level = card.stateLine()
+            self.assertEqual(text, "1 native lesion needs normalization review in Library")
+            settled["review"] = 0  # a native lesion that could not be normalized: nothing left to do
+            text, level = card.stateLine()
+            self.assertTrue(text.startswith("Up to date"), text)
+            self.assertEqual(level, "ok")
+        finally:
+            card.plan, card.planKey, card.record = saved
+            if previous is None:
+                os.environ.pop(pipeline.NORMALIZER_ENV, None)
+            else:
+                os.environ[pipeline.NORMALIZER_ENV] = previous
+
+
+class LesionNetworkMappingPipelineModelPercentTest(unittest.TestCase):
+    """The overall percent of the Run everything card (bar, state line, status chip) only grows (A-04c)."""
+
+    def test_percent_never_goes_back_when_a_sub_step_restarts_its_counter(self):
+        from LesionNetworkMappingUI import card_pipeline as cp
+
+        model = cp.PipelineModel()
+        stages = [{"name": "maps", "estimate_s": 10}, {"name": "stats", "estimate_s": 10}, {"name": "report", "estimate_s": 20}]
+        model.apply({"event": "start", "stages": stages})
+        model.apply({"event": "stage", "name": "maps", "status": "running"})
+        model.apply({"event": "stage", "name": "maps", "status": "done"})
+        model.apply({"event": "stage", "name": "stats", "status": "running"})
+        seen = []
+        # a sub-step ends at 20/25 and the next one restarts at 3/100: the raw estimate would fall back
+        for done, total in ((20, 25), (3, 100), (40, 100), (90, 100)):
+            model.apply({"event": "progress", "stage": "stats", "done": done, "total": total})
+            seen.append(model.percent())
+        self.assertEqual(seen, [45.0, 45.0, 45.0, 47.5])
+        text = model.statusText()
+        model.apply({"event": "stage", "name": "stats", "status": "done"})  # the stage start/end events clear the counter too
+        self.assertEqual(model.percent(), 50.0)
+        model.apply({"event": "stage", "name": "report", "status": "running"})
+        self.assertEqual(model.percent(), 50.0)
+        self.assertIn("47%", text)
+        model.state = "done"
+        self.assertEqual(model.percent(), 100.0)
+
+
+class LesionNetworkMappingPipelinePlanSeedsTest(unittest.TestCase):
+    """Run everything runs with the locked plan's permutation seed, null seed, alpha and FDR choice (BB-1)."""
+
+    def test_locked_plan_seeds_and_alpha_reach_the_run(self):
+        from LesionNetworkMappingLib import pipeline, recipes
+        from LesionNetworkMappingUI import card_pipeline as cp
+
+        recipe = recipes.find_recipe("classic_ferguson2019_adapted", recipes.load_recipes())
+        plan = recipes.apply(recipe)
+        plan["seeds"].update({"permutation": 7, "nulls": 11})
+        plan["alpha"] = 0.01
+        plan["fdr"] = False
+        plan = recipes.normalize_parameters(plan)
+        # The recipe header stores these options for Run everything (card_recipe._setMapSettings)
+        options = recipes.pipeline_options(plan, recipe.steps, dict(cp.DEFAULT_OPTIONS))
+        config = cp.configDict("/study", "/bundle.lnmc", options, rule=plan["rule"])
+        self.assertEqual((config["perm_seed"], config["null_seed"], config["alpha"], config["fdr"]), (7, 11, 0.01, False))
+        run = pipeline.config_from_args(pipeline._parser().parse_args(cp.commandArguments(config)))
+        self.assertEqual((run.perm_seed, run.null_seed, run.alpha, run.fdr), (7, 11, 0.01, False))
+        # The same as the recipe's own converter (the headless app)
+        converted = recipes.to_pipeline_config(recipe, params=plan, module_available=lambda name: True)["config"]
+        self.assertEqual((converted["perm_seed"], converted["null_seed"], converted["alpha"], converted["fdr"]), (run.perm_seed, run.null_seed, run.alpha, run.fdr))
+        # The Map holds what the plan says: no deviation; a different seed or alpha in the options is one
+        self.assertEqual(recipes.compare_parameters(plan, recipes.parameters_from_map(plan, rule=plan["rule"], options=options)), [])
+        changed = recipes.parameters_from_map(plan, rule=plan["rule"], options=dict(options, perm_seed=0, alpha=0.05))
+        self.assertEqual(sorted(item["field"] for item in recipes.compare_parameters(plan, changed)), ["alpha", "seeds.permutation"])
+        # A run of the plan whose pipeline.json has seed 0 is not up to date
+        self.assertEqual(cp.settingsChanged(config, {"config": dict(config, perm_seed=0)}), ["perm_seed"])
+        # The defaults (no recipe) add no argument: the command line of a Classic run is unchanged
+        defaults = cp.commandArguments(cp.configDict("/study", "/bundle.lnmc", dict(cp.DEFAULT_OPTIONS)))
+        for flag in ("--perm-seed", "--null-seed", "--alpha", "--no-fdr"):
+            self.assertNotIn(flag, defaults)
+        # The options dialog keeps them (it has no control for them)
+        self.assertTrue({"perm_seed", "null_seed", "alpha", "fdr"} <= set(cp.KEPT_OPTION_KEYS))
+
+
+
+class LesionNetworkMappingPipelineRecipeRecordTest(unittest.TestCase):
+    """Run everything records the chosen recipe and the locked plan's sha256 in pipeline.json, as slicer-lnm --recipe does (BB-1)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="lnm-pipeline-recipe-")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_run_everything_records_the_recipe_and_the_plan(self):
+        from LesionNetworkMappingLib import methods, pipeline, recipes
+        from LesionNetworkMappingLib.study import Study
+        from LesionNetworkMappingUI import card_pipeline as cp
+
+        study = Study.create(os.path.join(self.tmp, "study"), name="study")
+        study.save()
+        # No recipe chosen: nothing is recorded and the command line is unchanged
+        self.assertIsNone(cp.recipeRecord(study.path))
+        self.assertNotIn("--recipe-record", cp.commandArguments(cp.configDict(study.path, "/bundle.lnmc", dict(cp.DEFAULT_OPTIONS))))
+        recipe = recipes.find_recipe("vdh2026_standard_settings", recipes.load_recipes())
+        self.assertIn("robustness", recipe.steps)  # a step that runs outside the pipeline (Map > Robust)
+        recipes.select_recipe(study.path, recipe)
+        self.assertEqual(cp.recipeRecord(study.path)["id"], recipe.id)
+        self.assertNotIn("plan_sha256", cp.recipeRecord(study.path))
+        plan = recipes.lock_plan(study.path, recipe, recipes.apply(recipe), {"primary": {"kind": "contrast", "contrast": "A>B"}})
+        record = cp.recipeRecord(study.path)
+        expected = recipes.pipeline_recipe(recipes.to_pipeline_config(recipe, study.path))  # what slicer-lnm --recipe records
+        self.assertEqual(record, expected)
+        self.assertEqual((record["id"], record["plan_sha256"]), (recipe.id, plan["sha256"]))
+        self.assertIn("robustness", record["outside_pipeline"])
+        params = recipes.effective_parameters(study.path)
+        options = recipes.pipeline_options(params, recipe.steps, dict(cp.DEFAULT_OPTIONS))
+        config = cp.configDict(study.path, "/bundle.lnmc", options, rule=params["rule"], recipe=record)
+        # The recipe is a run key: it does not change what is up to date
+        self.assertEqual(cp.planKey(config), cp.planKey(cp.configDict(study.path, "/bundle.lnmc", options, rule=params["rule"])))
+        run = pipeline.config_from_args(pipeline._parser().parse_args(cp.commandArguments(config)))
+        self.assertEqual(run.recipe, record)  # pipeline.json "recipe"
+        self.assertNotIn("recipe", run.to_json(analysis_only=True))
+        # The methods name the recipe and the recipe steps outside the pipeline
+        out = os.path.join(self.tmp, "out")
+        os.makedirs(out)
+        with open(os.path.join(out, "pipeline.json"), "w", encoding="utf-8") as f:
+            json.dump({"format": pipeline.FORMAT_NAME, "run_id": "pipeline-test", "recipe": run.recipe, "stages": []}, f)
+        text = methods.pipeline_section(methods.Records(study.path, include_dirs=[out])).text()
+        self.assertIn(f"recipe {recipe.id}", text)
+        self.assertIn("outside the pipeline (not part of this run): robustness", text)
 
 
 if __name__ == "__main__":

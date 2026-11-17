@@ -89,9 +89,12 @@ The results are in `<output_dir>/conn-<connectome>[_n-<N>]/`, with the names, si
 (DatasetType "derivative"). The group level can run alone; it computes the maps when the participant level
 did not.
 
-Common options: `--participant-label 01 02` (either level), `--rule '{"kind": "fwe_bonferroni", "alpha": 0.05}'`
-(or a JSON file), `--recipe NAME` (an analysis recipe; options given on the command line win),
-`--design design.json` (a design of Map ▸ Contrast: two-group case/control or continuous score),
+Common options: `--participant-label 01 02` (either level; the selection is stored in pipeline.json, so
+`reproduce_pipeline.sh` analyses the same subjects), `--rule '{"kind": "fwe_bonferroni", "alpha": 0.05}'`
+(or a JSON file), `--recipe NAME` (an analysis recipe; options given on the command line win; pipeline.json and the methods
+name it, and the recipe's steps outside the pipeline, such as validation, are listed as info events),
+`--design design.json` (a design of Map ▸ Contrast: two-group case/control or continuous score; a design
+that selects subjects by levels, an ANOVA, transforms or blocks is refused: run `slicer-lnm glm --design` on the maps),
 `--null-relocations K`, `--perm N`, `--preview N`, `--figures glass,montage,gallery` (extra figures of the
 mean T map), `--events json` (JSON lines for scripts), `--no-report`. `--subject-list` is not available in
 this build: the pipeline maps every connectome subject, or `--preview N` random ones. Exit codes: 0 done,
@@ -126,14 +129,17 @@ apptainer run --containall -B "$PWD/bids:/bids:ro" -B "$PWD/out:/out" -B /data/G
   them once in Connectome ▸ Manage… of the application, or on a writable copy with `--build-references`.
 
 Paths inside the outputs are relative, so the output folder can be moved together with the input it
-refers to; `provenance.json` and the reproduce scripts keep the paths of the run on purpose.
+refers to (this includes the run registry of the study, which lists the run folders as paths relative to it); `provenance.json` and the reproduce scripts keep the paths of the run on purpose.
 
 ## Reproducing a run
 
 `reproduce.sh` (next to the maps) recomputes the maps with `slicer-lnm engine` when `slicer-lnm` is on
-PATH (or `SLICER_LNM=/path/to/slicer-lnm`), otherwise with `PythonSlicer -m LesionNetworkMappingLib.engine`;
-`PYTHONSLICER=/path/to/PythonSlicer` forces the second. `OUT=folder sh reproduce.sh` writes the maps to
-`folder`. `reproduce_pipeline.sh` re-runs the whole pipeline from `pipeline.json` with PythonSlicer.
+PATH, is `SLICER_LNM=/path/to/slicer-lnm` or is the command that wrote the script, otherwise with
+`PythonSlicer -m LesionNetworkMappingLib.engine` (the `PythonSlicer` on PATH, else the one that wrote the
+script); `PYTHONSLICER=/path/to/PythonSlicer` forces the second. `OUT=folder sh reproduce.sh` writes the maps to
+`folder`. `reproduce_pipeline.sh` re-runs the whole pipeline from `pipeline.json` (`ACCEPT_TERMS=1 sh
+reproduce_pipeline.sh`) with `slicer-lnm pipeline run` when `slicer-lnm` is on PATH, is `SLICER_LNM` or is the command that
+wrote the script, otherwise with `PythonSlicer`; `PYTHONSLICER` forces the second.
 
 ## Licences and data
 

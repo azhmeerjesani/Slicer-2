@@ -147,6 +147,9 @@ public:
   };
   QList<BarLayoutItem> ClassicBarLayoutItems;
   bool ClassicBarLayoutRecorded{ false };
+  /// Classic keyboard focus order of the bar widgets, recorded the first time the tab order is arranged
+  QList<QPointer<QWidget>> ClassicTabOrder;
+  bool ClassicTabOrderRecorded{ false };
   QMargins ClassicBarMargins;
   int ClassicBarSpacing{ 2 };
   QString ClassicViewLabelStyleSheet;
@@ -188,6 +191,9 @@ protected:
   virtual void setupPopupUi();
   /// Reorder the bar layout items for the presentation selected by FlatStyle.
   void arrangeBarLayout();
+  /// Make the Tab order of the bar widgets follow the arranged layout (flat presentation: reading order, left to
+  /// right), or restore the classic order. Called after arrangeBarLayout().
+  void arrangeBarTabOrder();
   /// Show the pin or the options button depending on the presentation and the layout behavior.
   void updatePopupButtonsVisibility();
 };

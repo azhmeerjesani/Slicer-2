@@ -92,8 +92,9 @@ reads, so other 3D Slicer installations that share your settings file keep their
 - **Density** (`Appearance/Density`): *Comfortable* (default) or *Compact*, which uses the spacing of earlier
   3D Slicer versions. Takes effect after a restart.
 - **Font and size** (`Appearance/Font`): the interface font is *Inter*. While you have not chosen another font, Inter
-  is applied when the application starts and nothing is written to the settings; the `font` key that official 3D Slicer uses
-  is not changed. A font that you choose here is saved under `Appearance/Font` and applied by Slicer Studio only.
+  is applied when the application starts. On a first start Slicer Studio writes an empty `Appearance/Font` and its
+  own defaults `Appearance/ForkDefaultFontFamily` and `Appearance/ForkDefaultFontPointSize`; the `font` key that
+  official 3D Slicer uses is never written or changed. A font that you choose here is saved under `Appearance/Font` and applied by Slicer Studio only.
   In the classic interface and with `--testing`, the standard font setting of 3D Slicer is used as before.
 
 These choices have no effect when Slicer is started with `--testing`, which always uses the light theme and
@@ -124,19 +125,19 @@ the top bar of Studio also leads to it) controls where and how often your work i
 
 | Setting | Key | Default | Range |
 | ------- | --- | ------- | ----- |
-| **Slicer Studio folder** (**Change…**, **Show**) | `Studio/Projects/Root` (`Studio/Projects/RootChosen` once you chose it) | `Slicer Studio` in Documents | a folder |
-| **Save continuously** | `Studio/Autosave/Enabled` | on | |
-| **At most every** (minutes) | `Studio/Autosave/IntervalMinutes` | 2 | 1-60 |
-| **or after a pause of** (seconds) | `Studio/Autosave/IdleSeconds` | 10 | 3-300 |
+| **Slicer Studio folder** (**Change…**, **Show in Files**; Finder on macOS, Explorer on Windows) | `Studio/Projects/Root` (`Studio/Projects/RootChosen` once you chose it) | `Slicer Studio` in Documents | a folder |
+| **Save automatically** | `Studio/Autosave/Enabled` | on | |
+| **And at least every** (minutes) | `Studio/Autosave/IntervalMinutes` | 2 | 1-60 |
+| **After a pause of** (seconds) | `Studio/Autosave/IdleSeconds` | 10 | 3-300 |
 | **Location** | `Studio/Autosave/Directory` | empty, meaning the private folder `StudioAutosave` in the application data folder | a folder |
-| **Keep** (sessions) | `Studio/Autosave/KeepSessions` | 5 | 1-50 |
-| **Max size** (MB) | `Studio/Autosave/MaxDiskMB` | 2048 | 256-102400 |
+| **Sessions to keep** | `Studio/Autosave/KeepSessions` | 5 | 1-50 |
+| **At most** (MB) | `Studio/Autosave/MaxDiskMB` | 2048 | 256-102400 |
 | **Delete after** (days) | `Studio/Autosave/MaxAgeDays` | 14 | 1-365 |
 | **Skip data larger than** (MB) | `Studio/Autosave/MaxNodeMB` | 2048 | 16-102400 |
 
-The pause and the interval apply to projects and to recovery copies; **Location**, **Keep**, **Max size** and **Delete
+The pause and the interval apply to projects and to recovery copies; **Location**, **Sessions to keep**, **At most** and **Delete
 after** apply to the recovery copies of scenes that are not projects (Classic, studies). **Change…** offers to move the
-projects and studies to the new folder. The buttons **Recover autosaved work…**, **Autosave now** and **Delete all
+projects, studies and templates to the new folder. The buttons **Recover older work…**, **Autosave now** and **Delete all
 autosaves…** (permanent, for closed sessions) are in the panel too. The environment variable
 `SLICER_STUDIO_PROJECTS_ROOT` sets the Slicer Studio folder (the first-start question is then not asked),
 `SLICER_STUDIO_PROJECTS=0` turns projects off, `SLICER_STUDIO_AUTOSAVE_DIR` overrides the recovery location and
@@ -192,7 +193,7 @@ Most keys are written by the application and need not be edited. The keys that y
 | `Studio/SmartFill/*` | see [Segment Editor](modules/segmenteditor.md#smart-fill) | The defaults of Smart fill: `Mode`, `AutoTolerance`, `TolerancePercent`, `MaxRadiusMm`, `LeakGuardMm`, `FillHoles`, `StayInsideBrain`, `ApplyOnClick`. Written only when you change them; ignored with `--testing` |
 | `Studio/Autosave/*` | see the table above | The autosave settings |
 | `Studio/LNM/Connectomes` | | The connectomes registered in the module (their folders, in the setting only: never in a shared file) |
-| `Studio/LNM/DataDirectory` | the `SlicerStudio` folder in your documents | Where network mapping data and normalization outputs go when no study is open |
+| `Studio/LNM/DataDirectory` | the `LNM` folder inside your Slicer Studio folder (the `SlicerStudio` folder in your documents only if it already holds data) | Where network mapping data and normalization outputs go when no study is open |
 | `Studio/LNM/AcceptedTerms/<sha>` | false | You ticked "I accept these data use terms" for the connectome with this manifest hash |
 | `Studio/LNM/MaxJobThreads` | number of cores minus one | The most threads a background job uses |
 | `Studio/LNM/MemoryBudgetGB` | the smaller of a quarter of the memory and 4 | The memory a cohort pass may use |

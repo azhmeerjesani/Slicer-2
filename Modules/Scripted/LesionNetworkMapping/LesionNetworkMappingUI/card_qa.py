@@ -6,8 +6,9 @@ spatial modes, its hubs), so the card says how far a map is from that, calibrate
 - **Calibrated chip.** The percentile of r(map, μC_r) among the same similarity of the lesion's relocated null maps
   (K and the percentile resolution are shown: "2% at K=50"). Below the 5th percentile is green, 5th-95th amber
   ("indistinguishable from relocated lesions on this axis"), above the 95th red. A group map is calibrated against null
-  cohorts when a Nulls run exists, otherwise it says "not calibrated: run Nulls". The fixed 0.3 / 0.6 / 0.75 cut-offs
-  are only secondary text (the hubness line); no fixed cut-off is the verdict.
+  cohorts when a Nulls run exists, otherwise it says "not calibrated: run Nulls". The rl_independent run is used when
+  there is one (as in the pipeline report), the chip names the null kind, and an rl_strength run (matched on μC_r) gives
+  no verdict. The fixed 0.3 / 0.6 / 0.75 cut-offs are only secondary text (the hubness line); no fixed cut-off is the verdict.
 - **Reference rows.** r and rho of the map with μC_r, PC1-3 and hubness, the spatial R² on these four references, with the
   definition of each reference (reference.json, ``lnm-reference-v1``) in the tooltip. No "93%" line.
 - **Debiased view.** The map's OLS residual on [1, μC_r, PC1] (``similarity.residual_map``) as a separate volume
@@ -16,7 +17,7 @@ spatial modes, its hubs), so the card says how far a map is from that, calibrate
 - **Reference maps.** Without them: "Build reference maps (~N min)" runs ``reference build`` as a heavy job (an ETA from the
   bundle size); nothing builds them implicitly.
 - The relocated null (always stated, also when it is off), the hubness line (``qa degree``), the GSR negative-peaks note,
-  the coverage and space-family notice, and the N / df / preview / partial badges.
+  the coverage notice (the space-family notice is in the Compute and Result cards), and the N / df / preview / partial badges.
 
 The card expands itself when the calibrated chip (or the null) is amber or red.
 """
@@ -32,6 +33,13 @@ import slicer
 from slicer.i18n import tr as _
 
 from . import ORDER_QA, widgets
+
+
+def _fixed(value, digits=2):
+    """``value`` with ``digits`` decimals; a value that rounds to zero is printed without a sign ("0.00", never "-0.00")."""
+    text = f"{value:.{digits}f}"
+    return text[1:] if text.startswith("-") and not text.strip("-0.") else text
+
 
 #: Chip level of the qa.py levels
 _LEVELS = {"neutral": "neutral", "amber": "warn", "red": "danger", "below": "ok", "not_calibrated": "neutral"}
@@ -55,6 +63,20 @@ DEBIASED_COVARIATES = ("mu_r", "pc1")
 DERIVED_ATTRIBUTE = "LNM.Derived"
 #: Names of the files of a group (null) record that may carry the group QA of a cohort map (L-25)
 NULLS_RECORDS = ("nulls.json", os.path.join("nulls", "nulls.json"))
+#: The null kind the group chip is calibrated against when a run of it exists: the established relocated-lesion null,
+#: the kind the pipeline report uses too (addendum 3.7, F22)
+GROUP_QA_KIND = "rl_independent"
+#: Null kinds whose null cohorts are matched on the axis the chip measures (each lesion keeps its local μC_r, or its
+#: hubness), so their percentile of r(group map, μC_r) is not a degree-confound verdict
+MATCHED_NULL_KINDS = ("rl_strength",)
+#: How the group chip names the null kind of its run
+NULL_KIND_TEXT = {
+    "rl_independent": _("rl_independent: lesions relocated independently"),
+    "rl_cohort_shift": _("rl_cohort_shift: one shared shift of the cohort"),
+    "rl_strength": _("rl_strength: strength-matched relocations"),
+    "rl_overlap": _("rl_overlap: overlap-matched, experimental"),
+    "empirical_pool": _("control set"),
+}
 
 
 def nullCostText(bundle, nSubjects=None):
@@ -110,6 +132,46 @@ def referenceMetadata(bundlePath):
         if folder == folders[0]:
             return metadata
     return best[1] if best else None
+
+
+_staleCache = {}
+
+
+def staleReferenceReason(bundle):
+    """Why the reference maps of a bundle cannot be used (all of them out of date or damaged), or None.
+
+    None when there are no reference maps or when one is valid. Unlike :func:`referenceMetadata` this asks the engine
+    (``reference.reference_status``, which hashes the subjects' norms and the map files), so the answer is cached until
+    a reference.json or connectome.json changes.
+    """
+    from LesionNetworkMappingLib import reference
+    from LesionNetworkMappingLib.connectome import ConnectomeBundle
+
+    stamp = []
+    for path in [os.path.join(bundle.path, "connectome.json")] + [os.path.join(folder, "reference.json") for folder in referenceFolders(bundle.path)]:
+        try:
+            info = os.stat(path)
+            stamp.append((path, info.st_mtime_ns, info.st_size))
+        except OSError:
+            stamp.append((path, None, None))
+    cached = _staleCache.get(bundle.path)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    fresh = None
+    try:
+        # Opened again: the open bundle keeps the connectome.json it was opened with
+        fresh = ConnectomeBundle.open(bundle.path)
+        statuses = [entry for entry in reference.reference_status(fresh) if entry["status"] != "missing"]
+    except Exception as exc:
+        statuses = [{"status": "corrupt", "reason": f"{type(exc).__name__}: {exc}"}]
+    finally:
+        if fresh is not None:
+            fresh.close()
+    reason = None
+    if statuses and not any(entry["status"] == "ok" for entry in statuses):
+        reason = statuses[0]["reason"] or statuses[0]["status"]
+    _staleCache[bundle.path] = (stamp, reason)
+    return reason
 
 
 def buildSeconds(bundle):
@@ -390,11 +452,25 @@ class QACard:
 
     @staticmethod
     def _number(value):
-        return f"{value:.2f}" if isinstance(value, (int, float)) and math.isfinite(value) else "\u2013"
+        return _fixed(value) if isinstance(value, (int, float)) and math.isfinite(value) else "\u2013"
 
-    def _setCalibrated(self, level, chipText, text):
+    def _setCalibrated(self, level, chipText, text, toolTip=""):
         widgets.setChipLevel(self.calibratedChip, _LEVELS.get(level, "neutral") if level in _LEVELS else level, chipText)
+        self.calibratedChip.setToolTip(toolTip)
         self.calibratedLabel.setText(text)
+
+    @staticmethod
+    def _nullKindText(values):
+        """The name of the null kind of group QA values ("rl_independent: lesions relocated independently"), or ""."""
+        kind = values.get("null_kind") or ""
+        return NULL_KIND_TEXT.get(kind, kind if kind not in ("relocated", "null_cohort") else "")
+
+    def _calibratedToolTip(self, values):
+        """Tooltip of the calibrated chip of group QA values: the null kind and K of the Nulls run it is calibrated with."""
+        kindText = self._nullKindText(values)
+        if not kindText or values.get("percentile") is None:
+            return ""
+        return _("Calibrated against the Nulls run {kind} (K = {k}).").format(kind=kindText, k=int(values.get("k") or 0))
 
     def _calibratedFromValues(self, values):
         """(level, chip text, label text) of a "reference" qa value dict (single lesion or group)."""
@@ -402,11 +478,20 @@ class QACard:
         percentile, k = values.get("percentile"), values.get("k") or 0
         sample = values.get("mu_r_sample")
         muR = sample if isinstance(sample, (int, float)) and math.isfinite(sample) else values.get("mu_r")
-        muText = f"r(μC_r) = {muR:.2f} · " if isinstance(muR, (int, float)) and math.isfinite(muR) else ""
+        muText = f"r(μC_r) = {_fixed(muR)} · " if isinstance(muR, (int, float)) and math.isfinite(muR) else ""
         group = (values.get("null_kind") or "relocated") != "relocated"
         nulls = _("null cohorts") if group else _("relocated lesions")
         if level == "not_calibrated" or percentile is None:
             return "not_calibrated", _("Not calibrated"), f"{muText}{values.get('text') or _('not calibrated')}"
+        kindText = self._nullKindText(values) if group else ""
+        if kindText:
+            nulls = _("{nulls} ({kind})").format(nulls=nulls, kind=kindText)
+        if group and values.get("null_kind") in MATCHED_NULL_KINDS:
+            # These null cohorts keep each lesion's local mean connectivity, the axis the chip measures: their percentile
+            # is shown as information, never as the degree-confound verdict
+            text = _("{mu}{p} percentile of {k} {nulls}; these null cohorts keep each lesion's mean connectivity (μC_r), so this percentile does not say how degree-like "
+                     "the map is. Run Nulls with {kind} to calibrate the group map.").format(mu=muText, p=ordinal(round(percentile)), k=int(k), nulls=nulls, kind=GROUP_QA_KIND)  # fmt: skip
+            return "not_calibrated", _("Not calibrated"), text
         chipText = _("{p} percentile").format(p=ordinal(round(percentile)))
         text = _("{mu}{p} percentile of {k} {nulls}: {text}").format(mu=muText, p=ordinal(round(percentile)), k=int(k), nulls=nulls, text=values.get("text") or "")
         return level, chipText, text
@@ -418,6 +503,14 @@ class QACard:
         among the null cohorts' maps. The mean map of the rule's statistic is the group map of the Map module, so it is
         preferred; the run folder is ``nulls`` next to the cohort maps (the newest one wins), or the maps folder itself.
         A run of other maps is not used (``self.groupQaStale`` is then True): see :meth:`_nullsMatchMaps`.
+
+        An exact-pooled run wins over a newer fast-mode one: a fast run compares the approximate fast-mode map (recomputed
+        like with like), not the group map of the Map module, and fast-mode maps are never reported as the observed map
+        (addendum §3.6). Without an exact run, the best fast run is returned marked ``"approximate": True``.
+
+        Within a mode the verdict does not depend on which kind of Nulls ran last: a run of :data:`GROUP_QA_KIND`
+        (rl_independent, as the pipeline report) wins, then the newest run of another kind, and a run of a kind matched
+        on μC_r (:data:`MATCHED_NULL_KINDS`) only when there is no other. The values carry the run's ``null_kind``.
         """
         self.groupQaStale = False
         mapsPath = getattr(self.ctx, "cohortMaps", None)
@@ -432,6 +525,7 @@ class QACard:
                 found.append((os.stat(path).st_mtime_ns, path))
             except OSError:
                 continue
+        best = {}  # approximate (bool) -> (rank, values); the lowest rank wins, the newest run within a rank
         for stamp, path in sorted(found, reverse=True):
             try:
                 with open(path, encoding="utf-8") as f:
@@ -444,13 +538,30 @@ class QACard:
             if not self._nullsMatchMaps(record, stamp, os.fspath(mapsPath)):
                 self.groupQaStale = True
                 continue
+            values = None
             for key in ("mean", "overlap"):
-                values = group.get(key)
-                if isinstance(values, dict) and "level" in values:
-                    return values
-            if "level" in group and group.get("available", True):
-                return group
-        return None
+                if isinstance(group.get(key), dict) and "level" in group[key]:
+                    values = group[key]
+                    break
+            if values is None and "level" in group and group.get("available", True):
+                values = group
+            if values is None:
+                continue
+            kind = values.get("null_kind") or group.get("null_kind") or record.get("kind")
+            values = dict(values, null_kind=kind) if kind else values
+            rank = 0 if kind == GROUP_QA_KIND else 2 if kind in MATCHED_NULL_KINDS else 1
+            approximate = self._nullsApproximate(record)
+            if approximate not in best or rank < best[approximate][0]:
+                best[approximate] = (rank, dict(values, approximate=True) if approximate else values)
+        if False in best:
+            return best[False][1]
+        return best[True][1] if True in best else None
+
+    @staticmethod
+    def _nullsApproximate(record):
+        """True when a ``nulls.json`` record is of a fast-mode run (approximate maps), not an exact-pooled one."""
+        statistic = (record.get("group_qa") or {}).get("statistic") or record.get("statistic") or ""
+        return bool(record.get("approximate")) or record.get("mode") == "approximate" or str(statistic).startswith("approximate")
 
     @staticmethod
     def _nullsMatchMaps(record, stamp, mapsPath):
@@ -484,6 +595,11 @@ class QACard:
     def refresh(self, running=False, n=None, partial=None):
         run = self.ctx.currentRun
         bundle = self.ctx.bundle
+        # The derived maps belong to the run they were made of: when that run is no longer the current one (parked for
+        # another lesion or connectome, or cleared), they leave the views and the toggles are cleared
+        runDir = run.runDir if run is not None else None
+        if any(entry[1] != runDir for entry in self._overlays.values()):
+            self._dropOverlays()
         cohort = self._mode() == "cohort"
         job = getattr(run, "job", None) if run is not None else None
         if run is not None and not running:
@@ -529,6 +645,7 @@ class QACard:
 
         # The calibrated chip and the reference rows
         shownValues = None
+        staleReason = None
         if cohort:
             group = self._findGroupQa() if bundle is not None else None
             if bundle is None:
@@ -539,10 +656,20 @@ class QACard:
                 self._setCalibrated("neutral", _("Not calibrated"), _("Group maps: not calibrated — the Nulls run is of other maps, run Nulls again."))
             elif group is None:
                 self._setCalibrated("neutral", _("Not calibrated"), _("Group maps: not calibrated — run Nulls to compare a group map with null cohorts."))
+            elif group.get("approximate"):
+                # Only a fast-mode Nulls run: its values describe the approximate fast-mode map, not the group map of the
+                # Map module, so they are labelled approximate and the reference rows (of that map) are not shown
+                approximateValues = {key: value for key, value in group.items() if key not in ("mu_r", "mu_r_sample")}
+                level, chipText, text = self._calibratedFromValues(approximateValues)
+                if level != "not_calibrated":
+                    chipText = _("{chip} (approx.)").format(chip=chipText)
+                    levels.append(level)
+                self._setCalibrated(level, chipText, _("Group map: no exact Nulls run of these maps. Fast-mode run (approximate maps, not the group map): {text}. Run Nulls in exact mode to calibrate the group map.").format(text=text),
+                                    self._calibratedToolTip(group) if level != "not_calibrated" else "")
             else:
                 level, chipText, text = self._calibratedFromValues(group)
-                self._setCalibrated(level, chipText, _("Group map: {text}").format(text=text))
-                levels.append(group.get("level") or "not_calibrated")
+                self._setCalibrated(level, chipText, _("Group map: {text}").format(text=text), self._calibratedToolTip(group) if level != "not_calibrated" else "")
+                levels.append(level)
                 shownValues = group if group.get("mu_r") is not None else None
         elif bundle is None:
             self._setCalibrated("neutral", _("Not calibrated"), _("Choose a connectome to calibrate the QA."))
@@ -558,7 +685,12 @@ class QACard:
         elif not hasFiles:
             self._setCalibrated("warn", _("Not calibrated"), _("Not calibrated: this connectome has no reference maps yet. Build them once to compare the map with what any lesion gives."))
         else:
-            self._setCalibrated("warn", _("Not calibrated"), _("Not calibrated: this map was computed without valid reference maps (made before them, or they are out of date). Map again."))
+            # Mapping again helps only when the map is older than valid reference maps; out-of-date maps must be rebuilt
+            staleReason = staleReferenceReason(bundle)
+            if staleReason:
+                self._setCalibrated("warn", _("Not calibrated"), _("Not calibrated: the reference maps of this connectome are out of date and were not used. Rebuild them, then map again. Reason: {reason}.").format(reason=staleReason))
+            else:
+                self._setCalibrated("warn", _("Not calibrated"), _("Not calibrated: this map was computed before the reference maps were built. Map again."))
         self.tableCaption.setVisible(shownValues is not None)
         self.table.setVisible(shownValues is not None)
         self.r2Label.setVisible(shownValues is not None)
@@ -567,22 +699,23 @@ class QACard:
             from LesionNetworkMappingLib import qa as qaLib
 
             r2 = shownValues.get("r2_ref")
-            text = (qaLib.R2_REFERENCE_LABEL[:1].upper() + qaLib.R2_REFERENCE_LABEL[1:]) + (f": {r2:.2f}" if isinstance(r2, (int, float)) and math.isfinite(r2) else ": \u2013")
+            text = (qaLib.R2_REFERENCE_LABEL[:1].upper() + qaLib.R2_REFERENCE_LABEL[1:]) + (f": {_fixed(r2)}" if isinstance(r2, (int, float)) and math.isfinite(r2) else ": \u2013")
             partialValues = shownValues.get("partial_pc1_mu") or {}
             pc1 = partialValues.get("pc1_given_mu_r")
             if isinstance(pc1, (int, float)) and math.isfinite(pc1):
-                text += " · " + _("PC1 beyond μC_r: r = {r:.2f}").format(r=pc1)
+                text += " · " + _("PC1 beyond μC_r: r = {r}").format(r=_fixed(pc1))
             if metadata is not None:
                 text += " · " + _("reference {definition}, {k} sampled seeds").format(definition=metadata.get("definition", ""), k=metadata.get("K_seeds", "?"))
             self.r2Label.setText(text)
 
         # Reference maps: build action
-        buildable = bundle is not None and not hasFiles
+        buildable = bundle is not None and (not hasFiles or bool(staleReason))
         referenceRunning = self.referenceJob is not None and not self.referenceJob.isFinished()
         self.referenceButton.setVisible(buildable and not referenceRunning)
         self.referenceProgress.widget.setVisible(referenceRunning)
         if buildable:
-            self.referenceButton.setText(_("Build reference maps ({eta})").format(eta=self._etaText(bundle)))
+            label = _("Rebuild reference maps ({eta})") if staleReason else _("Build reference maps ({eta})")
+            self.referenceButton.setText(label.format(eta=self._etaText(bundle)))
 
         # Debiased view and analytic z need the reference of the run
         usable = (not cohort) and bool(reference) and run is not None and not running and not partial and bundle is not None
@@ -643,8 +776,8 @@ class QACard:
         if degreeR is not None:
             _level, text = qaLib.chip_level(degreeR)
             rho = qa.get("degree_rho")
-            rhoText = f", ρ = {rho:.2f}" if isinstance(rho, (int, float)) and math.isfinite(rho) else ""  # noqa: RUF001
-            self.degreeLabel.setText(_("Hubness (degree) similarity: r = {r:.2f}{rho}. Fixed cut-offs, secondary: {text}").format(r=degreeR, rho=rhoText, text=text))
+            rhoText = f", ρ = {_fixed(rho)}" if isinstance(rho, (int, float)) and math.isfinite(rho) else ""  # noqa: RUF001
+            self.degreeLabel.setText(_("Hubness (degree) similarity: r = {r}{rho}. Fixed cut-offs, secondary: {text}").format(r=_fixed(degreeR), rho=rhoText, text=text))
             widgets.setChipLevel(self.degreeChip, "neutral", _("Hubness"))
         elif bundle is None:
             self.degreeLabel.setText(_("Hubness (degree) similarity: choose a connectome."))
@@ -684,7 +817,8 @@ class QACard:
                 self.nullLabel.setText(_("Relocated null: off for this run ({cost}). Run it to compare the map with relocated lesions of the same shape.").format(cost=nullCostText(bundle, n)))
                 widgets.setChipLevel(self.nullChip, "warn", _("Null"))
                 self.nullRunButton.show()
-        elif partial:
+        elif partial and not running:
+            # Only a run that ended early: while the run goes on, the null is computed with the map when it finishes
             self.nullLabel.setText(_("Relocated null: not computed, the run stopped at N={n} (partial).").format(n=n))
             widgets.setChipLevel(self.nullChip, "warn", _("Null"))
         elif relocations > 0:
@@ -769,12 +903,17 @@ class QACard:
         bundle = self.ctx.bundle
         if bundle is None:
             return None
-        if self._reference is not None and self._reference[0] == bundle.path:
-            return self._reference[1]
         from LesionNetworkMappingLib import qa as qaLib
+        from LesionNetworkMappingLib import reference
 
+        try:
+            key = (bundle.path, reference.reference_fingerprint(bundle))
+        except Exception:
+            key = (bundle.path, None)
+        if self._reference is not None and self._reference[0] == key:
+            return self._reference[1]
         loaded = qaLib.load_reference(bundle, verify=False)
-        self._reference = (bundle.path, loaded)
+        self._reference = (key, loaded)
         return loaded
 
     def _maskedValues(self, path, bundle):
@@ -835,12 +974,36 @@ class QACard:
         widget.setChecked(checked)
         widget.blockSignals(blocked)
 
+    def shownOverlay(self):
+        """The derived map this card shows in the views (the debiased view or the analytic z), or None:
+        ``{"kind", "volume", "statistic"}``, where ``statistic`` is the short name the map legend and the layer chip show.
+        Both maps are descriptive: no threshold rule applies to them.
+        """
+        entry = self._overlays.get(self._shown) if self._shown is not None else None
+        if entry is None or entry[0] is None or entry[0].GetScene() is None:
+            return None
+        if self._shown == "debiased":
+            statistic = _("{statistic} resid").format(statistic={"AvgRFz": "Fz", "AvgR": "r"}.get(entry[2], entry[2]))
+        else:
+            statistic = _("RL z")
+        return {"kind": self._shown, "volume": entry[0], "statistic": statistic}
+
+    def _notifyShownOverlay(self):
+        """The Map widget's legend, layer chips and peak table follow the map shown in the views."""
+        widget = getattr(slicer.modules, "LesionNetworkMappingWidget", None)
+        if widget is not None and hasattr(widget, "onDerivedOverlayChanged"):
+            try:
+                widget.onDerivedOverlayChanged()
+            except Exception:
+                logging.exception("Lesion network mapping: the map legend could not follow the QA view")
+
     def setDebiased(self, checked):
         """Show (or hide) the debiased view: the map's residual on [1, μC_r, PC1] as the volume ``desc-<x>Resid``."""
         if not checked:
             if self._shown == "debiased":
                 self._shown = None
                 self._restoreForeground()
+                self._notifyShownOverlay()
             return None
         if self._shown == "analytic":
             self._setChecked(self.analyticButton, False)
@@ -850,7 +1013,32 @@ class QACard:
             return None
         self._shown = "debiased"
         self._showForeground(volume)
+        self._notifyShownOverlay()
         return volume
+
+    def onStatisticChanged(self):
+        """The Result card switched the statistic (T, Fz, r): while the debiased view is shown, it shows the residual of the new
+        statistic's map (made once per run and statistic), so the views, the legend and the Result switch agree.
+        """
+        if self._shown == "debiased":
+            self.setDebiased(True)
+
+    def reshowShownOverlay(self):
+        """Map was entered again: its layers put the plain map back in the views, so the derived map this card still shows (its
+        toggle is ticked) goes back to the foreground, and the legend, chips and peak header follow. A derived map that is
+        gone is dropped with its toggle.
+        """
+        if self._shown is None:
+            return
+        entry = self._overlays.get(self._shown)
+        if entry is None or entry[0] is None or entry[0].GetScene() is None:
+            self._dropOverlays()
+            self._notifyShownOverlay()
+        elif self._shown == "debiased":
+            self.setDebiased(True)  # the volume of the statistic now displayed (made again when that changed), shown and announced
+        else:
+            self._showForeground(entry[0])
+            self._notifyShownOverlay()
 
     def debiasedVolume(self):
         """Make (once per run) the debiased volume of the displayed statistic; return it, or None when it cannot be made."""
@@ -890,6 +1078,7 @@ class QACard:
             if self._shown == "analytic":
                 self._shown = None
                 self._restoreForeground()
+                self._notifyShownOverlay()
             return None
         if self._shown == "debiased":
             self._setChecked(self.debiasedCheckBox, False)
@@ -899,6 +1088,7 @@ class QACard:
             return None
         self._shown = "analytic"
         self._showForeground(volume)
+        self._notifyShownOverlay()
         return volume
 
     def analyticVolume(self):
@@ -932,8 +1122,11 @@ class QACard:
         return volume
 
     def _removeOverlay(self, kind):
+        from LesionNetworkMappingLib import display
+
         entry = self._overlays.pop(kind, None)
         if entry is not None and entry[0].GetScene() is not None:
+            display.hideForeground(entry[0])
             slicer.mrmlScene.RemoveNode(entry[0])
 
     def _dropOverlays(self):

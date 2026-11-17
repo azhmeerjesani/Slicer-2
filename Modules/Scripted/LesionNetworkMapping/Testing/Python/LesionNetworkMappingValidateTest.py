@@ -233,6 +233,20 @@ class MetricsTest(unittest.TestCase):
         self.assertIn("does not exceed", validate.verdict_text(0.01, [-0.09, -0.04], "lesion-volume baseline"))
         self.assertIn("exceeds", validate.verdict_text(0.06, [0.04, 0.09], "lesion-volume baseline"))
 
+    def test_verdict_reports_a_p_at_the_permutation_floor_as_at_most(self):
+        floor = 1.0 / 1001
+        text = validate.verdict_text(0.75, [-0.16, 1.45], "lesion-volume baseline", "r2", floor, "volume + circuit", p_floor=floor)
+        self.assertIn("p_perm \u2264 0.000999", text)
+        self.assertNotIn("p_perm = ", text)
+        self.assertIn("p_perm = 0.11", validate.verdict_text(0.75, [-0.16, 1.45], "x", "r2", 0.11, p_floor=floor))
+
+    def test_verdict_prints_values_that_round_to_zero_without_a_sign(self):
+        text = validate.verdict_text(-0.001, (-0.004, 0.003), "degree baseline", metric="r2")
+        self.assertIn("(ΔR² 0.00, 95% CI 0.00 to 0.00)", text)
+        self.assertNotIn("\u22120.00", text)
+        self.assertIn("\u22120.05", validate.verdict_text(-0.05, (-0.09, -0.01), "degree baseline"))  # real negatives keep the minus
+        self.assertEqual(validate._format_number(-0.0), "0.00")
+
     def test_logistic_fits(self):
         rng = np.random.default_rng(6)
         X = np.column_stack([np.ones(80), rng.standard_normal((80, 2))])
@@ -342,6 +356,24 @@ class ValidationTest(unittest.TestCase):
         record = result.to_dict()
         self.assertFalse(record["circuit"]["permutation_thresholds_in_folds"])
         json.dumps(jobs.to_json(record))
+
+    def test_constant_reference_map_is_not_computed(self):
+        # A constant or all-zero map has no spatial r with any lesion map: it is listed as not computed with a reason
+        # (not as the volume-only model under the map's name), and no verdict says the circuit exceeds it.
+        data = _cohort()
+        data.refmaps = {"const": np.ones(300), "zero": np.zeros(300), "other": np.random.default_rng(1).standard_normal(300)}
+        result = validate.validate(data, "slnm", scheme="kfold", k=4, repeats=1, n_boot=2, n_perm=0)
+        rows = {item["name"]: item for item in result.predictors}
+        for name in ("ref:const", "ref:zero"):
+            self.assertEqual(rows[name]["status"], "not computed", name)
+            self.assertTrue(rows[name]["reason"], name)
+        self.assertEqual(rows["ref:other"]["status"], "computed")
+        entries = {entry["baseline"]: entry for entry in result.comparisons}
+        for name, label in (("ref:const", "const"), ("ref:zero", "zero")):
+            self.assertEqual(entries[name]["status"], "not computed")
+            self.assertIsNone(entries[name]["delta"])
+            self.assertIn(f"reference-map baseline {label} was not computed", entries[name]["text"])
+            self.assertFalse(any(f"baseline {label} " in text and "exceeds" in text for text in result.verdicts))
 
     def test_planted_effect_and_neutral_verdicts(self):
         data = _cohort(n=60, effect=0.08, seed=11)
@@ -567,6 +599,92 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(len(validation), 1)
         self.assertEqual(validation[0]["status"], "done")
 
+    def test_stopped_rerun_keeps_finished_result(self):
+        """A stopped rerun into the folder of a finished validation (the card's <outcome>_<circuit>) leaves that result in place."""
+        fixture = self._write_fixture(self.tmp, study=True)
+        out = os.path.join(os.path.dirname(fixture["maps_dir"]), "validation", "group_glm")
+        argv = ["--maps", fixture["maps_tsv"], "--participants", fixture["participants"], "--outcome", "group", "--type", "binary", "--circuit", "glm", "--mask", fixture["mask"], "--out", out,
+                "--k", "3", "--repeats", "1", "--boot", "4", "--perm", "4", "--threads", "1"]
+        code, events = self.run_in_process(argv + ["--scheme", "kfold"])
+        self.assertEqual(code, 0, events[-1])
+        with open(os.path.join(out, "validation.json"), "rb") as f:
+            finished = f.read()
+        self.assertEqual(json.loads(finished)["status"], "done")
+        cancel = os.path.join(self.tmp, "cancel")
+        open(cancel, "w").close()
+        code, events = self.run_in_process(argv + ["--scheme", "loo", "--cancel-file", cancel])
+        os.remove(cancel)
+        self.assertEqual(code, jobs.EXIT_CANCELLED, events[-1])
+        with open(os.path.join(out, "validation.json"), "rb") as f:
+            self.assertEqual(f.read(), finished)  # not replaced by a cancelled stub
+        self.assertEqual(validate.read_record(os.path.join(out, "validation.json"))["status"], "done")
+        self.assertEqual(sorted(os.listdir(out)), ["folds.tsv", "scores.tsv", "validation.json"])
+        # A stopped first run (no finished record) still leaves its cancelled record
+        fresh = os.path.join(os.path.dirname(out), "group_topk")
+        open(cancel, "w").close()
+        code, events = self.run_in_process([*argv[:argv.index("--out") + 1], fresh, *argv[argv.index("--out") + 2:], "--cancel-file", cancel])
+        os.remove(cancel)
+        self.assertEqual(code, jobs.EXIT_CANCELLED, events[-1])
+        self.assertEqual(validate.read_record(os.path.join(fresh, "validation.json"))["status"], "cancelled")
+
+    def test_methods_cite_only_the_run_in_the_folder_in_words(self):
+        """Methods of validation runs (BB-1 methods-validation-paragraph-key-dump-cites-destroyed-runs): a paragraph from
+        validation.json (outcome, in-fold circuit, scheme, baselines, CI with B, Δ with CI, p_perm with K and its floor),
+        not the registry summary keys; a run whose folder now holds a later run's results is not cited; a frozen
+        replication gives the circuit sha256.
+        """
+        from LesionNetworkMappingLib import methods
+
+        fixture = self._write_fixture(self.tmp, study=True)
+        study = os.path.dirname(os.path.dirname(os.path.dirname(fixture["maps_dir"])))
+        root = os.path.join(os.path.dirname(fixture["maps_dir"]), "validation")
+        base = ["--maps", fixture["maps_tsv"], "--participants", fixture["participants"], "--outcome", "group", "--type", "binary", "--circuit", "glm", "--mask", fixture["mask"],
+                "--out", os.path.join(root, "group_glm"), "--scheme", "kfold", "--k", "3", "--repeats", "1", "--boot", "4", "--perm", "4", "--threads", "1"]
+        ids = []
+        for seed in ("1", "2"):  # the second run overwrites the first one's validation.json
+            code, events = self.run_in_process([*base, "--seed", seed])
+            self.assertEqual(code, 0, events[-1])
+            ids.append(next(event["run_id"] for event in events if event["event"] == "start"))
+        circuit = np.zeros(self.SHAPE, dtype=np.float32)
+        circuit.reshape(-1)[fixture["indices"]] = fixture["pattern"]
+        path = os.path.join(self.tmp, "circuit.nii.gz")
+        nifti.write_nifti(path, circuit, fixture["affine"])
+        sha = file_sha256(path)
+        code, events = self.run_in_process([*base[: base.index("--out")], "--out", os.path.join(root, "group_frozen"), "--frozen", path, "--frozen-sha256", sha, "--boot", "10", "--threads", "1"])
+        self.assertEqual(code, 0, events[-1])
+        frozen_id = next(event["run_id"] for event in events if event["event"] == "start")
+
+        def paragraphs():
+            text = methods.render([methods.find_section(methods.methods_sections(study), "statistics")], fmt="txt")
+            return [line for line in text.splitlines() if line.startswith(methods.KIND_LABELS["validation"])]
+
+        found = paragraphs()
+        self.assertEqual(len(found), 2, found)
+        self.assertFalse([line for line in found if ids[0] in line], "the overwritten run is cited")
+        cv = next(line for line in found if ids[1] in line)
+        frozen = next(line for line in found if frozen_id in line)
+        for line in found:
+            for key in ("delta_vs_volume", "mode cv", "mode frozen", "primary auc", "p_perm 0."):
+                self.assertNotIn(key, line)
+            self.assertEqual(methods.lint_wording(line), [])
+        self.assertIn("outcome group (binary; positive class case", cv)
+        self.assertIn(validate.CIRCUIT_LABELS["glm"], cv)
+        self.assertIn("stratified 3-fold × 1 repeat", cv)  # noqa: RUF001 (a multiplication sign)
+        self.assertIn("Baselines: lesion volume", cv)
+        self.assertIn("B = 4 resamples", cv)
+        self.assertRegex(cv, r"Primary metric AUC: circuit model [\d.]+ \(95% CI [\d.-]+ to [\d.]+\)")
+        self.assertRegex(cv, r"ΔAUC -?[\d.]+ \(95% CI ")
+        self.assertRegex(cv, r"p_perm (≤ 0\.2 \(the smallest attainable p with K = 4 permutations\)|= [\d.]+ \(K = 4 permutations; smallest attainable p 0\.2\))")
+        self.assertIn(f"sha256 {sha}", frozen)
+        self.assertRegex(frozen, r"AUC [\d.]+ \(95% CI [\d.]+ to [\d.]+\)")
+        self.assertIn("B = 10 resamples", frozen)
+        # Without its validation.json (deleted by hand) a run is described from the registry in words, its p at the floor as such
+        os.remove(os.path.join(root, "group_glm", "validation.json"))
+        cv = next(line for line in paragraphs() if ids[1] in line)
+        self.assertIn("validation.json not recorded", cv)
+        self.assertNotIn("delta_vs_volume", cv)
+        self.assertRegex(cv, r"p_perm (≤ 0\.2 \(the smallest|= [\d.]+ \(K = 4 permutations)")
+
     def test_reference_baselines_with_a_bundle(self):
         mask, affine = self._grid()
         rng = np.random.default_rng(5)
@@ -593,6 +711,82 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(record["reference"]["definition"], "lnm-reference-v1")
         self.assertEqual(record["circuit"]["thresholding"], "top 10% of |t| (a fixed rank rule)")
         self.assertEqual(_absolute_strings(record), [])
+
+    def test_missing_reference_maps_reason_is_a_sentence_for_the_app(self):
+        """A connectome without reference maps: the μC and PC1 rows, their verdicts and validation.json say where to build
+        them in the app (Manage… > Build reference maps), not a terminal command (the user sees these texts in the card).
+        """
+        mask, affine = self._grid()
+        rng = np.random.default_rng(5)
+        bundle_path = os.path.join(self.tmp, "synth.lnmc")
+        writer = connectome.ConnectomeWriter(bundle_path, mask, affine, name="Synth Conn", overwrite=True)
+        n_voxels = int(mask.sum())
+        for s in range(4):
+            writer.add_subject(f"sub-{s + 1:02d}", [rng.standard_normal((n_voxels, 30)) + 50.0 for _ in range(2)])
+        writer.finalize()
+        sha = subjects_sha256(connectome.ConnectomeBundle.open(bundle_path).subject_ids)
+        fixture = self._write_fixture(self.tmp, n=24, bundle=(bundle_path, sha))
+        out = os.path.join(self.tmp, "validation")
+        code, events = self.run_in_process(["--maps", fixture["maps_tsv"], "--participants", fixture["participants"], "--outcome", "group", "--type", "binary", "--circuit", "glm", "--scheme", "kfold", "--k", "3", "--repeats", "1", "--out", out, "--boot", "3", "--perm", "3", "--threads", "1"])
+        self.assertEqual(code, 0, events[-1])
+        with open(os.path.join(out, "validation.json"), encoding="utf-8") as f:
+            record = json.load(f)
+        rows = {item["name"]: item for item in record["predictors"]}
+        texts = [rows[name]["reason"] for name in ("mu_r", "pc1", "circuit_partial")]
+        texts += [text for text in record["verdicts"] if text and "reference maps" in text]
+        texts += [event["message"] for event in events if event["event"] == "warning" and "reference maps" in event["message"]]
+        self.assertGreaterEqual(len(texts), 5)
+        for text in texts:
+            self.assertIn("no valid reference maps", text)
+            self.assertIn("Manage… > Build reference maps", text)
+            self.assertNotIn("python -m", text)
+            self.assertNotIn("slicer-lnm", text)
+        # The partial comparison of the slnm command line keeps its command-line pointer
+        from LesionNetworkMappingLib import slnm
+
+        bundle = connectome.ConnectomeBundle.open(bundle_path)
+        args = type("Args", (), {"bundle": bundle_path})()
+        _, reason, _ = slnm._reference_for(args, None, None, bundle.mask_indices, tuple(bundle.shape))
+        bundle.close()
+        self.assertIn("python -m LesionNetworkMappingLib.reference build", reason)
+        # The app words the pointer for people (Symptom tab, Calibrate card): no terminal command
+        from LesionNetworkMappingLib import validate
+
+        self.assertEqual(slnm.REFERENCE_BUILD_HINT, validate.REFERENCE_BUILD_HINT)
+        for text in (reason, "no valid reference maps (slicer-lnm reference build)"):
+            shown = slnm.app_reason(text)
+            self.assertIn("Manage… > Build reference maps", shown)
+            self.assertNotIn("python -m", shown)
+            self.assertNotIn("slicer-lnm", shown)
+        self.assertIn("python -m", reason)
+        args = type("Args", (), {"bundle": bundle_path})()
+        bundle = connectome.ConnectomeBundle.open(bundle_path)
+        _, hinted, _ = slnm._reference_for(args, None, None, bundle.mask_indices, tuple(bundle.shape), build_hint=slnm.REFERENCE_BUILD_HINT)
+        bundle.close()
+        self.assertNotIn("python -m", hinted)
+
+        # Calibrate names the app's control only in a job of the app; a command-line run names the command
+        from LesionNetworkMappingLib import calibrate, pipeline
+
+        bundle = connectome.ConnectomeBundle.open(bundle_path)
+        mask_shape, indices = tuple(bundle.shape), bundle.mask_indices
+        bundle.close()
+        previous = os.environ.pop(jobs.APP_JOB_ENV, None)
+        try:
+            self.assertFalse(jobs.in_app_job())
+            _, _, cli_reason = calibrate._reference(args, None, None, indices, mask_shape)
+            self.assertIn("reference build", cli_reason)
+            self.assertNotIn("Connectome card", cli_reason)
+            self.assertIn("--score-columns aphasia", pipeline.UNCONFIRMED_SCORE_CLI.format(column="aphasia"))
+            os.environ[jobs.APP_JOB_ENV] = "1"
+            self.assertTrue(jobs.in_app_job())
+            _, _, app_reason = calibrate._reference(args, None, None, indices, mask_shape)
+            self.assertIn("Manage… > Build reference maps", app_reason)
+            self.assertNotIn("python -m", app_reason)
+        finally:
+            os.environ.pop(jobs.APP_JOB_ENV, None)
+            if previous is not None:
+                os.environ[jobs.APP_JOB_ENV] = previous
 
     def _rewrite_datasets(self, participants, filler):
         with open(participants, encoding="utf-8") as f:
@@ -666,6 +860,20 @@ class CommandLineTest(unittest.TestCase):
         self.assertIn("1 map(s) have |Fz| above 10", ranges[0])
         self.assertIn("sub-03", ranges[0])
 
+    def test_off_grid_refmap_is_left_out(self):
+        fixture = self._write_fixture(self.tmp, n=12)
+        good = os.path.join(self.tmp, "good_map.nii.gz")
+        nifti.write_nifti(good, np.random.default_rng(1).standard_normal(self.SHAPE).astype(np.float32), fixture["affine"])
+        wrong = os.path.join(self.tmp, "wronggrid.nii.gz")
+        nifti.write_nifti(wrong, np.zeros((3, 3, 3), dtype=np.float32), fixture["affine"])
+        events = []
+        loaded = validate.load_data(fixture["maps_tsv"], fixture["participants"], "group", "binary", mask=fixture["mask"], refmaps=[good, wrong], emit=lambda event, **fields: events.append(fields))
+        data = loaded["data"]
+        self.assertEqual(list(data.refmaps), ["good_map"])
+        warned = [fields["message"] for fields in events if fields.get("code") == "refmap_grid"]
+        self.assertEqual(len(warned), 1)
+        self.assertIn("wronggrid.nii.gz", warned[0])
+
     def test_frozen_and_usage(self):
         fixture = self._write_fixture(self.tmp)
         circuit = np.zeros(self.SHAPE, dtype=np.float32)
@@ -695,6 +903,43 @@ class CommandLineTest(unittest.TestCase):
         code, events = self.run_in_process(base)
         self.assertEqual(code, jobs.EXIT_USAGE)
         self.assertIn("--circuit is required", events[-1]["message"])
+
+    def test_frozen_circuit_from_the_scored_lesions_is_same_cohort(self):
+        """A circuit made from the scored lesions (its slnm.json names their maps.tsv) is not recorded as an independent replication."""
+        fixture = self._write_fixture(self.tmp, study=True)
+        circuit = np.zeros(self.SHAPE, dtype=np.float32)
+        circuit.reshape(-1)[fixture["indices"]] = fixture["pattern"]
+        run_dir = os.path.join(self.tmp, "slnm_run")
+        os.makedirs(run_dir)
+        path = os.path.join(run_dir, "circuit-slnmScore_desc-R_map.nii.gz")
+        nifti.write_nifti(path, circuit, fixture["affine"])
+        with open(os.path.join(run_dir, "slnm.json"), "w", encoding="utf-8") as f:
+            json.dump({"run_id": "slnm-1", "inputs": {"maps_tsv": os.path.relpath(fixture["maps_tsv"], run_dir)}}, f)
+        out = os.path.join(self.tmp, "frozen_same")
+        base = ["--maps", fixture["maps_tsv"], "--participants", fixture["participants"], "--outcome", "group", "--type", "binary", "--mask", fixture["mask"], "--threads", "1", "--boot", "10"]
+        code, events = self.run_in_process([*base, "--out", out, "--frozen", path, "--frozen-sha256", file_sha256(path)])
+        self.assertEqual(code, 0, events[-1])
+        with open(os.path.join(out, "validation.json"), encoding="utf-8") as f:
+            record = json.load(f)
+        self.assertEqual(record["frozen"]["independence"]["provenance"], "same_cohort")
+        self.assertGreater(record["frozen"]["independence"]["overlap"], 0)
+        self.assertTrue(record["frozen"]["provenance"].startswith("same_cohort"))
+        self.assertNotIn("independent circuit", record["frozen"]["provenance"])
+        self.assertEqual(_absolute_strings(record), [])
+        self.assertTrue([event for event in events if event.get("code") == "same_cohort"])
+        # The same file with no record of its source lesions, declared frozen with its sha256, stays a frozen replication
+        other = os.path.join(self.tmp, "elsewhere")
+        os.makedirs(other)
+        copy = os.path.join(other, "circuit.nii.gz")
+        shutil.copyfile(path, copy)
+        out = os.path.join(self.tmp, "frozen_other")
+        code, events = self.run_in_process([*base, "--out", out, "--frozen", copy, "--frozen-sha256", file_sha256(copy)])
+        self.assertEqual(code, 0, events[-1])
+        with open(os.path.join(out, "validation.json"), encoding="utf-8") as f:
+            record = json.load(f)
+        self.assertEqual(record["frozen"]["independence"]["provenance"], "frozen")
+        self.assertEqual(record["frozen"]["provenance"], "frozen (independent circuit, sha256 verified)")
+        self.assertFalse([event for event in events if event.get("code") == "same_cohort"])
 
 
 if __name__ == "__main__":

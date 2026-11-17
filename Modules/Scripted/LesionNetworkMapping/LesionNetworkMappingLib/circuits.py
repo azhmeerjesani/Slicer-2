@@ -86,7 +86,7 @@ SCORE_TEXT = {
 }
 RESID_SUFFIX = "_resid"
 #: Records next to a parent map that tell its run and its lesions (in this order)
-PARENT_RECORDS = ("circuit.json", "cohort.json", "glm.json", "slnm.json", "validation.json", "nulls.json", "cohortmaps.json", "run.json")
+PARENT_RECORDS = ("circuit.json", "cohort.json", "glm.json", "slnm.json", "validation.json", "nulls.json", "cohortmaps.json", "vlsm.json", "run.json")
 #: Gray-matter prior probability above which a voxel is gray matter (random target spheres are centred there)
 GM_THRESHOLD = 0.5
 DEFAULT_K = 1000
@@ -102,6 +102,12 @@ CIRCULARITY_MESSAGE = (
     "These damage scores come from a circuit made from the same lesions: testing them against an outcome of these "
     "lesions is circular (double dipping). Use Validate (in-fold circuits), or a circuit frozen from an independent "
     "cohort (declared with its sha256)."
+)
+CIRCULARITY_UNKNOWN_MESSAGE = (
+    "These damage scores come from a circuit whose independence from these lesions is not established (no circuit "
+    "record with its source lesions): testing them against an outcome of these lesions could be circular (double "
+    "dipping). Use Validate (in-fold circuits), or declare the circuit frozen with its sha256 if an independent cohort "
+    "fixed it."
 )
 NOT_ESTABLISHED = "independence not established (no circuit record with its source lesions, and not declared frozen)"
 NA = "n/a"
@@ -338,9 +344,44 @@ def lesions_of_maps(maps_tsv):
     return {"sha256": sha, "participants": sids, "pairs": pairs}
 
 
+#: Run records whose "outputs" list every map the run wrote into a folder that later runs re-use with other maps (a cohort run
+#: without the conjunction leaves the previous run's conjunction map beside its own): a map they do not list is not theirs
+OUTPUT_LISTING_RECORDS = ("cohort.json",)
+
+
+def _listed_outputs(record):
+    """The base names of the files a run record lists under "outputs" ({key: name}, {key: {"path": ...}} or [name]), or None."""
+    outputs = record.get("outputs") if isinstance(record, dict) else None
+    values = outputs.values() if isinstance(outputs, dict) else outputs if isinstance(outputs, list) else None
+    if values is None:
+        return None
+    names = set()
+    for value in values:
+        if isinstance(value, dict):
+            value = value.get("path")
+        if isinstance(value, str) and value:
+            names.add(os.path.basename(value))
+    return names or None
+
+
+def superseded_output(map_path):
+    """Whether ``map_path`` is a left-over of an earlier run: the run record next to it (OUTPUT_LISTING_RECORDS) lists its outputs
+    and this file is not among them (the last run there did not write it). False when there is no such record or it lists none.
+    """
+    folder, base = os.path.split(os.path.abspath(os.fspath(map_path)))
+    for name in OUTPUT_LISTING_RECORDS:
+        listed = _listed_outputs(_read_json(os.path.join(folder, name)))
+        if listed is not None:
+            return base not in listed
+    return False
+
+
 def parent_record(map_path):
     """What a parent map was made from: {"record": file name, "run_id", "kind", "maps_tsv", "lesions": {sha256, participants},
-    "study"} from the run record next to it (PARENT_RECORDS), or {} when there is none.
+    "study"} from the run record next to it (PARENT_RECORDS; for vlsm.json, "maps_tsv" is its lesions.tsv), or {} when there is none.
+
+    A map that record does not list among its outputs (:func:`superseded_output`, a left-over of an earlier run) gets
+    {"record", "kind", "run_id": None, "superseded": True}: the run that wrote it is unknown, never the later run's.
     """
     folder = os.path.dirname(os.path.abspath(os.fspath(map_path)))
     for name in PARENT_RECORDS:
@@ -348,6 +389,8 @@ def parent_record(map_path):
         if record is None:
             continue
         out = {"record": name, "run_id": record.get("run_id") or record.get("id"), "kind": record.get("kind") or os.path.splitext(name)[0]}
+        if name in OUTPUT_LISTING_RECORDS and superseded_output(map_path):
+            return {**out, "run_id": None, "superseded": True}
         if name == CIRCUIT_JSON:
             source = record.get("source") or {}
             out["lesions"] = {"sha256": list(source.get("lesion_sha256") or []), "participants": list(source.get("participants") or [])}
@@ -357,6 +400,9 @@ def parent_record(map_path):
         maps_tsv = _maps_tsv_of(record, folder)
         if maps_tsv is None and name == "cohortmaps.json" and os.path.isfile(os.path.join(folder, "maps.tsv")):
             maps_tsv = os.path.join(folder, "maps.tsv")
+        if maps_tsv is None and name == "vlsm.json":  # a VLSM result: its lesions.tsv (participant_id, lesion_sha256) names the lesions
+            lesions_tsv = _resolve(record.get("lesions_tsv") or "lesions.tsv", folder)
+            maps_tsv = lesions_tsv if lesions_tsv and os.path.isfile(lesions_tsv) else None
         if maps_tsv is not None:
             out["maps_tsv"] = maps_tsv
             out["lesions"] = lesions_of_maps(maps_tsv)
@@ -572,6 +618,22 @@ def read_circuit(path):
     return record
 
 
+def parent_changed(record):
+    """Whether the parent map a circuit was seeded from no longer is the file it recorded (re-run in place, edited or replaced,
+    or left over from an earlier run that a later run in its folder superseded without making it again).
+
+    ``record`` is :func:`read_circuit`'s result. True when ``parent.sha256`` is recorded, the parent file exists and its sha256
+    differs; False when there is no parent, no recorded sha256 or the file is missing (nothing to compare).
+    """
+    parent = (record or {}).get("parent") or {}
+    path, recorded = parent.get("file"), parent.get("sha256")
+    if not path or not recorded or not os.path.isfile(path):
+        return False
+    if superseded_output(path):  # a later run in that folder did not make this map again: it is no longer the current result
+        return True
+    return _sha256(path) != recorded
+
+
 def find_circuits(folder):
     """circuit.json records (absolute paths) in the sub-folders of ``folder`` (``<run root>/circuits``), newest first."""
     found = []
@@ -682,8 +744,16 @@ def damage_values(occupancy, circuit, threshold=None, sign="both"):
     return out
 
 
+def circularity_message(overlap):
+    """The refusal text that matches the basis: the circuit is known to share lesions (``overlap`` > 0) or its independence is unknown (None)."""
+    return CIRCULARITY_MESSAGE if overlap else CIRCULARITY_UNKNOWN_MESSAGE
+
+
 def provenance_of(circuit_path, sha256, scored, scored_study=None, frozen_sha256=None):
     """Whether a circuit is independent of the scored lesions.
+
+    The circuit's source lesions come from its circuit.json, else from the run record next to it (:func:`parent_record`:
+    slnm.json, glm.json, ...), so that a result map of a run on the scored lesions is never taken as independent.
 
     :param scored: {"sha256": [...], "participants": [...]} of the scored lesions (:func:`lesions_of_maps`).
     :param scored_study: the study folder of the scored lesions (participant ids count only within one study).
@@ -698,6 +768,10 @@ def provenance_of(circuit_path, sha256, scored, scored_study=None, frozen_sha256
     warnings = []
     source = (record or {}).get("source") or {}
     known = bool(record) and bool(source.get("known"))
+    if record is None:  # no circuit.json: the run record next to the file (slnm.json, glm.json, ...) names the lesions that made it
+        parent = parent_record(circuit_path)
+        lesions = parent.get("lesions") or {}
+        source = {"lesion_sha256": lesions.get("sha256") or [], "participants": lesions.get("participants") or [], "study": parent.get("study")}
     source_sha = set(source.get("lesion_sha256") or ())
     same_study = bool(scored_study and source.get("study") and os.path.normcase(os.path.realpath(source["study"])) == os.path.normcase(os.path.realpath(scored_study)))
     if not same_study and scored_study and source.get("study_key"):  # the study moved, or circuit.json names it by its identity only
@@ -815,7 +889,7 @@ def damage_scores(maps_tsv, circuit, threshold=None, sign="both", out_dir=None, 
         "provenance_basis": provenance["basis"],
         "overlap": provenance["overlap"],
         "declared_frozen": provenance["declared_frozen"],
-        "association": "allowed (frozen circuit)" if provenance["provenance"] == "frozen" else "refused: " + CIRCULARITY_MESSAGE,
+        "association": "allowed (frozen circuit)" if provenance["provenance"] == "frozen" else "refused: " + circularity_message(provenance["overlap"]),
         "maps_tsv": _portable(maps_tsv, out_dir, root),
         "threshold": threshold,
         "sign": sign,
@@ -890,9 +964,10 @@ def check_association(damage):
         if damage is None:
             raise ValueError("The damage scores cannot be read")
     provenance = damage.get("provenance")
+    overlap = provenance.get("overlap") if isinstance(provenance, dict) else damage.get("overlap")
     provenance = provenance.get("provenance") if isinstance(provenance, dict) else provenance
     if provenance != "frozen":
-        raise CircularityError(CIRCULARITY_MESSAGE)
+        raise CircularityError(circularity_message(overlap))
     return True
 
 
@@ -961,7 +1036,7 @@ def association(damage, participants, outcome, outcome_type=None, positive=None,
 
 def _target(label, x, y, z, radius, default_radius):
     radius = _finite(radius)
-    radius = float(default_radius) if radius is None or radius <= 0 else radius
+    radius = float(default_radius) if radius is None else radius  # only a blank radius means the default; 0 or negative is refused below
     coords = [_finite(value) for value in (x, y, z)]
     if any(value is None for value in coords):
         raise ValueError(f"The target {label!r} has no valid x, y, z")
@@ -1300,7 +1375,7 @@ def build_parser():
     damage.add_argument("--circuit", required=True, help="circuit NIfTI on the connectome grid")
     damage.add_argument("--out", required=True, help="output folder (damage.tsv, damage.json)")
     damage.add_argument("--name", default=None, help="circuit name (default: from circuit.json or the file name)")
-    damage.add_argument("--threshold", type=float, default=None, help="threshold of the % of the lesion in the circuit (default: 0.5 for a binary circuit)")
+    damage.add_argument("--threshold", type=float, default=None, help="threshold of the %% of the lesion in the circuit (default: 0.5 for a binary circuit)")
     damage.add_argument("--sign", choices=SIGNS, default="both", help="both (|circuit| >= t), pos or neg")
     masks = damage.add_mutually_exclusive_group()
     masks.add_argument("--mask", default=None, help="connectome mask NIfTI (default: the bundle of the maps)")

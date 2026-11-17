@@ -236,6 +236,10 @@ class WorkspaceController:
         if ws.defaultLayout is None:
             return None
         value = slicer.util.settingsValue(ws.layoutSettingsKey, ws.defaultLayout, converter=int)
+        if value == slicer.vtkMRMLLayoutNode.SlicerLayoutDicomBrowserView:
+            # The DICOM module's own browser layout is never a workspace layout (profiles that saved it while the
+            # DICOM module was being entered recover the workspace's default)
+            return ws.defaultLayout
         node = layouts.layoutNode()
         if node is not None and value >= layouts.STUDIO_LAYOUT_ID_FIRST and not node.IsLayoutDescription(value):
             return ws.defaultLayout
@@ -295,14 +299,15 @@ class WorkspaceController:
         self.transientModule = None
         self.shell._onWorkspaceEntered(ws, shrinkPanel=shrinkPanel)
         _callHook(ws, "enter", self.shell)
-        if hookFunction(ws, "focusFirst") is not None:
-            # After the module widget and the canvas are laid out
-            qt.QTimer.singleShot(0, lambda key=ws.key: self._focusFirst(key))
+        # After the module widget and the canvas are laid out
+        qt.QTimer.singleShot(0, lambda key=ws.key: self._focusFirst(key))
 
     def _focusFirst(self, key):
         if self.current != key or not self.shell.isActive():
             return
         callHook(workspace(key), "focusFirst", self.shell)
+        # The pointer may already be over a view (a scan was opened): the view gets the keys, as on entering
+        self.shell.focusHoveredView()
 
     def _leave(self):
         if self.current is None:
@@ -375,7 +380,11 @@ class WorkspaceController:
         if self._switching or self.current is None or self.transientModule is not None:
             return
         ws = workspace(self.current)
-        if ws.defaultLayout is None:
+        if ws.defaultLayout is None or layoutId == slicer.vtkMRMLLayoutNode.SlicerLayoutDicomBrowserView:
+            return
+        # A module being selected (for example DICOM, whose enter() shows its browser layout) changes the layout before
+        # onModuleSelected() marks it as transient: that layout is not the workspace's choice
+        if self.shell.currentModuleName() != ws.moduleName:
             return
         settings = qt.QSettings()
         if slicer.util.settingsValue(ws.layoutSettingsKey, ws.defaultLayout, converter=int) != layoutId:

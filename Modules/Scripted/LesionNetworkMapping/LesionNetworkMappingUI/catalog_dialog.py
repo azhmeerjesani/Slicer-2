@@ -52,10 +52,9 @@ def formatBytes(count):
     """"236 GB", "1.2 GB", "9 kB": decimal units, as the providers state sizes."""
     if count is None:
         return "—"
-    for unit, size in (("TB", 1e12), ("GB", 1e9), ("MB", 1e6), ("kB", 1e3)):
-        if count >= size:
-            return f"{count / size:.3g} {unit}"
-    return f"{int(count)} B"
+    from LesionNetworkMappingLib.manager import format_bytes
+
+    return format_bytes(count)
 
 
 def licenceText(entry):
@@ -138,8 +137,12 @@ def freeBytes(path):
         return None
 
 
-def planSummary(entry, subset, keepArchives, destination):
-    """``(text, problem)``: the disk plan of a download as a sentence, and why it cannot fit (or None)."""
+def planSummary(entry, subset, keepArchives, destination, unfinished=None):
+    """``(text, problem)``: the disk plan of a download as a sentence, and why it cannot fit (or None).
+
+    ``unfinished`` (the summary of an interrupted download in the folder, see ``fetchconnectome.unfinished_fetch``) makes it a
+    resume: what is already written is no longer free, so only the part still to be written is compared with the free space.
+    """
     from LesionNetworkMappingLib import catalog
 
     plan = catalog.disk_plan(entry, None if subset == "all" else subset, keepArchives)
@@ -152,14 +155,28 @@ def planSummary(entry, subset, keepArchives, destination):
         parts.append(_("stored {size}").format(size=formatBytes(plan["stored"])))
     if plan["peak"]:
         parts.append(_("peak {size}").format(size=formatBytes(plan["peak"])))
+    elif plan.get("peak_min"):
+        parts.append(_("peak at least {size}").format(size=formatBytes(plan["peak_min"])))
     if free is not None:
         parts.append(_("free here {size}").format(size=formatBytes(free)))
     text = " · ".join(parts)
     if plan["notes"]:
         text += "\n" + " ".join(plan["notes"])
     problem = None
-    if plan["peak"] and free is not None and free < plan["peak"] * 1.05:
-        problem = _("Not enough free space here: the plan needs about {need} at the peak and {free} are free.").format(need=formatBytes(plan["peak"]), free=formatBytes(free))
+    if not plan["peak"] and plan.get("peak_min") and free is not None:
+        # The bundle size is not known before the conversion, but a destination that cannot hold even its lower bound is refused
+        fraction = (unfinished or {}).get("fraction")
+        need = plan["peak_min"] if fraction is None else round(plan["peak_min"] * (1 - min(max(fraction, 0), 1)))
+        if free < need:
+            problem = _("Not enough free space here: the plan needs at least about {need} and {free} are free.").format(need=formatBytes(need), free=formatBytes(free))
+    elif plan["peak"] and free is not None:
+        fraction = (unfinished or {}).get("fraction")
+        if fraction is not None:
+            remaining = round(plan["peak"] * (1 - min(max(fraction, 0), 1)))
+            if free < remaining * 1.05:
+                problem = _("Not enough free space here: resuming needs about {need} more and {free} are free.").format(need=formatBytes(remaining), free=formatBytes(free))
+        elif free < plan["peak"] * 1.05:
+            problem = _("Not enough free space here: the plan needs about {need} at the peak and {free} are free.").format(need=formatBytes(plan["peak"]), free=formatBytes(free))
     return text, problem
 
 
@@ -182,13 +199,34 @@ def _button(text, objectName, primary=False):
     return button
 
 
+#: Left and right margin (px) of the chip inside its table cell
+CHIP_CELL_MARGIN = 4
+
+
 def _chipCell(text, level):
     cell = qt.QWidget()
     layout = qt.QHBoxLayout(cell)
-    layout.setContentsMargins(4, 0, 4, 0)
+    layout.setContentsMargins(CHIP_CELL_MARGIN, 0, CHIP_CELL_MARGIN, 0)
     layout.addWidget(widgets.chip(text, level), 0, qt.Qt.AlignVCenter)
     layout.addStretch(1)
     return cell
+
+
+def _availableArea(widget=None):
+    """The available geometry (``QRect``, without panels) of the screen that shows ``widget``, else of the primary screen; None without a screen.
+
+    ``QGuiApplication.primaryScreen`` is a property in PythonQt (Qt 5 and Qt 6) and cannot be called: ``StudioLib.ui``
+    resolves the screen when it can be imported, else the first of ``QGuiApplication.screens()`` is the primary screen.
+    """
+    try:
+        ui = widgets._studioUi()
+        screen = ui.screenOf(widget) if ui is not None else None
+        if screen is None:
+            screens = qt.QGuiApplication.screens()
+            screen = screens[0] if screens else None
+        return screen.availableGeometry if screen is not None else None
+    except Exception:  # noqa: BLE001 (the default size is fine without a screen)
+        return None
 
 
 class CatalogDialog(qt.QDialog):
@@ -202,6 +240,7 @@ class CatalogDialog(qt.QDialog):
             self.controller.catalogPath = catalogPath
         self.entries = []
         self.entry = None
+        self.termsChangeHandled = None  # the failed job's error event whose changed terms were already dropped and reloaded
         self.terms = {}  # entry id -> {"text", "display", "sha"} of the terms loaded in this session
         self.termsJob = None
         self.checkJobs = []
@@ -210,11 +249,9 @@ class CatalogDialog(qt.QDialog):
         self.setWindowTitle(_("Get a connectome"))
         self.setMinimumSize(860, 600)
         size = qt.QSize(1000, 760)
-        try:  # a real window manager clamps a window that is as high as the screen
-            available = qt.QGuiApplication.primaryScreen().availableGeometry
+        available = _availableArea(self.parentWidget())
+        if available is not None:  # a real window manager clamps a window that is as high as the screen
             size = qt.QSize(min(size.width(), max(860, available.width() - 80)), min(size.height(), max(600, available.height() - 120)))
-        except Exception:  # noqa: S110 (the default size is fine without a screen)
-            pass
         self.resize(size)
         layout = qt.QVBoxLayout(self)
         layout.setSpacing(8)
@@ -224,7 +261,7 @@ class CatalogDialog(qt.QDialog):
         self.notice.setObjectName("LNMCatalogNotice")
         self.notice.hide()
         layout.addWidget(self.notice)
-        self.resumeBanner = widgets.banner("", ((_("Resume"), self.onResume),), level="busy")
+        self.resumeBanner = widgets.banner("", ((_("Resume"), self.onResume), (_("Discard"), self.onDiscard)), level="busy")
         self.resumeBanner.setObjectName("LNMCatalogResumeBanner")
         self.resumeBanner.hide()
         layout.addWidget(self.resumeBanner)
@@ -415,6 +452,10 @@ class CatalogDialog(qt.QDialog):
         self.resumeButton = _button(_("Resume"), "LNMCatalogResume")
         self.resumeButton.connect("clicked()", self.onResume)
         buttons.addWidget(self.resumeButton)
+        self.discardButton = _button(_("Discard"), "LNMCatalogDiscard")
+        self.discardButton.setToolTip(_("Forget this unfinished download so that it is not offered again; what was already downloaded stays in its folder and can be deleted"))
+        self.discardButton.connect("clicked()", self.onDiscard)
+        buttons.addWidget(self.discardButton)
         self.acceptMismatchButton = _button(_("Keep this data anyway…"), "LNMCatalogAcceptMismatch")
         self.acceptMismatchButton.setToolTip(_("Accept the archive whose checksum does not match; the choice is recorded as checksum_override in the bundle"))
         self.acceptMismatchButton.connect("clicked()", self.onAcceptMismatch)
@@ -445,14 +486,26 @@ class CatalogDialog(qt.QDialog):
             self.notice.hide()
         current = self.entry["id"] if self.entry else None
         table = self.table
+        # Drop the previous licence chips first: setCellWidget on a refilled table leaves the old widgets
+        # drawn at their old position (they then overlap the titles when the dialog is resized)
+        for row in range(table.rowCount):
+            old = table.cellWidget(row, 1)
+            if old is not None:
+                table.removeCellWidget(row, 1)
+                old.hide()
+                old.deleteLater()
+        table.clearContents()
         table.setRowCount(len(self.entries))
         selectRow = 0
         for row, entry in enumerate(self.entries):
             cells = entryRow(entry)
             for column, value in enumerate(cells):
                 if column == 1:
-                    table.setCellWidget(row, column, _chipCell(value, licenceLevel(entry)))
+                    cell = _chipCell(value, licenceLevel(entry))
+                    table.setCellWidget(row, column, cell)
                     item = qt.QTableWidgetItem("")
+                    # ResizeToContents measures the item, not the cell widget (and the widget lies inside the item's padding): ask for the chip's whole width
+                    item.setSizeHint(qt.QSize(cell.sizeHint.width() + 2 * widgets.TABLE_ITEM_PADDING, widgets.TABLE_ROW_HEIGHT))
                 else:
                     item = qt.QTableWidgetItem(str(value))
                 item.setToolTip(entry["title"] if column == 0 else str(value))
@@ -597,14 +650,29 @@ class CatalogDialog(qt.QDialog):
     def onTermsDone(self, job, entryId):
         self.loadTermsButton.setEnabled(True)
         event = next((e for e in job.results if e.get("kind") == "terms"), None)
+        failure = None
         if job.succeeded() and event is not None:
             self.terms[entryId] = {"text": event.get("text") or "", "display": event.get("display") or event.get("text") or "", "sha": event.get("sha256"), "url": event.get("url")}
         else:
             self.terms.pop(entryId, None)
-            self.termsView.setPlainText(_("The terms could not be fetched ({reason}). They must be shown before anything is downloaded: check the connection and click Load terms again.").format(reason=job.failureReason))
+            failure = _("The terms could not be fetched ({reason}). They must be shown before anything is downloaded: check the connection and click Load terms again.").format(reason=job.failureReason)
         if self.entry is not None and self.entry["id"] == entryId:
             self.setTermsView(self.terms.get(entryId))
+            if failure is not None:  # setTermsView shows the click-to-load prompt for missing terms: the failure replaces it
+                self.termsView.setPlainText(failure)
         self.updateState()
+
+    def onTermsChanged(self):
+        """The provider changed its terms after they were accepted: the text shown is stale. Drop it (the box unticks, Download is
+        disabled) and load the live text once, so that the new text can be read and accepted.
+        """
+        event = self.controller.errorEvent
+        if self.entry is None or self.termsChangeHandled is event:
+            return
+        self.termsChangeHandled = event
+        self.terms.pop(self.entry["id"], None)
+        self.setTermsView(None)
+        self.loadTerms()
 
     def setTermsView(self, terms):
         if terms is None:
@@ -634,8 +702,14 @@ class CatalogDialog(qt.QDialog):
 
     # Destination and download
 
+    def destination(self):
+        """The destination folder as the job is given it: ``~`` expanded; "" when empty, None for a relative path (refused:
+        the job runs in the module folder, so it would be written inside the application, see ``widgets.typedPath``).
+        """
+        return widgets.typedPath(self.destEdit.text)
+
     def browse(self):
-        start = self.destEdit.text.strip() or self.defaultDestination()
+        start = self.destination() or self.defaultDestination()
         folder = qt.QFileDialog.getExistingDirectory(self, _("Where should the connectome be saved?"), nearestExisting(start))
         if folder:
             self.destEdit.setText(folder)
@@ -643,7 +717,7 @@ class CatalogDialog(qt.QDialog):
     def request(self):
         terms = self.currentTerms()
         subset = self.subsetCombo.currentData
-        return {"entry": self.entry["id"], "dest": self.destEdit.text.strip(), "subset": None if subset in (None, "", "all") else str(subset), "keepArchives": bool(self.keepCheck.checked),
+        return {"entry": self.entry["id"], "dest": self.destination(), "subset": None if subset in (None, "", "all") else str(subset), "keepArchives": bool(self.keepCheck.checked),
                 "streams": int(self.streamsSpin.value), "termsSha": terms["sha"] if terms else None}
 
     def updateState(self):
@@ -654,15 +728,20 @@ class CatalogDialog(qt.QDialog):
         if entry is None or not fetchable(entry):
             return
         terms = self.currentTerms()
-        destination = self.destEdit.text.strip()
+        destination = self.destination()
         subset = self.subsetCombo.currentData or "all"
         problem = None
-        if destination:
-            text, problem = planSummary(entry, subset, self.keepCheck.checked, destination)
+        if destination is None:
+            problem = widgets.relativePathProblem(self.destEdit.text)
+            self.planLabel.setText("")
+        elif destination:
+            problem = widgets.notAFolderProblem(destination) or widgets.unwritableProblem(destination)
+            text, planProblem = planSummary(entry, subset, self.keepCheck.checked, destination, None if self.mismatchHere() else self.unfinishedHere())
+            problem = problem or planProblem
             self.planLabel.setText(text)
         else:
             self.planLabel.setText("")
-        self.destNotice.setText(fetchconnectome.destination_notice(destination))
+        self.destNotice.setText(fetchconnectome.destination_notice(destination or ""))
         self.destNotice.setVisible(bool(self.destNotice.text))
         running = self.controller.isRunning()
         hint = None
@@ -670,33 +749,71 @@ class CatalogDialog(qt.QDialog):
             hint = _("Load the terms first.")
         elif not (self.acceptCheck.checked and manager_catalog.termsAccepted(terms["sha"])):
             hint = _("Read the terms and tick the box to accept them.")
-        elif not destination:
+        elif destination == "":
             hint = _("Choose a destination folder.")
         elif problem:
             hint = problem
         elif running:
             hint = _("A connectome is being fetched.")
+        elif self.runningElsewhereHere() is not None:
+            hint = _("Being downloaded by another Slicer window: wait until it finishes, or choose another folder.")
+        elif self.mismatchHere():
+            hint = _("The checksum of an archive does not match: use Keep this data anyway…, or choose another folder. Reading the archive again would fail the same way.")
+        elif resumeProblem := self.resumeSubsetProblem():
+            hint = resumeProblem
         elif self.completeHere():
             hint = _("{name} is already in this folder: choose another folder.").format(name=os.path.basename(fetchconnectome.bundle_path(entry, destination)))
         self.hintLabel.setText(hint or "")
-        self.downloadButton.setText(_("Resume this download") if self.unfinishedHere() else _("Download and convert"))
+        resumable = not running and not self.mismatchHere() and self.unfinishedHere()
+        self.downloadButton.setText(_("Resume this download") if resumable else _("Download and convert"))
         self.downloadButton.setEnabled(hint is None)
         self.loadTermsButton.setEnabled(self.termsJob is None or self.termsJob.isFinished())
+
+    def runningElsewhereHere(self):
+        """The lock holder of a download of the selected entry into the chosen folder that another live process runs, or None."""
+        from LesionNetworkMappingLib import fetchconnectome
+
+        destination = self.destination()
+        if self.entry is None or not destination or self.controller.isRunning():
+            return None
+        try:
+            return fetchconnectome.running_fetch(self.entry, destination)
+        except OSError:
+            return None
 
     def completeHere(self):
         """True when a finished bundle of the selected entry is in the chosen folder (nothing to resume: a new download would be refused)."""
         from LesionNetworkMappingLib import fetchconnectome
 
-        destination = self.destEdit.text.strip()
+        destination = self.destination()
         if self.entry is None or not destination or self.unfinishedHere():
             return False
         return os.path.exists(os.path.join(fetchconnectome.bundle_path(self.entry, destination), "connectome.json"))
+
+    def mismatchHere(self):
+        """True when the last fetch ended on a checksum mismatch in the selected entry and folder, and the folder still holds that
+        download: starting it again would read the whole archive again. Deleting the folder (what the failure text suggests) clears it.
+        """
+        from LesionNetworkMappingLib import fetchconnectome
+
+        controller = self.controller
+        request = controller.request
+        if controller.state != "failed" or not request or self.entry is None or not controller.status()["mismatch"]:
+            return False
+        destination = self.destination()
+        if request.get("entry") != self.entry.get("id") or not destination or os.path.normpath(request.get("dest") or "") != os.path.normpath(destination):
+            return False
+        try:
+            data = fetchconnectome.read_state(self.entry, destination) or {}
+        except Exception:
+            return False
+        return any((info or {}).get("status") == "mismatch" for info in (data.get("archives") or {}).values())
 
     def unfinishedHere(self):
         """A summary of an interrupted download of the selected entry in the chosen folder (it is continued, not started again)."""
         from LesionNetworkMappingLib import fetchconnectome
 
-        destination = self.destEdit.text.strip()
+        destination = self.destination()
         if self.entry is None or not destination:
             return None
         try:
@@ -704,10 +821,27 @@ class CatalogDialog(qt.QDialog):
         except Exception:
             return None
 
+    def resumeSubsetProblem(self):
+        """Why the interrupted download in the chosen folder cannot be resumed with the chosen subset (it would leave out
+        archives that are converted already), or None.
+        """
+        from LesionNetworkMappingLib import fetchconnectome
+
+        destination = self.destination()
+        if self.entry is None or not destination:
+            return None
+        try:
+            return fetchconnectome.resume_subset_problem(self.entry, destination, self.subsetCombo.currentData)
+        except Exception:
+            return None
+
     def onDownload(self):
-        if self.entry is None:
+        if self.entry is None or self.mismatchHere():
             return None
         request = self.request()
+        if not request["dest"]:  # empty or relative (updateState disables Download and says why)
+            self.updateState()
+            return None
         job = self.controller.start(request, resume=self.unfinishedHere() is not None)
         if job is None:
             self.showNotice(self.controller.lastRequestError or _("The download could not start."))
@@ -734,11 +868,17 @@ class CatalogDialog(qt.QDialog):
         widgets.setChipLevel(self.progressChip, level, chipText)
         self.progress.setJob(job if state == "running" else None)
         fraction = status["fraction"]
+        if fraction is None and state != "running":
+            fraction = 0.0  # a stopped job shows an empty bar, never a frozen busy segment
+        if state == "failed" and status["termsChanged"]:
+            self.onTermsChanged()
         if state == "running":
             archive = ""
             if status.get("archiveCount"):
                 archive = _(" · archive {i} of {n}").format(i=status.get("archiveIndex") or 1, n=status["archiveCount"])
-            subjects = _(" · {n} subjects").format(n=status["subjects"]) if status.get("subjects") else ""
+            subjects = ""
+            if status.get("subjects"):
+                subjects = (_(" · 1 subject") if status["subjects"] == 1 else _(" · {n} subjects").format(n=status["subjects"]))
             eta = f" · {status['eta']}" if status["eta"] else ""
             percent = f"{int(fraction * 100)}%" if fraction is not None else _("starting")
             data = ""
@@ -755,7 +895,8 @@ class CatalogDialog(qt.QDialog):
         else:
             self.progress.setProgress(1.0, text=_("Done: the connectome is registered and ready in the Connectome card."))
             self.progress.stopButton.setEnabled(False)
-        self.resumeButton.setVisible(state in ("paused", "failed") and not status["mismatch"])
+        self.resumeButton.setVisible(state in ("paused", "failed") and not status["mismatch"] and not status["termsChanged"] and not status["damaged"])
+        self.discardButton.setVisible(state in ("paused", "failed"))
         self.acceptMismatchButton.setVisible(state == "failed" and status["mismatch"])
         self.openFolderButton.setVisible(state == "done" and bool(status["path"]))
         notes = [w for w in status["warnings"] if w][-3:]
@@ -771,7 +912,7 @@ class CatalogDialog(qt.QDialog):
             return
         request, summary = found
         percent = f" ({int(summary['fraction'] * 100)}%)" if summary.get("fraction") is not None else ""
-        widgets.setBannerText(self.resumeBanner, _("An unfinished download of {name}{percent} is waiting. Resume continues where it stopped.").format(name=self.controller.shortName(request), percent=percent))
+        widgets.setBannerText(self.resumeBanner, _("An unfinished download of {name}{percent} is waiting. Resume continues where it stopped; Discard forgets it (what was downloaded stays in its folder).").format(name=self.controller.shortName(request), percent=percent))
         self.resumeBanner.show()
 
     def onResume(self):
@@ -779,6 +920,13 @@ class CatalogDialog(qt.QDialog):
             self.controller.request = self.controller.savedRequest()
         if self.controller.resume() is None and self.controller.lastRequestError:
             self.showNotice(self.controller.lastRequestError)
+
+    def onDiscard(self):
+        request = self.controller.discard()
+        if request is None and self.controller.runningElsewhere() is not None:
+            return  # the saved request belongs to a download that another window runs
+        if request is not None:
+            self.showNotice(self.controller.discardedNotice(request))
 
     def onAcceptMismatch(self):
         question = _("The checksum of an archive does not match the one the provider lists, also after reading it twice. Every file in it passed its integrity check, so the data may be fine, "
@@ -789,13 +937,13 @@ class CatalogDialog(qt.QDialog):
     def openFolder(self):
         path = self.controller.status().get("path")
         if path:
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(os.path.dirname(path)))
+            widgets.showInFileManager(os.path.dirname(path))
 
     def openSource(self):
         entry = self.entry
         url = (entry.get("link_url") or (entry.get("source") or {}).get("url")) if entry else None
         if url:
-            qt.QDesktopServices.openUrl(qt.QUrl(url))
+            widgets.openLink(url)
 
     # Catalog updates
 

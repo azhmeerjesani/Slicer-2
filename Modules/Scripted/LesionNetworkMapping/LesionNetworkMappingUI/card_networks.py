@@ -54,11 +54,13 @@ from .card_clusters import (
     _setAlignment,
     _settings,
     confirmFetch,
+    labelFamily,
     mapWidget,
     shortName,
     sharedAtlases,
     sharedModel,
 )
+from .cohort_contrast import _idClickedSignal
 
 #: Fork-only settings (SPEC Appendix B)
 SCHEME_SETTING = "Studio/LNM/Networks/Scheme"
@@ -67,6 +69,15 @@ ROI_FRACTION_SETTING = "Studio/LNM/Networks/RoiMinPercent"
 SCHEMES = {
     "yeo7": {"title": "Yeo-7", "cortex": "schaefer2018-400-7n-2mm", "cerebellum": "buckner2011-cerebellum-7n-1mm", "subcortex": "tian-s1-2mm"},
     "yeo17": {"title": "Yeo-17", "cortex": "schaefer2018-400-17n-2mm", "cerebellum": "buckner2011-cerebellum-17n-1mm", "subcortex": "tian-s1-2mm"},
+}
+#: The atlases of each scheme by template family (a map uses those of its own family; families are not mixed). In the 2009
+#: family: TemplateFlow's 2009c Schaefer and Tian's 2009cAsym S1; the catalog has no Buckner cerebellum there (None).
+FAMILY_SCHEMES = {
+    "fsl6": SCHEMES,
+    "2009": {
+        "yeo7": {"title": "Yeo-7", "cortex": "schaefer2018-400-7n-2mm-2009c", "cerebellum": None, "subcortex": "tian-s1-2mm-2009c"},
+        "yeo17": {"title": "Yeo-17", "cortex": "schaefer2018-400-17n-2mm-2009c", "cerebellum": None, "subcortex": "tian-s1-2mm-2009c"},
+    },
 }
 SYSTEMS = ("cortex", "cerebellum", "subcortex")
 SYSTEM_TEXT = {"cortex": _("Cortex"), "cerebellum": _("Cerebellum"), "subcortex": _("Subcortex"), "roi": _("ROI"), "other": _("Other")}
@@ -93,6 +104,19 @@ CAPTION_NOTE = _(
 #
 
 
+def schemeAtlasIds(schemeId, family, allowCrossFamily=False):
+    """{system: catalog id or None} of a scheme for a map of the label ``family`` (:func:`card_clusters.labelFamily`).
+
+    A system that has no atlas in that family is None, unless templates may be mixed (``allowCrossFamily``): the fsl6
+    atlas is then used (its labels are approximate).
+    """
+    scheme = FAMILY_SCHEMES.get(family, SCHEMES)[schemeId]
+    ids = {system: scheme[system] for system in SYSTEMS}
+    if allowCrossFamily:
+        ids = {system: atlasId or SCHEMES[schemeId][system] for system, atlasId in ids.items()}
+    return ids
+
+
 def labelVoxels(atlas, grid, indices):
     """Label value of ``atlas`` at each in-mask voxel of ``grid`` (nearest voxel through the affines; 0 outside)."""
     import numpy as np
@@ -112,8 +136,11 @@ def networkGroups(atlas):
     return list(groups.items())
 
 
-def buildUnits(schemeId, atlasList, grid, indices, allowCrossFamily=False):
+def buildUnits(schemeId, atlasList, grid, indices, allowCrossFamily=False, space=None):
     """The network units of a scheme for the voxels ``indices`` of ``grid``.
+
+    ``space`` is the template space the app knows for the map (``MapSource.space``); without it the space is recognized
+    from the grid.
 
     :return: ``(units, notices)``: units are dicts ``{"system", "name", "atlas", "positions"}`` (``positions``: positions
       into the in-mask vector); notices say which system is missing and why.
@@ -122,12 +149,15 @@ def buildUnits(schemeId, atlasList, grid, indices, allowCrossFamily=False):
 
     from LesionNetworkMappingLib import atlases as atlasLib
 
-    scheme = SCHEMES[schemeId]
     byId = {atlas.id: atlas for atlas in atlasList}
-    family, _space = atlasLib.mask_family(grid.shape, grid.affine)
+    family, _space = atlasLib.mask_family(grid.shape, grid.affine, space=space)
+    scheme = schemeAtlasIds(schemeId, family if family in FAMILY_SCHEMES else "fsl6", allowCrossFamily)
     units, notices = [], []
     for system in SYSTEMS:
         atlasId = scheme[system]
+        if atlasId is None:
+            notices.append(_("{system}: the atlas catalog has none in the {family} template family.").format(system=SYSTEM_TEXT[system], family=family))
+            continue
         atlas = byId.get(atlasId)
         if atlas is None:
             notices.append(_("{system}: {atlas} is not on this computer.").format(system=SYSTEM_TEXT[system], atlas=shortName(atlasId)))
@@ -149,8 +179,26 @@ def _signs(sign):
     return sign in ("both", "pos"), sign in ("both", "neg")
 
 
+def suprathresholdTotals(values, threshold, sign="both"):
+    """Counts of the finite voxels of ``values`` that pass the threshold: ``supraPos`` (``>= t``), ``supraNeg`` (``<= -t``, as the sign allows), ``voxels``.
+
+    These totals do not depend on the network units, so they are available also when no network can be listed.
+    """
+    import numpy as np
+
+    values = np.asarray(values, dtype=np.float64)
+    finite = np.isfinite(values)
+    wantPos, wantNeg = _signs(sign)
+    return {"supraPos": int((finite & (values >= threshold)).sum()) if wantPos else 0,
+            "supraNeg": int((finite & (values <= -threshold)).sum()) if wantNeg else 0, "voxels": int(finite.sum())}
+
+
 def networkStatistics(values, units, threshold, sign="both"):
-    """One row per unit, plus the voxels that are in no unit, with the statistics of the card (see the module docstring).
+    """One row per unit, plus the voxels that are in no network unit, with the statistics of the card (see the module docstring).
+
+    ROI units (``system == "roi"``) are extra rows: they do not take voxels from the "not in these networks" row, which
+    counts the voxels outside every network unit (so the network rows and that row add up to 100 %). It is listed only
+    when there is a network unit.
 
     :param values: in-mask values of the map (float, NaN ignored).
     :param threshold: absolute threshold: voxels ``>= t`` are positive, ``<= -t`` negative (as the sign allows).
@@ -178,9 +226,12 @@ def networkStatistics(values, units, threshold, sign="both"):
         return 100.0 * part / whole if whole else None
 
     rows = []
+    networks = False
     for unit in units:
         positions = unit["positions"]
-        covered[positions] = True
+        if unit["system"] != "roi":
+            covered[positions] = True
+            networks = True
         inside = finite[positions]
         k = int(inside.sum())
         mine = values[positions][inside]
@@ -196,7 +247,7 @@ def networkStatistics(values, units, threshold, sign="both"):
         rows.append(row)
     other = finite & ~covered
     k = int(other.sum())
-    if units and k:
+    if networks and k:
         mine = values[other]
         rows.append({"system": "other", "name": _("not in these networks"), "atlas": None, "voxels": k,
                      "pctPos": percent(int((pos & other).sum()), totalPos) if wantPos else None, "pctNeg": percent(int((neg & other).sum()), totalNeg) if wantNeg else None,
@@ -370,6 +421,16 @@ def findGroupNull(source):
         return None, _("The null cohorts are of the mean map of the statistic ({desc} is not).").format(desc=source.desc or source.name)
     if not source.path:
         return None, _("A group map is compared with null cohorts only when it is a file of the cohort's analysis folder.")
+    # The voxel sample indexes the in-mask voxels in the storage order of the cohort's connectome, which wrote the map file:
+    # the map must be in that order (a volume read back from a scene is stored flipped until it is put back on the file's grid).
+    from LesionNetworkMappingLib.geometry import Grid
+
+    try:
+        fileGrid = Grid.from_nifti(source.path)
+    except Exception as exc:
+        return None, _("The map file could not be read: {error}").format(error=exc)
+    if not _sameGrid(source.grid, fileGrid.affine, fileGrid.shape):
+        return None, _("The null maps are not on the grid of this map.")
     folder = os.path.dirname(os.path.abspath(source.path))
     candidates = []
     for base in (folder, os.path.dirname(folder)):
@@ -572,7 +633,7 @@ def nctVolumes(source):
     from LesionNetworkMappingLib.geometry import resample_to_grid
 
     target = nctGrid()
-    family, _space = atlasLib.mask_family(source.grid.shape, source.grid.affine)
+    family, _space = atlasLib.mask_family(source.grid.shape, source.grid.affine, space=getattr(source, "space", None))
     if not target.matches(source.grid):
         if family != "fsl6":
             raise ValueError(_("The Network Correspondence Toolbox takes maps on the FSL MNI 2 mm grid; this map is on another grid ({family} family): warp it to MNI152NLin6Asym first.").format(family=family))
@@ -594,13 +655,26 @@ def writeNct(source, folder, prefix="networks_nct"):
     """Write the NCT-compatible volumes and ``<prefix>.json`` into ``folder``; return the written paths."""
     from LesionNetworkMappingLib import nifti
 
-    volumes = nctVolumes(source)
+    try:
+        volumes = nctVolumes(source)
+    except ValueError:
+        # Refused (a map of another template family): an earlier export into the same folder may have left the NCT volumes and sidecar of another map,
+        # which must not sit beside this map's networks.tsv/json
+        for name in (f"{prefix}.json", *(f"{prefix}_desc-{desc}.nii.gz" for desc in ("supra", "suprapos", "supraneg", "thresholded"))):
+            stale = os.path.join(folder, name)
+            if os.path.isfile(stale):
+                os.remove(stale)
+        raise
     target = nctGrid()
     os.makedirs(folder, exist_ok=True)
     written = []
     wantPos, wantNeg = _signs(source.sign)
     for name, desc in (("binary", "supra"), ("pos", "suprapos"), ("neg", "supraneg"), ("map", "thresholded")):
         if (name == "pos" and not wantPos) or (name == "neg" and not wantNeg) or (name in ("pos", "neg") and source.sign != "both"):
+            # Not part of this export: an earlier export of both signs into the same folder may have left it, and the sidecar must not sit beside a mask it does not list
+            stale = os.path.join(folder, f"{prefix}_desc-{desc}.nii.gz")
+            if os.path.isfile(stale):
+                os.remove(stale)
             continue
         path = os.path.join(folder, f"{prefix}_desc-{desc}.nii.gz")
         nifti.write_nifti(path, volumes[name], target.affine, dtype="uint8" if name != "map" else "float32", descrip=f"LNM {source.statistic} {desc}")
@@ -698,6 +772,7 @@ class NetworksCard:
         self.scheme = self._storedScheme()
         self.source = None
         self.rows = []
+        self.totals = {}
         self.notices = []
         self.null = None
         self.nullInfo = {"reason": _("Nothing is computed yet.")}
@@ -722,11 +797,11 @@ class NetworksCard:
         self.schemeFrame, self.schemeGroup = widgets.segmented([SCHEMES[key]["title"] for key in SCHEMES])
         self.schemeFrame.setObjectName("LNMNetworksSchemeSegmented")
         self.schemeGroup.button(list(SCHEMES).index(self.scheme)).setChecked(True)
-        self.schemeGroup.connect("buttonClicked(int)", self._onSchemeClicked)
+        self.schemeGroup.connect(_idClickedSignal(self.schemeGroup), self._onSchemeClicked)
         schemeRow.addWidget(self.schemeFrame)
         schemeRow.addStretch(1)
         layout.addLayout(schemeRow)
-        self.atlasBanner = widgets.banner("", [(_("Get atlases"), self.getAtlases)], level="neutral")
+        self.atlasBanner = widgets.banner("", [(_("Get atlases"), self.getAtlases), (_("Stop"), self.atlases.stop)], level="neutral")
         self.atlasBanner.setObjectName("LNMNetworksAtlasBanner")
         self.atlasBanner.hide()
         layout.addWidget(self.atlasBanner)
@@ -767,6 +842,7 @@ class NetworksCard:
         self.table.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(qt.QAbstractItemView.SingleSelection)
+        self.table.setTabKeyNavigation(False)  # Tab leaves the table, arrows move (SPEC 2.9)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(ROW_HEIGHT)
@@ -826,7 +902,7 @@ class NetworksCard:
         self.roiRemoveButton.connect("clicked()", self.removeSelectedRoi)
         roiRow.addWidget(self.roiRemoveButton)
         roiRow.addStretch(1)
-        layout.addLayout(roiRow)
+        widgets.addWrapRow(layout, roiRow)
         self.roiList = qt.QListWidget()
         self.roiList.setObjectName("LNMNetworksRoiList")
         self.roiList.setMaximumHeight(ROW_HEIGHT * 4)
@@ -985,12 +1061,18 @@ class NetworksCard:
         except (ValueError, RuntimeError):
             return False
 
-    def atlasIds(self):
-        scheme = SCHEMES[self.scheme]
-        return [scheme[system] for system in SYSTEMS]
+    def atlasIds(self, source=None):
+        """Catalog ids of the scheme's atlases for the template family of ``source`` (default: the current map)."""
+        if source is None:
+            try:
+                source = self.model.source()
+            except Exception:
+                source = None
+        ids = schemeAtlasIds(self.scheme, labelFamily(source), self.atlases.allowCrossFamily)
+        return [ids[system] for system in SYSTEMS if ids[system]]
 
     def signature(self, source):
-        return (source.stamp(), self.scheme, tuple(self.atlases.isCached(atlasId) for atlasId in self.atlasIds()), self.atlases.allowCrossFamily,
+        return (source.stamp(), self.scheme, tuple(self.atlases.isCached(atlasId) for atlasId in self.atlasIds(source)), self.atlases.allowCrossFamily,
                 tuple((roi["kind"], roi.get("path") or roi.get("node"), roi.get("segment")) for roi in self.rois))
 
     def _currentSignature(self):
@@ -1005,6 +1087,7 @@ class NetworksCard:
     def schedule(self, *args):
         self._refreshRoiVisibility()
         self._refreshStatus()
+        self._refreshAtlasBanner()  # the map (and so the family of its atlases) may have changed
         if self.expanded() and self._isStale():
             self.timer.start()
 
@@ -1050,9 +1133,12 @@ class NetworksCard:
             widgets.setBannerText(self.atlasBanner, self.atlases.message or _("Downloading…"))
         elif missing:
             names = ", ".join(shortName(atlasId) for atlasId in missing)
-            widgets.setBannerText(self.atlasBanner, self.atlases.message or _("Not on this computer: {names} ({size}). Networks of the other atlases are listed.").format(names=names, size=self.atlases.sizeText(missing)))
+            note = "" if self.atlases.stopped else self.atlases.message  # a stop belongs to the card that started the download
+            widgets.setBannerText(self.atlasBanner, note or _("Not on this computer: {names} ({size}). Networks of the other atlases are listed.").format(names=names, size=self.atlases.sizeText(missing)))
         for button in self.atlasBanner.findChildren(qt.QToolButton):
-            button.setEnabled(not busy)
+            isStop = button.text == _("Stop")
+            button.setVisible(busy if isStop else True)
+            button.setEnabled(busy if isStop else not busy)
 
     #
     # The table
@@ -1074,10 +1160,10 @@ class NetworksCard:
         self.messageLabel.show()
 
     def _unitsFor(self, source, atlasList):
-        key = (self.scheme, source.grid.shape, tuple(source.grid.affine.ravel().round(4)), hash(source.indices.tobytes()), tuple(atlas.id for atlas in atlasList), self.atlases.allowCrossFamily)
+        key = (self.scheme, source.grid.shape, tuple(source.grid.affine.ravel().round(4)), hash(source.indices.tobytes()), tuple(atlas.id for atlas in atlasList), self.atlases.allowCrossFamily, source.space)
         if self._unitsCache is not None and self._unitsCache[0] == key:
             return self._unitsCache[1]
-        result = buildUnits(self.scheme, atlasList, source.grid, source.indices, self.atlases.allowCrossFamily)
+        result = buildUnits(self.scheme, atlasList, source.grid, source.indices, self.atlases.allowCrossFamily, space=source.space)
         self._unitsCache = (key, result)
         return result
 
@@ -1125,12 +1211,13 @@ class NetworksCard:
             return None
         try:
             with slicer.util.WaitCursor():
-                atlasList = self.atlases.load(self.atlasIds())
+                atlasList = self.atlases.load(self.atlasIds(source))
                 units, notices = self._unitsFor(source, atlasList)
                 roiUnits, roiNotices = self.roiUnits(source)
                 notices = [*notices, *roiNotices, *source.notes]
                 values = source.vector
                 rows = networkStatistics(values, [*units, *roiUnits], source.value, source.sign)
+                totals = suprathresholdTotals(values, source.value, source.sign)
                 null, reason = self._findNull(source)
                 nullInfo = {"reason": reason}
                 if null is not None:
@@ -1147,7 +1234,7 @@ class NetworksCard:
             logging.exception("Lesion network mapping: the network table could not be made")
             self._showMessage(_("The network table could not be made: {error}").format(error=exc))
             return None
-        self.source, self.rows, self.notices, self.null, self.nullInfo = source, rows, notices, null, nullInfo
+        self.source, self.rows, self.totals, self.notices, self.null, self.nullInfo = source, rows, totals, notices, null, nullInfo
         self._shown = self.signature(source)
         self._fillTable()
         self._showHeader()
@@ -1159,7 +1246,7 @@ class NetworksCard:
     def _showHeader(self):
         source = self.source
         parts = [source.thresholdText(), SCHEMES[self.scheme]["title"]]
-        totals = (self.rows[0].get("totals") if self.rows else None) or {}
+        totals = self.totals or {}
         if source.sign in ("both", "pos"):
             parts.append(_("{n:,} voxels positive").format(n=totals.get("supraPos", 0)))
         if source.sign in ("both", "neg"):
@@ -1339,7 +1426,7 @@ class NetworksCard:
     def addRoiFile(self, path=None):
         """Add a NIfTI mask as an ROI (a dialog asks for the file when ``path`` is None); return the entry."""
         if not path:
-            start = str(_settings().value(LAST_FOLDER_SETTING) or "")
+            start = str(_settings().value(LAST_FOLDER_SETTING) or "") or widgets.dialogStartFolder()
             path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Add a region of interest"), start, "NIfTI (*.nii *.nii.gz);;All files (*)")
         if not path:
             return None
@@ -1436,14 +1523,37 @@ class NetworksCard:
             gsr = widget.logic.gsr(bundle) if widget is not None else None
         except Exception:
             gsr = None
-        fixed = None if source.fromRule or rule is None else source.value
+        # The lesion maps are the rule's statistic (T, or Fz for an Fz rule). The source's typed threshold is on that scale
+        # only when the source is a map of the same statistic (the Result map, a mean T group map); a count, percentage or
+        # binary group map's threshold (overlapPct >= 25) is not, so each lesion's map is then read with the Result rule
+        # and its sign.
+        lesionStatistic = cohort.rule_statistic(rule) if rule is not None else "T"
+        sameScale = source.statistic == lesionStatistic
+        if source.fromRule or not sameScale:
+            if rule is None:
+                self.roiLabel.setText(_("The lesion maps are read with the Result card's rule: open the Result card first."))
+                return 0
+            fixed = None
+        else:
+            fixed = source.value
+        sign = source.sign
+        thresholdText = source.thresholdText()
+        if not source.fromRule and not sameScale:
+            try:
+                sign = widget._sign() if widget is not None else "both"
+            except Exception:
+                sign = "both"
+            thresholdText = None  # named after the run from the lesions' own thresholds (_finishRoi)
 
         def thresholdFor(values, row):
             if fixed is not None:
                 return fixed
-            return cohort.resolve_rules(values[None, :], rule, n, bundle.n_voxels, gsr)[0].value
+            value = cohort.resolve_rules(values[None, :], rule, n, bundle.n_voxels, gsr)[0].value
+            state["thresholds"].append(float(value))
+            return value
 
-        state = {"paths": [row[column] for row in rows], "ids": [row.get("participant_id", str(index + 1)) for index, row in enumerate(rows)], "index": 0, "connected": [], "percent": [], "stop": False}
+        state = {"paths": [row[column] for row in rows], "ids": [row.get("participant_id", str(index + 1)) for index, row in enumerate(rows)], "index": 0, "connected": [], "percent": [], "stop": False,
+                 "thresholds": [], "statistic": lesionStatistic, "sign": sign, "thresholdText": thresholdText}
         self._roiState = state
         positions = [unit["positions"] for unit in units]
         names = [unit["name"] for unit in units]
@@ -1467,7 +1577,7 @@ class NetworksCard:
                 self._finishRoi(state, names, minPercent, source, notices)
                 return
             try:
-                result = lesionConnectivity([state["paths"][state["index"]]], source.indices, bundle.shape, positions, lambda values, _row: thresholdFor(values, state["index"]), source.sign, minPercent)
+                result = lesionConnectivity([state["paths"][state["index"]]], source.indices, bundle.shape, positions, lambda values, _row: thresholdFor(values, state["index"]), sign, minPercent)
             except Exception as exc:
                 logging.exception("Lesion network mapping: a lesion map could not be read for the ROI chart")
                 state["error"] = str(exc)
@@ -1491,9 +1601,22 @@ class NetworksCard:
         if not done:
             self.roiLabel.setText(_("No lesion map was read.") if not state.get("error") else _("The ROI chart failed: {error}").format(error=state["error"]))
             return
+        threshold = state.get("thresholdText") or self._ruleThresholdText(state)
         self.roiResult = {"names": names, "connected": np.array(state["connected"], dtype=bool), "percent": np.array(state["percent"], dtype=np.float64), "ids": state["ids"][:done],
-                          "minPercent": minPercent, "threshold": source.thresholdText(), "partial": done < len(state["paths"]), "notices": notices}
+                          "minPercent": minPercent, "threshold": threshold, "partial": done < len(state["paths"]), "notices": notices}
         self._showRoiChart()
+
+    @staticmethod
+    def _ruleThresholdText(state):
+        """"|T| ≥ 4.674" (or a range when the lesions' thresholds differ) of the Result rule the lesion maps were read with."""
+        statistic = state.get("statistic") or "T"
+        quantity = {"both": f"|{statistic}|", "pos": statistic, "neg": f"-{statistic}"}.get(state.get("sign"), f"|{statistic}|")
+        values = [value for value in state.get("thresholds", []) if math.isfinite(value)]
+        if not values:
+            return _("the Result rule")
+        low, high = min(values), max(values)
+        cut = f"{low:.4g}" if f"{low:.4g}" == f"{high:.4g}" else f"{low:.4g}–{high:.4g}"  # noqa: RUF001
+        return _("Result rule: {quantity} ≥ {cut}").format(quantity=quantity, cut=cut)
 
     def roiItems(self):
         """Chart items of the ROI result: label, percentage of lesions connected and its text."""
@@ -1560,8 +1683,13 @@ class NetworksCard:
             return ""
         source = self.source
         atlasNames = sorted({shortName(row["atlas"]) for row in self.rows if row.get("atlas")})
-        text = _("Networks of the {statistic} map ({name}) at {threshold}: {scheme}; cortex from the Schaefer names, cerebellum from Buckner, subcortex from Tian structures; atlases: {atlases}. ").format(
-            statistic=source.statistic, name=source.name, threshold=source.thresholdText(), scheme=SCHEMES[self.scheme]["title"], atlases=", ".join(atlasNames) or _("none"))
+        # The cerebellum is named as from Buckner only when cerebellum rows exist; the 2009 family has no cerebellar atlas
+        if any(row.get("system") == "cerebellum" for row in self.rows):
+            sources = _("cortex from the Schaefer names, cerebellum from Buckner, subcortex from Tian structures")
+        else:
+            sources = _("cortex from the Schaefer names, subcortex from Tian structures; the cerebellum was not assigned to networks (its voxels count under 'not in these networks')")
+        text = _("Networks of the {statistic} map ({name}) at {threshold}: {scheme}; {sources}; atlases: {atlases}. ").format(
+            statistic=source.statistic, name=source.name, threshold=source.thresholdText(), scheme=SCHEMES[self.scheme]["title"], sources=sources, atlases=", ".join(atlasNames) or _("none"))
         if self.null is not None:
             text += _("Null: {description}. ").format(description=self.nullInfo["description"])
         else:
@@ -1590,7 +1718,7 @@ class NetworksCard:
         if not self.rows:
             return None
         if not folder:
-            start = str(_settings().value(LAST_FOLDER_SETTING) or "")
+            start = str(_settings().value(LAST_FOLDER_SETTING) or "") or widgets.dialogStartFolder()
             folder = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Export the networks into…"), start)
             if not folder:
                 return None
@@ -1616,7 +1744,7 @@ class NetworksCard:
             record = {
                 "format": "slicer-lnm-networks", "version": 1, "scheme": self.scheme, "statistic": source.statistic, "threshold": source.value, "sign": source.sign, "n": source.n,
                 "map": source.name,
-                "atlases": [{"id": atlasId, "title": self.atlases.title(atlasId)} for atlasId in self.atlasIds() if any(row.get("atlas") == atlasId for row in self.rows)],
+                "atlases": [{"id": atlasId, "title": self.atlases.title(atlasId)} for atlasId in self.atlasIds(source) if any(row.get("atlas") == atlasId for row in self.rows)],
                 "null": {"status": "tested" if self.null is not None else "not tested", "kind": self.nullInfo.get("kind"), "k": self.nullInfo.get("k"), "description": self.nullInfo.get("description"),
                          "reason": self.nullInfo.get("reason")},
                 "rois": [{"name": roi["name"], "kind": roi["kind"], "voxels": roi.get("voxels")} for roi in self.rois],
@@ -1651,7 +1779,7 @@ class NetworksCard:
 
     def showFolder(self):
         if self.lastFolder and os.path.isdir(self.lastFolder):
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(self.lastFolder))
+            widgets.showInFileManager(self.lastFolder)
 
 
 def cohortRecordN(mapsTsv):

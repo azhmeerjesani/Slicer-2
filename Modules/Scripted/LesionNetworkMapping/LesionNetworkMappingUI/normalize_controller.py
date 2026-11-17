@@ -10,7 +10,7 @@ Studio only) both drive a :class:`NormalizeController`:
   cancel file). Progress events are coalesced by a 100 ms timer into ``progressChanged``.
 - When the job is done a worker thread reads the template-space scan and lesion and the QC mosaic, and the
   main thread creates the volume "<scan> (<template>)" (window/level precomputed, AutoWindowLevel off) and
-  the segmentation "Lesion (<template>)" with the node attributes ``LNM.Normalization``,
+  the segmentation "<lesion> (<template>)" (named after the native segment, "Lesion" by default) with the node attributes ``LNM.Normalization``,
   ``LNM.NormalizedFrom``, ``LNM.NormSuggestion`` and ``Studio.Space`` (official Slicer ignores them).
 - ``buildQcWidget(result)`` shows the mosaic, the suggestion and the metrics, records the reviewer's verdict
   in normalization.json, and offers Review in views (template behind, warped scan at 50 %, lesion outline;
@@ -61,7 +61,7 @@ DEFAULT_DILATE_MM = 3.0
 LESION_SEGMENT = "Lesion"
 LESION_COLOR = (0xF2 / 255.0, 0x54 / 255.0, 0x5B / 255.0)
 
-#: Node attributes (SPEC 9.7 rule 2: official Slicer ignores them)
+#: Node attributes (SPEC 9.7 rule 2: official Slicer ignores them). The file references are portable (``portableReference()``)
 NORMALIZATION_ATTRIBUTE = "LNM.Normalization"
 NORMALIZED_FROM_ATTRIBUTE = "LNM.NormalizedFrom"
 SUGGESTION_ATTRIBUTE = "LNM.NormSuggestion"
@@ -200,6 +200,73 @@ def defaultOutputDirectory(scanNode=None, scanPath=None, subject=None, studyPath
     return os.path.join(dataDirectory(), "normalization", f"{stem}-{digest}")
 
 
+def _isAbsoluteReference(value):
+    """True for an absolute path of any platform (``/…``, a backslash, a drive letter), whatever the platform of this computer."""
+    return bool(value) and (os.path.isabs(value) or re.match(r"^([A-Za-z]:)?[\\/]", value) is not None)
+
+
+def portableReference(path, outDir=None):
+    """The value of ``LNM.Normalization`` / ``LNM.NormLesionWarp`` for a file of a normalization result folder.
+
+    Node attributes never hold an absolute user path (SPEC 9.7 rules 2 and 10: scenes and .mrb files are shared).
+    The reference starts at the result folder: ``derivatives/normalization/<sid>/…`` inside a study (as
+    ``libcard_normalize`` writes it, study-relative), ``normalization/<folder>/…`` in the data directory
+    (``dataDirectory()``-relative), else ``<folder>/…``. ``outDir`` is the result folder (default: the folder of
+    ``path``, or its parent for a file in ``warps``). A relative value is returned as is (with ``/``).
+    """
+    if not path:
+        return ""
+    path = str(path)
+    if not _isAbsoluteReference(path):
+        return path.replace("\\", "/")
+    parts = [part for part in re.split(r"[\\/]+", path) if part]
+    start = None
+    if outDir:
+        outParts = [part for part in re.split(r"[\\/]+", str(outDir)) if part]
+        if outParts and parts[:len(outParts)] == outParts and len(parts) > len(outParts):
+            start = len(outParts) - 1
+    if start is None:
+        start = max(len(parts) - 2, 0)
+        if start >= 1 and parts[start] == "warps":
+            start -= 1
+    if start >= 1 and parts[start - 1] == "normalization":
+        start -= 1
+        if start >= 1 and parts[start - 1] == "derivatives":
+            start -= 1
+    return "/".join(parts[start:])
+
+
+def resolveReference(value, studyPath=None):
+    """The local path of a ``portableReference()`` (``derivatives/…`` needs ``studyPath``), an earlier absolute value as is, or None."""
+    if not value:
+        return None
+    if _isAbsoluteReference(value):
+        return value
+    parts = [part for part in str(value).split("/") if part]
+    if not parts:
+        return None
+    base = os.fspath(studyPath) if parts[0] == "derivatives" and studyPath else (dataDirectory() if parts[0] == "normalization" else None)
+    return os.path.join(base, *parts) if base else None
+
+
+def migrateAbsoluteReferences(scene=None):
+    """Replace the absolute ``LNM.Normalization`` / ``LNM.NormLesionWarp`` values of earlier scenes by ``portableReference()``.
+
+    Called when a scene is loaded and before it is saved (``LesionNetworkMapping.installSceneMigration``). Return
+    the number of attributes changed.
+    """
+    scene = scene or slicer.mrmlScene
+    changed = 0
+    for index in range(scene.GetNumberOfNodes()):
+        node = scene.GetNthNode(index)
+        for attribute in (NORMALIZATION_ATTRIBUTE, LESION_WARP_ATTRIBUTE):
+            value = node.GetAttribute(attribute)
+            if value and _isAbsoluteReference(value):
+                node.SetAttribute(attribute, portableReference(value))
+                changed += 1
+    return changed
+
+
 def sampleDataDirectory():
     """The folder of the bundled templates (SampleData's Resources/Data), or None."""
     module = getattr(slicer.modules, "sampledata", None)
@@ -297,6 +364,51 @@ def templateFile(templateId, role):
 def templateAvailable(templateId):
     """Whether the registration target and brain mask of a template are present (bundled or downloaded)."""
     return all(templateFile(templateId, role) for role in ("fixed", "mask"))
+
+
+def rememberedOptions():
+    """Normalization options remembered with "Remember these options" (``Studio/LNM/Normalize/LastOptions``, read only here).
+
+    Always a full dict: ``templateId`` (None: automatic), ``quality``, ``modality``, ``dilateMm`` (1 to 10 mm) and ``remember``
+    (whether anything was stored). Shared by the Map card and Draw's one-click Normalize to MNI.
+    """
+    options = {"templateId": None, "quality": "standard", "modality": "auto", "dilateMm": DEFAULT_DILATE_MM, "remember": False}
+    try:
+        stored = json.loads(str(qt.QSettings().value(LAST_OPTIONS_SETTING) or "{}"))
+    except ValueError:
+        stored = {}
+    if isinstance(stored, dict):
+        for key in ("templateId", "quality", "modality", "dilateMm"):
+            if key in stored:
+                options[key] = stored[key]
+        options["remember"] = bool(stored)
+    if options["quality"] not in QUALITIES:
+        options["quality"] = "standard"
+    try:
+        options["dilateMm"] = min(max(float(options["dilateMm"]), 1.0), 10.0)
+    except (TypeError, ValueError):
+        options["dilateMm"] = DEFAULT_DILATE_MM
+    return options
+
+
+def rememberedRequestOptions():
+    """Keyword arguments for ``NormalizeRequest`` from the remembered options (empty when nothing was remembered).
+
+    A remembered template is used only when it is still usable (built-in, or one of the user's with image and mask in the
+    Templates folder); otherwise the request keeps the default template.
+    """
+    options = rememberedOptions()
+    if not options["remember"]:
+        return {}
+    chosen = options["templateId"]
+    templateId = DEFAULT_TEMPLATE
+    if isinstance(chosen, str) and chosen and (chosen in TEMPLATE_IDS or isUserTemplate(chosen)):
+        try:
+            if templateAvailable(chosen):
+                templateId = chosen
+        except Exception:
+            logging.exception("Studio: the remembered normalization template could not be checked")
+    return {"templateId": templateId, "quality": options["quality"], "modality": options["modality"] or "auto", "dilateMm": options["dilateMm"]}
 
 
 def headTemplateAvailable(templateId=DEFAULT_TEMPLATE):
@@ -494,11 +606,39 @@ def findSourceVolume(segmentationNode):
     return None
 
 
+def seedSpaceOf(segmentationNode):
+    """``(space, resolution)`` that Map's seed check gives a segmentation (``LesionNetworkMappingLogic.seedSpace`` on its
+    reference grid), else None (native space).
+
+    The Normalize to MNI card asks the same question as the Seed check, so both give one verdict: a lesion file a fraction
+    of a millimetre off a template grid (TemplateFlow's 2009c 2 mm files) is mapped as MNI by the Seed check and the engine,
+    so it is not offered for normalization. ``spaceOf`` (``StudioLib.space``, ±0.01 mm) is the fallback when the Map
+    logic cannot be imported.
+    """
+    if segmentationNode is None:
+        return None
+    grid = _gridOf(segmentationNode)
+    if grid is not None:
+        try:
+            from LesionNetworkMapping import LesionNetworkMappingLogic
+        except Exception:
+            LesionNetworkMappingLogic = None
+        if LesionNetworkMappingLogic is not None:
+            try:
+                found = LesionNetworkMappingLogic.seedSpace(segmentationNode, tuple(int(n) for n in grid[0]), grid[1])
+                return tuple(found) if found else None
+            except Exception:
+                logging.exception("Lesion network mapping: the template space of the lesion could not be found")
+    return spaceOf(segmentationNode)
+
+
 def isNativeSegmentation(segmentationNode):
-    """True for a segmentation that is not on an MNI grid and is not a normalization result."""
+    """True for a segmentation that is not a normalization result and that Map's seed check finds in native space
+    (``seedSpaceOf``: not on an MNI grid).
+    """
     if segmentationNode is None or isNormalizationResult(segmentationNode):
         return False
-    return spaceOf(segmentationNode) is None
+    return seedSpaceOf(segmentationNode) is None
 
 
 class _Answer(tuple):
@@ -547,7 +687,14 @@ def lesionIsEmpty(segmentationNode, segmentId):
         return True
     labelmap = segmentationNode.GetBinaryLabelmapInternalRepresentation(segmentId)
     if labelmap is None:
-        return not segment.GetRepresentationNames()
+        # vtkSegment has no Python-usable list of its representations: look at the source one (closed surface)
+        segmentation = segmentationNode.GetSegmentation()
+        representation = segment.GetRepresentation(segmentation.GetSourceRepresentationName())
+        if representation is None:
+            representation = segment.GetRepresentation(slicer.vtkSegmentationConverter.GetSegmentationClosedSurfaceRepresentationName())
+        if representation is None:
+            return True
+        return representation.GetNumberOfPoints() == 0 if hasattr(representation, "GetNumberOfPoints") else False
     extent = labelmap.GetExtent()
     if extent[1] < extent[0] or extent[3] < extent[2] or extent[5] < extent[4]:
         return True
@@ -565,6 +712,7 @@ def offerNormalize(*args, **kwargs):
     Accepted forms: ``offerNormalize(segmentationNode, segmentId, shell=None)`` (Draw's call to action) and
     ``offerNormalize(mapContext, segmentationNode, segmentId)`` (the Map seed refusal). In Studio's Draw the
     Draw card is focused; otherwise the Map card is expanded (Studio switches to Map) with the scan preselected.
+    ``preferMap=True`` always shows the Map card, also from Draw (the Draw card's "Options in Map…").
     Returns True when a card was shown.
     """
     ctx = None
@@ -575,9 +723,10 @@ def offerNormalize(*args, **kwargs):
     segmentationNode = args.pop(0) if args else kwargs.pop("segmentationNode", None)
     segmentId = args.pop(0) if args else kwargs.pop("segmentId", None)
     shell = args.pop(0) if args else kwargs.pop("shell", None)
+    preferMap = bool(kwargs.pop("preferMap", False))
     if shell is None and ctx is None:
         shell = _studioShell()
-    if ctx is None and shell is not None:
+    if ctx is None and shell is not None and not preferMap:
         current = None
         try:
             current = shell.currentWorkspace()
@@ -803,20 +952,78 @@ def _writeJsonAtomic(path, data):
     os.replace(tmpPath, path)
 
 
+class _RowElider(qt.QObject):
+    """Keeps the one-line status text of a ``ProgressRow`` that does not wrap ("Normalizing · nonlinear · 26% · ~28 s left") inside
+    its label. The label has an Ignored width, so Qt would cut the last glyphs without an ellipsis: the text is shortened with
+    an ellipsis (and the full text is the tooltip) when it is set and when the label is resized.
+    """
+
+    def __init__(self, label):
+        qt.QObject.__init__(self, label)
+        self.label = label
+        self.full = None  # the text that was set
+        self.shown = None  # what the label displays for it
+        label.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() == qt.QEvent.Resize and self.full is not None:
+            self.refresh()
+        return False
+
+    def setText(self, text):
+        self.full = str(text)
+        self.shown = None
+        self.refresh()
+
+    def refresh(self):
+        label = self.label
+        if self.shown is not None and str(label.text) != self.shown:
+            self.full = self.shown = None  # another text was set (Stopping..., a failure): it is not ours any more
+            return
+        text = self.full
+        if text is None:
+            return
+        width = label.width - 2 * label.margin - 2 * label.frameWidth
+        if label.wordWrap or width < 40:  # a wrapped text is read in full; an unplaced label gets its width with the resize event
+            shown = text
+        else:
+            shown = str(label.fontMetrics().elidedText(text, qt.Qt.ElideRight, width))
+        if str(label.text) != shown:
+            label.setText(shown)
+        self.shown = shown
+        if shown != text:
+            label.setToolTip(text)
+        elif not label.wordWrap:
+            label.setToolTip("")
+
+
+def _elider(progressRow):
+    elider = getattr(progressRow, "_rowElider", None)
+    if elider is None:
+        elider = progressRow._rowElider = _RowElider(progressRow.label)
+    return elider
+
+
 def setRowProgress(progressRow, fraction, text=None):
     """``ProgressRow.setProgress()`` without the progress bar's synchronous repaint (measured 20-35 ms per value in
     the Map panel): the bar is repainted with the next paint of the window instead.
+
+    A one-line status text that is wider than its label ends with an ellipsis (the full text is the tooltip).
     """
     bar = progressRow.bar
-    if text is not None and str(progressRow.label.text) == str(text):
+    elider = _elider(progressRow)
+    if text is not None and elider.full == str(text) and elider.shown == str(progressRow.label.text):
         text = None  # an unchanged text costs nothing
     if fraction is not None and bar.maximum == 1000 and bar.value == round(min(max(float(fraction), 0.0), 1.0) * 1000):
         if text is not None:
             progressRow.label.setText(text)
+            elider.setText(text)
         return
     bar.setUpdatesEnabled(False)
     try:
         progressRow.setProgress(fraction, text)
+        if text is not None:
+            elider.setText(text)
     finally:
         bar.setUpdatesEnabled(True)
     bar.update()
@@ -845,6 +1052,11 @@ def describeFailure(info):
         return _("The lesion is empty: trace it first, or normalize the scan only."), None
     if code == "locked":
         return _("Another job is writing this output folder; try again when it has finished."), None
+    if code == "output_unwritable":
+        return _("The output folder cannot be written: {folder}. Choose a folder you can write to as the data folder (Settings).").format(folder=event.get("path") or info.get("path") or _("(unknown)")), None
+    if code == "exception":
+        # an unexpected error: its text is internal (it may name local paths); the job log and the Python console have it
+        return _("Normalization failed because of an unexpected error ({kind}); the log has the details.").format(kind=event.get("type") or _("internal error")), None
     return _("Normalization failed: {message}").format(message=message), None
 
 
@@ -905,6 +1117,16 @@ class NormalizeRequest:
         return f"NormalizeRequest(scan={self.scanNode.GetName() if self.scanNode is not None else self.scanPath!r}, template={self.templateId}, quality={self.quality})"
 
 
+def _sourceSegmentName(request):
+    """The name of the native segment a request normalizes, or None (scan only, a lesion file, no such segment)."""
+    node = request.segmentationNode if request is not None else None
+    if node is None or not request.segmentId:
+        return None
+    segment = node.GetSegmentation().GetSegment(request.segmentId)
+    name = segment.GetName() if segment is not None else ""
+    return name.strip() or None
+
+
 class NormalizeResult:
     """A loaded normalization: folder, record, outputs, QC values and the nodes made from it."""
 
@@ -935,6 +1157,11 @@ class NormalizeResult:
     @property
     def provenancePath(self):
         return os.path.join(self.outDir, _normalizeLib().PROVENANCE_JSON)
+
+    @property
+    def reference(self):
+        """The ``LNM.Normalization`` value of the nodes made from this result (``portableReference()``, never absolute)."""
+        return portableReference(self.provenancePath, self.outDir)
 
     def pixmap(self, thumbnail=False):
         """The QC mosaic (``thumbnail``: the small copy made by the worker, when there is one)."""
@@ -1012,6 +1239,8 @@ class NormalizeController(VTKObservationMixin):
         self._reviewDisplayState = None
         self._exportedLesion = None
         self._observedNative = None
+        #: What start() set aside of the previous result: a run that is stopped gives it back (nothing was changed)
+        self._previousRun = None
         self._editGeneration = 0
         #: Counts scene closes: work started before a close never adds nodes to the next scene
         self._sceneGeneration = 0
@@ -1065,6 +1294,7 @@ class NormalizeController(VTKObservationMixin):
         if request.scanNode is None and not request.scanPath:
             raise ValueError("A normalization needs a scan")
         self.restoreViews()
+        self._previousRun = self._setAsideRun()
         self.request = request
         self.result = None
         self.failure = None
@@ -1080,15 +1310,20 @@ class NormalizeController(VTKObservationMixin):
         self._setEdited(False, False)
         self._tmpDir = os.path.join(slicer.app.temporaryPath, "LNMNormalize", uuid.uuid4().hex)
         writes = []
-        scanPath = self._scanSource(request, writes)
-        lesionPath = self._lesionSource(request, writes)
-        anatPath = self._anatSource(request, writes)
-        initialTransform = None
-        if request.initialTransformNode is not None:
-            os.makedirs(self._tmpDir, exist_ok=True)
-            initialTransform = os.path.join(self._tmpDir, "initial_transform.h5")
-            if not slicer.util.saveNode(request.initialTransformNode, initialTransform):
-                raise RuntimeError("The rough alignment could not be saved")
+        try:
+            scanPath = self._scanSource(request, writes)
+            lesionPath = self._lesionSource(request, writes)
+            anatPath = self._anatSource(request, writes)
+            initialTransform = None
+            if request.initialTransformNode is not None:
+                os.makedirs(self._tmpDir, exist_ok=True)
+                initialTransform = os.path.join(self._tmpDir, "initial_transform.h5")
+                if not slicer.util.saveNode(request.initialTransformNode, initialTransform):
+                    raise RuntimeError("The rough alignment could not be saved")
+        except Exception:
+            self._cleanupTmp()
+            self._restoreRun()  # nothing was started: the previous result stays
+            raise
         self.outDir = request.outDir or defaultOutputDirectory(request.scanNode, request.scanPath, request.subject, request.studyPath, request.sid)
         self._jobRunRoot = os.path.join(os.fspath(request.studyPath), ".studio", "jobs") if request.studyPath else None
         self.args = self.arguments(request, scanPath, lesionPath, anatPath, initialTransform, self.outDir)
@@ -1103,6 +1338,53 @@ class NormalizeController(VTKObservationMixin):
             self._submit()
         self.timings["start_ms"] = round((time.perf_counter() - started) * 1000.0, 2)
         return True
+
+    def _setAsideRun(self):
+        """What a new run replaces of the previous result (``None`` without one): ``_restoreRun()`` puts it back."""
+        if self.result is None:
+            return None
+        return {"result": self.result, "request": self.request, "outDir": getattr(self, "outDir", None), "args": getattr(self, "args", None),
+                "warnings": self.warnings, "stage": self.stage, "exportedLesion": self._exportedLesion, "edited": (self.edited, self.needsReregister),
+                "generation": self._sceneGeneration}
+
+    def _restoreRun(self):
+        """Give back the result that ``start()`` set aside, when the new run ended without a change (stopped, or never started).
+
+        Not when the scene was closed meanwhile, or when a node of that result is gone. Returns True when it was restored.
+        """
+        previous, self._previousRun = self._previousRun, None
+        if previous is None or previous["generation"] != self._sceneGeneration:
+            return False
+        result = previous["result"]
+        if not all(node is None or slicer.mrmlScene.IsNodePresent(node) for node in (result.volumeNode, result.segmentationNode)):
+            return False
+        self.result = result
+        self.request = previous["request"]
+        self.outDir = previous["outDir"]
+        self.args = previous["args"]
+        self.warnings = previous["warnings"]
+        self.stage = previous["stage"]
+        self.fraction = 1.0
+        self.eta = None
+        self._exportedLesion = previous["exportedLesion"]
+        self._trackEdits(result)
+        self._setEdited(*previous["edited"])
+        self._editTimer.start()  # the native lesion may have been edited since: compare it again
+        return True
+
+    def _setCancelled(self):
+        """The run ended without a result: the previous one (if any) is back before the state changes.
+
+        A run that the scene close stopped ends idle, not cancelled: the user did not stop it, and the next scene's cards
+        must not show "stopped" for a run they never saw.
+        """
+        if self._runGeneration != self._sceneGeneration:
+            self._previousRun = None
+            self.request = None
+            self._setState(IDLE)
+            return
+        self._restoreRun()
+        self._setState(CANCELLED)
 
     def _scanSource(self, request, writes):
         """The scan file, or a NIfTI that a worker writes from a copy of the voxels (no gzip on the main thread)."""
@@ -1218,7 +1500,7 @@ class NormalizeController(VTKObservationMixin):
         self._worker = None
         if self._stopRequested:
             self._cleanupTmp()
-            self._setState(CANCELLED)
+            self._setCancelled()
             return
         if error is not None:
             self._fail(_("The scan or the lesion could not be exported: {error}").format(error=error), "export_failed")
@@ -1314,7 +1596,7 @@ class NormalizeController(VTKObservationMixin):
         elif self.state == LOADING and self._worker is not None:
             self._worker.cancelled = True
             self._worker = None
-            self._setState(CANCELLED)
+            self._setCancelled()
 
     #
     # Done
@@ -1327,6 +1609,7 @@ class NormalizeController(VTKObservationMixin):
 
     def _fail(self, message, code=None, event=None, job=None):
         self.failure = {"message": message, "code": code, "event": event or {}, "job": job}
+        self._previousRun = None
         self._setState(FAILED)
         self._notify("failed", self.failure)
 
@@ -1334,14 +1617,14 @@ class NormalizeController(VTKObservationMixin):
         self._progressTimer.stop()
         self._cleanupTmp()
         if job.state == _jobrunner.CANCELLED:
-            self._setState(CANCELLED)
+            self._setCancelled()
             return
         if job.state != _jobrunner.DONE:
             event = job.errorEvent or {}
             self._fail(job.failureReason or _("the normalization failed"), event.get("code"), event, job)
             return
         if self._stopRequested:
-            self._setState(CANCELLED)
+            self._setCancelled()
             return
         self._setState(LOADING)
         status = (job.doneEvent or {}).get("status") or "done"
@@ -1354,7 +1637,7 @@ class NormalizeController(VTKObservationMixin):
             self._fail(_("The result could not be read: {error}").format(error=error), "read_failed")
             return
         if self._stopRequested or self._runGeneration != self._sceneGeneration or not self._requestNodesPresent(self.request):
-            self._setState(CANCELLED)  # stopped, or the scene was closed: no node of another scene's lesion
+            self._setCancelled()  # stopped, or the scene was closed: no node of another scene's lesion
             return
         started = time.perf_counter()
         collecting = gc.isenabled()
@@ -1370,10 +1653,14 @@ class NormalizeController(VTKObservationMixin):
                 gc.enable()
         self.timings["nodes_ms"] = round((time.perf_counter() - started) * 1000.0, 2)
         result.commandLine = self.commandLine()
+        self._previousRun = None
         self.result = result
         self.fraction = 1.0
         self._setState(DONE)
         self._trackEdits(result)
+        # The result was made from the lesion as it was at the start: an edit made while the job ran (not observed then)
+        # must flag it too, so compare the native lesion once now (debounced, a worker does the voxel work)
+        self._editTimer.start()
         # The cards build their QC panel in the next event-loop turn: node creation and layout are two short pauses, not one long one
         qt.QTimer.singleShot(0, lambda: self.result is result and self._notify("resultReady", result))
 
@@ -1401,6 +1688,7 @@ class NormalizeController(VTKObservationMixin):
             self.warpJob.stop()
         self.warpJob = None
         self.result = None
+        self._previousRun = None
         self._setEdited(False, False)
         if self.isBusy():
             self.stop()  # the job ends as cancelled (_onJobDone / _onOutputsLoaded create no node)
@@ -1409,13 +1697,22 @@ class NormalizeController(VTKObservationMixin):
             self._setState(IDLE)
 
     def loadResult(self, outDir, request=None):
-        """Load an existing result folder (no job): the worker reads it, then the nodes are made. Returns False when busy."""
+        """Load an existing result folder (no job): the worker reads it, then the nodes are made. Returns False when busy.
+
+        The native lesion as it is now is the original of the edit checks (as the exported lesion is for a run of
+        ``start()``): without it, every later check would report an edit outside the mask.
+        """
         if self.isBusy():
             return False
         self.request = request or self.request
         self.outDir = outDir
         self._stopRequested = False
         self._runGeneration = self._sceneGeneration
+        request = self.request
+        if request is not None and request.segmentationNode is not None and request.segmentId:
+            self._exportedLesion = self.exportLesion(request.segmentationNode, request.segmentId)
+        else:
+            self._exportedLesion = None
         self._setState(LOADING)
         self._worker = _Worker(lambda: _loadOutputs(outDir), lambda loaded, error: self._onOutputsLoaded(loaded, error, "reused")).start()
         return True
@@ -1426,15 +1723,46 @@ class NormalizeController(VTKObservationMixin):
 
     @staticmethod
     def _existingNodes(provenancePath, fingerprint):
-        """The volume and segmentation already made from this result (same normalization.json and fingerprint), or (None, None)."""
+        """The volume and segmentation already made from this result (same normalization.json and fingerprint), or (None, None).
+
+        Nodes hold ``portableReference(provenancePath)``; nodes of earlier scenes may still hold the absolute path.
+        """
         volume = segmentation = None
+        references = {portableReference(provenancePath, os.path.dirname(provenancePath)), provenancePath}
         for className in ("vtkMRMLScalarVolumeNode", "vtkMRMLSegmentationNode"):
             for node in slicer.util.getNodesByClass(className):
-                if node.GetAttribute(NORMALIZATION_ATTRIBUTE) == provenancePath and node.GetAttribute(FINGERPRINT_ATTRIBUTE) == (fingerprint or ""):
+                if node.GetAttribute(NORMALIZATION_ATTRIBUTE) in references and node.GetAttribute(FINGERPRINT_ATTRIBUTE) == (fingerprint or ""):
                     if className == "vtkMRMLScalarVolumeNode" and volume is None:
                         volume = node
                     elif className == "vtkMRMLSegmentationNode" and segmentation is None:
                         segmentation = node
+        return volume, segmentation
+
+    @staticmethod
+    def _previousNodes(request, result):
+        """The volume and segmentation of an earlier result of the same native lesion in the same space, or (None, None).
+
+        A new registration of an edited lesion (Normalize again, Re-register, ⋯ Redo) replaces their voxels instead of
+        adding a second MNI lesion: the Map seed and every other reference keep following the lesion (one MNI lesion per
+        native lesion and template). A segmentation that holds the run's own lesion before an "Update MNI lesion" comes
+        first; else the most recent one. The volume is the one made with that segmentation (same reference and run).
+        """
+        native = request.segmentationNode if request is not None else None
+        if native is None:
+            return None, None
+        origin = f"{native.GetID()}|{request.segmentId or ''}"
+        space = spaceAttributeValue(result.templateId, result.record)
+        candidates = [node for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode")
+                      if node.GetAttribute(NORMALIZED_FROM_ATTRIBUTE) == origin and node.GetAttribute(SPACE_ATTRIBUTE) == space
+                      and node.GetAttribute(NORMALIZATION_ATTRIBUTE)]
+        if not candidates:
+            return None, None
+        runOf = lambda node: (node.GetAttribute(FINGERPRINT_ATTRIBUTE) or "").split("+edit-")[0]  # noqa: E731
+        own = [node for node in candidates if runOf(node) == (result.fingerprint or "")]
+        segmentation = own[0] if own else candidates[-1]
+        reference, fingerprint = segmentation.GetAttribute(NORMALIZATION_ATTRIBUTE), runOf(segmentation)
+        volume = next((node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
+                       if node.GetAttribute(NORMALIZATION_ATTRIBUTE) == reference and node.GetAttribute(FINGERPRINT_ATTRIBUTE) == fingerprint), None)
         return volume, segmentation
 
     def createNodes(self, loaded, status, request):
@@ -1451,8 +1779,13 @@ class NormalizeController(VTKObservationMixin):
             result.nativeSegmentId = request.segmentId
         provenance = result.provenancePath
         volume, segmentation = self._existingNodes(provenance, result.fingerprint)
+        # A new registration of the same native lesion (edited, or other options) replaces the earlier result's nodes
+        previousVolume, previousSegmentation = self._previousNodes(request, result) if segmentation is None else (None, None)
         scanName = scanNode.GetName() if scanNode is not None else (result.record.get("subject") or "scan")
-        if volume is None and "scan" in loaded:
+        if volume is None and previousVolume is not None and "scan" in loaded:
+            volume = previousVolume
+            self._replaceScan(volume, loaded["scan"], result)
+        elif volume is None and "scan" in loaded:
             scan = loaded["scan"]
             # The display node comes first, with AutoWindowLevel off: no histogram of the 8.5 M voxels on the main thread
             display = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeDisplayNode")
@@ -1468,14 +1801,20 @@ class NormalizeController(VTKObservationMixin):
             image.GetPointData().SetScalars(scan["scalars"])
             volume.SetIJKToRASMatrix(_arrayToMatrix(scan["affine"]))
             volume.SetAndObserveImageData(image)
+        if previousSegmentation is not None:
+            segmentation = previousSegmentation
+            self._replaceLesion(segmentation, loaded.get("lesion"), result, volume)
         if segmentation is None:
-            segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", slicer.mrmlScene.GenerateUniqueName(f"Lesion ({templateName(templateId)})"))
+            # The MNI lesion keeps the name of the native segment (segment ID stays LESION_SEGMENT): with several lesions
+            # in one segmentation, the Map seed then names the lesion that was normalized
+            lesionName = _sourceSegmentName(request) or LESION_SEGMENT
+            segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", slicer.mrmlScene.GenerateUniqueName(f"{lesionName} ({templateName(templateId)})"))
             segmentation.CreateDefaultDisplayNodes()
             # Hidden until it is shown over a template-space image (showInViews): over the native scan it would mislead
             segmentation.GetDisplayNode().SetVisibility(False)
             if volume is not None:
                 segmentation.SetReferenceImageGeometryParameterFromVolumeNode(volume)
-            segmentId = segmentation.GetSegmentation().AddEmptySegment(LESION_SEGMENT, LESION_SEGMENT, LESION_COLOR)
+            segmentId = segmentation.GetSegmentation().AddEmptySegment(LESION_SEGMENT, lesionName, LESION_COLOR)
             mask = loaded.get("lesion")
             if mask is not None and mask.get("kji") is not None:
                 slicer.vtkSlicerSegmentationsModuleLogic.SetBinaryLabelmapToSegment(_orientedLabelmap(mask), segmentation, segmentId)
@@ -1489,8 +1828,40 @@ class NormalizeController(VTKObservationMixin):
         return result
 
     @staticmethod
+    def _replaceScan(volume, scan, result):
+        """Replace the warped scan of an earlier result in place (``createNodes()``: same node, the new run's voxels)."""
+        display = volume.GetDisplayNode()
+        if display is not None:
+            display.AutoWindowLevelOff()
+            display.SetWindowLevelMinMax(*scan["window"])
+        image = vtk.vtkImageData()
+        shape = scan["shape"]
+        image.SetDimensions(int(shape[0]), int(shape[1]), int(shape[2]))
+        image.GetPointData().SetScalars(scan["scalars"])
+        volume.SetIJKToRASMatrix(_arrayToMatrix(scan["affine"]))
+        volume.SetAndObserveImageData(image)
+        NormalizeController._tag(volume, result)
+
+    @staticmethod
+    def _replaceLesion(segmentation, mask, result, volume=None):
+        """Replace the MNI lesion of an earlier result in place (``createNodes()``): the run's lesion, the run's tags."""
+        if volume is not None:
+            segmentation.SetReferenceImageGeometryParameterFromVolumeNode(volume)
+        if segmentation.GetSegmentation().GetSegment(LESION_SEGMENT) is None:
+            segmentation.GetSegmentation().AddEmptySegment(LESION_SEGMENT, LESION_SEGMENT, LESION_COLOR)
+        if mask is not None and mask.get("kji") is not None:
+            labelmap = _orientedLabelmap(mask)
+        else:
+            labelmap = slicer.vtkOrientedImageData()
+            labelmap.SetExtent(0, -1, 0, -1, 0, -1)
+            labelmap.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 1)
+        slicer.vtkSlicerSegmentationsModuleLogic.SetBinaryLabelmapToSegment(labelmap, segmentation, LESION_SEGMENT)
+        NormalizeController._tag(segmentation, result)
+        segmentation.RemoveAttribute(LESION_WARP_ATTRIBUTE)  # the warp of an "Update MNI lesion" of the earlier run
+
+    @staticmethod
     def _tag(node, result):
-        node.SetAttribute(NORMALIZATION_ATTRIBUTE, result.provenancePath)
+        node.SetAttribute(NORMALIZATION_ATTRIBUTE, result.reference)
         node.SetAttribute(SPACE_ATTRIBUTE, spaceAttributeValue(result.templateId, result.record))
         node.SetAttribute(SUGGESTION_ATTRIBUTE, result.suggestion or "")
         node.SetAttribute(FINGERPRINT_ATTRIBUTE, result.fingerprint or "")
@@ -1537,7 +1908,7 @@ class NormalizeController(VTKObservationMixin):
         node = slicer.util.loadTransform(path)
         if node is not None:
             node.SetName(f"native → {result.templateId}")
-            node.SetAttribute(NORMALIZATION_ATTRIBUTE, result.provenancePath)
+            node.SetAttribute(NORMALIZATION_ATTRIBUTE, result.reference)
         result.transformNode = node
         return node
 
@@ -1569,6 +1940,12 @@ class NormalizeController(VTKObservationMixin):
         for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
             if node.GetAttribute(REVIEW_TEMPLATE_ATTRIBUTE) == templateId:
                 return node, False
+        if isUserTemplate(templateId):
+            # The open volume of the user's template carries its id in Studio.TemplateId (its Studio.Space is the space, never "user:<slug>")
+            for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
+                if (node.GetAttribute("Studio.TemplateId") == templateId and not node.IsA("vtkMRMLLabelMapVolumeNode")
+                        and not isNormalizationResult(node) and self._isTemplateVolume(node)):
+                    return node, False
         for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
             if node.GetAttribute("Studio.Role") == "template" and not isNormalizationResult(node):
                 found = spaceOf(node)
@@ -1577,12 +1954,21 @@ class NormalizeController(VTKObservationMixin):
         path = templateFile(templateId, "reference") or (templateFile(templateId, "fixed") if templateId == DEFAULT_TEMPLATE else templateFile(templateId, "head"))
         if not path:
             return None, False
-        node = self._readTemplateVolume(path, f"{templateId} template")
+        node = self._readTemplateVolume(path, f"{templateName(templateId)} template")
         if node is None:
             return None, False
         node.SetAttribute(REVIEW_TEMPLATE_ATTRIBUTE, templateId)
         node.SetAttribute(SPACE_ATTRIBUTE, spaceAttributeValue(templateId))
         return node, True
+
+    @staticmethod
+    def _isTemplateVolume(node):
+        """False for the volume of a removed template with the same id that was added again with another image."""
+        try:
+            from StudioLib import templates
+            return templates.templateOfNode(node) is not None
+        except Exception:
+            return True
 
     @staticmethod
     def _readTemplateVolume(path, name):
@@ -1813,7 +2199,7 @@ class NormalizeController(VTKObservationMixin):
         """Replace the voxels of the MNI lesion segment in one step.
 
         The segmentation then no longer holds the run's lesion: its fingerprint is changed so that a later reuse
-        of the run (same fingerprint) makes a new segmentation from the run's lesion instead of returning this one.
+        of the run (same fingerprint) does not return it as it is but puts the run's lesion back (``_previousNodes()``).
         """
         segmentation = result.segmentationNode
         if segmentation is None or not slicer.mrmlScene.IsNodePresent(segmentation) or result.segmentId is None:
@@ -1829,7 +2215,7 @@ class NormalizeController(VTKObservationMixin):
         stamp = uuid.uuid4().hex[:8]
         segmentation.SetAttribute(FINGERPRINT_ATTRIBUTE, f"{result.fingerprint or ''}+edit-{stamp}")
         if warpPath:
-            segmentation.SetAttribute(LESION_WARP_ATTRIBUTE, warpPath)
+            segmentation.SetAttribute(LESION_WARP_ATTRIBUTE, portableReference(warpPath, result.outDir))
         return True
 
     #
@@ -1921,7 +2307,7 @@ class NormalizeController(VTKObservationMixin):
         menuButton.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0px; }")
         menu = qt.QMenu(menuButton)
         menu.setObjectName("LNMNormalizeMenu")
-        menu.addAction(_("Open folder")).connect("triggered()", lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(result.outDir)))
+        menu.addAction(_("Open folder")).connect("triggered()", lambda: widgets.showInFileManager(result.outDir))
         menu.addAction(_("Load transform")).connect("triggered()", lambda: self.loadTransform(result))
         if onRedo is not None:
             menu.addSeparator()

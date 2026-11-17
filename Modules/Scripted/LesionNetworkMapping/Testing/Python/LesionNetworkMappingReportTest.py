@@ -195,6 +195,63 @@ class ReportTest(unittest.TestCase):
         self.assertNotIn('href="report.html"', files)
         self.assertIn("Neurological convention", text)
 
+    def test_watermark(self):
+        """L-53: a tutorial study (TUTORIAL DATA) or a synthetic connectome (SYNTHETIC) is named in the title and a
+        header banner, and every map figure carries the watermark (bug bash BB-1: reports had none).
+        """
+        from PIL import Image
+
+        def title(text):
+            return re.search(r"<title>([^<]*)</title>", text).group(1)
+
+        def overlap_png(text):
+            source = re.search(r'<img src="data:image/png;base64,([^"]+)"[^>]*alt="Lesion overlap montage"', text).group(1)
+            return np.asarray(Image.open(io.BytesIO(base64.b64decode(source))).convert("RGB")).astype(int)
+
+        # The fixture's connectome is synthetic
+        self.assertIn("(SYNTHETIC)", title(self.text))
+        self.assertRegex(section_html(self.text, "header"), r'<p class="banner watermark" role="alert">SYNTHETIC: ')
+        # A tutorial study wins over the synthetic connectome (figures.watermark_for)
+        study_json = os.path.join(self.fx["study"], "study.json")
+        original = read(study_json)
+
+        def restore():
+            with open(study_json, "w", encoding="utf-8") as f:
+                f.write(original)
+
+        self.addCleanup(restore)
+        edit_json(study_json, lambda data: data.update(tutorial=True))
+        tutorial = read(report.render_report(copy_out(self.out, "copy-tutorial"), now=NOW, strict=True))
+        self.assertIn("(TUTORIAL DATA)", title(tutorial))
+        self.assertRegex(section_html(tutorial, "header"), r'<p class="banner watermark" role="alert">TUTORIAL DATA: ')
+        self.assertEqual(report.lint_wording(tutorial), [])
+        # Without a watermark the page and the figures carry none
+        with mock.patch.object(report._Report, "_watermark", return_value=None):
+            plain = read(report.render_report(copy_out(self.out, "copy-nowatermark"), now=NOW, strict=True))
+        self.assertNotIn("TUTORIAL DATA", plain)
+        self.assertNotIn("banner watermark", plain)
+        marked, unmarked = overlap_png(tutorial), overlap_png(plain)
+        self.assertEqual(marked.shape, unmarked.shape)
+        changed = np.abs(marked - unmarked).sum(axis=2) > 0
+        self.assertGreater(int(changed.sum()), 50, "the watermark is burnt into the report figures")
+        height, width = changed.shape
+        rows, columns = np.nonzero(changed)
+        self.assertLess(abs(rows.mean() - height / 2), height / 4, "centred")
+        self.assertLess(abs(columns.mean() - width / 2), width / 4, "centred")
+        # Every canvas figure records and draws it
+        canvas, shape, affine = self.canvas()
+        marked_canvas = reportfigs.Canvas(canvas.template, watermark="tutorial")
+        lesion = np.zeros(shape, dtype=np.uint8)
+        lesion[18:22, 22:26, 18:22] = 1
+        volume = figures.Volume(lesion, affine, "lesion")
+        for name, call in (("montage", lambda c: c.montage(volume, "lesion", slices=[0.0])),
+                           ("ortho", lambda c: c.ortho(volume, (0.0, 0.0, 0.0))),
+                           ("gallery_strip", lambda c: c.gallery_strip(volume, None, None, 1.0, label="1"))):
+            with_mark, without = call(marked_canvas), call(canvas)
+            self.assertEqual(with_mark.meta["watermark"], "TUTORIAL DATA", name)
+            self.assertIsNone(without.meta["watermark"], name)
+            self.assertFalse(np.array_equal(np.asarray(with_mark.image), np.asarray(without.image)), name)
+
     def test_preview_overrides_and_missing_inputs(self):
         out = copy_out(self.out, "copy-preview")
 
@@ -216,6 +273,31 @@ class ReportTest(unittest.TestCase):
         self.assertIn("not computed: no control group (every mapped lesion is a case)", section_html(text, "specificity"))
         self.assertIn("not computed: no confirmed score column", section_html(text, "slnm"))
         self.assertNotIn('id="slnm-AphasiaScore"', text)
+
+    def test_nulls_off_shows_reason(self):
+        """Bug bash BB-1: with null models off the section read 'Null models (); K = n/a ...' instead of the reason."""
+        reason = "null models are off (--nulls off)"
+        out = copy_out(self.out, "copy-nullsoff")
+
+        def change(data):
+            data["cohort"]["nulls"] = {"reason": reason}  # what pipeline._skip records
+            for stage in data["stages"]:
+                if stage["name"] == "nulls":
+                    stage.update(status="skipped", reason=reason)
+
+        edit_json(os.path.join(out, pipeline.PIPELINE_JSON), change)
+        nulls = section_html(read(report.render_report(out, now=NOW, strict=True)), "nulls")
+        self.assertIn(f"not computed: {html.escape(reason)}", nulls)
+        self.assertNotIn("n/a null cohorts", nulls)
+        self.assertNotIn("()", nulls)
+
+        # a record without a stage entry still shows its own reason
+        def change2(data):
+            data["stages"] = [stage for stage in data["stages"] if stage["name"] != "nulls"]
+
+        edit_json(os.path.join(out, pipeline.PIPELINE_JSON), change2)
+        nulls = section_html(read(report.render_report(out, now=NOW, strict=True)), "nulls")
+        self.assertIn(f"not computed: {html.escape(reason)}", nulls)
 
     def test_no_template(self):
         out = copy_out(self.out, "copy-notemplate")
@@ -420,6 +502,21 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(png, reportfigs.encode_png(result.image), "deterministic bytes")
         self.assertLessEqual(len(reportfigs.encode_png(result.image, 128)), len(png) + 64)
 
+    def test_masked_keeps_p_exactly_alpha(self):
+        """A voxel with p = 50/1000 (stored as float32 0.0500000007) is kept at alpha 0.05: the rule is p <= alpha everywhere."""
+        from types import SimpleNamespace
+
+        affine = np.eye(4)
+        values = np.full((2, 2, 1), 3.0, dtype=np.float32)
+        p = np.array([50 / 1000, 0.049, 0.051, np.nan], dtype=np.float32).reshape(2, 2, 1)
+        with tempfile.TemporaryDirectory() as folder:
+            value_path, p_path = os.path.join(folder, "t.nii.gz"), os.path.join(folder, "p.nii.gz")
+            nifti.write_nifti(value_path, values, affine, dtype="float32")
+            nifti.write_nifti(p_path, p, affine, dtype="float32")
+            data, _affine, kept = report._Report.masked(SimpleNamespace(alpha=0.05), value_path, p_path)
+        self.assertEqual(kept, 2)
+        self.assertEqual(data.reshape(-1).tolist(), [3.0, 3.0, 0.0, 0.0])
+
     def test_find_template(self):
         explicit = os.path.join(self.tmp, "explicit_T1w.nii.gz")
         shape, affine = ras_grid()
@@ -466,6 +563,16 @@ class ReportTest(unittest.TestCase):
         for banned in ("lstsq", "pinv", "default_rng", "np.random", "scipy.stats", "polyfit", "corrcoef", "permutation_test", "import vtk", "import slicer", "matplotlib"):
             self.assertNotIn(banned, code)
         self.assertNotIn("<script", code.lower())
+
+
+class MapsPhraseTest(unittest.TestCase):
+    """Bug report-html-singular-plural-1-lesions-1-maps: one map reads "1 map", not "1 maps"."""
+
+    def test_singular_and_plural(self):
+        self.assertEqual(report._maps_phrase(1), "1 map")
+        self.assertEqual(report._maps_phrase("1", "lesion network "), "1 lesion network map")
+        self.assertEqual(report._maps_phrase(3), "3 maps")
+        self.assertEqual(report._maps_phrase("n/a"), "n/a maps")
 
 
 if __name__ == "__main__":

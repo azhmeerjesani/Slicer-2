@@ -77,7 +77,7 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             draw.saveLesionDialog = self._saveLesionDialog
             del self._saveLesionDialog
         for provider in palette.providers():
-            if provider is _w205Provider:
+            if provider is _w205Provider or getattr(provider, "__name__", "") == "paletteItems":
                 palette.unregisterProvider(provider)
         live = shell._shell
         if live is not None:
@@ -192,6 +192,11 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         from StudioLib import palette
 
         studioShell = self._applyStudio()
+        # The real app registers the projects provider ("Save a copy as…" has the synonym "export"): so do the gate queries
+        from StudioLib import projects_ui
+
+        palette.registerProvider(projects_ui.paletteItems)
+        self.assertTrue(any(entry.id == "projects.saveCopy" for entry in palette.search(studioShell, "copy")))
         for withW205 in (False, True):
             if withW205:
                 palette.registerProvider(_w205Provider)
@@ -457,6 +462,71 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._pump()
         self.assertEqual(slicer.mrmlScene.GetNumberOfNodes(), nodesBefore, "re-opening a Recent file adds no node")
 
+    def test_06b_recent_files_skip_missing_and_internal(self):
+        """Recent files of Search match Library's: a deleted file and a file of the cache folder are not offered; choosing a
+        recent file that disappeared after the list was built says it was moved or deleted (no generic "Failed to load").
+        """
+        import os
+
+        from StudioLib import importer, palette
+
+        studioShell = self._applyStudio()
+        directory = qt.QTemporaryDir()
+        paths = []
+        for name in ("StudioPaletteKeep", "StudioPaletteGone"):
+            path = f"{directory.path()}/{name}.nrrd"
+            scan = self._mriVolume(name, (10, 10, 10), 1.0, (0.0, 0.0, 0.0))
+            self.assertTrue(slicer.util.saveNode(scan, path))
+            slicer.mrmlScene.RemoveNode(scan)
+            paths.append(path)
+        keep, gone = paths
+        importer.loadFiles([keep, gone], studioShell)
+        self._pump()
+        studioShell.openPalette()
+        live = palette.instance()
+        live.index.refresh()
+        ids = [entry.id for entry in live.index.entries if entry.kind == palette.KIND_RECENT]
+        self.assertIn(f"recent:{gone}", ids)
+        # The file is deleted: Search no longer lists it; nor a file of the cache folder, which Library hides
+        os.remove(gone)
+        cacheFolder = slicer.app.cachePath
+        os.makedirs(cacheFolder, exist_ok=True)
+        cached = os.path.join(cacheFolder, "StudioPaletteCached.nrrd")
+        scan = self._mriVolume("StudioPaletteCached", (10, 10, 10), 1.0, (0.0, 0.0, 0.0))
+        self.assertTrue(slicer.util.saveNode(scan, cached))
+        slicer.mrmlScene.RemoveNode(scan)
+        try:
+            importer.loadFiles([cached], studioShell)
+            self._pump()
+            menuFiles = [str(action.property("fileParameters").get("fileName", ""))
+                         for action in self.mainWindow.findChild("QMenu", "RecentlyLoadedMenu").actions() if action.property("fileParameters")]
+            self.assertIn(cached, menuFiles, "the cache file is in the recently loaded menu (so the filter is tested)")
+            live.index.refresh()
+            ids = [entry.id for entry in live.index.entries if entry.kind == palette.KIND_RECENT]
+            self.assertNotIn(f"recent:{gone}", ids)
+            self.assertNotIn(f"recent:{cached}", ids)
+            self.assertIn(f"recent:{keep}", ids)
+        finally:
+            os.remove(cached)
+        live.close()
+        # A recent file that disappeared after the list was built: a plain message
+        messages = []
+        original = slicer.util.warningDisplay
+        errors = []
+        originalError = slicer.util.errorDisplay
+        slicer.util.warningDisplay = lambda text, *args, **kwargs: messages.append(str(text))
+        slicer.util.errorDisplay = lambda text, *args, **kwargs: errors.append(str(text))
+        try:
+            result = importer.loadRecentFile({"fileName": gone, "fileType": "VolumeFile"}, shell=studioShell)
+        finally:
+            slicer.util.warningDisplay = original
+            slicer.util.errorDisplay = originalError
+        self.assertEqual(errors, [])
+        self.assertEqual(len(messages), 1)
+        self.assertIn("moved or deleted", messages[0])
+        self.assertIn("StudioPaletteGone.nrrd", messages[0])
+        self.assertEqual(result.nodes(), [])
+
     def test_07_commands(self):
         """View commands and window/level presets."""
         from StudioLib import importer, palette
@@ -499,6 +569,56 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertTrue(toolBar.isVisible())
             allowed = slicer.util.settingsValue("Studio/AllowedToolbars", [])
             self.assertIn("MarkupsToolBar", [allowed] if isinstance(allowed, str) else list(allowed))
+
+    def test_07a_undo_redo_entries_are_draw_only(self):
+        """Search offers Undo and Redo of the lesion only in Draw, and only with a step to take: in Map (where the lesion is
+        hidden) the entry would silently change the lesion that the shown map was computed from (as Ctrl+Z, it does nothing there).
+        """
+        import numpy as np
+        from StudioLib import importer, palette
+
+        studioShell = self._applyStudio()
+        volume, segmentation = importer.startOnTemplate(shell=studioShell)
+        self._pump()
+        studioShell.switchTo("draw")
+        self._pump()
+        editor = slicer.modules.SegmentEditorWidget.editor
+        segmentId = segmentation.GetSegmentation().GetNthSegmentID(0)
+        palette.search(studioShell, "x")
+        entries = palette._palette.index.byId
+        undo, redo = entries["action.undo"], entries["action.redo"]
+
+        def stroke(voxels):
+            editor.saveStateForUndo()
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, segmentId, volume).copy()
+            array.flat[:voxels] = 1
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentId, volume)
+            self._pump()
+
+        def voxels():
+            return int(np.count_nonzero(slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, segmentId, volume)))
+
+        stroke(50)
+        stroke(100)
+        self.assertEqual(voxels(), 100)
+        self.assertTrue(undo.isEnabled(), "Undo is offered in Draw with a step to take")
+        self.assertFalse(redo.isEnabled(), "Redo is not offered with nothing undone")
+        for workspace in ("map", "library"):
+            studioShell.switchTo(workspace)
+            self._pump()
+            self.assertFalse(undo.isEnabled(), f"Undo is not offered in {workspace}")
+            self.assertFalse(redo.isEnabled(), f"Redo is not offered in {workspace}")
+            self.assertNotIn(undo, [entry for entry in palette.search(studioShell, "undo") if entry.isEnabled()])
+            self.assertEqual(voxels(), 100, "the lesion is untouched")
+        studioShell.switchTo("draw")
+        self._pump()
+        palette.runEntry(studioShell, "action.undo")
+        self._pump()
+        self.assertEqual(voxels(), 50)
+        self.assertTrue(redo.isEnabled(), "Redo is offered after an undo in Draw")
+        studioShell.switchTo("map")
+        self._pump()
+        self.assertFalse(redo.isEnabled())
 
     #
     # Shortcut overlay
@@ -581,6 +701,105 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
     #
     # Probe
     #
+
+    def test_08a_cheat_sheet_follows_a_theme_switch_while_open(self):
+        """The top bar stays usable while the overlay is open: a theme switch restyles the open overlay with the new tokens
+        (the title was left in the old theme's ink on the new card).
+        """
+        from StudioLib import cheatsheet
+        from StudioLib import ui
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self._pump()
+        originalPalette = qt.QPalette(slicer.app.palette())
+        wasDark = ui.isDark()
+        otherWindow = "#f4f4f6" if wasDark else "#1c1c1f"
+        try:
+            studioShell.toggleCheatSheet()
+            self._wait(0.2)
+            self.assertTrue(cheatsheet.isVisible())
+            sheet = cheatsheet.instance()
+            before = sheet.widget.styleSheet
+            self.assertIn(ui.token("text").name(), before)
+            slicer.app.setPalette(qt.QPalette(qt.QColor(otherWindow)))
+            self._wait(0.5)
+            self.assertEqual(ui.isDark(), not wasDark, "the palette did not change with the theme")
+            self.assertTrue(cheatsheet.isVisible())
+            after = sheet.widget.styleSheet
+            self.assertNotEqual(after, before, "the open overlay keeps the old theme's style sheet")
+            self.assertIn(f"QLabel#StudioCheatSheetTitle {{ color: {ui.token('text').name()};", after)
+            # The same style sheet as when the overlay is opened again
+            sheet.close()
+            sheet.open()
+            self.assertEqual(sheet.widget.styleSheet, after)
+        finally:
+            if cheatsheet.isVisible():
+                studioShell.toggleCheatSheet()
+            slicer.app.setPalette(originalPalette)
+            self._pump()
+
+    def test_08b_cheat_sheet_title_in_a_narrow_window(self):
+        """USABILITY 9.4: in a window of 960x540 logical px (QT_SCALE_FACTOR=2 on 1080p) the title of the overlay is not cut
+        off; the hint gives way (it is also the tool tip of the close button), and the search field shrinks.
+        """
+        from StudioLib import cheatsheet
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self._pump()
+        oldSize = self.mainWindow.size
+        self.mainWindow.showNormal()
+        self.mainWindow.resize(960, 540)
+        self._wait(0.3)
+        try:
+            studioShell.toggleCheatSheet()
+            self._wait(0.3)
+            self.assertTrue(cheatsheet.isVisible())
+            sheet = cheatsheet.instance()
+            title = sheet.title
+            self.assertGreaterEqual(title.width, title.sizeHint.width(), "the title is cut off")
+            self.assertGreaterEqual(sheet.field.width, cheatsheet.SEARCH_MIN_WIDTH)
+            if sheet.hint.isVisible():
+                self.assertGreaterEqual(sheet.hint.width, sheet.hint.sizeHint.width(), "the hint is cut off")
+            self.assertLessEqual(sheet.closeButton.mapTo(sheet.widget, qt.QPoint(sheet.closeButton.width, 0)).x(), sheet.widget.width)
+            # Narrower still (a larger font): the hint gives way
+            sheet._placeContent(560, 540)
+            self.assertFalse(sheet.hint.isVisible())
+            self.mainWindow.resize(1920, 1000)
+            self._wait(0.3)
+            self.assertTrue(sheet.hint.isVisible())
+            self.assertGreaterEqual(sheet.hint.width, sheet.hint.sizeHint.width())
+        finally:
+            if cheatsheet.isVisible():
+                studioShell.toggleCheatSheet()
+            self.mainWindow.resize(oldSize)
+
+    def test_08b_cheat_sheet_agrees_with_the_docs(self):
+        """Ctrl+Alt+0 is described by what it does (the key leaves Studio: docs say "Classic interface (and back)"), and
+        the Map keys are listed before Map has been shown (README: the full list is in Ctrl+/).
+        """
+        from StudioLib import cheatsheet
+
+        studioShell = self._applyStudio()
+        studioShell.installClassicSwitch()
+        studioShell.switchTo("library")
+        self._pump()
+        # As in a session in which Map has not been shown yet: its keys are not registered with the shell
+        registered = studioShell._workspaceShortcuts.pop("map", None)
+        try:
+            content = {section: rows for section, title, rows in cheatsheet.sections(studioShell)}
+        finally:
+            if registered is not None:
+                studioShell._workspaceShortcuts["map"] = registered
+        appRows = {description: keys for keys, description in content[cheatsheet.SECTION_APP]}
+        interfaceRows = [description for keys, description in content[cheatsheet.SECTION_APP] if "Ctrl+Alt+0" in keys]
+        self.assertEqual(len(interfaceRows), 1, interfaceRows)
+        self.assertIn("Classic", interfaceRows[0])
+        self.assertNotEqual(interfaceRows[0], "Studio interface")
+        self.assertIn("Ctrl+E", appRows.get("Export the maps", []), appRows)
+        self.assertIn("Alt+Left", appRows.get("Previous map", []), appRows)
+        self.assertIn("Alt+Right", appRows.get("Next map", []), appRows)
 
     def test_09_probe_texts(self):
         """The probe in MNI space, in scanner space and over a figure; hidden when the mouse leaves; Classic has none."""
@@ -748,7 +967,12 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                     self.assertFalse(overlaps, f"{viewName} ({viewWidth} px): {box} overlaps {(left, right, top)}")
                 self.assertGreaterEqual(box[0], 0, f"{viewName}: the line is inside the view")
                 if viewWidth > 600:
-                    self.assertEqual(view.bottom, probe.MARGIN, f"{viewName}: a wide view keeps the bottom row")
+                    # A wide view keeps the bottom row, except under the display statement of an axial or coronal view
+                    from StudioLib import orientation
+
+                    statementBox = orientation.viewStatementBox(viewName)
+                    expected = probe.MARGIN if statementBox is None else statementBox[1] + statementBox[2] + probe.VERTICAL_GAP
+                    self.assertEqual(view.bottom, expected, f"{viewName}: a wide view keeps the bottom row")
                 elif viewWidth < 360:
                     self.assertGreater(view.bottom, probe.MARGIN, f"{viewName}: a narrow view raises the line")
                     # Raised above the bottom-centre letter
@@ -761,6 +985,40 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 self.mainWindow.showMaximized()
             else:
                 self.mainWindow.setGeometry(geometry)
+
+    def test_12b_probe_clear_of_orientation_statement(self):
+        """The probe line does not overlap the orientation statement ("Radiological · L on right") at the bottom right of
+        an axial or coronal view: it is raised above it. A sagittal view has no statement.
+        """
+        from StudioLib import importer, orientation, probe
+
+        studioShell = self._applyStudio()
+        importer.startOnTemplate(shell=studioShell)
+        orientation.update()
+        live = probe.instance()
+        for viewName, hasStatement in (("Red", True), ("Green", True), ("Yellow", False)):
+            text = self._cursorAt(viewName, (-13.9, -19.3, 17.5))
+            self.assertTrue(text.startswith("Left 13.9"), text)
+            view = live.views[viewName]
+            viewWidth, _viewHeight = view.renderer.GetSize()
+            statementBox = orientation.viewStatementBox(viewName)
+            if not hasStatement:
+                self.assertIsNone(statementBox, viewName)
+                continue
+            self.assertIsNotNone(statementBox, f"{viewName}: the statement is shown")
+            # Both boxes as drawn: the actors' own bounding boxes, relative to their anchors at the right edge
+            statementActor = orientation._controller.views[viewName].statementActor
+            relative = [0.0] * 4
+            statementActor.GetBoundingBox(view.renderer, relative)
+            statementY = statementActor.GetPositionCoordinate().GetValue()[1]
+            statement = (viewWidth - orientation.CORNER_ANNOTATION_MARGIN + relative[0], viewWidth - orientation.CORNER_ANNOTATION_MARGIN + relative[1],
+                         statementY + relative[2], statementY + relative[3])
+            view.actor.GetBoundingBox(view.renderer, relative)
+            probeBox = (viewWidth - probe.MARGIN + relative[0], viewWidth - probe.MARGIN + relative[1],
+                        view.bottom + relative[2], view.bottom + relative[3])
+            horizontal = probeBox[0] < statement[1] and probeBox[1] > statement[0]
+            vertical = probeBox[2] < statement[3] and probeBox[3] > statement[2]
+            self.assertFalse(horizontal and vertical, f"{viewName}: the probe {probeBox} overlaps the statement {statement}")
 
     def test_13_more_tools_in_search(self):
         """Every Draw tool is in Search, also the ones under "More tools" (no key while they are hidden): "th" is
@@ -803,3 +1061,337 @@ class StudioPaletteTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         widget.editor.setActiveEffect(None)
         if hasattr(widget, "setMoreToolsShown"):
             widget.setMoreToolsShown(False)
+
+    def test_14_settings_entries_ignore_the_restart_marker(self):
+        """After a theme or density change CTK shows "Appearance*" in the settings tree: the Search entry keeps the
+        plain page name and id (and opens that page), instead of "Settings: Appearance*" (settings.Appearance*).
+        """
+        from StudioLib import palette
+
+        dialog = slicer.app.settingsDialog()
+        tree = dialog.findChild("QTreeWidget")
+        item = next((tree.topLevelItem(i) for i in range(tree.topLevelItemCount) if str(tree.topLevelItem(i).text(0)).rstrip("*") == "Appearance"), None)
+        self.assertIsNotNone(item, "the settings dialog has an Appearance page")
+        original = item.text(0)
+        try:
+            item.setText(0, "Appearance*")
+            self.assertIn("Appearance", palette._settingsPanels(dialog))
+            self.assertFalse([title for title in palette._settingsPanels(dialog) if title.endswith("*")])
+            palette.search(self._applyStudio(), "x")
+            entries = {entry.id: entry.title for entry in palette._palette.index._settingsEntries(dialog)}
+            self.assertEqual(entries.get("settings.Appearance"), "Settings: Appearance", entries)
+            self.assertFalse([key for key in entries if key.endswith("*")], entries)
+        finally:
+            item.setText(0, original)
+
+    def test_15_settings_panel_list_scrolls_to_a_panel_chosen_while_hidden(self):
+        """Search > "Check for updates" selects the Updates panel while the settings dialog is still hidden: once shown, the
+        panel list is scrolled so that the selected entry is fully visible instead of cut off at the bottom of the list.
+        """
+        self._applyStudio()
+        dialog = slicer.app.settingsDialog()
+        tree = dialog.findChild("QTreeWidget", "SettingsTreeWidget")
+        self.assertIsNotNone(tree)
+        panels = []
+        for index in range(tree.topLevelItemCount):
+            panels.append(str(tree.topLevelItem(index).data(0, qt.Qt.UserRole + 1101) or tree.topLevelItem(index).text(0)))
+        self.assertGreater(len(panels), 4, panels)
+        try:
+            dialog.hide()
+            self._pump()
+            # A short list (the dialog has a minimum height), so that the last panel's entry is below its visible part
+            tree.setMaximumHeight(250)
+            dialog.setCurrentPanel(panels[0])
+            dialog.setCurrentPanel(panels[-1])
+            dialog.show()
+            self._wait(0.5)
+            item = tree.currentItem()
+            self.assertIsNotNone(item)
+            self.assertEqual(str(item.data(0, qt.Qt.UserRole + 1101) or item.text(0)), panels[-1])
+            rect = tree.visualItemRect(item)
+            self.assertGreater(tree.verticalScrollBar().maximum, 0, "the list does not scroll: the test needs a shorter list")
+            self.assertGreaterEqual(rect.y(), 0, "the selected entry starts above the list")
+            self.assertLessEqual(rect.y() + rect.height(), tree.viewport().height,
+                                 f"the selected entry is cut off: y={rect.y()}, h={rect.height()}, viewport {tree.viewport().height}")
+        finally:
+            dialog.hide()
+            tree.setMaximumHeight(16777215)
+            self._pump()
+
+    def test_15c_settings_panel_list_shows_the_current_panel_and_the_keyboard_focus(self):
+        """The panel shown when Settings opens was the current item but not selected, so the list marked nothing, and the
+        stylesheet removed the focus rectangle (``outline: 0``) without a replacement: a keyboard user could not see that the
+        list has the focus (USABILITY 9.2). The shown panel is selected, and the current row has a ring while the list has the
+        focus (the official dialog highlights it too).
+        """
+        self._applyStudio()
+        dialog = slicer.app.settingsDialog()
+        tree = dialog.findChild("QTreeWidget", "SettingsTreeWidget")
+        self.assertIsNotNone(tree)
+        try:
+            dialog.hide()
+            self._pump()
+            dialog.setCurrentPanel(str(tree.topLevelItem(0).data(0, qt.Qt.UserRole + 1101) or tree.topLevelItem(0).text(0)))
+            tree.clearSelection()
+            dialog.show()
+            self._wait(0.5)
+            self.assertIn("::item:focus", str(tree.styleSheet), "the panel list has no rule for the keyboard focus")
+            self.assertEqual(list(tree.selectedItems()), [tree.currentItem()],
+                             "the panel shown at opening is not marked in the list")
+            dialog.activateWindow()
+            tree.setFocus(qt.Qt.TabFocusReason)
+            self._wait(0.5)
+            self.assertTrue(tree.hasFocus(), "the panel list did not take the keyboard focus")
+            rect = tree.visualItemRect(tree.currentItem())
+            focused = tree.viewport().grab().toImage()
+            dialog.findChild("QDialogButtonBox", "SettingsButtonBox").button(qt.QDialogButtonBox.Ok).setFocus(qt.Qt.TabFocusReason)
+            self._wait(0.5)
+            self.assertFalse(tree.hasFocus())
+            unfocused = tree.viewport().grab().toImage()
+            changed = 0
+            for y in range(rect.y(), rect.y() + rect.height()):
+                for x in range(rect.x(), rect.x() + rect.width()):
+                    changed += focused.pixel(x, y) != unfocused.pixel(x, y)
+            self.assertGreater(changed, 50, "the current row does not change when the panel list gets the keyboard focus")
+        finally:
+            dialog.hide()
+            self._pump()
+
+    def test_15d_settings_panel_list_fits_its_column_at_a_larger_app_font(self):
+        """The panel list was fixed at 200 px while the names, icons and padding grow with the application font: at 17 px
+        (about 125 %) "Internationalization" no longer fitted and the list got a horizontal scroll bar. The list is wide
+        enough for its longest name at the font in use, and never scrolls sideways.
+        """
+        self._applyStudio()
+        dialog = slicer.app.settingsDialog()
+        tree = dialog.findChild("QTreeWidget", "SettingsTreeWidget")
+        self.assertIsNotNone(tree)
+        savedFont = qt.QFont(qt.QApplication.font())
+        try:
+            for pixelSize in (14, 17, 20):
+                dialog.hide()
+                font = qt.QFont(savedFont)
+                font.setPixelSize(pixelSize)
+                qt.QApplication.setFont(font)
+                # The dialog is created once: its list keeps the font it was created with, as it would be created at this font
+                tree.setFont(font)
+                self._pump()
+                dialog.setCurrentPanel(str(tree.topLevelItem(0).data(0, qt.Qt.UserRole + 1101) or tree.topLevelItem(0).text(0)))
+                dialog.show()
+                dialog.resize(1100, 700)
+                self._wait(0.5)
+                bar = tree.horizontalScrollBar()
+                self.assertFalse(bar.isVisible(), f"font {pixelSize} px: horizontal scroll bar, range {bar.minimum}-{bar.maximum}")
+                self.assertEqual(bar.maximum, 0, f"font {pixelSize} px: the panel list scrolls sideways")
+                self.assertGreaterEqual(tree.viewport().width, tree.sizeHintForColumn(0),
+                                        f"font {pixelSize} px: the longest panel name does not fit the list")
+        finally:
+            qt.QApplication.setFont(savedFont)
+            tree.setFont(savedFont)
+            dialog.hide()
+            self._pump()
+
+    def test_15a_settings_panel_icons_follow_a_theme_switch_with_the_dialog_open(self):
+        """The theme is switched on the Appearance page while the (modal) settings dialog stays open, so no Show event redraws
+        the panel list: its Lucide icons (pixmaps tinted for the palette at show time) kept the old theme's ink, and the
+        selected row's icon was invisible on the new selection fill. They are redrawn when the palette changes.
+        """
+        from StudioLib import ui
+
+        self._applyStudio()
+        dialog = slicer.app.settingsDialog()
+        tree = dialog.findChild("QTreeWidget", "SettingsTreeWidget")
+        self.assertIsNotNone(tree)
+        originalPalette = qt.QPalette(slicer.app.palette())
+        wasDark = ui.isDark()
+        # The theme switch of the Appearance page changes the application palette (the test session keeps its style fixed)
+        otherWindow = "#f4f4f6" if wasDark else "#1c1c1f"
+
+        def ink(mode):
+            """The colour of the first opaque pixel of the first row's icon in the given icon mode."""
+            image = tree.topLevelItem(0).icon(0).pixmap(16, 16, mode).toImage()
+            for y in range(16):
+                for x in range(16):
+                    color = qt.QColor.fromRgba(image.pixel(x, y))
+                    if color.alpha() > 200:
+                        return color.name()
+            return None
+
+        try:
+            dialog.show()
+            self._wait(0.5)
+            before = (ink(qt.QIcon.Normal), ink(qt.QIcon.Selected))
+            self.assertTrue(all(before), before)
+            slicer.app.setPalette(qt.QPalette(qt.QColor(otherWindow)))
+            self._wait(1.0)
+            self.assertEqual(ui.isDark(), not wasDark, "the palette did not change with the theme")
+            self.assertTrue(dialog.isVisible())
+            after = (ink(qt.QIcon.Normal), ink(qt.QIcon.Selected))
+            self.assertNotEqual(after[0], before[0], f"the icons of the panel list keep the old theme's ink: {before} -> {after}")
+            self.assertNotEqual(after[1], before[1], f"the selected icon keeps the old theme's ink: {before} -> {after}")
+            # The same inks as when the dialog is opened again
+            dialog.hide()
+            self._pump()
+            dialog.show()
+            self._wait(0.5)
+            self.assertEqual((ink(qt.QIcon.Normal), ink(qt.QIcon.Selected)), after)
+        finally:
+            dialog.hide()
+            slicer.app.setPalette(originalPalette)
+            self._pump()
+
+    def test_15b_settings_dialog_look_with_qt6_layout_margins(self):
+        """Qt 6: QLayout declares the ``contentsMargins`` property, so PythonQt gives a QMargins value and not the getter.
+
+        ``SettingsDialogLook.apply`` called ``layout.contentsMargins()``, which raised "'QMargins' object is not callable"
+        each time Settings was shown: the Appearance page and the 16 px dialog margins kept the official look and the panel
+        list was not scrolled. Here the layouts behave as with Qt 6 and the look is still applied.
+        """
+        from StudioLib import shell, ui
+
+        class Qt6Layout:
+            """A QLayout as PythonQt wraps it with Qt 6: ``contentsMargins`` is the property value."""
+
+            def __init__(self, layout):
+                object.__setattr__(self, "_layout", layout)
+
+            def __getattr__(self, name):
+                if name == "contentsMargins":
+                    return self._layout.contentsMargins()
+                return getattr(self._layout, name)
+
+        class Qt6Owner:
+            """A widget whose ``layout()`` is a ``Qt6Layout``, and whose Appearance panel is one too."""
+
+            def __init__(self, widget):
+                object.__setattr__(self, "_widget", widget)
+
+            def __getattr__(self, name):
+                if name == "layout":
+                    return lambda: Qt6Layout(self._widget.layout())
+                if name == "findChild":
+                    return lambda *args: self._wrapped(self._widget.findChild(*args))
+                return getattr(self._widget, name)
+
+            @staticmethod
+            def _wrapped(child):
+                return Qt6Owner(child) if child is not None and child.objectName == "qSlicerSettingsStylesPanel" else child
+
+        # The helper reads the margins with Qt 5 (method) and Qt 6 (property value)
+        probe = qt.QVBoxLayout()
+        probe.setContentsMargins(3, 4, 5, 6)
+        for candidate in (probe, Qt6Layout(probe)):
+            margins = ui.layoutContentsMargins(candidate)
+            self.assertEqual((margins.left(), margins.top(), margins.right(), margins.bottom()), (3, 4, 5, 6))
+
+        dialog = qt.QDialog()
+        dialogLayout = qt.QGridLayout(dialog)
+        panel = qt.QWidget()
+        panel.setObjectName("qSlicerSettingsStylesPanel")
+        form = qt.QFormLayout(panel)
+        label = qt.QLabel("Theme:")
+        label.setObjectName("ThemeLabel")
+        form.addRow(label, qt.QComboBox())
+        dialogLayout.addWidget(panel, 0, 0)
+        look = shell.SettingsDialogLook.__new__(shell.SettingsDialogLook)
+        look.dialog = Qt6Owner(dialog)
+        look.applied = False
+        look._saved = {}
+        scrolled = []
+        look._scrollToCurrentPanel = lambda: scrolled.append(True)
+        try:
+            look.apply()
+            self.assertTrue(look.applied, "the settings dialog look failed on the layout margins")
+            self.assertIn("appearance", look._saved, "the Appearance page keeps the official look")
+            self.assertIn("margins", look._saved)
+            margins = dialogLayout.contentsMargins()
+            self.assertEqual((margins.left(), margins.top(), margins.right(), margins.bottom()), (16, 16, 16, 16))
+            self.assertEqual(label.minimumHeight, ui.SETTINGS_ROW_HEIGHT)
+            self._wait(0.2)
+            self.assertTrue(scrolled, "the panel list is not scrolled to the selected panel")
+        finally:
+            dialog.deleteLater()
+
+    def test_16_search_index_without_qaction_menu(self):
+        """Qt 6: QAction.menu() is a template that PythonQt does not wrap, so actions have no menu attribute. The submenus
+        of the Layout menu are still found (shell.actionMenu) and Search opens and lists the layouts, as with Qt 5.
+        """
+        from StudioLib import palette, shell
+
+        class Qt6Action:
+            """A QAction as PythonQt wraps it with Qt 6: every attribute except menu."""
+
+            def __init__(self, action):
+                object.__setattr__(self, "_action", action)
+
+            def __getattr__(self, name):
+                if name in ("menu", "setMenu"):
+                    raise AttributeError(f"QAction has no attribute named '{name}'")
+                return getattr(self._action, name)
+
+            def __eq__(self, other):
+                return self._action == getattr(other, "_action", other)
+
+            __hash__ = None
+
+        class Qt6Menu:
+            def __init__(self, menu):
+                self._menu = menu
+
+            def actions(self):
+                return [Qt6Action(action) for action in self._menu.actions()]
+
+        # The helper, on a plain action, a submenu (QMenu.addMenu) and a separator
+        menu = qt.QMenu("Layout")
+        plain = menu.addAction("Plain")
+        submenu = menu.addMenu("Compare")
+        submenu.addAction("2 viewers")
+        separator = menu.addSeparator()
+        for action, expectedMenu in ((plain, None), (submenu.menuAction(), submenu), (separator, None)):
+            self.assertEqual(shell.actionMenu(Qt6Action(action)), expectedMenu, str(action.text))
+            self.assertEqual(shell.actionMenu(action), expectedMenu, str(action.text))
+        expected = [(path, str(action.text)) for path, action in palette._menuActions(menu)]
+        self.assertEqual(expected, [((), "Plain"), (("Compare",), "2 viewers")])
+        self.assertEqual([(path, str(action.text)) for path, action in palette._menuActions(Qt6Menu(menu))], expected)
+
+        # Search opens and finds a layout when the Layout menu's actions have no menu()
+        realMenuActions = palette._menuActions
+        palette._menuActions = lambda menu, path=(): realMenuActions(Qt6Menu(menu) if menu is not None else None, path)
+        try:
+            studioShell = self._applyStudio()
+            layoutMenu = self.mainWindow.findChild("QMenu", "LayoutMenu")
+            self.assertIsNotNone(layoutMenu)
+            self.assertTrue(palette._menuActions(layoutMenu), "the Layout menu has actions")
+            studioShell.openPalette()
+            live = palette.instance()
+            self.assertIsNotNone(live)
+            self.assertTrue(live.isOpen(), "Search did not open")
+            live.close()
+            self._pump()
+            titles = [entry.title for entry in palette.search(studioShell, "conventional")]
+            self.assertTrue([title for title in titles if "Conventional" in title], titles)
+        finally:
+            palette._menuActions = realMenuActions
+        menu.deleteLater()
+
+    def test_17_open_settings_without_a_panel_passes_no_empty_name(self):
+        """Search > Settings... used to call openSettingsDialog("") and Qt then logged "QStackedWidget::setCurrentWidget: widget 0x0
+        not contained in stack" once the dialog had shown another page (BB-1): with no panel the call has no argument.
+        """
+        from StudioLib import palette
+
+        calls = []
+
+        class FakeApp:
+            def openSettingsDialog(self, *args):
+                calls.append(args)
+
+        realSlicer = palette.slicer
+        palette.slicer = types.SimpleNamespace(app=FakeApp())
+        try:
+            palette._openSettings()
+            palette._openSettings("")
+            palette._openSettings("Updates")
+        finally:
+            palette.slicer = realSlicer
+        self.assertEqual(calls, [(), (), ("Updates",)])

@@ -33,10 +33,13 @@ import re
 import qt
 from slicer.i18n import tr as _
 
+from . import widgets
 from .cohort_contrast import DEFAULT_PERM, CohortTab, CovariateChips, _fill, _fmtP, _idClickedSignal, _readJson, checksHtml, label, segmented
 
 #: Order of the tab in the Cohort card (Overlap 10, Contrast 20, Symptom 30, VLSM 40)
 ORDER_SYMPTOM = 30
+#: Width (px) below which the leave-one-dataset-out check box and the Control scores button stack
+EXTRAS_WRAP_WIDTH = 310
 METHODS = ("pearson", "spearman")
 P_MAPS = ("p_fwe", "p_fdr")
 #: Observers of the current circuit (``ctx.currentCircuitChanged``, created on first use: MapContext has no such list)
@@ -48,6 +51,7 @@ class SymptomTab(CohortTab):
 
     PREFIX = "LNMSymptom"
     TITLE = "sLNM"
+    PLAN_SCOPE = "symptom"
 
     def __init__(self, ctx):
         self.sdesign = None
@@ -68,6 +72,7 @@ class SymptomTab(CohortTab):
 
     def buildControls(self, layout):
         form = qt.QFormLayout()
+        form.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
         self.scoreCombo = qt.QComboBox()
         self.scoreCombo.setObjectName("LNMSymptomScore")
@@ -102,6 +107,7 @@ class SymptomTab(CohortTab):
         layout.addWidget(self.volumeReasonEdit)
 
         options = qt.QFormLayout()
+        options.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         methodRow = qt.QHBoxLayout()
         self.methodFrame, self.methodGroup = segmented([_("Pearson"), _("Spearman")], "LNMSymptomMethod",
                                                        _("Pearson: partial r of the score and the maps · Spearman: the same on ranks (scores, numeric covariates and maps)"))
@@ -135,21 +141,28 @@ class SymptomTab(CohortTab):
         self.permuteLabel = label("", "LNMSymptomPermuteReason", "secondaryText")
         layout.addWidget(self.permuteLabel)
 
-        extras = qt.QHBoxLayout()
         self.lodoCheckBox = qt.QCheckBox(_("Leave-one-dataset-out"))
         self.lodoCheckBox.setObjectName("LNMSymptomLodo")
         self.lodoCheckBox.setToolTip(_("Per-dataset maps, their cross-dataset similarity with a block-permutation p, and convergence (Stouffer z, I²; descriptive). "
                                        "Datasets need at least 10 subjects"))
         self.lodoCheckBox.connect("toggled(bool)", lambda checked: self.onSettingsChanged())
-        extras.addWidget(self.lodoCheckBox)
-        extras.addStretch(1)
         self.controlsButton = qt.QPushButton(_("Control scores…"))
         self.controlsButton.setObjectName("LNMSymptomControlsButton")
         self.controlsButton.setProperty("slicerRole", "ghost")
         self.controlsButton.setToolTip(_("Other scores mapped with the same pipeline and compared with this map (spatial r and partial r given PC1 and μC)"))
         self.controlsButton.connect("clicked()", self.showControls)
-        extras.addWidget(self.controlsButton)
-        layout.addLayout(extras)
+        studioUi = widgets._studioUi()
+        if studioUi is not None:
+            # The button goes under the check box when the inspector is narrow: side by side they are wider than the
+            # cohort tab of a 340 px inspector (they would make the inspector wider)
+            self.controlsButton.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Fixed)
+            layout.addWidget(studioUi.wrapRow([self.lodoCheckBox, self.controlsButton], width=EXTRAS_WRAP_WIDTH))
+        else:
+            extras = qt.QHBoxLayout()
+            extras.addWidget(self.lodoCheckBox)
+            extras.addStretch(1)
+            extras.addWidget(self.controlsButton)
+            layout.addLayout(extras)
         self.controlsLabel = label("", "LNMSymptomControlsText", "secondaryText")
         self.controlsLabel.hide()
         layout.addWidget(self.controlsLabel)
@@ -194,6 +207,18 @@ class SymptomTab(CohortTab):
 
     def covariateColumns(self):
         return [name for name in self.covariates.checked() if name != self.score()]
+
+    def planValues(self):
+        return {"n_perm": self.nPerm(), "design.covariates": self.covariateColumns()}
+
+    def applyPlanValues(self, values):
+        if values.get("n_perm") is not None:
+            self.permSpinBox.setValue(int(values["n_perm"]))
+        if values.get("design.covariates") is not None:
+            for name, button in self.covariates.buttons.items():
+                if name != self.score():
+                    button.setChecked(name in values["design.covariates"])
+        self.onSettingsChanged()
 
     def volumeOffReason(self):
         return None if self.volumeOn() else (self.volumeReasonEdit.text.strip() or None)
@@ -398,10 +423,25 @@ class SymptomTab(CohortTab):
         return name
 
     def outputDir(self):
+        """conn-X/slnm/<outputName>, with a number added while that folder holds the result of another score.
+
+        Labels keep only ASCII letters and digits, so two columns can share one ("aphasia_score_1" and
+        "aphasia_score1"; "NIHSS" and "nihss" on a case-insensitive disk): a run must not replace the other's result.
+        """
+        from LesionNetworkMappingLib import slnm
+
         connDir = self.connectomeDir()
-        if not connDir or not self.score():
+        score = self.score()
+        if not connDir or not score:
             return None
-        return os.path.join(connDir, "slnm", self.outputName())
+        base = self.outputName()
+        name, counter = base, 2
+        while True:
+            folder = os.path.join(connDir, "slnm", name)
+            record = _readJson(os.path.join(folder, slnm.SLNM_JSON)) if os.path.isdir(folder) else None
+            if not isinstance(record, dict) or record.get("score") in (None, score):
+                return folder
+            name, counter = f"{base}{counter}", counter + 1
 
     def resultFolders(self):
         connDir = self.connectomeDir()
@@ -454,6 +494,7 @@ class SymptomTab(CohortTab):
         self.lodoTable = qt.QTableWidget(0, 0)
         self.lodoTable.setObjectName("LNMSymptomLodoTable")
         self.lodoTable.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
+        self.lodoTable.setTabKeyNavigation(False)  # Tab leaves the table, arrows move (SPEC 2.9)
         self.lodoTable.setToolTip(_("Cross-dataset spatial r of the per-dataset partial r maps; LODO r: each dataset against the combination of the others (one-sided block-permutation p)"))
         self.lodoTable.horizontalHeader().setSectionResizeMode(qt.QHeaderView.Stretch)
         layout.addWidget(self.lodoTable)
@@ -522,6 +563,10 @@ class SymptomTab(CohortTab):
         self.showLodo(lodo)
         comparisons = [control.get("text") for control in record.get("controls") or [] if control.get("text")]
         reason = (record.get("comparison") or {}).get("reference_missing_reason")
+        if reason:
+            from LesionNetworkMappingLib import slnm
+
+            reason = slnm.app_reason(reason)
         texts = [f"<div>{html.escape(_('Control {name}: {text}').format(name=control.get('name') or control.get('desc') or '', text=control.get('text')))}</div>"
                  for control in record.get("controls") or [] if control.get("text")]
         if comparisons and reason:

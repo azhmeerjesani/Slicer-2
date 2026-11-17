@@ -13,6 +13,8 @@ and dispose them. They cover:
 - (c) incremental generations, and no generation when nothing changed;
 - (d) the round trip of volumes, segments, markups, tables and color tables (with alpha);
 - (e) recover(): no storage node in the autosave folder, original files, modified state and URL restored;
+  a referenced original file that is gone does not stop the re-linking (the session is recovered and the file
+  reported); another load error fails the recovery, with no storage node left in the autosave folder;
 - (f) a modified 512^3 volume: chunked snapshot and background write without freezing the main thread;
 - (g) scan(): a session locked by a live process, and a crashed session;
 - (h) retention; (i) a scene closed without saving keeps a closed-unsaved slot;
@@ -37,10 +39,14 @@ Studio surfaces (StudioLib/autosave_ui.py, A-01b), with ``Shell(force=True).appl
   them; no visible string says "Saved".
 - (x) A-09: while the scene is a project it is saved there and no private session is written; when the project is
   released (a study opens) the private recovery autosave runs again.
+- (y) a node removed after the autosave and project helpers listed it is freed (no leaked GetNodesByClass collection).
+- (za) Qt 6 (QAction without menu()): the File menu actions are installed, and a failing install step does not skip the
+  later ones.
 """
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -330,6 +336,254 @@ class StudioAutosaveTest(unittest.TestCase):
             self.assertIsNone(node.GetStorageNode(), name)
         self.assertTrue(scene.GetStorableNodesModifiedSinceRead())
 
+    def test_e3_recoverWithMissingOriginal(self):
+        """BB-1: a referenced original file moved or deleted after the autosave failed the scene load, and recover()
+        returned before re-linking: the lesion stayed on the autosave folder, the session stayed offered and Save
+        proposed the autosave folder. Now the loaded nodes are re-linked, the missing file is reported and the session
+        is recovered.
+        """
+        from StudioLib import recovery
+
+        built = self._buildScene()
+        lesionVoxels = int(built["lesion"].sum())
+        scene = slicer.mrmlScene
+        scene.SetURL(os.path.join(self.userDir, "My scene.mrml"))
+        scene.SetRootDirectory(self.userDir)
+        service = self._service()
+        self._generate(service)
+        scanPath = os.path.join(self.userDir, "MR Head.nrrd")
+        os.makedirs(os.path.join(self.tempDir, "moved"))
+        shutil.move(scanPath, os.path.join(self.tempDir, "moved", "MR Head.nrrd"))
+        slot = recovery.scan(self.root, None)[0].slots[0]
+        scene.Clear(0)
+        scene.SetURL("")
+        report = recovery.recover(slot, mode="replace")
+        self.assertIsNotNone(report, "the recovery stopped at the missing original file")
+        self.assertEqual([os.path.realpath(path) for path in report["missing"]], [os.path.realpath(scanPath)])
+        self.assertEqual(self._storageFilesUnder(self.root), [])
+        self.assertEqual(scene.GetURL(), os.path.join(self.userDir, "My scene.mrml"))
+        segmentation = slicer.util.getNode("Lesions")
+        self.assertIsNone(segmentation.GetStorageNode(), "Save must ask where to save the lesion")
+        self.assertTrue(segmentation.GetModifiedSinceRead())
+        self.assertEqual(int(slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, built["segmentId"]).sum()), lesionVoxels)
+        self.assertEqual(os.path.realpath(slicer.util.getNode("MR Head").GetStorageNode().GetFileName()), os.path.realpath(scanPath))
+        self.assertEqual(slot.session.status, "recovered")
+
+    def test_e4_recoverLoadErrorKeepsSessionOffered(self):
+        """A load error that missing original files do not explain (a damaged autosave file) still fails the recovery:
+        the error is raised, the session is not marked recovered, and no storage node is left on the autosave folder.
+        """
+        from StudioLib import recovery
+
+        self._buildScene()
+        service = self._service()
+        self._generate(service)
+        slot = recovery.scan(self.root, None)[0].slots[0]
+        entry = next(e for e in service.writer.entries.values() if e["name"] == "Lesions")
+        with open(os.path.join(slot.path, entry["file"]), "wb") as f:
+            f.write(b"not a nrrd file")
+        slicer.mrmlScene.Clear(0)
+        with self.assertRaises(RuntimeError):  # shown in an error box, outside testing
+            recovery.recover(slot, mode="replace")
+        self.assertEqual(self._storageFilesUnder(self.root), [])
+        self.assertNotEqual(slot.session.status, "recovered")
+
+    def _recentlyLoadedPaths(self):
+        """The files of the official recently loaded list: the menu of the main window and the shared setting."""
+        from StudioLib import library
+
+        paths = []
+        menu = library.recentlyLoadedMenu()
+        if menu is not None:
+            for action in menu.actions():
+                properties = action.property("fileParameters")
+                if properties:
+                    paths.append(str(properties.get("fileName", "")))
+        settings = qt.QSettings()
+        count = settings.beginReadArray("RecentlyLoadedFiles/RecentFiles")
+        for index in range(count):
+            settings.setArrayIndex(index)
+            properties = settings.value("file")
+            if properties:
+                paths.append(str(dict(properties).get("fileName", "")))
+        settings.endArray()
+        return [os.path.normcase(os.path.realpath(path)) for path in paths if path]
+
+    def test_e5_recoverIsNotARecentFile(self):
+        """BB-1: Recover loaded the private autosave scene like a file of the user: it was added to the official
+        RecentlyLoadedFiles (shared with official 3D Slicer) and listed in Library > Opened from elsewhere, and it outlived
+        its session. Recovering is not opening a file: nothing is recorded, and the IO manager signals are restored.
+        """
+        from StudioLib import library, recovery
+
+        self._buildScene()
+        service = self._service()
+        self._generate(service)
+        slot = recovery.scan(self.root, None)[0].slots[0]
+        scenePath = os.path.normcase(os.path.realpath(slot.scenePath()))
+        root = os.path.normcase(os.path.realpath(self.root))
+        self.assertIsNotNone(library.recentlyLoadedMenu(), "the test needs the main window")
+        settings = qt.QSettings()
+        keepKey = "RecentlyLoadedFiles/NumberToKeep"
+        previousKeep = settings.value(keepKey)
+        settings.setValue(keepKey, 10)  # the main window records nothing without it (a new settings file)
+        try:
+            slicer.mrmlScene.Clear(0)
+            ioManager = slicer.app.coreIOManager()
+            self.assertFalse(ioManager.signalsBlocked())
+            self.assertIsNotNone(recovery.recover(slot, mode="replace"))
+            self.assertFalse(ioManager.signalsBlocked())
+            self.assertNotIn(scenePath, self._recentlyLoadedPaths())
+            self.assertEqual([path for path in self._recentlyLoadedPaths() if path.startswith(root + os.sep)], [])
+            self.assertEqual([entry for entry in library.recentEntries(limit=50) if os.path.realpath(entry.path).startswith(root)], [])
+            # Control: a scene that is loaded like a file of the user is recorded
+            slicer.util.loadScene(slot.scenePath(), {"clear": True})
+            self.assertIn(scenePath, self._recentlyLoadedPaths())
+        finally:
+            if previousKeep is None:
+                settings.remove(keepKey)
+            else:
+                settings.setValue(keepKey, previousKeep)
+            slicer.mrmlScene.Clear(0)
+
+    def test_e6_recoverFailureRestoresIOSignals(self):
+        from StudioLib import recovery
+
+        self._buildScene()
+        service = self._service()
+        self._generate(service)
+        slot = recovery.scan(self.root, None)[0].slots[0]
+        entry = next(e for e in service.writer.entries.values() if e["name"] == "Lesions")
+        with open(os.path.join(slot.path, entry["file"]), "wb") as f:
+            f.write(b"not a nrrd file")
+        slicer.mrmlScene.Clear(0)
+        with self.assertRaises(RuntimeError):
+            recovery.recover(slot, mode="replace")
+        self.assertFalse(slicer.app.coreIOManager().signalsBlocked())
+
+    def test_e7_autosaveFolderIsInternalForRecent(self):
+        """Entries that an earlier version recorded are not listed in Library (the autosave folder is not a user folder)."""
+        from StudioLib import library
+
+        previous = os.environ.get("SLICER_STUDIO_AUTOSAVE_DIR")
+        os.environ["SLICER_STUDIO_AUTOSAVE_DIR"] = self.root
+        try:
+            self.assertTrue(library.isInternalPath(os.path.join(self.root, "20260101-000000-1-1", "scene-1", "Scene.mrml")))
+            self.assertFalse(library.isInternalPath(os.path.join(self.userDir, "My scene.mrml")))
+        finally:
+            if previous is None:
+                os.environ.pop("SLICER_STUDIO_AUTOSAVE_DIR", None)
+            else:
+                os.environ["SLICER_STUDIO_AUTOSAVE_DIR"] = previous
+
+    def test_e8_recoverRestoresWriteOptionsOfUserFiles(self):
+        """BB-1: the autosave writes its private copies cropped and uncompressed, and Recover kept those options on the
+        storage nodes of the user's files: a later Save rewrote lesion.seg.nrrd cropped to the lesion and scan.nrrd as raw
+        NRRD. Now Recover puts back the options of the user's files (also for autosaves that did not record them).
+        """
+        from StudioLib import recovery
+
+        def header(path):
+            with open(path, "rb") as stream:
+                text = stream.read(1 << 16).split(b"\n\n", 1)[0].decode("latin-1")
+            return {line.split(":", 1)[0]: line.split(":", 1)[1].strip() for line in text.splitlines()[1:] if ":" in line and ":=" not in line}
+
+        scene = slicer.mrmlScene
+        volume = self._userVolume(name="scan", shape=(20, 24, 28))  # small: written by the C++ storage node (uncompressed)
+        segmentation = scene.AddNewNodeByClass("vtkMRMLSegmentationNode", "lesion")
+        segmentation.SetReferenceImageGeometryParameterFromVolumeNode(volume)
+        segmentId = segmentation.GetSegmentation().AddEmptySegment("Lesion")
+        lesion = np.zeros((20, 24, 28), dtype=np.uint8)
+        lesion[8:12, 10:14, 12:16] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(lesion, segmentation, segmentId, volume)
+        segPath = os.path.join(self.userDir, "lesion.seg.nrrd")
+        segmentation.AddDefaultStorageNode()
+        segmentation.GetStorageNode().SetFileName(segPath)
+        self.assertTrue(segmentation.GetStorageNode().WriteData(segmentation))
+        scanPath = volume.GetStorageNode().GetFileName()
+        before = {"seg": header(segPath)["sizes"], "scan": header(scanPath)["sizes"]}
+        self.assertEqual(before["seg"], "28 24 20", "the user's lesion is on the full grid of the scan")
+        self.assertEqual((header(segPath)["encoding"], header(scanPath)["encoding"]), ("gzip", "gzip"))
+
+        for manifestOptions in (True, False):
+            with self.subTest(manifestOptions=manifestOptions):
+                scene.Clear(0)
+                volume = slicer.util.loadVolume(scanPath)
+                segmentation = slicer.util.loadSegmentation(segPath)
+                self.assertFalse(segmentation.GetStorageNode().GetCropToMinimumExtent())
+                # Edits: paint in the lesion, change the scan
+                lesion[9:11, 11:13, 13:15] = 0
+                slicer.util.updateSegmentBinaryLabelmapFromArray(lesion, segmentation, segmentation.GetSegmentation().GetNthSegmentID(0), volume)
+                voxels = slicer.util.arrayFromVolume(volume)
+                voxels[0, 0, 0] += 1
+                slicer.util.arrayFromVolumeModified(volume)
+                service = self._service()
+                self._generate(service)
+                scenePath = os.path.join(service.writer.slotDir, self.io.SCENE_FILE)
+                with open(scenePath, encoding="utf-8") as stream:
+                    self.assertIn('CropToMinimumExtent="true"', stream.read(), "the private autosave copy is cropped")
+                slot = recovery.scan(self.root, None)[0].slots[0]
+                if not manifestOptions:
+                    # An autosave of an earlier version: the manifest has no options of the original storage nodes
+                    manifestPath = os.path.join(slot.path, self.io.MANIFEST_FILE)
+                    manifest = self.io.readJson(manifestPath)
+                    for entry in manifest["entries"].values():
+                        self.assertIn("originalStorageOptions", entry)
+                        entry.pop("originalStorageOptions")
+                    self.io.atomicWriteText(manifestPath, json.dumps(manifest))
+                service.dispose()
+                scene.Clear(0)
+                self.assertIsNotNone(recovery.recover(slot, mode="replace"))
+                self.assertEqual(self._storageFilesUnder(self.root), [])
+                segmentation = slicer.util.getNode("lesion")
+                volume = slicer.util.getNode("scan")
+                segStorage, scanStorage = segmentation.GetStorageNode(), volume.GetStorageNode()
+                self.assertEqual(os.path.realpath(segStorage.GetFileName()), os.path.realpath(segPath))
+                self.assertEqual(os.path.realpath(scanStorage.GetFileName()), os.path.realpath(scanPath))
+                self.assertFalse(segStorage.GetCropToMinimumExtent(), "Recover kept the crop of the private autosave copy")
+                self.assertTrue(segStorage.GetUseCompression())
+                self.assertTrue(scanStorage.GetUseCompression(), "Recover kept the uncompressed writing of the private autosave copy")
+                # File > Save writes the user's files as before the crash
+                self.assertTrue(segStorage.WriteData(segmentation))
+                self.assertTrue(scanStorage.WriteData(volume))
+                self.assertEqual(header(segPath)["sizes"], before["seg"], "Save cropped the user's lesion file")
+                self.assertEqual(header(scanPath)["sizes"], before["scan"])
+                self.assertEqual((header(segPath)["encoding"], header(scanPath)["encoding"]), ("gzip", "gzip"))
+                shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_e2_recoveredMessagePlural(self):
+        from StudioLib import recovery
+
+        one = recovery.recoveredText(1, "15:53")
+        self.assertIn("Recovered 1 item from", one)
+        self.assertNotIn("1 items", one)
+        self.assertIn("Save to keep it.", one)
+        many = recovery.recoveredText(3, "15:53")
+        self.assertIn("Recovered 3 items from the autosave of 15:53", many)
+        self.assertIn("Save to keep them.", many)
+
+    def test_e3_classicRecoveredMessageHasNoDetailsWithoutDetails(self):
+        """Classic's message box has a details section (and the padded title it needs) only when there are details."""
+        from StudioLib import recovery
+
+        calls = []
+        realInfoDisplay = slicer.util.infoDisplay
+        slicer.util.infoDisplay = lambda text, **kwargs: calls.append((text, kwargs))
+        try:
+            recovery._classicMessage("Recovered 2 items.", [])
+            recovery._classicMessage("Recovered 2 items.", ["Changed on disk since the autosave: a.nrrd"])
+            recovery._classicMessage("Recovered 2 items.", [], {"missing": [os.path.join(self.root, "b.nrrd")]})
+            recovery._classicMessage("Recovered 2 items.", [], {"changed": [os.path.join(self.root, "c.nrrd")]})
+        finally:
+            slicer.util.infoDisplay = realInfoDisplay
+        self.assertEqual(len(calls), 4)
+        self.assertNotIn("detailedText", calls[0][1])
+        self.assertTrue(calls[0][1]["windowTitle"].strip())
+        self.assertIn("a.nrrd", calls[1][1]["detailedText"])
+        self.assertNotIn("detailedText", calls[2][1])
+        self.assertIn("b.nrrd", calls[2][0])
+        self.assertIn("c.nrrd", calls[3][0])  # a scan changed since the autosave is named in the main text
+
     def test_f_largeVolume(self):
         scene = slicer.mrmlScene
         service = self._service()
@@ -412,6 +666,74 @@ class StudioAutosaveTest(unittest.TestCase):
             self.assertIn("Crashed", dialog.list.topLevelItem(0).text(1))
         finally:
             dialog.close()
+
+    def test_g2_crashedSessionInReadOnlyFolderIsCrashedNotRunning(self):
+        """QLockFile cannot delete the stale lock of a crashed session in a folder that cannot be written (it says locked)."""
+        import types
+
+        from StudioLib import recovery
+
+        self._buildScene()
+        service = self._service()
+        self._generate(service)
+        crashedDir = os.path.join(self.root, "20260101-120000-1-abcd")
+        os.makedirs(os.path.join(crashedDir, "scene-1"))
+        shutil.copy(os.path.join(service.writer.slotDir, self.io.SCENE_FILE), os.path.join(crashedDir, "scene-1", self.io.SCENE_FILE))
+        process = subprocess.Popen([sys.executable, "-c", "pass"])
+        process.wait()
+        lockPath = os.path.join(crashedDir, self.io.LOCK_FILE)
+
+        def writeLock(pid, host=None):
+            with open(lockPath, "w") as f:
+                f.write(f"{pid}\nSlicer\n{host or qt.QSysInfo.machineHostName()}\n")
+
+        writeLock(process.pid)
+        data = service._sessionJson()
+        data.update(sessionId="20260101-120000-1-abcd", state="running", pid=process.pid)
+        data["slots"] = [{"name": "scene-1", "state": "current", "unsaved": True, "summary": {"title": "Crashed"}}]
+        self.io.atomicWriteJson(os.path.join(crashedDir, self.io.SESSION_FILE), data)
+
+        class StuckLock:
+            """A QLockFile that cannot take the lock because it cannot delete the stale lock file (no write permission)."""
+
+            def __init__(self, path):
+                pass
+
+            def setStaleLockTime(self, ms):
+                pass
+
+            def tryLock(self, timeout=0):
+                return False
+
+        def sessionStatus():
+            return {s.sessionId: s for s in recovery.scan(self.root, None)}["20260101-120000-1-abcd"]
+
+        realQt = recovery.qt
+        recovery.qt = types.SimpleNamespace(QLockFile=StuckLock, QSysInfo=qt.QSysInfo)
+        try:
+            session = sessionStatus()
+            self.assertEqual(session.status, "crashed")
+            self.assertTrue(session.presentable())
+            self.assertEqual(recovery.lockState(crashedDir), "free")
+            # A live holder, another machine and an unreadable lock stay locked
+            writeLock(os.getpid())
+            self.assertEqual(sessionStatus().status, "running")
+            writeLock(process.pid, "some-other-machine.example")
+            self.assertEqual(sessionStatus().status, "running")
+            with open(lockPath, "w") as f:
+                f.write("not a lock\n")
+            self.assertEqual(sessionStatus().status, "running")
+        finally:
+            recovery.qt = realQt
+
+        # With the real QLockFile and a folder that really cannot be written (not possible as the superuser)
+        if os.name == "posix" and os.geteuid() != 0:
+            writeLock(process.pid)
+            os.chmod(crashedDir, 0o500)
+            try:
+                self.assertEqual(sessionStatus().status, "crashed")
+            finally:
+                os.chmod(crashedDir, 0o700)
 
     def test_h_retention(self):
         from StudioLib import recovery
@@ -834,6 +1156,49 @@ class StudioAutosaveTest(unittest.TestCase):
         self.assertTrue(service.waitForIdle(30.0))
         self.assertEqual(service.writer.generation, 2)
 
+    def test_s2_clockGoesBack(self):
+        """The wall clock set back (NTP, manual change, resumed VM) must not stop the autosave (idle and rate use a clock that never goes back)."""
+        import time as realTime
+
+        class ShiftedTime:
+            """The ``time`` module with the wall clock ``time()`` 1 h behind (``monotonic()`` is not affected)."""
+
+            def time(self):
+                return realTime.time() - 3600.0
+
+            def __getattr__(self, name):
+                return getattr(realTime, name)
+
+        built = self._buildScene()
+        service = self._service()
+        service.reloadSettings()
+        service.settings["IdleSeconds"] = 1
+        service.settings["IntervalMinutes"] = 0.05  # 3 s
+        self._generate(service)
+        self.assertFalse(service.dirty)
+        self.autosave.time = ShiftedTime()
+        self.addCleanup(lambda: setattr(self.autosave, "time", realTime))
+        service._pollTimer.start()
+        try:
+            service.poll()
+            lesion = built["lesion"].copy()
+            lesion[20, 25, 38] = 1
+            edited = time.monotonic()
+            slicer.util.updateSegmentBinaryLabelmapFromArray(lesion, built["segmentation"], built["segmentId"], built["volume"])
+            started = None
+            deadline = time.monotonic() + 25.0
+            while time.monotonic() < deadline and started is None:
+                slicer.app.processEvents()
+                if service.plan is not None:
+                    started = time.monotonic() - edited
+                time.sleep(0.005)
+        finally:
+            service._pollTimer.stop()
+        self.assertIsNotNone(started, "no autosave started in 25 s after the wall clock went back by 1 h")
+        self.assertLess(started, 15.0)
+        self.assertTrue(service.waitForIdle(30.0))
+        self.assertFalse(service.dirty)
+
     #
     # Studio surfaces (A-01b)
     #
@@ -1047,6 +1412,118 @@ class StudioAutosaveTest(unittest.TestCase):
         # A recovered session is not offered again
         self.assertIsNone(ui.presentRecovery(sessions))
 
+    def test_u2_recoveryHandlerMarksRecovered(self):
+        """BB-1: reopening the study (a recovery handler) from the card or from the dialog left the session 'running' in
+        session.json, so the next start offered the same unsaved work again.
+        """
+        from StudioLib import autosave_ui, recovery
+
+        service = self._service()
+        self._studioScene()
+        self._generate(service)
+        handled = []
+        service.registerRecoveryHandler(lambda slot: True, handled.append)
+
+        def state(session):
+            return (self.io.readJson(os.path.join(session.path, self.io.SESSION_FILE)) or {}).get("state")
+
+        # The card ("Reopen study at <sid>")
+        sessions = self._crashedSessions(service)
+        studioShell = self._applyStudio(service)
+        ui = autosave_ui.instance()
+        self.assertEqual(state(sessions[0]), "running")
+        self.assertTrue(ui.recover(sessions[0].recoverableSlots()[0]))
+        self.assertEqual(len(handled), 1)
+        self.io.backgroundWriter().drain(5.0)  # the write goes through the background writer
+        self.assertEqual(state(sessions[0]), "recovered")
+        self.assertEqual([s for s in recovery.scan(self.root, service.sessionId) if s.presentable()], [])
+
+        # The dialog ("Recover unsaved work...")
+        shutil.rmtree(sessions[0].path)
+        sessions = self._crashedSessions(service)
+        self.assertEqual(state(sessions[0]), "running")
+        dialog = recovery.RecoveryDialog()
+        try:
+            dialog.setSessions(sessions, startup=True, root=self.root)
+            dialog.list.setCurrentItem(dialog.list.topLevelItem(0))
+            dialog.onRecover()
+        finally:
+            dialog.close()
+        self.assertEqual(len(handled), 2)
+        self.io.backgroundWriter().drain(5.0)
+        self.assertEqual(state(sessions[0]), "recovered")
+        self.assertIsNotNone(studioShell)
+
+    def test_u3_reopenStudyKeepsOtherData(self):
+        """BB-1: the card of a crash in a study listed '1 point list · 1 table', but 'Reopen study at <sid>' only reopened
+        the study: the autosaved point list and table were never loaded, and no part of the UI could restore them. The
+        study's subject is reopened by the study (not loaded twice), the other data is added with the views kept.
+        """
+        from StudioLib import autosave_ui, importer, study_ui
+
+        if not study_ui.isAvailable():
+            self.skipTest("needs the lesion network mapping library")
+        from LesionNetworkMappingLib import geometry, nifti
+
+        service = self._service()
+        studioShell = self._applyStudio(service)
+        originalToast = study_ui._toast
+        study_ui._toast = lambda shell, text, **kwargs: None
+        self.addCleanup(setattr, study_ui, "_toast", originalToast)
+        self.addCleanup(study_ui.closeStudy)
+        grid = geometry.GRID_BY_ID["TF2009-2mm"].grid
+        folder = os.path.join(self.userDir, "Points study")
+        os.makedirs(folder)
+        scans = []
+        for index, sid in enumerate(("sub-01", "sub-02")):
+            scans.append(os.path.join(folder, f"{sid}_T1w.nii.gz"))
+            nifti.write_nifti(scans[-1], (np.indices(grid.shape).sum(axis=0) % (50 + index)).astype(np.int16), grid.affine)
+        session = study_ui.createStudy(scans, studioShell, folder=folder)
+        self.assertTrue(session.open("sub-01", switchToDraw=False))
+        self._pump()
+        points = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Targets")
+        for position in ((1.0, 2.0, 3.0), (4.0, 5.0, 6.0), (7.0, 8.0, 9.0)):
+            points.AddControlPoint(vtk.vtkVector3d(*position))
+        table = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTableNode", "Measurements")
+        table.AddColumn().SetName("value")
+        table.SetCellText(table.AddEmptyRow(), 0, "7")
+        self._generate(service)
+        sessions = self._crashedSessions(service)
+        slot = sessions[0].recoverableSlots()[0]
+        self.assertIn("1 point list", slot.contentsText())
+        self.assertIn("1 table", slot.contentsText())
+        self.assertEqual(autosave_ui.recoverText(slot), "Reopen study at sub-01")
+
+        # The restart: no study, an empty scene
+        study_ui.closeStudy()
+        slicer.mrmlScene.Clear(0)
+        self._pump()
+        self.assertTrue(autosave_ui.instance().recover(slot))
+        self._pump()
+        session = study_ui.session()
+        self.assertIsNotNone(session)
+        self.assertEqual(session.current(), "sub-01")
+        # The subject is the study's own, once (the autosaved copy of its scan and lesion is not added)
+        self.assertEqual([node.GetID() for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode")], [session.segmentationNode().GetID()])
+        self.assertEqual([node.GetID() for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")], [session.volumeNode().GetID()])
+        # The point list and the table are back, on no file of the autosave folder
+        recoveredPoints = slicer.util.getNodesByClass("vtkMRMLMarkupsFiducialNode")
+        self.assertEqual([node.GetName() for node in recoveredPoints], ["Targets"])
+        self.assertEqual(recoveredPoints[0].GetNumberOfControlPoints(), 3)
+        recoveredTables = slicer.util.getNodesByClass("vtkMRMLTableNode")
+        self.assertEqual([node.GetName() for node in recoveredTables], ["Measurements"])
+        self.assertEqual(recoveredTables[0].GetCellText(0, 0), "7")
+        self.assertEqual(self._storageFilesUnder(self.root), [])
+        # The views still show the subject and Draw still edits its lesion (loading a scene empties them)
+        for compositeNode in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode"):
+            self.assertEqual(compositeNode.GetBackgroundVolumeID(), session.volumeNode().GetID())
+        editor = importer.segmentEditorWidget()
+        editor = getattr(editor, "editor", editor)
+        if editor is not None and editor.mrmlSegmentEditorNode() is not None:
+            self.assertEqual(editor.segmentationNode().GetID(), session.segmentationNode().GetID())
+        # No temporary scene file is left in the private slot folder
+        self.assertEqual([name for name in os.listdir(slot.path) if name.endswith(".mrml")], [self.io.SCENE_FILE])
+
     def test_v_studioClassic(self):
         from StudioLib import autosave_ui, library
 
@@ -1168,3 +1645,564 @@ class StudioAutosaveTest(unittest.TestCase):
                 os.environ.pop(projects.ROOT_ENVIRONMENT, None)
             else:
                 os.environ[projects.ROOT_ENVIRONMENT] = environment
+
+    def test_z_recoveryDialogChrome(self):
+        """VISUAL 4.7: the recovery dialog has the Studio dialog chrome, the header with the icon tile, a link on the left, one
+        primary button on the right, and an empty state instead of an empty list.
+        """
+        from StudioLib import recovery
+
+        dialog = recovery.RecoveryDialog()
+        try:
+            self.assertTrue(dialog.property("studioDialogChrome"))
+            self.assertTrue(dialog.windowFlags() & qt.Qt.FramelessWindowHint)
+            self.assertFalse(dialog.isModal())
+            tile = dialog.findChild(qt.QLabel, "StudioRecoveryIcon")
+            self.assertEqual((tile.width, tile.height), (40, 40))
+            self.assertEqual(dialog.titleLabel.text, "Recover unsaved work")
+            self.assertEqual(dialog.recoverButton.property("slicerRole"), "primary")
+            self.assertEqual(dialog.settingsLink.property("studioLink"), True)
+            self.assertIn("Autosave settings", dialog.settingsLink.text)
+            dialog.setSessions([], startup=False, root=self.root)
+            dialog.show()
+            self.assertTrue(dialog.emptyLabel.isVisible())
+            self.assertFalse(dialog.list.isVisible())
+            self.assertFalse(dialog.recoverButton.enabled)
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+
+    def test_y_removedNodesAreFreed(self):
+        """BB-1: every helper that lists scene nodes (private autosave poll and generation, project save, recovery,
+        projects and Lesion Network Mapping helpers) must release the collection that GetNodesByClass returns;
+        otherwise the collection keeps each listed node, and its image data, in memory after it is removed.
+        """
+        import gc
+
+        import LesionNetworkMapping
+        from LesionNetworkMappingLib import display
+        from StudioLib import projects, recovery
+
+        freed = set()
+
+        def watch(name, obj):
+            obj.AddObserver(vtk.vtkCommand.DeleteEvent, lambda caller, event, name=name: freed.add(name))
+
+        def addData():
+            # A volume shown in the views is released by the view pipeline only at its next display change, also in
+            # official Slicer: nothing is shown here
+            array = np.arange(40 * 50 * 60, dtype=np.int16).reshape(40, 50, 60)
+            path = os.path.join(self.userDir, "Saved scan.nrrd")
+            self.assertTrue(slicer.util.saveNode(slicer.util.addVolumeFromArray(array, name="Saved scan"), path))
+            slicer.mrmlScene.Clear(0)
+            saved = slicer.util.loadVolume(path, {"show": False})  # has a storage node: listed, not copied
+            unsaved = slicer.util.addVolumeFromArray(np.arange(30 * 40 * 50, dtype=np.int16).reshape(30, 40, 50), name="Unsaved scan")
+            segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Lesions")
+            segmentation.CreateDefaultDisplayNodes()
+            segmentation.GetSegmentation().AddEmptySegment("Lesion")
+            for node in (saved, unsaved, segmentation):
+                watch(node.GetName(), node)
+            watch("Saved scan image", saved.GetImageData())
+            watch("Unsaved scan image", unsaved.GetImageData())
+            return [node.GetID() for node in (saved, unsaved, segmentation)]
+
+        environment = os.environ.get(projects.ROOT_ENVIRONMENT)
+        os.environ[projects.ROOT_ENVIRONMENT] = os.path.join(self.tempDir, "Slicer Studio")
+        try:
+            nodeIDs = addData()
+            service = self._service()
+            service.poll()
+            self._generate(service)  # private recovery autosave
+            service.studioActiveOverride = True
+            service.poll()
+            self.assertIsNotNone(service.project)
+            self.assertTrue(service.saveNow("test", progress=False))  # project save
+            scene = slicer.mrmlScene
+            projects.sceneHasUserData(scene)
+            projects.defaultProjectName(scene)
+            projects.counts(scene)
+            recovery.sceneHasDisplayableData(scene)
+            recovery.autosaveSlotOfScene(scene, [self.root])
+            LesionNetworkMapping.migrateLegacyConnectomePaths(scene)
+            display.ensureLUT(scene)
+            self.io.backgroundWriter().drain(30.0)
+            for nodeID in nodeIDs:
+                slicer.mrmlScene.RemoveNode(slicer.mrmlScene.GetNodeByID(nodeID))
+            service.poll()
+            self.io.backgroundWriter().drain(30.0)
+            gc.collect()
+            self.assertEqual(sorted(freed), sorted(["Saved scan", "Unsaved scan", "Lesions", "Saved scan image", "Unsaved scan image"]))
+        finally:
+            if environment is None:
+                os.environ.pop(projects.ROOT_ENVIRONMENT, None)
+            else:
+                os.environ[projects.ROOT_ENVIRONMENT] = environment
+
+    def test_za_installWithoutQActionMenu(self):
+        """BB-1, Qt 6: QAction.menu() is a template that PythonQt does not wrap, so File menu actions have no menu
+        attribute. installActions() still puts 'Recover Autosaved Work…' after the Recent submenu and adds 'Autosave
+        now', and when one install step fails the later ones (Search entries, settings panel, close summary, project
+        File menu items) are still installed.
+        """
+        from StudioLib import autosave_settings, projects_ui
+
+        class Qt6Action:
+            """A QAction as PythonQt wraps it with Qt 6: every attribute except menu."""
+
+            def __init__(self, action):
+                object.__setattr__(self, "_action", action)
+
+            def __getattr__(self, name):
+                if name in ("menu", "setMenu"):
+                    raise AttributeError(f"QAction has no attribute named '{name}'")
+                return getattr(self._action, name)
+
+            def __eq__(self, other):
+                return self._action == getattr(other, "_action", other)
+
+            __hash__ = None
+
+        def unwrap(action):
+            return getattr(action, "_action", action)
+
+        class Qt6FileMenu:
+            def __init__(self, menu):
+                self.menu = menu
+
+            def actions(self):
+                return [Qt6Action(action) for action in self.menu.actions()]
+
+            def insertAction(self, before, action):
+                self.menu.insertAction(unwrap(before), unwrap(action))
+
+            def addAction(self, action):
+                self.menu.addAction(unwrap(action))
+
+        window = qt.QMainWindow()
+        fileMenu = window.menuBar().addMenu("File")
+        fileMenu.setObjectName("FileMenu")
+        for text in ("Add Data", "Add DICOM Data"):
+            fileMenu.addAction(text)
+        fileMenu.addMenu("Recent").addAction("scan.nrrd")
+        fileMenu.addAction("Save")
+        fileMenu.addSeparator()
+        fileMenu.addAction("Exit")
+
+        class Qt6Window:
+            """The main window, whose File menu actions have no menu() (the QActions are parented to the real window)."""
+
+            def __getattr__(self, name):
+                return getattr(window, name)
+
+            def findChild(self, className, name):
+                return Qt6FileMenu(fileMenu) if name == "FileMenu" else window.findChild(className, name)
+
+        realMainWindow = slicer.util.mainWindow
+        realQAction = qt.QAction
+        slicer.util.mainWindow = lambda *args, **kwargs: Qt6Window()
+        # PythonQt needs a real QObject parent: give it the real window behind the stand-in
+        qt.QAction = lambda text, parent=None: realQAction(text, window if isinstance(parent, Qt6Window) else parent)
+        try:
+            service = self._service()
+            service.installActions()
+        finally:
+            slicer.util.mainWindow = realMainWindow
+            qt.QAction = realQAction
+        try:
+            self.assertEqual([str(action.text) for action in fileMenu.actions() if not action.isSeparator()],
+                             ["Add Data", "Add DICOM Data", "Recent", "Recover Autosaved Work…", "Save", "Exit"])
+            self.assertEqual(service.recoverAction.objectName, "StudioRecoverAutosaveAction")
+            self.assertEqual(service.autosaveNowAction.objectName, "StudioAutosaveNowAction")
+            self.assertIn("StudioAutosaveNowAction", [action.objectName for action in window.actions()])
+        finally:
+            window.deleteLater()
+
+        # A failing step does not skip the steps after it
+        service = self._service()
+        ran = []
+
+        def qt6InstallActions():
+            ran.append("installActions")
+            raise AttributeError("QAction has no attribute named 'menu'")
+
+        service.installActions = qt6InstallActions
+        service.registerPaletteProvider = lambda: ran.append("registerPaletteProvider")
+        service.connectCloseSummary = lambda: ran.append("connectCloseSummary")
+        realSettingsInstall = autosave_settings.install
+        realAttachService = projects_ui.attachService
+        autosave_settings.install = lambda svc=None: ran.append("autosave_settings.install")
+        projects_ui.attachService = lambda svc: ran.append("projects_ui.attachService")
+        try:
+            service._install()
+        finally:
+            autosave_settings.install = realSettingsInstall
+            projects_ui.attachService = realAttachService
+        self.assertEqual(ran, ["installActions", "registerPaletteProvider", "autosave_settings.install", "connectCloseSummary",
+                               "projects_ui.attachService"])
+        self.assertTrue(service._pollTimer.isActive())
+
+    def test_zb_docsNameTheSavingPanel(self):
+        """BB-1: A-09 renamed the Autosave settings panel to Saving and relabelled its controls. The documentation and the
+        README.txt of the autosave folder name the panel and the controls that exist: every bold name of the Saving section
+        of settings.md is a label or a button of the panel, and the old names are gone.
+        """
+        import re
+
+        from StudioLib import autosave_io, autosave_settings
+
+        self.assertEqual(autosave_settings.PANEL_NAME, "Saving")
+        panel = autosave_settings.AutosaveSettingsPanel(None)
+        try:
+            texts = set()
+            for className in ("QLabel", "QAbstractButton"):
+                for widget in panel.findChildren(className):
+                    texts.add(str(widget.text).strip())
+            texts.discard("")
+        finally:
+            panel.deleteLater()
+
+        root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        documents = {name: os.path.join(root, *name.split("/")) for name in
+                     ("README.md", "Docs/user_guide/settings.md", "Docs/user_guide/modules/studio.md")}
+        if not all(os.path.isfile(path) for path in documents.values()):
+            self.skipTest("the documentation is not next to this build")
+        contents = {}
+        for name, path in documents.items():
+            with open(path, encoding="utf-8") as stream:
+                contents[name] = stream.read()
+
+        section = contents["Docs/user_guide/settings.md"].split("\n### Saving\n", 1)[1].split("\n### ", 1)[0]
+        names = [" ".join(name.split()) for name in re.findall(r"\*\*([^*]+)\*\*", section)]
+        self.assertGreater(len(names), 10)
+        # "Show in Files" is "Show in Finder" or "Show in Explorer" on the other systems
+        missing = [name for name in names if name not in texts and not name.startswith("Show in ")]
+        self.assertEqual(missing, [], "settings.md names controls that the Saving panel does not have")
+
+        stale = ["Application Settings > Autosave", "Autosave the scene", "Autosave panel", "in the Autosave settings",
+                 "Save continuously", "**At most every**", "**or after a pause of**", "**Max size**",
+                 "**Recover autosaved work…**", "**Keep**"]
+        for name, content in contents.items():
+            for phrase in stale:
+                self.assertNotIn(phrase, content, f"{name} still says {phrase!r}")
+        self.assertNotIn("Application Settings > Autosave", autosave_io._README_TEXT)
+        self.assertIn("Application Settings > Saving", autosave_io._README_TEXT)
+
+    def test_zb2_studioProjectsDocNamesTheFolderButtonsOfTheSavingPanel(self):
+        """BB-1: studio_projects.md named a "Show" button next to "Change…" in Settings > Saving; the button is "Show in Files"
+        ("Show in Finder" on macOS, "Show in Explorer" on Windows). Every bold button name that the sentence about the Slicer
+        Studio folder of the Saving panel gives must be a button of the panel (the file manager name differs per system).
+        """
+        import re
+
+        from StudioLib import autosave_settings
+
+        panel = autosave_settings.AutosaveSettingsPanel(None)
+        try:
+            buttons = {str(button.text).strip() for button in panel.findChildren("QAbstractButton")}
+            names = [str(panel.findChild(qt.QPushButton, name).text) for name in
+                     ("StudioProjectsShowRootButton", "StudioProjectsChangeRootButton")]
+        finally:
+            panel.deleteLater()
+        self.assertEqual(names[1], "Change\u2026")
+        self.assertTrue(names[0].startswith("Show in "), names[0])
+
+        root = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", ".."))
+        path = os.path.join(root, "Docs", "user_guide", "studio_projects.md")
+        if not os.path.isfile(path):
+            self.skipTest("the documentation is not next to this build")
+        with open(path, encoding="utf-8") as stream:
+            content = stream.read()
+        sentence = content.split("shows the Slicer Studio folder, with ", 1)[1].split(". When you change", 1)[0]
+        named = [" ".join(name.split()) for name in re.findall(r"\*\*([^*]+)\*\*", sentence)]
+        self.assertIn("Change\u2026", named)
+        for name in named:
+            self.assertTrue(name in buttons or name in ("Show in Files", "Show in Finder", "Show in Explorer"),
+                            f"studio_projects.md names {name!r}, which the Saving panel does not have")
+        self.assertNotIn("Show", named, "the Saving panel has no button called Show")
+
+    def test_zc0_cameraMovingAfterOpenIsNotAnEdit(self):
+        """BB-1: a camera node is a storable node, but the 3D view moves it on its own a moment after a scene with points,
+        a line or a curve is shown (the project was rewritten and "Last edited" moved on every open). A camera moving is
+        not an edit; a new node is still a change.
+        """
+        scene = slicer.mrmlScene
+        scene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Pts").AddControlPoint([1.0, 2.0, 3.0], "P1")
+        camera = scene.AddNewNodeByClass("vtkMRMLCameraNode", "ViewCamera")
+
+        def fingerprint():
+            return self.io.sceneFingerprint(scene, self.io.sentinelIds())
+
+        before = fingerprint()
+        camera.SetPosition(0.0, 400.0, 10.0)
+        camera.SetFocalPoint(1.0, 2.0, 3.0)
+        camera.Modified()
+        self.assertEqual(fingerprint(), before, "a moved camera makes the project look edited")
+        scene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "More")
+        self.assertNotEqual(fingerprint(), before)
+
+    def test_zc1_folderAttributeIsAnEdit(self):
+        """BB-1: an attribute set on a subject hierarchy item (``SetItemAttribute``: the DICOM tag editor, extensions)
+        does not modify the node; it is an edit of the project and changes the fingerprint (quit lost it).
+        """
+        scene = slicer.mrmlScene
+        hierarchy = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(scene)
+        folder = hierarchy.CreateFolderItem(hierarchy.GetSceneItemID(), "Group A")
+
+        def fingerprint():
+            return self.io.sceneFingerprint(scene, self.io.sentinelIds())
+
+        before = fingerprint()
+        hierarchy.SetItemAttribute(folder, "Group", "case")
+        after = fingerprint()
+        self.assertNotEqual(after, before, "a folder attribute is not seen as an edit")
+        hierarchy.SetItemAttribute(folder, "Group", "control")
+        self.assertNotEqual(fingerprint(), after)
+
+    def test_zc2_pausedStatusIsPlainWhenFolderCannotBeWritten(self):
+        """BB-1: "Autosave paused" says why in plain words, not "[Errno 13] Permission denied: '<session path>'"."""
+        # The autosave folder is below a file, so its session folder cannot be created
+        blocker = os.path.join(self.tempDir, "a file")
+        with open(blocker, "w") as f:
+            f.write("not a folder")
+        self.root = os.path.join(blocker, "StudioAutosave")
+        service = self._service()
+        self._userVolume()
+        service.autosaveNow("test")
+        status = service.status()
+        self.assertEqual(status.state, "paused", status.message)
+        self.assertTrue(status.message.startswith("Autosave paused: the autosave folder cannot be written"), status.message)
+        self.assertNotIn("Errno", status.message)
+        self.assertNotIn(self.tempDir, status.message)
+        # Any OSError (writing step, failed background generation) says the same, with the folder named
+        service.root = os.path.join(self.tempDir, "StudioAutosave")
+        error = PermissionError(13, "Permission denied", os.path.join(service.root, "20261109-session"))
+        service._pauseForOSError(error)
+        self.assertEqual(
+            service.status().message,
+            "Autosave paused: the autosave folder cannot be written (Permission denied (in the folder StudioAutosave)).",
+        )
+
+    def test_zc3_synchronousAutosaveIntoUnwritableFolderPausesPlainly(self):
+        """BB-1: a close/exit autosave that cannot write pauses with the plain message (no traceback, no busy state)."""
+        service = self._service()
+        self._userVolume()
+        service.autosaveNow("test")
+        self.assertTrue(service.waitForIdle(120.0))
+        writer = service._slotWriter()
+        realFinalize = writer.finalize
+
+        def failing(plan):
+            raise PermissionError(13, "Permission denied", os.path.join(service.root, "session", "scene-1", "data"))
+
+        errors = []
+
+        class _Handler(logging.Handler):
+            def emit(self, record):
+                if record.levelno >= logging.ERROR:
+                    errors.append(record.getMessage())
+
+        handler = _Handler()
+        logging.getLogger().addHandler(handler)
+        writer.finalize = failing
+        try:
+            slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Changed").AddControlPoint(1.0, 2.0, 3.0)
+            service.autosaveNow("test", synchronous=True)
+        finally:
+            writer.finalize = realFinalize
+            logging.getLogger().removeHandler(handler)
+        status = service.status()
+        self.assertEqual(status.state, "paused", status.message)
+        self.assertTrue(status.message.startswith("Autosave paused: the autosave folder cannot be written"), status.message)
+        self.assertEqual(errors, [])
+
+    def test_zd_discardConfirmationSaysTrash(self):
+        """BB-1: Discard moves the session to the OS Trash, so its confirmation must not say "This cannot be undone"
+        (a user who believes it is deleted will not empty the Trash); it names the Trash.
+        """
+        from StudioLib import projects, recovery
+
+        folder = os.path.join(self.root, "session-trash")
+        os.makedirs(folder)
+        session = recovery.SessionInfo(folder, {"updated": ""}, "closed")
+        asked = []
+        moved = []
+        realQuestion, realMove, realMark = qt.QMessageBox.question, projects.moveToTrash, recovery.markSession
+        try:
+            qt.QMessageBox.question = lambda parent, title, text, *args: (asked.append(text), qt.QMessageBox.Discard)[1]
+            projects.moveToTrash = lambda path: (moved.append(path), True)[1]
+            recovery.markSession = lambda *args, **kwargs: None
+            self.assertTrue(recovery.discard(session))
+        finally:
+            qt.QMessageBox.question, projects.moveToTrash, recovery.markSession = realQuestion, realMove, realMark
+        self.assertEqual(moved, [folder])
+        self.assertEqual(len(asked), 1)
+        self.assertNotIn("cannot be undone", asked[0].lower())
+        self.assertIn("Trash", asked[0])
+
+    def test_zc_labelLockAndTreeOrderAreEdits(self):
+        """BB-1: the label, the description and the lock of a control point (they invoke a custom modified event, not
+        Modified(), so the node's MTime stays) and the order of siblings in the Data tree (the fingerprint sorted the items)
+        are edits of the project: the fingerprint changes, the poll marks the scene as not saved, and the next autosave
+        writes them (it said "Saved" and a crash lost them).
+        """
+        scene = slicer.mrmlScene
+        points = scene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Pts")
+        points.AddControlPoint([1.0, 2.0, 3.0], "P1")
+        others = [scene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", name) for name in ("B", "C")]
+        hierarchy = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(scene)
+
+        def fingerprint():
+            return self.io.sceneFingerprint(scene, self.io.sentinelIds())
+
+        edits = [
+            ("label", lambda: points.SetNthControlPointLabel(0, "Target")),
+            ("description", lambda: points.SetNthControlPointDescription(0, "the target")),
+            ("lock", lambda: points.SetNthControlPointLocked(0, True)),
+            ("unlock", lambda: points.SetNthControlPointLocked(0, False)),
+            ("order", lambda: hierarchy.MoveItem(hierarchy.GetItemByDataNode(others[1]), hierarchy.GetItemByDataNode(others[0]))),
+        ]
+        for name, edit in edits:
+            before = fingerprint()
+            edit()
+            self.assertNotEqual(fingerprint(), before, f"the fingerprint does not see the {name} edit")
+            self.assertEqual(fingerprint(), fingerprint())
+
+        # The poll sees the edit and the next generation writes the new label
+        service = self._service()
+        self._generate(service)
+        service.poll()
+        self.assertFalse(service.dirty)
+        points.SetNthControlPointLabel(0, "Renamed")
+        service.poll()
+        self.assertTrue(service.dirty, "the status says saved with an unsaved label")
+        self._generate(service)
+        self.assertFalse(service.dirty)
+
+    def test_ze_thumbnailSkipsLesionHiddenInTheViews(self):
+        """BB-1: a segmentation that the slice views hide (a lesion of another subject, hidden by the importer) is not the
+        lesion of the project thumbnail: the thumbnail shows what the views show.
+        """
+        from StudioLib import thumbnails
+
+        volume = self._userVolume()
+        slicer.util.setSliceViewerLayers(background=volume)
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "Other lesion")
+        segmentation.CreateDefaultDisplayNodes()
+        segmentId = segmentation.GetSegmentation().AddEmptySegment("Lesion")
+        lesion = np.zeros(slicer.util.arrayFromVolume(volume).shape, np.uint8)
+        lesion[20, 25, 30] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(lesion, segmentation, segmentId, volume)
+        self.assertEqual(len(thumbnails.projectThumbnailSource().lesions), 1)
+        segmentation.GetDisplayNode().SetVisibility2D(False)
+        source = thumbnails.projectThumbnailSource()
+        self.assertIsNotNone(source)
+        self.assertEqual(len(source.lesions), 0)
+
+    def test_ze2_singleSliceScanGetsAThumbnail(self):
+        """BB-1: a project whose scan is a single-slice (2D) image got no thumbnail (the background test refused any image with
+        a dimension of 1): it is a scan like any other and is rendered; a line of voxels still is not.
+        """
+        from StudioLib import thumbnails
+
+        slicer.mrmlScene.Clear(0)
+        slice2d = slicer.util.addVolumeFromArray((np.arange(40 * 50).reshape(1, 50, 40) % 500).astype(np.int16), name="sub-06_T1w")
+        source = thumbnails.projectThumbnailSource()
+        self.assertIsNotNone(source, "a single-slice scan is a thumbnail background")
+        folder = tempfile.mkdtemp(prefix="StudioSingleSlice")
+        try:
+            private = os.path.join(folder, ".studio")
+            os.makedirs(private)
+            written = thumbnails.renderProjectViews(source, private)
+            self.assertTrue(written)
+            for path in written:
+                self.assertGreater(os.path.getsize(path), 0)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+        slicer.mrmlScene.RemoveNode(slice2d)
+        line = slicer.util.addVolumeFromArray(np.zeros((1, 1, 30), np.int16), name="line")
+        self.assertIsNone(thumbnails.projectThumbnailSource(), "a line of voxels has nothing to show")
+        slicer.mrmlScene.RemoveNode(line)
+
+    def test_zf_openRecoveryFolderBeforeFirstAutosave(self):
+        """BB-1: Settings > Saving > Recovery "Open" did nothing while the recovery folder did not exist yet (Studio work goes to
+        Projects, so a fresh install has none): it now creates the folder and shows it.
+        """
+        import shutil
+        import tempfile
+
+        from StudioLib import autosave_settings, projects
+
+        base = tempfile.mkdtemp(prefix="StudioAutosaveOpen")
+        folder = os.path.join(base, "StudioAutosave")
+        shown = []
+        realShow, realEnv = projects.showInFileManager, os.environ.get("SLICER_STUDIO_AUTOSAVE_DIR")
+        projects.showInFileManager = lambda path: shown.append(path) or True
+        os.environ["SLICER_STUDIO_AUTOSAVE_DIR"] = folder
+        panel = autosave_settings.AutosaveSettingsPanel(None)
+        try:
+            self.assertFalse(os.path.exists(folder))
+            panel.onOpenDirectory()
+            self.assertEqual(shown, [os.path.normpath(folder)])
+            self.assertTrue(os.path.isdir(folder))
+        finally:
+            panel.deleteLater()
+            projects.showInFileManager = realShow
+            if realEnv is None:
+                os.environ.pop("SLICER_STUDIO_AUTOSAVE_DIR", None)
+            else:
+                os.environ["SLICER_STUDIO_AUTOSAVE_DIR"] = realEnv
+            shutil.rmtree(base, ignore_errors=True)
+
+    def test_zg_recoverDialogOpenFolderBeforeFirstAutosave(self):
+        """BB-1: Recover Autosaved Work > "Open autosave folder" (and the autosave menu's open) did nothing while the recovery folder
+        did not exist yet: they now create it and show it.
+        """
+        import shutil
+        import tempfile
+
+        from StudioLib import autosave_io, projects, recovery
+
+        base = tempfile.mkdtemp(prefix="StudioRecoverOpen")
+        folder = os.path.join(base, "StudioAutosave")
+        shown = []
+        realShow, realEnv = projects.showInFileManager, os.environ.get("SLICER_STUDIO_AUTOSAVE_DIR")
+        projects.showInFileManager = lambda path: shown.append(path) or True
+        os.environ["SLICER_STUDIO_AUTOSAVE_DIR"] = folder
+        try:
+            self.assertFalse(os.path.exists(folder))
+            dialog = recovery.RecoveryDialog.__new__(recovery.RecoveryDialog)
+            dialog.currentSlot = lambda: None
+            dialog.root = None
+            recovery.RecoveryDialog.onOpenFolder(dialog)
+            self.assertEqual(shown, [os.path.normpath(autosave_io.defaultRoot())])
+            self.assertTrue(os.path.isdir(folder))
+        finally:
+            projects.showInFileManager = realShow
+            if realEnv is None:
+                os.environ.pop("SLICER_STUDIO_AUTOSAVE_DIR", None)
+            else:
+                os.environ["SLICER_STUDIO_AUTOSAVE_DIR"] = realEnv
+            shutil.rmtree(base, ignore_errors=True)
+
+    def test_zh_thumbnailRenderedWhenTheQuitFlushSavesTheLesion(self):
+        """BB-1: a lesion drawn after the first autosave and saved by the quit flush never reached the project thumbnail (the
+        quit save skipped it): the quit save renders it at once.
+        """
+        from StudioLib import autosave, thumbnails
+
+        slicer.mrmlScene.Clear(0)
+        volume = self._userVolume()
+        slicer.util.setSliceViewerLayers(background=volume)
+        folder = tempfile.mkdtemp(prefix="StudioQuitThumb")
+        try:
+            os.makedirs(os.path.join(folder, ".studio"))
+            service = autosave.AutosaveService.__new__(autosave.AutosaveService)
+            service.project = type("P", (), {"path": folder})()
+            service._projectThumbnailKey = None
+            service._projects = type("L", (), {"notifyChanged": lambda self: None})
+            plan = type("Plan", (), {"reason": "quit"})()
+            service._queueProjectThumbnail(plan)
+            path = os.path.join(folder, ".studio", thumbnails.PROJECT_VIEW_FILES[0][1])
+            self.assertTrue(os.path.isfile(path), "the quit save renders the thumbnail")
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)

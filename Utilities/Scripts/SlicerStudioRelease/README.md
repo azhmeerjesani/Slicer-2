@@ -82,7 +82,7 @@ must be marked as the latest one. The file is the release manifest:
 | `--required` | Every older version must update at its next start |
 | `--minimum-supported X.Y.Z` | Versions older than X.Y.Z must update |
 | `--notes FILE` / `--notes-text TEXT` | Release notes shown in the application |
-| `--published YYYY-MM-DD` | Publication date (default today) |
+| `--published YYYY-MM-DD` | Publication date, checked as a real date (default today) |
 | `--no-web` | Do not make the web launcher bundle |
 | `--out-dir DIR` | Output folder (default `release-v<version>`) |
 

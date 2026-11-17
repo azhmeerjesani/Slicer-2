@@ -14,7 +14,7 @@ The policy has two rules. Both are enforced by the code, and the tests check the
    fetch data is made only when you click for it.
 2. **A connectome is downloaded only when you ask for it and have accepted the provider's own terms.** The app shows the
    *live* terms text of the provider (fetched when you click "Load terms"), with its sha256, and the download stays
-   disabled until you tick "I accept these data use terms". The acceptance is stored for that exact text
+   disabled until you tick "I have read and accept these terms". The acceptance is stored for that exact text
    (`Studio/LNM/AcceptedTermsText/<sha256>`): if the provider changes the text, you are asked again. **A source that does
    not state its terms is only linked to**, never downloaded (a grey badge).
 
@@ -23,10 +23,10 @@ setting `Studio/LNM/EnableConnectomeFetch` (on by default).
 
 ## Getting a connectome
 
-**Map > Connectome > Manage… > Get a connectome…** opens a catalog of the connectomes that can be obtained (a non-modal
-dialog; you can keep working). The shipped catalog (`catalog/connectomes.json`) lists, for each entry, its source and
-DOI, version, files with sizes and checksums, licence, terms, population, preprocessing, the template space and the
-estimated disk space. It is refreshed only when you click **Check catalog updates**.
+**Map > Connectome > Get a connectome…** (with a connectome already registered: **Manage… > Get a connectome…**) opens a
+catalog of the connectomes that can be obtained (a non-modal dialog; you can keep working). The shipped catalog
+(`catalog/connectomes.json`) lists, for each entry, its source and DOI, version, files with sizes and checksums, licence,
+terms, population, preprocessing, the template space and the estimated disk space. It is refreshed only when you click **Check catalog updates**.
 
 | Entry | Status | Licence | Notes |
 | ----- | ------ | ------- | ----- |
@@ -45,13 +45,21 @@ and custom terms; **grey** when the terms are not stated. A grey entry is never 
 - You choose a **destination folder** (the dialog shows the free space and the disk plan, including the estimated final
   size), a **subset** (all archives, a range of archives, or a number of subjects, or one of the named subsets) and
   how many archives are downloaded at once (1 to 4).
-- Each archive is **streamed into the converter**: no archive is stored unless you choose "keep archives". The download
+- The archives of a subject subset are estimated before the download. For a Lead-DBS connectome the bundle holds
+  exactly the subjects of the subset: the other subjects of those archives are skipped, and the next archives are read
+  too when the estimated ones do not hold all of them. Otherwise the bundle holds every subject of the archives read;
+  when they are not the subset asked for, a warning says so and `connectome.json` records the archives read
+  (`archives:00-01`) instead of the subset's name.
+- Each archive is **streamed into the converter**: no archive is stored unless you tick "Also keep the downloaded archives". The download
   runs as a light, low-priority job with a status chip ("Fetching GSP1000 · 41% · 2 h 10 min"); **Pause** stops it and
   **Resume** continues from where it stopped. If the application was closed during a download, Map asks, a few seconds after it is opened again, whether to resume
-  ("Resume" or "Not now"); nothing resumes by itself.
+  ("Resume", "Not now" or "Discard"); nothing resumes by itself. "Not now" asks again at the next launch; "Discard" (also
+  a button in the catalog dialog) forgets the unfinished download so that it is never offered again. What was already
+  downloaded stays in the destination folder, and the notice says where, so you can delete it.
 - The computer is kept awake during the download on macOS and Windows.
 - The result is `<destination>/<id>.lnmc`, a normal connectome bundle (see
-  [The connectome bundle](lesionnetworkmapping.md#data)), registered and selected in Map.
+  [The connectome bundle](lesionnetworkmapping.md#data)), registered and listed in Map. It is selected only when the
+  open project has no connectome yet: a project keeps the connectome its map was computed with until you choose another.
 - Command line (a job; the application never passes `--server`, which exists for mirrors and tests):
   `python -m LesionNetworkMappingLib.fetchconnectome --entry ID --dest DIR --terms-sha SHA256 [--subset S] [--streams N]
   [--keep-archives] [--resume]`, with the subcommands `terms` (show the live terms text and its sha256) and `check`
@@ -84,7 +92,8 @@ starts. The same page lists **Build reference maps**, **Build fast index…** an
 
 The **Compare** card keeps a library of reference maps in `<LNM data folder>/ReferenceMaps/` (a registry with the licence,
 the citation, the sha256 and the space of each map; paths are relative, so the folder can be moved). Maps are added on a
-click, from NeuroVault (a public image or collection; the licence is recorded as CC0), from a URL or a file (the licence
+click, from NeuroVault (a public image or collection; the licence is recorded as CC0; a collection adds at most its first 100
+images, and the notice says when it has more), from a URL or a file (the licence
 you state, default "unknown", grey), or the van den Heuvel degree map from its pinned commit. The last one is derived from
 GSP data, so it needs the GSP terms to have been shown and accepted, is never redistributed and is recorded as such.
 
@@ -164,6 +173,12 @@ launcher inside `Slicer Studio.app` start it.) The input is a BIDS dataset with 
 and opens in the Library. A GUI run and a batch run of the same study, connectome and settings give the same files
 within numerical tolerance. The `participant` level runs the stages up to the network maps and the per-lesion export;
 the `group` level runs every stage and reuses what the participant level completed.
+
+**Threshold rule (`--rule`)** is a JSON object with a `kind` and that kind's keys, for example
+`{"kind":"top_pct","value":5}`. `fwe_bonferroni`: `alpha` (default 0.05). `t_convention`, `fz_abs`, `custom_t`: `value`
+(the threshold). `top_pct`: `value` (the percentage, default 10), `statistic` (`Fz` or `T`), `sign` (`both`, `pos` or
+`neg`). `t_convention` and `custom_t` also take `reference_n`, and any kind takes `override`. A key that the kind does not
+know, for example a misspelled one, is refused as a usage error (exit 2) that lists the keys it expects.
 
 **Exit codes** of the pipeline and the twin: 0 done, 1 error, 2 usage, 3 stopped, 4 data use terms not accepted
 (`--accept-terms` is required: it states that you accepted the terms of the connectome), 5 blocked by the preflight,

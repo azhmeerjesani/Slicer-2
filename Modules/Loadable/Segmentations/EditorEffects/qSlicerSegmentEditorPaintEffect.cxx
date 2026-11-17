@@ -858,11 +858,17 @@ void qSlicerSegmentEditorPaintEffectPrivate::updateBrushModel(qMRMLWidget* viewW
 }
 
 //-----------------------------------------------------------------------------
+bool qSlicerSegmentEditorPaintEffectPrivate::brushModelAvailable() const
+{
+  return this->BrushToWorldOriginTransformer->GetNumberOfInputConnections(0) > 0;
+}
+
+//-----------------------------------------------------------------------------
 void qSlicerSegmentEditorPaintEffectPrivate::updateBrush(qMRMLWidget* viewWidget, BrushPipeline* pipeline)
 {
   Q_Q(qSlicerSegmentEditorPaintEffect);
   qMRMLSliceWidget* sliceWidget = qobject_cast<qMRMLSliceWidget*>(viewWidget);
-  if (this->BrushToWorldOriginTransformer->GetNumberOfInputConnections(0) == 0 //
+  if (!this->brushModelAvailable() //
       || q->integerParameter("BrushPixelMode"))
   {
     pipeline->SetBrushVisibility(false);
@@ -1612,7 +1618,10 @@ bool qSlicerSegmentEditorPaintEffect::processInteractionEvents(vtkRenderWindowIn
     // Mouse pointer entered the widget
     // It is more reliable to check for viewWidget pointer change than vtkCommand::EnterEvent, because
     // the effect may be activated using keyboard shortcut while the mouse pointer is already inside the widget.
-    brushPipeline->SetBrushVisibility(!this->integerParameter("BrushPixelMode"));
+    // The brush model is built at the first mouse move: showing the brush before that would render the brush
+    // pipeline with its first filter unconnected (VTK error "Input port 0 ... has 0 connections but is not optional"),
+    // for example when a layout change puts a view under a resting mouse pointer.
+    brushPipeline->SetBrushVisibility(!this->integerParameter("BrushPixelMode") && d->brushModelAvailable());
   }
   d->ActiveViewWidget = viewWidget;
 
@@ -1687,6 +1696,16 @@ bool qSlicerSegmentEditorPaintEffect::processInteractionEvents(vtkRenderWindowIn
     {
       return false;
     }
+    if (!d->BrushModelUpToDate || !d->brushModelAvailable())
+    {
+      // The brush model is built at mouse moves. A press with no mouse move since the effect was activated (for example
+      // by a keyboard shortcut while the pointer rests on the view) or since the brush changed would paint with no brush
+      // model (nothing painted, "ModifyImage failed: geometry mismatch") or a stale one: build it at the press position.
+      d->updateBrushModel(viewWidget, brushPosition_World);
+      d->updateBrushes();
+      d->BrushModelUpToDate = true;
+      viewWidgets = d->BrushPipelines.keys();
+    }
     // Start the stroke feedback. In the slice view that the stroke is painted in, it is drawn as circles
     // in the slice plane; other views show the brush glyphs (the other slice views cut them).
     d->resetFeedback();
@@ -1732,7 +1751,7 @@ bool qSlicerSegmentEditorPaintEffect::processInteractionEvents(vtkRenderWindowIn
       for (qMRMLWidget* const aViewWidget : viewWidgets)
       {
         d->BrushPipelines[aViewWidget]->SetFeedbackVisibility(false);
-        d->BrushPipelines[aViewWidget]->SetBrushVisibility(worldPositionValid);
+        d->BrushPipelines[aViewWidget]->SetBrushVisibility(worldPositionValid && d->brushModelAvailable());
         qSlicerSegmentEditorAbstractEffect::scheduleRender(aViewWidget);
       }
 

@@ -20,7 +20,7 @@ if MODULE_DIR not in sys.path:
 import numpy as np
 from scipy import ndimage
 
-from LesionNetworkMappingLib import atlases, clusters, thresholds
+from LesionNetworkMappingLib import atlases, clusters, stats, thresholds
 from LesionNetworkMappingLib.geometry import Grid, mask_indices, space_family
 
 SHAPE = (20, 22, 18)
@@ -105,6 +105,23 @@ class TwoBlobTest(unittest.TestCase):
         self.assertEqual(len(table.clusters), 2)
         self.assertEqual(sorted(np.unique(table.cluster_vector).tolist()), [0, 1, 2])
         self.assertEqual(int((table.cluster_vector == 2).sum()), 16)
+
+    def test_midline_column_on_2009c_and_fsl_2mm_grids(self):
+        from LesionNetworkMappingLib.geometry import GRID_BY_ID
+
+        def sides(grid_id):
+            spec = GRID_BY_ID[grid_id]
+            g = Grid(spec.shape, spec.affine)
+            xyz = g.voxel_to_world(np.indices(spec.shape).reshape(3, -1).T).reshape(*spec.shape, 3)
+            d2 = xyz[..., 0] ** 2 + (xyz[..., 1] + 60) ** 2 + (xyz[..., 2] - 40) ** 2
+            volume = 8.0 * np.exp(-d2 / 32.0) + 1e-6 * np.sign(xyz[..., 0])
+            return [row["hemisphere"] for row in clusters.cluster_table(volume, g, None, 5.0)]
+
+        self.assertEqual(sides("NLin6-2mm"), ["midline"])
+        self.assertEqual(sides("TF2009-2mm"), ["midline"])  # the midline column is centred at x = -0.5
+        self.assertEqual(clusters._hemisphere(-2.5, 1.0), "L")
+        self.assertEqual(clusters._hemisphere(1.5, 1.0), "R")
+        self.assertEqual(clusters._hemisphere(1.0, 1.0), "R")  # a voxel that only touches x = 0 is not midline
 
     def test_one_sided(self):
         self.assertEqual([row["sign"] for row in clusters.cluster_table(self.volume, grid(), None, 2.0, sign="pos")], ["pos"])
@@ -212,6 +229,24 @@ class SubpeakTest(unittest.TestCase):
         self.assertEqual(clusters.cluster_table(volume, grid(), None, 1.0)[0]["ijk"], (5, 10, 9))
 
 
+class PlateauPeakAgreementTest(unittest.TestCase):
+    def test_peak_table_and_clusters_report_the_same_plateau_peak(self):
+        volume = np.zeros(SHAPE)
+        volume[4:7, 10:13, 8:11] = 7.0  # a 3x3x3 cube of equal maxima: the peak is its centre voxel
+        volume[14, 5, 5] = 3.0
+        card = clusters.cluster_table(volume, grid(), None, 1.0)[0]
+        self.assertEqual(card["ijk"], (5, 11, 9))
+        peaks = stats.peak_table(volume, grid(), top_k=2)
+        self.assertEqual(peaks[0]["ijk"], card["ijk"])
+        self.assertEqual(peaks[0]["world"], tuple(card["xyz"]))
+        self.assertEqual(peaks[1]["ijk"], (14, 5, 5))
+        # masked vector, negative plateau, and a 2-voxel plateau (first in index order wins, as in clusters)
+        vol2 = np.zeros(SHAPE)
+        vol2[4:6, 10, 8] = -4.0
+        idx = np.flatnonzero(vol2.ravel())
+        self.assertEqual(stats.peak_table(vol2.ravel()[idx], grid(), mask_indices=idx)[0]["ijk"], (4, 10, 8))
+
+
 class MinimumExtentTest(unittest.TestCase):
     def test_min_extent(self):
         volume = np.zeros(SHAPE)
@@ -294,6 +329,67 @@ class LabelTest(unittest.TestCase):
         self.assertEqual(table[0]["labels"], [])
         self.assertGreater(len(table.clusters), 1)
         self.assertEqual([notice["code"] for notice in table.notices], ["family_mismatch"])  # once, not once per cluster
+
+    def test_network_is_the_largest_share_of_the_cluster(self):
+        """The network names the network holding most of the cluster, whatever the order of the atlases (BB-1)."""
+        space = "MNI152NLin6Asym"
+        family = space_family(space)
+        volume = np.zeros(SHAPE)
+        volume[2:12, 10, 10] = 5.0  # one 10-voxel bar cluster
+        # one atlas: 40 % in a Cont parcel, 30 % + 30 % in two Default parcels -> Default (60 %), not the top parcel
+        data = np.zeros(SHAPE, dtype=np.int32)
+        data[2:6, 10, 10], data[6:9, 10, 10], data[9:12, 10, 10] = 1, 2, 3
+        names = {1: "7Networks_LH_Cont_pCun_1", 2: "7Networks_LH_Default_PCC_1", 3: "7Networks_LH_Default_PCC_2"}
+        schaefer = atlases.Atlas("schaefer", data, AFFINE, names, family=family, space=space, networks="schaefer")
+        for top in (3, 1):  # also when only the top parcel is kept as a row: the share counts every parcel
+            table = clusters.cluster_table(volume, grid(), None, 2.0, labeler=clusters.atlas_labeler([schaefer], top=top, min_pct=5.0, space=space))
+            self.assertEqual(table[0]["network"], "Default", top)
+        # two atlases: 10 % in a Schaefer Vis parcel, 90 % in a Tian thalamus parcel -> THA in both orders
+        cortex = np.zeros(SHAPE, dtype=np.int32)
+        cortex[2, 10, 10] = 1
+        thalamus = np.zeros(SHAPE, dtype=np.int32)
+        thalamus[3:12, 10, 10] = 1
+        schaefer = atlases.Atlas("schaefer", cortex, AFFINE, {1: "7Networks_LH_Vis_13"}, family=family, space=space, networks="schaefer")
+        tian = atlases.Atlas("tian", thalamus, AFFINE, {1: "pTHA-lh"}, family=family, space=space, networks="tian")
+        for order in ([schaefer, tian], [tian, schaefer]):
+            table = clusters.cluster_table(volume, grid(), None, 2.0, labeler=clusters.atlas_labeler(order, top=3, min_pct=5.0, space=space))
+            self.assertEqual(table[0]["network"], "THA", [atlas.id for atlas in order])
+            self.assertEqual([label for _atlas, label, _pct in table[0]["labels"]], [label for atlas in order for label in ({"schaefer": ["7Networks_LH_Vis_13"], "tian": ["pTHA-lh"]}[atlas.id])])
+        # a plain labeler without network shares: summed over its rows of one atlas
+        table = clusters.cluster_table(volume, grid(), None, 2.0, labeler=lambda mask, grid_: [("toy", "a", 40.0, "Cont"), ("toy", "b", 30.0, "Default"), ("toy", "c", 30.0, "Default")])
+        self.assertEqual(table[0]["network"], "Default")
+
+    def test_no_network_from_a_small_share(self):
+        """A network that holds less of the cluster than its atlas leaves outside every network is not named (BB-1).
+
+        A brainstem cluster that a Buckner-like atlas touches with 1 of 10 voxels was exported as "Limbic".
+        """
+        space = "MNI152NLin6Asym"
+        family = space_family(space)
+        volume = np.zeros(SHAPE)
+        volume[2:12, 10, 10] = 5.0  # one 10-voxel bar cluster
+        cerebellum = np.zeros(SHAPE, dtype=np.int32)
+        cerebellum[11, 10, 10] = 5  # Network5 = Limbic: 10 % of the cluster
+        subcortex = np.zeros(SHAPE, dtype=np.int32)
+        subcortex[2:12, 10, 10] = 8  # Brainstem: 100 %, no networks
+        empty = np.zeros(SHAPE, dtype=np.int32)
+        empty[0, 0, 0] = 1  # a Schaefer-like atlas that covers none of the cluster
+        order = [
+            atlases.Atlas("schaefer", empty, AFFINE, {1: "7Networks_LH_Default_1"}, family=family, space=space, networks="schaefer"),
+            atlases.Atlas("buckner", cerebellum, AFFINE, {5: "Network5"}, family=family, space=space, networks="yeo7"),
+            atlases.Atlas("ho-sub", subcortex, AFFINE, {8: "Brainstem"}, family=family, space=space),
+        ]
+        table = clusters.cluster_table(volume, grid(), None, 2.0, labeler=clusters.atlas_labeler(order, space=space))
+        self.assertIsNone(table[0]["network"])
+        self.assertIn(("ho-sub", "Brainstem", 100.0), [(atlas, label, round(pct, 6)) for atlas, label, pct in table[0]["labels"]])
+        # a plain labeler: 30 % SomMot with the rest outside every network -> none; half in a network -> named
+        table = clusters.cluster_table(volume, grid(), None, 2.0, labeler=lambda mask, grid_: [("toy", "a", 30.0, "SomMot"), ("toy", "white matter", 70.0, None)])
+        self.assertIsNone(table[0]["network"])
+        table = clusters.cluster_table(volume, grid(), None, 2.0, labeler=lambda mask, grid_: [("toy", "a", 50.0, "SomMot"), ("toy", "white matter", 50.0, None)])
+        self.assertEqual(table[0]["network"], "SomMot")
+        # a split cortical cluster keeps its plurality network: 40 % Default, 35 % Cont, 25 % outside
+        table = clusters.cluster_table(volume, grid(), None, 2.0, labeler=lambda mask, grid_: [("toy", "a", 40.0, "Default"), ("toy", "b", 35.0, "Cont")])
+        self.assertEqual(table[0]["network"], "Default")
 
 
 class HomologueTest(unittest.TestCase):

@@ -1,0 +1,246 @@
+"""Test that an exported Compare card comparison is recorded in the run registry, so checklist item G10 sees it.
+
+The Compare card writes ``derivatives/lnm/compare/<time>`` and registers a done run of kind "comparison" (its summary
+counts the reference maps of the library). A comparison of maps of this study only does not make G10 "done"; one with a
+reference map of the library does.
+
+It needs the Slicer application and uses the synthetic study of ``lnm_pipeline_fixture.py`` (no network)::
+
+    python3 Utilities/Scripts/StudioTestRunner.py --home $(mktemp -d) unittest LesionNetworkMapping LesionNetworkMappingCompareUITest
+
+Under a plain PythonSlicer (the library test glob) the module is skipped.
+"""
+
+import os
+import shutil
+import sys
+import tempfile
+import unittest
+
+try:
+    import qt  # noqa: F401
+    import slicer
+except ImportError as exc:
+    raise unittest.SkipTest("needs the Slicer application") from exc
+if getattr(slicer, "app", None) is None:
+    raise unittest.SkipTest("needs the Slicer application")
+
+TEST_DIR = os.path.dirname(os.path.abspath(__file__))
+if TEST_DIR not in sys.path:
+    sys.path.insert(0, TEST_DIR)
+
+
+class LesionNetworkMappingCompareUITest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import lnm_pipeline_fixture as fixture
+
+        from LesionNetworkMapping import LesionNetworkMappingLogic
+
+        cls.tmp = tempfile.mkdtemp(prefix="lnm compare ui ")
+        cls.fx = fixture.make_fixture(os.path.join(cls.tmp, "f1"), extra_rows=False)
+        cls.study = cls.fx["study"]
+        slicer.util.selectModule("LesionNetworkMapping")
+        cls.widget = slicer.modules.LesionNetworkMappingWidget
+        cls.bundle = LesionNetworkMappingLogic.registerConnectome(cls.fx["bundle"])
+        LesionNetworkMappingLogic.setTermsAccepted(cls.bundle, True)
+        cls.widget.refreshConnectomes(select=cls.bundle.path)
+        cls.widget.openCohortStudy(cls.study)
+        cls.card = cls.widget.ctx.card("compare")
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            from StudioLib import study_ui
+
+            study_ui.closeStudy()
+        except Exception:
+            pass
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _compare(self, withReference):
+        import numpy as np
+
+        from LesionNetworkMappingLib import refmaps
+        from LesionNetworkMappingUI.card_compare import MapSource
+
+        rng = np.random.default_rng(1)
+        base = rng.standard_normal(200)
+        maps = {"Group T": base + rng.standard_normal(200), "Other": base + rng.standard_normal(200)}
+        sources = [MapSource("group:a", "Group T", "group", None, {"kind": "group", "desc": "T"}),
+                   MapSource("group:b", "Other", "group", None, {"kind": "group", "desc": "Other"})]
+        if withReference:
+            maps["Pain reference"] = base + rng.standard_normal(200)
+            sources.append(MapSource("reference:nv-1", "Pain reference", "reference", None,
+                                     {"kind": "neurovault", "id": "nv-1", "title": "Pain reference", "licence": "CC0-1.0", "condition": "pain", "sha256": "ab" * 32}))
+        self.card.comparison = refmaps.compare(maps, None)
+        self.card.comparedSources = sources
+        self.card.tests = {}
+        self.card.top = []
+
+    def _g10(self):
+        from LesionNetworkMappingLib import checklist
+
+        return next(item for item in checklist.evaluate(self.study) if item["id"] == "G10")
+
+    def test_1_study_only_comparison_is_registered_but_not_cross_condition(self):
+        from LesionNetworkMappingLib import runs
+
+        self.assertEqual(self._g10()["status"], "not_run")
+        self._compare(withReference=False)
+        out = self.card.export()
+        self.assertTrue(out and os.path.isfile(os.path.join(out, "compare.json")), self.card.notice)
+        records = [record for record in runs.load(self.study).values() if record["kind"] == "comparison"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["status"], "done")
+        self.assertEqual(records[0]["id"], self.card.lastRunId)
+        self.assertEqual(runs.read_summary(self.study, records[0])["n_reference_maps"], 0)
+        self.assertEqual(self._g10()["status"], "not_run")
+
+    def test_2_comparison_with_a_library_map_makes_g10_done(self):
+        from LesionNetworkMappingLib import runs
+
+        self._compare(withReference=True)
+        out = self.card.export()
+        self.assertTrue(out and os.path.isfile(os.path.join(out, "compare.json")), self.card.notice)
+        record = runs.load(self.study)[self.card.lastRunId]
+        self.assertEqual(record["kind"], "comparison")
+        self.assertEqual(runs.read_summary(self.study, record)["n_reference_maps"], 1)
+        self.assertNotIn(self.tmp, str(record["dir"]))  # relative to the study
+        item = self._g10()
+        self.assertEqual(item["status"], "done", item)
+        self.assertEqual(item["evidence"], [self.card.lastRunId])
+
+    def test_3_neurovault_field_reads_links(self):
+        """The number of a NeuroVault download link (/media/images/<collection>/<file>) is the collection, never the image id."""
+        from LesionNetworkMappingUI.card_compare import neurovaultArgs
+
+        args = self.card.additionArgs("neurovault", {"id": "https://neurovault.org/media/images/457/tfMRI_EMOTION_FACES-SHAPES_zstat1.nii.gz"})
+        self.assertNotIn("--image", args)
+        self.assertEqual(args[args.index("--collection"):], ["--collection", "457", "--file", "tfMRI_EMOTION_FACES-SHAPES_zstat1.nii.gz"])
+        cases = {"https://neurovault.org/images/3128/": ["--image", "3128"], "3128": ["--image", "3128"], "C457": ["--collection", "457"],
+                 "https://neurovault.org/collections/457/": ["--collection", "457"], "neurovault.org/media/images/457/a%20b.nii.gz": ["--collection", "457", "--file", "a b.nii.gz"]}
+        for text, expected in cases.items():
+            self.assertEqual(neurovaultArgs(text), expected, text)
+        # Any wording of a collection label names the collection, never an image with the same number.
+        for text in ("Collection: 457", "c 457", "collection  457", "collection #457", "coll 457", "Collections 457"):
+            self.assertEqual(neurovaultArgs(text), ["--collection", "457"], text)
+        self.assertEqual(neurovaultArgs("image 3128"), ["--image", "3128"])
+        args = self.card.additionArgs("neurovault", {"id": "Collection: 457"})
+        self.assertNotIn("--image", args)
+        for text in ("https://neurovault.org/media/images/457/", "https://neurovault.org/collections/ABCDEF/", "",
+                     "collection id 457 or 458", "c-457 x"):
+            with self.assertRaises(ValueError, msg=text):
+                neurovaultArgs(text)
+
+    def test_4_constant_map_is_excluded_with_a_reason(self):
+        """A map with no variance over the connectome voxels (a ROI mask) is left out with a reason, never the anchor."""
+        import numpy as np
+
+        from LesionNetworkMappingUI.card_compare import MapSource
+
+        rng = np.random.default_rng(2)
+        data = {"constant": np.ones(200), "a": rng.standard_normal(200), "b": rng.standard_normal(200)}
+        data["constant"][:5] = np.nan
+        card = self.card
+        saved = (card.sources, card.checkedKeys, card.runState, card.vector)
+        try:
+            card.sources = {name: MapSource(name, name, "other", None, {"kind": "map"}) for name in data}
+            card.checkedKeys = lambda: list(data)
+            card.runState = lambda: (True, "")
+            card.vector = lambda source: data[source.key].copy()
+            comparison = card.compare()
+        finally:
+            card.sources, card.checkedKeys, card.runState, card.vector = saved
+        self.assertIsNotNone(comparison)
+        self.assertEqual(list(comparison.names), ["a", "b"])
+        self.assertIn("constant", card.notice)
+        self.assertIn("no variance", card.notice)
+
+    def test_5_vdh_terms_offline_message_is_one_sentence_with_try_again(self):
+        from types import SimpleNamespace
+
+        from LesionNetworkMappingUI import card_compare
+
+        reason = "No connection to dataverse.harvard.edu: the proxy server cannot be reached. Check the network and try again."
+        calls = []
+        saved = card_compare.AddReferenceDialog.loadTerms
+        card_compare.AddReferenceDialog.loadTerms = lambda self: calls.append(1)
+        dialog = card_compare.AddReferenceDialog("vdh", slicer.util.mainWindow())
+        try:
+            self.assertEqual(len(calls), 1)
+            retry = dialog.findChild("QPushButton", "LNMCompareVdhTermsRetry")
+            self.assertIsNotNone(retry)
+            self.assertFalse(retry.isVisibleTo(dialog))
+            dialog._onTermsDone(SimpleNamespace(results=[], failureReason=reason, state="failed"))
+            text = dialog.termsView.toPlainText()
+            self.assertEqual(text.lower().count("try again"), 1, text)
+            self.assertNotIn(".)", text)
+            self.assertIn("could not be fetched", text)
+            self.assertIn(reason, text)
+            self.assertTrue(retry.isVisibleTo(dialog))
+            retry.click()
+            self.assertEqual(len(calls), 2)
+        finally:
+            card_compare.AddReferenceDialog.loadTerms = saved
+            dialog.deleteLater()
+
+    def test_6_heat_map_does_not_widen_the_inspector(self):
+        """The heat map picture (a fixed 380 px) sits in a scroll area, so the Compare results ask for far less width than the picture."""
+        from LesionNetworkMappingUI.card_compare import HEATMAP_MAX_PX
+
+        self._compare(withReference=True)
+        self.card.showComparison()
+        heatmap = self.card.results.findChild("QLabel", "LNMCompareHeatmap")
+        self.assertIsNotNone(heatmap)
+        self.assertGreater(heatmap.width, 100)  # the picture is drawn at its own size
+        self.assertLess(self.card.results.minimumSizeHint.width(), HEATMAP_MAX_PX - 100)
+        self.assertLess(self.card.heatmapScroll.minimumSizeHint.width(), HEATMAP_MAX_PX - 100)
+
+    def test_6b_pairs_table_map_names_are_not_cut_to_letters(self):
+        """Map A / Map B fit their contents (up to a cap) instead of sharing what the number columns leave over."""
+        import qt
+
+        from LesionNetworkMappingUI.card_compare import PAIR_NAME_MAX_PX
+
+        self._compare(withReference=True)
+        self.card.showComparison()
+        table = self.card.pairsTable
+        header = table.horizontalHeader()
+        for column in (0, 1):
+            self.assertNotEqual(int(header.sectionResizeMode(column)), int(qt.QHeaderView.Stretch))
+        self.assertGreater(table.rowCount, 0)
+        self.assertEqual(header.maximumSectionSize, PAIR_NAME_MAX_PX)
+        slicer.app.processEvents()
+        for column in (0, 1):
+            self.assertGreaterEqual(header.sectionSize(column), min(table.sizeHintForColumn(column), PAIR_NAME_MAX_PX))
+            self.assertGreaterEqual(header.sectionSize(column), 50)
+
+    def test_7_excluded_maps_notice_names_the_maps_one_sentence_each(self):
+        """The notice for left-out maps uses the short name (not the list label with the licence badge) and ends each sentence."""
+        import numpy as np
+
+        from LesionNetworkMappingUI.card_compare import MapSource
+
+        rng = np.random.default_rng(3)
+        data = {"x": np.full(200, np.nan), "y": np.full(200, np.nan), "const": np.ones(200), "a": rng.standard_normal(200), "b": rng.standard_normal(200)}
+        card = self.card
+        saved = (card.sources, card.checkedKeys, card.runState, card.vector)
+        try:
+            card.sources = {key: MapSource(key, f"Map {key} ● CC0-1.0", "other", None, {"kind": "map"}, name=f"Map {key}") for key in data}
+            card.checkedKeys = lambda: list(data)
+            card.runState = lambda: (True, "")
+            card.vector = lambda source: data[source.key].copy()
+            comparison = card.compare()
+        finally:
+            card.sources, card.checkedKeys, card.runState, card.vector = saved
+        self.assertIsNotNone(comparison)
+        notice = card.notice
+        self.assertNotIn("CC0", notice)
+        self.assertNotIn("●", notice)
+        self.assertIn("Map x does not cover this connectome's voxels. Map y does not cover", notice)
+        self.assertIn("Map const has no variance over this connectome's voxels (every value is the same). ", notice)
+
+
+if __name__ == "__main__":
+    unittest.main()

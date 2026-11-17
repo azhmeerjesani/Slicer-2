@@ -35,7 +35,7 @@ from . import thresholds
 
 SIGNS = ("pos", "neg")
 CONNECTIVITY_RANK = {6: 1, 18: 2, 26: 3}  # ndimage.generate_binary_structure(3, rank)
-MIDLINE_MM = 0.5  # |x| below this is "midline"
+MIDLINE_MM = 0.5  # |x| below this is "midline" when the grid is not known; with a grid: half the voxel width along x
 DESCRIPTIVE_NOTE = "Extents are descriptive (no cluster-extent inference)."
 SIGN_LABELS = {"pos": "+", "neg": "-"}  # ASCII, so that the TSV reads anywhere
 
@@ -108,8 +108,13 @@ def _as_volume(values, grid, mask_indices):
     return volume.reshape(grid.shape), positions
 
 
-def _hemisphere(x):
-    if abs(x) < MIDLINE_MM:
+def _hemisphere(x, half_width=MIDLINE_MM):
+    """"midline" for the voxel column that contains x = 0 (|x| < half the voxel width along x), else "L" or "R".
+
+    A fixed 0.5 mm never matched the 2 mm MNI152NLin2009cAsym grid (voxel centres at -2.5, -0.5, 1.5 mm), whose
+    midline column is centred at x = -0.5. A voxel that merely touches x = 0 with its edge is not midline.
+    """
+    if abs(x) < half_width - 1e-9:
         return "midline"
     return "R" if x > 0 else "L"
 
@@ -150,8 +155,17 @@ def _peaks(score, cluster, offset, grid, min_mm, max_subpeaks):
 
 
 def _label_rows(labels, table):
-    """Normalize labeler output to [(atlas, label, pct)] and the network of its largest overlap."""
-    rows, network = [], None
+    """Normalize labeler output to [(atlas, label, pct)] and the network that holds the largest share of the mask.
+
+    The share of a network is summed over the labels of one atlas: over all of them when the labeler gives
+    ``labels.networks`` ({atlas: {network: pct}}, as :func:`atlas_labeler` does), else over the rows it returned.
+    Atlases are not added together (two cortical atlases would count the same voxels twice); the largest share of
+    any atlas wins, ties going to the earlier atlas and then to the name, so the order of the atlases only breaks ties.
+    The part of the mask an atlas leaves outside all its networks (unlabelled voxels, white matter) competes as one
+    more share of that atlas: a network is named only when it holds at least as much of the mask as that part, so a
+    brainstem cluster that a cerebellar network atlas touches with 1.6 % of its voxels has no network (BB-1).
+    """
+    rows, shares = [], {}
     for notice in getattr(labels, "notices", None) or []:
         if notice not in table.notices:  # one notice per atlas, not one per cluster
             table.notices.append(notice)
@@ -160,9 +174,18 @@ def _label_rows(labels, table):
         rows.append((atlas, label, pct))
         if atlas not in table.atlases:
             table.atlases.append(atlas)
-        if network is None and len(item) > 3 and isinstance(item[3], str) and item[3]:
-            network = item[3]
-    return rows, network
+        if len(item) > 3 and isinstance(item[3], str) and item[3]:
+            byNetwork = shares.setdefault(atlas, {})
+            byNetwork[item[3]] = byNetwork.get(item[3], 0.0) + pct
+    given = getattr(labels, "networks", None)
+    if given:
+        shares = {atlas: dict(byNetwork) for atlas, byNetwork in given.items() if byNetwork}
+    order = {atlas: index for index, atlas in enumerate(dict.fromkeys([*(row[0] for row in rows), *shares]))}
+    candidates = []
+    for atlas, byNetwork in shares.items():
+        outside = max(0.0, 100.0 - sum(byNetwork.values()))  # the share of the mask in none of this atlas's networks
+        candidates += [(-pct, order[atlas], name) for name, pct in byNetwork.items() if pct > 0 and pct >= outside]
+    return rows, (min(candidates)[2] if candidates else None)
 
 
 def cluster_table(values, grid, mask_indices, threshold, sign="both", connectivity=26, min_extent_mm3=0.0, subpeak_min_mm=8.0, max_subpeaks=3, labeler=None, extra_maps=None, statistic=None):
@@ -235,6 +258,7 @@ def cluster_table(values, grid, mask_indices, threshold, sign="both", connectivi
                 mask = np.zeros(grid.shape, dtype=bool)
                 mask[region][cluster] = True
                 labels_of, network = _label_rows(labeler(mask, grid), table)
+            half_x = 0.5 * float(np.abs(grid.affine[0, :3]).sum())
             for peak, (voxel, xyz) in enumerate(zip(ijk, world, strict=True)):
                 index = tuple(int(v) for v in voxel)
                 main = peak == 0
@@ -250,7 +274,7 @@ def cluster_table(values, grid, mask_indices, threshold, sign="both", connectivi
                         "extra": {name: float(extra[index]) for name, extra in extras.items()},
                         "ijk": index,
                         "xyz": tuple(float(v) for v in xyz),
-                        "hemisphere": _hemisphere(float(xyz[0])),
+                        "hemisphere": _hemisphere(float(xyz[0]), half_x),
                         "cog": tuple(float(v) for v in cog) if main else None,
                         "labels": labels_of if main else [],
                         "network": network if main else None,
@@ -264,7 +288,7 @@ def atlas_labeler(atlases, top=3, min_pct=0.0, space=None, allow_cross_family=Fa
     """A ``labeler`` for :func:`cluster_table` that labels each cluster with ``atlases.label_cluster``.
 
     Rows are (atlas id, label, pct of the cluster, network); the atlases' notices (e.g. a space-family mismatch)
-    reach ``table.notices``.
+    reach ``table.notices``, and their network shares over every label (``networks``) name the cluster's network.
     """
     from . import atlases as atlases_module
 
@@ -272,6 +296,7 @@ def atlas_labeler(atlases, top=3, min_pct=0.0, space=None, allow_cross_family=Fa
         result = atlases_module.label_cluster(mask, grid, atlases, allow_cross_family=allow_cross_family, space=space, top=top, min_pct=min_pct)
         rows = atlases_module.LabelResult((detail["atlas"], detail["label"], detail["pct_of_mask"], detail["network"]) for detail in result.details)
         rows.notices = result.notices
+        rows.networks = result.networks  # network shares over every label, not only the rows kept
         return rows
 
     return labeler

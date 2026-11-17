@@ -10,6 +10,7 @@ import contextlib
 import glob
 import io
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -155,6 +156,34 @@ class StepsTest(_TempCase):
         preview = pipeline.PipelineConfig.from_json(recipes.to_pipeline_config(self.builtin("preview"))["config"])
         self.assertEqual(preview.preview_n, 100)
 
+    def test_pipeline_runs_the_recipe_contrast(self):
+        """Run everything tests the recipe's (or the locked plan's) one-sided contrast, and the Map options carry it (BB-1)."""
+        from LesionNetworkMappingLib import pipeline
+
+        recipe = self.builtin("classic_ferguson2019_adapted")
+        params = recipes.apply(recipe)
+        self.assertEqual(params["design"]["contrast"], "A>B")
+        config = pipeline.PipelineConfig.from_json(recipes.to_pipeline_config(recipe, module_available=lambda name: True)["config"])
+        self.assertEqual(config.contrast, "A>B")
+        self.assertEqual(config.to_json()["contrast"], "A>B")
+        # A two-sided run keeps the configuration of earlier versions (no "contrast" key)
+        self.assertNotIn("contrast", pipeline.PipelineConfig.from_json(recipes.to_pipeline_config(self.builtin("siddiqi2021_slnm"))["config"]).to_json())
+        with self.assertRaises(ValueError):
+            pipeline.PipelineConfig(contrast="positive")
+        # The Map options hold the contrast; a two-sided run of an A>B plan is a deviation (held until a reason is given)
+        options = recipes.pipeline_options(params, recipe.steps, {})
+        self.assertEqual(options["contrast"], "A>B")
+        self.assertEqual(recipes.parameters_from_map(params, rule=params["rule"], options=options), params)
+        current = recipes.parameters_from_map(params, rule=params["rule"], options=dict(options, contrast="two_sided"))
+        changes = recipes.diff(recipe, current)
+        self.assertEqual([item["field"] for item in changes], ["design.contrast"])
+        self.assertEqual(recipes.pipeline_options(current, recipe.steps, {})["contrast"], "two_sided")
+        # The F test of two groups is the two-sided t test
+        self.assertEqual(recipes.pipeline_contrast(recipes.set_field(params, "design.contrast", "F")), "two_sided")
+        # The command line takes it too
+        args = pipeline._parser().parse_args(["run", "--study", "s", "--bundle", "b", "--contrast", "B>A"])
+        self.assertEqual(pipeline.config_from_args(args).contrast, "B>A")
+
 
 class ApplyDiffTest(_TempCase):
     def test_apply_and_diff(self):
@@ -209,6 +238,18 @@ class ApplyDiffTest(_TempCase):
         loaded = recipes.load_recipes(folders=[folder], errors=errors)
         self.assertEqual(sorted(recipe.id for recipe in loaded), sorted(recipe.id for recipe in recipes.load_recipes()))  # the built-ins still load
         self.assertEqual(sorted(os.path.basename(path) for path, _message in errors), sorted(f"{name}.json" for name in bad))
+
+    def test_same_title_lab_recipes_get_distinct_labels(self):
+        base = self.builtin("classic_ferguson2019_adapted")
+        params = recipes.apply(base)
+        folder = self.path("labdup")
+        for name in ("lab_recipe.json", "lab_recipe_2.json"):
+            recipes.save_lab_recipe(os.path.join(folder, name), params, base, title="Same name", recipe_id=name[:-5])
+        lab = [r for r in recipes.load_recipes(folders=[folder]) if r.status == "lab"]
+        labels = recipes.distinct_labels(lab, lambda r: f"{r.title} · lab")
+        self.assertEqual(len(set(labels)), 2)
+        self.assertTrue(any("lab_recipe_2.json" in label for label in labels))
+        self.assertEqual(recipes.distinct_labels(lab[:1], lambda r: f"{r.title} · lab"), ["Same name · lab"])
 
     def test_lab_recipe_is_shareable(self):
         base = self.builtin("classic_ferguson2019_adapted")
@@ -299,6 +340,52 @@ class PlanLockTest(_TempCase):
             json.dump(data, f)
         self.assertEqual(recipes.plan_status(study)["state"], "modified")
 
+    def test_plan_edited_after_lock_is_a_deviation(self):
+        """A plan file edited after the lock is not adopted silently: it waits for a reason (Run everything is held) and
+        the methods text reports the edit (bug recipes-plan-lock-roi-gui:plan-edited-after-lock-used-silently-methods-say-no-deviations).
+        """
+        study = self.make_study()
+        plan = self.lock(study)
+        self.assertIsNone(recipes.plan_modification(study))
+        text = methods.find_section(methods.methods_sections(study.path), "deviations").text()
+        self.assertIn("No deviations from the locked analysis plan were recorded.", text)
+        path = recipes.plan_path(study)
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        data["parameters"]["alpha"] = data["hypotheses"]["alpha"] = 0.2
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        self.assertEqual(recipes.plan_status(study)["state"], "modified")
+        edited = recipes.plan_modification(study)
+        self.assertEqual((edited["field"], edited["old"], edited["recorded"]), (recipes.PLAN_FILE_FIELD, plan["sha256"], False))
+        self.assertEqual(edited["new"], recipes.plan_sha256(data))
+        # The methods text says the plan was modified after the lock, not "no deviations"
+        text = methods.find_section(methods.methods_sections(study.path), "deviations").text()
+        self.assertNotIn("No deviations from the locked analysis plan were recorded.", text)
+        self.assertIn("was modified after it was locked", text)
+        self.assertIn(plan["sha256"][:8], text)
+        # The edit is a pending deviation (it holds Run everything until its reason is given), even when Map follows it
+        current = recipes.effective_parameters(study)
+        self.assertEqual(current["alpha"], 0.2)
+        pending = recipes.pending_deviations(study, current)
+        self.assertEqual([item["field"] for item in pending], [recipes.PLAN_FILE_FIELD])
+        self.assertIn("edited after the lock", pending[0]["description"])
+        # Recording its reason (as the Recipe card does) settles it, and the methods text lists it with the reason
+        recipes.record_deviation(study, pending[0]["field"], pending[0]["old"], pending[0]["new"], "alpha corrected to the grant", description=pending[0]["description"])
+        self.assertEqual(recipes.pending_deviations(study, current), [])
+        self.assertTrue(recipes.plan_modification(study)["recorded"])
+        self.assertEqual(recipes.effective_parameters(study)["alpha"], 0.2)
+        text = methods.find_section(methods.methods_sections(study.path), "deviations").text()
+        self.assertIn("edited after the lock", text)
+        self.assertIn("reason: alpha corrected to the grant", text)
+        self.assertNotIn("was modified after it was locked", text)
+        # A further edit needs its own reason
+        data["parameters"]["n_perm"] = 6000
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        self.assertEqual([item["field"] for item in recipes.pending_deviations(study, recipes.effective_parameters(study))], [recipes.PLAN_FILE_FIELD])
+        self.assertIn("was modified after it was locked", methods.find_section(methods.methods_sections(study.path), "deviations").text())
+
     def test_hypotheses_validation(self):
         study = self.make_study()
         recipe = self.builtin("siddiqi2021_slnm")
@@ -310,6 +397,43 @@ class PlanLockTest(_TempCase):
         self.assertEqual(plan["hypotheses"]["primary"], {"kind": "score", "score": "nihss", "direction": "two_sided"})
         self.assertEqual(plan["parameters"]["n_perm"], 10000)
         self.assertEqual([item["field"] for item in plan["deviations_from_recipe"]], ["n_perm"])
+
+    def test_locked_primary_contrast_is_the_contrast_that_runs(self):
+        """The primary contrast chosen in Lock plan is the one Run everything tests, listed as a change from the recipe (BB-1)."""
+        recipe = self.builtin("classic_ferguson2019_adapted")
+        for target in ("A>B", "B>A", "two_sided", "contrast:B>A"):
+            study = self.make_study(f"study-{len(target)}-{target.replace('>', 'gt').replace(':', '-')}")
+            hypotheses = {"primary": target} if target.startswith("contrast:") else {"primary": {"kind": "contrast", "contrast": target}}
+            plan = recipes.lock_plan(study, recipe, recipes.apply(recipe), hypotheses, now=self.NOW)
+            wanted = plan["hypotheses"]["primary"]["contrast"]
+            self.assertEqual(wanted, target.replace("contrast:", ""))
+            self.assertEqual(plan["parameters"]["design"]["contrast"], wanted)
+            effective = recipes.effective_parameters(study)
+            self.assertEqual(effective["design"]["contrast"], wanted)
+            self.assertEqual(recipes.pipeline_options(effective, recipes.effective_steps(study))["contrast"], wanted)
+            fields = [item["field"] for item in plan["deviations_from_recipe"]]
+            self.assertEqual(fields, [] if wanted == "A>B" else ["design.contrast"])
+            self.assertEqual(recipes.plan_status(study)["state"], "locked")
+
+    def test_locked_score_hypothesis_runs_slnm(self):
+        """A score primary hypothesis locked on a recipe without sLNM adds the sLNM step, so Run everything tests it (BB-1)."""
+        recipe = self.builtin("classic_ferguson2019_adapted")
+        self.assertNotIn("slnm", recipe.steps)
+        study = self.make_study("study-score-primary")
+        plan = recipes.lock_plan(study, recipe, recipes.apply(recipe), {"primary": {"kind": "score", "score": "nihss"}}, now=self.NOW)
+        self.assertIn("slnm", plan["steps"])
+        self.assertEqual(plan["steps"], recipes.ordered_steps(plan["steps"]))
+        self.assertEqual([item["field"] for item in plan["deviations_from_recipe"]], ["steps"])
+        self.assertIn("slnm", recipes.effective_steps(study))
+        self.assertEqual(recipes.pipeline_options(recipes.effective_parameters(study), recipes.effective_steps(study))["scores"], "auto")
+        self.assertEqual(recipes.pending_deviations(study, recipes.effective_parameters(study), steps=recipes.effective_steps(study)), [])
+        self.assertEqual(recipes.to_pipeline_config(recipe, study)["config"]["scores"], "auto")
+        self.assertEqual(recipes.plan_status(study)["state"], "locked")
+        # A contrast hypothesis keeps the recipe's steps
+        other = self.make_study("study-contrast-primary")
+        plan = recipes.lock_plan(other, recipe, recipes.apply(recipe), {"primary": {"kind": "contrast", "contrast": "A>B"}}, now=self.NOW)
+        self.assertEqual(plan["steps"], recipes.ordered_steps(recipe.steps))
+        self.assertEqual(recipes.to_pipeline_config(recipe, other)["config"]["scores"], "none")
 
     def test_deviation_log_and_methods(self):
         study = self.make_study()
@@ -343,6 +467,121 @@ class PlanLockTest(_TempCase):
         recipes.record_deviation(study, "n_perm", 1000, 10, "hand edit")
         self.assertEqual(recipes.effective_parameters(study)["n_perm"], 1000)
 
+    def test_volume_off_after_lock_is_settled_by_one_record(self):
+        """Turning the volume covariate off after the lock is settled by one Record: the covariates, recorded before the
+        reason volume is off, are not skipped, asked again or warned about on every poll
+        (bug recipes-plan-lock-roi-gui:locked-plan-volume-covariate-off-deviation-never-applies-asks-again-warning-flood).
+        """
+        study = self.make_study()
+        plan = self.lock(study)
+        current = recipes.set_field(recipes.set_field(plan["parameters"], "design.covariates", []), "design.volume_off_reason", "volumes matched by design")
+        pending = recipes.pending_deviations(study, current)
+        self.assertEqual([item["field"] for item in pending], ["design.covariates", "design.volume_off_reason"])
+        self.assertEqual(pending[1]["description"], "reason volume is not a covariate: volumes matched by design")
+        for item in pending:  # as the Recipe card's Record does
+            recipes.record_deviation(study, item["field"], item["old"], item["new"], "one reason", description=item["description"])
+        with self.assertNoLogs(level="WARNING"):
+            for _poll in range(3):
+                self.assertEqual(recipes.effective_parameters(study)["design"]["covariates"], [])
+                self.assertEqual(recipes.pending_deviations(study, current), [])
+        self.assertEqual(recipes.analysis_parameters(study, "contrast")["design.covariates"], [])
+        self.assertEqual(len(recipes.read_deviations(study)), 2)
+        # A record that never becomes valid is skipped with one warning, not one per poll
+        recipes.record_deviation(study, "n_perm", 5000, 10, "hand edit")
+        with self.assertLogs(level="WARNING") as logs:
+            for _poll in range(3):
+                self.assertEqual(recipes.effective_parameters(study)["n_perm"], 5000)
+            logging.warning("end")
+        self.assertEqual(sum("Deviation of n_perm skipped" in line for line in logs.output), 1)
+
+    def test_cohort_analysis_follows_a_recorded_plan_change(self):
+        """After a change of the plan is recorded, an analysis that still held the plan's value follows it; one the user
+        changed keeps its value (bug recipes-plan-lock-roi-gui:locked-plan-deviation-cascades-phantom-contrast-symptom-deviations).
+        """
+        before = {"n_perm": 5000, "design.covariates": ["volume_ml"], "design.tfce": False, "fdr": True, "statistic": "Fz"}
+        after = dict(before, **{"n_perm": 2000, "design.covariates": []})
+        self.assertEqual(recipes.analysis_follow(before, after, dict(before)), {"n_perm": 2000, "design.covariates": []})
+        self.assertEqual(recipes.analysis_follow(before, after, {"n_perm": 3000, "design.covariates": ["volume_ml"]}), {"design.covariates": []})
+        self.assertEqual(recipes.analysis_follow(before, before, dict(before)), {})
+        self.assertEqual(recipes.analysis_follow(None, after, dict(before)), {})
+        self.assertEqual(recipes.analysis_follow(before, after, {"n_perm": 5000}), {"n_perm": 2000})  # only the fields it holds
+        # With a study: Run everything's permutations recorded after the lock; the analyses at the plan's 5000 follow
+        study = self.make_study()
+        self.lock(study)
+        old = recipes.analysis_parameters(study, "symptom")
+        current = {"n_perm": 5000, "design.covariates": ["volume_ml"]}
+        recipes.record_deviation(study, "n_perm", 5000, 2000, "compute budget")
+        new = recipes.analysis_parameters(study, "symptom")
+        follow = recipes.analysis_follow(old, new, current)
+        self.assertEqual(follow, {"n_perm": 2000})
+        self.assertEqual(recipes.analysis_pending(study, "symptom", dict(current, **follow)), [])
+        self.assertEqual(len(recipes.analysis_pending(study, "symptom", current)), 1, "without following, a change nobody made")
+
+    def test_cohort_analysis_deviations(self):
+        """The Cohort card's Contrast and Symptom analyses are compared with the plan apart from Run everything."""
+        study = self.make_study()
+        self.assertEqual(recipes.analysis_pending(study, "contrast", {"n_perm": 1000}), [])  # no plan: nothing to deviate from
+        self.lock(study)
+        planned = {"n_perm": 5000, "design.covariates": ["volume_ml"], "design.tfce": False, "fdr": True, "statistic": "Fz"}
+        self.assertEqual(recipes.analysis_parameters(study, "contrast"), planned)
+        self.assertEqual(recipes.analysis_pending(study, "contrast", planned), [])
+        # Below the plan's minimum (a preview) and volume off are changes too
+        current = dict(planned, **{"n_perm": 500, "design.covariates": ["age"]})
+        pending = recipes.analysis_pending(study, "contrast", current)
+        self.assertEqual([(item["field"], item["old"], item["new"], item["scope"]) for item in pending],
+                         [("contrast.n_perm", 5000, 500, "contrast"), ("contrast.design.covariates", ["volume_ml"], ["age"], "contrast")])
+        self.assertEqual(pending[0]["description"], "Contrast GLM: n_perm 500 instead of 5000")
+        self.assertEqual(recipes.analysis_pending(study, "contrast", dict(planned, **{"design.covariates": ["age", "volume_ml"]}))[0]["new"], ["age", "volume_ml"])
+        self.assertEqual(recipes.analysis_pending(study, "symptom", {"n_perm": 5000, "design.covariates": ["volume_ml"]}), [])
+        with self.assertRaises(recipes.RecipeError):
+            recipes.analysis_parameters(study, "unknown")
+        # Recorded: the analysis follows its deviation; Run everything (effective parameters) and the other analysis do not
+        for item in pending:
+            recipes.record_deviation(study, item["field"], item["old"], item["new"], "matched volumes; a preview first", description=item["description"])
+        self.assertEqual(recipes.analysis_pending(study, "contrast", current), [])
+        self.assertEqual(recipes.analysis_parameters(study, "contrast")["n_perm"], 500)
+        self.assertEqual(recipes.effective_parameters(study)["n_perm"], 5000)
+        self.assertEqual(recipes.effective_parameters(study)["design"]["covariates"], ["volume_ml"])
+        self.assertEqual(recipes.analysis_parameters(study, "symptom")["n_perm"], 5000)
+        self.assertEqual(recipes.to_pipeline_config(self.builtin("classic_ferguson2019_adapted"), study)["config"]["perm"], 5000)
+        # A later deviation of the plan itself is followed by the analysis too (in the order recorded)
+        recipes.record_deviation(study, "n_perm", 5000, 10000, "more permutations")
+        self.assertEqual(recipes.analysis_parameters(study, "contrast")["n_perm"], 10000)
+        self.assertEqual(recipes.analysis_parameters(study, "contrast")["design.covariates"], ["age"])
+        # The methods text lists the analysis's deviations with their reason
+        text = methods.find_section(methods.methods_sections(study.path), "deviations").text()
+        self.assertIn("Contrast GLM: n_perm 500 instead of 5000 (reason: matched volumes; a preview first", text)
+
+    def test_nulls_card_deviations(self):
+        """The Null models card's kind, K, mode and seed are compared with a plan that has null models (bug
+        recipes-plan-lock-roi-gui:nulls-card-kind-and-k-changes-after-lock-not-deviations).
+        """
+        study = self.make_study()
+        recipe = self.builtin("vdh2026_standard_settings")
+        recipes.lock_plan(study, recipe, recipes.apply(recipe), {"primary": {"kind": "contrast", "contrast": "A>B"}, "rois": [], "seeds": {"permutation": 7}}, now=self.NOW)
+        planned = {"nulls.kinds": ["rl_independent"], "nulls.k": 1000, "nulls.mode": "exact", "seeds.nulls": 0}
+        self.assertEqual(recipes.analysis_parameters(study, "nulls_card"), planned)
+        self.assertEqual(recipes.analysis_pending(study, "nulls_card", planned), [])
+        # Another kind and K: both wait for a reason; the kind is recorded as the planned kinds with it added
+        current = dict(planned, **{"nulls.kinds": ["rl_cohort_shift"], "nulls.k": 200})
+        pending = recipes.analysis_pending(study, "nulls_card", current)
+        self.assertEqual([(item["field"], item["old"], item["new"], item["scope"]) for item in pending],
+                         [("nulls_card.nulls.kinds", ["rl_independent"], ["rl_independent", "rl_cohort_shift"], "nulls_card"), ("nulls_card.nulls.k", 1000, 200, "nulls_card")])
+        self.assertEqual(pending[1]["description"], "Null models card: null cohorts 200 instead of 1000")
+        self.assertEqual([item["field"] for item in recipes.analysis_pending(study, "nulls_card", dict(planned, **{"nulls.mode": "fast", "seeds.nulls": 3}))],
+                         ["nulls_card.nulls.mode", "nulls_card.seeds.nulls"])
+        for item in pending:
+            recipes.record_deviation(study, item["field"], item["old"], item["new"], "a cohort-shift check", description=item["description"])
+        self.assertEqual(recipes.analysis_pending(study, "nulls_card", current), [])
+        self.assertEqual(recipes.analysis_pending(study, "nulls_card", dict(current, **{"nulls.kinds": ["rl_independent"]})), [], "the planned kind stays allowed")
+        self.assertEqual(recipes.effective_parameters(study)["nulls"], {"mode": "exact", "kinds": ["rl_independent"], "k": 1000, "relocations": "auto"})
+        text = methods.find_section(methods.methods_sections(study.path), "deviations").text()
+        self.assertIn("Null models card: null cohorts 200 instead of 1000 (reason: a cohort-shift check", text)
+        # A plan without null models states no null-model settings: the card is not compared
+        other = self.make_study("other")
+        self.lock(other)
+        self.assertEqual(recipes.analysis_pending(other, "nulls_card", current), [])
+
     def test_selection(self):
         study = self.make_study()
         self.assertIsNone(recipes.selected_recipe(study))
@@ -365,6 +604,11 @@ class RoiTest(_TempCase):
         self.assertTrue(np.allclose(roi.roi_means(maps, masks), [[0.5, 4.0], [6.5, 10.0]]))
         with self.assertRaises(roi.RoiError):
             roi.roi_means(maps, np.zeros(6))
+
+    def test_roi_names_refuse_duplicate_file_names(self):
+        self.assertEqual(roi.roi_names(["a/left.nii.gz", "b/right.nii"]), ["left", "right"])
+        with self.assertRaisesRegex(roi.RoiError, "must be unique"):
+            roi.roi_names(["rois/left/roi.nii.gz", "rois/right/roi.nii.gz"])
 
     def test_roi_max_stat_equals_brute_force(self):
         design, rng = self.design()

@@ -595,7 +595,8 @@ def estimate(bundle, subjects=None, subject_list=None, n_seeds=DEFAULT_SEEDS, k=
     per_maps = max(read_rate * mean_bytes, maps_s) if prefetch else read_rate * mean_bytes + maps_s
     per_pcs = max(read_rate * mean_bytes, pcs_s)
     info["seconds_per_subject"] = {"maps": round(per_maps, 4), "pcs": round(per_pcs, 4), "read": round(read_rate * mean_bytes, 4)}
-    info["seconds"] = round(len(ids) * (per_maps + _n_steps(power_iters) * per_pcs), 1)
+    # A measured time never rounds to 0.0 (None means "not measured"): small bundles take milliseconds
+    info["seconds"] = max(0.001, round(len(ids) * (per_maps + _n_steps(power_iters) * per_pcs), 3))
     return info
 
 
@@ -1036,14 +1037,35 @@ def _candidates(bundle, path=None):
     return [base, *sorted(glob.glob(os.path.join(base, "subj-*")))]
 
 
-def reference_status(bundle, subjects_sha=None, path=None, strict=False, verify=True):
+def reference_fingerprint(bundle):
+    """A cheap stamp of what :func:`load_reference` reads first: the reference.json of every reference
+    folder and the bundle's connectome.json (path, size and mtime of each; None for a missing file).
+
+    It changes when reference maps are built, rebuilt or removed, or the connectome is re-converted,
+    so a caller that keeps a loaded :class:`Reference` reloads it when the stamp differs.
+    """
+    bundle_path = os.fspath(getattr(bundle, "path", bundle))
+    stamps = []
+    base = os.path.join(bundle_path, "derived", "reference")
+    folders = [base, *sorted(glob.glob(os.path.join(base, "subj-*")))]  # as _candidates
+    for path in [os.path.join(folder, REFERENCE_JSON) for folder in folders] + [os.path.join(bundle_path, "connectome.json")]:
+        try:
+            info = os.stat(path)
+            stamps.append((path, info.st_size, info.st_mtime_ns))
+        except OSError:
+            stamps.append((path, None, None))
+    return tuple(stamps)
+
+
+def reference_status(bundle, subjects_sha=None, path=None, strict=False, verify=True, check_data=True):
     """Status of every reference folder of a bundle: a list of {path, status, reason, metadata}.
 
     status is "ok", "missing", "stale" (another definition, or the connectome changed: its
     data-defining keys, kind or preprocessing record, mask, the time series of the reference's
     subjects or, with ``strict``, any byte of connectome.json), "other_subjects" (with
     ``subjects_sha``) or "corrupt" (reference.json is malformed, or with ``verify`` a file is missing
-    or does not match its sha256).
+    or does not match its sha256). With ``check_data`` False the time series of the subjects are not
+    hashed (a quick check for listings; :func:`load_reference` always checks them).
     """
     bundle = _open_bundle(bundle)
     statuses = []
@@ -1084,13 +1106,19 @@ def reference_status(bundle, subjects_sha=None, path=None, strict=False, verify=
             entry.update(status="stale", reason="connectome.json changed")
         elif subjects_sha is not None and metadata["subjects"].get("sha256") != subjects_sha:
             entry.update(status="other_subjects", reason="built for another subject list")
-        elif _subjects_data_stale(bundle, metadata["subjects"]):
+        elif check_data and _subjects_data_stale(bundle, metadata["subjects"]):
             entry.update(status="stale", reason="the connectome time series changed (subjects/<id>.norms.npy)")
         elif verify:
             for item in metadata["maps"].values():
                 file_path = os.path.join(folder, item["file"])
                 if not os.path.isfile(file_path) or _file_sha256(file_path) != item.get("sha256"):
                     entry.update(status="corrupt", reason=f"{item['file']} is missing or does not match its sha256")
+                    break
+        else:
+            # a quick listing does not hash the maps, but a deleted map is cheap to see (load_reference rejects it)
+            for item in metadata["maps"].values():
+                if not os.path.isfile(os.path.join(folder, item["file"])):
+                    entry.update(status="corrupt", reason=f"{item['file']} is missing")
                     break
     return statuses
 
@@ -1266,7 +1294,7 @@ def _build_main(argv):
     except (jobs.Cancelled, jobs.JobError):
         raise
     except (OSError, ValueError, KeyError) as exc:
-        raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None
+        raise jobs.JobError(jobs.input_message(exc, args), code="input") from None
     return jobs.EXIT_OK
 
 
@@ -1282,7 +1310,7 @@ def _estimate_main(argv):
         jobs.emit("start", job="reference-estimate", argv=argv, threads=args.threads)
         info = estimate(bundle, args.subjects, args.subject_list, args.seeds, args.pcs, args.power_iters, args.oversample, args.ev1, args.chunk, int(args.memory_gb * 1024**3))
     except (OSError, ValueError, KeyError) as exc:
-        raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None
+        raise jobs.JobError(jobs.input_message(exc, args), code="input") from None
     jobs.emit("result", kind="estimate", **info)
     jobs.emit("done", outputs=[], elapsed=round(jobs.elapsed(), 3), run_id=None, seconds=info["seconds"])
     return jobs.EXIT_OK
@@ -1302,10 +1330,10 @@ def _compare_main(argv):
         subjects_sha = bundle.resolve_subject_list(args.subject_list).sha256 if args.subject_list else None
         reference = load_reference(bundle, subjects_sha=subjects_sha, path=args.reference)
         if reference is None:
-            raise jobs.JobError("No valid reference maps for this connectome and subject list: build them with 'python -m LesionNetworkMappingLib.reference build'", code="no_reference")
+            raise jobs.JobError(jobs.command_text("No valid reference maps for this connectome and subject list: build them with 'python -m LesionNetworkMappingLib.reference build'"), code="no_reference")
         external = external_on_grid(args.external, bundle, args.min_coverage)
     except (OSError, ValueError, KeyError) as exc:
-        raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None
+        raise jobs.JobError(jobs.input_message(exc, args), code="input") from None
     from .qa import degree_similarity
 
     n_covered = int(np.count_nonzero(np.isfinite(external)))

@@ -59,7 +59,8 @@ class Step:
         self.when = when
 
     def bodyText(self, shell):
-        return self.body(shell) if callable(self.body) else self.body
+        """The body with its ``{key:Ctrl+O}`` markers shown as this platform displays the keys ("⌘O" on macOS)."""
+        return migration.formatKeys(self.body(shell) if callable(self.body) else self.body)
 
     def inSlicerText(self, native=True):
         """The "In 3D Slicer" line: ``inSlicer``, else the official places of ``rows``."""
@@ -117,6 +118,16 @@ def _workspaceAvailable(key):
 
     ws = workspaces.workspace(key)
     return ws is not None and workspaces.isAvailable(ws)
+
+
+def _libraryAvailable(shell=None):
+    """False while a study is open: Library then shows the study page, none of whose controls the Library tour points at."""
+    from . import library
+
+    try:
+        return library._studySession() is None
+    except Exception:
+        return True
 
 
 def _mapAvailable(shell=None):
@@ -178,7 +189,7 @@ def _drawToolsBody(shell):
     text = _("The Segment Editor effects as labelled tools: Brush, Outline, Smart fill, Erase and Fill gaps; More tools shows the others. ")
     if _hasSourceVolume():
         return text + _("Pick Brush (P) and drag in a view to draw. On the MNI template or a new lesion it is ready.")
-    return text + _("Once a scan is open (Library, or Start on MNI template), pick Brush (P) and drag in a view to draw.")
+    return text + _("Once a scan is open (Library > Start on template, or Start on MNI template here), pick Brush (P) and drag in a view to draw.")
 
 
 def _viewsBody(shell):
@@ -214,7 +225,7 @@ _STUDIO_STEPS = (
                     "Mouse Interaction, Crosshair Selection and Extensions."),
          placement="below"),
     Step("library", ("StudioDropZone", "StudioLibraryOpenButton"), _("Library: open your data"),
-         _("Drop scans, lesion masks, scenes or a DICOM folder anywhere on the window, or press Ctrl+O. "
+         _("Drop scans, lesion masks, scenes or a DICOM folder anywhere on the window, or press {key:Ctrl+O}. "
            "They open with the same readers as in 3D Slicer."),
          rows=("add-data", "add-dicom"), keys=((("Ctrl+O",), _("open files")),), workspace="library"),
     Step("template", "StudioLibraryStartOnTemplateButton", _("Start on the MNI template"),
@@ -231,7 +242,7 @@ _STUDIO_STEPS = (
     Step("save-lesion", "StudioSaveLesionButton", _("Save lesion"),
          _("Writes the lesion as a NIfTI mask (.nii.gz) on its own grid, which official 3D Slicer, FSL and other tools read; in a "
            "project the dialog proposes its Lesions folder. After the first save it saves again to the same file. ⋯ > Export each segment as a "
-           "NIfTI mask… writes one mask per segment. The whole project is saved automatically; Ctrl+S saves it at once."),
+           "NIfTI mask… writes one mask per segment. The whole project is saved automatically; {key:Ctrl+S} saves it at once."),
          rows=("export-segmentation",), keys=((("Ctrl+Shift+S",), _("save lesion")), (("Ctrl+Enter",), _("the blue button"))),
          workspace="draw", inspector=True, placement="left"),
     Step("inspector", "StudioPanelHeader", _("The inspector"),
@@ -245,7 +256,7 @@ _STUDIO_STEPS = (
          rows=("layout", "crosshair"), keys=((("Alt+1", "Alt+4"), _("Focus, Single, Four-up, Row")), (("Alt+5",), _("Focus + 3D"))), placement="below"),
     Step("search", "StudioSearchPill", _("Search"),
          _("Find any module, Draw tool, layout, menu command, setting or sample by name, also the ones that no workspace shows. "
-           "A module opened from Search has a ← back button, and Esc returns too. Ctrl+/ lists every key."),
+           "A module opened from Search has a ← back button, and Esc returns too. {key:Ctrl+/} lists every key."),
          rows=("modules", "module-finder", "shortcuts-reference"),
          keys=((("Ctrl+K",), _("search")), (("Ctrl+F",), _("modules only")), (("Ctrl+/",), _("all keys"))), placement="below"),
     Step("app-menu", "StudioAppMenuButton", _("Everything else: the ≡ menu"),
@@ -255,7 +266,7 @@ _STUDIO_STEPS = (
     # The status appears with the first save: until then (or with saving off) the step shows the ≡ menu, where the File items are
     Step("autosave", ("StudioSaveStatus", "StudioAppMenuButton"), _("Saved automatically"),
          _("Your work is saved as you go, in the Slicer Studio folder you chose: one folder per project, under Projects, that "
-           "official 3D Slicer opens too. The top bar shows \"Saved\"; Ctrl+S saves at once, Ctrl+N starts a new project, and "
+           "official 3D Slicer opens too. The top bar shows \"Saved\"; {key:Ctrl+S} saves at once, {key:Ctrl+N} starts a new project, and "
            "File > Save a copy as… writes a .mrb file anywhere. Without a project (Classic, a study) Studio keeps a recovery copy instead."),
          rows=("save-data", "save-as", "where-files"),
          inSlicer=_("No autosave: you save with File > Save Data ({key:Ctrl+S})."), placement="below"),
@@ -272,11 +283,11 @@ _FROM_SLICER_STEPS = (
          rows=("add-data", "save-data"), workspace="library"),
     Step("modules", "StudioSearchPill", _("Every module is still here"),
          _("Library, Draw and Map cover the lesion workflow. The other modules, and those of your extensions, are one search away; "
-           "Search also finds menu commands and layouts, and answers \"where is …\". Ctrl+/ lists every key."),
+           "Search also finds menu commands and layouts, and answers \"where is …\". {key:Ctrl+/} lists every key."),
          rows=("modules", "module-finder", "shortcuts-reference"), keys=((("Ctrl+K",), _("search")), (("Ctrl+/",), _("all keys"))),
          placement="below"),
     Step("draw", "StudioDrawWorkspaceButton", _("Draw is the Segment Editor"),
-         _("The same effects and keys, with your lesion in the inspector. Save lesion writes a NIfTI mask; Ctrl+S saves the scene as before."),
+         _("The same effects and keys, with your lesion in the inspector. Save lesion writes a NIfTI mask; {key:Ctrl+S} saves the scene as before."),
          rows=("segment-editor", "export-segmentation"), keys=((("Ctrl+Alt+2",), _("Draw")),), placement="below"),
     Step("views", "qMRMLSliceWidgetRed/SliceView", _("The views work as you know them"), _viewsBody,
          rows=("mouse-mode", "view-controllers"), workspace="draw"),
@@ -322,7 +333,7 @@ _LIBRARY_STEPS = (
            "is not saved. The inspector lists the same under Open now."),
          rows=("data-module",), workspace="library"),
     Step("loaded-set", "StudioLoadedSetCard", _("Loaded set"),
-         _("Lesion masks loaded together (up to 60) are reviewed one at a time: Review in Draw shows the first, Alt+← and Alt+→ "
+         _("Lesion masks loaded together (up to 60) are reviewed one at a time: Review in Draw shows the first, {key:Alt+Left} and {key:Alt+Right} "
            "step through them. Close set removes exactly these masks from the scene; your files are never deleted."),
          rows=("data-module",), workspace="library"),
     Step("projects", "studioProjectsSection", _("Projects"),
@@ -366,7 +377,7 @@ _DRAW_STEPS = (
          _("Click inside a lesion: Smart fill grows the region with an automatic intensity tolerance and shows a preview before you apply it."),
          inSlicer=_("No such effect; the closest are Grow from seeds and Level tracing."), keys=((("M",), _("Smart fill")),),
          workspace="draw", inspector=True, placement="left"),
-    Step("display", "StudioDisplayCard", _("Display"),
+    Step("display", "StudioDisplayCard", _("Overlay"),
          _("The Overlay slider sets the opacity of the lesion fill and the Outline switch draws its outline. ⋯ in the inspector header has "
            "Show lesion in 3D, Voxel view (crisp voxels, on by default on the MNI template) and the Window/level presets."),
          inSlicer=_("The Segmentations module (display) and the Volumes module (window/level, interpolation)."), keys=((("O",), _("fill or outline")),),
@@ -375,7 +386,7 @@ _DRAW_STEPS = (
          rows=("segment-editor-undo",), keys=((("Ctrl+Z",), _("undo")), (("Ctrl+Y",), _("redo"))), workspace="draw", placement="below"),
     Step("save", "StudioSaveLesionButton", _("Save lesion"),
          _("Writes the lesion as a NIfTI mask (.nii.gz) on its own grid, which official 3D Slicer, FSL and other tools read, with a small .json "
-           "sidecar (scan, space, notes). After the first save it saves again to the same file. Ctrl+S still saves the whole scene. "
+           "sidecar (scan, space, notes). After the first save it saves again to the same file. {key:Ctrl+S} still saves the whole scene. "
            "Export as NIfTI… (the ⋯ of an Open now row in Library, or Search) writes scans, label maps and maps too."),
          rows=("export-segmentation",), keys=((("Ctrl+Enter", "Ctrl+Shift+S"), _("save lesion")),), workspace="draw", inspector=True, placement="left"),
 )
@@ -409,7 +420,7 @@ _MAP_STEPS = (
            "worked out again from the number of subjects, so a T threshold is never silently reused on another N. "
            "The statistic, the sign (±, +, −) and the opacity change only what is shown. Notes about the map are one line with Details, "  # noqa: RUF001
            "the peaks name their region from an atlas you have downloaded, and ⋯ in the inspector header has the recipes and the "
-           "reporting checks. A map opened from Library is shown here too; Alt+← / Alt+→ show the maps next to it, one at a time."),
+           "reporting checks. A map opened from Library is shown here too; {key:Alt+Left} / {key:Alt+Right} show the maps next to it, one at a time."),
          inSlicer=_("Not part of official 3D Slicer. The map is an ordinary volume: the Volumes and Data modules work on it as usual."),
          workspace="map", inspector=True, placement="left"),
     Step("disclaimer", "LNMDisclaimer", _("Research use only"),
@@ -422,8 +433,9 @@ TOURS = (
     Tour("studio", _("Slicer Studio in 2 minutes"), _("The top bar, the three workspaces, Search, layouts and the Classic interface."), _STUDIO_STEPS),
     Tour("from-slicer", _("Coming from 3D Slicer"), _("What stays the same, what moved, and where to find it now."), _FROM_SLICER_STEPS,
          finishText=_("Open the map")),
-    Tour("library", _("Library tour"), _("Opening data, the MNI template, Recent and sample data."), _LIBRARY_STEPS, workspace="library"),
-    Tour("draw", _("Draw tour"), _("Your lesion, the tools, the brush, Display, Undo and Save lesion."), _DRAW_STEPS, workspace="draw"),
+    Tour("library", _("Library tour"), _("Opening data, the MNI template, files opened from elsewhere and sample data."), _LIBRARY_STEPS, workspace="library",
+         available=_libraryAvailable),
+    Tour("draw", _("Draw tour"), _("Your lesion, the tools, the brush, Overlay, Undo and Save lesion."), _DRAW_STEPS, workspace="draw"),
     Tour("map", _("Map tour"), _("Lesion network mapping: the lesion, the connectome, Map network, the result and its threshold."), _MAP_STEPS,
          workspace="map", available=_mapAvailable),
 )

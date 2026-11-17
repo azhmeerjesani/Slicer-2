@@ -38,6 +38,10 @@ WEB_FILES = ("slicer_studio_web.py", "Dockerfile", "README.md", "docker")
 
 REPOSITORY = "azhmeerjesani/Slicer-2"
 MANIFEST_NAME = "studio-update.json"
+#: What the application accepts (StudioLib/updates.py MANIFEST_MAX_BYTES and NOTES_MAX_CHARS; this script uses only the
+#: standard library, so the values are repeated here and checked against updates.py by StudioUpdatesTest)
+MANIFEST_MAX_BYTES = 256 * 1024
+NOTES_MAX_CHARS = 20000
 PLATFORM_KEYS = ("macos-arm64", "macos-x86_64", "linux-x86_64", "web")
 #: Names that GitHub keeps as they are (spaces would become dots) and that the application accepts
 ASSET_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,254}$")
@@ -136,6 +140,18 @@ def git_commit():
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def check_published(text):
+    """--published must be a real calendar date written YYYY-MM-DD."""
+    match = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", text)
+    try:
+        if not match:
+            raise ValueError(text)
+        datetime.date(*(int(part) for part in match.groups()))
+    except ValueError:
+        raise ReleaseError(f"--published {text!r} is not a date YYYY-MM-DD (for example 2026-10-22).") from None
+    return text
+
+
 def build_manifest(version, assets, required=False, minimum_supported=None, notes="", published=None):
     manifest = {
         "version": version,
@@ -178,7 +194,7 @@ def collect_assets(args):
     return {key: str(Path(path).resolve()) for key, path in assets.items()}
 
 
-def print_steps(version, manifest_path, files, required, notes_file):
+def print_steps(version, manifest_path, files, required, notes_file, minimum_supported=None):
     tag = f"v{version}"
     commit = git_commit()
     print()
@@ -198,6 +214,9 @@ def print_steps(version, manifest_path, files, required, notes_file):
     print()
     if required:
         print("This release is REQUIRED: older installed versions show a blocking 'Update required' dialog at their next start (when they check for updates).")
+    elif minimum_supported:
+        print(f"Installed versions older than {minimum_supported} show a blocking 'Update required' dialog at their next start (when they check for updates); "
+              "newer ones are offered this release in Settings > Updates and with a notice that can be skipped.")
     else:
         print("This release is optional: Slicer Studio offers it in Settings > Updates and with a notice that can be skipped.")
     print(f"Manifest: {manifest_path}")
@@ -230,8 +249,9 @@ def main(argv=None):
         if source_version and version != source_version:
             raise ReleaseError(f"--version {version} differs from STUDIO_VERSION {source_version} in {VERSION_FILE}: "
                                "raise STUDIO_VERSION and build the packages again.")
-        if args.minimum_supported:
-            version_key(args.minimum_supported)
+        if args.published is not None:
+            check_published(args.published)
+        if args.minimum_supported is not None:
             if version_key(args.minimum_supported) > version_key(version):
                 raise ReleaseError(f"--minimum-supported {args.minimum_supported} is newer than the release {version}.")
         assets = collect_assets(args)
@@ -253,18 +273,39 @@ def main(argv=None):
                   "release, and upload the manifest, before or together with them.", file=sys.stderr)
         notes_text = ""
         if args.notes:
-            notes_text = Path(args.notes).read_text(encoding="utf-8")
+            try:
+                notes_text = Path(args.notes).read_text(encoding="utf-8")
+            except UnicodeDecodeError as error:
+                raise ReleaseError(f"The notes file {args.notes} is not UTF-8 text ({error.reason} at byte {error.start}): "
+                                   "save it as UTF-8.") from None
+            except OSError as error:
+                raise ReleaseError(f"Cannot read the notes file {args.notes}: {error.strerror or error}.") from None
         elif args.notes_text:
             notes_text = args.notes_text
         out_dir = Path(args.out_dir or f"release-v{version}").resolve()
-        out_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise ReleaseError(f"Cannot create the output folder {out_dir}: {error.strerror or error}.") from None
         if "linux-x86_64" in assets and "web" not in assets and not args.no_web:
             assets["web"] = str(make_web_bundle(version, out_dir))
         manifest = build_manifest(version, assets, args.required, args.minimum_supported, notes_text, args.published)
         manifest_path = out_dir / MANIFEST_NAME
-        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        manifest_text = json.dumps(manifest, indent=2) + "\n"
+        manifest_size = len(manifest_text.encode("utf-8"))
+        if manifest_size > MANIFEST_MAX_BYTES:
+            raise ReleaseError(f"The manifest would be {manifest_size} bytes, more than the {MANIFEST_MAX_BYTES} bytes that the "
+                               "application accepts: it would refuse the release (\"The update manifest is too large.\"). "
+                               f"Shorten the release notes (the application shows only the first {NOTES_MAX_CHARS} characters).")
+        if len(notes_text) > NOTES_MAX_CHARS:
+            print(f"Warning: the release notes have {len(notes_text)} characters; the application shows only the first "
+                  f"{NOTES_MAX_CHARS}. Shorten them or put the rest on the release page.", file=sys.stderr)
+        try:
+            manifest_path.write_text(manifest_text, encoding="utf-8")
+        except OSError as error:
+            raise ReleaseError(f"Cannot write {manifest_path}: {error.strerror or error}.") from None
         files = [assets[key] for key in PLATFORM_KEYS if key in assets] + [str(manifest_path)]
-        print_steps(version, manifest_path, files, args.required, args.notes)
+        print_steps(version, manifest_path, files, args.required, args.notes, args.minimum_supported)
     except ReleaseError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1

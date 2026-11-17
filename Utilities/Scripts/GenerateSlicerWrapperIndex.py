@@ -89,7 +89,11 @@ def vtk_class_names(module_name, data):
     """Return the names of the Python types defined by a VTK wrapper library."""
     pattern = re.compile(rb"\0" + re.escape(module_name.encode()) + rb"\.(" + _IDENTIFIER + rb")\0")
     # The library file name ("<module>.so") matches the pattern too.
-    return {name.decode() for name in pattern.findall(data)} - {suffix[1:] for suffix in EXTENSION_SUFFIXES}
+    names = {name.decode() for name in pattern.findall(data)} - {suffix[1:] for suffix in EXTENSION_SUFFIXES}
+    # "<Class>Initialize" (for example vtkSlicerDynamicModelerToolFactoryInitialize) is the helper that
+    # registers an object factory. VTK wraps it as a type, but it is not a vtkObjectBase subclass, so the
+    # eager import never copies it into ``slicer``; indexing it would make dir(slicer) list a name that fails.
+    return {name for name in names if not name.endswith("Initialize")}
 
 
 def qt_class_names(data):

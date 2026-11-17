@@ -9,11 +9,14 @@ connectome itself is not read).
 The report assembles and computes no statistics: maps and their thresholds come from the pipeline's outputs and
 sidecars, figures from :mod:`reportfigs` (over the L-23 renderer :mod:`figures`), labels from :mod:`atlases`
 (L-15), methods and checklist from :mod:`methods`/:mod:`checklist` (L-18), cluster tables from :mod:`clusters`
-(L-19) and QA chips from :mod:`qa` (L-10). Significance masks only hide voxels whose recorded p is not below alpha.
+(L-19) and QA chips from :mod:`qa` (L-10). Significance masks only hide voxels whose recorded p is not at most alpha.
 
 Sections, by id and in this order: header, summary, preflight, lesions, network-<tag> (one per rule), nulls,
 specificity, conjunction, slnm-<Label> (one per score; "slnm" when none), qa, clusters, gallery, methods,
 checklist, reproduce, files. The research-only disclaimer appears at the top and at the bottom.
+
+A tutorial study ("TUTORIAL DATA") or a synthetic connectome ("SYNTHETIC", :func:`figures.watermark_for`) is named
+in the page title and in a banner under the header, and every map figure carries the same watermark (L-53).
 
 Re-render without computing anything::
 
@@ -55,6 +58,10 @@ REFERENCES = (
     ("Siddiqi et al., 2026, bioRxiv", "10.64898/2026.02.24.707529"),
     ("Zalesky & Cash, 2026, Nat Neurosci", "10.1038/s41593-026-02259-3"),
 )
+WATERMARK_NOTES = {
+    "TUTORIAL DATA": "this study was built from a published tutorial dataset to practise the workflow; its maps are a teaching example, not a new analysis.",
+    "SYNTHETIC": "these maps were computed on a synthetic connectome (simulated data for testing); they do not describe real brain connectivity.",
+}
 NOT_AVAILABLE_QA = "not available: no reference maps (μC/PC1) for this connectome and subject list; build them with --build-references"
 
 CSS = (
@@ -108,6 +115,11 @@ def _read_tsv(path):
 
 def _e(value):
     return html.escape("" if value is None else str(value), quote=True)
+
+
+def _maps_phrase(n, kind=""):
+    """'1 map' / '3 maps' (with an optional adjective phrase such as 'lesion network '); 'n/a' stays plural."""
+    return f"{n} {kind}{'map' if str(n) == '1' else 'maps'}"
 
 
 def _num(value, digits=3):
@@ -244,6 +256,7 @@ class _Report:
         self.alpha = float(self.config.get("alpha") or 0.05)
         self.space = self.connectome.get("space") or self.lesionset.get("space")
         self.convention = convention or self.config.get("figure_convention") or None
+        self.watermark = self._watermark()
         self.template = self._template(template)
         self.atlas_arg = atlas or self._path_or_id(self.config.get("atlas"))
         self.atlas_labels_arg = atlas_labels or self._resolve(self.config.get("atlas_labels"))
@@ -288,6 +301,13 @@ class _Report:
                 out[sid] = content
         return out
 
+    def _watermark(self):
+        """"TUTORIAL DATA" for a tutorial study, "SYNTHETIC" for a synthetic connectome, else None (L-53)."""
+        from . import figures
+
+        study = os.path.join(self.study_path, "study.json") if self.study_path else None
+        return figures.watermark_for(study if study and os.path.isfile(study) else None, self.connectome)
+
     def _template(self, explicit):
         from . import reportfigs
 
@@ -327,7 +347,7 @@ class _Report:
             reference = None if self.template else self.reference_image()
             if self.template is None and reference is None:
                 return None
-            self._canvas = reportfigs.Canvas(self.template, reference=reference, convention=self.convention)
+            self._canvas = reportfigs.Canvas(self.template, reference=reference, convention=self.convention, watermark=self.watermark)
         return self._canvas
 
     def reference_image(self):
@@ -461,9 +481,9 @@ class _Report:
         body += [self.qa_section(), self.clusters(), self.gallery(), self.methods(), self.checklist(), self.reproduce(), self.files()]
         if self.emit is not None and self.total != self.done:  # the start estimate was high: end the bar at 100%
             self.total = self.done
-            self.emit("progress", stage="report", done=self.done, total=self.total, unit="figures")
+            self.emit("progress", stage="report", done=self.done, total=self.total, unit="figures", final=True)
         footer = f'<section id="footer"><div class="disc" role="note">{_e(export.DISCLAIMER)}</div></section>'
-        title = f"Lesion network mapping report: {self.study_name()}"
+        title = f"Lesion network mapping report: {self.study_name()}" + (f" ({self.watermark})" if self.watermark else "")
         page = (
             '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width,initial-scale=1">\n'
             f"<title>{_e(title)}</title>\n<style>{CSS}</style>\n</head>\n<body>\n<main>\n" + "\n".join(part for part in body if part) + "\n" + footer + "\n</main>\n</body>\n</html>\n"
@@ -487,6 +507,9 @@ class _Report:
 
         data, connectome = self.data, self.connectome
         parts = [f"<h1>{_e(self.study_name())}</h1>", '<p class="mut">Lesion network mapping cohort report</p>']
+        if self.watermark:
+            note = WATERMARK_NOTES.get(self.watermark, "the figures of this report are watermarked.")
+            parts.append(f'<p class="banner watermark" role="alert">{_e(self.watermark)}: {_e(note)}</p>')
         identity = [f"Connectome <b>{_e(connectome.get('name') or 'not recorded')}</b>",
                     f"N = {_num(connectome.get('n_subjects') or connectome.get('N'))}",
                     f"V = {_num(connectome.get('n_voxels'))} voxels",
@@ -674,7 +697,8 @@ class _Report:
                 ["dimensionality", ", ".join(f"{key} {value}" for key, value in (summary.get("dimensionality") or {}).items())]]
         for key, item in (summary.get("balance") or {}).items():
             if isinstance(item, dict) and item.get("flagged"):
-                rows.append([_td(_e(f"imbalance: {key}"), "amber"), f"SMD {_num(item.get('smd'))}; cases {_num(item.get('case_mean'))}, controls {_num(item.get('control_mean'))}"])
+                smd_text = ("+inf" if item["smd_inf"] > 0 else "-inf") if item.get("smd_inf") and item.get("smd") is None else _num(item.get("smd"))
+                rows.append([_td(_e(f"imbalance: {key}"), "amber"), f"SMD {smd_text}; cases {_num(item.get('case_mean'))}, controls {_num(item.get('control_mean'))}"])
         literature = [_e(item.get("text")) for item in summary.get("literature") or [] if isinstance(item, dict)]
         return "<h3>Lesion-set diagnostics</h3>" + _table(["Diagnostic", "Value"], rows) + ("<p>Literature context:</p>" + _list(literature) if literature else "")
 
@@ -717,14 +741,14 @@ class _Report:
         if mean:
             note = "" if threshold is not None else " Shown unthresholded: this rule does not give one |T| for the mean map."
             side = self.group_sidecar("meanT")
-            parts.append(self.montage_html(mean, "diverging", (f"meanT: {MEAN_CAPTION}; n = {side.get('n_maps', 'n/a')} maps ({side.get('population', 'not recorded')}); voxels with |T| below {_num(threshold)} are hidden.{note}" if threshold else f"meanT: {MEAN_CAPTION}.{note}"),
+            parts.append(self.montage_html(mean, "diverging", (f"meanT: {MEAN_CAPTION}; n = {_maps_phrase(side.get('n_maps', 'n/a'))} ({side.get('population', 'not recorded')}); voxels with |T| below {_num(threshold)} are hidden.{note}" if threshold else f"meanT: {MEAN_CAPTION}.{note}"),
                                            threshold=threshold, sign=sign, alt=f"Mean T montage ({tag})"))
         for suffix, label in (("Pos", "positive network, headline"), ("Neg", "negative network, secondary")):
             desc = self.desc_for("percent", suffix.lower(), tag, primary)
             path = self.group_path(desc) if desc else None
             if path:
                 side = self.group_sidecar(desc)
-                caption = f"overlapPct{suffix} ({label}): % of the {side.get('n_maps', 'n/a')} lesion network maps ({side.get('population', 'not recorded')}) above the rule; classic overlap, hub-inflated (read it next to the null models)."
+                caption = f"overlapPct{suffix} ({label}): % of the {_maps_phrase(side.get('n_maps', 'n/a'), 'lesion network ')} ({side.get('population', 'not recorded')}) above the rule; classic overlap, hub-inflated (read it next to the null models)."
                 parts.append(self.montage_html(path, "sequential", caption, vmax=100.0, alt=f"Overlap percent {suffix} montage ({tag})",
                                                bar=self.colorbar("sequential", 0, 100, "% of maps above the rule")))
         pos, neg = self.desc_for("binary", "pos", tag, primary), self.desc_for("binary", "neg", tag, primary)
@@ -753,22 +777,22 @@ class _Report:
     def stage(self, name):
         return next((stage for stage in self.data.get("stages") or [] if stage.get("name") == name), {})
 
-    def not_run(self, name, prefix="not run"):
+    def not_run(self, name, prefix="not run", reason=None):
         stage = self.stage(name)
-        reason = stage.get("reason") or stage.get("status") or "not recorded"
+        reason = stage.get("reason") or reason or stage.get("status") or "not recorded"
         estimate = f" (estimated {_duration(stage['estimate_s'])})" if stage.get("estimate_s") else ""
         return f'<p class="mut">{_e(prefix)}: {_e(reason)}{_e(estimate)}</p>'
 
     def masked(self, values_path, p_path, sign=None):
-        """(data, affine) of a map with the voxels whose recorded p is not below alpha (and of the other sign) set to 0."""
+        """(data, affine) of a map with the voxels whose recorded p is not at most alpha (and of the other sign) set to 0."""
         import numpy as np
 
-        from . import nifti
+        from . import glm, nifti
 
         data, affine, _header = nifti.read_nifti(values_path)
         p, _p_affine, _p_header = nifti.read_nifti(p_path)
         data = np.asarray(data, dtype=np.float32)
-        keep = np.isfinite(p) & (np.asarray(p) < self.alpha)
+        keep = glm.passes_alpha(p, self.alpha)
         if sign == "pos":
             keep &= data > 0
         elif sign == "neg":
@@ -781,8 +805,9 @@ class _Report:
         from . import methods
 
         info = self.cohort.get("nulls")
-        if not info:
-            return self.section("nulls", "Null models", self.not_run("nulls"))
+        if not info or not (info.get("mode_label") or info.get("k") is not None):
+            # a skipped stage records only {"reason": ...} (pipeline._skip): show it, as the other sections do
+            return self.section("nulls", "Null models", self.not_run("nulls", "not computed", (info or {}).get("reason")))
         parts = [(f"<p>{_e(info.get('mode_label'))} ({_e(info.get('kind'))}{', approximate' if info.get('approximate') else ''}); K = {_num(info.get('k'))} null cohorts; "
                  f"minimum attainable p = {_num(info.get('min_attainable_p'))}, q = {_num(info.get('min_attainable_q'))}; BH-FDR needs at least {_num(info.get('fdr_floor_voxels'))} voxels.</p>")]
         classic = info.get("classic_rule") or {}
@@ -792,10 +817,10 @@ class _Report:
         if excess and pfwe:
             values, affine, kept = self.masked(excess, pfwe)
             if kept:
-                parts.append(self.montage_html((values, affine, "sensNullExcess"), "diverging", (f"Null-referenced sensitivity: observed minus null overlap (percentage points), shown where PFWE < {self.alpha:g} ({kept} voxels). {info.get('caption') or methods.NULL_CAPTION}"),
+                parts.append(self.montage_html((values, affine, "sensNullExcess"), "diverging", (f"Null-referenced sensitivity: observed minus null overlap (percentage points), shown where PFWE ≤ {self.alpha:g} ({kept} voxels). {info.get('caption') or methods.NULL_CAPTION}"),
                                                threshold=None, alt="Null-referenced sensitivity montage"))
             else:
-                parts.append(f"<p>No voxel of the null-referenced sensitivity reaches PFWE &lt; {self.alpha:g}.</p>")
+                parts.append(f"<p>No voxel of the null-referenced sensitivity reaches PFWE &le; {self.alpha:g}.</p>")
         group_qa = info.get("group_qa") or {}
         if group_qa.get("text"):
             parts.append(f"<p>Group QA against null cohorts: {_e(group_qa.get('text'))}</p>")
@@ -832,14 +857,14 @@ class _Report:
                 values, affine, kept = self.masked(tstat, pfwe, sign)
                 count = fwe.get(sign) or {}
                 if kept:
-                    caption = f"GLM {label} T statistic, {role}: voxels with PFWE < {self.alpha:g} ({_num(count.get('voxels', kept))} voxels, {_num(count.get('ml'))} mL; permutation max-statistic FWE)."
+                    caption = f"GLM {label} T statistic, {role}: voxels with PFWE ≤ {self.alpha:g} ({_num(count.get('voxels', kept))} voxels, {_num(count.get('ml'))} mL; permutation max-statistic FWE)."
                     parts.append(self.montage_html((values, affine, f"{label}Tstat{sign}"), "diverging", caption, sign=sign, alt=f"GLM T {sign} montage"))
                 else:
-                    parts.append(f"<p>{_e(role.capitalize())}: no voxel survives FWE (PFWE &lt; {self.alpha:g}).</p>")
+                    parts.append(f"<p>{_e(role.capitalize())}: no voxel survives FWE (PFWE &le; {self.alpha:g}).</p>")
         pfdr = self.group_path(f"{label}PFdr")
         secondary = []
         if fdr:
-            secondary.append(f"FDR (secondary): {_num(fdr.get('n_significant'))} voxels with q < {self.alpha:g}. {fdr.get('note') or ''}")
+            secondary.append(f"FDR (secondary): {_num(fdr.get('n_significant'))} voxels with q ≤ {self.alpha:g}. {fdr.get('note') or ''}")
         effect = self.group_path(f"{label}HedgesG")
         if effect:
             secondary.append("Hedges g map: " + self.rel_link(os.path.basename(effect)))
@@ -857,7 +882,7 @@ class _Report:
             return self.section("conjunction", "Conjunction", self.not_run("conjunction", "not computed"))
         from . import colormaps
 
-        parts = [(f"<p>Conjunction of sensitivity and specificity (sens AND sign(t) AND PFWE &lt; {self.alpha:g}): positive {_num(conj.get('pos_voxels'))} voxels ({_num(conj.get('pos_ml'))} mL), "
+        parts = [(f"<p>Conjunction of sensitivity and specificity (sens AND sign(t) AND PFWE &le; {self.alpha:g}): positive {_num(conj.get('pos_voxels'))} voxels ({_num(conj.get('pos_ml'))} mL), "
                  f"negative {_num(conj.get('neg_voxels'))} voxels ({_num(conj.get('neg_ml'))} mL).</p>")]
         base = pos or neg
         overlays = [(neg, "binary", colormaps.NEGATIVE_COLORS[0])] if pos and neg else []
@@ -904,10 +929,10 @@ class _Report:
             if r_path and p_path:
                 values, affine, kept = self.masked(r_path, p_path)
                 if kept:
-                    caption = f"Partial r of {info.get('column')} with the network maps, shown where PFWE < {self.alpha:g} ({kept} voxels): a network associated with the score."
+                    caption = f"Partial r of {info.get('column')} with the network maps, shown where PFWE ≤ {self.alpha:g} ({kept} voxels): a network associated with the score."
                     parts.append(self.montage_html((values, affine, f"slnm{label}R"), "diverging", caption, alt=f"sLNM {label} montage"))
                 else:
-                    parts.append(f"<p>No voxel survives FWE (PFWE &lt; {self.alpha:g}); uncorrected maps are not shown as results.</p>")
+                    parts.append(f"<p>No voxel survives FWE (PFWE &le; {self.alpha:g}); uncorrected maps are not shown as results.</p>")
             out.append(self.section(f"slnm-{label}", f"sLNM: {label}", "".join(parts)))
         return out
 
@@ -1080,7 +1105,9 @@ class _Report:
             note = f'<p class="amber">The gallery shows the first {GALLERY_MAX} of {len(order)} lesions.</p>'
         intro = (f"<p>One strip per lesion in supplementary-table order: the lesion (red) on the axial slice through its centroid; its T map on that slice with the lesion outlined in white; "
                  f"the axial maximum-|T| projection over the template's maximum projection. Map values with |T| below {_num(threshold)} are hidden; colour range ±{_num(window)} shared by all strips. {_e(self.orientation_text())}</p>")
-        content = intro + note + f'<details{" open" if len(order) <= GALLERY_OPEN_MAX else ""}><summary>{len(order[:GALLERY_MAX])} lesions</summary><div class="gal">' + "".join(figures_html) + "</div></details>"
+        shown = len(order[:GALLERY_MAX])
+        word = "lesion" if shown == 1 else "lesions"
+        content = intro + note + f'<details{" open" if len(order) <= GALLERY_OPEN_MAX else ""}><summary>{shown} {word}</summary><div class="gal">' + "".join(figures_html) + "</div></details>"
         return self.section("gallery", "Lesion gallery", content)
 
     # 13. methods

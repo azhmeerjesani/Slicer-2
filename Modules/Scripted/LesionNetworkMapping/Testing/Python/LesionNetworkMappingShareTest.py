@@ -6,7 +6,9 @@ Run without Slicer's GUI:
     PythonSlicer -m unittest Testing/Python/LesionNetworkMappingShareTest.py -v
 """
 
+import csv
 import gzip
+import io
 import json
 import os
 import shutil
@@ -158,6 +160,29 @@ class ExclusionTest(ShareTestBase):
         for item in share.verify_export(out):
             self.assertEqual(item["status"], "ok", item)
 
+    def test_cells_that_start_with_a_quote_read_back_as_written(self):
+        """A citation or title with double quotes is written with typographic quotes in participants.tsv and
+        sources/records.tsv, so that official 3D Slicer (which takes every straight quote as a string delimiter),
+        pandas, R and the csv module all read the same text back.
+        """
+        citation = '"Pure alexia" after stroke, Smith et al. 2019'
+        title = '"Pure alexia" without agraphia: a case report'
+        typographic = {citation: "\u201cPure alexia\u201d after stroke, Smith et al. 2019", title: "\u201cPure alexia\u201d without agraphia: a case report"}
+        self.study.set("sub-02", citation=citation)
+        self.study.save()
+        with open(os.path.join(self.root, "sources", "records.tsv"), "w", encoding="utf-8") as f:
+            f.write("record_id\tdoi\ttitle\tyear\nR1\t10.1/xyz\t" + '"' + title.replace('"', '""') + '"' + "\t2019\n")
+        self.study = Study.open(self.root)
+        self.assertEqual(self.study.subject("sub-02")["citation"], typographic[citation])
+        result, out = self.export("quotes", columns=["citation"])
+        for path, column, expected in (("participants.tsv", "citation", citation), ("sources/records.tsv", "title", title)):
+            with open(os.path.join(out, *path.split("/")), encoding="utf-8", newline="") as f:
+                text = f.read()
+            self.assertNotIn('"', text, path)
+            rows = list(csv.DictReader(io.StringIO(text), delimiter="\t"))  # the usual quoting rules, as pandas
+            self.assertIn(typographic[expected], [row[column] for row in rows], path)
+        self.assertEqual(result["validation"], {})
+
     def test_default_columns_leave_out_free_text_names_and_dates(self):
         columns = share.default_columns(self.study)
         for name in ("notes", "rater", "modified", "scan", "lesion"):
@@ -186,6 +211,44 @@ class ExclusionTest(ShareTestBase):
         self.assertEqual(item["status"], "warn")
         self.assertIn("notes", item["detail"])
 
+    def test_personal_columns_confirmed_as_metadata_stay_off_and_are_flagged(self):
+        # Person names, dates of birth and record numbers that the user confirmed as Metadata (the Columns... dialog keeps
+        # the inferred type), with names that say what they hold or neutral ones
+        names = ["Hans Mueller", "Anna Schmidt", "Peter Weber", "Maria Fischer", "Karl Wagner"]
+        for i, sid in enumerate(row["participant_id"] for row in self.study.subjects):
+            self.study.set(sid, patient_name=names[i], dob=f"195{i}-01-1{i}", mrn=f"MRN48291{i}", who=names[i],
+                           born=f"196{i}-02-0{i + 1}", code=f"X{i}Q", site="A" if i % 2 else "B")
+        self.study.save()
+        self.study = Study.open(self.root)
+        self.assertEqual(self.study.column_spec("dob").type, "date")
+        for name in ("patient_name", "dob", "mrn", "who", "born", "code", "site"):
+            self.study.set_column_role(name, "metadata", type="categorical")
+        self.study.save()
+        self.study = Study.open(self.root)
+        offered = {choice["name"]: choice for choice in share.column_choices(self.study)}
+        self.assertEqual(offered["patient_name"]["sensitive"], "person name")
+        self.assertEqual(offered["dob"]["sensitive"], "date")
+        self.assertEqual(offered["mrn"]["sensitive"], "record number")
+        self.assertEqual(offered["born"]["sensitive"], "date")
+        self.assertEqual(offered["who"]["sensitive"], "one value per participant")
+        self.assertEqual(offered["code"]["sensitive"], "one value per participant")
+        self.assertIsNone(offered["site"]["sensitive"])
+        columns = share.default_columns(self.study)
+        for name in ("patient_name", "dob", "mrn", "who", "born", "code"):
+            self.assertNotIn(name, columns)
+        self.assertIn("site", columns)
+        _result, out = self.export()
+        with open(os.path.join(out, "participants.tsv"), encoding="utf-8") as f:
+            text = f.read()
+        for leaked in ("Hans Mueller", "1950-01-10", "MRN482910", "1960-02-01", "X0Q"):
+            self.assertNotIn(leaked, text)
+        # Ticked by hand, they are exported with a warning that names them
+        checklist = share.checklist(self.study, {"licence": "CC0-1.0", "columns": ["age", "patient_name", "dob", "who"]})
+        item = next(item for item in checklist if item["id"] == "columns")
+        self.assertEqual(item["status"], "warn")
+        for text in ("patient_name (person name)", "dob (date)", "who (one value per participant)"):
+            self.assertIn(text, item["detail"])
+
     def test_own_patient_masks_need_a_decision(self):
         checklist = share.checklist(self.study, {"licence": "CC0-1.0", "lesions": True})
         item = next(item for item in checklist if item["id"] == "own_patient")
@@ -204,6 +267,30 @@ class ExclusionTest(ShareTestBase):
         checklist = share.checklist(self.study, {"licence": "CC0-1.0"})
         self.assertNotIn("own_patient", [item["id"] for item in checklist])
 
+    def test_damaged_lesion_mask_is_named(self):
+        # A truncated .nii.gz (an interrupted copy) made gzip raise a bare EOFError that named no file: the user saw
+        # "Not exported: EOFError: Compressed file ended…" and could not tell which subject to repair or exclude.
+        path = os.path.join(self.root, "lesions", f"sub-05_space-{SPACE}_desc-lesion_mask.nii.gz")
+        with open(path, "r+b") as f:
+            f.truncate(os.path.getsize(path) // 2)
+        out = os.path.join(self.tmp, "damaged")
+        with self.assertRaises(share.ShareError) as caught:
+            share.export_dataset(self.study, out, {"licence": "CC0-1.0", "lesions": True, "own_patient": "share"})
+        message = str(caught.exception)
+        self.assertIn("The lesion mask of sub-05", message)
+        self.assertIn(os.path.basename(path), message)
+        self.assertIn("damaged", message)
+        self.assertNotIn("Error", message)
+        self.assertNotIn(self.root, message)  # the file name is enough
+        self.assertFalse(os.path.exists(out))
+        self.assertEqual([name for name in os.listdir(self.tmp) if name.startswith("damaged")], [])
+        # Excluding the subject lets the export go ahead
+        lesions = len(share.plan(self.study, {"licence": "CC0-1.0", "lesions": True, "own_patient": "share"})["lesions"])
+        self.study.set("sub-05", include="0")
+        self.study.save()
+        result = share.export_dataset(self.study, out, {"licence": "CC0-1.0", "lesions": True, "own_patient": "share"})
+        self.assertEqual(result["lesions"], lesions - 1)
+
     def test_output_inside_private_folder_is_refused(self):
         with self.assertRaises(share.ShareError):
             share.export_dataset(self.study, os.path.join(self.root, ".studio", "share-out"), {"licence": "CC0-1.0"})
@@ -217,6 +304,19 @@ class ExclusionTest(ShareTestBase):
         with self.assertRaises(share.ShareError):
             share.export_dataset(self.study, os.path.join(self.tmp, "busy"), {"licence": "CC0-1.0"})
 
+    def test_output_through_a_symbolic_link_into_the_study_is_refused(self):
+        link = os.path.join(self.tmp, "link-to-study")
+        try:
+            os.symlink(self.root, link)
+        except (OSError, NotImplementedError, AttributeError):
+            self.skipTest("symbolic links are not available")
+        with self.assertRaises(share.ShareError):
+            share.check_outside_study(self.study, os.path.join(link, "via-link"))
+        with self.assertRaises(share.ShareError):
+            share.export_dataset(self.study, os.path.join(link, "via-link"), {"licence": "CC0-1.0"})
+        self.assertFalse(os.path.exists(os.path.join(self.root, "via-link")))
+        share.check_outside_study(self.study, os.path.join(self.tmp, "elsewhere"))  # no error
+
     def test_zip_export(self):
         out = os.path.join(self.tmp, "share.zip")
         result = share.export_dataset(self.study, out, {"licence": "CC0-1.0", "lesions": True, "own_patient": "share", "zip": True})
@@ -227,6 +327,101 @@ class ExclusionTest(ShareTestBase):
             self.assertFalse(any(".studio" in name or name.endswith(".png") for name in names))
             self.assertTrue(all(info.date_time == (1980, 1, 1, 0, 0, 0) for info in archive.infolist()))
         self.assertFalse([name for name in os.listdir(self.tmp) if ".partial-" in name])
+
+
+class OfficialValidatorTest(ShareTestBase):
+    """The folder names in .bidsignore are bare (bids-validator 3.0.2 does not honour "group/"); a table without folders is ignored."""
+
+    def ignore_lines(self, out):
+        with open(os.path.join(out, ".bidsignore"), encoding="utf-8") as f:
+            return f.read().split()
+
+    def test_default_export_lists_the_participants_table_in_bidsignore(self):
+        result = share.export_dataset(self.study, os.path.join(self.tmp, "default"), {"licence": "CC0-1.0"})
+        out = result["path"]
+        self.assertEqual(result["lesions"], 0)
+        self.assertFalse(any(path.startswith("sub-") for path in result["files"]))
+        self.assertTrue(os.path.exists(os.path.join(out, "participants.tsv")))
+        self.assertEqual(sorted(self.ignore_lines(out)), ["participants.json", "participants.tsv", "sources"])  # sources/records.tsv is in the fixture
+        self.assertEqual(result["validation"], {})
+        with open(os.path.join(out, "README.md"), encoding="utf-8") as f:
+            self.assertIn("listed in .bidsignore", f.read())
+        # Without the .bidsignore entry the validator would report PARTICIPANT_ID_MISMATCH, and Studio's check says so too
+        os.remove(os.path.join(out, ".bidsignore"))
+        self.assertIn("participants.tsv", share.validate_dataset(out))
+
+    def test_lesions_keep_the_participants_table_visible(self):
+        result, out = self.export("lesions")
+        self.assertGreater(result["lesions"], 0)
+        self.assertEqual(self.ignore_lines(out), ["sources"])  # the table is checked against the sub-<id> folders
+        self.assertEqual(result["validation"], {})
+
+    def test_participants_values_fit_the_exported_dictionary(self):
+        """A study keeps the values of its source table ("male", "f", text outside the levels typed in Columns…); the
+        exported participants.json never declares Levels or Units those values break (the official validator:
+        TSV_VALUE_INCORRECT_TYPE).
+        """
+        path = os.path.join(self.root, "participants.tsv")
+        with open(path, encoding="utf-8", newline="") as f:
+            rows = list(csv.reader(f, delimiter="\t"))
+        header = rows[0]
+        changes = {
+            "sub-JohnSmith20240102": {"sex": "female", "handedness": "right", "comment": "ok"},
+            "sub-02": {"sex": "male", "handedness": "Left", "comment": "Ümlaut ü"},
+            "sub-03": {"age": "abc", "handedness": "R"},
+            "sub-05": {"sex": "f", "comment": "c"},
+        }
+        header += ["handedness", "comment"]
+        for row in rows[1:]:
+            row += ["n/a", "n/a"]
+            for column, value in changes.get(row[0], {}).items():
+                row[header.index(column)] = value
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write("".join("\t".join(row) + "\n" for row in rows))
+        study = Study.open(self.root)
+        self.assertEqual(study.value("sub-02", "sex"), "male")  # kept as the source table has it
+        study.set_column_role("comment", "metadata", type="categorical", levels={"ok": "fine", "c": "control"})  # Columns…: levels without "Ümlaut ü"
+        study.save()
+        self.study = Study.open(self.root)
+        result, out = self.export("values", columns=["group", "age", "sex", "handedness", "comment"])
+        with open(os.path.join(out, "participants.json"), encoding="utf-8") as f:
+            dictionary = json.load(f)
+        with open(os.path.join(out, "participants.tsv"), encoding="utf-8") as f:
+            table = list(csv.DictReader(f, delimiter="\t"))
+        # Synonyms become the declared levels
+        self.assertEqual(set(dictionary["sex"]["Levels"]), {"M", "F", "O"})
+        self.assertEqual(sorted(row["sex"] for row in table), ["F", "F", "M", "n/a"])
+        self.assertEqual(set(dictionary["handedness"]["Levels"]), {"R", "L", "A"})
+        self.assertEqual(sorted(row["handedness"] for row in table), ["L", "R", "R", "n/a"])
+        # Levels that a value is not one of are left out; the values are kept
+        self.assertEqual(dictionary["comment"], {"Description": "comment"})
+        self.assertEqual(sorted(row["comment"] for row in table), ["c", "n/a", "ok", "Ümlaut ü"])
+        # A non-number age keeps its value; the column is declared a string (the BIDS schema types "age" as a number)
+        self.assertNotIn("Units", dictionary["age"])
+        self.assertEqual(dictionary["age"]["Format"], "string")
+        self.assertIn("abc", [row["age"] for row in table])
+        self.assertEqual(result["validation"], {})
+        # The study itself is unchanged
+        self.assertEqual(Study.open(self.root).value("sub-02", "sex"), "male")
+        # Studio's own check reports values outside the dictionary, as the official validator does
+        dictionary["comment"]["Levels"] = {"ok": "fine", "c": "control"}
+        dictionary["age"] = {"Description": "Age", "Units": "years"}
+        with open(os.path.join(out, "participants.json"), "w", encoding="utf-8") as f:
+            json.dump(dictionary, f)
+        problems = share.validate_dataset(out)["participants.tsv"]
+        self.assertEqual(len(problems), 2)
+        self.assertIn("'abc' is not a number", " ".join(problems))
+        self.assertIn("'Ümlaut ü' is not one of the Levels", " ".join(problems))
+
+    def test_extra_folders_are_listed_without_a_trailing_slash(self):
+        self.add_gsp_maps()
+        result, out = self.export("maps", maps=True, neurovault=True, terms_acknowledged=True, licence=export.GSP_LICENCE)
+        lines = self.ignore_lines(out)
+        for folder in ("group", "neurovault", "sources"):
+            self.assertIn(folder, lines)
+        self.assertFalse([line for line in lines if line.endswith("/")], lines)
+        self.assertEqual(result["validation"], {})
+        self.assertEqual(share.validate_dataset(out), {})
 
 
 class ScrubTest(ShareTestBase):
@@ -472,6 +667,19 @@ class SidecarTest(ShareTestBase):
         for name in ("README.md", "CHANGES", "LICENSE"):
             self.assertTrue(os.path.isfile(os.path.join(out, name)), name)
 
+    def test_authors_only_in_citation_cff(self):
+        # BIDS (bids-validator 3.0.2: AUTHORS_AND_CITATION_FILE_MUTUALLY_EXCLUSIVE): CITATION.cff is always written, so the
+        # authors must not also be in dataset_description.json
+        result, out = self.export(authors=["Ada Lovelace", " Alan Turing ", " "])
+        with open(os.path.join(out, "dataset_description.json"), encoding="utf-8") as f:
+            self.assertNotIn("Authors", json.load(f))
+        with open(os.path.join(out, "CITATION.cff"), encoding="utf-8") as f:
+            citation = f.read()
+        self.assertIn('  - name: "Ada Lovelace"', citation)
+        self.assertIn('  - name: "Alan Turing"', citation)
+        self.assertEqual(result["validation"], {})
+        self.assertEqual(share.validate_dataset(out), {})
+
 
 class ValidatorTest(unittest.TestCase):
     def test_names(self):
@@ -494,9 +702,44 @@ class ValidatorTest(unittest.TestCase):
             open(os.path.join(tmp, "group", "anything.nii.gz"), "wb").close()
             open(os.path.join(tmp, "stray.txt"), "wb").close()
             self.assertEqual(set(share.validate_dataset(tmp)), {"group/anything.nii.gz", "stray.txt"})
+            # bids-validator 3.0.2 does not honour a trailing slash ("group/" gives NOT_INCLUDED): Studio's check does not either
             with open(os.path.join(tmp, ".bidsignore"), "w", encoding="utf-8") as f:
                 f.write("group/\n")
+            self.assertEqual(set(share.validate_dataset(tmp)), {"group/anything.nii.gz", "stray.txt"})
+            with open(os.path.join(tmp, ".bidsignore"), "w", encoding="utf-8") as f:
+                f.write("group\n")
             self.assertEqual(set(share.validate_dataset(tmp)), {"stray.txt"})
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_participants_without_subject_folders(self):
+        tmp = tempfile.mkdtemp(prefix="lnm_share_v_")
+        try:
+            with open(os.path.join(tmp, "participants.tsv"), "w", encoding="utf-8") as f:
+                f.write("participant_id\tgroup\nsub-P001\tcase\n")
+            self.assertEqual(list(share.validate_dataset(tmp)), ["participants.tsv"])  # the official validator: PARTICIPANT_ID_MISMATCH
+            os.makedirs(os.path.join(tmp, "sub-P002", "anat"))
+            open(os.path.join(tmp, "sub-P002", "anat", "sub-P002_space-MNI152NLin2009cAsym_desc-lesion_mask.nii.gz"), "wb").close()
+            self.assertEqual(share.validate_dataset(tmp), {})  # a folder for only some of the participants is accepted
+            shutil.rmtree(os.path.join(tmp, "sub-P002"))
+            with open(os.path.join(tmp, ".bidsignore"), "w", encoding="utf-8") as f:
+                f.write("participants.tsv\n")
+            self.assertEqual(share.validate_dataset(tmp), {})
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_authors_and_citation_file_are_exclusive(self):
+        tmp = tempfile.mkdtemp(prefix="lnm_share_v_")
+        try:
+            with open(os.path.join(tmp, "dataset_description.json"), "w", encoding="utf-8") as f:
+                json.dump({"Name": "x", "BIDSVersion": share.BIDS_VERSION, "Authors": ["Ada Lovelace"]}, f)
+            self.assertEqual(share.validate_dataset(tmp), {})  # Authors alone is fine
+            with open(os.path.join(tmp, "CITATION.cff"), "w", encoding="utf-8") as f:
+                f.write("cff-version: 1.2.0\n")
+            self.assertEqual(list(share.validate_dataset(tmp)), ["CITATION.cff"])  # the official validator's location
+            with open(os.path.join(tmp, "dataset_description.json"), "w", encoding="utf-8") as f:
+                json.dump({"Name": "x", "BIDSVersion": share.BIDS_VERSION}, f)
+            self.assertEqual(share.validate_dataset(tmp), {})
         finally:
             shutil.rmtree(tmp)
 
@@ -537,6 +780,99 @@ class NeuroVaultTest(ShareTestBase):
         for module in ("urllib", "http.client", "requests", "socket", "ssl"):
             self.assertNotIn(f"import {module}", source)
             self.assertNotIn(f"from {module}", source)
+
+
+class UserTemplateTest(unittest.TestCase):
+    """A study drawn on a template the user added (Slicer Studio A-10): the export names the template (id, name, space,
+    sha256) and includes its file only with ``include_template`` (off by default), byte for byte so its checksum matches.
+    """
+
+    def setUp(self):
+        import hashlib
+
+        self.tmp = tempfile.mkdtemp(prefix="lnm_share_tpl_")
+        templates = os.path.join(self.tmp, "Templates")
+        folder = os.path.join(templates, "Lab ICBM 1.5")
+        os.makedirs(folder)
+        self.template_image = os.path.join(folder, "lab_icbm_T1w.nii.gz")
+        nifti.write_nifti(self.template_image, np.arange(int(np.prod(SHAPE)), dtype=np.int16).reshape(SHAPE), AFFINE, descrip="ICBM lab template")
+        with open(self.template_image, "rb") as f:
+            self.sha = hashlib.sha256(f.read()).hexdigest()
+        with open(os.path.join(folder, "template.json"), "w", encoding="utf-8") as f:
+            json.dump({"schema": "slicer-studio-template", "id": "lab-icbm-1-5", "name": "Lab ICBM 1.5 mm", "space": "MNI (other)",
+                       "files": {"image": "lab_icbm_T1w.nii.gz"}, "sha256": {"image": self.sha}}, f)
+        self.templates = templates
+        self.root = os.path.join(self.tmp, "study")
+        template = {"id": "MNI (other)", "source": "user:lab-icbm-1-5", "name": "Lab ICBM 1.5 mm", "space": "MNI (other)", "sha256": self.sha}
+        study = Study.create(self.root, name="Template study", template=template, space=SPACE)
+        nifti.write_nifti(os.path.join(self.root, "lesions", f"sub-01_space-{SPACE}_desc-lesion_mask.nii.gz"), _sphere((5, 6, 5)), AFFINE)
+        study.add_subject("sub-01", {"group": "case", "status": "traced", "lesion": f"lesions/sub-01_space-{SPACE}_desc-lesion_mask.nii.gz",
+                                     "space": SPACE, "source_type": "case_report"})
+        study.save()
+        self.study = Study.open(self.root)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def export(self, name, **options):
+        return share.export_dataset(self.study, os.path.join(self.tmp, name), {"licence": "CC0-1.0", "lesions": True, **options})
+
+    def test_template_identity_in_metadata_without_the_file(self):
+        self.assertIn("include_template", share.DEFAULT_OPTIONS)
+        self.assertFalse(share.DEFAULT_OPTIONS["include_template"])  # off by default
+        result = self.export("share", template_dirs=[self.templates])
+        out = result["path"]
+        self.assertIsNone(result["template"])
+        self.assertFalse(any(relpath.startswith("template/") for relpath in result["files"]), result["files"])
+        with open(os.path.join(out, "dataset_description.json"), encoding="utf-8") as f:
+            description = json.load(f)
+        self.assertEqual(description["SlicerStudio"]["template"],
+                         {"id": "user:lab-icbm-1-5", "name": "Lab ICBM 1.5 mm", "space": "MNI (other)", "sha256": self.sha})
+        with open(os.path.join(out, "README.md"), encoding="utf-8") as f:
+            readme = f.read()
+        for text in ("Lab ICBM 1.5 mm", "user:lab-icbm-1-5", self.sha, "MNI (other)"):
+            self.assertIn(text, readme)
+        self.assertEqual(share.find_absolute_paths(out), [])
+
+    def test_include_template_file_copies_it_unchanged(self):
+        import hashlib
+
+        result = self.export("share", include_template=True, template_dirs=[self.templates])
+        out = result["path"]
+        self.assertEqual(result["template"], "template/tpl-LabIcbm15.nii.gz")
+        self.assertIn(result["template"], result["files"])
+        with open(os.path.join(out, *result["template"].split("/")), "rb") as f:
+            self.assertEqual(hashlib.sha256(f.read()).hexdigest(), self.sha)  # byte for byte: a recipient adds it by checksum
+        with open(os.path.join(out, "dataset_description.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["SlicerStudio"]["template"]["file"], result["template"])
+        with open(os.path.join(out, ".bidsignore"), encoding="utf-8") as f:
+            self.assertIn("template", f.read().split())
+        self.assertEqual(share.validate_dataset(out), {})
+        statuses = {item["id"]: item["status"] for item in result["checklist"]}
+        self.assertEqual(statuses["template"], "warn")  # the licence note
+        self.assertTrue(all(item["status"] == "ok" for item in result["checklist"] if item["id"] in ("headers", "exclusions", "paths")))
+
+    def test_include_template_needs_the_file(self):
+        items = share.checklist(self.study, {"licence": "CC0-1.0", "include_template": True, "template_dirs": [os.path.join(self.tmp, "elsewhere")]})
+        self.assertEqual({item["id"]: item["status"] for item in items}["template"], "blocker")
+        with self.assertRaises(share.ShareError):
+            self.export("share", include_template=True)
+        # Another file under the same id is never taken (its checksum differs)
+        with open(os.path.join(self.templates, "Lab ICBM 1.5", "template.json"), encoding="utf-8") as f:
+            record = json.load(f)
+        record["sha256"]["image"] = "0" * 64
+        with open(os.path.join(self.templates, "Lab ICBM 1.5", "template.json"), "w", encoding="utf-8") as f:
+            json.dump(record, f)
+        self.assertIsNone(share.find_template_file(self.study, [self.templates]))
+
+    def test_builtin_template_study_unchanged(self):
+        root = os.path.join(self.tmp, "builtin")
+        study = Study.create(root, name="Built-in", template={"id": SPACE, "res": 2, "source": "builtin"}, space=SPACE)
+        self.assertIsNone(share.template_identity(study))
+        result = share.export_dataset(study, os.path.join(self.tmp, "builtin-share"), {"licence": "CC0-1.0", "include_template": True})
+        with open(os.path.join(result["path"], "dataset_description.json"), encoding="utf-8") as f:
+            self.assertNotIn("SlicerStudio", json.load(f))
+        self.assertIsNone(result["template"])
 
 
 if __name__ == "__main__":

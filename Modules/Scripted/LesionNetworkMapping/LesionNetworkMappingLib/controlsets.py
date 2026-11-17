@@ -26,12 +26,14 @@ Lesions of different template families are refused. Each lesion is then read onc
 **Study links** (``Study.link_control_set``) add one row per control lesion with group = control, source_type =
 control_db, source_dataset = <name>, source_id = <lesion id> and lesion = ``controlset:<name>/<rel>``.
 ``Study.abspath`` resolves such paths through the registry: ``Study.controlset_root``, else the environment variable
-:data:`ENV_ROOT`, else the default data directory. study.json records ``control_sets: [{"name", "sha256"}]``, where
-sha256 is :func:`content_sha256` of the set (its space and lesion hashes), so a changed set is detected.
+:data:`ENV_ROOT`, else the application's data directory (:func:`set_data_directory_resolver`). study.json records
+``control_sets: [{"name", "sha256"}]``, where sha256 is :func:`content_sha256` of the set (its space and lesion hashes), so
+a changed set is detected.
 
 **Maps** go to the set's own cache (:func:`maps_cache_root`): :func:`map_controls` (or the cohortmaps command line with
 :func:`map_job_args`) maps the set once per connectome and subject list, and every study that links the set looks its
-lesions up in the same cache (:func:`study_control_lesions` with ``cache_root=maps_cache_root(entry)``).
+lesions up in the same cache: the cohortmaps job of a study (``--study``) and the pipeline's maps stage pass
+:func:`study_maps_cache_roots` as shared caches, and the entries found there are copied into the study's cache.
 
 **Balance**: :func:`mismatch_report` compares a study's cases with the set (standardized mean differences of volume,
 2D share and left hemisphere share, |SMD| > 0.25 flagged, and the template family); :func:`matched_subsample` picks a
@@ -49,6 +51,7 @@ import os
 import re
 import shutil
 import sys
+import zlib
 
 FORMAT = "slicer-studio-controlset"
 VERSION = 1
@@ -97,11 +100,47 @@ class AmbiguousSpaceError(ValueError):
 # Registry location
 
 
-def default_data_directory():
-    """The default ``Studio/LNM/DataDirectory`` without Qt: /data/SlicerStudio in the web or Docker build, else ~/Documents/SlicerStudio."""
-    if os.environ.get("SLICER_STUDIO_WEB") or os.path.exists("/.dockerenv"):
+#: The Slicer Studio folder (StudioLib.projects, without Qt): $SLICER_STUDIO_PROJECTS_ROOT, else <Documents>/Slicer Studio
+#: (/data/Slicer Studio in the web build); the data directory's default is its LNM folder (A-09, D-A16)
+STUDIO_ROOT_ENV = "SLICER_STUDIO_PROJECTS_ROOT"
+STUDIO_FOLDER_NAME = "Slicer Studio"
+STUDIO_LNM_DIR = "LNM"
+
+
+def _is_web_build():
+    return bool(os.environ.get("SLICER_STUDIO_WEB")) or os.path.exists("/.dockerenv")
+
+
+def legacy_data_directory():
+    """The default ``Studio/LNM/DataDirectory`` before A-09: /data/SlicerStudio in the web or Docker build, else
+    <Documents>/SlicerStudio.
+    """
+    if _is_web_build():
         return "/data/SlicerStudio"
     return os.path.join(_documents_directory(), "SlicerStudio")
+
+
+def default_data_directory():
+    """The default ``Studio/LNM/DataDirectory`` without Qt, as the application gives it when the setting is unset
+    (``normalize_controller.dataDirectory``): the former default folder (:func:`legacy_data_directory`) when it already
+    holds data, else <Slicer Studio folder>/LNM, where the Slicer Studio folder is $SLICER_STUDIO_PROJECTS_ROOT, else
+    <Documents>/Slicer Studio (/data/Slicer Studio in the web build). The settings themselves (a data directory or a
+    Slicer Studio folder chosen in the application) are not read here: :data:`ENV_ROOT` names another registry.
+    """
+    legacy = legacy_data_directory()
+    try:
+        if os.path.isdir(legacy) and os.listdir(legacy):
+            return legacy
+    except OSError:
+        pass
+    studio = os.environ.get(STUDIO_ROOT_ENV, "").strip()
+    if studio:
+        studio = os.path.normpath(os.path.abspath(os.path.expanduser(studio)))
+    elif _is_web_build():
+        studio = "/data/" + STUDIO_FOLDER_NAME
+    else:
+        studio = os.path.join(_documents_directory(), STUDIO_FOLDER_NAME)
+    return os.path.join(studio, STUDIO_LNM_DIR)
 
 
 def _documents_directory():
@@ -124,14 +163,35 @@ def _documents_directory():
     return os.path.join(home, "Documents")
 
 
+#: Callable giving the application's data directory (``Studio/LNM/DataDirectory`` with its defaults), installed by the
+#: LesionNetworkMapping module (:func:`set_data_directory_resolver`); None outside the application
+_data_directory_resolver = None
+
+
+def set_data_directory_resolver(resolver):
+    """Install the callable that :func:`registry_root` asks for the data directory when neither a root nor :data:`ENV_ROOT`
+    is given, so that the registry does not depend on which card was shown first (None removes it).
+    """
+    global _data_directory_resolver
+    _data_directory_resolver = resolver
+
+
 def registry_root(root=None):
-    """The registry folder: ``root``, else the environment variable :data:`ENV_ROOT`, else <default data directory>/ControlSets."""
+    """The registry folder: ``root``, else the environment variable :data:`ENV_ROOT`, else <data directory>/ControlSets,
+    where the data directory is the application's (:func:`set_data_directory_resolver`), else :func:`default_data_directory`.
+    """
     if root:
         return os.path.abspath(os.fspath(root))
     value = os.environ.get(ENV_ROOT, "").strip()
     if value:
         return os.path.abspath(value)
-    return os.path.join(default_data_directory(), REGISTRY_DIR)
+    data_directory = None
+    if _data_directory_resolver is not None:
+        try:
+            data_directory = str(_data_directory_resolver() or "").strip() or None
+        except Exception:
+            data_directory = None
+    return os.path.join(data_directory or default_data_directory(), REGISTRY_DIR)
 
 
 def root_for_data_directory(data_directory):
@@ -256,25 +316,95 @@ def _read_entry(path):
     return entry
 
 
+def _recorded_names(registry):
+    """{set folder name: the name its controlset.json records} of the registry's sets (unreadable entries are skipped)."""
+    out = {}
+    try:
+        names = os.listdir(registry)
+    except OSError:
+        return out
+    for name in names:
+        path = os.path.join(registry, name, CONTROLSET_JSON)
+        if not NAME_PATTERN.match(name) or not os.path.isfile(path):
+            continue
+        try:
+            out[name] = str(_read_entry(path).get("name") or "")
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def _set_name(folder_name, recorded, registry):
+    """The name of the set in the registry folder ``folder_name`` whose controlset.json records the name ``recorded``.
+
+    Studies link a set by name ("controlset:<name>/<rel>"). A set folder renamed by hand (in the file manager) still
+    records its old name, which its studies link: the set keeps that name while no other folder of the registry has it
+    and no other set records it; otherwise (and for a moved set, :func:`relocate`) it is named after its folder.
+    """
+    if not recorded or recorded == folder_name or not NAME_PATTERN.match(recorded) or recorded in (".", ".."):
+        return folder_name
+    other = os.path.join(registry, recorded)
+    if os.path.lexists(other):  # another set's folder, or this one on a case-insensitive file system
+        try:
+            return recorded if os.path.samefile(other, os.path.join(registry, folder_name)) else folder_name
+        except OSError:
+            return folder_name
+    claims = [name for name, value in _recorded_names(registry).items() if value == recorded]
+    return recorded if claims == [folder_name] else folder_name
+
+
+def _find_set_dir(name, registry):
+    """The folder of the set named ``name`` in ``registry``: <registry>/<name>, else the one renamed folder that still
+    records ``name`` (:func:`_set_name`), else None.
+    """
+    folder = os.path.join(registry, name)
+    if os.path.isfile(os.path.join(folder, CONTROLSET_JSON)):
+        return folder
+    claims = [folder_name for folder_name, value in _recorded_names(registry).items() if value == name and folder_name != name]
+    if len(claims) == 1 and _set_name(claims[0], name, registry) == name:
+        return os.path.join(registry, claims[0])
+    return None
+
+
+def case_twin(name, root=None):
+    """The registered set name (a registry folder, or a name a renamed folder records) that differs from ``name`` only in
+    letter case, else None: two such sets would be one folder on a case-insensitive disk (macOS, exFAT).
+    """
+    registry = registry_root(root)
+    try:
+        folders = [entry for entry in os.listdir(registry) if os.path.isfile(os.path.join(registry, entry, CONTROLSET_JSON))]
+    except OSError:
+        return None
+    names = folders + [value for value in _recorded_names(registry).values() if value]
+    for other in names:
+        if other != name and other.lower() == name.lower():
+            return other
+    return None
+
+
 def load(name, root=None):
     """The registry entry of a set (a dict as in the module docstring, plus "dir" and the absolute "folder_path").
 
+    The set named ``name`` is the folder <registry>/<name>, or a folder renamed by hand that still records ``name``
+    (:func:`_set_name`): the entry's "name" is the name studies link it by, "dir" its folder.
     ``name`` may also be an entry (returned as it is). Raises FileNotFoundError for a set that is not registered.
     """
     if isinstance(name, dict):
         return name
-    folder = set_dir(name, root)
-    path = os.path.join(folder, CONTROLSET_JSON)
-    if not os.path.isfile(path):
-        raise FileNotFoundError(f"No control set named {name!r} in {registry_root(root)}")
-    entry = dict(_read_entry(path))
+    name = validate_name(name)
+    registry = registry_root(root)
+    folder = _find_set_dir(name, registry)
+    if folder is None:
+        raise FileNotFoundError(f"No control set named {name!r} in {registry}")
+    entry = dict(_read_entry(os.path.join(folder, CONTROLSET_JSON)))
+    entry["name"] = _set_name(os.path.basename(folder), str(entry.get("name") or ""), registry)
     entry["dir"] = folder
     entry["folder_path"] = _join(folder, entry.get("folder") or ".")
     return entry
 
 
 def list_sets(root=None):
-    """The registered sets (entries, sorted by name); unreadable entries are skipped."""
+    """The registered sets (entries, sorted by folder name); unreadable entries are skipped."""
     registry = registry_root(root)
     out = []
     try:
@@ -282,22 +412,72 @@ def list_sets(root=None):
     except OSError:
         return out
     for name in names:
-        if not NAME_PATTERN.match(name) or not os.path.isfile(os.path.join(registry, name, CONTROLSET_JSON)):
+        path = os.path.join(registry, name, CONTROLSET_JSON)
+        if not NAME_PATTERN.match(name) or not os.path.isfile(path):
             continue
         try:
-            out.append(load(name, registry))
+            entry = dict(_read_entry(path))
         except (OSError, ValueError):
             continue
+        folder = os.path.join(registry, name)
+        entry["name"] = _set_name(name, str(entry.get("name") or ""), registry)
+        entry["dir"] = folder
+        entry["folder_path"] = _join(folder, entry.get("folder") or ".")
+        out.append(entry)
     return out
 
 
 def unregister(name, root=None):
     """Remove a set from the registry (its controlset.json, lesions.tsv and map cache). The lesion files are not touched."""
-    folder = set_dir(name, root)
-    if not os.path.isfile(os.path.join(folder, CONTROLSET_JSON)):
+    folder = _find_set_dir(validate_name(name), registry_root(root))
+    if folder is None:
         raise FileNotFoundError(f"No control set named {name!r}")
     _entries_cache.pop(os.path.join(folder, CONTROLSET_JSON), None)
     shutil.rmtree(folder)
+
+
+def unique_name(registry, name):
+    """A valid set name for ``name`` that no folder of ``registry`` has (compared case-insensitively): ``name`` when it is
+    free, else "<name>-2", "<name>-3"... (a space is not allowed in a set name, so not "<name> 2"). At most 64 characters.
+    """
+    try:
+        taken = {entry.lower() for entry in os.listdir(registry)}
+    except OSError:
+        taken = set()
+    name = str(name or "set")
+    if NAME_PATTERN.match(name) and name.lower() not in taken:
+        return name
+    base = re.sub(r"[^A-Za-z0-9_.-]", "_", name).lstrip("_.-") or "set"
+    index = 2
+    while True:
+        suffix = f"-{index}"
+        candidate = base[:64 - len(suffix)] + suffix
+        if candidate.lower() not in taken:
+            return candidate
+        index += 1
+
+
+def relocate(directory, lesion_folder):
+    """A set folder ``directory`` that moved (a move of the Slicer Studio folder, maybe under another name): its
+    controlset.json gets the folder's name as its name and ``lesion_folder`` (the absolute lesion folder, where it is now)
+    relative to the new place; lesions.tsv follows. The lesions, their sha256 and the content sha256 are unchanged.
+    Return True when a file was rewritten.
+    """
+    json_path = os.path.join(directory, CONTROLSET_JSON)
+    entry = dict(_read_entry(json_path))
+    name = validate_name(os.path.basename(os.path.normpath(directory)))
+    folder = os.fspath(entry.get("folder") or ".")
+    new_folder = folder if os.path.isabs(folder) else _rel(lesion_folder, directory)
+    if entry.get("name") == name and new_folder == folder:
+        return False
+    entry["name"] = name
+    entry["folder"] = new_folder
+    lesion_folder = _join(directory, new_folder)
+    rows = "".join(f"{lesion['id']}\t{_rel(_join(lesion_folder, lesion['rel']), directory)}\t{lesion['sha256']}\n" for lesion in entry["lesions"])
+    _write_text_atomic(os.path.join(directory, LESIONS_TSV), "participant_id\tlesion\tlesion_sha256\n" + rows)
+    _write_text_atomic(json_path, json.dumps(entry, indent=1) + "\n")
+    _entries_cache.pop(json_path, None)
+    return True
 
 
 def set_lesions(entry, ids=None):
@@ -349,8 +529,8 @@ def scan_folder(folder, lesion_rule=None, id_regex=None):
         rel = _rel(path, folder)
         try:
             header = read_nifti_header(path)
-        except (OSError, ValueError) as exc:
-            skipped.append({"rel": rel, "reason": f"{SKIPPED_UNREADABLE}: {exc}"})
+        except (OSError, ValueError, EOFError, zlib.error) as exc:  # a .nii.gz cut short in its header: EOFError
+            skipped.append({"rel": rel, "reason": _unreadable(exc, path)})
             continue
         shape = tuple(header["shape"])
         if len(shape) > 3 and any(int(n) != 1 for n in shape[3:]):
@@ -395,6 +575,26 @@ def scan_folder(folder, lesion_rule=None, id_regex=None):
         if item["hint"]:
             grid["hints"][item["hint"]] = grid["hints"].get(item["hint"], 0) + 1
     return {"folder": folder, "lesions": unique, "skipped": skipped, "grids": grids, "all_lesions": all_lesions}
+
+
+def mixed_family_message(counts):
+    """The refusal text for lesions of several template families: counts is {family id: number of files}; "" for one family."""
+    from .geometry import family_name
+
+    counts = {family: n for family, n in counts.items() if family}
+    if len(counts) < 2:
+        return ""
+    parts = ", ".join(f"{n} in {family_name(family)}" for family, n in sorted(counts.items(), key=lambda kv: family_name(kv[0])))
+    return f"The folder holds lesions of different template families ({parts}); register one control set per family"
+
+
+def scan_mixed_families(scan):
+    """The warning for a scan whose lesions are on grids of two template families, or "" (shown before Register)."""
+    counts = {}
+    for grid in scan["grids"].values():
+        if grid.get("family"):
+            counts[grid["family"]] = counts.get(grid["family"], 0) + grid["n"]
+    return mixed_family_message(counts)
 
 
 def questions(scan, answers=None):
@@ -495,6 +695,22 @@ def _check_cancel(cancel, done):
         raise Cancelled(done=done)
 
 
+def _unreadable(exc, path):
+    """The skip reason of a damaged file: the error text without the file's absolute path (shared sidecar)."""
+    text = str(exc)
+    # Longest forms first, in a fixed order (a set would sometimes strip the bare file name before the full
+    # path and leave the directory behind); the bare file name is kept, it holds no local path.
+    names = []
+    for name in (os.path.abspath(str(path)), str(path)):
+        if name and name not in names:
+            names.append(name)
+    for name in names:
+        for quoted in (repr(name), f'"{name}"', name):  # OSError quotes the path: [Errno 2] ...: '/a/b'
+            for pattern in (f": {quoted}", f" in {quoted}", quoted):
+                text = text.replace(pattern, "")
+    return f"{SKIPPED_UNREADABLE}: {text.strip().rstrip(':').strip()}"
+
+
 def _read_lesion(item, space):
     """The registry record of a scanned lesion (its file is read once), or the reason it is skipped."""
     from .nifti import read_nifti
@@ -504,7 +720,7 @@ def _read_lesion(item, space):
             sha = hashlib.sha256(f.read()).hexdigest()
         image, affine, _header = read_nifti(item["path"])
     except (OSError, ValueError, EOFError) as exc:
-        return f"{SKIPPED_UNREADABLE}: {exc}"
+        return _unreadable(exc, item["path"])
     if image.ndim > 3:
         image = image.reshape(image.shape[:3])
     stats = _lesion_stats(image, affine)
@@ -532,7 +748,10 @@ def register_folder(folder, name, source=None, licence_note=None, space=None, as
     from .geometry import space_family
 
     name = validate_name(name)
-    target = set_dir(name, root)
+    twin = case_twin(name, root)
+    if twin is not None:
+        raise FileExistsError(f"A control set named {twin!r} is already registered (a name that differs only in letter case is the same folder on some disks)")
+    target = _find_set_dir(name, registry_root(root)) or set_dir(name, root)  # a set renamed by hand keeps its name
     json_path = os.path.join(target, CONTROLSET_JSON)
     if os.path.exists(json_path) and not replace:
         raise FileExistsError(f"A control set named {name!r} is already registered")
@@ -549,9 +768,12 @@ def register_folder(folder, name, source=None, licence_note=None, space=None, as
         usable.append((item, item_space))
     if not usable:
         raise ValueError(f"No usable control lesion in {folder}")
-    families = {space_family(item_space) for _item, item_space in usable}
+    family_counts = {}
+    for _item, item_space in usable:
+        family_counts[space_family(item_space)] = family_counts.get(space_family(item_space), 0) + 1
+    families = set(family_counts)
     if len(families) > 1:
-        raise ValueError(f"The lesions are in spaces of different template families ({', '.join(sorted(families))}); register one set per family")
+        raise ValueError(mixed_family_message(family_counts))
     lesions = []
     total = len(usable)
     for done, (item, item_space) in enumerate(usable):
@@ -690,6 +912,82 @@ def linked_rows(study, name=None):
     return [row for row in study.subjects if is_control_row(row, name)]
 
 
+def unregistered_sets(study, root=None, participants=None):
+    """{name: [participant ids]} of the control sets that a study's included rows link but that are not registered in
+    the registry (``root``, else the study's ``controlset_root``, else :func:`registry_root`'s default): a study made
+    with another registry (the application's) opened where that registry is not named (:data:`ENV_ROOT`).
+
+    :param participants: only these participant ids (None: every row).
+    """
+    root = root if root is not None else getattr(study, "controlset_root", None)
+    registry = registry_root(root)
+    found = {}
+    for row in linked_rows(study):
+        if participants is not None and row["participant_id"] not in participants:
+            continue
+        if str(row.get("include", "1")).strip().lower() in ("0", "false", "no"):
+            continue
+        name = parse_path(row["lesion"])[0]
+        if name not in found:
+            try:
+                load(name, registry)
+                found[name] = None
+            except (OSError, ValueError, KeyError):
+                found[name] = []
+        if found[name] is not None:
+            found[name].append(row["participant_id"])
+    return {name: sids for name, sids in found.items() if sids}
+
+
+def rename_sets_in_study(study, names):
+    """Make a study's links follow renamed sets: ``names`` is {old name: new name}, applied at once (a set renamed to the
+    old name of another one is not renamed twice). Rows ``controlset:<old>/<rel>`` become ``controlset:<new>/<rel>``
+    (source_dataset too), and study.json ``control_sets`` records the new names. Participant ids are kept. Return True
+    when the study changed (the caller saves it).
+    """
+    names = {old: new for old, new in names.items() if old != new}
+    changed = False
+    for row in linked_rows(study):
+        old, rel = parse_path(row["lesion"])
+        if old not in names:
+            continue
+        values = {"lesion": controlset_path(names[old], rel)}
+        if row.get("source_dataset") == old:
+            values["source_dataset"] = names[old]
+        study.set(row["participant_id"], values)
+        changed = True
+    sets = study.control_sets
+    if any(item["name"] in names for item in sets):
+        for item in sets:
+            item["name"] = names.get(item["name"], item["name"])
+        study.metadata["control_sets"] = sets
+        changed = True
+    return changed
+
+
+def study_maps_cache_roots(study, root=None):
+    """The map caches (:func:`maps_cache_root`) of the control sets linked to a study (its study.json ``control_sets``):
+    the ``shared_cache_roots`` of its cohortmaps runs. Sets that are not registered (in this registry) are skipped.
+
+    :param study: a ``Study`` or its folder.
+    :param root: registry folder (default the study's ``controlset_root``, else :func:`registry_root`'s default).
+    """
+    if isinstance(study, (str, os.PathLike)):
+        from .study import Study
+
+        study = Study.open(study)
+    root = root if root is not None else getattr(study, "controlset_root", None)
+    out = []
+    for item in getattr(study, "control_sets", None) or ():
+        try:
+            folder = maps_cache_root(item["name"], root)
+        except (OSError, ValueError, KeyError):
+            continue
+        if folder not in out:
+            out.append(folder)
+    return out
+
+
 def study_control_lesions(study, name, root=None):
     """[(participant id, absolute path, sha256)] of the study's rows linked from the set ``name`` (for cohortmaps with
     ``cache_root=maps_cache_root(name)``: the set's cached maps are reused by every study).
@@ -735,13 +1033,15 @@ def _covariates(volume, dimensionality, hemisphere):
 
 def case_rows(study):
     """The study's included rows to compare with a control set: group = case when the study has any, else every included
-    row that is not linked from a control set.
+    row that is not linked from a control set. Rows marked "QC fail" (qc = fail) are left out, as every analysis leaves
+    them out (``Study.analysis_rows``).
     """
-    from .study import _included
+    from .study import _included, qc_failed
 
     rows = [row for row in study.subjects if _included(row) and not is_control_row(row)]
     cases = [row for row in rows if row.get("group") == "case"]
-    return cases if cases else [row for row in rows if row.get("group") != "control"]
+    chosen = cases if cases else [row for row in rows if row.get("group") != "control"]
+    return [row for row in chosen if not qc_failed(row)]
 
 
 def _stats_key(path):

@@ -355,12 +355,12 @@ class PipelineChecks:
         occ = lesionset.load_occupancies(subset, lesionset.resolve_grid(subset, self.bundle, space=fixture.SPACE), space=fixture.SPACE)
         expected = lesionset.overlap_maps(occ).count.reshape(-1)[self.bundle.mask_indices]
         np.testing.assert_array_equal(masked(self.group_path("lesionCount"), self.bundle), expected)
-        # Conjunction = sens AND sign(t) AND PFwe < alpha
+        # Conjunction = sens AND sign(t) AND PFwe <= alpha
         t = masked(self.group_path("caseVsControlTstat"), self.bundle)
         p = masked(self.group_path("caseVsControlPFwe"), self.bundle)
         for suffix, sign in (("Pos", t > 0), ("Neg", t < 0)):
             sens = masked(self.group_path(f"sens90{suffix}"), self.bundle) != 0
-            np.testing.assert_array_equal(masked(self.group_path(f"conj{suffix}"), self.bundle) != 0, sens & sign & (p < 0.05))
+            np.testing.assert_array_equal(masked(self.group_path(f"conj{suffix}"), self.bundle) != 0, sens & sign & (p <= 0.05 * (1 + 1e-6)))
 
     # Study files
 
@@ -411,9 +411,59 @@ class PipelineChecks:
         self.assertLessEqual(seconds, 5.0)
 
 
+class GroupMapParseTest(unittest.TestCase):
+    """--group-map parsing needs no pipeline run."""
+
+    def test_a_value_mapped_to_two_groups_is_refused(self):
+        for text in ("patient=case,patient=control,HC=control", "patient=case,Patient=control"):
+            with self.assertRaises(ValueError) as caught:
+                pipeline._group_map(text)
+            self.assertIn("patient", str(caught.exception).lower())
+        self.assertEqual(pipeline._group_map("patient=case,Patient=case,HC=control"), {"patient": "case", "hc": "control"})
+
+
 @unittest.skipIf(ENV_BASELINE, "the full suite runs without LNM_PIPELINE_PROVIDERS=baseline")
 class PipelineTest(PipelineChecks, unittest.TestCase):
     """The full suite (preferred providers), plus the scenarios that need their own runs."""
+
+    def test_child_progress_units_name_what_is_counted(self):
+        """The maps a child job loads are "maps", its shufflings "permutations" (slnm sends the analysis it permutes as ``unit``)."""
+        self.assertEqual(pipeline.progress_fields("specificity", "maps", {"done": 25, "total": 26})["unit"], "maps")
+        self.assertEqual(pipeline.progress_fields("slnm", "maps", {"done": 25, "total": 26})["unit"], "maps")
+        self.assertEqual(pipeline.progress_fields("specificity", "permutations", {"done": 1, "total": 9})["unit"], "permutations")
+        fields = pipeline.progress_fields("slnm", "permutations", {"done": 4160, "total": 4999, "unit": "control:age"})
+        self.assertEqual((fields["unit"], fields["analysis_unit"]), ("permutations", "control:age"))
+        self.assertEqual(pipeline.progress_fields("slnm", "lodo", {"done": 1, "total": 9})["unit"], "permutations")
+        self.assertEqual(pipeline.progress_fields("normalize", "normalize", {})["unit"], "subjects")
+        self.assertEqual(pipeline.progress_fields("maps", "maps", {})["unit"], "subject passes")
+        self.assertEqual(pipeline.progress_fields("maps", "maps", {"unit": "batches"})["unit"], "batches")
+
+    def test_read_only_study_is_a_plain_usage_error(self):
+        """A study the user cannot write fails with code read_only and exit 2 (no traceback), also when only creating the folder fails."""
+        tmp = tempfile.mkdtemp(prefix="lnm-pipeline-ro-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        fx = fixture.make_fixture(os.path.join(tmp, "f"))
+        shutil.rmtree(fx["out"], ignore_errors=True)
+        for patches in ({"study_read_only": True}, {"makedirs": True}):
+            with self.subTest(patches=patches):
+                if "makedirs" in patches:
+                    error = PermissionError(13, "Permission denied", os.path.join(fx["study"], "derivatives", "lnm"))
+                    patcher = mock.patch("os.makedirs", side_effect=error)
+                    flag = mock.patch.object(pipeline, "study_read_only", return_value=False)
+                else:
+                    patcher = mock.patch.object(pipeline, "study_read_only", return_value=True)
+                    flag = mock.patch.dict(os.environ, {})
+                with flag, patcher:
+                    parser = pipeline._parser()
+                    config = pipeline.config_from_args(parser.parse_args(run_args(fx)))
+                    config.out = None
+                    events = []
+                    code = pipeline.run(config, emit=pipeline.Emitter("json", sink=lambda event, record, sink=events: sink.append(record)))
+                self.assertEqual(code, jobs.EXIT_USAGE)
+                errors = [e for e in events if e.get("event") == "error"]
+                self.assertEqual([e.get("code") for e in errors], ["read_only"], events)
+                self.assertNotIn("traceback", errors[0])
+                self.assertNotIn("[Errno", errors[0]["message"])
 
     def test_resume_scenarios(self):
         fx = fixture.make_fixture(os.path.join(self.tmp, "f2"))
@@ -483,6 +533,34 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         status = stage_status(events)
         self.assertEqual((status["slnm"], status["nulls"]), ("done", "reused"))
 
+    def test_design_fingerprint_follows_the_design(self):
+        """pipeline.json records the design it analysed; a plan after a group, include or score change gives another one
+        (the cards then say "Design changed since the last run"), a status or a filled lesion volume does not.
+        """
+        recorded = self.pipeline_json["inputs"]["design_sha256"]
+        self.assertRegex(recorded or "", r"^[0-9a-f]{64}$")
+        study_copy = os.path.join(self.tmp, "design copy", fixture.STUDY_NAME)
+        shutil.copytree(self.fx["study"], study_copy, ignore=shutil.ignore_patterns("derivatives", ".studio"))
+        config = pipeline.PipelineConfig.from_json(self.pipeline_json, base=self.out)
+        config.study, config.out, config.accept_terms = study_copy, os.path.join(self.tmp, "design out"), True
+
+        def design(**changes):
+            study = Study.open(study_copy)
+            for sid, values in changes.items():
+                study.set(sid, **values)
+            study.save()
+            return pipeline.plan(config).design_sha256
+
+        self.assertEqual(design(), recorded, "an unchanged study is the design of the last run")
+        self.assertEqual(design(**{"sub-01": {"status": "mapped"}, "sub-02": {"volume_ml": "n/a"}}), recorded, "statuses and lesion volumes are not the design")
+        self.assertNotEqual(design(**{"sub-05": {"group": "control"}}), recorded, "a case that becomes a control")
+        self.assertEqual(design(**{"sub-05": {"group": "case"}}), recorded)
+        self.assertNotEqual(design(**{"sub-06": {"include": "0"}}), recorded, "a subject that is no longer included")
+        self.assertEqual(design(**{"sub-06": {"include": "1"}}), recorded)
+        score = Study.open(study_copy).subject("sub-03")["aphasia_score"]
+        self.assertNotEqual(design(**{"sub-03": {"aphasia_score": "99"}}), recorded, "a changed score")
+        self.assertEqual(design(**{"sub-03": {"aphasia_score": score}}), recorded)
+
     def test_top_pct_primary_rule(self):
         fx = fixture.make_fixture(os.path.join(self.tmp, "f9"))
         rule = {"kind": "top_pct", "value": 10}
@@ -498,6 +576,111 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
             sidecar = read_json(export.sidecar_path(out, sid, self.bundle.name))
             expected = thresholds.resolve(rule, n, self.bundle.n_voxels, values=masked(export.map_paths(out, sid, self.bundle.name)["AvgFz"], self.bundle))
             self.assertAlmostEqual(sidecar["threshold"]["resolved"]["value"], expected.value, places=5)
+
+    def test_refused_primary_rule_blocks_and_keeps_the_previous_run(self):
+        """A primary rule refused for the connectome's N (|T| >= 7 convention, N = 20) blocks the run in Prepare (exit 5, the
+        rule's banner), so no stage after the overlap meets a missing sensitivity map and the previous run's report and
+        group maps stay; --allow-rule-anyway applies it to every stage (the nulls too) and the run completes.
+        """
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-rule"), n_cases=6, n_controls=4, extra_rows=False)
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, "--null-relocations", "0"))
+        self.assertEqual(code, 0, stderr[-2000:] + str(done_event(events)))
+        out = fx["out"]
+        kept = sorted(name for name in os.listdir(out) if name == "report.html" or re.search(r"desc-(sens|overlap|conj)", name))
+        self.assertIn("report.html", kept)
+        self.assertTrue(any("sens90Pos" in name for name in kept) and any("conjPos" in name for name in kept), kept)
+        digests = {name: sha256(os.path.join(out, name)) for name in kept}
+        rule = json.dumps({"kind": "t_convention", "value": 7.0, "reference_n": 1000})
+        config = pipeline.config_from_args(pipeline._parser().parse_args(run_args(fx, "--rule", rule)))
+        blocks = [block for block in pipeline.plan(config, hash_lesions=False).blocks if block["id"] == "rule_refused"]
+        self.assertEqual(len(blocks), 1, "the plan refuses the rule")
+        self.assertIn("N≈1000", blocks[0]["message"])
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, "--null-relocations", "0", "--rule", rule))
+        error = done_event(events)
+        self.assertEqual(code, pipeline.EXIT_BLOCKED, stderr[-2000:] + str(error))
+        self.assertEqual(error["code"], "blocked")
+        self.assertIn("N=20", error["message"])
+        self.assertNotIn("FileNotFoundError", error["message"])
+        self.assertNotIn(self.tmp, error["message"])
+        self.assertEqual({name: sha256(os.path.join(out, name)) for name in kept if os.path.isfile(os.path.join(out, name))}, digests, "the previous run's outputs stay")
+        # Applied anyway: every stage runs (the nulls and the conjunction with the overridden rule)
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, "--null-relocations", "0", "--rule", rule, "--allow-rule-anyway"))
+        self.assertEqual(code, 0, stderr[-2000:] + str(done_event(events)))
+        statuses = stage_status(events)
+        for name in ("nulls", "overlap", "conjunction", "report"):
+            self.assertIn(statuses.get(name), ("done", "reused"), (name, statuses))
+        self.assertTrue(os.path.isfile(os.path.join(out, "report.html")))
+
+    def test_unknown_score_block_does_not_name_an_option_the_user_did_not_use(self):
+        """A score column that is not in participants.tsv blocks the run; the fix names the participants.tsv columns and both
+        places the column can come from (--scores, or score_column in the --design file), not --scores alone.
+        """
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-score"), n_cases=6, n_controls=4, extra_rows=False)
+        config = pipeline.config_from_args(pipeline._parser().parse_args(run_args(fx, "--scores", "nope")))
+        blocks = [block for block in pipeline.plan(config, hash_lesions=False).blocks if block["id"] == "unknown_score"]
+        self.assertEqual(len(blocks), 1, "the plan blocks the unknown column")
+        self.assertIn("nope", blocks[0]["message"])
+        self.assertIn("participant_id", blocks[0]["fix"])
+        self.assertIn("score_column", blocks[0]["fix"])
+        self.assertNotEqual(blocks[0]["fix"], "Check --scores")
+
+    def test_locked_plan_contrast_is_run(self):
+        """Run everything runs the locked plan's one-sided contrast (Ferguson 2019: A>B, case > control), not a two-sided GLM (BB-1)."""
+        if self.baseline:
+            self.skipTest("The GLM is not available with the wave-1 providers")
+        from LesionNetworkMappingLib import glm, recipes
+
+        self.assertNotIn("contrast", self.pipeline_json["config"])  # a two-sided run stores what earlier versions stored
+        self.assertEqual(read_json(os.path.join(self.out, "stages", "glm", glm.GLM_JSON))["tails"], 2)
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f12"))
+        recipe = next(item for item in recipes.load_recipes(study=fx["study"]) if item.id == "classic_ferguson2019_adapted")
+        recipes.lock_plan(fx["study"], recipe, recipes.apply(recipe), {"primary": {"kind": "contrast", "contrast": "A>B"}, "rois": [], "alpha": 0.05, "n_perm": 1000, "seeds": {"permutation": 0}})
+        converted = recipes.to_pipeline_config(recipe, fx["study"])
+        config = dict(converted["config"], bundle=fx["bundle"], accept_terms=True, events="json", report=False, recipe=converted["recipe"])
+        code = pipeline.run(pipeline.PipelineConfig.from_json(config), emit=pipeline.Emitter("json", sink=lambda event, record: None))
+        self.assertEqual(code, 0)
+        written = read_json(os.path.join(fx["out"], pipeline.PIPELINE_JSON))
+        self.assertEqual((written["recipe"]["id"], written["recipe"]["plan_sha256"]), (recipe.id, recipes.read_plan(fx["study"])["sha256"]))  # recorded for methods
+        self.assertNotIn("recipe", written["config"])
+        record = read_json(os.path.join(fx["out"], "stages", "glm", glm.GLM_JSON))
+        self.assertEqual((record["contrast"]["label"], record["contrast"]["spec"], record["tails"]), ("caseGtControl", "A>B", 1))
+        self.assertEqual(read_json(os.path.join(fx["out"], pipeline.PIPELINE_JSON))["config"]["contrast"], "A>B")
+        self.assertTrue(os.path.isfile(self.group_path("caseGtControlTstat", fx["out"])))
+        self.assertEqual(recipes.read_deviations(fx["study"]), [])  # the plan was followed
+
+    def test_study_edited_during_run_keeps_the_planned_groups(self):
+        """The GLM analyses the groups the run planned with (pipeline.json), even when another writer changes the study's
+        participants.tsv during the run: a slicer-lnm run refused with exit code 75 used to rewrite it with its own
+        --group-map, and the running run's case-vs-control T map came out sign-flipped (BB-1).
+        """
+        if self.baseline:
+            self.skipTest("The GLM is not available with the wave-1 providers")
+        from LesionNetworkMappingLib import glm
+
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f13"))
+        snapshot = pipeline.Runner._snapshot
+
+        def swap_groups_then_snapshot(runner, rows):
+            # after the plan (pipeline.json "inputs"), before the maps and the GLM: another writer swaps case and control
+            study = Study.open(fx["study"])
+            for sid in study.subject_ids:
+                group = study.subject(sid).get("group")
+                if group in ("case", "control"):
+                    study.set(sid, group="control" if group == "case" else "case")
+            study.save()
+            snapshot(runner, rows)
+
+        with mock.patch.object(pipeline.Runner, "_snapshot", swap_groups_then_snapshot):
+            code, events, _calls, _seconds = run_in_process(fx, *FAST)
+        self.assertEqual(code, 0, done_event(events))
+        planned = {row["participant_id"]: row["group"] for row in read_json(os.path.join(fx["out"], pipeline.PIPELINE_JSON))["inputs"]["rows"] if row["status"] != "excluded"}
+        self.assertEqual(sorted(planned.values()).count("case"), fixture.N_CASES)
+        self.assertEqual(Study.open(fx["study"]).subject("sub-01")["group"], "control")  # the study was changed
+        record = read_json(os.path.join(fx["out"], "stages", "glm", glm.GLM_JSON))
+        self.assertEqual(record["n_per_level"], {"case": fixture.N_CASES, "control": fixture.N_CONTROLS})
+        ours = nifti.read_nifti(self.group_path("caseVsControlTstat", fx["out"]))[0]
+        reference = nifti.read_nifti(self.group_path("caseVsControlTstat"))[0]  # the class run on the unchanged study
+        np.testing.assert_allclose(np.asarray(ours, np.float64), np.asarray(reference, np.float64), atol=1e-4)
 
     def test_lesion_outside_mask_is_excluded(self):
         fx = fixture.make_fixture(os.path.join(self.tmp, "f10"))
@@ -566,6 +749,48 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
             self.assertAlmostEqual(again["cohort"]["slnm"][label]["max_abs_r"], value["max_abs_r"], places=6)
         self.assertEqual(again["cohort"]["nulls"]["classic_rule"], self.pipeline_json["cohort"]["nulls"]["classic_rule"])
 
+    def test_reproduce_pipeline_uses_slicer_lnm_without_pythonslicer(self):
+        """A wheel or container run has no PythonSlicer: reproduce_pipeline.sh then runs 'slicer-lnm pipeline run' (like reproduce.sh)."""
+        script = os.path.join(self.out, "reproduce_pipeline.sh")
+        bin_dir = os.path.join(self.tmp, "fakebin")
+        os.makedirs(bin_dir, exist_ok=True)
+        log = os.path.join(self.tmp, "fake-slicer-lnm.log")
+        fake = os.path.join(bin_dir, "slicer-lnm")
+        with open(fake, "w", encoding="utf-8") as f:
+            f.write('#!/bin/sh\nprintf "%s\\n" "$@" > "$FAKE_LOG"\n')
+        os.chmod(fake, 0o755)
+        no_pythonslicer = dict(PYTHONSLICER=None, SLICER_LNM=None, FAKE_LOG=log, ACCEPT_TERMS="1", OUT=os.path.join(self.tmp, "reproduced-lnm"))
+        system_path = os.pathsep.join(path for path in ("/usr/bin", "/bin") if os.path.isdir(path))
+        # slicer-lnm on PATH, no PythonSlicer anywhere: the documented command works
+        result = subprocess.run(["sh", script], env=_env(PATH=bin_dir + os.pathsep + system_path, **no_pythonslicer), capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        with open(log, encoding="utf-8") as f:
+            called = f.read().splitlines()
+        self.assertEqual(called[:2], ["pipeline", "run"], called)
+        self.assertIn("--accept-terms", called)
+        self.assertEqual(called[called.index("--config") + 1], os.path.join(self.out, "pipeline.json"))
+        # $SLICER_LNM names the command when it is not on PATH
+        os.remove(log)
+        result = subprocess.run(["sh", script], env=_env(PATH=system_path, **dict(no_pythonslicer, SLICER_LNM=fake)), capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        self.assertTrue(os.path.isfile(log))
+        # $PYTHONSLICER forces the Python route, also when slicer-lnm is on PATH
+        os.remove(log)
+        result = subprocess.run(["sh", script], env=_env(PATH=bin_dir + os.pathsep + system_path, **dict(no_pythonslicer, PYTHONSLICER=fake)), capture_output=True, text=True, check=False)
+        self.assertTrue(os.path.isfile(log))
+        with open(log, encoding="utf-8") as f:
+            self.assertEqual(f.read().splitlines()[:3], ["-m", "LesionNetworkMappingLib.pipeline", "run"])
+        # the script remembers the slicer-lnm that wrote it (a venv that is not activated)
+        venv_bin = os.path.join(self.tmp, "venv", "bin")
+        os.makedirs(venv_bin, exist_ok=True)
+        shutil.copy(fake, os.path.join(venv_bin, "slicer-lnm"))
+        with mock.patch.object(pipeline.sys, "executable", os.path.join(venv_bin, "python")), mock.patch.object(pipeline.shutil, "which", return_value=None):
+            self.assertEqual(pipeline._slicer_lnm_executable(), os.path.join(venv_bin, "slicer-lnm"))
+        with open(script, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("DEFAULT_SLICER_LNM=", text)
+        self.assertIn("slicer-lnm pipeline run", text)
+
     def test_cancel_during_maps_and_resume(self):
         fx = self.fx
         out = os.path.join(self.tmp, "cancel-maps")
@@ -601,10 +826,15 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
                 open(os.path.join(out, pipeline.PRIVATE_DIR, pipeline.STOP_NAME), "w").close()
                 stopped["at"] = event["_wall"]
 
-        code, _events, _stdout, stderr, wall = cli(*args, on_event=on_event)
+        code, events, _stdout, stderr, wall = cli(*args, on_event=on_event)
         self.assertIn("at", stopped)
         self.assertEqual(code, 3, stderr[-2000:])
         self.assertLessEqual(wall - stopped["at"], 3.0)
+        # The progress text names what is counted: the maps the GLM loads, then its permutations
+        for event in events:
+            if event["event"] == "progress" and event.get("stage") == "specificity":
+                self.assertEqual(event.get("unit"), {"maps": "maps", "permutations": "permutations"}.get(event.get("child_stage")), event)
+        self.assertTrue(any(e["event"] == "progress" and e.get("child_stage") == "permutations" for e in events))
         state = read_json(os.path.join(out, "stages", "glm", ".glm-resume.json"))
         cursor = state["data"]["cursor"]
         self.assertGreater(cursor, 1)
@@ -618,6 +848,304 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         code, _events, _stdout, stderr, _wall = cli(*args, on_event=on_event_again)
         self.assertEqual(code, 3, stderr[-2000:])
         self.assertGreaterEqual(resumed["first"], cursor - 1, "the GLM resumes from its cursor")
+
+    def test_run_outside_the_study_keeps_the_study_registry(self):
+        """A run written outside the study (``OUT=elsewhere sh reproduce_pipeline.sh``) registers in its own folder: the study's
+        runs.jsonl, and so its methods, checklist and Report card, stay as they were, and never get an absolute run folder.
+        """
+        from LesionNetworkMappingLib import methods
+
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-outside"))
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST))
+        self.assertEqual(code, 0, stderr[-2000:])
+        study_run = done_event(events)["run_id"]
+        registry_path = runs.registry_path(fx["study"])
+        with open(registry_path, "rb") as f:
+            before = f.read()
+        methods_before = methods.render(methods.methods_sections(fx["study"]), "md")
+        outside = os.path.join(self.tmp, "f-outside-reproduced")
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST, "--out", outside))
+        self.assertEqual(code, 0, stderr[-2000:])
+        outside_run = done_event(events)["run_id"]
+        with open(registry_path, "rb") as f:
+            after = f.read()
+        added = [json.loads(line) for line in after[len(before):].decode("utf-8").splitlines() if line.strip()]
+        self.assertTrue(after.startswith(before))
+        self.assertEqual([record for record in added if record.get("kind") != "preflight"], [], "only the study's preflight report is added")
+        self.assertFalse([record for record in runs.read_records(fx["study"]) if isinstance(record.get("dir"), str) and os.path.isabs(record["dir"])])
+        self.assertEqual(methods.render(methods.methods_sections(fx["study"]), "md"), methods_before)
+        self.assertIn(f"run {study_run}", methods_before)
+        # The run outside the study has its own registry (relative folders) and its methods cite it
+        own = runs.load(outside)
+        self.assertEqual(own[outside_run]["status"], "done")
+        self.assertEqual(own[outside_run]["dir"], ".")
+        self.assertTrue(runs.children(outside, outside_run))
+        self.assertFalse([record for record in own.values() if os.path.isabs(record.get("dir") or "")])
+        with open(os.path.join(outside, "methods.md"), encoding="utf-8") as f:
+            self.assertIn(f"The analysis ran as one pipeline (run {outside_run}", f.read())
+
+    def test_finished_run_methods_and_report_do_not_say_pending(self):
+        """methods.* and report.html are written during the export and report stages; a finished run rewrites them once every stage
+        (finish included) is recorded, so neither describes a stage of the finished run as pending.
+        """
+        self.assertEqual(self.pipeline_json["status"], "done")
+        stages = {record["name"]: record["status"] for record in self.pipeline_json["stages"]}
+        for name in ("export", "report", "finish"):
+            self.assertEqual(stages[name], "done", name)
+        for name in ("methods.md", "methods.html", "methods.txt", "report.html"):
+            with open(os.path.join(self.out, name), encoding="utf-8") as f:
+                self.assertNotRegex(f.read(), r"\bpending\b", name)
+
+    def test_no_report_progress_after_finish(self):
+        """The refresh of report.html after Finish is silent: no stage-15 progress follows the Finish event, and the figure counter ends at its total."""
+        names = [(event.get("event"), event.get("name"), event.get("status")) for event in self.events]
+        finish = names.index(("stage", "finish", "done"))
+        late = [event for event in self.events[finish + 1:] if event.get("event") == "progress"]
+        self.assertEqual(late, [], "no progress event after Finish")
+        report_progress = [event for event in self.events[:finish] if event.get("event") == "progress" and event.get("stage") == "report"]
+        self.assertTrue(report_progress)
+        self.assertEqual(report_progress[-1]["done"], report_progress[-1]["total"], "the figure counter ends at its real total")
+
+    def test_resumed_run_methods_cite_the_run_that_finished(self):
+        """A run stopped while the report is made has already written the export; the run that resumes it writes it again, so the
+        methods, the sidecars and the report name the run that finished (not the cancelled one), and a finished run's export is reused.
+        """
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-cancel-report"))
+        out = fx["out"]
+        stopped = {}
+
+        def on_event(event, process):
+            if "at" not in stopped and event["event"] == "stage" and event.get("name") == "report" and event.get("status") == "running":
+                open(os.path.join(out, pipeline.PRIVATE_DIR, pipeline.STOP_NAME), "w").close()
+                stopped["at"] = event["_wall"]
+
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST), on_event=on_event)
+        self.assertIn("at", stopped, "the report stage was reached")
+        self.assertEqual(code, 3, stderr[-2000:])
+        cancelled = read_json(os.path.join(out, "pipeline.json"))["run_id"]
+        self.assertEqual(done_event(events)["event"], "cancelled")
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST))
+        self.assertEqual(code, 0, stderr[-2000:])
+        finished = read_json(os.path.join(out, "pipeline.json"))["run_id"]
+        self.assertNotEqual(finished, cancelled)
+        status = {record["id"]: record.get("status") for record in runs.list_runs(fx["study"])}
+        self.assertEqual((status[cancelled], status[finished]), ("cancelled", "done"))
+        self.assertEqual(stage_status(events)["export"], "done", "the export of the stopped run is written again")
+        with open(os.path.join(out, "methods.md"), encoding="utf-8") as f:
+            methods = f.read()
+        self.assertIn(f"The analysis ran as one pipeline (run {finished}", methods)
+        self.assertNotIn(cancelled, methods)
+        with open(os.path.join(out, "report.html"), encoding="utf-8") as f:
+            self.assertNotIn(cancelled, f.read())
+        self.assertEqual(read_json(export.sidecar_path(out, "sub-01", self.bundle.name))["pipeline"]["run_id"], finished)
+        # An unchanged run after a finished one reuses the export (and the report)
+        code, events, calls, _seconds = run_in_process(fx, *FAST)
+        self.assertEqual((code, calls), (0, []))
+        self.assertEqual((stage_status(events).get("export"), stage_status(events).get("report")), ("reused", "reused"))
+
+    def test_stopped_or_killed_rerun_is_never_cited_by_the_study_methods(self):
+        """Every pipeline run of an output folder rewrites its pipeline.json from its start. After a finished run, a rerun that is
+        stopped (or killed: its registry record stays "running") leaves its own stages there: the study's methods (Report card,
+        methods export) say that the latest run did not finish, never pair the finished run's id with the stopped run's stages,
+        and never cite the stopped run in Thresholds (BB-1 methods-cite-killed-pipeline-rerun).
+        """
+        from LesionNetworkMappingLib import methods
+
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-stopped-rerun"))
+        out = fx["out"]
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST))
+        self.assertEqual(code, 0, stderr[-2000:])
+        finished = done_event(events)["run_id"]
+        text = methods.render(methods.methods_sections(fx["study"]), "txt")
+        self.assertIn(f"The analysis ran as one pipeline (run {finished}", text)
+        self.assertIn(f"Run {finished}: rule", text)
+        stopped = {}
+
+        def on_event(event, process):
+            if "at" not in stopped and event["event"] == "stage" and event.get("name") == "maps" and event.get("status") == "running":
+                open(os.path.join(out, pipeline.PRIVATE_DIR, pipeline.STOP_NAME), "w").close()
+                stopped["at"] = event["_wall"]
+
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST, "--recompute"), on_event=on_event)
+        self.assertIn("at", stopped, "the maps stage was reached")
+        self.assertEqual(code, 3, stderr[-2000:])
+        rerun = read_json(os.path.join(out, pipeline.PIPELINE_JSON))["run_id"]
+        self.assertNotEqual(rerun, finished)
+        status = {record["id"]: record.get("status") for record in runs.list_runs(fx["study"])}
+        self.assertEqual((status[finished], status[rerun]), ("done", "cancelled"))
+        for registry_status, expected in (("cancelled", "was stopped before it finished"), ("running", "has not finished")):
+            if registry_status == "running":  # a killed run: its record is never updated
+                runs.update(fx["study"], rerun, status="running")
+            sections = methods.methods_sections(fx["study"])
+            text = methods.render(sections, "txt")
+            pipeline_text = methods.render([methods.find_section(sections, "pipeline")], "txt")
+            self.assertNotIn("The analysis ran as one pipeline", text, registry_status)
+            self.assertIn(f"The latest pipeline run (run {rerun}) {expected}", text, registry_status)
+            self.assertIn(finished, pipeline_text, registry_status)
+            self.assertNotIn(rerun, text.replace(pipeline_text.strip(), ""), f"{registry_status}: only the Pipeline section names the stopped run")
+            self.assertNotRegex(text, r"(?m)^- (maps|nulls|export|report): provider", registry_status)
+            thresholds = text[text.index("Thresholds\n"):]
+            thresholds = thresholds[:thresholds.index("Maps are stored unthresholded")]
+            self.assertNotIn(rerun, thresholds, registry_status)
+            self.assertIn(f"Run {finished}: rule", thresholds, registry_status)
+
+    def test_recompute_run_is_reused_by_the_next_run(self):
+        """--recompute ("Recompute everything") forces its own run only: the stages it completed are reused by the next run without
+        it, after a stop in the report (A-04c: completed work is kept and resumed on the next click) and after a finished run.
+        """
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-recompute"))
+        out = fx["out"]
+        stopped = {}
+
+        def on_event(event, process):
+            if "at" not in stopped and event["event"] == "stage" and event.get("name") == "report" and event.get("status") == "running":
+                open(os.path.join(out, pipeline.PRIVATE_DIR, pipeline.STOP_NAME), "w").close()
+                stopped["at"] = event["_wall"]
+
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST, "--recompute"), on_event=on_event)
+        self.assertIn("at", stopped, "the report stage was reached")
+        self.assertEqual(code, 3, stderr[-2000:])
+        completed = [name for name, status in stage_status(events).items() if status == "done" and name not in ("prepare", "preflight", "export", "report")]
+        self.assertIn("maps", completed)
+        self.assertIn("specificity", completed)
+        # The resume without --recompute computes only what the stop left (the export is written again for the finished run)
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST))
+        self.assertEqual(code, 0, stderr[-2000:])
+        status = stage_status(events)
+        self.assertEqual({name: status.get(name) for name in completed}, dict.fromkeys(completed, "reused"))
+        self.assertEqual(status.get("report"), "done")
+        # A finished --recompute run, then a run without it: nothing is computed and no process starts
+        code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST, "--recompute"))
+        self.assertEqual(code, 0, stderr[-2000:])
+        self.assertEqual(stage_status(events)["maps"], "done")
+        code, events, calls, _seconds = run_in_process(fx, *FAST)
+        self.assertEqual((code, calls), (0, []))
+        self.assertEqual(stage_status(events)["maps"], "reused")
+
+    def test_second_recompute_does_not_reuse_the_private_map_cache(self):
+        """Every --recompute maps everything again: the private cache that the previous --recompute left in stages/cohortmaps/cache
+        is not reused (BB-1: the second run ended with 'N reused', also for a damaged map the user wanted to get rid of).
+        """
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-recompute-twice"))
+        out = fx["out"]
+        records = []
+        for _run in range(2):
+            code, _events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST, "--recompute"))
+            self.assertEqual(code, 0, stderr[-2000:])
+            found = glob.glob(os.path.join(out, "**", "cohortmaps.json"), recursive=True)
+            self.assertTrue(found)
+            lesions = read_json(found[0])["lesions"]
+            records.append((lesions["computed"], lesions["cache_hits"]))
+        self.assertGreater(records[0][0], 0)
+        self.assertEqual(records[1], (records[0][0], 0), records)
+
+    def test_no_stale_group_maps_after_skip_or_stop(self):
+        """GLM and conjunction maps of an earlier run never pass for the results of a run that skipped or stopped those stages."""
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-stale"))
+        out = fx["out"]
+        stale = ("caseVsControl", "conj")
+
+        def check(label, status):
+            data = read_json(os.path.join(out, pipeline.PIPELINE_JSON))
+            self.assertEqual(data["status"], status, label)
+            listed = [item["desc"] for item in data["outputs"]["group"]]
+            self.assertIn("overlapPctPos", listed, label)
+            self.assertFalse([desc for desc in listed if desc.startswith(stale)], f"{label}: pipeline.json lists maps of an earlier run")
+            self.assertFalse([name for name in os.listdir(out) if name.startswith(("group_conn-", "clusters_")) and any(word in name for word in stale)], f"{label}: stale maps or tables left")
+            self.assertFalse([key for key in data["outputs"]["clusters"] or {} if key.startswith(stale)], label)
+            self.assertIsNone(data["cohort"]["conjunction"], label)
+            for item in data["outputs"]["group"]:
+                self.assertTrue(os.path.isfile(os.path.join(out, item["path"])), item)
+            return data
+
+        full = run_args(fx, *FAST, "--scores", "none", "--no-report")
+        code, _events, _stdout, stderr, _wall = cli(*full)
+        self.assertEqual(code, 0, stderr[-2000:])
+        self.assertTrue({"conjPos", "conjNeg"} <= {item["desc"] for item in read_json(os.path.join(out, pipeline.PIPELINE_JSON))["outputs"]["group"]})
+        self.assertTrue(os.path.isfile(os.path.join(out, "clusters_conjPos.tsv")))
+        # Specificity off: the GLM and the conjunction are skipped, and their earlier maps and cluster tables go
+        code, events, _stdout, stderr, _wall = cli(*full, "--specificity", "off")
+        self.assertEqual(code, 0, stderr[-2000:])
+        self.assertEqual((stage_status(events)["specificity"], stage_status(events)["conjunction"]), ("skipped", "skipped"))
+        data = check("specificity off", "done")
+        self.assertIsNone(data["cohort"]["specificity"])
+        self.assertIn("meanT", data["outputs"]["clusters"])
+        # Stopped while the GLM recomputes (another permutation count): its earlier maps and the stages built on them go,
+        # the overlap maps of this run stay listed, and the next run recomputes everything that went
+        code, _events, _stdout, stderr, _wall = cli(*full)
+        self.assertEqual(code, 0, stderr[-2000:])
+        self.assertTrue(os.path.isfile(os.path.join(out, "group_conn-Synthetic_desc-conjPos_map.nii.gz")))
+        stopped = {}
+
+        def on_event(event, process):
+            if "at" not in stopped and event["event"] == "progress" and event.get("stage") == "specificity" and event.get("child_stage") == "permutations":
+                open(os.path.join(out, pipeline.PRIVATE_DIR, pipeline.STOP_NAME), "w").close()
+                stopped["at"] = True
+
+        slow = [arg if arg != "1000" else "60000" for arg in full]
+        code, _events, _stdout, stderr, _wall = cli(*slow, on_event=on_event)
+        self.assertIn("at", stopped)
+        self.assertEqual(code, 3, stderr[-2000:])
+        check("stopped during the GLM", "cancelled")
+        self.assertFalse(os.path.exists(os.path.join(out, "qa.json")), "the quality checks of the earlier GLM are stale")
+        code, events, _stdout, stderr, _wall = cli(*full)
+        self.assertEqual(code, 0, stderr[-2000:])
+        status = stage_status(events)
+        self.assertEqual([status[name] for name in ("overlap", "specificity", "conjunction", "clusters")], ["reused", "done", "done", "done"])
+        listed = {item["desc"] for item in read_json(os.path.join(out, pipeline.PIPELINE_JSON))["outputs"]["group"]}
+        self.assertTrue({"conjPos", "caseVsControlTstat"} <= listed, listed)
+
+    def test_methods_cite_only_the_slnm_of_the_latest_run(self):
+        """A rerun whose sLNM is skipped (every score equal: there is nothing to map) leaves no sLNM in its methods, report or
+        files; a rerun that computes it again cites only its own sLNM, not also the one it superseded (same folder, same score).
+        """
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-slnm-rerun"))
+        out = fx["out"]
+        args = run_args(fx, *FAST, "--specificity", "off")
+        cited = re.compile(r"Symptom lesion network mapping \(run ([^)]+)\)")
+        folder = os.path.join(out, pipeline.STAGES_DIR, "slnm-AphasiaScore")
+
+        def set_scores(value):
+            study = Study.open(fx["study"])
+            for index, row in enumerate(study.subjects):
+                study.set(row["participant_id"], aphasia_score=value(index))
+            study.save()
+
+        def outputs(label):
+            code, events, _stdout, stderr, _wall = cli(*args)
+            self.assertEqual(code, 0, f"{label}: {stderr[-2000:]}")
+            texts = {}
+            for name in ("methods.md", "methods.html", "methods.txt", "report.html"):
+                with open(os.path.join(out, name), encoding="utf-8") as f:
+                    texts[name] = f.read()
+            return stage_status(events), texts
+
+        status, texts = outputs("first run")
+        self.assertEqual(status["slnm"], "done")
+        first = sorted(set(cited.findall(texts["methods.md"])))
+        self.assertEqual(len(first), 1, first)
+        set_scores(lambda index: 5)
+        status, texts = outputs("constant scores")
+        self.assertEqual(status["slnm"], "skipped", "a constant score is skipped with its reason, not a failed stage")
+        with open(os.path.join(out, "pipeline.json"), encoding="utf-8") as f:
+            pipeline_json = json.load(f)
+        self.assertEqual(pipeline_json.get("failed_stages"), [])
+        for name, text in texts.items():
+            self.assertNotIn("linearly dependent", text, name)
+            self.assertNotIn("rank-deficient", text, name)
+        for name, text in texts.items():
+            self.assertEqual(cited.findall(text), [], f"{name} describes the sLNM of an earlier run")
+        self.assertNotIn(first[0], texts["methods.md"])
+        self.assertFalse(os.path.exists(os.path.join(folder, "slnm.json")), "the earlier sLNM record stays in the stage folder")
+        self.assertFalse(glob.glob(os.path.join(folder, "group_conn-*")), "the earlier sLNM maps stay in the stage folder")
+        self.assertNotIn("stages/slnm-AphasiaScore/group_conn-", texts["report.html"], "the report lists the earlier sLNM maps")
+        set_scores(lambda index: (index * 7) % 11)
+        status, texts = outputs("new scores")
+        self.assertEqual(status["slnm"], "done")
+        latest = read_json(os.path.join(folder, "slnm.json"))["run_id"]
+        self.assertNotEqual(latest, first[0])
+        for name in ("methods.md", "methods.html", "methods.txt"):
+            self.assertEqual(sorted(set(cited.findall(texts[name]))), [latest], name)
 
     def test_parent_pid_watchdog(self):
         out = os.path.join(self.tmp, "parent")
@@ -716,6 +1244,17 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertEqual(code, 0, stderr[-2000:])
         rows = {row["participant_id"]: row for row in read_json(os.path.join(self.tmp, "native-stub", "pipeline.json"))["inputs"]["rows"]}
         self.assertEqual(rows[native]["reason"], pipeline.NORM_NEEDS_REVIEW)
+        # The next plan knows the native lesion is settled (normalized, awaiting review): it is not new or changed (the card's "Up to date")
+        out = os.path.join(self.tmp, "native-stub")
+        with mock.patch.dict(os.environ, {pipeline.NORMALIZER_ENV: stub}):
+            config = pipeline.PipelineConfig(study=fx["study"], bundle=fx["bundle"], accept_terms=True, nulls="off", out=out)
+            planned = pipeline.plan(config)
+            self.assertEqual({row["participant_id"]: row["settled"] for row in planned.rows if row["status"] == "normalize"}, {native: pipeline.NORM_NEEDS_REVIEW})
+            config.recompute = True
+            self.assertEqual([row["settled"] for row in pipeline.plan(config).rows if row["status"] == "normalize"], [None])
+            config.recompute = False
+            config.out = os.path.join(self.tmp, "native-never-run")
+            self.assertEqual([row["settled"] for row in pipeline.plan(config).rows if row["status"] == "normalize"], [None])
         code, _events, _stdout, stderr, _wall = cli(*run_args(fx, *cheap, "--native", "include-unreviewed", "--out", os.path.join(self.tmp, "native-include")), env=env)
         self.assertEqual(code, 0, stderr[-2000:])
         data = read_json(os.path.join(self.tmp, "native-include", "pipeline.json"))
@@ -725,6 +1264,22 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertTrue(os.path.isfile(export.map_paths(os.path.join(self.tmp, "native-include"), native, self.bundle.name)["T"]))
 
     # init
+
+    def test_init_bad_score_column_leaves_nothing(self):
+        source = os.path.join(self.tmp, "score lesions")
+        os.makedirs(source)
+        study = Study.open(self.fx["study"])
+        sid = self.mapped_sids()[0]
+        shutil.copyfile(study.abspath(study.subject(sid)["lesion"]), os.path.join(source, f"{sid}_lesion.nii.gz"))
+        csv = os.path.join(self.tmp, "score table.csv")
+        with open(csv, "w", encoding="utf-8") as f:
+            f.write(f"participant_id,group,aphasia_score\n{sid},case,3\n")
+        for column, text in (("nosuch", "is not a column of the participants table (columns: group, aphasia_score)"), ("group", "is the group column, not a score")):
+            target = os.path.join(self.tmp, f"refused {column}")
+            with self.assertRaises(ValueError) as caught:
+                pipeline.init_study(source, target, participants=csv, score_columns=[column])
+            self.assertIn(text, str(caught.exception))
+            self.assertFalse(os.path.exists(target), "a refused score column leaves no study behind")
 
     def test_init(self):
         source = os.path.join(self.tmp, "folder of lesions")
@@ -763,6 +1318,52 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         code, events, _stdout, _stderr, _wall = cli("init", "--from", source, "--study", target)
         self.assertEqual(code, 75)
         self.assertIn("study open in Slicer", done_event(events)["message"])
+
+    def test_init_group_options_are_checked_and_named(self):
+        # A participants group column that is not case/control, a --group-column that is no column and a --group-map that is not
+        # 'value=case,...' each say so (and name the option) and leave no half-made study behind
+        source = os.path.join(self.tmp, "group lesions")
+        os.makedirs(source)
+        study = Study.open(self.fx["study"])
+        lines = ["participant_id\tgroup"]
+        for sid in self.mapped_sids()[:2]:
+            shutil.copyfile(study.abspath(study.subject(sid)["lesion"]), os.path.join(source, f"{sid}_lesion.nii.gz"))
+            lines.append(f"{sid}\t{'patient' if sid == self.mapped_sids()[0] else 'HC'}")
+        table = os.path.join(self.tmp, "group table.tsv")
+        with open(table, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        cases = [({}, "--group-map"),
+                 ({"group_column": "nosuch", "group_map": "patient=case,HC=control"}, "--group-column 'nosuch'"),
+                 ({"group_column": "group", "group_map": "patient:case,HC:control"}, "--group-map item 'patient:case'")]
+        for index, (options, expected) in enumerate(cases):
+            target = os.path.join(self.tmp, f"group study {index}")
+            with self.assertRaises(ValueError) as caught:
+                pipeline.init_study(source, target, participants=table, **options)
+            self.assertIn(expected, str(caught.exception))
+            self.assertFalse(os.path.exists(target), "a refused option must not leave a study behind")
+        code, _events, _stdout, stderr, _wall = cli("init", "--from", source, "--participants", table, "--study", os.path.join(self.tmp, "group cli study"))
+        self.assertNotEqual(code, 0)
+        self.assertIn("--group-map", stderr + str(_events))
+        summary = pipeline.init_study(source, os.path.join(self.tmp, "group ok"), participants=table, group_column="group", group_map="patient=case,HC=control")
+        self.assertEqual(summary["subjects"], 2)
+
+    def test_init_invalid_patterns_are_usage_errors_and_leave_no_study(self):
+        # A --id-regex or --lesion-rule that does not compile is a usage error (exit 2) that names the option, not a traceback,
+        # and no study folder is created
+        source = os.path.join(self.tmp, "regex lesions")
+        os.makedirs(source)
+        study = Study.open(self.fx["study"])
+        sid = self.mapped_sids()[0]
+        shutil.copyfile(study.abspath(study.subject(sid)["lesion"]), os.path.join(source, f"{sid}_lesion.nii.gz"))
+        for index, (option, value) in enumerate([("--id-regex", "("), ("--id-regex", "sub-(\\d+"), ("--lesion-rule", "(")]):
+            target = os.path.join(self.tmp, f"regex study {index}")
+            code, events, _stdout, stderr, _wall = cli("init", "--from", source, "--study", target, option, value)
+            self.assertEqual(code, 2, stderr[-2000:])
+            self.assertIn(f"Invalid {option}", str(events))
+            self.assertNotIn("Traceback", stderr + str(events))
+            self.assertFalse(os.path.exists(target), "a refused pattern must not leave a study behind")
+        summary = pipeline.init_study(source, os.path.join(self.tmp, "regex ok"), id_regex="(\\w+)_lesion")
+        self.assertEqual(summary["subjects"], 1)
 
     # Events and speed
 
@@ -812,6 +1413,145 @@ class PipelineTest(PipelineChecks, unittest.TestCase):
         self.assertLessEqual(seconds, 1.0, f"plan of 300 lesions took {seconds:.2f} s")
         self.assertFalse(os.path.exists(result.out), "plan writes nothing")
         self.assertEqual(sha256(os.path.join(study.path, "participants.tsv")), before)
+
+    def test_nulls_plan_counts_cases_only(self):
+        """One case plus controls: the nulls use the cases only, so the plan skips the stage instead of failing it later."""
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-one-case"), n_cases=1, n_controls=1, extra_rows=False)
+        config = pipeline.PipelineConfig(study=fx["study"], bundle=fx["bundle"], accept_terms=True, nulls="exact")
+        stages = {stage["name"]: stage for stage in pipeline.plan(config).stages}
+        self.assertEqual(stages["nulls"]["status"], "skip", stages["nulls"])
+        self.assertIn("at least 2 lesions", stages["nulls"]["reason"])
+
+    def test_participant_label_rows_are_only_not_selected(self):
+        """--participant-label: the plan's checks and design counts cover the selected participants only, and a left-out
+        subject is only "not selected", even when its lesion file is unreadable (BB-1: methods.md gave it the reason
+        "lesion file unreadable" and Prepare counted case n = 7 while the GLM counted n = 6).
+        """
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-labels"))
+        damaged = os.path.join(fx["study"], "lesions", f"sub-08_space-{fixture.SPACE}_desc-lesion_mask.nii.gz")
+        with open(damaged, "rb") as f:
+            head = f.read(300)
+        with open(damaged, "wb") as f:
+            f.write(head)
+        selected = ["sub-01", "sub-02", "sub-03", "sub-04", "sub-05", "sub-06", "sub-09", "sub-10", "sub-11", "sub-12"]  # 6 cases, 4 controls
+        config = pipeline.PipelineConfig(study=fx["study"], bundle=fx["bundle"], accept_terms=True, nulls="off", specificity="glm", participant_label=selected)
+        planned = pipeline.plan(config)
+        reasons = {row["participant_id"]: row["reason"] for row in planned.rows}
+        self.assertEqual({sid for sid, reason in reasons.items() if reason == pipeline.NOT_SELECTED}, set(reasons) - set(selected))
+        self.assertEqual(reasons["sub-08"], pipeline.NOT_SELECTED)
+        self.assertEqual(sorted(row["participant_id"] for row in planned.rows if row["status"] != "excluded"), selected)
+        messages = [item["message"] for item in planned.warnings + planned.infos]
+        self.assertFalse([message for message in messages if "sub-08" in message or "unreadable" in message], messages)
+        counts = {count for message in messages for count in re.findall(r"\bcase \(n = (\d+)\)", message)}
+        self.assertLessEqual(counts, {"6"}, messages)
+        self.assertNotIn("sub-08", planned.preflight["excluded"])
+        self.assertEqual(planned.preflight["counts"]["subjects"], len(selected))
+
+    def test_auto_nulls_with_fast_index_fall_back_to_exact_when_the_parity_gate_refuses(self):
+        """--nulls auto with a top-x% rule and a fast index (D-A23): without reference maps the parity gate cannot pass,
+        so the plan takes the exact pooled null; when the gate refuses fast mode at run time, the stage runs the exact
+        null instead of failing.
+        """
+        from LesionNetworkMappingLib import fastmap
+
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-auto-fast"), n_cases=14, n_controls=4, extra_rows=False)
+        bundle = connectome.ConnectomeBundle.open(fx["bundle"])
+        try:
+            fastmap.build_index(bundle, fastmap.build_tiling(bundle, []), emit=lambda *a, **k: None, register=False)
+        finally:
+            bundle.close()
+        config = pipeline.PipelineConfig(study=fx["study"], bundle=fx["bundle"], accept_terms=True, nulls="auto", rule={"kind": "top_pct", "value": 10}, perm=1000,
+                                          report=False, out=fx["out"])
+        self.assertEqual(pipeline.plan(config).nulls_mode, "exact", "no reference maps: the parity gate cannot pass")
+        # the plan expects the gate to pass (as with reference maps); the gate refuses at run time
+        events = []
+        with mock.patch.object(pipeline, "_references_for_parity", return_value=True):
+            self.assertEqual(pipeline.plan(config).nulls_mode, "fast")
+            code = pipeline.run(config, emit=pipeline.Emitter("json", sink=lambda event, record: events.append(record)))
+        self.assertEqual(code, 0, str(done_event(events)))
+        self.assertEqual(done_event(events)["failed_stages"], [], str(done_event(events)))
+        self.assertEqual(stage_status(events)["nulls"], "done")
+        self.assertTrue([event for event in events if event["event"] == "warning" and event.get("code") == "nulls_fallback"])
+        self.assertEqual(read_json(os.path.join(fx["out"], pipeline.PIPELINE_JSON))["cohort"]["nulls"]["mode"], "exact_pooled")
+
+    def test_child_failure_message_has_no_dangling_separator(self):
+        import inspect
+
+        source = inspect.getsource(pipeline)
+        self.assertNotIn('message += " | " + " / ".join', source)
+
+    def test_slnm_skip_reason_names_the_real_cause(self):
+        base = dict(study=self.fx["study"], bundle=self.fx["bundle"], accept_terms=True, nulls="off")
+        auto = {stage["name"]: stage for stage in pipeline.plan(pipeline.PipelineConfig(**base)).stages}
+        self.assertEqual(auto["slnm"]["status"], "planned", "the study has a confirmed score column")
+        none = {stage["name"]: stage for stage in pipeline.plan(pipeline.PipelineConfig(scores="none", **base)).stages}
+        self.assertEqual(none["slnm"]["status"], "skip")
+        self.assertIn("not requested", none["slnm"]["reason"])
+        self.assertNotIn("no confirmed score column", none["slnm"]["reason"])
+        self.assertEqual(pipeline._slnm_skip_reason(pipeline.PipelineConfig(scores="auto", **base)), "no confirmed score column")
+
+    def test_cohort_preflight_warning_is_emitted_once(self):
+        """A subject-scope warning of the preflight is one cohort-level sentence: one event, not one per subject."""
+        subjects = [f"sub-{index:02d}" for index in range(1, 13)]
+        message = f"The lesion metrics of {len(subjects)} subjects are missing (sub-01, sub-02 and 10 more); they were measured now."
+        report = {"run_id": "pf-test", "counts": {}, "blocked": False, "checks": [
+            {"id": "metrics_stale", "level": "warn", "scope": "subject", "subjects": subjects, "message": message, "excludes": False},
+            {"id": "float_storage", "level": "warn", "scope": "subject", "subjects": ["sub-03"], "message": "sub-03 is stored as float.", "excludes": False}]}
+        events = []
+        runner = mock.MagicMock()
+        runner.plan.preflight = report
+        runner.providers = {"preflight": mock.MagicMock(kind="preferred")}
+        runner.warnings = []
+        runner.current = "prepare"
+        runner.emit = lambda event, **fields: events.append((event, fields))
+        runner.warn = lambda message, code="warning", **fields: pipeline.Runner.warn(runner, message, code=code, **fields)
+        pipeline.Runner._warn_preflight(runner)
+        warnings = [fields for event, fields in events if event == "warning"]
+        self.assertEqual(len([w for w in warnings if w["message"] == message]), 1, "the cohort sentence is emitted once")
+        cohort_event = next(w for w in warnings if w["code"] == "metrics_stale")
+        self.assertEqual(cohort_event["participants"], subjects, "all subjects are listed, without a cap")
+        self.assertNotIn("participant_id", cohort_event)
+        single = next(w for w in warnings if w["code"] == "float_storage")
+        self.assertEqual(single["participant_id"], "sub-03")
+        self.assertEqual(len(warnings), 2)
+        # They are kept for pipeline.json (the card shows its list after a reopen)
+        self.assertEqual([item["code"] for item in runner.warnings], ["metrics_stale", "float_storage"])
+
+    def test_preflight_warnings_persist_after_an_unchanged_rerun(self):
+        """The preflight's subject-scope warnings are in the events and in pipeline.json of every run, also when the preflight stage is reused."""
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-warnings"))
+        shown = []
+        for _attempt in (1, 2):
+            code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST), env=self.env())
+            self.assertEqual(code, 0, stderr[-2000:])
+            if _attempt == 2:
+                self.assertEqual(stage_status(events)["preflight"], "reused", "the second run reuses the preflight")
+            self.assertIn("metrics_stale", [event.get("code") for event in events if event["event"] == "warning"])
+            record = read_json(os.path.join(fx["out"], pipeline.PIPELINE_JSON))
+            self.assertTrue([text for text in record["warnings"] if text.startswith("The lesion metrics of")], record["warnings"])
+            shown.append([text for text in record["warnings"] if "excluded" in text or "lesion metrics" in text])
+        self.assertEqual(shown[0], shown[1])
+
+    def test_reused_stage_warnings_persist_after_a_rerun(self):
+        """A warning that a stage raised when it computed (the GLM's small-group design check) is raised again when the stage
+        is reused: after a threshold-rule change and after an identical rerun, once each.
+        """
+        fx = fixture.make_fixture(os.path.join(self.tmp, "f-stage-warnings"))
+        small = "Fewer than 10 subjects"
+        rule = ["--rule", json.dumps({"kind": "fz_abs", "value": 0.1})]
+        for attempt, extra in enumerate(([], rule, rule)):
+            code, events, _stdout, stderr, _wall = cli(*run_args(fx, *FAST, *extra), env=self.env())
+            self.assertEqual(code, 0, stderr[-2000:])
+            if attempt:
+                self.assertEqual(stage_status(events)["specificity"], "reused", f"run {attempt + 1} reuses the GLM")
+            found = [event for event in events if event["event"] == "warning" and small in str(event.get("message"))]
+            self.assertEqual(len(found), 1, f"run {attempt + 1}: {found}")
+            record = read_json(os.path.join(fx["out"], pipeline.PIPELINE_JSON))
+            self.assertEqual(len([text for text in record["warnings"] if small in text]), 1, f"run {attempt + 1}: {record['warnings']}")
+            report = os.path.join(fx["out"], "report.html")
+            if os.path.isfile(report):
+                with open(report, encoding="utf-8") as f:
+                    self.assertIn(small, f.read(), f"run {attempt + 1}: report.html")
 
     # Code rules
 

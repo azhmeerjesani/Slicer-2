@@ -74,6 +74,17 @@ SECTION_TITLES = {
     "disclaimer": "Disclaimer",
 }
 PIPELINE_JSON = "pipeline.json"
+PIPELINE_FORMAT = "slicer-lnm-pipeline"  # pipeline.FORMAT_NAME
+# The kind of the runs that a pipeline stage makes as child jobs (pipeline.json "stages": "child_run_id", comma-separated)
+PIPELINE_CHILD_KINDS = {"maps": "cohortmaps", "nulls": "nulls", "specificity": "glm", "slnm": "slnm"}
+#: How the methods name a pipeline run that has not finished, by its registry status (:func:`pipeline_section`)
+PIPELINE_UNFINISHED_TEXTS = {
+    "running": "has not finished (it is still running or was interrupted)",
+    "cancelled": "was stopped before it finished",
+    "failed": "failed before it finished",
+}
+# Stage statuses of a pipeline run that leave no result of the stage: the pipeline dropped the earlier outputs (pipeline._drop_stale)
+PIPELINE_NO_RESULT = ("failed", "blocked", "error", "skipped", "unavailable", "cancelled")
 NORMALIZATION_JSON = "normalization.json"
 RECORDS_TSV = ("sources", "records.tsv")
 INTERRATER_TSV = ("derivatives", "qc", "interrater.tsv")
@@ -83,7 +94,7 @@ LESIONSET_JSON = ("derivatives", "lnm", "lesionset.json")
 SOURCE_TYPE_LABELS = {"own_scan": "own scans", "case_report": "published case reports", "dataset": "shared datasets", "control_db": "control lesion databases"}
 EXTRUSION_SEMANTICS = {
     "fractional": "fractional, exact total thickness of {total} mm (edge slices fractional)",
-    "binary": "binary ±1 mm (3 voxels at 1 mm)",
+    "binary": "binary ±{half} mm, whole voxels on each lesion's grid",
     "single": "kept as a single slice",
 }
 # Registry kinds reported in the statistics section, in this order (other kinds follow in registry order)
@@ -98,7 +109,14 @@ KIND_LABELS = {
     "vlsm": "Voxel-based lesion-symptom mapping",
     "circuits": "Circuits",
 }
-NULL_CAPTION = "Null models benchmark significance; they do not by themselves establish disease specificity (van den Heuvel et al. 2026b); see also Zalesky & Cash 2026; Siddiqi et al. 2026."
+VLSM_JSON = "vlsm.json"
+#: The record of a validation run (validate.VALIDATION_JSON; validate imports numpy, so it is imported only when needed)
+VALIDATION_JSON = "validation.json"
+#: The record of a nulls run (nulls.NULLS_JSON; nulls imports numpy, so it is not imported here)
+NULLS_JSON = "nulls.json"
+#: How VLSM results are described: VLSM tests lesion location, not a network (vlsm.INTERPRETATION)
+VLSM_CLAIM = "Voxel-based lesion-symptom mapping results are described as lesion locations associated with the tested contrast or score; VLSM tests location, not the network."
+NULL_CAPTION = "Null models benchmark significance; they do not by themselves establish disease specificity (van den Heuvel et al. 2026); see also Zalesky & Cash 2026; Siddiqi et al. 2026."
 #: Inflections of "localize" (claim wording); "localization" stays allowed (the title of Boes et al., 2015)
 _LOCALIZE_INFLECTIONS = r"locali[sz](?:e|es|ed|ing)"
 _BANNED_PATTERN = re.compile(r"\b(?:" + "|".join([_LOCALIZE_INFLECTIONS, *(re.escape(phrase) for phrase in BANNED_PHRASES)]) + r")\b", re.IGNORECASE)
@@ -413,8 +431,84 @@ class Records:
     # Registry
 
     def done_runs(self, kind):
+        """Finished runs of ``kind`` (a kind or a collection), without those a later pipeline run superseded (:meth:`superseded`)."""
         kinds = {kind} if isinstance(kind, str) else set(kind)
-        return [record for record in self.runs.values() if record.get("kind") in kinds and record.get("status") == "done"]
+        return [record for record in self.runs.values() if record.get("kind") in kinds and record.get("status") == "done" and not self.superseded(record)]
+
+    def pipeline_stage_runs(self, stage, statuses=("done", "reused")):
+        """The done pipeline runs whose pipeline.json lists ``stage`` with one of ``statuses`` (for stages that register no child run, such as overlap)."""
+        stages = self._pipeline_stages()
+        return [record for record in self.done_runs("pipeline") if (stages.get(record["id"], {}).get(stage) or (None,))[0] in statuses]
+
+    def _pipeline_stages(self):
+        """{pipeline run id: {stage name: (status, {child run ids})}} from the pipeline.json in each pipeline run's folder.
+
+        The folder's pipeline.json is the one the latest pipeline run there wrote, so every pipeline run of a folder gets
+        the stages of that latest run.
+        """
+        if "pipeline_stages" in self._cache:
+            return self._cache["pipeline_stages"]
+        out, by_folder = {}, {}
+        for record in self.runs.values():
+            if record.get("kind") != "pipeline":
+                continue
+            folder = self.run_dir(record)
+            if not folder:
+                continue
+            real = os.path.realpath(folder)
+            if real not in by_folder:
+                data = _read_json(os.path.join(folder, PIPELINE_JSON))
+                stages = None
+                if data is not None and data.get("format") == PIPELINE_FORMAT and isinstance(data.get("stages"), list):
+                    stages = {}
+                    for stage in data["stages"]:
+                        if isinstance(stage, dict) and stage.get("name"):
+                            ids = {part.strip() for part in str(stage.get("child_run_id") or "").split(",") if part.strip()}
+                            stages[stage["name"]] = (stage.get("status"), ids)
+                by_folder[real] = stages
+            if by_folder[real] is not None:
+                out[record["id"]] = by_folder[real]
+        self._cache["pipeline_stages"] = out
+        return out
+
+    def superseded(self, record):
+        """Whether a run that a pipeline stage made as a child job (sLNM, GLM, null models, cohort maps) no longer stands
+        for the results of that pipeline's output folder: the folder's latest pipeline run lists other runs for the stage,
+        or its stage failed, was skipped or was stopped (the pipeline dropped the earlier outputs; files of an earlier run
+        must never pass for the results of a later one). Runs of other kinds, and runs whose pipeline records nothing
+        about the stage, are never superseded.
+        """
+        stage = next((name for name, kind in PIPELINE_CHILD_KINDS.items() if kind == record.get("kind")), None)
+        if stage is None:
+            return False
+        pipelines = self._pipeline_stages()
+        for parent in record.get("parents") or ():
+            stages = pipelines.get(parent)
+            if stages is None or stage not in stages:
+                continue
+            status, ids = stages[stage]
+            if status in PIPELINE_NO_RESULT:
+                return True
+            if status in ("done", "reused") and ids:
+                return record.get("id") not in ids
+            return False
+        return False
+
+    def overwritten(self, record):
+        """Whether a later run wrote its results into the folder of a Robust analysis run (``record``, kind robustness).
+
+        Each Robust analysis writes one fixed folder and result file (``splithalf.json``, ``influence.json``, ...) holding
+        the id of the run that wrote it: a record whose id differs no longer stands for the files on disk, as for GLM and
+        sLNM in :meth:`group_records`. A run without a readable result file is not overwritten.
+        """
+        from . import robustness
+
+        analysis = (self.params(record) or {}).get("analysis")
+        if not analysis:
+            return False
+        name = {"seeds": robustness.VARIANTS_JSON, "consolidate": robustness.CONSOLIDATION_JSON}.get(analysis, f"{analysis}.json")
+        data = self.run_json(record, name)
+        return isinstance(data, dict) and data.get("run_id") not in (None, record["id"])
 
     def summary(self, record):
         from . import runs as runslib
@@ -430,6 +524,15 @@ class Records:
 
         try:
             value = runslib.read_params(self.root, record)
+        except (OSError, ValueError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    def seeds(self, record):
+        from . import runs as runslib
+
+        try:
+            value = runslib.read_field(self.root, record, "seeds")
         except (OSError, ValueError):
             return None
         return value if isinstance(value, dict) else None
@@ -464,6 +567,8 @@ class Records:
         for record in self.done_runs(kind):
             folder = self.run_dir(record)
             data = _read_json(os.path.join(folder, name)) if folder else None
+            if data is not None and data.get("run_id") not in (None, record["id"]):
+                continue  # a later run wrote its results to the same folder: they are not this run's
             if data is not None:
                 seen.add(os.path.realpath(folder))
                 out.append((record["id"], data))
@@ -507,8 +612,20 @@ class Records:
                 "split_half": None,
                 "versions": data.get("versions") or record.get("software"),
                 "software": None,
+                # Coordinate, atrophy and stimulation seeds (coords.py): the run folder's seeds.json
+                "seeds": _seed_record(folder),
             })
-        run_ids = {os.path.realpath(self.run_dir(record) or ""): record["id"] for record in self.runs.values() if self.run_dir(record)}
+        # A folder's provenance.json is written by a run that reached its export, so it is cited with the folder's latest
+        # finished run: a later run that is still running, was stopped or failed there (it shares the folder) never is.
+        run_ids, done_ids = {}, {}
+        for record in self.runs.values():
+            folder = self.run_dir(record)
+            if folder:
+                real = os.path.realpath(folder)
+                run_ids[real] = record["id"]
+                if record.get("status") == "done":
+                    done_ids[real] = record["id"]
+        run_ids.update(done_ids)
         for folder in self._folders():
             real = os.path.realpath(folder)
             if real in seen:
@@ -531,17 +648,48 @@ class Records:
         return list(groups.values())
 
     def pipeline(self):
-        """(pipeline.json content, run id or None), or (None, None)."""
+        """(pipeline.json content, run id or None), or (None, None).
+
+        The content and the id are always those of the same run: the id is the one the pipeline.json names. When the
+        registry's pipeline.json belongs to a run that has not finished, :meth:`pipeline_interrupted` says so.
+        """
+        data, run_id, _interrupted = self._pipeline_lookup()
+        return data, run_id
+
+    def pipeline_interrupted(self):
+        """None, or {"run_id", "status", "finished"} when the pipeline.json found through the registry belongs to a pipeline
+        run that has not finished (still running, stopped, failed or killed). Every pipeline run of an output folder rewrites
+        the folder's pipeline.json from its start, so a stopped or killed rerun leaves its own stages there in place of
+        those of the last finished run ("finished": that run's id, or None).
+        """
+        return self._pipeline_lookup()[2]
+
+    def _pipeline_lookup(self):
+        if "pipeline" in self._cache:
+            return self._cache["pipeline"]
+        result = None, None, None
         for folder in [*self.include_dirs, self.root]:
             data = _read_json(os.path.join(folder, PIPELINE_JSON))
             if data is not None:
-                return data, data.get("run_id")
-        records = self.done_runs("pipeline") or [record for record in self.runs.values() if record.get("kind") == "pipeline"]
-        for record in reversed(records):
-            data = self.run_json(record, PIPELINE_JSON)
-            if data is not None:
-                return data, record["id"]
-        return None, None
+                result = data, data.get("run_id"), None
+                break
+        else:
+            done = self.done_runs("pipeline")
+            records = done or [record for record in self.runs.values() if record.get("kind") == "pipeline"]
+            for record in reversed(records):
+                data = self.run_json(record, PIPELINE_JSON)
+                if data is None:
+                    continue
+                owner = data.get("run_id") or record["id"]
+                owner_record = record if owner == record["id"] else self.runs.get(owner)
+                status = owner_record.get("status") if owner_record else None
+                if owner_record is None or status == "done":  # a run of another registry: cited as its pipeline.json names it
+                    result = data, owner, None
+                else:
+                    result = data, owner, {"run_id": owner, "status": status or data.get("status"), "finished": record["id"] if done else None}
+                break
+        self._cache["pipeline"] = result
+        return result
 
     def normalizations(self):
         """normalization.json contents of the study's native-space lesions (derivatives/normalization/*/ and normalization runs)."""
@@ -576,8 +724,45 @@ class Records:
             out.append({"rms_mm": rms, "loo_rms_mm": loo})
         return out
 
+    def lesionset_path(self):
+        """Path of the lesion-set diagnostics (lesionset.json) of this root, or None.
+
+        An extra folder's (the output folder of the pipeline run being exported) comes first; otherwise the newest of the
+        study's ``derivatives/lnm/lesionset.json`` (``lesionset.py`` CLI) and the output folders of the done pipeline runs
+        (their Lesion-set stage writes ``<out>/lesionset.json``, never the study's file).
+        """
+        if "lesionset_path" in self._cache:
+            return self._cache["lesionset_path"]
+        found = None
+        for folder in self.include_dirs:
+            path = os.path.join(folder, LESIONSET_JSON[-1])
+            if _read_json(path) is not None:
+                found = path
+                break
+        if found is None:
+            candidates = [self.path(*LESIONSET_JSON)]
+            for record in self.done_runs("pipeline"):
+                folder = self.run_dir(record)
+                if folder:
+                    candidates.append(os.path.join(folder, LESIONSET_JSON[-1]))
+            dated, seen = [], set()
+            for index, path in enumerate(candidates):
+                real = os.path.realpath(path)
+                if real in seen or _read_json(path) is None:
+                    continue
+                seen.add(real)
+                try:
+                    mtime = os.path.getmtime(path)
+                except OSError:
+                    continue
+                dated.append((mtime, -index, path))
+            found = max(dated)[2] if dated else None
+        self._cache["lesionset_path"] = found
+        return found
+
     def lesionset(self):
-        return _read_json(self.path(*LESIONSET_JSON))
+        path = self.lesionset_path()
+        return _read_json(path) if path else None
 
     def records_tsv(self):
         return _read_tsv(self.path(*RECORDS_TSV))
@@ -588,6 +773,15 @@ class Records:
     def deviations(self):
         """(analysis plan exists, deviation records or None when the log is absent)."""
         return os.path.isfile(self.path(*PLAN_JSON)), _read_jsonl(self.path(*DEVIATIONS_JSONL))
+
+    def plan_modification(self):
+        """The edit of the locked analysis plan after the lock (``recipes.plan_modification``), or None."""
+        from . import recipes
+
+        try:
+            return recipes.plan_modification(self.root)
+        except (OSError, ValueError, TypeError):
+            return None
 
 
 def _open_study(root):
@@ -631,6 +825,7 @@ def _map_record_from_provenance(provenance, folder, run_id):
         "split_half": qa_json.get("split_half"),
         "versions": provenance.get("versions"),
         "software": provenance.get("software"),
+        "lesions": [lesion for lesion in provenance.get("lesions") or [] if isinstance(lesion, dict) and lesion.get("name")],
     }
 
 
@@ -675,11 +870,26 @@ def pipeline_section(records):
     data, run_id = records.pipeline()
     if data is None:
         return section.paragraph(f"Pipeline: {NOT_RECORDED} (no {PIPELINE_JSON}).")
+    interrupted = getattr(records, "pipeline_interrupted", lambda: None)()  # duck-typed records without it: never interrupted
+    if interrupted:
+        # Never cite a half-written run, nor mix its stages with the id of another run (they share the output folder)
+        state = PIPELINE_UNFINISHED_TEXTS.get(interrupted["status"], PIPELINE_UNFINISHED_TEXTS["running"])
+        text = f"The latest pipeline run (run {interrupted['run_id']}) {state}, so it is not described here."
+        if interrupted["finished"]:
+            text += (f" The last finished pipeline run is {interrupted['finished']}; its stage record ({PIPELINE_JSON}) was replaced when run "
+                     f"{interrupted['run_id']} started, so its stages are {NOT_RECORDED}.")
+        else:
+            text += f" No pipeline run has finished: stages {NOT_RECORDED}."
+        return section.paragraph(text + " Run the pipeline again to completion to record them.")
     head = f"The analysis ran as one pipeline (run {run_id or NOT_RECORDED}"
     recipe = data.get("recipe")
+    outside = []
     if isinstance(recipe, dict):
+        outside = [str(step) for step in recipe.get("outside_pipeline") or []]
         recipe = recipe.get("name") or recipe.get("id")
     head += f"; recipe {recipe})." if recipe else ")."
+    if outside:
+        head += f" Recipe steps outside the pipeline (not part of this run): {', '.join(outside)}."
     section.paragraph(head)
     stages = data.get("stages")
     if isinstance(stages, dict):
@@ -769,7 +979,7 @@ def lesions_section(records, used):
         items.append(f"Figure left-right convention: {_counts([None if _missing(row.get('fig_convention')) else row['fig_convention'] for row in figure_rows or rows])}")
     items.append(f"Dimensionality: {_counts(column('dimensionality'))}")
     extrude = policy.get("extrude_2d")
-    items.append(f"2D extrusion policy: {_extrusion_text(extrude)}")
+    items.append(f"2D extrusion policy: {_extrusion_text(extrude, rows)}")
     flipped = [value for value in column("flipped") if value is not None]
     mirrored = sum(1 for value in flipped if str(value) == "1")
     items.append(f"Mirrored left-right: {mirrored} lesion(s) (approximate: templates are asymmetric)" if flipped else f"Mirrored left-right: {NOT_RECORDED}")
@@ -813,20 +1023,32 @@ def lesions_section(records, used):
     return section
 
 
-def _extrusion_text(extrude):
+def _extrusion_text(extrude, rows=()):
+    """The study's 2D policy; for binary, the thickness each extruded lesion got (whole voxels on its own grid).
+
+    The binary sentence is rebuilt from the mode and thickness: older studies stored one counted at the template
+    resolution, which is not the grid the lesions were extruded on.
+    """
     if not extrude:
         return NOT_RECORDED
     if isinstance(extrude, str):
         extrude = {"mode": extrude}
     if not isinstance(extrude, dict):
         return str(extrude)
-    if extrude.get("semantics"):
-        return str(extrude["semantics"])
     mode = str(extrude.get("mode") or "")
     key = "fractional" if mode.startswith("frac") else "binary" if mode.startswith("bin") else "single" if mode.startswith(("single", "keep", "none")) else None
+    if key != "binary" and extrude.get("semantics"):
+        return str(extrude["semantics"])
     if key is None:
         return f"{mode or NOT_RECORDED}"
-    return EXTRUSION_SEMANTICS[key].format(total=_number(extrude.get("total_mm")) or "2")
+    total = _as_float(extrude.get("total_mm")) or 2.0
+    text = EXTRUSION_SEMANTICS[key].format(total=_number(total), half=_number(total / 2.0))
+    if key == "binary":
+        effective = [_number(row.get("extrude_mm")) for row in rows if str(row.get("dimensionality") or "").lower() in ("2d", "multi2d")]
+        effective = [f"{value} mm" for value in effective if value is not None]
+        if effective:
+            text += f"; effective thickness per lesion: {_counts(effective)}"
+    return text
 
 
 def normalization_paragraph(normalizations, rows=()):
@@ -860,6 +1082,34 @@ def normalization_paragraph(normalizations, rows=()):
     return text + f". BRAINSFit samples randomly and multi-threaded, so {RESULTS_MAY_DIFFER}; reruns with the same inputs reuse the stored result."
 
 
+def _seed_record(folder):
+    """The ``seeds.json`` of a coordinate, atrophy or stimulation run folder (coords.write_seed_set), or None."""
+    data = _read_json(os.path.join(folder, "seeds.json")) if folder else None
+    return data if isinstance(data, dict) and data.get("format") == "slicer-lnm-seeds" else None
+
+
+def _seed_set_text(seeds):
+    """How the seeds of a coordinate, atrophy or stimulation run were made (from its seeds.json)."""
+    kind = seeds.get("kind")
+    count = len(seeds.get("seeds") or [])
+    if kind == "coordinates":
+        sphere = seeds.get("sphere_text") or f"sphere {NOT_RECORDED}"
+        text = (f"{_or_nr(seeds.get('foci'))} literature coordinate(s) of {_or_nr(seeds.get('studies'))} stud(ies) made {count} seed(s): "
+                f"{seeds.get('seed_rule') or 'study-level union of spheres'}, each focus a sphere of {sphere}, as fractional voxel occupancy. "
+                f"{seeds.get('conversion_text') or ''} {seeds.get('placement') or ''}".rstrip())
+    elif kind == "stimulation":
+        stim = seeds.get("stimulation") or {}
+        sphere = stim.get("sphere")
+        shape = f", each site a sphere of {sphere['radius_mm']:g} mm radius ({sphere['diameter_mm']:g} mm diameter)" if isinstance(sphere, dict) and sphere.get("radius_mm") is not None else ""
+        text = (f"{count} stimulation seed(s) from {_or_nr(stim.get('kind'))} (weighting {_or_nr(stim.get('weighting'))}){shape}. "
+                f"{stim.get('conversion_text') or ''} {stim.get('placement') or ''}".rstrip())
+    elif kind == "atrophy":
+        text = f"{count} atrophy seed(s): {seeds.get('seed_rule') or 'per-patient w-map thresholded'} ({'weighted' if seeds.get('weighted') else 'binary'})"
+    else:
+        return None
+    return " ".join(text.split()).rstrip(".")
+
+
 def seeds_section(records):
     section = _section("seeds")
     maps = records.map_records()
@@ -867,13 +1117,26 @@ def seeds_section(records):
         return section.paragraph(f"Seeds: {NOT_RECORDED} (no network-mapping run).")
     items = []
     for record in maps:
+        seed_set = _seed_set_text(record["seeds"]) if record.get("seeds") else None
+        if seed_set:
+            space_text = _lesion_space_text(record.get("lesions") or [], record.get("bundle") or {})
+            items.append(
+                f"Run {record['id']}: {seed_set}. Each seed was mapped on the connectome grid with its weights as they are (supersampling {_or_nr(record.get('supersample'))} per axis); "
+                f"the weighted mean time course of the seed was correlated with every voxel (Pearson r), averaged over runs and Fisher z-transformed; "
+                f"stored maps: mean r, mean Fisher z and the voxelwise one-sample t of Fisher z (statistic recorded for pooling: {_or_nr(record.get('statistic'))})"
+                + (f".{space_text}" if space_text else ""),
+            )
+            continue
         probabilistic = record.get("probabilistic")
         seed = "fractional voxel occupancy (probabilistic lesions)" if probabilistic else "fractional voxel occupancy of the binarized lesion" if probabilistic is False else f"seed weighting {NOT_RECORDED}"
         supersample = record.get("supersample")
+        # The lesions' template spaces and the note for lesions on another template family than the connectome
+        space_text = _lesion_space_text(record.get("lesions") or [], record.get("bundle") or {})
         items.append(
             f"Run {record['id']}: each lesion was resampled onto the connectome grid as {seed} (supersampling {_or_nr(supersample)} per axis); "
             f"the occupancy-weighted mean time course of the lesion was correlated with every voxel (Pearson r), averaged over runs and Fisher z-transformed; "
-            f"stored maps: mean r, mean Fisher z and the voxelwise one-sample t of Fisher z (statistic recorded for pooling: {_or_nr(record.get('statistic'))})",
+            f"stored maps: mean r, mean Fisher z and the voxelwise one-sample t of Fisher z (statistic recorded for pooling: {_or_nr(record.get('statistic'))})"
+            + (f".{space_text}" if space_text else ""),
         )
     section.bullets(items)
     inputs = sorted({str((data.get("inputs") or {}).get("input") or data.get("input")) for _, data in records.group_records("glm.json", "glm") + records.group_records("slnm.json", "slnm") if (data.get("inputs") or {}).get("input") or data.get("input")})
@@ -926,18 +1189,445 @@ def statistics_section(records, used):
         found = True
         used.update(("winkler2014", "benjamini1995"))
         section.paragraph(slnm_paragraph(data, run_id))
+    if records.done_runs("calibration"):
+        from . import calibrate  # numpy: imported only when a calibration was run
+
+        # A calibration counts for the reported analyses only when it was run for the design of one of them (as
+        # checklist item F8 decides); one of another design is described as such, without its rates.
+        groups = [("glm", data) for _, data in records.group_records("glm.json", "glm")] + [("slnm", data) for _, data in records.group_records("slnm.json", "slnm")]
+        for run_id, data in reversed(calibrate.finished_records(records.root, records.runs)):
+            current = not groups or any(calibrate.matches_group(data, group, kind) for kind, group in groups)
+            section.paragraph(calibration_paragraph(data, run_id, calibrate.rate_text) if current else stale_calibration_paragraph(data, run_id))
+    network_found = found
+    vlsm_records = dict(records.group_records(VLSM_JSON, "vlsm"))
     for kind in [*STATISTICS_KINDS[3:], *sorted({r.get("kind") for r in records.runs.values()} - set(STATISTICS_KINDS) - {"map", "cohortmaps", "reference", "preflight", "figure", "report", "export", "normalization", "pipeline", "fastindex", "calibration", "parity", None})]:
         for record in records.done_runs(kind):
+            if kind == "robustness" and records.overwritten(record):
+                continue  # a later Robust run wrote its results to the same folder: only that run is cited
+            if kind == "validation":
+                validation = records.run_json(record, VALIDATION_JSON)
+                if isinstance(validation, dict) and validation.get("run_id") not in (None, record["id"]):
+                    continue  # a later validation run wrote its results to the same folder: only that run is cited
+            if kind == "nulls":
+                nulls = records.run_json(record, NULLS_JSON)
+                if isinstance(nulls, dict) and nulls.get("run_id") not in (None, record["id"]):
+                    continue  # a later nulls run of the same kind and mode wrote its results to the same folder: only that run is cited
+            circuit = None
+            if kind == "circuits":
+                circuit = _circuit_record(records, record)
+                if circuit is False:
+                    continue  # a later circuit, damage or target run wrote its results to the same folder: only that run is cited
+            if kind == "vlsm" and record["id"] not in vlsm_records:
+                other = records.run_json(record, VLSM_JSON)
+                if isinstance(other, dict) and other.get("run_id") not in (None, record["id"]):
+                    continue  # a later VLSM run wrote its results to the same folder: only that run is cited
             found = True
+            if kind == "vlsm":
+                # VLSM tests lesion location (not a network): its own paragraph from vlsm.json, never the summary keys
+                data = vlsm_records.get(record["id"])
+                used.update(("winkler2014", "benjamini1995"))
+                if data is not None and (data.get("tfce") or {}).get("enabled"):
+                    used.add("smith2009")
+                section.paragraph(vlsm_paragraph(data, record["id"]) if data is not None else vlsm_summary_text(records.summary(record) or {}, record["id"]))
+                continue
+            network_found = True
             summary = records.summary(record) or {}
-            text = f"{KIND_LABELS.get(kind, kind.capitalize())} (run {record['id']}): {_generic_text(summary) or 'summary ' + NOT_RECORDED}."
+            if kind == "validation":
+                # Its own paragraph from validation.json (outcome, circuit, scheme, baselines, CIs, K), never the summary keys
+                if isinstance(validation, dict) and validation.get("status") == "done":
+                    section.paragraph(validation_paragraph(validation, record["id"]))
+                else:
+                    section.paragraph(validation_summary_text(summary, records.params(record), record["id"]))
+                continue
+            if kind == "circuits":
+                # Its own paragraph from circuit.json / damage.json / targets.json (parent result, seed, connectome, provenance), never the summary keys
+                section.paragraph(circuits_paragraph(circuit, records.params(record), summary, record["id"]))
+                continue
+            if kind == "robustness":
+                body = robustness_text(summary, records.params(record), records.seeds(record))
+            elif kind == "nulls":
+                body = nulls_text(summary, records.params(record), records.seeds(record), nulls)
+            else:
+                body = _generic_text(summary)
+            text = f"{KIND_LABELS.get(kind, kind.capitalize())} (run {record['id']}): {body or 'summary ' + NOT_RECORDED}."
             if kind == "nulls":
                 text += f" {NULL_CAPTION}"
             section.paragraph(text)
     if not found:
         section.paragraph(f"Group statistics: {NOT_RUN} (no group analysis in the run registry).")
-    section.paragraph(f"Results are described as the {CLAIM_TEMPLATE.format('the tested contrast or score')}; no test gives an automatic verdict on specificity.")
+    vlsm_done = bool(records.done_runs("vlsm"))
+    if network_found or not vlsm_done:
+        section.paragraph(f"Results are described as the {CLAIM_TEMPLATE.format('the tested contrast or score')}; no test gives an automatic verdict on specificity.")
+    if vlsm_done:
+        section.paragraph(VLSM_CLAIM)
     return section
+
+
+def _transformed_name(name, transforms):
+    """'log(volume_ml)' when the design transformed the covariate (vlsm.json / calibration.json "transforms"), else the name."""
+    transform = (transforms or {}).get(name)
+    return f"{transform}({name})" if transform else str(name)
+
+
+def _covariate_text(data):
+    """The covariates of a vlsm.json record, with the transforms of the model actually fitted (log volume, z-scores)."""
+    covariates = data.get("covariates")
+    transforms = data.get("transforms") or {}
+    text = ", ".join(
+        f"{_transformed_name(covariate, transforms)} (total lesion volume)" if covariate == "volume_ml" else _transformed_name(covariate, transforms)
+        for covariate in covariates
+    ) if covariates else "none"
+    if data.get("volume_off_reason"):
+        text += f" (lesion volume off: {data['volume_off_reason']})"
+    return text
+
+
+def _overlap_rule_text(overlap):
+    """'6 lesions', or 'max(5, 10%) of the lesions (here 8 lesions)', of a vlsm.json min_overlap record."""
+    rule, count = overlap.get("rule"), overlap.get("min_count")
+    if not rule:
+        return f"{_or_nr(count)} lesions"
+    if re.fullmatch(r"\d+ lesions?", str(rule)):
+        return str(rule)
+    return f"{rule} of the lesions (here {_or_nr(count)} lesions)"
+
+
+def _vlsm_excluded_text(data):
+    """'2 not analysed: outside the template2mm grid 1, missing score 1': VLSM also drops lesions that could not be loaded, which is not listwise deletion."""
+    total = _or_nr(data.get("n_excluded", 0))
+    excluded = data.get("excluded") or {}
+    reasons = ", ".join(f"{reason} {len(sids)}" for reason, sids in excluded.items() if sids)
+    return f"{total} not analysed: {reasons}" if reasons else f"{total} not analysed"
+
+
+def _tfce_extra_text(tfce):
+    """", 100 steps, 26-connectivity" when the record has them (older records do not)."""
+    text = ""
+    if tfce.get("steps") is not None:
+        text += f", {tfce['steps']} steps"
+    if tfce.get("connectivity") is not None:
+        text += f", {tfce['connectivity']}-connectivity"
+    return text
+
+
+def vlsm_paragraph(data, run_id=None):
+    """Methods text of a vlsm.json record (voxel-based lesion-symptom mapping, L-50): binary lesion masks, the design
+    and contrast, the covariates, the minimum-overlap rule and the voxels it left, the permutation method, the
+    corrections and the smallest observed FWE p (next to the smallest attainable p, which is not a result).
+    """
+    contrast = data.get("contrast") or {}
+    overlap = data.get("min_overlap") or {}
+    fwe, fdr = data.get("fwe") or {}, data.get("fdr") or {}
+    tfce = data.get("tfce") or {}
+    direction = contrast.get("spec")
+    contrast_text = _or_nr(contrast.get("label"))
+    if direction and direction != contrast.get("label"):
+        contrast_text += f" ({direction})"
+    binarize = _number(overlap.get("binarize_at"))
+    all_lesioned = overlap.get("n_voxels_all_lesioned")
+    tested = overlap.get("n_voxels_tested", data.get("n_voxels"))
+    text = (
+        f"{KIND_LABELS['vlsm']} (run {run_id or data.get('run_id') or NOT_RECORDED}): binary lesion masks"
+        f"{f' (occupancy ≥ {binarize})' if binarize else ''} as the voxelwise outcome; design {_or_nr(data.get('design_type'))} (test {_or_nr(data.get('test'))}), "
+        f"contrast {contrast_text}, n = {_or_nr(data.get('n'))} ({_vlsm_excluded_text(data)}); covariates: {_covariate_text(data)}. "
+        f"Minimum overlap: only voxels lesioned in at least {_overlap_rule_text(overlap)} were tested, {_or_nr(tested)} voxels"
+    )
+    if all_lesioned:
+        text += f" ({all_lesioned} voxels lesioned in every lesion were not tested: no variance)"
+    tfce_text = (
+        f"TFCE (H = {_number(tfce.get('H')) or NOT_RECORDED}, E = {_number(tfce.get('E')) or NOT_RECORDED}{_tfce_extra_text(tfce)}) with FWE from the maximum TFCE of each permutation (Smith & Nichols, 2009)"
+        if tfce.get("enabled")
+        else "TFCE was not used"
+    )
+    alpha = _number(fwe.get("alpha")) or NOT_RECORDED
+    text += (
+        f". Inference: {_permutation_text(data.get('permutation'))}; statistic {_or_nr(data.get('stat'))}, {_tails_text(data.get('tails'))}, df = {_or_nr(data.get('df'))}. "
+        f"Correction: voxelwise max-statistic FWE (primary, alpha {alpha}) and Benjamini-Hochberg FDR (secondary, q {_number(fdr.get('alpha')) or NOT_RECORDED}); {tfce_text}; "
+        "no cluster-extent inference (cluster tables are descriptive). "
+        f"Result: {_or_nr(fwe.get('n_significant'))} voxels with FWE p ≤ {alpha}, {_or_nr(fdr.get('n_significant'))} with FDR q ≤ {_number(fdr.get('alpha')) or NOT_RECORDED}; "
+        f"the smallest observed FWE p was {_number(fwe.get('min_p')) or NOT_RECORDED} (the smallest attainable p is {_number(data.get('min_attainable_p', data.get('min_p'))) or NOT_RECORDED})."
+    )
+    if tfce.get("enabled") and tfce.get("n_significant") is not None:
+        text += f" TFCE: {tfce['n_significant']} voxels with TFCE FWE p ≤ {alpha}; the smallest observed TFCE FWE p was {_number(tfce.get('min_p')) or NOT_RECORDED}."
+    if fdr and fdr.get("enabled", True):
+        # The FDR floor, as in glm_paragraph: FDR 0 next to FWE-significant voxels is often this floor, not a result
+        text += f" BH-FDR reaches q ≤ {_number(fdr.get('alpha')) or 0.05} only when at least {_or_nr(fdr.get('floor_voxels'))} voxels reach the smallest attainable p (FDR floor)"
+        if fdr.get("voxels_at_floor") is not None:
+            text += f"; {fdr['voxels_at_floor']} voxels reached it"
+        text += "."
+    return text
+
+
+def vlsm_summary_text(summary, run_id=None):
+    """Methods text of a VLSM run whose vlsm.json is gone: the registry summary, named in words. Its "min_p" (registries
+    written before "min_attainable_p") is the smallest attainable p, never an observed one.
+    """
+    attainable = summary.get("min_attainable_p", summary.get("min_p"))
+    parts = [
+        f"design {_or_nr(summary.get('design_type'))}",
+        f"n = {_or_nr(summary.get('n'))}",
+        f"{_or_nr(summary.get('n_voxels'))} voxels tested after the minimum-overlap rule",
+        f"{_or_nr(summary.get('n_perm'))} permutations",
+        f"{_or_nr(summary.get('fwe_significant'))} voxels with voxelwise max-statistic FWE p ≤ 0.05",
+    ]
+    if summary.get("fwe_min_p") is not None:
+        parts.append(f"smallest observed FWE p {_number(summary['fwe_min_p']) or NOT_RECORDED}")
+    parts.append(f"smallest attainable p {_number(attainable) or NOT_RECORDED}")
+    return f"{KIND_LABELS['vlsm']} (run {run_id or NOT_RECORDED}; vlsm.json {NOT_RECORDED}): {'; '.join(parts)}."
+
+
+VALIDATION_SCHEME_TEXT = {"lodo": "leave-one-dataset-out", "kfold": "stratified k-fold", "loo": "leave-one-out"}
+VALIDATION_SCORE_TEXT = {
+    "similarity": "spatial similarity (Fisher z of the spatial r between each lesion's network map and the circuit)",
+    "damage": "circuit damage (the lesion's occupancy weighted by the circuit)",
+    "roi": "ROI connectivity (each lesion's network map averaged over the signed circuit ROI)",
+}
+VALIDATION_METRIC_NAMES = {"auc": "AUC", "or_per_sd": "OR per SD", "r": "r", "r2": "out-of-sample R²"}
+VALIDATION_BASELINE_LABELS = {"volume": "lesion volume", "mu_r": "degree (μC_r)", "pc1": "PC1", "location": "lesion location"}
+
+
+def _ci_text(ci):
+    """'95% CI a to b' of a [low, high] interval ("no CI" when it is missing or not finite)."""
+    if isinstance(ci, (list, tuple)) and len(ci) == 2 and _number(ci[0]) is not None and _number(ci[1]) is not None:
+        return f"95% CI {_number(ci[0])} to {_number(ci[1])}"
+    return f"CI {NOT_RECORDED}"
+
+
+def _metric_name(metric):
+    return VALIDATION_METRIC_NAMES.get(metric, _or_nr(metric))
+
+
+def _p_perm_text(p, k):
+    """'p_perm = 0.12 (K = 999 ...)', or 'p_perm ≤ 0.05 (the smallest attainable p with K = 19 ...)' at the floor 1/(K+1)."""
+    k = _as_float(k)
+    if not k:
+        return "no permutation test (K = 0)"
+    floor = 1.0 / (k + 1.0)
+    value = _as_float(p)
+    if value is None:
+        return f"p_perm {NOT_RECORDED} (K = {_number(k)} permutations)"
+    if value <= floor * (1 + 1e-9):
+        return f"p_perm ≤ {_number(floor)} (the smallest attainable p with K = {_number(k)} permutations)"
+    return f"p_perm = {_number(value)} (K = {_number(k)} permutations; smallest attainable p {_number(floor)})"
+
+
+def _validation_outcome_text(outcome):
+    outcome = outcome if isinstance(outcome, dict) else {}
+    text = f"outcome {_or_nr(outcome.get('column'))} ({_or_nr(outcome.get('type'))}"
+    if outcome.get("type") == "binary":
+        text += f"; positive class {_or_nr(outcome.get('positive'))}: {_or_nr(outcome.get('n_positive'))} positive, {_or_nr(outcome.get('n_negative'))} negative"
+    text += f"), n = {_or_nr(outcome.get('n'))}"
+    excluded = outcome.get("excluded")
+    if isinstance(excluded, dict) and excluded:
+        text += f" ({sum(len(members) if isinstance(members, (list, tuple)) else 1 for members in excluded.values())} excluded: {', '.join(str(reason) for reason in excluded)})"
+    datasets = outcome.get("datasets")
+    if isinstance(datasets, list) and datasets:
+        text += f", {len(datasets)} dataset{'s' if len(datasets) != 1 else ''} ({outcome.get('dataset_column') or 'dataset'} column)"
+    return text
+
+
+def _validation_scheme_text(scheme):
+    scheme = scheme if isinstance(scheme, dict) else {}
+    used = scheme.get("used")
+    if used == "kfold":
+        text = f"stratified {_or_nr(scheme.get('k'))}-fold × {_or_nr(scheme.get('repeats'))} repeat{'s' if scheme.get('repeats') != 1 else ''} (strata: dataset × class for a binary outcome, dataset for a score)"  # noqa: RUF001 (a multiplication sign)
+    elif used == "lodo":
+        folds = scheme.get("n_folds") or []
+        text = f"leave-one-dataset-out ({_or_nr(folds[0] if folds else None)} datasets)"
+    else:
+        text = VALIDATION_SCHEME_TEXT.get(used, _or_nr(used))
+    reason = scheme.get("reason")
+    if scheme.get("requested") and scheme.get("requested") != used:
+        text += f"; {scheme['requested']} was requested ({reason or NOT_RECORDED})"
+    elif reason and not str(reason).endswith("as requested"):
+        text += f" ({reason})"
+    return text
+
+
+def _validation_circuit_text(circuit):
+    circuit = circuit if isinstance(circuit, dict) else {}
+    text = f"{_or_nr(circuit.get('label'))}, built inside each training fold only"
+    if circuit.get("thresholding"):
+        text += f" (thresholding: {circuit['thresholding']}"
+        text += "; no permutation thresholds inside the folds)" if circuit.get("permutation_thresholds_in_folds") is False else ")"
+    text += f"; lesion score: {VALIDATION_SCORE_TEXT.get(circuit.get('score'), _or_nr(circuit.get('score')))}"
+    if circuit.get("partial"):
+        text += f", also with {', '.join('μC_r' if key == 'mu_r' else str(key).upper() for key in circuit['partial'])} partialled out (circuit partial row)"
+    return text
+
+
+def _validation_baseline_label(name):
+    name = str(name)
+    return VALIDATION_BASELINE_LABELS.get(name) or (f"reference map {name[4:]}" if name.startswith("ref:") else name)
+
+
+def validation_paragraph(data, run_id=None):
+    """Methods text of a validation.json record (addendum §3.8): cross-validation (outcome, in-fold circuit, scheme,
+    baselines, primary metric with its whole-CV bootstrap CI and B, incremental Δ with CI, p_perm with K and its floor)
+    or a frozen replication (circuit sha256, provenance, metric with its CI).
+    """
+    label = f"{KIND_LABELS['validation']} (run {run_id or data.get('run_id') or NOT_RECORDED})"
+    outcome_text = _validation_outcome_text(data.get("outcome"))
+    covariates = [str(item) for item in data.get("covariates") or []]
+    covariate_text = ", ".join("total lesion volume" if item == "volume_ml" else item for item in covariates) or NOT_RECORDED
+    bootstrap = data.get("bootstrap") or {}
+    if data.get("mode") == "frozen":
+        frozen = data.get("frozen") or {}
+        metrics = data.get("metrics") or {}
+        top_pct = _number(frozen.get("top_pct"))
+        text = (
+            f"{label}: frozen circuit (sha256 {_or_nr(frozen.get('sha256'))}; {_or_nr(frozen.get('provenance'))}) applied without refitting; "
+            f"lesion score: {VALIDATION_SCORE_TEXT.get(frozen.get('score'), _or_nr(frozen.get('score')))}{f' of its top {top_pct}% ROI' if top_pct else ''}; {outcome_text}. "
+        )
+        parts = [f"{_metric_name(name)} {_number((item or {}).get('value')) or NOT_RECORDED} ({_ci_text((item or {}).get('ci'))})" for name, item in metrics.items() if isinstance(item, dict)]
+        text += f"Performance of the frozen score: {'; '.join(parts) or NOT_RECORDED}"
+        volume = data.get("volume_metrics") or {}
+        volume_parts = [f"{_metric_name(name)} {_number((item or {}).get('value')) or NOT_RECORDED} ({_ci_text((item or {}).get('ci'))})" for name, item in volume.items() if isinstance(item, dict)]
+        if volume_parts:
+            text += f"; lesion volume alone, for context: {'; '.join(volume_parts)}"
+        text += f". CIs: simple bootstrap percentile intervals (subjects resampled within strata; the circuit is fixed), B = {_or_nr(bootstrap.get('B'))} resamples."
+        return text
+    primary = data.get("primary_metric")
+    metric = _metric_name(primary)
+    predictors = {item.get("name"): item for item in data.get("predictors") or [] if isinstance(item, dict)}
+    computed, missing = [], []
+    for name, item in predictors.items():
+        if item.get("role") != "baseline":
+            continue
+        if item.get("status") == "computed":
+            computed.append(_validation_baseline_label(name))
+        else:
+            missing.append(f"{_validation_baseline_label(name)} not computed ({item.get('reason') or NOT_RECORDED})")
+    text = (
+        f"{label}: cross-validation of the {outcome_text}. In-fold circuit: {_validation_circuit_text(data.get('circuit'))}. "
+        f"Scheme: {_validation_scheme_text(data.get('scheme'))}. Covariates of every model: {covariate_text}. "
+        f"Baselines: {', '.join(computed) or 'none computed'}{'; ' + '; '.join(missing) if missing else ''}. "
+    )
+    if data.get("model"):
+        text += f"{str(data['model']).rstrip('.')}. "
+    circuit_metric = ((predictors.get("circuit") or {}).get("metrics") or {}).get(primary) or {}
+    text += (
+        f"Primary metric {metric}: circuit model {_number(circuit_metric.get('value')) or NOT_RECORDED} ({_ci_text(circuit_metric.get('ci'))}); "
+        f"CIs from the whole-CV bootstrap (subjects resampled within strata; folds, circuits and models rerun; bias-corrected percentile intervals), B = {_or_nr(bootstrap.get('B'))} resamples."
+    )
+    incremental = data.get("incremental") or {}
+    permutation = data.get("permutation") or {}
+    text += (
+        f" Incremental value ({incremental.get('model') or 'volume + circuit vs volume'}): Δ{metric} {_number(incremental.get('delta')) or NOT_RECORDED} ({_ci_text(incremental.get('ci'))}); "
+        f"{_p_perm_text(incremental.get('p_perm'), permutation.get('K'))}, {permutation.get('tails') or 'one-sided'}, {permutation.get('scheme') or 'outcome permuted within datasets'}."
+    )
+    comparisons = [
+        f"{_validation_baseline_label(entry.get('baseline'))} Δ{metric} {_number(entry.get('delta'))} ({_ci_text(entry.get('ci'))})"
+        for entry in data.get("comparisons") or []
+        if isinstance(entry, dict) and entry.get("baseline") != "volume" and _number(entry.get("delta")) is not None
+    ]
+    if comparisons:
+        text += f" Circuit compared with each baseline: {'; '.join(comparisons)}."
+    warnings = [str(item).rstrip(".") for item in data.get("warnings") or [] if item]
+    if warnings:
+        text += f" Notes: {'; '.join(warnings)}."
+    return text
+
+
+def validation_summary_text(summary, params=None, run_id=None):
+    """Methods text of a validation run whose validation.json is gone: the registry summary and parameters, named in
+    words (a p_perm at 1/(K+1) is the smallest attainable p, stated as such).
+    """
+    summary = summary if isinstance(summary, dict) else {}
+    params = params if isinstance(params, dict) else {}
+    label = f"{KIND_LABELS['validation']} (run {run_id or NOT_RECORDED}; {VALIDATION_JSON} {NOT_RECORDED})"
+    outcome = f"outcome {_or_nr(params.get('outcome'))} ({_or_nr(params.get('type'))}), n = {_or_nr(summary.get('n'))}"
+    if summary.get("mode") == "frozen" or params.get("mode") == "frozen":
+        metrics = summary.get("metrics") if isinstance(summary.get("metrics"), dict) else {}
+        parts = [f"{_metric_name(name)} {_number(value) or NOT_RECORDED}" for name, value in metrics.items()]
+        return (
+            f"{label}: frozen circuit (sha256 {_or_nr(params.get('frozen_sha256'))}; provenance {_or_nr(summary.get('provenance'))}) applied without refitting; {outcome}; "
+            f"{'; '.join(parts) or 'metrics ' + NOT_RECORDED}; B = {_or_nr(params.get('n_boot'))} bootstrap resamples."
+        )
+    metric = _metric_name(summary.get("primary"))
+    scheme = VALIDATION_SCHEME_TEXT.get(summary.get("scheme"), _or_nr(summary.get("scheme")))
+    if summary.get("scheme") == "kfold":
+        scheme = f"stratified {_or_nr(params.get('k'))}-fold × {_or_nr(params.get('repeats'))} repeats"  # noqa: RUF001 (a multiplication sign)
+    circuit = params.get("circuit")
+    return (
+        f"{label}: cross-validation of the {outcome}; in-fold circuit {_or_nr(circuit)}{' (unthresholded)' if circuit in ('glm', 'slnm') else ''}; scheme {scheme}; "
+        f"primary metric {metric}: circuit model {_number(summary.get('circuit')) or NOT_RECORDED}; Δ{metric} vs lesion volume {_number(summary.get('delta_vs_volume')) or NOT_RECORDED} ({_ci_text(summary.get('delta_ci'))}); "
+        f"whole-CV bootstrap B = {_or_nr(params.get('n_boot'))}; {_p_perm_text(summary.get('p_perm'), params.get('n_perm'))}."
+    )
+
+
+CIRCUIT_RECORDS = {"seed": "circuit.json", "damage": "damage.json", "targets": "targets.json"}
+CIRCUIT_SIGN_TEXT = {"both": "both signs", "pos": "positive voxels", "neg": "negative voxels"}
+CIRCUIT_PARENT_TEXT = {"circuit.json": "an earlier circuit", "cohort.json": "a cohort result", "glm.json": "a GLM result", "slnm.json": "an sLNM result",
+                       "validation.json": "a validation result", "nulls.json": "a null-model result", "cohortmaps.json": "a cohort of lesion maps",
+                       "vlsm.json": "a VLSM result", "run.json": "an engine run"}
+
+
+def _circuit_record(records, record):
+    """The result file of a circuits run (circuit.json, damage.json or targets.json by its command): a dict, None when the
+    run has no readable file, or False when a later run wrote its results to the same folder (the file names another run).
+    """
+    name = CIRCUIT_RECORDS.get((records.params(record) or {}).get("command"))
+    data = records.run_json(record, name) if name else None
+    if not isinstance(data, dict):
+        return None
+    return False if data.get("run_id") not in (None, record["id"]) else data
+
+
+def _circuit_parent_text(data):
+    parent = data.get("parent")
+    if not isinstance(parent, dict) or not (parent.get("file") or parent.get("run_id")):
+        return "no parent result recorded"
+    what = CIRCUIT_PARENT_TEXT.get(parent.get("record"), "a result map")
+    where = os.path.basename(str(parent["file"]).replace("\\", "/")) if parent.get("file") else None
+    text = f"seeded from {what}" + (f" ({where})" if where else "")
+    if parent.get("run_id"):
+        text += f", run {parent['run_id']}"
+    return text
+
+
+def _circuit_seed_text(seed):
+    seed = seed if isinstance(seed, dict) else {}
+    voxels = _number(seed.get("voxels_in_mask"))
+    if seed.get("kind") == "peak":
+        xyz = seed.get("peak_xyz")
+        where = f" at ({', '.join(_number(v) or NOT_RECORDED for v in xyz)}) mm" if isinstance(xyz, (list, tuple)) else ""
+        text = f"a spherical seed{where} of radius {_or_nr(_number(seed.get('radius_mm')))} mm"
+    else:
+        text = f"a binary seed ({CIRCUIT_SIGN_TEXT.get(seed.get('sign'), _or_nr(seed.get('sign')))} of the result)"
+    return f"{text}, {voxels or NOT_RECORDED} voxels in the connectome mask"
+
+
+def circuits_paragraph(data, params=None, summary=None, run_id=None):
+    """Methods text of a circuits run (seed-this, damage scores or stimulation targets) from its result file ``data``
+    (circuit.json, damage.json, targets.json; None when it is gone: the registry params and summary are named instead).
+    """
+    label = KIND_LABELS["circuits"]
+    params, summary = params or {}, summary or {}
+    command = params.get("command")
+    run = f"run {run_id or (data or {}).get('run_id') or NOT_RECORDED}"
+    if not isinstance(data, dict):
+        return f"{label} ({run}; result file {NOT_RECORDED}): {_generic_text(summary) or 'summary ' + NOT_RECORDED}."
+    if command == "damage":
+        circuit = data.get("circuit") or {}
+        same = data.get("provenance") == "same_cohort"
+        status = ("same-cohort circuit: the scores describe these lesions only and are not tested against an outcome of the same lesions"
+                  if same else "frozen circuit, independent of the scored lesions (" + _or_nr(data.get("provenance_basis")) + ")")
+        text = (f"{label} ({run}): damage scores of {_or_nr(data.get('n'))} lesions against the circuit {_or_nr(circuit.get('name'))} "
+                f"(sum, mean and percentage inside the circuit, residualized on {_or_nr(data.get('residualized_on'))}); {status}.")
+        return text
+    if command == "targets":
+        null = data.get("null") or {}
+        return (f"{label} ({run}): {_or_nr(data.get('n'))} user-given stimulation targets scored against {_or_nr(null.get('k'))} random gray-matter spheres of the same radius "
+                f"(seed {_or_nr(null.get('seed'))}); research use only.")
+    bundle = data.get("bundle") or {}
+    text = (f"{label} ({run}): circuit {_or_nr(data.get('name'))}, {_circuit_parent_text(data)}; {_circuit_seed_text(data.get('seed'))}; "
+            f"connectome {_or_nr(bundle.get('label') or bundle.get('name'))}, N = {_or_nr(data.get('n'))} subjects.")
+    if (data.get("source") or {}).get("known"):
+        text += " Damage scores of the lesions behind the parent result are same-cohort and descriptive only."
+    else:
+        text += " Its independence of a lesion cohort is not established (no source lesions recorded)."
+    return text
 
 
 def _generic_text(data, keys=None):
@@ -957,6 +1647,285 @@ def _generic_text(data, keys=None):
         if len(parts) >= 8:
             break
     return "; ".join(parts)
+
+
+NULL_KIND_TEXT = {
+    "rl_independent": "relocated-lesion null models (independent relocation)",
+    "rl_cohort_shift": "relocated-lesion null models (one shift for the whole cohort)",
+    "rl_strength": "relocated-lesion null models (strength-matched relocation)",
+    "rl_overlap": "relocated-lesion null models (overlap-preserving relocation)",
+    "empirical_pool": "empirical-pool null models",
+}
+NULL_STRENGTH_TEXT = {"signed": "matched on signed mean connectivity μC_r", "abs": "matched on absolute hubness"}
+NULL_MODE_TEXT = {"exact_pooled": "exact pooled", "approximate": "approximate (fast parcel mode)"}
+
+
+def _null_kind_status(kind, summary, record):
+    """The status tag of a null kind (addendum 3.6): from nulls.json, the summary, else nulls.KIND_INFO."""
+    for source in (record, summary):
+        status = source.get("kind_status") if isinstance(source, dict) else None
+        if isinstance(status, str) and status:
+            return status
+    try:
+        from . import nulls as nullslib  # numpy: imported only when a null-model run is described
+    except ImportError:
+        return None
+    return (nullslib.KIND_INFO.get(kind) or {}).get("status")
+
+
+def _null_mode_text(kind, mode, params, record):
+    """'approximate (fast parcel mode)', or for an exact run 'pooled exact null (K_pool = 20 per lesion)' (addendum 3.6)."""
+    if mode != "exact_pooled":
+        return NULL_MODE_TEXT.get(mode, _or_nr(mode))
+    label = record.get("label") if isinstance(record, dict) else None
+    if isinstance(label, str) and label.startswith("pooled exact null"):
+        return label
+    k_pool = _number(params.get("k_pool"))
+    if kind == "rl_cohort_shift" and k_pool:
+        return f"pooled exact null ({k_pool} cohort shifts)"
+    if kind not in ("rl_cohort_shift", "empirical_pool") and k_pool:
+        return f"pooled exact null (K_pool = {k_pool} per lesion)"
+    return NULL_MODE_TEXT["exact_pooled"]
+
+
+def _parity_group_text(name, verdict):
+    if not isinstance(verdict, dict):
+        return f"{name} {NOT_RECORDED}"
+    return (
+        f"{name} n = {_number(verdict.get('n')) or NOT_RECORDED}, median partial r {_number(verdict.get('median_partial_r')) or NOT_RECORDED}, "
+        f"median top-10% Dice {_number(verdict.get('median_top10_dice')) or NOT_RECORDED} ({'passed' if verdict.get('passed') else 'failed'})"
+    )
+
+
+def _null_parity_text(parity):
+    """The parity gate numbers of a fast-mode null run (nulls.json "parity"): constants, groups, lesions left out."""
+    if not isinstance(parity, dict) or not parity:
+        return f"fast/exact parity gate {NOT_RECORDED}"
+    constants = parity.get("constants") if isinstance(parity.get("constants"), dict) else {}
+    text = (
+        f"fast/exact parity gate on {_number(parity.get('n')) or NOT_RECORDED} exactly mapped lesions "
+        f"(pass: median partial r >= {_number(constants.get('partial_r')) or NOT_RECORDED} and median top-10% Dice >= {_number(constants.get('top10_dice')) or NOT_RECORDED})"
+    )
+    groups = [_parity_group_text(name, verdict) for key in ("strata", "size_bins") if isinstance(parity.get(key), dict) for name, verdict in parity[key].items()]
+    if groups:
+        text += ": " + ", ".join(groups)
+    excluded = parity.get("excluded")
+    if isinstance(excluded, list):
+        names = [str(item.get("name")) for item in excluded if isinstance(item, dict) and item.get("name")]
+        if names:
+            text += f"; {len(names)} lesion{'' if len(names) == 1 else 's'} left out by the gate ({', '.join(names[:10])}{', ...' if len(names) > 10 else ''})"
+        else:
+            text += "; no lesion left out by the gate"
+    return text
+
+
+def nulls_text(summary, params=None, seeds=None, record=None):
+    """Methods sentence of one null-model run; missing values are "not recorded".
+
+    :param summary: the run's registry summary (kind, mode, k, n_lesions, n_fwe_05, min_attainable_p, classic_rule).
+    :param params: the run's registry params (kind, mode, k, k_pool, rule, sign, overlap).
+    :param seeds: the run's registry seeds (the null seed is ``seeds["null"]``).
+    :param record: the run's nulls.json (kind_status, label, rule, k_pool, seeds, parity), when it belongs to this run.
+    :return: the text without the run label and the final full stop ("" for a summary that is not a dict).
+    """
+    if not isinstance(summary, dict) or not summary:
+        return ""
+    params = params if isinstance(params, dict) else {}
+    seeds = seeds if isinstance(seeds, dict) else {}
+    record = record if isinstance(record, dict) else {}
+    kind = summary.get("kind") or params.get("kind")
+    mode = summary.get("mode") or params.get("mode")
+    k, lesions, n_fwe = _number(summary.get("k")), _number(summary.get("n_lesions")), summary.get("n_fwe_05")
+    status = _null_kind_status(kind, summary, record)
+    kind_text = NULL_KIND_TEXT.get(kind, _or_nr(kind))
+    if kind == "rl_strength":
+        design = record.get("design") if isinstance(record.get("design"), dict) else {}
+        strength = params.get("strength") or design.get("strength") or record.get("strength")
+        kind_text = kind_text[:-1] + f", {NULL_STRENGTH_TEXT.get(strength, NOT_RECORDED)})"
+    parts = [
+        (
+            f"{kind_text}{f' [status: {status}]' if status else ''}, {_null_mode_text(kind, mode, params, record)}, "
+            f"{k or NOT_RECORDED} null cohorts of the {lesions or NOT_RECORDED} case lesions"
+        ),
+    ]
+    requested = _number(summary.get("k_requested"))
+    if requested is not None and k is not None and requested != k:
+        parts[0] += f" ({requested} requested; only {k} could be drawn)"
+    if params or record:
+        # How the overlap was counted, and how to draw the same null cohorts again
+        rule = params.get("rule") if isinstance(params.get("rule"), dict) else record.get("rule")
+        overlap = _number(params.get("overlap", record.get("overlap_pct")))
+        k_pool = params.get("k_pool") if "k_pool" in params else record.get("k_pool")
+        seed = seeds.get("null")
+        if seed is None and isinstance(record.get("seeds"), dict):
+            seed = record["seeds"].get("seed")
+        text = f"rule {_rule_param_text(rule)}, ≥ {overlap + '%' if overlap else NOT_RECORDED} overlap, sign {_or_nr(params.get('sign', record.get('sign')))}"
+        if kind != "empirical_pool" and not (mode == "approximate" and kind in ("rl_cohort_shift", "rl_overlap")):
+            text += f", K_pool = {_number(k_pool) or NOT_RECORDED} {'shared cohort shifts' if kind == 'rl_cohort_shift' else 'relocations per lesion'}"
+        parts.append(text + f", seed {_or_nr(seed)}")
+    if mode == "approximate" and (params or record):
+        parts.append(_null_parity_text(record.get("parity")))
+    if summary.get("below_min_k"):
+        parts.append("too few null cohorts for any voxel to reach p <= 0.05")
+    warnings = [str(text).rstrip(".") for text in summary.get("warnings") or [] if text]
+    if warnings:
+        parts.append("warnings: " + "; ".join(warnings))
+    if _number(n_fwe) is None:
+        parts.append(f"voxels reaching PFWE <= 0.05 {NOT_RECORDED}")
+    elif float(n_fwe) == 0:
+        parts.append("no voxel reached PFWE <= 0.05")
+    else:
+        parts.append(f"{_number(n_fwe)} voxel{'' if float(n_fwe) == 1 else 's'} reached PFWE <= 0.05")
+    parts.append(f"smallest attainable p = {_number(summary.get('min_attainable_p')) or NOT_RECORDED}")
+    rule = summary.get("classic_rule")
+    if isinstance(rule, str) and rule:
+        parts.append(f"classic overlap rule: {rule.rstrip('.')}")
+    return "; ".join(parts)
+
+
+def _rule_param_text(rule):
+    """'FWE (Bonferroni) (alpha 0.05)' of a threshold rule dict (not recorded when it is not a rule)."""
+    if not isinstance(rule, dict) or not rule.get("kind"):
+        return NOT_RECORDED
+    from . import thresholds
+
+    extras = ", ".join(f"{key} {_number(value) or value}" for key, value in rule.items() if key != "kind" and value is not None and not isinstance(value, (dict, list)))
+    return f"{thresholds.RULE_LABELS.get(rule['kind'], rule['kind'])}{f' ({extras})' if extras else ''}"
+
+
+def _median_text(summary):
+    """The median of a distribution summary, or not recorded (None, a missing metric or a bare number)."""
+    value = summary.get("median") if isinstance(summary, dict) else summary
+    return _number(value) or NOT_RECORDED
+
+
+def _lesions_text(params):
+    lesions = params.get("lesions")
+    return {"cases": "the cases only", "all": "all lesions"}.get(lesions, f"lesion set {_or_nr(lesions)}")
+
+
+def robustness_text(summary, params=None, seeds=None):
+    """Methods sentence of one robustness run: what was done and found; missing values are "not recorded".
+
+    :param summary: the run's registry summary (``analysis`` names the analysis).
+    :param params: the run's registry params (rule, overlap, sign, n_splits, side, ...).
+    :param seeds: the run's registry seeds (the split-half seed is ``seeds["splits"]``).
+    :return: the text without the run label and the final full stop; "" for a summary of another shape
+      (the caller then falls back to the scalar values of the summary).
+    """
+    summary = summary if isinstance(summary, dict) else {}
+    params = params if isinstance(params, dict) else {}
+    analysis = summary.get("analysis") or params.get("analysis")
+    handler = {
+        "sweep": _sweep_text,
+        "replicate": _replicate_text,
+        "splithalf": _splithalf_text,
+        "influence": _influence_text,
+        "seeds": _seeds_text,
+        "consolidate": _consolidate_text,
+        "connectome_split_half": _connectome_split_half_text,
+    }.get(analysis)
+    if handler is None:
+        return _generic_text(summary)
+    return handler(summary, params, seeds if isinstance(seeds, dict) else {})
+
+
+def _sweep_text(summary, params, seeds):
+    flips = summary.get("conclusion_flips")
+    overlap = _number(params.get("overlap_pct"))
+    return (
+        f"threshold sweep around the primary rule {_rule_param_text(params.get('rule'))}, "
+        f"≥ {overlap + '%' if overlap else NOT_RECORDED} overlap, sign {_or_nr(params.get('sign'))}, {_lesions_text(params)}; "
+        f"{_number(summary.get('settings')) or NOT_RECORDED} settings; "
+        + (flips if isinstance(flips, str) and flips else "no conclusion flip found at any setting")
+    )
+
+
+def _replicate_text(summary, params, seeds):
+    connectomes = summary.get("connectomes")
+    thresholds_ = summary.get("thresholds")
+    text = (
+        f"replication on a second connectome ({' vs '.join(str(c) for c in connectomes) if isinstance(connectomes, list) and connectomes else NOT_RECORDED}), "
+        f"{_number(summary.get('n_lesions')) or NOT_RECORDED} lesions; median lesion map r between the connectomes {_number(summary.get('cross_connectome_r')) or NOT_RECORDED}, "
+        f"group map r {_number(summary.get('group_r')) or NOT_RECORDED}; {_number(summary.get('flagged')) or NOT_RECORDED} map(s) flagged"
+    )
+    if isinstance(thresholds_, dict) and thresholds_:
+        text += "; thresholds " + ", ".join(f"{label} {value}" for label, value in thresholds_.items())
+    if summary.get("rule_resolution"):
+        text += f"; rule resolved {summary['rule_resolution']}"
+    if summary.get("reference"):
+        text += f"; reference {summary['reference']}"
+    return text
+
+
+def _splithalf_text(summary, params, seeds):
+    distribution = summary.get("lesion_split_half")
+    distribution = distribution if isinstance(distribution, dict) else {}
+    text = (
+        f"lesion split-half, {_or_nr(params.get('n_splits'))} random splits (seed {_or_nr(seeds.get('splits'))}), "
+        f"{'with the GLM design' if params.get('design') else 'overlap maps only (no GLM design)'}"
+        f"{', stratified by ' + str(params['strata']) if params.get('strata') else ''}, {_lesions_text(params)}; "
+        f"rule {_rule_param_text(params.get('rule'))}, ≥ {_or_nr(_number(params.get('overlap_pct')))}% overlap, sign {_or_nr(params.get('sign'))}; "
+        f"median r of the halves' overlap maps {_median_text(distribution.get('r_overlap'))}, "
+        f"median Dice of the halves' sensitivity maps {_median_text(distribution.get('dice_sensitivity'))}"
+    )
+    if params.get("design") or "r_glm_t" in distribution:
+        text += f", median r of the halves' GLM t maps {_median_text(distribution.get('r_glm_t'))}"
+    return text
+
+
+def _influence_text(summary, params, seeds):
+    top = summary.get("influence_top")
+    return (
+        f"leave-one-lesion-out influence ({_or_nr(summary.get('influence'))}), "
+        f"{'with the GLM design' if params.get('design') else 'overlap maps only (no GLM design)'}, {_lesions_text(params)}; "
+        f"rule {_rule_param_text(params.get('rule'))}, ≥ {_or_nr(_number(params.get('overlap_pct')))}% overlap, sign {_or_nr(params.get('sign'))}; "
+        + (
+            f"most influential lesions {', '.join(str(sid) for sid in top)}"
+            if isinstance(top, list) and top
+            else "no single lesion changes the result" if isinstance(top, list) else f"most influential lesions {NOT_RECORDED}"
+        )
+    )
+
+
+def _seeds_text(summary, params, seeds):
+    variants = summary.get("seed_variants")
+    comparisons = summary.get("comparisons")
+    text = f"seed variants {', '.join(str(v) for v in variants) if isinstance(variants, list) and variants else NOT_RECORDED}"
+    text += f", primary seeds {'fractional (probabilistic)' if params.get('probabilistic') else 'binary (non-zero)'}" if "probabilistic" in params else f", primary seeds {NOT_RECORDED}"
+    if not isinstance(comparisons, dict) or not comparisons:
+        return text + f"; comparison of the variants' maps with the primary maps {NOT_RECORDED}"
+    parts = []
+    for variant, entry in comparisons.items():
+        entry = entry if isinstance(entry, dict) else {}
+        parts.append(
+            f"{variant}: median r {_number(entry.get('median_lesion_r')) or NOT_RECORDED}, median Dice {_number(entry.get('median_lesion_dice')) or NOT_RECORDED} "
+            f"over {_number(entry.get('n_changed')) or NOT_RECORDED} changed lesion(s), group map r {_number(entry.get('group_r')) or NOT_RECORDED}",
+        )
+    return f"{text}; rule {_rule_param_text(params.get('rule'))}; " + "; ".join(parts)
+
+
+def _consolidate_text(summary, params, seeds):
+    data = summary.get("consolidation")
+    data = data if isinstance(data, dict) else {}
+    side = data.get("side") or params.get("side")
+    counts = ", ".join(f"{label} {_number(data.get(key)) or NOT_RECORDED}" for key, label in (
+        ("mirrored", "mirrored"), ("kept", "kept"), ("bilateral_or_midline", "bilateral or midline (not mirrored)"), ("empty", "empty")))
+    return f"lesions consolidated to the {_or_nr({'L': 'left', 'R': 'right'}.get(side, side))} hemisphere (an analysis option, not the primary result): {counts}"
+
+
+def _of_connectome(name):
+    return f" of {name}" if isinstance(name, str) and name else ""
+
+
+def _connectome_split_half_text(summary, params, seeds):
+    data = summary.get("split_half")
+    data = data if isinstance(data, dict) else {}
+    return (
+        f"connectome split-half{_of_connectome(data.get('bundle'))} (odd/even subjects), {_or_nr(data.get('label'))}: {_number(data.get('n_odd')) or NOT_RECORDED} and {_number(data.get('n_even')) or NOT_RECORDED} subjects per half; "
+        f"median r {_number(data.get('median_r')) or NOT_RECORDED}, minimum r {_number(data.get('min_r')) or NOT_RECORDED}"
+        f"{'; small halves (the estimate is less reliable)' if data.get('small_halves') else ''}"
+    )
 
 
 def _tails_text(tails):
@@ -1034,6 +2003,57 @@ def slnm_paragraph(data, run_id=None):
     return text
 
 
+def calibration_paragraph(data, run_id=None, rate_text=None):
+    """Methods text of a calibration.json record (pipeline calibration, L-48); ``rate_text`` formats a rate with its CI."""
+    rate_text = rate_text or (lambda summary: _number((summary or {}).get("rate")) or NOT_RECORDED)
+    design = data.get("design") or {}
+    text = (
+        f"Pipeline calibration (run {run_id or data.get('run_id') or NOT_RECORDED}): the configured analysis "
+        f"({_or_nr(design.get('label'))}, test {_or_nr(design.get('test'))}, n = {_or_nr(design.get('n'))}, permutation {_or_nr(design.get('permute'))}) was run again on synthetic data"
+    )
+    fwer = data.get("fwer") or {}
+    if fwer.get("fwe"):
+        text += (
+            f". Empirical family-wise error rate: {_or_nr(fwer.get('k'))} null datasets ({fwer.get('null_source_text') or NOT_RECORDED}), "
+            f"{_or_nr(fwer.get('inner_perm'))} permutations each, seed {_or_nr(fwer.get('seed'))}; the fraction with any voxelwise max-statistic FWE-significant voxel "
+            f"was {rate_text(fwer['fwe'])} at alpha {_number(fwer.get('alpha')) or NOT_RECORDED} ({fwer.get('level') or NOT_RECORDED})"
+        )
+        if fwer.get("fdr"):
+            text += f"; BH-FDR: {rate_text(fwer['fdr'])}"
+    else:
+        text += f". Empirical family-wise error rate: not computed ({fwer.get('reason') or NOT_RECORDED})"
+    planted = data.get("planted") or {}
+    effects = planted.get("effects") or []
+    if effects:
+        powers = "; ".join(f"beta = {_number(effect.get('beta'))}: {rate_text(effect.get('power'))}" for effect in effects)
+        text += f". Planted-network recovery ({_or_nr(planted.get('n_sims'))} simulations per effect), power (any FWE voxel in the target): {powers}"
+    return text + "."
+
+
+def _calibration_design_text(design):
+    """The design of a calibration.json record: contrast, test, n, covariates (with their transforms), statistic and
+    permutation scheme.
+    """
+    transforms = design.get("transforms") or {}
+    covariates = [_transformed_name(name, transforms) for name in design.get("covariates") or []]
+    covariate_text = ", ".join(covariates) if covariates else "none" if design.get("covariates") is not None else NOT_RECORDED
+    return (
+        f"{_or_nr(design.get('label'))}, test {_or_nr(design.get('test'))}, n = {_or_nr(design.get('n'))}, covariates: {covariate_text}, "
+        f"statistic {_or_nr(design.get('stat'))}, permutation {_or_nr(design.get('permute'))}"
+    )
+
+
+def stale_calibration_paragraph(data, run_id=None):
+    """Methods text of a calibration.json record run for another design than every reported group analysis: it is
+    out of date (checklist item F8), so its rates are not cited as a calibration of the reported analyses.
+    """
+    design = data.get("design") or {}
+    return (
+        f"Pipeline calibration (run {run_id or data.get('run_id') or NOT_RECORDED}): out of date. It was run for another design "
+        f"({_calibration_design_text(design)}) than the group analyses reported here, so it does not calibrate them and its rates are not reported."
+    )
+
+
 def thresholds_section(records):
     from . import thresholds
 
@@ -1106,6 +2126,12 @@ def qa_section(records):
 def deviations_section(records):
     section = _section("deviations")
     plan, deviations = records.deviations()
+    edited = records.plan_modification() if plan else None
+    if edited and not edited["recorded"]:
+        # The plan file no longer matches the sha256 of its lock: the settings reported as the plan are the edited ones
+        edit = (f"The analysis plan file ({'/'.join(PLAN_JSON)}) was modified after it was locked: its content no longer matches the sha256 "
+                f"recorded at the lock ({str(edited['old'] or '')[:8] or NOT_RECORDED}; {edited['new'][:8]} now), and the analysis used the edited plan's settings")
+        deviations = [*(deviations or []), {"description": edit, "reason": NOT_RECORDED}]
     if deviations:
         items = []
         for item in deviations:
@@ -1209,6 +2235,64 @@ def disclaimer_section():
 # One exported run (export.methods_text)
 
 
+def _top_pct_text(rule, resolved):
+    """Methods sentence of a top-x% rule: a rank rule (no p-value, not an effect size) restricted to the
+    rule's sign, as thresholds.describe and the sidecar's "derived" field state it ("top 5% of T (≥ 2.28)").
+    A one-sided rule is written with its signed cut (T ≥ 2.28, or T ≤ -1.90 for the negative tail), never as |T|.
+    """
+    statistic = resolved.get("statistic") or rule.get("statistic") or "T"
+    name = "T" if statistic == "T" else "mean Fz"
+    sign = rule.get("sign", "both")
+    value = resolved.get("value")
+    x = f"{float(rule.get('value', 0)):g}"
+    if sign == "pos":
+        values, cut = f"positive {name} values", (f"{name} ≥ {value:.3g}" if value is not None else None)
+    elif sign == "neg":
+        values, cut = f"negative {name} values", (f"{name} ≤ -{value:.3g}" if value is not None else None)
+    else:
+        values, cut = f"absolute {name} values", (f"|{name}| ≥ {value:.3g}" if value is not None else None)
+    cut = cut or "no voxel of this sign, nothing passes"
+    df = f"df = {resolved['df']}, " if statistic == "T" and resolved.get("df") is not None else ""
+    maps = "T maps" if statistic == "T" else "Mean Fz maps"
+    return f"{maps} were thresholded at the top {x}% of {values} ({cut}; rank rule top_pct, no p-value; {df}V = {resolved['v']:,} voxels); maps are stored unthresholded."
+
+
+def _lesion_space(lesion):
+    """(template space or None, family notice or "") of an exported lesion (its sidecar entry, else its QA values)."""
+    qa = lesion.get("qa") or {}
+    return lesion.get("space") or qa.get("lesion_space"), lesion.get("space_notice") or qa.get("space_notice") or ""
+
+
+def _lesion_spaces_value(lesions):
+    """The "Lesion template space" parameter: the distinct template spaces of the lesions, or not recorded."""
+    spaces = []
+    for lesion in lesions:
+        space = _lesion_space(lesion)[0]
+        if space and space not in spaces:
+            spaces.append(space)
+    return ", ".join(spaces) if spaces else NOT_RECORDED
+
+
+def _lesion_space_text(lesions, info):
+    """' Lesion template space: <space> (<lesions>); connectome space: <space>. <notice> (<lesions>; ...).' ("" when none is recorded)."""
+    spaces, notices = {}, {}
+    for lesion in lesions:
+        space, notice = _lesion_space(lesion)
+        if space:
+            spaces.setdefault(space, []).append(lesion["name"])
+        if notice:
+            notices.setdefault(notice, []).append(lesion["name"])
+    if not spaces and not notices:
+        return ""
+    text = ""
+    if spaces:
+        listed = "; ".join(f"{space} ({', '.join(names)})" for space, names in spaces.items())
+        text += f" Lesion template space: {listed}" + (f"; connectome space: {info['space']}." if info.get("space") else ".")
+    for notice, names in notices.items():
+        text += f" {notice.rstrip('.')} ({', '.join(names)}; no template-family transform was applied)."
+    return text
+
+
 def run_sections(info, n, subset, threshold, lesions, run_meta=None, software=None):
     """Sections of one exported network-mapping run (the content of ``export.methods_text``)."""
     run_meta = run_meta or {}
@@ -1240,11 +2324,29 @@ def run_sections(info, n, subset, threshold, lesions, run_meta=None, software=No
     elif info.get("gsr") is False:
         identity.append("preprocessed without global signal regression")
     identity_text = f"; {', '.join(identity)}" if identity else ""
-    if resolved["statistic"] == "Fz":
-        threshold_text = f"Maps were displayed at |mean Fz| ≥ {resolved['value']:g} (effect size; maps are stored unthresholded)."
+    rule = threshold.get("rule") or resolved.get("rule") or {}
+    if rule.get("kind") == "top_pct":
+        threshold_text = _top_pct_text(rule, resolved)
+    elif resolved["statistic"] == "Fz":
+        tail = threshold.get("sign")
+        if tail == "pos":
+            quantity = f"mean Fz ≥ {resolved['value']:g}"
+        elif tail == "neg":
+            quantity = f"mean Fz ≤ -{resolved['value']:g}"
+        else:
+            quantity = f"|mean Fz| ≥ {resolved['value']:g}"
+        threshold_text = f"Maps were displayed at {quantity} (effect size; maps are stored unthresholded)."
     else:
-        p_text = f", two-sided p_unc ≤ {resolved['p_unc']:.2g}" if resolved.get("p_unc") is not None else ""
-        threshold_text = f"T maps were thresholded at |T| ≥ {export._format_number(resolved['value'])} (rule {threshold['rule']['kind']}, df = {resolved['df']}, V = {resolved['v']:,} voxels{p_text}); maps are stored unthresholded."
+        tail = threshold.get("sign")
+        value = export._format_number(resolved["value"])
+        p_unc = resolved.get("p_unc")
+        if tail in ("pos", "neg"):
+            quantity = f"T ≥ {value}" if tail == "pos" else f"T ≤ -{value}"
+            p_text = f", one-sided p_unc ≤ {p_unc / 2:.2g}" if p_unc is not None else ""
+        else:
+            quantity = f"|T| ≥ {value}"
+            p_text = f", two-sided p_unc ≤ {p_unc:.2g}" if p_unc is not None else ""
+        threshold_text = f"T maps were thresholded at {quantity} (rule {threshold['rule']['kind']}, df = {resolved['df']}, V = {resolved['v']:,} voxels{p_text}); maps are stored unthresholded."
     qa_text = "Connectome-confound QA followed van den Heuvel et al. (2026): the spatial correlation between each T map and the connectome degree map was computed when the degree map was available"
     if null.get("k"):
         qa_text += (
@@ -1257,12 +2359,13 @@ def run_sections(info, n, subset, threshold, lesions, run_meta=None, software=No
         else:
             qa_text += "; the similarity to the relocated-lesion maps is not available for this run (it is computed when a run completes)"
     qa_text += "."
+    space_text = _lesion_space_text(lesions, info)
     paragraph = (
         f"Lesion network maps were computed with the lesion network mapping library of 3D Slicer ({export.LIBRARY_NAME} {export.LIBRARY_VERSION}). "
         f"Each lesion was resampled onto the {spacing_text} grid of the {info.get('name')} normative functional connectome ({info.get('n_voxels', 0):,} voxels{identity_text}) as fractional voxel occupancy. "
         f"For each of N = {n} subjects{subset_text}, the occupancy-weighted time course of the lesion was correlated (Pearson r) with the time course of every voxel, "
         "the correlations were averaged over runs and Fisher z-transformed, and maps of the mean r, the mean Fisher z and the voxelwise one-sample t statistic of Fisher z "
-        f"across subjects (df = {max(n - 1, 0)}) were computed (Boes et al., 2015; Fox, 2018). {threshold_text} {qa_text}"
+        f"across subjects (df = {max(n - 1, 0)}) were computed (Boes et al., 2015; Fox, 2018).{space_text} {threshold_text} {qa_text}"
     )
     sections = [_section("maps").paragraph(paragraph)]
     parameters = _section("parameters").table(
@@ -1279,6 +2382,7 @@ def run_sections(info, n, subset, threshold, lesions, run_meta=None, software=No
             ["Threshold rule", f"`{json.dumps(threshold['rule'], sort_keys=True)}`"],
             ["Resolved threshold", threshold["derived"]],
             ["Relocated-lesion null", f"{null.get('k', 0)} per lesion, seed {null.get('seed', 0)}"],
+            ["Lesion template space", _lesion_spaces_value(lesions)],
         ],
     )
     sections.append(parameters)

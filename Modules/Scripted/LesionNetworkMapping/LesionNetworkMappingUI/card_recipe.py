@@ -8,7 +8,11 @@ A header strip above the Seed card (every seed mode, Studio and Classic):
   settings stay as they are until a recipe is picked. Picking one sets the primary threshold rule (Result card) and the
   options of Run everything (``Studio/LNM/Pipeline/Options`` through card_pipeline): steps that are not in the recipe
   are turned off there, so the Run everything pipeline (A-04) runs the recipe's steps. The study remembers the choice
-  (``derivatives/lnm/recipe.json``).
+  (``derivatives/lnm/recipe.json``). The rule and the options are not kept per study, so opening a study with a
+  remembered recipe and an open plan sets them to that recipe's again (not to another study's), and a study without a
+  remembered recipe shows none (a recipe picked before any study was open carries over to the first one). Opening a
+  study whose plan is locked sets the rule, the Run everything options and the Cohort analyses' settings to the plan's
+  (with its recorded deviations), as **Use the plan's settings** does; nothing is recorded.
 - **Status line** (``LNMRecipeStatus``): the status tag, "Custom (based on X) · 2 changes" when the Map settings differ
   from the recipe, and the partial-recipe badge "1 step not available in this build: Coordinate seeds".
 - **Plan chip** (``LNMPlanChip``): "Plan: open" or "Plan: locked 2026-10-18 · 3f2a1b9c" ("modified after lock" in red
@@ -18,7 +22,12 @@ A header strip above the Seed card (every seed mode, Studio and Classic):
 - After the lock, a change of the rule or of the Run everything options shows an **inline reason row**
   (``LNMDeviationPrompt``: "Changed after the plan was locked: n_perm 1000 instead of 5000", a reason field and
   **Record**). Until the reason is recorded in ``analysis_plan_deviations.jsonl``, Compute and Run everything are
-  blocked (``MapContext.setComputeEnabled(False, …, key="recipe")``); setting the value back clears it.
+  blocked (``MapContext.setComputeEnabled(False, …, key="recipe")``); setting the value back clears it. The Cohort
+  card's Contrast and Symptom analyses hold their own permutations, covariates and inference options
+  (``recipes.analysis_pending``): their changes are shown in the same row ("Contrast GLM: n_perm 1000 instead of
+  5000"), hold only that analysis's Run until the reason is recorded, and are recorded as "contrast.n_perm". The
+  Null models card's kind, null cohorts (K), mode and seed are compared the same way when the plan has null models
+  ("Null models card: null cohorts 200 instead of 1000", recorded as "nulls_card.nulls.k").
 - **Deviations (n)** (``LNMDeviationsButton``) opens a popover with the log; the ⋯ menu has Recipe details…,
   Save as lab recipe…, Add recipe folder… and Reload recipes.
 
@@ -26,8 +35,9 @@ Search entries (``StudioLib.palette.registerProvider``): "Choose an analysis rec
 "Lock analysis plan…" and "Show deviations from the analysis plan".
 
 Settings: reads and extends ``Studio/LNM/RecipeFolders`` (a list of folders; only when the user adds one); writes
-``Studio/LNM/Pipeline/Options`` through ``card_pipeline.saveOptions`` only when a recipe is picked. No prompt, setting or
-file is written at start or under ``--testing``.
+``Studio/LNM/Pipeline/Options`` through ``card_pipeline.saveOptions`` only when a recipe is picked, a plan is locked or
+restored, or a study with a locked plan or a remembered recipe is opened. No prompt, setting or file is written at start
+or under ``--testing``.
 """
 
 import html
@@ -123,7 +133,7 @@ class Popover:
         self.label.setObjectName(f"{objectName}Text")
         self.label.setWordWrap(True)
         self.label.setTextFormat(qt.Qt.RichText)
-        self.label.setOpenExternalLinks(True)
+        widgets.routeLinks(self.label)
         self.label.setTextInteractionFlags(qt.Qt.TextBrowserInteraction)
         self.label.setContentsMargins(12, 10, 12, 10)
         self.label.setAlignment(qt.Qt.AlignTop | qt.Qt.AlignLeft)
@@ -138,9 +148,31 @@ class Popover:
         geometry = getattr(screen, "availableGeometry", None) if screen is not None else None
         geometry = geometry() if callable(geometry) else geometry  # a property in PythonQt, a method elsewhere
         available = geometry.height() if geometry is not None else 768
-        self.frame.setFixedHeight(int(max(60, min(height, 0.7 * available))))
-        self.frame.move(anchor.mapToGlobal(qt.QPoint(0, anchor.height)))
+        height = int(max(60, min(height, 0.7 * available)))
+        self.frame.setFixedHeight(height)
+        self.frame.move(self.position(anchor, geometry, POPOVER_WIDTH, height))
         self.frame.show()
+
+    @staticmethod
+    def position(anchor, geometry, width, height):
+        """The global top-left point of a ``width`` x ``height`` popover for ``anchor``, kept inside ``geometry`` (the screen's available area).
+
+        Below the anchor, left-aligned with it; right-aligned with it when that would pass the screen's right edge (as for a button at the
+        right of a header), and above it when there is no room below. A plain ``Qt::Popup`` frame is not moved on screen by Qt (unlike a QMenu).
+        """
+        topLeft = anchor.mapToGlobal(qt.QPoint(0, 0))
+        x, y = topLeft.x(), topLeft.y() + anchor.height
+        if geometry is None:
+            return qt.QPoint(x, y)
+        left, top = geometry.x(), geometry.y()
+        right, bottom = left + geometry.width(), top + geometry.height()  # exclusive edges
+        if x + width > right:
+            x = topLeft.x() + anchor.width - width
+        x = max(left, min(x, right - width))
+        if y + height > bottom and topLeft.y() - height >= top:
+            y = topLeft.y() - height
+        y = max(top, min(y, bottom - height))
+        return qt.QPoint(x, y)
 
 
 class LockPlanDialog:
@@ -227,7 +259,7 @@ class LockPlanDialog:
             self.targetCombo.setCurrentIndex(max(0, index))
 
     def _addRoi(self):
-        paths = qt.QFileDialog.getOpenFileNames(self.dialog, _("Add a-priori ROI masks"), "", "NIfTI (*.nii *.nii.gz);;All files (*)")
+        paths = qt.QFileDialog.getOpenFileNames(self.dialog, _("Add a-priori ROI masks"), widgets.dialogStartFolder(), "NIfTI (*.nii *.nii.gz);;All files (*)")
         for path in paths or []:
             item = qt.QListWidgetItem(os.path.basename(path))
             item.setData(qt.Qt.UserRole, path)
@@ -376,7 +408,7 @@ class RecipeHeader:
         promptLayout.addLayout(row)
         self.restoreButton = qt.QPushButton(_("Use the plan's settings"))
         self.restoreButton.setObjectName("LNMRestorePlanButton")
-        self.restoreButton.setToolTip(_("Set the threshold rule and the Run everything options back to the locked plan (nothing is recorded)"))
+        self.restoreButton.setToolTip(_("Set the threshold rule, the Run everything options and the Cohort analyses' settings back to the locked plan (nothing is recorded)"))
         self.restoreButton.setProperty("slicerRole", "ghost")
         self.restoreButton.connect("clicked()", self.restorePlanSettings)
         promptLayout.addWidget(self.restoreButton, 0, qt.Qt.AlignLeft)
@@ -444,6 +476,27 @@ class RecipeHeader:
             logging.exception("Lesion network mapping: the locked plan's parameters are not valid")
             return recipes.apply(self.recipe) if self.recipe is not None else recipes.normalize_parameters({})
 
+    def analysisTabs(self):
+        """The analyses that hold their own copy of plan parameters (``PLAN_SCOPE``): the Cohort card's Contrast and
+        Symptom tabs, and the Null models card (its kind, K, mode and seed).
+        """
+        card = self.ctx.card("cohort")
+        tabs = [controller for _key, controller in getattr(card, "tabControllers", None) or [] if getattr(controller, "PLAN_SCOPE", None)]
+        nulls = self.ctx.card("nulls")
+        if getattr(nulls, "PLAN_SCOPE", None):
+            tabs.append(nulls)
+        return tabs
+
+    def analysisPending(self):
+        """Changes of the Cohort-card analyses from the locked plan that wait for a reason (each with its ``scope``)."""
+        pending = []
+        for tab in self.analysisTabs():
+            try:
+                pending.extend(tab.planPending())
+            except Exception:
+                logging.exception("Lesion network mapping: a Cohort analysis could not be compared with the locked plan")
+        return pending
+
     def currentSteps(self):
         """The steps Run everything would run now (the plan's or the recipe's steps, following the options)."""
         recipes = _recipes()
@@ -469,13 +522,40 @@ class RecipeHeader:
             logging.exception("Lesion network mapping: the recipes could not be read")
             self.recipes = []
         path = self.studyPath()
+        previous = self._lastStudyPath
+        opened = bool(path) and path != previous
         self._lastStudyPath = path
         chosen = self.recipe.id if self.recipe is not None else None
+        selected = None
         if path:
-            chosen = (recipes.selected_recipe(path) or {}).get("id") or chosen  # the study's choice (its locked plan's recipe first)
+            selected = (recipes.selected_recipe(path) or {}).get("id")  # the study's choice (its locked plan's recipe first)
+            # Another study's recipe is not this study's choice; one picked before any study was open carries over
+            if selected or (opened and previous):
+                chosen = selected
         self.recipe = next((recipe for recipe in self.recipes if recipe.id == chosen), None)
         self._fillCombo()
+        # A study with a locked plan was opened: Map starts from the plan's settings (with its recorded deviations), not
+        # from the defaults of a new session or another study's options, so only the user's later changes ask for a reason
+        if opened and self._planLocked(path):
+            if self.restorePlanSettings():
+                return
+        elif opened and selected and self.recipe is not None:
+            # An open plan with a remembered recipe: the rule and the Run everything options are not kept per study, so
+            # they are set to this recipe's again (Run everything runs its steps, not those another study left)
+            try:
+                params = recipes.apply(self.recipe)
+            except (ValueError, TypeError):
+                logging.exception("Lesion network mapping: the study's recipe parameters are not valid")
+            else:
+                self._setMapSettings(params, self.recipe.steps, "recipe")
         self.refresh()
+
+    def _planLocked(self, path):
+        try:
+            return _recipes().read_plan(path) is not None
+        except Exception:
+            logging.exception("Lesion network mapping: the analysis plan could not be read")
+            return False
 
     def _fillCombo(self):
         recipes = _recipes()
@@ -483,9 +563,9 @@ class RecipeHeader:
         try:
             self.combo.clear()
             self.combo.addItem(_("Choose a recipe…"), "")
-            for recipe in self.recipes:
-                tag = {"adapted": _("adapted"), "established": _("established"), "2026-preprint": _("2026 preprint"), "lab": _("lab")}.get(recipe.status, recipe.status)
-                text = f"{recipe.title} · {tag}"
+            tags = {"adapted": _("adapted"), "established": _("established"), "2026-preprint": _("2026 preprint"), "lab": _("lab")}
+            labels = recipes.distinct_labels(self.recipes, lambda r: f"{r.title} · {tags.get(r.status, r.status)}")
+            for recipe, text in zip(self.recipes, labels, strict=True):
                 badge = recipes.partial_badge(recipe)
                 if badge:
                     text += " · " + _("partial")
@@ -493,6 +573,15 @@ class RecipeHeader:
                 tip = recipe.status_text() + (f"\n{badge}" if badge else "")
                 self.combo.setItemData(self.combo.count - 1, tip, qt.Qt.ToolTipRole)
             index = self.combo.findData(self.recipe.id) if self.recipe is not None else 0
+            self.combo.setCurrentIndex(max(0, index))
+        finally:
+            self.combo.blockSignals(False)
+
+    def _restoreComboIndex(self):
+        """Show the current recipe in the combo again (a pick that was not applied must not leave its label there)."""
+        index = self.combo.findData(self.recipe.id) if self.recipe is not None else 0
+        self.combo.blockSignals(True)
+        try:
             self.combo.setCurrentIndex(max(0, index))
         finally:
             self.combo.blockSignals(False)
@@ -512,27 +601,11 @@ class RecipeHeader:
         """Choose a recipe: set the threshold rule and the Run everything options, and remember it in the study."""
         recipes = _recipes()
         if self.plan() is not None:
-            self.refresh()  # the combo is disabled while a plan is locked; nothing changes
+            self._restoreComboIndex()  # the combo is disabled while a plan is locked; nothing changes
+            self.refresh()
             return False
-        params = recipes.apply(recipe)
         self.recipe = recipe
-        widget = _mapWidget()
-        try:
-            if widget is not None and hasattr(widget, "setRule"):
-                widget.setRule(params["rule"])
-            else:
-                self.ctx.setRule(params["rule"])
-        except Exception:
-            logging.exception("Lesion network mapping: the recipe's threshold rule could not be set")
-        module = _pipelineCard()
-        if module is not None:
-            try:
-                module.saveOptions(recipes.pipeline_options(params, recipe.steps, module.loadOptions()))
-                card = self.ctx.card("pipeline")
-                if card is not None and hasattr(card, "onRunSettingsChanged"):
-                    card.onRunSettingsChanged()
-            except Exception:
-                logging.exception("Lesion network mapping: the Run everything options could not be set from the recipe")
+        self._setMapSettings(recipes.apply(recipe), recipe.steps, "recipe")
         path = self.studyPath()
         if path:
             try:
@@ -544,6 +617,27 @@ class RecipeHeader:
             self.combo.setCurrentIndex(index)
         self.refresh()
         return True
+
+    def _setMapSettings(self, params, steps, source):
+        """Set the threshold rule and the Run everything options to ``params`` and ``steps`` (a recipe's or the plan's)."""
+        recipes = _recipes()
+        widget = _mapWidget()
+        try:
+            if widget is not None and hasattr(widget, "setRule"):
+                widget.setRule(params["rule"])
+            else:
+                self.ctx.setRule(params["rule"])
+        except Exception:
+            logging.exception(f"Lesion network mapping: the {source}'s threshold rule could not be set")
+        module = _pipelineCard()
+        if module is not None:
+            try:
+                module.saveOptions(recipes.pipeline_options(params, steps, module.loadOptions()))
+                card = self.ctx.card("pipeline")
+                if card is not None and hasattr(card, "onRunSettingsChanged"):
+                    card.onRunSettingsChanged()
+            except Exception:
+                logging.exception(f"Lesion network mapping: the Run everything options could not follow the {source}")
 
     #
     # Refresh
@@ -584,7 +678,8 @@ class RecipeHeader:
         self.planRow.setVisible(bool(path))
         self.statusLabel.setToolTip("\n".join(f"{change['description']}" for change in recipes.diff(self.recipe, params)) if self.recipe is not None else "")
         level = {"open": "neutral", "locked": "ok", "modified": "danger"}[status["state"]]
-        self.pending = recipes.pending_deviations(path, params, steps=self.currentSteps()) if locked and path else []
+        # The Cohort analyses' own changes (scoped) only hold their own Run; the others block every computation
+        self.pending = recipes.pending_deviations(path, params, steps=self.currentSteps()) + self.analysisPending() if locked and path else []
         if self.pending:
             level = "warn"
         widgets.setChipLevel(self.planChip, level, status["chip"])
@@ -653,7 +748,7 @@ class RecipeHeader:
             text = _("Changed after the plan was locked: {changes}.").format(changes="; ".join(change["description"] for change in pending))
             self.promptLabel.setText(text)
         self.prompt.setVisible(bool(pending))
-        blocked = bool(pending)
+        blocked = any(not change.get("scope") for change in pending)
         if blocked != self._blocked or blocked:
             self.ctx.setComputeEnabled(not blocked, _("Give a reason for the change from the locked analysis plan (Recipe, top of Map)") if blocked else "", key=BLOCK_KEY)
             self._blocked = blocked
@@ -661,9 +756,10 @@ class RecipeHeader:
     def checkBeforeCompute(self):
         """``ctx.beforeCompute``: a change from the locked plan needs its reason first."""
         self.refresh()
-        if not self.pending:
+        pending = [change for change in self.pending if not change.get("scope")]  # a Cohort analysis's change holds only its Run
+        if not pending:
             return None
-        return False, _("Changed after the plan was locked: {changes}. Give the reason in the Recipe header.").format(changes="; ".join(change["description"] for change in self.pending)), (_("Give reason"), self.focusReason)
+        return False, _("Changed after the plan was locked: {changes}. Give the reason in the Recipe header.").format(changes="; ".join(change["description"] for change in pending)), (_("Give reason"), self.focusReason)
 
     def focusReason(self):
         self.ctx.focusCard("recipe")
@@ -676,6 +772,12 @@ class RecipeHeader:
         path = self.studyPath()
         if not reason or not path or not self.pending:
             return []
+        followed = {}  # what each Cohort analysis followed before, and its settings: it follows a recorded plan change
+        for tab in self.analysisTabs():
+            try:
+                followed[tab] = (recipes.analysis_parameters(path, tab.PLAN_SCOPE), tab.planValues())
+            except Exception:
+                logging.exception("Lesion network mapping: a Cohort analysis could not be compared with the locked plan")
         records = []
         for change in list(self.pending):
             try:
@@ -683,7 +785,17 @@ class RecipeHeader:
             except (recipes.RecipeError, OSError) as exc:
                 logging.error(f"Lesion network mapping: the deviation could not be recorded: {exc}")
         self.reasonEdit.clear()
+        for tab, (before, current) in followed.items():
+            try:
+                values = recipes.analysis_follow(before, recipes.analysis_parameters(path, tab.PLAN_SCOPE), current)
+                if values:
+                    tab.applyPlanValues(values)
+                    tab.refresh()
+            except Exception:
+                logging.exception("Lesion network mapping: a Cohort analysis could not follow the locked plan")
         self.refresh()
+        for tab in self.analysisTabs():
+            tab.showState()  # Run of a Cohort analysis waited for this reason
         return records
 
     #
@@ -726,30 +838,28 @@ class RecipeHeader:
         return plan
 
     def restorePlanSettings(self):
-        """Set the threshold rule and the Run everything options back to the locked plan (with its recorded deviations)."""
+        """Set the threshold rule, the Run everything options and the Cohort analyses' settings back to the locked plan
+        (with its recorded deviations).
+        """
         recipes = _recipes()
         path = self.studyPath()
-        params = recipes.effective_parameters(path) if path else None
+        try:
+            params = recipes.effective_parameters(path) if path else None
+            steps = recipes.effective_steps(path) if params is not None else None
+        except (recipes.RecipeError, ValueError, TypeError, OSError):  # a hand-edited plan (the chip says "modified")
+            logging.exception("Lesion network mapping: the locked plan's settings could not be read")
+            return False
         if params is None:
             return False
-        steps = recipes.effective_steps(path)
-        widget = _mapWidget()
-        try:
-            if widget is not None and hasattr(widget, "setRule"):
-                widget.setRule(params["rule"])
-            else:
-                self.ctx.setRule(params["rule"])
-        except Exception:
-            logging.exception("Lesion network mapping: the plan's threshold rule could not be set")
-        module = _pipelineCard()
-        if module is not None:
+        self._setMapSettings(params, steps, "locked plan")
+        for tab in self.analysisTabs():
             try:
-                module.saveOptions(recipes.pipeline_options(params, steps, module.loadOptions()))
-                card = self.ctx.card("pipeline")
-                if card is not None and hasattr(card, "onRunSettingsChanged"):
-                    card.onRunSettingsChanged()
+                values = recipes.analysis_parameters(path, tab.PLAN_SCOPE)
+                if values is not None:
+                    tab.applyPlanValues(values)
+                    tab.refresh()
             except Exception:
-                logging.exception("Lesion network mapping: the Run everything options could not follow the locked plan")
+                logging.exception("Lesion network mapping: a Cohort analysis could not follow the locked plan")
         self.refresh()
         return True
 
@@ -822,7 +932,7 @@ class RecipeHeader:
                 return None
         folder = folder or self.labRecipeFolder()
         if folder is None:
-            folder = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Folder for lab recipes"))
+            folder = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Folder for lab recipes"), widgets.dialogStartFolder())
             if not folder:
                 return None
             addRecipeFolder(folder)
@@ -853,7 +963,7 @@ class RecipeHeader:
         return saved
 
     def chooseRecipeFolder(self):
-        folder = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Add a folder of lab recipes"))
+        folder = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Add a folder of lab recipes"), widgets.dialogStartFolder())
         if folder:
             addRecipeFolder(folder)
             self.reload()
@@ -918,13 +1028,19 @@ def paletteEntries(shell=None):
         header = _headerOrNone()
         return header is None or header.plan() is not None
 
+    def canChoose():
+        header = _headerOrNone()
+        return header is None or header.plan() is None
+
     def chooseRecipe(header):
+        if not header.combo.isEnabled():  # a locked plan keeps its recipe; showPopup would open on a disabled combo
+            return
         header.combo.setFocus()
         header.combo.showPopup()
 
     return [
         {"id": "lnm.recipe", "title": _("Choose an analysis recipe (lesion network mapping)…"), "category": _("Map"),
-         "synonyms": ["recipe", "pipeline preset", "cookbook", "ferguson", "boes", "sLNM"], "callback": lambda: showInMap(chooseRecipe),
+         "synonyms": ["recipe", "pipeline preset", "cookbook", "ferguson", "boes", "sLNM"], "callback": lambda: showInMap(chooseRecipe), "enabled": canChoose,
          "description": _("Named, cited analysis pipelines with their differences from the source")},
         {"id": "lnm.lock-plan", "title": _("Lock analysis plan…"), "category": _("Map"), "synonyms": ["pre-registration", "preregister", "analysis plan", "hypotheses", "roi"],
          "callback": lambda: showInMap(lambda header: header.onLockClicked()), "enabled": canLock,

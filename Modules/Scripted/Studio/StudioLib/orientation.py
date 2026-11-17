@@ -46,7 +46,8 @@ are separate actors (``StudioFigureLetter_*``), not ``StudioOrientationLetter_*`
 
 Re-centring: when the background volume of a slice view changes and the slice offset is outside the new
 background along the view normal, the offset moves to the nearest bound, half a voxel inside, so that the view
-never stays black. Figure views are skipped, and a view whose offset is inside the volume never moves.
+never stays black. A view whose offset is inside the volume never moves, except a view that has just become a figure
+view (a scan swapped for a figure): it is fitted to the figure and put on the middle of its single slice (SPEC 6.7).
 
 This module is an optional plug-in of the Studio shell: ``install(shell)`` shows the letters while the
 shell is active (unless the ``Studio/OrientationLetters`` setting is false), ``uninstall(shell)``
@@ -373,13 +374,41 @@ class _ViewLetters:
         normal = tuple(round(sliceToRAS.GetElement(row, 2), 3) for row in range(3))
         return (node.GetID(), node.GetAttribute("Studio.Role"), node.GetAttribute("Studio.FigureConvention"), normal)
 
-    def _recentre(self):
-        """Move the slice offset into the new background volume (half a voxel inside the nearest bound).
-
-        Only a view whose offset is outside the volume along the view normal is moved. Figure views are skipped.
-        Return True if the offset changed.
+    def _viewMissesBackground(self, bounds):
+        """True if the view's in-plane rectangle does not overlap the in-plane extent of the background (``bounds`` are the
+        slice-space bounds of the background volume): such a view shows nothing but black.
         """
-        if self.isFigure or self.backgroundNode is None:
+        dimensions = self.sliceNode.GetDimensions()
+        if not dimensions or dimensions[0] < 2 or dimensions[1] < 2:
+            return False
+        # The slice-space bounds of a volume are in the frame of the slice axes with the origin at (0, 0, 0) (see
+        # vtkMRMLSliceLogic::GetVolumeSliceBounds), so the corners of the view go through the same frame
+        rasToSlice = vtk.vtkMatrix4x4()
+        rasToSlice.DeepCopy(self.sliceNode.GetSliceToRAS())
+        for row in range(3):
+            rasToSlice.SetElement(row, 3, 0.0)
+        rasToSlice.Invert()
+        xyToRAS = self.sliceNode.GetXYToRAS()
+        corners = [
+            rasToSlice.MultiplyPoint(xyToRAS.MultiplyPoint([float(x), float(y), 0.0, 1.0]))
+            for x in (0, dimensions[0]) for y in (0, dimensions[1])
+        ]
+        xs = [corner[0] for corner in corners]
+        ys = [corner[1] for corner in corners]
+        return max(xs) < bounds[0] or min(xs) > bounds[1] or max(ys) < bounds[2] or min(ys) > bounds[3]
+
+    def _recentre(self, becameFigure=False):
+        """Bring the new background volume into view (U-04: a view never stays black after its background changes).
+
+        A view whose offset is outside the volume along the view normal is moved half a voxel inside the nearest bound.
+        A view whose field of view does not overlap the volume in the view plane (two scans with far apart origins) is
+        fitted to the volume, as the Fit button does; the slice offset stays where it is.
+        A view that has just become a figure view (``becameFigure``: a scan was swapped for a figure, SPEC 6.7) shows
+        the figure whole instead: it is fitted to the figure and put on the middle of its single slice. A view that was
+        already a figure view is moved and fitted only if it would otherwise be black, like any other view.
+        Return True if the offset or the field of view changed.
+        """
+        if self.backgroundNode is None:
             return False
         sliceLogic = self.sliceWidget.sliceLogic()
         bounds = [0.0] * 6
@@ -387,13 +416,23 @@ class _ViewLetters:
         low, high = bounds[4], bounds[5]
         if not high > low:
             return False
+        changed = False
         offset = self.sliceNode.GetSliceOffset()
-        if low <= offset <= high:
-            return False
-        spacing = sliceLogic.GetBackgroundSliceSpacing()
-        half = min(0.5 * abs(spacing[2]), 0.5 * (high - low))
-        sliceLogic.SetSliceOffset(low + half if offset < low else high - half)
-        return True
+        if becameFigure:
+            sliceLogic.FitSliceToAll()
+            sliceLogic.SetSliceOffset(0.5 * (low + high))
+            return True
+        if not low <= offset <= high:
+            spacing = sliceLogic.GetBackgroundSliceSpacing()
+            half = min(0.5 * abs(spacing[2]), 0.5 * (high - low))
+            sliceLogic.SetSliceOffset(low + half if offset < low else high - half)
+            changed = True
+        if self._viewMissesBackground(bounds):
+            offset = self.sliceNode.GetSliceOffset()
+            sliceLogic.FitSliceToAll()
+            sliceLogic.SetSliceOffset(offset)
+            changed = True
+        return changed
 
     def _cornerTextHeight(self, position=0):
         """Height in pixels of the text of a lower corner of the corner annotation (0: lower left, 1: lower right; 0 if it
@@ -503,8 +542,9 @@ class _ViewLetters:
         figureKey = self._figureKey()
         if key != self.directionKey or figureKey != self.figureKey or backgroundChanged:
             self.figureKey = figureKey
+            wasFigure = self.isFigure
             self._updateFigureState()
-            if backgroundChanged and self._recentre():
+            if backgroundChanged and self._recentre(becameFigure=self.isFigure and not wasFigure):
                 changed = True
             self.directionKey = key
             if self.isFigure:
@@ -691,7 +731,7 @@ def viewLetters(sliceViewName):
 
 
 def viewStatement(sliceViewName):
-    """The display statement shown in a slice view ("Left is on screen right"), "" if it has none, None without letters."""
+    """The display statement shown in a slice view ("Radiological · L on right"), "" if it has none, None without letters."""
     if _controller is None:
         return None
     view = _controller.views.get(sliceViewName)
@@ -704,6 +744,20 @@ def viewShownStatement(sliceViewName):
         return None
     view = _controller.views.get(sliceViewName)
     return view.shownStatement if view is not None else None
+
+
+def viewStatementBox(sliceViewName):
+    """``(width, bottom, height)`` in pixels of the statement drawn in a slice view: its width, the height of its bottom
+    above the view bottom edge and its height; it is right-aligned at ``CORNER_ANNOTATION_MARGIN`` from the right edge.
+    None if the view shows no statement (the probe keeps clear of it).
+    """
+    if _controller is None:
+        return None
+    view = _controller.views.get(sliceViewName)
+    if view is None or not view.shownStatement:
+        return None
+    width, height = view._textSize(view.statementActor, view.shownStatement)
+    return width, view.statementActor.GetPositionCoordinate().GetValue()[1], height
 
 
 def viewTag(sliceViewName):

@@ -108,6 +108,38 @@ def signed_permutation(src_affine, dst_affine, tolerance=1e-3):
     return SignedPermutation(axes, signs, tuple(int(v) for v in rounded[:3, 3]))
 
 
+def reorder_to_grid(volume, affine, dst_shape, dst_affine, tolerance=1e-3):
+    """``volume`` [i, j, k] (on ``affine``) stored in the voxel order of the grid (``dst_shape``, ``dst_affine``).
+
+    Two grids that hold the same voxel centres and extent differ only by their storage order (axes swapped
+    or flipped): Slicer's volume reader, for example, stores the k axis of an FSL MNI file the other way
+    round. Values that are indexed by the destination's flat voxel order (a connectome mask, a voxel sample
+    of null maps) then need the volume in that order.
+
+    :return: C-contiguous array of shape ``dst_shape`` (the same values, moved), or None when the grids do
+      not hold the same voxels (a resampled or cropped grid, another voxel size).
+    """
+    volume = np.asarray(volume)
+    dst_shape = tuple(int(n) for n in dst_shape[:3])
+    if volume.ndim != 3:
+        return None
+    mapping = signed_permutation(affine, dst_affine, tolerance=tolerance)
+    if mapping is None:
+        return None
+    for axis in range(3):
+        target = mapping.axes[axis]
+        first = mapping.offsets[target]
+        last = first + mapping.signs[axis] * (volume.shape[axis] - 1)
+        if volume.shape[axis] != dst_shape[target] or min(first, last) != 0 or max(first, last) != dst_shape[target] - 1:
+            return None
+    order = np.argsort(mapping.axes)  # source axis of each destination axis
+    moved = np.transpose(volume, order)
+    flips = tuple(target for target in range(3) if mapping.signs[order[target]] < 0)
+    if flips:
+        moved = np.flip(moved, axis=flips)
+    return np.ascontiguousarray(moved)
+
+
 # Template grids and spaces
 #
 # A grid (shape, voxel size and position) does not name a space: TemplateFlow resamples
@@ -431,12 +463,71 @@ def space_family(space):
     return "unknown"
 
 
+#: Families of MNI templates (images in any of them are in MNI coordinates, a few millimetres apart at most)
+MNI_FAMILIES = ("fsl6", "2009", "2009b", "spm", "colin", "pediatric")
+#: MNI template labels of no known family: "MNI" ("MNI (other)", e.g. one of the user's own templates), MNI305, SPM's
+#: IXI549Space and the ICBM 452 templates
+_OTHER_MNI_LABELS = re.compile(r"^(mni|mni305|ixi549space|icbm452airspace|icbm452warp5space)$")
+#: A user template ("user:<id>", or its BIDS label "user<Id>" as normalize names its outputs): always an MNI template
+_USER_TEMPLATE_LABEL = re.compile(r"^(user:.+|user[A-Z0-9][A-Za-z0-9]*)$")
+
+
+def is_mni_space(space):
+    """True when a space label names an MNI template space: a template of a known MNI family (:func:`space_family`),
+    "MNI" (an MNI template of no known family), MNI305, IXI549Space, the ICBM 452 templates or a user template.
+
+    False for None, native (subject) spaces, other template spaces (Talairach, TT_N27, fsaverage, ...) and labels that
+    are not recognised (e.g. a misspelt "MNI512NLin6Asym"): a lesion in such a space must not be mapped as if it were
+    in MNI space without saying so.
+    """
+    if not space:
+        return False
+    if space_family(space) in MNI_FAMILIES:
+        return True
+    text = str(space).strip()
+    if _USER_TEMPLATE_LABEL.match(text):
+        return True
+    label = text.lower()
+    for prefix in ("tpl-", "space-"):
+        if label.startswith(prefix):
+            label = label[len(prefix):]
+    return bool(_OTHER_MNI_LABELS.match(label.replace("_", "").replace(" ", "")))
+
+
+FAMILY_NAMES = {
+    "fsl6": "MNI152NLin6Asym", "2009": "MNI152NLin2009a/cAsym", "2009b": "MNI152NLin2009bAsym", "spm": "MNI152Lin",
+    "colin": "MNIColin27", "pediatric": "MNIPediatric", "native": "native (subject)", "unknown": "unknown",
+}
+
+
+def family_name(family):
+    """The name of a space family as the app names templates elsewhere ("fsl6" -> "MNI152NLin6Asym")."""
+    return FAMILY_NAMES.get(family, str(family))
+
+
 def same_family(a, b):
     """True when two space labels belong to the same template family (images are comparable without
     a template-family transform). Native (subject) and unknown spaces never share a family.
     """
     family = space_family(a)
     return family not in ("native", "unknown") and family == space_family(b)
+
+
+def family_notice(seed_space, connectome_space):
+    """The note for a lesion (seed) on a template of another MNI family than the connectome, or "" when
+    the families match, either space is not known, the lesion is not in an MNI template space (a native space, Talairach
+    or a label that is not recognised: engine.native_space_notice) or the connectome's family is not known (the text
+    recorded in run.json, qa.json, the sidecars and methods; the Map module shows the same note).
+    "MNI" (an MNI template of no known family, e.g. one of the user's own templates) is "MNI (other)".
+    """
+    if not seed_space or not connectome_space:
+        return ""
+    connectome_family = space_family(connectome_space)
+    if connectome_family in ("native", "unknown") or space_family(seed_space) == connectome_family or not is_mni_space(seed_space):
+        return ""  # a lesion in a native (subject) or non-MNI space is not a template-family question (engine.native_space_notice)
+    shown = "MNI (other)" if seed_space == "MNI" else seed_space
+    return (f"The lesion is on {shown}, the connectome on {connectome_space}: the template families are a few millimetres apart, "
+            "so the map is approximate near subcortical structures.")
 
 
 def resample_to_grid(src_data, src_affine, dst_grid, mode="fraction", supersample=2, max_points=4_000_000):

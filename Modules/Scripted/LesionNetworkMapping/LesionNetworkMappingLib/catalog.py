@@ -63,6 +63,9 @@ STORED_SAMPLE_BYTES = 2
 STORED_NORM_BYTES = 4
 #: Bytes per sample of a run kept in memory or staged between two archives (float32)
 STAGED_SAMPLE_BYTES = 4
+#: Bytes per sample of the runs in the archives of a streamed converter (float32: GSP NIfTI runs, Lead-DBS gmtc), so a
+#: bundle whose size the catalog does not state holds at least about STORED_SAMPLE_BYTES / ARCHIVE_SAMPLE_BYTES of its archives
+ARCHIVE_SAMPLE_BYTES = 4
 _DOI_PATTERN = re.compile(r"^10\.\d{4,9}/\S+$")
 _ARCHIVE_SUBSET_PATTERN = re.compile(r"^archives:\s*(.+)$", re.IGNORECASE)
 _SUBJECT_SUBSET_PATTERN = re.compile(r"^subjects:\s*(\d+)$", re.IGNORECASE)
@@ -412,13 +415,17 @@ def disk_plan(entry, subset=None, keep_archives=False):
 
     - ``download``: the selected archives plus every other file of the entry (metadata, participants, docs);
     - ``stored``: the converted bundle (float16), the high end of ``stored_range`` ([low, high], scaled by the
-      subset's fraction of the subjects); None when the catalog cannot estimate it;
+      subset's fraction of the subjects; for a subject subset of a converter that keeps every subject of the archives
+      read, the fraction of those archives); None when the catalog cannot estimate it;
     - ``peak``: the most space in use at once. Streamed converters keep no archive (unless ``keep_archives``):
       the bundle, the small files and the runs staged between two archives. Other entries keep the download
       next to what is converted from it. None for link-out entries (nothing is downloaded by the app) and
       when the bundle size is unknown.
+    - ``peak_min``: a lower bound of the peak when the peak is unknown for a streamed converter (the bundle keeps the
+      runs of the archives as float16, at least half of their float32 bytes); otherwise None. Checked like the peak, so
+      a destination that cannot hold even this is refused before anything is written.
 
-    :return: dict with download, stored, stored_range, peak, staging, archives (names), subjects, exact
+    :return: dict with download, stored, stored_range, peak, peak_min, staging, archives (names), subjects, exact
       (whether the download is exact) and notes.
     """
     selection = resolve_subset(entry, subset)
@@ -432,13 +439,23 @@ def disk_plan(entry, subset=None, keep_archives=False):
         sizes_known = _is_count(entry.get("size"))
         download = entry["size"] if sizes_known else None
     fraction = selection["fraction"]
+    kept_subjects = selection["subjects"]
+    if not selection["exact"] and entry.get("converter") != "leaddbs_vol" and selection["archives"]:
+        # Only Lead-DBS keeps just the subset's subjects; other converters keep every subject of the archives read, so the
+        # bundle is planned as the archive subset (the archives' share of the archive bytes, as for "archives:...")
+        all_files = archives(entry)
+        archive_bytes = sum(f.get("size") or 0 for f in all_files)
+        chosen_bytes = sum(f.get("size") or 0 for f in selection["archives"])
+        fraction = max(fraction, chosen_bytes / archive_bytes if archive_bytes else len(selection["archives"]) / len(all_files))
+        total_subjects = disk.get("subjects") or (entry.get("population") or {}).get("n")
+        kept_subjects = max(kept_subjects or 0, round(total_subjects * fraction)) if total_subjects else kept_subjects
     notes = []
     stored_range = None
     if disk.get("stored_bytes"):
         stored_range = [round(disk["stored_bytes"][0] * fraction), round(disk["stored_bytes"][1] * fraction)]
-    elif disk.get("voxels") and disk.get("timepoints_per_run") and disk.get("runs_per_subject") and selection["subjects"]:
+    elif disk.get("voxels") and disk.get("timepoints_per_run") and disk.get("runs_per_subject") and kept_subjects:
         per_run = disk["voxels"] * (disk["timepoints_per_run"] * STORED_SAMPLE_BYTES + STORED_NORM_BYTES)
-        stored_range = [per_run * runs * selection["subjects"] for runs in disk["runs_per_subject"]]
+        stored_range = [per_run * runs * kept_subjects for runs in disk["runs_per_subject"]]
     if stored_range is None and entry.get("status") != "link_out":
         notes.append("The bundle size is not known before the conversion.")
     staging = 0
@@ -458,13 +475,27 @@ def disk_plan(entry, subset=None, keep_archives=False):
                 notes.append("Archives are streamed into the bundle and never stored.")
         elif download is not None:
             peak = download + kept
+    peak_min = None
+    if peak is None and not link_out(entry) and entry.get("converter") in STREAM_CONVERTERS and download is not None:
+        # The bundle size is known only at conversion (Lead-DBS: from the mask in dataset_volsurf.mat), but the runs in the
+        # archives are float32 and the bundle keeps them as float16: it needs at least about half of the archive bytes
+        # of the subjects it keeps (the subset's fraction of all the archives), next to the small files
+        all_archives = sum(f.get("size") or 0 for f in files if f.get("role") == "archive")
+        other_bytes = sum(f.get("size") or 0 for f in others)
+        bundle_min = round(all_archives * fraction * STORED_SAMPLE_BYTES / ARCHIVE_SAMPLE_BYTES)
+        peak_min = bundle_min + other_bytes + (download - other_bytes if keep_archives else 0)
     if not selection["exact"]:
         notes.append("The archives of a subject subset are estimated: subjects are assumed spread evenly over the archives in order.")
+        if entry.get("converter") == "leaddbs_vol":
+            notes.append("Only the subset's subjects are kept, and the next archives are read too when these do not hold all of them.")
+        else:
+            notes.append("The bundle holds every subject of these archives, and records them as the archives read when that is not the subset.")
     return {
         "download": download,
         "stored": stored,
         "stored_range": stored_range,
         "peak": peak,
+        "peak_min": peak_min,
         "staging": staging,
         "archives": [f["name"] for f in selection["archives"]],
         "subjects": selection["subjects"],

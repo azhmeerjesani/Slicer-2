@@ -3,9 +3,10 @@
 This module is the single source of truth for two questions that several Studio pages ask:
 
 - **Is this image on an MNI grid?** ``spaceOf(node)`` answers with ``(spaceName, resolutionMm)`` or None:
-  the node attribute ``Studio.Space`` first (written by normalization), else an exact table of the known template
-  grids (``KNOWN_GRIDS``, ±0.01 mm), else ``LesionNetworkMappingLib.geometry.detect_space`` with the same tolerance
-  when that library is importable, which also knows the grids of the user's own templates (A-10: ``templates`` registers
+  the node attribute ``Studio.Space`` first (written by normalization), else (for a segmentation) the ``Studio.Space``
+  of a volume on exactly its grid (a lesion drawn on a template is in the template's space), else an exact table of the known template
+  grids (``KNOWN_GRIDS``, ±0.01 mm), else ``LesionNetworkMappingLib.geometry.detect_space`` (origin tolerance 1 mm, as
+  Map's seed check and the engine) when that library is importable, which also knows the grids of the user's own templates (A-10: ``templates`` registers
   them; an anisotropic one is matched by its exact grid). A grid is compared through the RAS positions of its voxel
   centres, so a template stored LAS (FSL) or RAS (TemplateFlow) is recognized either way. ``hemisphereWord()``
   returns "Left", "Right" or "Both hemispheres" only on an MNI grid: in scanner space x = 0 is not the midline.
@@ -43,6 +44,10 @@ KNOWN_GRIDS = (
 )
 #: Tolerance of the built-in table (mm)
 GRID_TOLERANCE_MM = 0.01
+#: Origin tolerance of ``geometry.detect_space`` (mm): the verdict of Map's seed check, study intake and the engine CLI
+#: (``geometry.detect_grid``'s own default), so Draw, Map and the Normalize card give one answer for a lesion file that is a
+#: fraction of a voxel off a template grid (TemplateFlow files, resampled masks)
+DETECT_ORIGIN_TOLERANCE_MM = 1.0
 
 
 #
@@ -152,8 +157,8 @@ def tableSpace(dims, ijkToRas, tolerance=GRID_TOLERANCE_MM):
 def _detectSpace(source):
     """``LesionNetworkMappingLib.geometry.detect_space(source)`` when that library is importable (``False`` otherwise).
 
-    Its origin tolerance is ``GRID_TOLERANCE_MM``, as for the built-in table: a scan grid 1 mm away from a template grid
-    is not a template grid.
+    Its origin tolerance is ``DETECT_ORIGIN_TOLERANCE_MM`` (the Map seed check's and the engine's), not the exact table's
+    ``GRID_TOLERANCE_MM``: a file 0.5 mm off a template grid is on that template for every route; one more than 1 mm off is not.
     """
     try:
         from LesionNetworkMappingLib import geometry
@@ -166,7 +171,7 @@ def _detectSpace(source):
     if detect is None:
         return False
     try:
-        result = detect(source, origin_tolerance=GRID_TOLERANCE_MM)
+        result = detect(source, origin_tolerance=DETECT_ORIGIN_TOLERANCE_MM)
     except Exception:
         return False
     if result is None:
@@ -184,6 +189,59 @@ def _templatesModule():
         return templates
     except Exception:
         return None
+
+
+def _sameWorldGrid(firstGrid, secondGrid, tolerance=GRID_TOLERANCE_MM):
+    """True when two ``(dims, ijkToRas)`` grids put their voxel centres at the same RAS positions (any storage order)."""
+    first, second = worldBox(*firstGrid), worldBox(*secondGrid)
+    if first is None or second is None:
+        return (tuple(firstGrid[0]) == tuple(secondGrid[0])
+                and bool(np.all(np.abs(np.asarray(firstGrid[1], dtype=float) - np.asarray(secondGrid[1], dtype=float)) <= tolerance)))
+    return (first[0] == second[0] and bool(np.all(np.abs(first[1] - second[1]) <= tolerance))
+            and bool(np.all(np.abs(first[2] - second[2]) <= tolerance)))
+
+
+def _sharedGridSpace(segmentationNode, grid):
+    """The space named by the ``Studio.Space`` attribute of a volume that is on exactly the lesion's grid (its reference
+    volume first, then any volume of the scene), else None.
+
+    A lesion drawn on one of your templates keeps that template's space where the template's grid is not registered: a
+    project opened on another computer (its template volume in Images/ still says ``Studio.Space``), or a template removed
+    in Settings while it is open (A-10).
+    """
+    scene = segmentationNode.GetScene() if hasattr(segmentationNode, "GetScene") else None
+    if scene is None:
+        return None
+    role = slicer.vtkMRMLSegmentationNode.GetReferenceImageGeometryReferenceRole()
+    candidates = [segmentationNode.GetNodeReference(role)]
+    volumes = scene.GetNodesByClass("vtkMRMLVolumeNode")
+    volumes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
+    candidates += [volumes.GetItemAsObject(index) for index in range(volumes.GetNumberOfItems())]
+    seen = set()
+    for volume in candidates:
+        if volume is None or not volume.IsA("vtkMRMLVolumeNode") or volume.GetID() in seen:
+            continue
+        seen.add(volume.GetID())
+        if not volume.GetAttribute(SPACE_ATTRIBUTE) or volume.GetParentTransformNode() is not None:
+            continue
+        volumeGrid = gridOf(volume)
+        if volumeGrid is None or not _sameWorldGrid(grid, volumeGrid):
+            continue
+        found = spaceOf(volume)
+        if found is not None:
+            return found
+    return None
+
+
+def sharedGridSpace(segmentationNode):
+    """The space of a volume tagged ``Studio.Space`` that is on exactly the grid of ``segmentationNode`` (its reference
+    volume first), else None (also for a segmentation under a parent transform). A lesion drawn on one of your templates
+    is in the space you chose for the template, also when the template's grid is a built-in grid (Map's seed space).
+    """
+    if segmentationNode is None or not segmentationNode.IsA("vtkMRMLSegmentationNode") or segmentationNode.GetParentTransformNode() is not None:
+        return None
+    grid = gridOf(segmentationNode)
+    return _sharedGridSpace(segmentationNode, grid) if grid is not None else None
 
 
 def _userTemplateGridSpace(dims, ijkToRas):
@@ -209,8 +267,10 @@ def spaceOf(nodeOrGeometry):
     """``(spaceName, resolutionMm)`` of an image on an MNI grid, None otherwise (scanner space, figures, unknown grids).
 
     The node attribute ``Studio.Space`` ("MNI152NLin6Asym", optionally with the resolution: "MNI152NLin6Asym 2") wins;
-    else the built-in ``KNOWN_GRIDS``; else ``LesionNetworkMappingLib.geometry.detect_space`` when it is importable (more
-    spaces and resolutions, with the same ±0.01 mm origin tolerance).
+    else, for a segmentation, the ``Studio.Space`` of a volume on exactly its grid (``_sharedGridSpace``: a lesion drawn
+    on one of your templates is in the space you chose for it, even on a built-in grid); else the built-in
+    ``KNOWN_GRIDS``; else ``LesionNetworkMappingLib.geometry.detect_space`` when it is importable (more spaces and
+    resolutions, origin tolerance 1 mm like Map's seed check); else your templates' unregistered grids.
     A node under a parent transform is only recognized by its attribute (its grid is not where the file put it).
     """
     node = nodeOrGeometry if hasattr(nodeOrGeometry, "GetAttribute") else None
@@ -235,7 +295,14 @@ def spaceOf(nodeOrGeometry):
     if grid is None:
         return None
     dims, ijkToRas = grid
-    detected = tableSpace(dims, ijkToRas)
+    detected = None
+    if node is not None and node.IsA("vtkMRMLSegmentationNode"):
+        # A lesion on the grid of a volume whose space is known is in that volume's space: a lesion drawn on one of your
+        # templates whose grid is also a built-in grid (the 91x109x91 FSL grid added as MNI152Lin) is in the space you
+        # chose for the template, not the grid's built-in space; and a template not registered on this computer
+        detected = _sharedGridSpace(node, grid)
+    if detected is None:
+        detected = tableSpace(dims, ijkToRas)
     if detected is None:
         detected = _detectSpace((dims, ijkToRas)) or None
     if detected is None:

@@ -37,8 +37,10 @@ writes ``.studio/inbox/<utc>-<pid>-<source>.json``, and the session merges them 
 
 import copy
 import contextlib
+import csv
 import datetime
 import hashlib
+import io
 import json
 import logging
 import math
@@ -46,6 +48,7 @@ import os
 import re
 import threading
 import time
+import zlib
 
 from . import schema
 
@@ -99,6 +102,8 @@ LOCK_STALE_S = 30
 LOCK_TIMEOUT_S = 40
 #: Reasons of rows that Study.analysis_rows excludes (plus "missing <column>" and "not a number: <column>")
 EXCLUDED_INCLUDE = "include=0"
+#: A lesion marked "QC fail" (the qc column, Library ▸ QC) is never analysed: every analysis and Run everything leave it out
+EXCLUDED_QC = "qc=fail"
 EXCLUDED_REVIEW = "review_status != approved"
 EXCLUDED_NORM_QC = "norm_qc != pass"
 EXCLUDED_AUTO = "automatic segmentation not approved"
@@ -151,6 +156,10 @@ def participant_label(subject_id):
     return f"sub-{label}"
 
 
+def _case_twin_message(sid, twin):
+    return f"Subject {sid} differs from {twin} only in letter case: on macOS they would share files"
+
+
 def format_value(value):
     """TSV text of a value: "n/a" for None, NaN and empty text; "1"/"0" for booleans; comma-separated sequences."""
     if value is None:
@@ -188,39 +197,161 @@ def _nifti_stem(path):
     return None
 
 
+def _is_relative_to(path, folder):
+    """Whether ``path`` is ``folder`` or inside it (absolute paths; letter case as the platform compares it)."""
+    path, folder = os.path.normcase(path), os.path.normcase(folder)
+    try:
+        return os.path.commonpath([path, folder]) == folder
+    except ValueError:  # another drive
+        return False
+
+
+_BIDS_SESSION = re.compile(r"(?:^|_)ses-([A-Za-z0-9]+)(?=_|$)")
+
+
+def _bids_session(path):
+    """The BIDS session label of a file ("2" for sub-01_ses-2_T1w.nii.gz or .../ses-2/anat/...), or None."""
+    path = os.path.abspath(os.fspath(path))
+    parts = [_nifti_stem(path) or os.path.basename(path)]
+    folder = os.path.dirname(path)
+    for _ in range(3):  # sub-01/ses-2/anat/file
+        parts.append(os.path.basename(folder))
+        folder = os.path.dirname(folder)
+    for part in parts:
+        match = _BIDS_SESSION.search(part)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _same_grid(header, other, tolerance=1e-3):
+    """Whether two NIfTI headers describe the same voxel grid (shape and voxel-to-RAS matrix)."""
+    if tuple(header["shape"][:3]) != tuple(other["shape"][:3]):
+        return False
+    a, b = header["affine"], other["affine"]
+    return all(abs(float(a[i][j]) - float(b[i][j])) <= tolerance for i in range(4) for j in range(4))
+
+
+def _header_space(header, grid_answers=None):
+    """Template space of a NIfTI header's grid: the space of any registry grid (ATLAS/McGill 2009a, SPM, the user's
+    registered MNI templates, ...), else "native". An ambiguous grid gives its answer in ``grid_answers`` ({grid id:
+    space}, study.json), else its default space.
+    """
+    from .geometry import NATIVE_SPACE, detect_grid_candidates
+
+    match = detect_grid_candidates(header["shape"][:3], header["affine"])
+    if match is None:
+        return NATIVE_SPACE
+    return (grid_answers or {}).get(match.grid_id) or match.space
+
+
 def detect_file_space(path):
-    """Template space of a NIfTI file from its header: "MNI152NLin6Asym", "MNI152NLin2009cAsym" or "native"."""
-    from .geometry import detect_space
+    """Template space of a NIfTI file from its header: the space of any registry grid (e.g. "MNI152NLin6Asym",
+    "MNI152NLin2009cAsym", "MNI152NLin2009aSym", "MNI152Lin") or "native".
+    """
     from .nifti import read_nifti_header
 
-    header = read_nifti_header(path)
-    return detect_space(header["shape"][:3], header["affine"])
+    return _header_space(read_nifti_header(path))
+
+
+class TableError(ValueError):
+    """A problem with the user's table file (its encoding, its columns): the message says what to do about it.
+
+    ``user_problem`` lets the application show the message without logging a traceback (it is not a program error).
+    """
+
+    user_problem = True
+
+
+def decode_table(data, path):
+    """The text of the bytes of a TSV or CSV table (UTF-8, with or without a byte order mark).
+
+    :raises TableError: for any other encoding (Windows-1252 and UTF-16 are what Excel writes), with what to do.
+    """
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        name = os.path.basename(os.fspath(path))
+        raise TableError(f"{name} is not saved as UTF-8 text (for example as Windows-1252 or UTF-16 by Excel). "
+                         "Save the table as UTF-8 (in Excel: Save As > CSV UTF-8, then rename it to .tsv if needed; "
+                         "in a text editor: Save with encoding UTF-8) and try again.") from None
 
 
 def read_tsv(path):
     """Read a TSV table: (column names, list of row dicts). Empty values become "n/a".
 
+    A value in double quotes may contain tabs, line breaks and doubled quotes (BIDS escapes a tab
+    that way, and pandas, R and spreadsheets write such values so).
+
     :raises ValueError: for duplicate or empty column names, or a row with more non-empty values
-      than there are columns (they would be lost on the next save); extra empty fields are ignored.
+      than there are columns (they would be lost on the next save); extra empty fields are ignored,
+      and so are empty column names at the end of the header (spreadsheets write them as trailing tabs).
+      A table that is not UTF-8 text raises :class:`TableError` (a ``ValueError``) that says so.
     """
-    with open(path, encoding="utf-8-sig", newline="") as f:
-        return _parse_tsv(f.read(), path)
+    with open(path, "rb") as f:
+        data = f.read()
+    return _parse_tsv(decode_table(data, path), path)
+
+
+def _tsv_records_plain(text):
+    """Records of a TSV text that has no quoting: [(line number, values)], one per line."""
+    return [(number, line.rstrip("\r").split("\t")) for number, line in enumerate(text.split("\n"), start=1)]
+
+
+def _tsv_records_quoted(text):
+    """Records of a TSV text with double-quoted values ([(first line number, values)]); None when the quoting is broken."""
+    reader = csv.reader(io.StringIO(text, newline=""), delimiter="\t", quotechar='"', doublequote=True, strict=True)
+    records, line = [], 1
+    try:
+        for values in reader:
+            records.append((line, values))
+            line = reader.line_num + 1
+    except csv.Error:
+        return None
+    return records
+
+
+def _tsv_records(text):
+    """Records of a TSV text: [(first line number, values)].
+
+    Values in double quotes are read as CSV readers do. A text whose quoting is broken, or whose
+    quoted reading gives rows of the wrong length while the plain one does not (a file written
+    before quoting, with a value that starts with a lone quote), is read without quoting as before.
+    """
+    plain = _tsv_records_plain(text)
+    if '"' not in text:
+        return plain
+    quoted = _tsv_records_quoted(text)
+    if quoted is None:
+        return plain
+
+    def regular(records):
+        records = [values for _number, values in records if any(value.strip() for value in values)]
+        width = len(records[0]) if records else 0
+        return all(len(values) == width or (len(values) > width and not any(v.strip() for v in values[width:])) for values in records)
+
+    return quoted if regular(quoted) or not regular(plain) else plain
 
 
 def _parse_tsv(text, path):
-    """:func:`read_tsv` of the file text (``path`` is only used in messages)."""
-    lines = [(number, line.rstrip("\r")) for number, line in enumerate(text.split("\n"), start=1)]
-    lines = [(number, line) for number, line in lines if line.strip()]
-    if not lines:
+    """:func:`read_tsv` of the file text (``path`` is only used in messages).
+
+    Tabs and line breaks inside a quoted value become one space, as :func:`format_value` writes them,
+    so that a table read back equals the one written.
+    """
+    records = [(number, [re.sub(r"[\t\r\n]+", " ", value).strip() for value in values]) for number, values in _tsv_records(text)]
+    records = [(number, values) for number, values in records if any(values)]
+    if not records:
         return [], []
-    columns = [name.strip() for name in lines[0][1].split("\t")]
+    columns = records[0][1]
+    while columns and not columns[-1]:
+        columns = columns[:-1]  # empty names after the last column: trailing tabs; values under them are refused below
     if len(set(columns)) != len(columns) or not all(columns):
-        raise ValueError(f"{path}: duplicate or empty column names")
+        raise TableError(f"{os.path.basename(os.fspath(path))}: duplicate or empty column names")
     rows = []
-    for number, line in lines[1:]:
-        values = [value.strip() for value in line.split("\t")]
+    for number, values in records[1:]:
         if any(values[len(columns):]):
-            raise ValueError(f"{path}, line {number}: {len(values)} fields but only {len(columns)} columns; add a column name for the extra values or remove them")
+            raise TableError(f"{os.path.basename(os.fspath(path))}, line {number}: {len(values)} fields but only {len(columns)} columns; add a column name for the extra values or remove them")
         values += [NA] * (len(columns) - len(values))
         rows.append({column: value or NA for column, value in zip(columns, values[: len(columns)], strict=True)})
     return columns, rows
@@ -231,9 +362,46 @@ def write_tsv(path, columns, rows):
     _write_text_atomic(path, _tsv_text(columns, rows))
 
 
+#: Characters that open a quotation: a straight double quote after one of them (or at the start) becomes an opening quote
+_OPENING_CONTEXT = "([{<\u2018\u201c-\u2013\u2014/"
+
+
+def typographic_quotes(text):
+    """``text`` with each straight double quote (") replaced by a typographic one (“ or ”).
+
+    Official 3D Slicer reads tables with VTK's delimited text reader, which takes every straight double
+    quote as the start or end of a quoted string and knows no escaped quote: "Müller "et al." 2020"
+    comes back as "et al. 2020", and an odd number of quotes merges the rest of the row into one cell.
+    No spelling of a straight quote reads the same there and in BIDS tools (pandas, R, the csv module),
+    so Studio writes the typographic quote, which all of them keep as it is. A quote at the start or
+    after a space or an opening bracket opens (“), any other closes (” also serves as an inch mark).
+    """
+    if '"' not in text:
+        return text
+    out = []
+    for index, char in enumerate(text):
+        if char == '"':
+            before = text[index - 1] if index else ""
+            char = "“" if not before or before.isspace() or before in _OPENING_CONTEXT else "”"
+        out.append(char)
+    return "".join(out)
+
+
+def _tsv_field(text):
+    """A TSV cell that official 3D Slicer and BIDS tools read alike.
+
+    Straight double quotes become typographic ones (:func:`typographic_quotes`); a cell with a tab or a
+    line break is put in double quotes (both readers keep it whole then).
+    """
+    text = typographic_quotes(text)
+    if "\t" in text or "\n" in text or "\r" in text:
+        return '"' + text.replace('"', '""') + '"'
+    return text
+
+
 def _tsv_text(columns, rows):
-    lines = ["\t".join(columns)]
-    lines += ["\t".join(format_value(row.get(column)) for column in columns) for row in rows]
+    lines = ["\t".join(_tsv_field(column) for column in columns)]
+    lines += ["\t".join(_tsv_field(format_value(row.get(column))) for column in columns) for row in rows]
     return "\n".join(lines) + "\n"
 
 
@@ -267,8 +435,110 @@ def _normalize(column, text):
     return schema.normalize_value(column, text)
 
 
-def _included(row):
-    return str(row.get("include", "1")).strip().lower() not in ("0", "false", "no")
+#: Spellings of include values (any case) that keep their meaning, besides numbers equal to 1 or 0 (:func:`include_value`)
+INCLUDE_WORDS = {"1": "1", "true": "1", "yes": "1", "y": "1", "0": "0", "false": "0", "no": "0", "n": "0"}
+
+
+def include_value(value):
+    """The canonical include value ("1" or "0") of a cell, or None when it is missing or not an include value.
+
+    Besides 1 and 0 it accepts :data:`INCLUDE_WORDS` and numbers equal to 1 or 0, which is how pandas and
+    spreadsheets write the column ("1.0", "0.0", for example when a column of integers has an empty cell).
+    """
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in INCLUDE_WORDS:
+        return INCLUDE_WORDS[text]
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    return "1" if number == 1 else "0" if number == 0 else None
+
+
+def canonical_value(column, value):
+    """The allowed value (:data:`ALLOWED_VALUES`) that a cell of a standard column with fixed values means, or None.
+
+    Include values go through :func:`include_value` ("yes", "1.0" give "1"); the other columns accept their allowed values
+    in another case ("Traced" gives "traced"). Values that mean none of them ("alive" in a status column) give None, as do
+    columns without fixed values.
+    """
+    allowed = ALLOWED_VALUES.get(column)
+    if allowed is None or value is None:
+        return None
+    text = str(value).strip()
+    if text in allowed:
+        return text
+    if column == "include":
+        return include_value(text)
+    return next((v for v in allowed if v == text.lower()), None)
+
+
+#: Values of the space column besides "native": the BIDS standard template identifiers (BIDS appendix "Coordinate
+#: systems"), the TemplateFlow spellings Studio writes (MNI152NLin6Asym) and "MNI" (an MNI template of another family,
+#: Slicer Studio's own templates). A space column holding anything else ("3T", a field strength) is a user's column.
+SPACE_LABELS = (
+    "native", "MNI", "MNI152Lin", "MNI152NLin2009aSym", "MNI152NLin2009bSym", "MNI152NLin2009cSym", "MNI152NLin2009aAsym",
+    "MNI152NLin2009bAsym", "MNI152NLin2009cAsym", "MNI152NLin6Sym", "MNI152NLin6Asym", "MNI152NLin6ASym", "MNI305", "MNIColin27",
+    "MNIInfant", "MNIPediatricAsym", "ICBM452AirSpace", "ICBM452Warp5Space", "IXI549Space", "NKI", "OASIS30AntsOASISAnts",
+    "OASIS30Atropos", "Talairach", "UNCInfant", "fsaverage", "fsaverageSym", "fsLR", "fsaverage3", "fsaverage4", "fsaverage5",
+    "fsaverage6",
+)
+_SPACE_LABELS_FOLDED = {label.casefold() for label in SPACE_LABELS}
+
+
+def is_space_value(value):
+    """Whether a cell can be the study's space column: missing, "native" or a template space (:data:`SPACE_LABELS`, any case)."""
+    return is_missing(value) or str(value).strip().casefold() in _SPACE_LABELS_FOLDED
+
+
+def is_included(row):
+    """True unless the row's include value means 0 (:func:`include_value`); the one test every reader uses."""
+    return include_value((row or {}).get("include", "1")) != "0"
+
+
+_included = is_included
+
+
+def _canonical_cells(rows, path, fill_absent=False):
+    """Write the standard columns with fixed values (:data:`ALLOWED_VALUES`) of rows read from a file as Studio does.
+
+    Tables edited outside Studio can hold other spellings: an include column written by pandas holds "1.0" / "0.0"
+    and empty cells. Include values are made "1" or "0" (:func:`include_value`), other values in another case
+    ("Traced") the allowed one, and missing cells (empty, "n/a" or "nan") the default (:data:`DEFAULTS`), so that every
+    reader sees the same values and the next save repairs the file. Unknown values are kept (with a warning).
+
+    :param fill_absent: also give a missing column its default (on open; a merge treats a column missing on disk as
+      unchanged there).
+    """
+    unknown = {}
+    for row in rows:
+        for column, allowed in ALLOWED_VALUES.items():
+            if column not in row:
+                if fill_absent:
+                    row[column] = DEFAULTS.get(column, NA)
+                continue
+            value = row[column]
+            if value in allowed:
+                continue
+            text = str(value).strip().lower()
+            if is_missing(text) or text == "nan":
+                row[column] = DEFAULTS.get(column, NA)
+                continue
+            canonical = canonical_value(column, text)
+            if canonical is None:
+                unknown.setdefault(column, []).append(row.get("participant_id"))
+            else:
+                row[column] = canonical
+    for column, sids in unknown.items():
+        logging.warning(f"{path}: {column} has values other than {', '.join(ALLOWED_VALUES[column])} ({', '.join(map(str, sids[:5]))}"
+                        f"{', ...' if len(sids) > 5 else ''}); they are kept as they are")
+
+
+def qc_failed(row):
+    """True when the row's lesion is marked "QC fail" (qc = fail): analyses leave it out (:data:`EXCLUDED_QC`)."""
+    return str(row.get("qc") or "").strip().lower() == "fail"
 
 
 def _digest(data):
@@ -354,7 +624,8 @@ class Study:
     ``dictionary`` is the participants.json data dictionary ({column: entry}). ``validation_warnings``
     collects (participant_id, column, value, message) for values of lenient registry columns that
     were kept although unknown (for example ``sex`` = "unknown"). ``inbox_errors`` lists
-    (file, participant_id, message) for inbox values that :meth:`apply_inbox` rejected.
+    (file, participant_id, message) for inbox values that :meth:`apply_inbox` rejected, and
+    ``inbox_held`` (file, [participant ids]) for the files that the last :meth:`apply_inbox` held back.
     """
 
     #: Registry folder of the control sets (<Studio/LNM/DataDirectory>/ControlSets) that ``controlset:`` paths resolve
@@ -367,9 +638,11 @@ class Study:
         self.dictionary = dict(dictionary or {})
         self.validation_warnings = []
         self.inbox_errors = []
+        self.inbox_held = []
         self._columns = list(columns)
         self._rows = []
         self._index = {}
+        self._folded = {}  # {casefolded id: [ids]}: ids that differ only in case name one file on macOS
         for row in rows:
             self._insert(row)
         self._baseline = None  # state of the files when last read or written (merge-save)
@@ -433,12 +706,13 @@ class Study:
         tsv = os.path.join(path, PARTICIPANTS_TSV)
         data = _read_bytes(tsv) if os.path.isfile(tsv) else None
         digests[PARTICIPANTS_TSV] = _digest(data)
-        columns, rows = _parse_tsv(data.decode("utf-8-sig"), tsv) if data is not None else ([], [])
+        columns, rows = _parse_tsv(decode_table(data, tsv), tsv) if data is not None else ([], [])
         if columns and "participant_id" not in columns:
             raise ValueError(f"{tsv} has no participant_id column")
         # participant_id first, other columns in file order, then the missing standard columns
         columns = ["participant_id"] + [c for c in columns if c != "participant_id"]
         columns += [c for c in STANDARD_COLUMNS if c not in columns]
+        _canonical_cells(rows, tsv, fill_absent=True)
         dictionary_path = os.path.join(path, PARTICIPANTS_JSON)
         dictionary, dictionary_error, data = {}, None, None
         try:
@@ -490,6 +764,10 @@ class Study:
         # The baseline is the digest of the text written (not of the file afterwards), so that a file
         # replaced by a lockless writer right after this write is still merged by the next save
         digests = dict(self._digests)
+        for row in self._rows:  # memory holds what the file holds (_tsv_field writes typographic quotes)
+            for column, value in row.items():
+                if type(value) is str and '"' in value and column != "participant_id":  # ids index the rows
+                    row[column] = typographic_quotes(value)
         text = _tsv_text(self._columns, self._rows)
         _write_text_atomic(tsv_path, text)
         digests[PARTICIPANTS_TSV] = _digest(text)
@@ -563,7 +841,8 @@ class Study:
 
         tsv_path, data = changed(PARTICIPANTS_TSV)
         if data is not None:
-            columns, rows = _parse_tsv(data.decode("utf-8-sig"), tsv_path)
+            columns, rows = _parse_tsv(decode_table(data, tsv_path), tsv_path)
+            _canonical_cells(rows, tsv_path)
             self._merge_rows(base["rows"], columns, rows, conflicts)
         _, data = changed(STUDY_JSON)
         if data is not None:
@@ -668,6 +947,18 @@ class Study:
     def __contains__(self, sid):
         return sid in self._index
 
+    def case_twin(self, sid):
+        """The subject id that differs from ``sid`` only in letter case ("sub-P01" for "sub-p01"), else None.
+
+        Subject ids name files (lesions/<sid>_...), and on a case-insensitive disk (the macOS default) such
+        ids would share one file, so new subjects may not be case twins of existing ones.
+        """
+        return next((other for other in self._folded.get(str(sid).casefold(), ()) if other != sid), None)
+
+    def id_taken(self, sid):
+        """True when ``sid`` is a subject id of the study or differs from one only in letter case."""
+        return sid in self._index or self.case_twin(sid) is not None
+
     def __repr__(self):
         return f"Study({self.name!r}, subjects={len(self)})"
 
@@ -688,6 +979,13 @@ class Study:
             return resolve_path(path, self.controlset_root)
         return path if os.path.isabs(path) else os.path.normpath(os.path.join(self.path, *path.split("/")))
 
+    def _same_file(self, a, b):
+        """Whether two table paths (relative or absolute) name one file."""
+        if a == b:
+            return True
+        pa, pb = self.abspath(a), self.abspath(b)
+        return pa is not None and pb is not None and os.path.normcase(os.path.normpath(pa)) == os.path.normcase(os.path.normpath(pb))
+
     def relpath(self, path):
         """Table path of a file: relative to the study with "/" separators (absolute if on another drive)."""
         path = os.path.abspath(os.fspath(path))
@@ -695,6 +993,40 @@ class Study:
             return os.path.relpath(path, self.path).replace(os.sep, "/")
         except ValueError:
             return path
+
+    def follow_move(self, old_path, moved=None):
+        """Make the table paths that leave the study ("../...") point at their files again after the study folder moved.
+
+        The study was at ``old_path`` and is now at :attr:`path`. A relative path to a file outside the study (one that
+        Add files referenced in place) would otherwise resolve from the new place, which is a different file or none when
+        the new folder is at another depth. Such a path is written again relative to the new place. ``moved`` maps the
+        absolute path a file had before the move to where it is now (files that moved with the study's parent folder);
+        files that stayed where they were are found at their old path. Paths inside the study, "controlset:" paths,
+        absolute paths and paths whose file is missing are kept. Running it again changes nothing. Changes the table
+        in memory (save it with :meth:`save`); return the number of cells changed.
+        """
+        old_path = os.path.normpath(os.path.abspath(os.fspath(old_path)))
+        if os.path.normcase(old_path) == os.path.normcase(os.path.normpath(self.path)):
+            return 0
+        columns = [column for column in self._columns if column in ("scan", "lesion") or self.column_spec(column).type == "path"]
+        changed = 0
+        for row in self._rows:
+            for column in columns:
+                value = row.get(column)
+                if is_missing(value) or value.startswith(CONTROLSET_PREFIX) or os.path.isabs(value):
+                    continue
+                parts = value.split("/")
+                if os.path.normpath(os.path.join(*parts)).split(os.sep)[0] != os.pardir:
+                    continue  # inside the study: it moved with it
+                before = os.path.normpath(os.path.join(old_path, *parts))
+                now = moved(before) if moved is not None else before
+                if not now or not os.path.exists(now):
+                    continue
+                if os.path.normcase(os.path.normpath(self.abspath(value))) == os.path.normcase(os.path.normpath(now)):
+                    continue
+                self.set(row["participant_id"], {column: self.relpath(now)})
+                changed += 1
+        return changed
 
     def lesion_relpath(self, sid, space=None):
         """Table path of a subject's lesion file: lesions/<sid>_space-<space>_desc-lesion_mask.nii.gz."""
@@ -721,6 +1053,7 @@ class Study:
                 full[column] = value
         self._rows.append(full)
         self._index[sid] = full
+        self._folded.setdefault(sid.casefold(), []).append(sid)
         return full
 
     def _row(self, sid):
@@ -748,6 +1081,9 @@ class Study:
         sid = participant_label(sid)
         if sid in self._index:
             raise ValueError(f"Subject {sid} is already in the study")
+        twin = self.case_twin(sid)
+        if twin is not None:
+            raise ValueError(_case_twin_message(sid, twin))
         self._insert({"participant_id": sid})
         try:
             return self.set(sid, values, **fields)
@@ -760,6 +1096,9 @@ class Study:
         row = self._row(sid)
         self._rows = [other for other in self._rows if other is not row]
         del self._index[sid]
+        twins = self._folded.get(sid.casefold(), [])
+        if sid in twins:
+            twins.remove(sid)
 
     def set(self, sid, values=None, **fields):
         """Set cells of a subject's row; unknown columns are added at the end of the table.
@@ -778,7 +1117,7 @@ class Study:
         texts = {}
         warnings = []
         for column, value in updates.items():
-            text = format_value(value)
+            text = typographic_quotes(format_value(value))  # as written to participants.tsv (_tsv_field)
             texts[column], warning = _normalize(column, text)
             if warning:
                 warnings.append((sid, column, text, warning))
@@ -882,9 +1221,19 @@ class Study:
             changes["type"] = "categorical"
         elif role == "score" and spec.type not in ("numeric", "ordinal"):
             changes["type"] = "numeric"
+        if changes.get("type") == "numeric":
+            # Applies to an explicit type and to the numeric type that the score role implies
+            words = sorted({str(row.get(name)) for row in self._rows
+                            if not schema.is_missing(row.get(name)) and schema._number(str(row.get(name))) is None})
+            if words:
+                raise ValueError(f"The values of {name} are not all numbers (for example {', '.join(words[:3])}), "
+                                 "so it cannot be numeric; keep it categorical or text")
         given = {"levels": levels, "units": units, "description": description}
         changes.update({key: value for key, value in given.items() if value is not None})
         spec = spec.replace(**changes)
+        if levels is None and spec.levels and spec.type not in ("categorical", "ordinal"):
+            # The levels were inferred while the column looked categorical: BIDS Levels belong to categorical columns
+            spec = spec.replace(levels=None)
         entry = schema.dictionary_entry(spec, True, self.dictionary.get(name))
         bids = spec.bids_entry()
         for key, field in (("Levels", "levels"), ("Units", "units"), ("Description", "description")):
@@ -932,7 +1281,7 @@ class Study:
         """Columns with the role "block" (exchangeability blocks, such as dataset)."""
         return self._columns_with_role("block")
 
-    def analysis_rows(self, columns=(), include_only=True, require_review=None, require_norm_qc=True):
+    def analysis_rows(self, columns=(), include_only=True, require_review=None, require_norm_qc=True, exclude_qc_fail=True):
         """Rows an analysis may use, with listwise exclusion (missing values are never imputed).
 
         :param columns: columns that must have a value in every row used (numeric columns must hold numbers).
@@ -941,9 +1290,10 @@ class Study:
           :attr:`review_required`. Unless False (a recorded override), an automatic segmentation (an
           ``auto:<tool>`` token in trace_method) that no human approved is excluded whatever the setting.
         :param require_norm_qc: exclude normalized rows (with a norm_method) whose norm_qc is not "pass".
+        :param exclude_qc_fail: exclude rows whose lesion is marked "QC fail" (qc = fail), as Run everything does.
         :return: (copies of the rows used, {reason: [participant ids]}); each excluded row is counted once,
-          under the first reason: :data:`EXCLUDED_INCLUDE`, :data:`EXCLUDED_REVIEW`, :data:`EXCLUDED_AUTO`,
-          :data:`EXCLUDED_NORM_QC`, "missing <column>" or "not a number: <column>".
+          under the first reason: :data:`EXCLUDED_INCLUDE`, :data:`EXCLUDED_QC`, :data:`EXCLUDED_REVIEW`,
+          :data:`EXCLUDED_AUTO`, :data:`EXCLUDED_NORM_QC`, "missing <column>" or "not a number: <column>".
         """
         if isinstance(columns, str):
             columns = (columns,)
@@ -954,6 +1304,8 @@ class Study:
             reason = None
             if include_only and not _included(row):
                 reason = EXCLUDED_INCLUDE
+            elif exclude_qc_fail and qc_failed(row):
+                reason = EXCLUDED_QC
             elif review and row.get("review_status") != "approved":
                 reason = EXCLUDED_REVIEW
             elif require_review is not False and row.get("review_status") != "approved" and any(
@@ -1102,6 +1454,13 @@ class Study:
                 "dimensionality": lesion.get("dimensionality"),
                 "hemisphere": lesion.get("hemisphere"),
             }
+            # The file's size and time (not paths): a run then trusts the cached metrics instead of measuring every control again
+            try:
+                stat = os.stat(controlsets.resolve_path(values["lesion"], root or self.controlset_root))
+                values["lesion_mtime"] = stat.st_mtime
+                values["lesion_size"] = stat.st_size
+            except OSError:
+                values["lesion_mtime"] = values["lesion_size"] = None
             sid = linked.get(lesion["id"])
             if sid is not None:
                 self.set(sid, values)
@@ -1110,6 +1469,10 @@ class Study:
             sid = controlsets.study_participant_id(entry["name"], lesion["id"])
             if sid in self._index:
                 report["skipped"].append({"id": lesion["id"], "reason": f"{sid} is already a subject of the study"})
+                continue
+            twin = self.case_twin(sid)
+            if twin is not None:
+                report["skipped"].append({"id": lesion["id"], "reason": _case_twin_message(sid, twin)})
                 continue
             self.add_subject(sid, values)
             report["added"].append(sid)
@@ -1192,11 +1555,49 @@ class Study:
         schema.write_text_atomic(path, json.dumps(content, ensure_ascii=False) + "\n")
         return path
 
-    def apply_inbox(self, save=True):
+    def unsaved_rows(self):
+        """The cells changed in memory since the files were last read or written: ``({sid: {column: value}}, added, removed)``.
+
+        ``added`` and ``removed`` are the participant ids of rows added or removed in memory (sorted).
+        """
+        base = (self._baseline or {}).get("rows", {})
+        changed, added = {}, []
+        for row in self._rows:
+            sid = row["participant_id"]
+            if sid not in base:
+                added.append(sid)
+                continue
+            values = {column: value for column, value in row.items() if column != "participant_id" and value != base[sid].get(column, NA)}
+            if values:
+                changed[sid] = values
+        removed = sorted(sid for sid in base if sid not in self._index)
+        return changed, sorted(added), removed
+
+    def keep_unsaved(self, reason, source="unsaved"):
+        """Keep the cells changed in memory that :meth:`save` could not write (participants.tsv on disk cannot be read, or
+        it stayed locked) as an inbox file, which the next session merges like a job result (:meth:`apply_inbox`)
+        once the table can be read again. Nothing is written when no cell changed.
+
+        Rows added or removed in memory cannot be posted (the inbox changes existing rows only); they are returned.
+
+        :return: ``(inbox file path or None, [participant ids kept], [ids added or removed that are not kept])``.
+        """
+        changed, added, removed = self.unsaved_rows()
+        path = None
+        if changed:
+            # The study's own folder is not named in the record (no local path in the study's files)
+            reason = str(reason).replace(self.path + os.sep, "").replace(self.path, ".")
+            audit = {"event": "unsaved_kept", "reason": reason, "sids": sorted(changed), "at": now_iso()}
+            path = Study.post_results(self.path, changed, source, audit=audit)
+        return path, sorted(changed), added + removed
+
+    def apply_inbox(self, save=True, hold=None):
         """Merge the values that jobs posted (:meth:`post_result`), oldest first.
 
         Each subject's values are validated together (all or nothing). Unknown subjects and invalid
-        values are listed in :attr:`inbox_errors`. With ``save``, the study is then saved (with merge);
+        values are listed in :attr:`inbox_errors`. ``hold(participant_id, values)`` (optional) returns
+        True for values that must wait: a file with such values is left in the inbox, untouched, for a
+        later merge, and is listed in :attr:`inbox_held`. With ``save``, the study is then saved (with merge);
         otherwise the next :meth:`save` finishes the inbox. After the save, the audit records of the
         files are appended to ``.studio/audit.jsonl`` (a record {"event": "inbox", ...} for files
         without one), applied files are deleted, and files with rejected values move to
@@ -1211,6 +1612,7 @@ class Study:
             return []
         pending = {item["path"] for item in self._pending_inbox}
         applied = []
+        self.inbox_held = []
         for name in names:
             path = os.path.join(folder, name)
             if path in pending:
@@ -1226,6 +1628,11 @@ class Study:
             rows = data.get("rows")
             if not errors and (data.get("format") != INBOX_FORMAT or not isinstance(data.get("version"), int) or data["version"] > INBOX_VERSION or not isinstance(rows, dict)):
                 errors.append((None, f"not a {INBOX_FORMAT} file of version {INBOX_VERSION}"))
+            if not errors and hold is not None:
+                held = [sid for sid, values in rows.items() if sid in self._index and isinstance(values, dict) and hold(sid, values)]
+                if held:
+                    self.inbox_held.append((path, held))
+                    continue
             for sid, values in rows.items() if not errors else ():
                 if sid not in self._index:
                     errors.append((sid, "unknown subject"))
@@ -1386,7 +1793,9 @@ class Study:
         """Merge a TSV table keyed by participant_id (ids are normalized to "sub-<label>").
 
         New columns are appended in the file's order; non-missing values overwrite existing cells
-        and unknown subjects are added. All values are validated before anything changes.
+        and unknown subjects are added. All values are validated before anything changes: the standard
+        columns with fixed values take their other spellings (:func:`canonical_value`: include "yes" or
+        "1.0" is 1) and refuse values that mean none of them.
 
         :return: {"added": [ids], "updated": [ids], "columns": [new columns]}.
         """
@@ -1398,10 +1807,21 @@ class Study:
             sid = participant_label(row["participant_id"])
             values = {column: value for column, value in row.items() if column != "participant_id" and not is_missing(value)}
             for column, value in values.items():
-                _normalize(column, format_value(value))  # strict columns raise; set() records the warnings
+                canonical = canonical_value(column, value)
+                if canonical is not None:
+                    values[column] = canonical
+                else:
+                    _normalize(column, format_value(value))  # strict columns raise; set() records the warnings
             prepared.append((sid, values))
         if len({sid for sid, _ in prepared}) != len(prepared):
             raise ValueError(f"{path} has duplicate participant ids")
+        first = {}
+        for sid, _ in prepared:
+            twin = first.setdefault(sid.casefold(), sid)
+            if twin == sid:
+                twin = self.case_twin(sid)
+            if twin is not None:
+                raise ValueError(f"{path}: {_case_twin_message(sid, twin)}")
         new_columns = [column for column in columns if column != "participant_id" and column not in self._columns]
         for column in new_columns:
             self._columns.append(column)
@@ -1422,12 +1842,14 @@ class Study:
         write_tsv(path, self._columns, self._rows)
         return path
 
-    def add_files(self, paths, lesion_rule=None, id_regex=None):
+    def add_files(self, paths, lesion_rule=None, id_regex=None, root=None):
         """Add scans and lesion masks, paired by subject id (only NIfTI headers are read).
 
         :param paths: NIfTI files and/or folders (searched recursively; hidden folders and the
           study's own derivatives and .studio folders are skipped). BIDS layouts work: the subject
-          id is searched in the file name, then in the parent folders (sub-01/anat/...).
+          id is searched in the file name, then in the parent folders (sub-01/anat/...), up to the
+          folder that was chosen (a folder of ``paths``, else ``root``): folders above it are read only
+          when the chosen folder is itself a modality or session folder (sub-01/anat chosen: sub-01).
         :param lesion_rule: regular expression (case-insensitive) that marks lesion files by name, matched
           as whole words (see :func:`whole_word_rule`: "sub-01_desc-lesion_mask" and "LesionSmooth" are
           lesions, "sub-01_T1w_masked" and "Segura_01_T1" are scans); default: the study's rule
@@ -1437,12 +1859,16 @@ class Study:
           Files without a match use the start of their name: the words before the first modality or
           lesion word (T1, FLAIR, lesion, ...) up to the first word with a digit ("patient_01_T1.nii.gz":
           "patient01"; "sub_01_lesion.nii.gz": "01"; "Patient 7 T1.nii": "Patient7"), or the first
-          word when there is no digit ("smith_T1.nii": "smith").
+          word when there is no digit ("smith_T1.nii": "smith"). A name made only of such words
+          ("T1.nii.gz", "lesion.nii.gz") takes its id the same way from the nearest folder below the
+          chosen folder that gives one ("patients/patient01/T1.nii.gz": "patient01").
+        :param root: the folder that ``paths`` given as files were chosen in (``createStudy()``: the
+          study folder); without it, such files search three parent folders for ``id_regex`` and
+          take no id from a folder name.
         :return: {"added": [ids], "updated": [ids], "skipped": [{"path", "reason"}], "pairs": {id: {"scan", "lesion"}},
           "warnings": [{"path", "message"}]} (files that are added but lie at different places in
           different programs because their sform and qform disagree).
         """
-        from .geometry import detect_space
         from .nifti import XFORM_WARNING_MM, read_nifti_header, xform_disagreement
 
         rules = self.rules
@@ -1451,13 +1877,15 @@ class Study:
         report = {"added": [], "updated": [], "skipped": [], "pairs": {}, "warnings": []}
         candidates = {}
         original_stems = {}
-        for path in self._expand(paths):
+        canonical = {}  # casefolded id: the id its files go to
+        root = os.path.abspath(os.fspath(root)) if root else None
+        for path, chosen_root in self._expand(paths, root):
             stem = _nifti_stem(path)
             if stem is None:
                 continue
             try:
                 header = read_nifti_header(path)
-            except (OSError, ValueError) as exc:
+            except (OSError, EOFError, ValueError, zlib.error) as exc:
                 report["skipped"].append({"path": path, "reason": f"unreadable: {exc}"})
                 continue
             if len(header["shape"]) > 3:
@@ -1468,13 +1896,18 @@ class Study:
                 continue
             is_lesion = bool(lesion_re.search(stem))
             try:
-                raw_id = self._subject_id(path, stem, id_re, lesion_re)
+                raw_id, id_source = self._subject_id_and_source(path, stem, id_re, lesion_re, chosen_root)
                 sid = participant_label(raw_id)
             except ValueError:
                 report["skipped"].append({"path": path, "reason": "no subject id"})
                 continue
             if sid != raw_id:
-                original_stems[path] = stem  # not a BIDS id: the row keeps the file's stem as source_id
+                # Not a BIDS id: the row keeps the file's stem (or the folder name the id came from) as source_id
+                original_stems[path] = id_source
+            # Ids differing only in letter case name one subject (one file name on macOS): "patient01_T1w.nii.gz"
+            # belongs to the row sub-Patient01 of the participants table, and files spelling one new id in
+            # different cases go to one new subject
+            sid = canonical.setdefault(sid.casefold(), sid if sid in self._index else (self.case_twin(sid) or sid))
             kind = "lesion" if is_lesion else "scan"
             candidates.setdefault(sid, {"scan": [], "lesion": []})[kind].append((path, header))
             disagreement = xform_disagreement(header)
@@ -1484,15 +1917,26 @@ class Study:
                     "message": f"The sform and qform disagree by up to {disagreement:.2g} mm: Slicer may show this image at another place than FSL and the network mapping, which use the sform.",
                 })
 
+        answers = self.grid_answers
+
         def file_space(item):
-            return detect_space(item[1]["shape"][:3], item[1]["affine"])
+            return _header_space(item[1], answers)
 
         for sid, kinds in candidates.items():
             # The lesion first: the scan should be in its space (BIDS derivatives may hold native and template T1w files)
             lesions = sorted(kinds["lesion"], key=lambda item: ("lesion" not in os.path.basename(item[0]).lower(), item[0]))
             chosen = {"lesion": lesions[0] if lesions else None}
             lesion_space = file_space(chosen["lesion"]) if chosen["lesion"] else None
-            scans = sorted(kinds["scan"], key=lambda item: (lesion_space is not None and file_space(item) != lesion_space, "t1" not in os.path.basename(item[0]).lower(), item[0]))
+            # A scan on the lesion's own grid first, then one of the lesion's BIDS session (ses-2 lesion: the ses-2 scan,
+            # not the ses-1 scan that sorts first), then one in its template space
+            lesion_session = _bids_session(chosen["lesion"][0]) if chosen["lesion"] else None
+            scans = sorted(kinds["scan"], key=lambda item: (
+                chosen["lesion"] is not None and not _same_grid(item[1], chosen["lesion"][1]),
+                lesion_session is not None and _bids_session(item[0]) != lesion_session,
+                lesion_space is not None and file_space(item) != lesion_space,
+                "t1" not in os.path.basename(item[0]).lower(),
+                item[0],
+            ))
             chosen["scan"] = scans[0] if scans else None
             for kind, files in (("scan", scans), ("lesion", lesions)):
                 for path, _ in files[1:]:
@@ -1513,7 +1957,7 @@ class Study:
             if updates.get("lesion") and row.get("status") == "untraced":
                 updates["status"] = "traced"
             for column, value in values.items():
-                if value is not None and not is_missing(row.get(column)) and row[column] != value:
+                if value is not None and not is_missing(row.get(column)) and not self._same_file(row[column], value):
                     report["skipped"].append({"path": self.abspath(value), "reason": f"{sid} already has a {column}"})
             if updates and source_id and is_missing(row.get("source_id")):
                 updates.update(source_id)
@@ -1522,33 +1966,97 @@ class Study:
                 report["updated"].append(sid)
         return report
 
-    def _expand(self, paths):
+    def _expand(self, paths, root=None):
+        """Yield (file, the folder it was chosen in): a folder of ``paths``, else ``root`` (None when not given)."""
         if isinstance(paths, (str, os.PathLike)):
             paths = [paths]
         excluded = {os.path.join(self.path, DERIVATIVES_DIR, "lnm"), os.path.join(self.path, PRIVATE_DIR)}
         for path in paths:
             path = os.path.abspath(os.fspath(path))
             if os.path.isfile(path):
-                yield path
+                yield path, root
                 continue
             for folder, subfolders, files in os.walk(path):
                 subfolders[:] = sorted(d for d in subfolders if not d.startswith(".") and os.path.join(folder, d) not in excluded)
                 for name in sorted(files):
-                    yield os.path.join(folder, name)
+                    yield os.path.join(folder, name), path
 
     @staticmethod
-    def _subject_id(path, stem, id_re, lesion_re):
-        match = id_re.search(stem)
+    def _subject_id(path, stem, id_re, lesion_re, root=None):
+        """The subject id of a file (see :meth:`add_files`); ValueError when it has none."""
+        return Study._subject_id_and_source(path, stem, id_re, lesion_re, root)[0]
+
+    @staticmethod
+    def _subject_id_and_source(path, stem, id_re, lesion_re, root=None):
+        """(subject id, the name it was taken from: the file's stem or a folder name); ValueError when there is none.
+
+        ``root`` is the folder the file was chosen in: the parent folders are searched up to it (it included), and a stem
+        without an id takes it from the nearest folder below it that gives one. Folders above it are read only when the
+        chosen folder is itself a modality or session folder (sub-01/anat chosen: anat names no subject, sub-01 above it
+        does). Without ``root`` (or for a file outside it), three parent folders are searched for ``id_re`` and no folder
+        name gives an id.
+        """
+        ancestors = []  # nearest first, at most three: BIDS sub-<id>/[ses-<id>/]anat/<file>
         folder = os.path.dirname(path)
-        for _ in range(3):  # BIDS: sub-<id>/[ses-<id>/]anat/<file>
-            if match is not None or os.path.dirname(folder) == folder:
-                break
-            match = id_re.search(os.path.basename(folder))
+        while len(ancestors) < 3 and os.path.dirname(folder) != folder:
+            ancestors.append(folder)
             folder = os.path.dirname(folder)
-        if match is not None:
+        if root is not None and not _is_relative_to(os.path.dirname(path), root):
+            root = None
+        # The folders up to the chosen one (it included), those strictly below it, and those above it
+        folders, below, above = ancestors, ancestors, []
+        if root is not None:
+            for index, folder in enumerate(ancestors):
+                if os.path.normcase(folder) == os.path.normcase(root):
+                    folders, below, above = ancestors[: index + 1], ancestors[:index], ancestors[index + 1 :]
+                    break
+
+        def matched(match):
             if "id" in id_re.groupindex:
                 return match.group("id")
             return match.group(1) if id_re.groups else match.group(0)
+
+        source = stem
+        match = id_re.search(stem)
+        for folder in folders:
+            if match is not None:
+                break
+            source = os.path.basename(folder)
+            match = id_re.search(source)
+        if match is not None:
+            return matched(match), source
+        try:
+            return Study._id_from_name(stem, lesion_re, path), stem
+        except ValueError:
+            if root is None:
+                raise
+        # patients/patient01/T1.nii.gz: the subject folder names the subject (not the chosen folder itself)
+        for folder in below:
+            try:
+                return Study._id_from_name(os.path.basename(folder), lesion_re, path), os.path.basename(folder)
+            except ValueError:
+                continue  # anat/, ses-01/: modality words
+        # sub-01/anat chosen: the chosen folder is a modality or session folder, so the subject folder lies above it;
+        # any other chosen folder ("patients") bounds the search, so that an ancestor such as "sub-generic" never names
+        # every subject
+        if above and not Study._names_subject(os.path.basename(root), lesion_re):
+            for folder in above:
+                match = id_re.search(os.path.basename(folder))
+                if match is not None:
+                    return matched(match), os.path.basename(folder)
+        raise ValueError(f"No subject id in {path}")
+
+    @staticmethod
+    def _names_subject(name, lesion_re):
+        """Whether a folder name can name a subject: not one made only of modality or lesion words (anat, ses-01, lesions)."""
+        try:
+            Study._id_from_name(name, lesion_re, name)
+        except ValueError:
+            return False
+        return True
+
+    @staticmethod
+    def _id_from_name(stem, lesion_re, path):
         # The first run of words that are not modality or lesion words ("T1_patient_01_lesion_v2": patient, 01)
         def named(word):
             return _SCAN_WORD.fullmatch(word) or lesion_re.fullmatch(word)

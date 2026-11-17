@@ -26,6 +26,7 @@ import qt
 from slicer.i18n import tr as _
 
 from . import widgets
+from .card_clusters import formatCoordinate
 from .cohort_contrast import (
     CONTRASTS,
     DEFAULT_PERM,
@@ -93,6 +94,7 @@ class VlsmTab(CohortTab):
                         "whether the network adds anything beyond location."), "LNMVlsmIntro", "caption")
         layout.addWidget(intro)
         form = qt.QFormLayout()
+        form.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
         self.testFrame, self.testGroup = segmented([_("Groups"), _("Score")], "LNMVlsmTest", _("Test a group factor (lesion location differs between groups) or a score"))
         self.testGroup.button(0).setChecked(True)
@@ -104,6 +106,7 @@ class VlsmTab(CohortTab):
         self.groupBox = qt.QWidget()
         self.groupBox.setObjectName("LNMVlsmGroupControls")
         groupForm = qt.QFormLayout(self.groupBox)
+        groupForm.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         groupForm.setContentsMargins(0, 0, 0, 0)
         groupForm.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
         self.groupCombo = qt.QComboBox()
@@ -135,6 +138,7 @@ class VlsmTab(CohortTab):
         self.scoreBox = qt.QWidget()
         self.scoreBox.setObjectName("LNMVlsmScoreControls")
         scoreForm = qt.QFormLayout(self.scoreBox)
+        scoreForm.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         scoreForm.setContentsMargins(0, 0, 0, 0)
         scoreForm.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
         self.scoreCombo = qt.QComboBox()
@@ -167,6 +171,7 @@ class VlsmTab(CohortTab):
         layout.addWidget(self.volumeReasonEdit)
 
         overlap = qt.QFormLayout()
+        overlap.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         overlap.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
         overlapRow = qt.QHBoxLayout()
         self.minLesionsSpinBox = qt.QSpinBox()
@@ -190,17 +195,21 @@ class VlsmTab(CohortTab):
             self.permuteCombo.addItem(_(text), mode)
         self.permuteCombo.setToolTip(_("Override the automatic exchangeability decision"))
         self.permuteCombo.connect("currentIndexChanged(int)", lambda index: self.onSettingsChanged())
+        # Ignored: the combos share the row and never make the inspector wider
+        self.permuteCombo.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
         permute.addWidget(self.permuteCombo, 1)
         self.blockCombo = qt.QComboBox()
         self.blockCombo.setObjectName("LNMVlsmBlockColumn")
         self.blockCombo.setToolTip(_("Exchangeability blocks: dataset, else source_type (a column with the role block)"))
         self.blockCombo.connect("currentIndexChanged(int)", lambda index: self.onSettingsChanged())
+        self.blockCombo.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
         permute.addWidget(self.blockCombo, 1)
         layout.addLayout(permute)
         self.permuteLabel = label("", "LNMVlsmPermuteReason", "secondaryText")
         layout.addWidget(self.permuteLabel)
 
         options = qt.QFormLayout()
+        options.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         inference = qt.QHBoxLayout()
         self.fweCheckBox = qt.QCheckBox(_("FWE"))
         self.fweCheckBox.setObjectName("LNMVlsmFwe")
@@ -238,6 +247,8 @@ class VlsmTab(CohortTab):
         self.clusterCombo.setMinimumContentsLength(12)
         self.clusterCombo.connect("currentIndexChanged(int)", lambda index: self.showSeedState())
         self.clusterCombo.connect("activated(int)", lambda index: self.jumpToCluster())
+        # Ignored: the combo shrinks next to the button and never makes the inspector wider
+        self.clusterCombo.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
         row.addWidget(self.clusterCombo, 1)
         self.seedButton = qt.QPushButton(_("Seed from VLSM cluster"))
         self.seedButton.setObjectName("LNMVlsmSeedButton")
@@ -311,6 +322,58 @@ class VlsmTab(CohortTab):
         tested = self.score() if self.testKind() == "score" else self.groupColumn()
         return [name for name in self.covariates.checked() if name != tested]
 
+    def restoreDesign(self, folder):
+        """Set the controls to the design.json of ``folder``, the result shown again after a restart.
+
+        Without it the controls fall back to their defaults and Run VLSM would run another analysis than the one on
+        screen. Unreadable or unfit files change nothing.
+        """
+        from LesionNetworkMappingLib import design as designlib
+
+        try:
+            spec = designlib.DesignSpec.load(folder)
+        except Exception:
+            logging.debug("Lesion network mapping: the design of the shown VLSM result could not be read", exc_info=True)
+            return
+        if spec.test == "continuous":
+            scores = [self.scoreCombo.itemData(i) for i in range(self.scoreCombo.count)]
+            if spec.score_column not in scores:
+                return
+            self.testGroup.button(TESTS.index("score")).setChecked(True)
+            self.scoreCombo.setCurrentIndex(scores.index(spec.score_column))
+            if spec.contrast in SCORE_CONTRASTS:
+                self.directionGroup.button(SCORE_CONTRASTS.index(spec.contrast)).setChecked(True)
+        elif spec.test in ("two_group", "anova"):
+            groups = [self.groupCombo.itemText(i) for i in range(self.groupCombo.count)]
+            if spec.group_column not in groups:
+                return
+            self.testGroup.button(TESTS.index("groups")).setChecked(True)
+            if spec.group_column != self.groupColumn():
+                self.groupCombo.setCurrentIndex(groups.index(spec.group_column))
+            if spec.levels and len(spec.levels) >= 2:
+                for combo, level in ((self.levelACombo, spec.levels[0]), (self.levelBCombo, spec.levels[1])):
+                    index = combo.findText(level)
+                    if index >= 0:
+                        combo.setCurrentIndex(index)
+            if spec.contrast in CONTRASTS:
+                self.contrastGroup.button(CONTRASTS.index(spec.contrast)).setChecked(True)
+        else:
+            return
+        for name, button in self.covariates.buttons.items():
+            button.setChecked(name in spec.covariates)
+        self.logVolumeCheckBox.setChecked(spec.transforms.get(designlib.VOLUME_COLUMN) == "log")
+        self.volumeReasonEdit.setText(spec.volume_off_reason or "")
+        index = self.permuteCombo.findData(spec.permute)
+        if index >= 0:
+            self.permuteCombo.setCurrentIndex(index)
+        index = self.blockCombo.findData(spec.block_column or "")
+        if index >= 0:
+            self.blockCombo.setCurrentIndex(index)
+        self.fdrCheckBox.setChecked(bool(spec.inference.get("fdr")))
+        if spec.inference.get("n_perm"):
+            self.permSpinBox.setValue(int(spec.inference["n_perm"]))
+        self.onSettingsChanged()
+
     def spec(self):
         """The ``design.DesignSpec`` of the current settings (n_perm at least the design minimum; ``nPerm()`` is run)."""
         from LesionNetworkMappingLib import design as designlib
@@ -335,6 +398,12 @@ class VlsmTab(CohortTab):
             reasons.append(_("Choose two different levels A and B."))
         if not self.volumeOn() and not self.volumeReasonEdit.text.strip():
             reasons.append(_("Give the reason for turning lesion volume off (it is recorded in the methods)."))
+        if self.design is not None and self.design.n:
+            from LesionNetworkMappingLib import vlsm
+
+            count = vlsm.min_lesion_count(self.design.n, *self.minimumOverlap())
+            if count > self.design.n:
+                reasons.append(_("Lower the minimum overlap: no voxel can be lesioned in {k} of the {n} lesions.").format(k=count, n=self.design.n))
         return reasons
 
     def onSettingsChanged(self):
@@ -347,8 +416,14 @@ class VlsmTab(CohortTab):
         self.volumeReasonEdit.setVisible(not volumeOn)
         self.logVolumeCheckBox.setVisible(volumeOn and designlib.VOLUME_COLUMN in self.covariates.buttons)
         twoGroup = self.contrast() != "F"
-        self.levelACombo.setEnabled(twoGroup)
-        self.levelBCombo.setEnabled(twoGroup)
+        pair = len(self._levels) >= 2  # a one-sided contrast compares two different levels of the group column
+        self.levelACombo.setEnabled(twoGroup and pair)
+        self.levelBCombo.setEnabled(twoGroup and pair)
+        for index in (0, 1):
+            self.contrastGroup.button(index).setEnabled(pair)
+        tip = "" if pair else _("The group column has fewer than two levels among the subjects: there is nothing to contrast")
+        self.levelACombo.setToolTip(tip or _("Level A"))
+        self.levelBCombo.setToolTip(tip or _("Level B"))
         tested = self.score() if score else self.groupColumn()
         for name, button in self.covariates.buttons.items():
             button.setVisible(name != tested)
@@ -360,7 +435,7 @@ class VlsmTab(CohortTab):
         self.onSettingsChanged()
 
     def onLevelsChanged(self):
-        a, b = self.levelACombo.currentText or "A", self.levelBCombo.currentText or "B"
+        a, b = (self.levelACombo.currentText or "A", self.levelBCombo.currentText or "B") if len(self._levels) >= 2 else ("A", "B")
         for index, text in enumerate([f"{a} > {b}", f"{b} > {a}"]):
             self.contrastGroup.button(index).setText(text)
         self.onSettingsChanged()
@@ -416,7 +491,7 @@ class VlsmTab(CohortTab):
         a = a if a in levels else (levels[0] if levels else "")
         b = b if b in levels and b != a else next((level for level in levels if level != a), "")
         _fill(self.levelACombo, [(level, level) for level in levels], a)
-        _fill(self.levelBCombo, [(level, level) for level in levels], b)
+        _fill(self.levelBCombo, [(level, level) for level in levels] if len(levels) >= 2 else [], b)  # one level: no "A vs A"
         self.onLevelsChanged()
 
     #
@@ -517,7 +592,8 @@ class VlsmTab(CohortTab):
         if self.running():
             return False, _("{title} running…").format(title=self.TITLE)
         if self.design is None:
-            return False, self.designError or _("No design.")
+            # the error itself is the red line under the controls (showDesignState): say it once
+            return False, _("Blocked by the design checks (in red above).") if self.designError else _("No design.")
         settings = self.blockingSettings()
         if settings:
             return False, settings[0]
@@ -565,6 +641,15 @@ class VlsmTab(CohortTab):
 
         return [os.path.join(root, name) for name in sorted(os.listdir(root)) if os.path.isfile(os.path.join(root, name, vlsm.VLSM_JSON))]
 
+    def mapSpace(self):
+        """VLSM maps are on the template grid of the study's lesions, not on the connectome's: the space vlsm.json
+        records, or None (the grid is then recognised from the file).
+        """
+        from LesionNetworkMappingLib import geometry
+
+        space = (self.result[1] or {}).get("space") if self.result else None
+        return str(space) if space and geometry.space_family(space) not in ("native", "unknown") else None
+
     def readResult(self, folder):
         from LesionNetworkMappingLib import vlsm
 
@@ -579,7 +664,11 @@ class VlsmTab(CohortTab):
         os.makedirs(outDir, exist_ok=True)
         self._jobFolder = outDir
         spec = self.spec()
-        designPath = spec.save(os.path.join(outDir, "design.json"))
+        # The job's input spec goes next to its log (<runRoot>/logs), not into outDir: outDir/design.json belongs to the
+        # finished result there until this run finishes (vlsm.vlsm then writes the resolved design.json)
+        logDir = os.path.join(os.path.dirname(outDir), "logs")
+        os.makedirs(logDir, exist_ok=True)
+        designPath = spec.save(os.path.join(logDir, f"vlsm-{os.path.basename(outDir)}-design.json"))
         minLesions, minPercent = self.minimumOverlap()
         study = self.ctx.study.path
         args = ["run", "--study", study, "--design", designPath, "--out", outDir, "--run-root", study, "--min-lesions", str(minLesions), "--min-percent", f"{minPercent:g}"]
@@ -632,22 +721,36 @@ class VlsmTab(CohortTab):
                 (record.get("contrast") or {}).get("spec"), "{score}").format(score=scoreName)
         else:
             contrast = contrastText((record.get("contrast") or {}).get("spec", ""), list(record.get("n_per_level") or {}))
+        transforms = record.get("transforms") or {}
+
+        def transformed(name):  # the covariate as the model used it: log(volume_ml), z(age) (BB-1: transforms were not shown)
+            return f"{transforms[name]}({name})" if transforms.get(name) else str(name)
+
+        others = [transformed(name) for name in (record.get("covariates") or []) if name != "volume_ml"]
+        otherCovariates = (" · " + _("covariates: {names}").format(names=", ".join(others))) if others else ""
         lines = [
             "<b>" + html.escape(_("VLSM · {contrast} · n = {n}").format(contrast=contrast, n=record.get("n", "?"))) + (f" ({perLevel})" if perLevel else "") + "</b>",
             html.escape(_("{v} voxels tested: lesioned in ≥ {k} lesions ({rule}) · lesion volume {volume}").format(
                 v=f"{overlap.get('n_voxels_tested', record.get('n_voxels', 0)):,}", k=overlap.get("min_count", "?"), rule=overlap.get("rule", ""),
-                volume=_("covariate") if record.get("volume_covariate") else _("off"))),
+                volume=(_("covariate ({name})").format(name=transformed("volume_ml")) if transforms.get("volume_ml") else _("covariate"))
+                if record.get("volume_covariate") else _("off")) + otherCovariates),
             html.escape(_("{n} permutations{kind} · smallest attainable p {p:.2g} · {scheme}").format(
                 n=f"{nPerm:,}" if isinstance(nPerm, int) else nPerm, kind=_(" (exhaustive)") if permutation.get("exhaustive") else (_(" (preview)") if permutation.get("preview") else ""),
                 p=float(record.get("min_attainable_p") or record.get("min_p") or 1.0), scheme=permutation.get("reason") or permutation.get("scheme") or "")),
-            html.escape(_("FWE p ≤ 0.05: {n} voxels in {c} clusters (smallest FWE p {p})").format(n=fwe.get("n_significant", "?"), c=(record.get("clusters") or {}).get("n", len(clusters)),
-                                                                                                 p=_fmtP(fwe.get("min_p")))),
+            html.escape(_fweSummaryText(fwe.get("n_significant", "?"), (record.get("clusters") or {}).get("n", len(clusters)), _fmtP(fwe.get("min_p")))),
         ]
+        excludedLine = _excludedText(record.get("excluded"))
+        if excludedLine:
+            lines.insert(1, html.escape(excludedLine))
         effectRange = (record.get("effect_size") or {}).get("range")
         if effectRange:
             lines.append(html.escape(_("{effect} from {low:.2f} to {high:.2f}").format(effect=effectText, low=effectRange[0], high=effectRange[1])))
         if fdr.get("enabled", True) and fdr:
             lines.append(html.escape(_("FDR q ≤ 0.05: {n} voxels").format(n=fdr.get("n_significant", "?"))))
+            # The FDR floor (smallest attainable p and the voxels BH-FDR needs at it), as in the Contrast tab: FDR 0
+            # next to FWE-significant voxels is often this floor, not a result
+            if fdr.get("note"):
+                lines.append(html.escape(fdr["note"]))
         self.summaryLabel.setText("".join(f"<div>{line}</div>" for line in lines))
         notes = []
         if record.get("interpretation"):
@@ -675,8 +778,8 @@ class VlsmTab(CohortTab):
         items = []
         for item in clusters:
             x, y, z = item.get("peak_xyz") or (0.0, 0.0, 0.0)
-            items.append((_("Cluster {id} · {sign} · {n} voxels ({ml:.1f} mL) · peak {stat} {value:.2f} at {where}").format(
-                id=item.get("id"), sign=SIGN_TEXT.get(item.get("sign"), ""), n=item.get("voxels"), ml=float(item.get("volume_ml") or 0.0), stat=statName,
+            items.append((_("Cluster {id} · {sign} · {size} · peak {stat} {value:.2f} at {where}").format(
+                id=item.get("id"), sign=SIGN_TEXT.get(item.get("sign"), ""), size=_clusterSizeText(item.get("voxels"), item.get("volume_ml")), stat=statName,
                 value=float(item.get("peak_stat") or 0.0), where=_whereText(x, y, z)), str(item.get("id"))))
         for sign in ("pos", "neg"):
             if sum(1 for item in clusters if item.get("sign") == sign) > 1:
@@ -715,8 +818,8 @@ class VlsmTab(CohortTab):
             return None
         return (x, y, z)
 
-    def _showFirstMap(self):
-        super()._showFirstMap()
+    def afterFirstMapLayers(self):
+        # After the layers are final: the first run of a session loads the template later, and that re-fits the views
         if not self._cleanedUp:
             self.jumpToCluster()
 
@@ -856,11 +959,52 @@ def _removeUnfinished(folder):
         logging.exception("Lesion network mapping: the unfinished circuit folder could not be removed")
 
 
+def _clusterSizeText(nVoxels, volumeMl):
+    """A cluster's size for the seed combo: "1 voxel (0.008 mL)", "12 voxels (0.1 mL)"; volumes under 0.1 mL keep 3 decimals (never "0.0 mL")."""
+    ml = float(volumeMl or 0.0)
+    mlText = f"{ml:.1f}" if (ml >= 0.095 or ml <= 0.0) else f"{ml:.3f}"
+    if nVoxels == 1:
+        return _("1 voxel ({ml} mL)").format(ml=mlText)
+    return _("{n} voxels ({ml} mL)").format(n=nVoxels, ml=mlText)
+
+
+def _fweSummaryText(nVoxels, nClusters, minP):
+    """The "FWE p ≤ 0.05" line of the result summary, with "voxel" and "cluster" singular when the count is 1."""
+    voxelWord = _("voxel") if nVoxels == 1 else _("voxels")
+    clusterWord = _("cluster") if nClusters == 1 else _("clusters")
+    return _("FWE p ≤ 0.05: {n} {voxelWord} in {c} {clusterWord} (smallest FWE p {p})").format(
+        n=nVoxels, voxelWord=voxelWord, c=nClusters, clusterWord=clusterWord, p=minP)
+
+
+def _excludedText(excluded, limit=8):
+    """The subjects a VLSM did not analyse (``vlsm.json`` "excluded": {reason: [sids]}), as one line, or "" when none.
+
+    Lesions off the template grid and listwise exclusions (a missing score, group or covariate) both leave the n of the
+    result: the line names the count, each reason and its subjects (the first ``limit`` of each).
+    """
+    if not isinstance(excluded, dict):
+        return ""
+    parts, total = [], 0
+    for reason, sids in excluded.items():
+        sids = [str(sid) for sid in (sids or [])]
+        if not sids:
+            continue
+        total += len(sids)
+        shown = ", ".join(sids[:limit]) + (", …" if len(sids) > limit else "")
+        parts.append(_("{reason}: {n} ({sids})").format(reason=reason, n=len(sids), sids=shown))
+    if not total:
+        return ""
+    return _("{n} subject(s) not analysed: {reasons}").format(n=total, reasons=" · ".join(parts))
+
+
 def _whereText(x, y, z):
-    """World coordinates with direction letters: "R 7 A 7 S 7" (RAS mm)."""
+    """World coordinates with direction letters: "R 7 A 7 S 7" (RAS mm).
+
+    Rounded half away from zero like the Clusters card (``formatCoordinate``), not half to even.
+    """
 
     def part(value, negative, positive):
-        return f"{positive if value >= 0 else negative} {abs(value):.0f}"
+        return f"{positive if value >= 0 else negative} {formatCoordinate(abs(value))}"
 
     return " ".join([part(x, "L", "R"), part(y, "P", "A"), part(z, "I", "S")])
 

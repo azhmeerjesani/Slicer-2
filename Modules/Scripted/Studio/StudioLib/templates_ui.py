@@ -18,6 +18,7 @@ The model is ``templates``. Only the fork-only key ``Studio/Templates/Default`` 
 import logging
 import os
 import re
+import shutil
 import sys
 import traceback
 
@@ -37,6 +38,8 @@ ROW_THUMBNAIL = 48
 CARD_THUMBNAIL = 72
 #: Widest file list of an "Optional" row (px; longer lists are elided in the middle, the tooltip has them all)
 VALUE_WIDTH = 230
+NAME_WIDTH = 420  # a template name in the Settings list is elided to this width
+FILE_NAME_WIDTH = 330  # the file name in the add dialog is elided to this width
 CONTRAST_LABELS = (("T1w", "T1w"), ("T2w", "T2w"), ("PD", "PD"), ("FLAIR", "FLAIR"), ("CT", "CT"), ("other", "Other"))
 IMAGE_FILTER = "Images (*.nii *.nii.gz *.nrrd);;All files (*)"
 SURFACE_FILTER = "Surfaces (*.vtk *.vtp *.stl *.obj *.ply *.gii);;All files (*)"
@@ -80,6 +83,18 @@ def _label(text, objectName, pixelSize=13, weight=None, color=None, wrap=False):
     return label
 
 
+def _setElidedText(label, text, maxWidth, mode=None):
+    """Show ``text`` in a one-line ``label``, elided to ``maxWidth`` px (the whole text is its tool tip when elided).
+
+    A plain QLabel asks for its whole text width, so a long name would widen the dialog that holds it.
+    """
+    metrics = qt.QFontMetrics(label.font)
+    shown = metrics.elidedText(text or "", mode if mode is not None else qt.Qt.ElideRight, maxWidth)
+    label.setTextFormat(qt.Qt.PlainText)  # names and file names are shown as typed, never as rich text
+    label.setText(shown)
+    label.setToolTip(text if shown != text else "")
+
+
 def _button(text, objectName, callback, role="secondary"):
     button = qt.QPushButton(text)
     button.setObjectName(objectName)
@@ -110,7 +125,11 @@ def _thumbnailLabel(size, objectName="studioTemplateThumbnail"):
 
 def _lastDirectory():
     value = qt.QSettings().value(LAST_DIRECTORY_KEY)
-    return str(value) if value and os.path.isdir(str(value)) else os.path.expanduser("~")
+    if value and os.path.isdir(str(value)):
+        return str(value)
+    from . import importer
+
+    return importer.webStartFolder() or os.path.expanduser("~")
 
 
 def _rememberDirectory(path):
@@ -168,21 +187,41 @@ def _companionRole(path):
 
 
 class _DropFilter(qt.QObject):
+    """Takes the files dragged onto the "Add your own template" dialog, wherever on it they are dropped.
+
+    It is installed on the dialog and on its text fields: a file manager that offers the path as text besides the URL (GNOME
+    Files does) is otherwise taken by the field, which would put the path in the name. Only local files of a kind the dialog
+    can use (an image or a 3D surface) are accepted, with the copy action; any other drag (a web link, a folder, a text file)
+    is refused, so the pointer shows it cannot be dropped, and is never typed into a field.
+    """
+
     def __init__(self, callback):
         qt.QObject.__init__(self)
         self.callback = callback
 
+    @staticmethod
+    def _usablePaths(event):
+        mimeData = event.mimeData()
+        if not mimeData.hasUrls():
+            return None
+        paths = [url.toLocalFile() for url in mimeData.urls() if url.isLocalFile()]
+        return [path for path in paths if templates.isImageFile(path) or templates.isSurfaceFile(path)]
+
     def eventFilter(self, obj, event):
-        if event.type() == qt.QEvent.DragEnter and event.mimeData().hasUrls():
-            event.acceptProposedAction()
+        eventType = event.type()
+        if eventType not in (qt.QEvent.DragEnter, qt.QEvent.DragMove, qt.QEvent.Drop):
+            return False
+        paths = self._usablePaths(event)
+        if paths is None:
+            return False  # not a file drag: a text drag into a field works as usual
+        if not paths:
+            event.ignore()
             return True
-        if event.type() == qt.QEvent.Drop and event.mimeData().hasUrls():
-            paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
-            event.acceptProposedAction()
-            if paths:
-                self.callback(paths)
-            return True
-        return False
+        event.setDropAction(qt.Qt.CopyAction)
+        event.accept()
+        if eventType == qt.QEvent.Drop:
+            self.callback(paths)
+        return True
 
 
 class _OptionalRow:
@@ -225,6 +264,18 @@ class _OptionalRow:
         self.valueLabel.setVisible(bool(text))
         self.hintLabel.setVisible(not text)
         self.clearButton.setVisible(bool(text))
+
+
+def _plainCopyError(error, plan):
+    """A failure of the copy in plain words: "Permission denied" naming the folder that cannot be written, not the error
+    number and the internal staging folder (``.adding-<id>``) of the Templates folder.
+    """
+    if not isinstance(error, OSError):
+        return str(error)
+    from .autosave import plainOSErrorIn
+
+    folder = os.path.dirname(os.path.normpath(plan.folder)) if plan is not None and getattr(plan, "folder", None) else ""
+    return plainOSErrorIn(error, folder)
 
 
 class AddTemplateDialog(qt.QDialog):
@@ -337,7 +388,11 @@ class AddTemplateDialog(qt.QDialog):
         self.spaceLabelEdit = qt.QLineEdit()
         self.spaceLabelEdit.setObjectName("studioAddTemplateSpaceName")
         self.spaceLabelEdit.setPlaceholderText(_("Your label (optional)"))
-        self.spaceLabelEdit.setMaximumWidth(180)
+        # Room for the placeholder and a short label at the app font of the run (the field was squeezed to 97 px at 125%).
+        fm = qt.QFontMetrics(self.spaceLabelEdit.font)
+        textWidth = fm.horizontalAdvance(self.spaceLabelEdit.placeholderText) if hasattr(fm, "horizontalAdvance") else fm.width(self.spaceLabelEdit.placeholderText)
+        self.spaceLabelEdit.setMinimumWidth(textWidth + 32)
+        self.spaceLabelEdit.setMaximumWidth(max(180, textWidth + 48))
         spaceRow.addWidget(self.spaceLabelEdit)
         form.addLayout(spaceRow, 1, 1)
         form.addWidget(_label(_("Contrast"), "studioAddTemplateContrastLabel", 13, color="text2"), 2, 0)
@@ -402,6 +457,8 @@ class AddTemplateDialog(qt.QDialog):
 
         self._dropFilter = _DropFilter(self._onDropped)
         self.installEventFilter(self._dropFilter)
+        for edit in (self.nameEdit, self.spaceLabelEdit):
+            edit.installEventFilter(self._dropFilter)
         self._progressTimer = qt.QTimer(self)
         self._progressTimer.setInterval(100)
         self._progressTimer.connect("timeout()", self._showProgress)
@@ -420,8 +477,14 @@ class AddTemplateDialog(qt.QDialog):
         surfaces = [path for path in paths if templates.isSurfaceFile(path)]
         roles = {path: _companionRole(path) for path in paths if templates.isImageFile(path)}
         images = sorted(roles, key=lambda path: roles[path] is not None)  # the template image first
-        if images and self.imagePath is None:
+        # A plain image sets the template image, replacing the current one as Change… does
+        if images and roles[images[0]] is None:
             self.setImage(images.pop(0))
+        elif images and self.imagePath is None:
+            # Only mask or head files and no template image yet: they are companions, never the template image
+            for path in images:
+                message(_("{name} was not added: choose the template image first").format(name=os.path.basename(path)))
+            images = []
         for path in images:
             if roles[path] == "mask" and self.maskPath is None:
                 self.setCompanion("mask", path)
@@ -442,7 +505,7 @@ class AddTemplateDialog(qt.QDialog):
         """Check an image (header only) and show what was detected."""
         self.imagePath = path
         self.detection = templates.identify(path)
-        self.fileLabel.setText(os.path.basename(path))
+        _setElidedText(self.fileLabel, os.path.basename(path), FILE_NAME_WIDTH, qt.Qt.ElideMiddle)
         self.fileLabel.setToolTip(path)
         self.changeButton.setText(_("Change…"))
         detection = self.detection
@@ -457,6 +520,7 @@ class AddTemplateDialog(qt.QDialog):
         lines = list(detection.warnings) + ([detection.privacyNote] if detection.privacyNote else [])
         self.warningLabel.setText("\n".join(lines))
         self.warningLabel.setVisible(bool(lines))
+        self._fitWrappedLabels()
         if detection.ok:
             if not self._nameEdited:
                 self.nameEdit.setText(templates.proposedName(path))
@@ -553,6 +617,26 @@ class AddTemplateDialog(qt.QDialog):
     def _setError(self, text):
         self.errorLabel.setText(text or "")
         self.errorLabel.setVisible(bool(text))
+        self._fitWrappedLabels()
+
+    def _fitWrappedLabels(self):
+        """Reserve the full height of the word-wrapped labels.
+
+        The dialog has a fixed width, but a layout works out its height from the width a wrapped label would take
+        when it is not wrapped: the dialog is then too short and the last lines (the privacy note) are cut. The width
+        each label gets is known here, so its height for that width becomes its minimum height.
+        """
+        margins = ui.layoutContentsMargins(self.layout())
+        cardMargins = ui.layoutContentsMargins(self.fileCard.layout())
+        cardWidth = DIALOG_WIDTH - margins.left() - margins.right()
+        detailsWidth = cardWidth - cardMargins.left() - cardMargins.right() - self.fileCard.layout().spacing - CARD_THUMBNAIL
+        for label, width in ((self.detectionLabel, detailsWidth), (self.factsLabel, detailsWidth), (self.warningLabel, detailsWidth),
+                             (self.errorLabel, cardWidth)):
+            label.setMinimumHeight(label.heightForWidth(width) if label.text else 0)
+        self.layout().invalidate()
+        self.layout().activate()
+        if self.isVisible():
+            self.resize(self.width, max(self.height, self.sizeHint.height()))
 
     def _update(self, *args):
         if getattr(self, "addButton", None) is None:
@@ -607,6 +691,12 @@ class AddTemplateDialog(qt.QDialog):
         plan, self.plan = self.plan, None
         if plan is None:
             return
+        if plan.cancelled:
+            # Cancel came after the copy was done but before its result was delivered: remove the new folder (it is not
+            # registered yet), so a cancelled add leaves nothing behind and adds no template
+            if plan.folder and os.path.isdir(plan.folder):
+                shutil.rmtree(plan.folder, ignore_errors=True)
+            return
         try:
             self.template = templates.finishAdd(plan, record)
         except Exception as error:
@@ -623,14 +713,20 @@ class AddTemplateDialog(qt.QDialog):
 
     def _onCopyFailed(self, error):
         self._progressTimer.stop()
-        self.plan = None
-        if not _isAlive(self):
+        plan, self.plan = self.plan, None
+        if not _isAlive(self) or (plan is not None and plan.cancelled):
             return
         self.progressBar.hide()
         self.addButton.setText(_("Add template"))
-        text = str(error) if isinstance(error, templates.TemplateError) else _("The template could not be added: {error}").format(error=error)
-        if not isinstance(error, templates.TemplateError):
-            logging.error(f"Slicer Studio: adding a template failed: {error}")
+        if isinstance(error, templates.TemplateError):
+            text = str(error)
+        else:
+            text = _("The template could not be added: {error}").format(error=_plainCopyError(error, plan))
+            if isinstance(error, OSError):
+                # A folder that cannot be written is a user problem: a plain warning, no error badge, no error number
+                logging.warning(f"Slicer Studio: adding a template failed: {text}")
+            else:
+                logging.error(f"Slicer Studio: adding a template failed: {text} ({error})")
         self._setError(text)
         self._update()
 
@@ -678,7 +774,21 @@ class TemplatesSettingsPanel(ctk.ctkSettingsPanel):
         ctk.ctkSettingsPanel.__init__(self, *args, **kwargs)
         self.setObjectName(PANEL_OBJECT_NAME)
         self.rows = []
-        layout = qt.QVBoxLayout(self)
+        # The page scrolls (like Settings > Saving): every template adds a row, and without a scroll area
+        # the Settings dialog's minimum height grew with the number of templates until OK/Cancel left the screen.
+        outer = qt.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.scrollArea = qt.QScrollArea()
+        self.scrollArea.setObjectName("studioTemplatesScrollArea")
+        self.scrollArea.setWidgetResizable(True)
+        self.scrollArea.setFrameShape(qt.QFrame.NoFrame)
+        self.scrollArea.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        outer.addWidget(self.scrollArea)
+        page = qt.QWidget()
+        page.setObjectName("studioTemplatesPage")
+        self.scrollArea.setWidget(page)
+        self.scrollArea.viewport().setAutoFillBackground(False)
+        layout = qt.QVBoxLayout(page)
         # The margins of the other Studio settings pages (VISUAL 4.7)
         layout.setContentsMargins(24, 20, 24, 16)
         layout.setSpacing(14)
@@ -739,7 +849,8 @@ class TemplatesSettingsPanel(ctk.ctkSettingsPanel):
     @staticmethod
     def _styleSheet():
         t = {name: ui.token(name).name() for name in ("border", "hairline", "card", "accent-subtle", "accent-fg", "text", "text2")}
-        return (f"QFrame#studioTemplatesList {{ border: 1px solid {t['border']}; border-radius: 10px; background: transparent; }}"
+        return (f"QScrollArea#studioTemplatesScrollArea, QWidget#studioTemplatesPage {{ background: transparent; }}"
+                f"QFrame#studioTemplatesList {{ border: 1px solid {t['border']}; border-radius: 10px; background: transparent; }}"
                 f"QFrame#studioTemplateRow {{ border: none; border-bottom: 1px solid {t['hairline']}; background: transparent; }}"
                 f"QFrame#studioTemplateRow[last=\"true\"] {{ border-bottom: none; }}"
                 f"QFrame#studioTemplateRow[isDefault=\"true\"] {{ background-color: {t['card']}; }}"
@@ -792,11 +903,17 @@ class TemplatesSettingsPanel(ctk.ctkSettingsPanel):
         texts.setSpacing(2)
         nameRow = qt.QHBoxLayout()
         nameRow.setSpacing(8)
-        nameLabel = _label(template.name, "studioTemplateName", 13, qt.QFont.Medium)
+        nameLabel = _label("", "studioTemplateName", 13, qt.QFont.Medium)
+        _setElidedText(nameLabel, template.name, NAME_WIDTH)
         nameRow.addWidget(nameLabel)
         chip = ui.chip(_("Built-in") if template.builtin else _("Yours"), "neutral" if template.builtin else "busy")
         chip.setObjectName("studioTemplateKindChip")
         nameRow.addWidget(chip)
+        if template.isUser and not template.isAvailable():
+            missing = ui.chip(_("Image missing"), "warn")
+            missing.setObjectName("studioTemplateMissingChip")
+            missing.setToolTip(_("The image file of this template was deleted. Remove the template and add it again."))
+            nameRow.addWidget(missing)
         if template.surfacePaths:
             surfaces = ui.chip(_("{count} surfaces").format(count=len(template.surfacePaths)) if len(template.surfacePaths) != 1 else _("1 surface"), "neutral")
             surfaces.setObjectName("studioTemplateSurfacesChip")
@@ -815,11 +932,16 @@ class TemplatesSettingsPanel(ctk.ctkSettingsPanel):
             layout.addWidget(defaultLabel)
         else:
             setDefault = _button(_("Set as default"), "studioTemplateSetDefault", lambda templateId=template.id: self.setDefault(templateId), role="ghost")
+            if not template.isAvailable():
+                setDefault.setEnabled(False)
+                setDefault.setToolTip(_("The image file of this template is missing, so it cannot be the default. Remove the template and add it again."))
             layout.addWidget(setDefault)
         more = qt.QToolButton()
         more.setObjectName("studioTemplateMoreButton")
         more.setIcon(ui.icon("ellipsis", 16))
-        more.setToolTip(_("More"))
+        more.setToolTip(ui.tooltip(_("More"), description=_("Actions for {name}").format(name=template.name)))
+        # An icon-only button is announced by its accessible name, and every row's button must tell its template
+        more.setAccessibleName(_("More actions for {name}").format(name=template.name))
         more.setPopupMode(qt.QToolButton.InstantPopup)
         ui.setRole(more, "ghost")
         menu = qt.QMenu(more)
@@ -847,7 +969,13 @@ class TemplatesSettingsPanel(ctk.ctkSettingsPanel):
         showAddDialog(self.window(), onAdded=lambda template: self.refresh())
 
     def setDefault(self, templateId):
-        templates.setDefault(templateId)
+        try:
+            templates.setDefault(templateId)
+        except ValueError as error:
+            # The row's button is disabled for such a template; this is for a stale row or a script
+            if not slicer.app.testingEnabled():
+                slicer.util.warningDisplay(str(error), windowTitle=_("Set as default"))
+            return
         self.refresh()
 
     def remove(self, templateId, confirm=True):
@@ -945,7 +1073,9 @@ def populateTemplateMenu(menu, onStart=None):
     onStart = onStart or startOn
     defaultId = templates.defaultTemplateId()
     for template in templates.listTemplates():
-        action = menu.addAction(template.name)
+        missing = template.isUser and not template.isAvailable()
+        shownName = template.name.replace("&", "&&")  # a single "&" would make the next letter a menu mnemonic
+        action = menu.addAction(_("{name} (image missing)").format(name=shownName) if missing else shownName)
         action.setObjectName("studioTemplateMenuItem")
         action.setData(template.id)
         action.setCheckable(True)
@@ -972,7 +1102,9 @@ def paletteItems(shell=None):
          "synonyms": ["templates", "default template", "remove template", "template settings", "mni templates"]},
     ]
     for template in templates.userTemplates():
-        items.append({"id": f"templates.start.{template.slug}", "title": _("Start on {name}").format(name=template.name), "category": _("Action"),
+        missing = not template.isAvailable()
+        title = _("Start on {name} (image missing)") if missing else _("Start on {name}")
+        items.append({"id": f"templates.start.{template.slug}", "title": title.format(name=template.name), "category": _("Action"),
                       "callback": lambda templateId=template.id: startOn(templateId), "synonyms": ["template", "start on template", template.space.lower()],
                       "description": template.metaLine()})
     return items
@@ -1050,17 +1182,27 @@ def install(shell):
     """Studio plug-in entry point (``shell.OPTIONAL_PLUGINS``): Search entries now; Settings > Templates and the grids of
     your templates shortly after.
     """
-    global _installTimer
     registerPaletteProvider()
+    installSettingsPanelDeferred()
+
+
+def installSettingsPanelDeferred():
+    """Schedule Settings > Templates and the template grids (idempotent), also without the Studio interface.
+
+    Called at startup in Classic and in Studio, so that the settings panels are the same in both modes (the Lesion
+    Network Mapping messages "Settings > Templates" are for Classic users too). The Studio plug-in does the same.
+    """
+    global _installTimer
     if _installTimer is None:
         _installTimer = qt.QTimer()
         _installTimer.setSingleShot(True)
         _installTimer.setInterval(DEFERRED_INSTALL_MS)
         _installTimer.connect("timeout()", _deferredInstall)
-    _installTimer.start()
+    if not _installTimer.isActive():
+        _installTimer.start()
 
 
 def uninstall(shell):
-    if _installTimer is not None:
-        _installTimer.stop()  # a Studio -> Classic switch within DEFERRED_INSTALL_MS adds no Settings > Templates
+    # No timer stop: Settings > Templates is part of Classic as well (a Studio -> Classic switch within
+    # DEFERRED_INSTALL_MS still adds it)
     unregisterPaletteProvider()

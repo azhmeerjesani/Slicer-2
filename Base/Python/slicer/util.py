@@ -507,7 +507,20 @@ def importModuleObjects(from_module_name, dest_module_name, type_info):
 # - after ``startupCompleted``, the remaining wrappers are imported one per event-loop pass while
 #   the application is idle, so that the namespace converges to the eager one within seconds.
 
-_lazyWrapperState = {
+import sys
+import threading
+import types
+
+# One re-entrant lock serializes every change of the state below and every wrapper import, so that a
+# Python worker thread that reads ``slicer.<Class>`` while the main thread imports wrappers (the idle
+# prefetch) waits until the classes are copied, instead of finding the module "imported" but empty or
+# iterating a dictionary that another thread changes. Re-entrant because importing a wrapper can read
+# ``slicer.<Class>`` in the same thread.
+# A reload of this module (importlib.reload) must keep the existing lock and state: the prefetch timer and
+# the wrapper registry hold on to them, and a new empty state would lose the classes not imported yet.
+_lazyWrapperLock = globals().get("_lazyWrapperLock") or threading.RLock()
+
+_lazyWrapperState = globals().get("_lazyWrapperState") or {
     "indexes": [],  # registered (directory, index path)
     "classes": {},  # class name -> wrapper module name, for classes not copied into slicer yet
     "kinds": {},  # wrapper module name -> "vtk" or "qt"
@@ -515,6 +528,7 @@ _lazyWrapperState = {
     "imported": set(),
     "startupCompleted": False,
     "timer": None,
+    "removed": set(),  # names that the user deleted from slicer: a later import must not bring them back
 }
 
 _LAZY_WRAPPER_PATTERNS = (
@@ -538,6 +552,37 @@ def _lazyWrapperMatches(item, kind):
     return type(item).__name__ == "PythonQtClassWrapper"
 
 
+class _LazyWrapperSlicerModule(types.ModuleType):
+    """Class of the ``slicer`` module while wrappers are imported lazily.
+
+    As in a module without lazy wrappers, ``slicer.<Class> = value`` replaces the class for good
+    (the lazy import must not overwrite it later) and ``del slicer.<Class>`` removes it, also for
+    an indexed class that is not imported yet.
+    """
+
+    def __setattr__(self, name, value):
+        with _lazyWrapperLock:
+            _lazyWrapperState["classes"].pop(name, None)
+            _lazyWrapperState["removed"].discard(name)
+            super().__setattr__(name, value)
+
+    def __delattr__(self, name):
+        with _lazyWrapperLock:
+            state = _lazyWrapperState
+            pending = state["classes"].pop(name, None) is not None
+            if name in self.__dict__:
+                super().__delattr__(name)
+            elif not pending:
+                raise AttributeError(f"module 'slicer' has no attribute {name!r}")
+            state["removed"].add(name)
+
+
+def _installLazyWrapperModuleClass():
+    slicerModule = sys.modules.get("slicer")
+    if slicerModule is not None and type(slicerModule) is types.ModuleType:
+        slicerModule.__class__ = _LazyWrapperSlicerModule
+
+
 def _registerLazyWrapperIndex(directory, indexPath):
     """Register the wrapper class index of ``directory`` instead of importing its wrappers.
 
@@ -546,6 +591,11 @@ def _registerLazyWrapperIndex(directory, indexPath):
     the index does not list (a stale index) are imported right away. Returns False, after doing
     nothing, if the index cannot be used; the caller then imports the wrappers eagerly.
     """
+    with _lazyWrapperLock:
+        return _registerLazyWrapperIndexLocked(directory, indexPath)
+
+
+def _registerLazyWrapperIndexLocked(directory, indexPath):
     import fnmatch
     import json
     import os
@@ -592,6 +642,7 @@ def _registerLazyWrapperIndex(directory, indexPath):
     presentNames = {name for name, _ in present}
 
     state["indexes"].append(key)
+    _installLazyWrapperModuleClass()
     unindexed = []
     for moduleName, kind in present:
         if moduleName in state["imported"] or moduleName in state["pending"]:
@@ -628,6 +679,11 @@ def _registerLazyWrapperIndex(directory, indexPath):
 
 def _importLazyWrapperModule(moduleName):
     """Import one wrapper module and copy its classes into ``slicer``, as the eager import does."""
+    with _lazyWrapperLock:
+        _importLazyWrapperModuleLocked(moduleName)
+
+
+def _importLazyWrapperModuleLocked(moduleName):
     import importlib
     import sys
 
@@ -648,26 +704,79 @@ def _importLazyWrapperModule(moduleName):
     if module is not None:
         for itemName in dir(module):
             item = getattr(module, itemName)
-            if not _lazyWrapperMatches(item, kind):
+            if itemName in state["removed"] or not _lazyWrapperMatches(item, kind):
                 continue
             owner = classes.get(itemName)
             if owner == moduleName:
-                setattr(slicerModule, itemName, item)
+                # __dict__ directly: a name that the user assigned or deleted is no longer in
+                # ``classes`` (see _LazyWrapperSlicerModule), so it is never overwritten here.
+                slicerModule.__dict__[itemName] = item
                 del classes[itemName]
             elif owner is None and itemName not in slicerModule.__dict__:
                 # Not in the index, for example an abstract Qt base class that PythonQt registers
                 # with the first wrapped subclass.
-                setattr(slicerModule, itemName, item)
+                slicerModule.__dict__[itemName] = item
+    if kind != "vtk":
+        _copyLazyWrapperPrivateClasses(slicerModule)
     # Indexed names that the eager import would not have copied (not a class of this kind)
-    for className in [name for name, owner in classes.items() if owner == moduleName]:
+    for className in [name for name, owner in list(classes.items()) if owner == moduleName]:
         del classes[className]
+
+
+# Qt base classes that PythonQt registers under PythonQt.private and that the eager import finds in
+# the first wrapper module (so official 3D Slicer has them as slicer.<Class>). All other classes under
+# PythonQt.private are internal or not wrapped (QMainWindowLayout, ctkSlider, qSlicerStyle, ...) and
+# official 3D Slicer does not have them in slicer, so they are never copied.
+_LAZY_WRAPPER_PRIVATE_CLASSES = ("qSlicerSubjectHierarchyAbstractPlugin",)
+
+
+def _copyLazyWrapperPrivateClasses(slicerModule, names=None):
+    """Copy the Qt base classes that PythonQt registered under ``PythonQt.private`` into ``slicer``.
+
+    An object whose wrapper module is not imported yet (for example a subject hierarchy plugin
+    wrapped during startup) makes PythonQt register its abstract base classes under
+    ``PythonQt.private``. They are in no wrapper module and not in the index, but the eager import
+    finds them in the module that is imported first (``slicer.qSlicerSubjectHierarchyAbstractPlugin``).
+    Only the classes listed in ``_LAZY_WRAPPER_PRIVATE_CLASSES`` (or ``names``) are copied.
+    """
+    state = _lazyWrapperState
+    candidates = [
+        name
+        for name in (_LAZY_WRAPPER_PRIVATE_CLASSES if names is None else names)
+        if name not in state["removed"] and name not in slicerModule.__dict__ and name not in state["classes"]
+    ]
+    if not candidates:
+        return
+    try:
+        import PythonQt
+
+        private = PythonQt.private
+    except (ImportError, AttributeError):
+        return
+    for itemName in candidates:
+        try:
+            item = getattr(private, itemName)
+        except AttributeError:
+            continue
+        if _lazyWrapperMatches(item, "qt"):
+            slicerModule.__dict__[itemName] = item
 
 
 def _importPendingLazyWrappers():
     """Import all wrapper modules that are not imported yet."""
-    state = _lazyWrapperState
-    while state["pending"]:
-        _importLazyWrapperModule(state["pending"][0])
+    with _lazyWrapperLock:
+        while _importNextPendingLazyWrapper():
+            pass
+
+
+def _importNextPendingLazyWrapper():
+    """Import the first wrapper module that is not imported yet. Return False if there is none."""
+    with _lazyWrapperLock:
+        pending = _lazyWrapperState["pending"]
+        if not pending:
+            return False
+        _importLazyWrapperModule(pending[0])
+        return True
 
 
 _LAZY_WRAPPER_CLASS_NAME = None
@@ -682,7 +791,9 @@ def _resolveLazyWrapperAttribute(name):
     state = _lazyWrapperState
     slicerModule = sys.modules["slicer"]
     moduleName = state["classes"].get(name)
-    if moduleName is not None:
+    if name in state["removed"]:
+        pass
+    elif moduleName is not None:
         _importLazyWrapperModule(moduleName)
     elif state["pending"]:
         # A class that the index cannot list (an abstract Qt base class registered with a subclass):
@@ -691,6 +802,9 @@ def _resolveLazyWrapperAttribute(name):
             _LAZY_WRAPPER_CLASS_NAME = re.compile(r"^(q|vtk|ctk)[A-Z]\w*$")
         if _LAZY_WRAPPER_CLASS_NAME.match(name):
             _importPendingLazyWrappers()
+    if name in _LAZY_WRAPPER_PRIVATE_CLASSES and name not in slicerModule.__dict__:
+        with _lazyWrapperLock:
+            _copyLazyWrapperPrivateClasses(slicerModule, (name,))
     if name in slicerModule.__dict__:
         return slicerModule.__dict__[name]
     raise AttributeError(f"module 'slicer' has no attribute {name!r}")
@@ -698,7 +812,8 @@ def _resolveLazyWrapperAttribute(name):
 
 def _lazyWrapperClassNames():
     """Return the names of the indexed classes that are not copied into ``slicer`` yet."""
-    return list(_lazyWrapperState["classes"])
+    with _lazyWrapperLock:
+        return list(_lazyWrapperState["classes"])
 
 
 def _onStartupCompletedLazyWrapperPrefetch():
@@ -718,8 +833,7 @@ def _startLazyWrapperPrefetch():
 
     def importNext():
         try:
-            if state["pending"]:
-                _importLazyWrapperModule(state["pending"][0])
+            _importNextPendingLazyWrapper()
         finally:
             if not state["pending"]:
                 timer.stop()
@@ -3429,11 +3543,16 @@ class VTKObservationMixin:
                 obj.RemoveObserver(tag)
             self.__observations.clear()
         else:
-            for obj, events in self.__observations.items():
-                for e, methods in events.items():
+            for obj, events in list(self.__observations.items()):
+                for e, methods in list(events.items()):
                     if method in methods:
                         _g, t, _p = methods.pop(method)
                         obj.RemoveObserver(t)
+                        if not methods:
+                            del events[e]
+                if not events:
+                    # Without observations, the object is not kept alive by the mixin
+                    del self.__observations[obj]
 
     def addObserver(self, obj, event, method, group="none", priority=0.0):
         from warnings import warn
@@ -3458,6 +3577,12 @@ class VTKObservationMixin:
             obj.RemoveObserver(tag)
         except KeyError:
             warn("does not have observer")
+            return
+        # Without observations, the object is not kept alive by the mixin (a removed node would stay in memory)
+        if not methods:
+            del events[event]
+        if not events:
+            del self.__observations[obj]
 
     def getObserver(self, obj, event, method, default=None):
         try:

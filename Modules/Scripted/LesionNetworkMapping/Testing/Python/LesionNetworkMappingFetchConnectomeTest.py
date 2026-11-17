@@ -13,6 +13,7 @@ Run without Slicer's GUI:
 """
 
 import copy
+import errno
 import hashlib
 import http.server
 import io
@@ -37,7 +38,7 @@ if MODULE_DIR not in sys.path:
 import numpy as np
 from scipy import io as sio
 
-from LesionNetworkMappingLib import catalog, connectome, fetchconnectome, jobs, nifti, runs
+from LesionNetworkMappingLib import catalog, connectome, fetchconnectome, jobs, leaddbs, manager, nifti, runs
 
 GSP_RUN = "GSP1000/sub-{s}/func/sub-{s}_bld00{r}_rest_skip4_stc_mc_bp_0.0001_0.08_resid_FS1mm_MNI1mm_MNI2mm_sm7_finalmask.nii.gz"
 TERMS_TEXT = "<p>GSP Open Access Data Use Terms (2014-Apr-22)</p><p>1. I will not attempt to identify any participant.<br>2. I will acknowledge the project in publications. See <a href=\"https://example.org/terms\">the terms</a>.</p>"
@@ -355,6 +356,9 @@ class FetchRunTest(FetchConnectomeBase):
         self.assertIs(provenance["preprocessing"]["gsr"], True)
         self.assertEqual(provenance["trS"], 3.0)
         self.assertEqual(provenance["kind"], "timeseries")
+        self.assertEqual(self.entry["space"], "MNI152NLin6Asym")
+        self.assertEqual(bundle.metadata.get("space"), "MNI152NLin6Asym")  # a fetched bundle records the catalog's space
+        self.assertEqual(manager.bundle_summary(summary["path"])["space"], "MNI152NLin6Asym")  # the manager's Space column
         self.assertEqual(provenance["participants"], "participants.tsv")
         self.assertNotIn("checksumOverride", provenance["source"])
         with open(os.path.join(summary["path"], "participants.tsv"), "rb") as f:
@@ -396,6 +400,33 @@ class FetchRunTest(FetchConnectomeBase):
         self.assertIsNone(bundle.provenance["population"].get("ageRange"))  # the subjects of a part are not the entry's population
         self.assertEqual(bundle.provenance["population"]["n"], 4)
         self.assertFalse([r for r in self.server.requests if r["file"] == 1002])  # the third archive was not requested
+
+    def test_a_subject_subset_records_the_subjects_the_bundle_holds(self):
+        # 3 of 5 subjects are estimated to be in ceil(3/5 * 3) = 2 archives, which hold 4: the bundle does not claim "subjects:3"
+        summary = self.fetch(subset="subjects:3")
+        bundle = connectome.ConnectomeBundle.open(summary["path"])
+        self.assertEqual(bundle.subject_ids, ["sub-0001", "sub-0002", "sub-0003", "sub-0004"])
+        self.assertEqual(bundle.provenance["source"]["subset"], "archives:00-01")
+        differs = self.warnings("subset_differs")
+        self.assertEqual(len(differs), 1)
+        self.assertIn("hold 4", differs[0]["message"])
+
+    def test_a_subject_subset_is_planned_as_the_archives_it_reads(self):
+        # every subject of the archives read is kept, so subjects:1 (archive 00) needs the space of archives:00, not 1/5
+        entry = copy.deepcopy(self.entry)
+        entry["disk"]["stored_bytes"] = [5_000_000, 50_000_000]
+        for subset, archive_subset in (("subjects:1", "archives:00"), ("subjects:3", "archives:00-01")):
+            plan, as_archives = catalog.disk_plan(entry, subset), catalog.disk_plan(entry, archive_subset)
+            self.assertEqual(plan["archives"], as_archives["archives"])
+            self.assertEqual(plan["stored"], as_archives["stored"], subset)
+            self.assertEqual(plan["peak"], as_archives["peak"], subset)
+        # the job's own free-space check refuses a destination that holds the 1/5 share of the bundle but not archive 00
+        free = catalog.disk_plan(entry, "subjects:1")["peak"]
+        self.assertGreater(free, round(50_000_000 / 5 * fetchconnectome.DISK_MARGIN))
+        with mock.patch.object(fetchconnectome.shutil, "disk_usage", return_value=shutil._ntuple_diskusage(10**12, 10**12 - free, free)):
+            with self.assertRaises(jobs.JobError) as ctx:
+                self.fetch(entry, subset="subjects:1")
+        self.assertEqual(ctx.exception.code, "disk_space")
 
     def test_keep_archives_stores_each_archive(self):
         summary = self.fetch(keep_archives=True)
@@ -537,6 +568,21 @@ class FetchStreamingTest(FetchConnectomeBase):
         self.assertNotEqual(resolver.url(file), second)
         self.assertEqual(fetchconnectome.RESIGN_AFTER_S, 3500.0)
 
+    def test_a_missing_archive_is_reported_as_missing_not_as_refused(self):
+        for status, refused in ((404, False), (410, False), (401, True), (403, True)):
+            session = mock.Mock()
+            session.get.return_value = mock.Mock(status_code=status, headers={})
+            resolver = fetchconnectome.SignedUrlResolver(session, "https://dataverse.invalid")
+            with self.assertRaises(jobs.JobError) as ctx:
+                resolver.url({"id": 5001, "name": "x.tar"})
+            self.assertEqual(ctx.exception.code, "http")
+            self.assertEqual(ctx.exception.fields["status"], status)
+            message = str(ctx.exception)
+            self.assertEqual("does not allow" in message, refused, message)
+            if not refused:
+                self.assertIn("no longer at the provider", message)
+                self.assertIn("check the catalog for updates", message)
+
     def test_a_server_that_always_answers_403_gives_up(self):
         self.server.token_budget = 0
         with self.assertRaises(jobs.JobError) as ctx:
@@ -590,6 +636,140 @@ class FetchStreamingTest(FetchConnectomeBase):
         self.assertEqual(ctx.exception.code, "exists")
         self.assertEqual(self.fetch(resume=True)["subjects"], 5)
 
+    def test_a_resume_with_a_subset_that_leaves_out_converted_archives_is_refused_up_front(self):
+        # Paused with the first archive done and the second one partly converted, then resumed with only the first archive:
+        # the bundle already holds subjects of the second one, so the resume is refused with a plain message (it used to fail
+        # with "Not a connectome bundle (missing connectome.json)" and record the narrower subset in state.json)
+        bundle = self.bundle()
+        with self.assertRaises(jobs.Cancelled):
+            self.fetch(cancel=lambda: os.path.isfile(os.path.join(bundle, "subjects", "sub-0003.f16.npy")))
+        state = fetchconnectome.read_state(self.entry, self.dest)
+        self.assertEqual(state["archives"]["GSP1000_v2_00.tar"]["status"], "done")
+        self.assertEqual(state["archives"]["GSP1000_v2_01.tar"]["status"], "partial")
+        problem = fetchconnectome.resume_subset_problem(self.entry, self.dest, "archives:00-00")
+        self.assertIn("GSP1000_v2_01.tar", problem or "")
+        for subset in (None, "all", "archives:00-01", "archives:00-02", "subjects:5"):  # the same subset or a larger one
+            self.assertIsNone(fetchconnectome.resume_subset_problem(self.entry, self.dest, subset), subset)
+        with self.assertRaises(jobs.JobError) as ctx:
+            self.fetch(resume=True, subset="archives:00-00")
+        self.assertEqual(ctx.exception.code, "subset_changed")
+        self.assertEqual(ctx.exception.exit_code, jobs.EXIT_USAGE)
+        self.assertIn("GSP1000_v2_01.tar", ctx.exception.message)
+        self.assertIsNone(fetchconnectome.read_state(self.entry, self.dest)["subset"])  # the state keeps the subset it was paused with
+        summary = self.fetch(resume=True)
+        self.assertEqual(summary["subjects"], 5)
+        self.assertSameSubjects(summary["path"], self.reference())
+
+    def test_a_resume_whose_archives_are_all_converted_finalizes_the_bundle(self):
+        # Paused once the first archive was converted (and nothing of the second one), then resumed with only the first
+        # archive: no archive is left to convert, and the bundle is still finished (it used to have no connectome.json)
+        stop = threading.Event()
+
+        def emit(event, **fields):
+            self.emit(event, **fields)
+            if event == "result" and fields.get("kind") == "archive" and fields.get("name") == "GSP1000_v2_00.tar":
+                stop.set()
+
+        with self.assertRaises(jobs.Cancelled):
+            self.fetch(cancel=stop, streams=1, emit=emit)
+        state = fetchconnectome.read_state(self.entry, self.dest)
+        self.assertEqual(state["archives"]["GSP1000_v2_00.tar"]["status"], "done")
+        self.assertFalse(fetchconnectome._archive_has_data(state["archives"].get("GSP1000_v2_01.tar")))
+        self.assertFalse(os.path.isfile(os.path.join(self.bundle(), "connectome.json")))
+        self.assertIsNone(fetchconnectome.resume_subset_problem(self.entry, self.dest, "archives:00-00"))
+        summary = self.fetch(resume=True, subset="archives:00-00")
+        self.assertEqual(summary["subjects"], 2)
+        bundle = connectome.ConnectomeBundle.open(summary["path"])
+        self.assertEqual(bundle.subject_ids, ["sub-0001", "sub-0002"])
+        self.assertEqual(bundle.provenance["source"]["subset"], "archives:00-00")
+        self.assertTrue(fetchconnectome.read_state(self.entry, self.dest)["complete"])
+        # The same bundle as a fetch of the first archive alone
+        other = os.path.join(self.dest, "direct")
+        direct = self.fetch(dest=other, subset="archives:00-00")
+        self.assertSameSubjects(summary["path"], direct["path"])
+
+    def test_a_deleted_bundle_is_fetched_again_not_trusted_from_the_state(self):
+        # Paused with the first archive done, then the user deleted the bundle folder: Resume must not skip that archive
+        bundle = self.bundle()
+        with self.assertRaises(jobs.Cancelled):
+            self.fetch(cancel=lambda: os.path.isfile(os.path.join(bundle, "subjects", "sub-0003.f16.npy")))
+        self.assertEqual(fetchconnectome.read_state(self.entry, self.dest)["archives"]["GSP1000_v2_00.tar"]["status"], "done")
+        shutil.rmtree(bundle)
+        self.assertIsNone(fetchconnectome.unfinished_fetch(self.entry, self.dest))  # nothing to resume: the dialog offers a new download
+        before = len(self.server.requests)
+        summary = self.fetch(resume=True)
+        self.assertTrue([r for r in self.server.requests[before:] if r["file"] == 1000])  # the first archive is read again
+        self.assertEqual(summary["subjects"], 5)
+        self.assertSameSubjects(summary["path"], self.reference())
+        self.assertEqual(connectome.ConnectomeBundle.open(summary["path"]).provenance["population"]["n"], 5)
+        self.assertEqual(len(self.warnings("bundle_missing")), 1)
+
+        # A complete fetch whose bundle was deleted: a new download (with or without --resume) starts again
+        shutil.rmtree(bundle)
+        self.assertIsNone(fetchconnectome.unfinished_fetch(self.entry, self.dest))
+        self.assertIsNone(fetchconnectome.finished_fetch(self.entry, self.dest))
+        self.assertEqual(self.fetch()["subjects"], 5)
+        shutil.rmtree(bundle)
+        summary = self.fetch(resume=True)
+        self.assertEqual(summary["subjects"], 5)
+        self.assertSameSubjects(summary["path"], self.reference())
+        self.assertEqual(fetchconnectome.finished_fetch(self.entry, self.dest), bundle)
+
+        # The bundle still there: a finished fetch is refused, as before
+        with self.assertRaises(jobs.JobError) as ctx:
+            self.fetch()
+        self.assertEqual(ctx.exception.code, "exists")
+
+    def _replaced_archive(self, index, subject, source):
+        """Archive ``index`` as the provider republishes it: the run of ``subject`` holds the data of ``source``."""
+        with open(os.path.join(self.runs_dir, f"{source}.nii.gz"), "rb") as f:
+            other = f.read()
+        with tarfile.open(fileobj=io.BytesIO(self.archives[index])) as tar:
+            members = [(m.name, tar.extractfile(m).read()) for m in tar.getmembers() if m.isfile()]
+        return _tar([(name, other if name == GSP_RUN.format(s=subject, r=1) else data) for name, data in members])
+
+    def test_a_resume_after_the_provider_replaced_a_converted_archive_does_not_mix_versions(self):
+        # Paused with archive 00 converted and archive 01 partly converted; the provider then publishes version 3.1, in which
+        # one of them holds other data for one subject (a new MD5). The resumed bundle used to keep the old subject and record
+        # the new MD5 as verified at version 3.1: it must equal an uninterrupted fetch of version 3.1 instead
+        bundle = self.bundle()
+        for index, subject, source in ((0, "0001", "0002"), (1, "0003", "0004")):
+            with self.subTest(archive=index):
+                shutil.rmtree(self.dest, ignore_errors=True)
+                os.makedirs(self.dest)
+                self.server.reset()
+                self.events = []
+                with self.assertRaises(jobs.Cancelled):
+                    self.fetch(streams=1, cancel=lambda: os.path.isfile(os.path.join(bundle, "subjects", "sub-0003.f16.npy")))
+                state = fetchconnectome.read_state(self.entry, self.dest)
+                self.assertEqual(state["archives"]["GSP1000_v2_00.tar"]["status"], "done")
+                self.assertEqual(state["archives"]["GSP1000_v2_01.tar"]["status"], "partial")
+
+                replaced = self._replaced_archive(index, subject, source)
+                original = self.server.files[1000 + index]["data"]
+                self.server.files[1000 + index]["data"] = replaced
+                self.server.version = (3, 1)
+                try:
+                    summary = self.fetch(streams=1, resume=True)
+                    reference = os.path.join(self.root, "reference-v31.lnmc")
+                    shutil.rmtree(reference, ignore_errors=True)
+                    archives = [replaced if i == index else data for i, data in enumerate(self.archives)]
+                    import warnings
+
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", connectome.ConversionWarning)
+                        for i, data in enumerate(archives):
+                            list(connectome.from_tar_stream(io.BytesIO(data), reference, finalize=i == len(archives) - 1, name="reference"))
+                    self.assertSameSubjects(summary["path"], reference)
+                    source_files = {f["name"]: f for f in connectome.ConnectomeBundle.open(summary["path"]).provenance["source"]["files"]}
+                    name = f"GSP1000_v2_{index:02d}.tar"
+                    self.assertEqual(source_files[name]["md5"], _md5(replaced))
+                    self.assertEqual(source_files[name]["verification"], "md5")  # read in full from the new archive
+                    self.assertEqual(connectome.ConnectomeBundle.open(summary["path"]).provenance["source"]["version"], "3.1")
+                    self.assertEqual(len([w for w in self.warnings("catalog_differs") if "discarded" in w["message"]]), 1)
+                finally:
+                    self.server.files[1000 + index]["data"] = original
+
     def test_a_server_that_ignores_range_cannot_resume_mid_archive(self):
         bundle = self.bundle()
         with self.assertRaises(jobs.Cancelled):
@@ -632,6 +812,33 @@ class FetchStreamingTest(FetchConnectomeBase):
                     timer.cancel()
                 self.assertFalse([e for e in self.events if e["event"] == "error"])
 
+    def test_a_full_disk_is_a_disk_space_error_and_leaves_no_temporary_file_after_the_resume(self):
+        real_save = np.save
+        calls = {"n": 0}
+
+        def full_disk_save(file, array, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 5:  # the third subject's data: a partial file, then the write fails like a full disk
+                file.write(b"\x93NUMPY partial")
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real_save(file, array, *args, **kwargs)
+
+        with mock.patch.object(connectome.np, "save", full_disk_save):
+            with self.assertRaises(jobs.JobError) as context:
+                self.fetch(streams=1)
+        self.assertEqual(context.exception.code, "disk_space")
+        self.assertIn("resume", context.exception.message)
+        subjects_dir = os.path.join(self.bundle(), "subjects")
+        self.assertEqual([n for n in os.listdir(subjects_dir) if n.endswith(".tmp")], [])
+        # a writer that was killed leaves its file under another pid: the resume removes that as well
+        stale = os.path.join(subjects_dir, "sub-stale.f16.npy.99999.tmp")
+        with open(stale, "wb") as f:
+            f.write(b"x")
+        summary = self.fetch(resume=True, streams=1)
+        self.assertEqual(summary["subjects"], 5)
+        self.assertSameSubjects(summary["path"], self.reference())
+        self.assertEqual([n for _, _, names in os.walk(self.bundle()) for n in names if n.endswith(".tmp")], [])
+
     def test_progress_events_carry_bytes_and_totals(self):
         self.fetch()
         progress = [e for e in self.events if e["event"] == "progress"]
@@ -640,6 +847,26 @@ class FetchStreamingTest(FetchConnectomeBase):
         self.assertTrue(all(e["total"] == total for e in progress))
         self.assertEqual(progress[-1]["done"], total)
         self.assertEqual(progress[-1]["archive_count"], 3)
+
+    def _shown_subjects(self):
+        return [e["subjects"] for e in self.events if e["event"] == "progress"]
+
+    def test_the_progress_subject_count_is_the_bundle_total_not_the_count_of_the_archive(self):
+        self.fetch()
+        shown = self._shown_subjects()
+        self.assertEqual(shown, sorted(shown), "the subject count never falls back at the start of an archive")
+        self.assertEqual(shown[-1], 5)  # the 5 subjects of the 3 archives (2 + 2 + 1), not the 1 of the last archive
+
+    def test_the_progress_subject_count_keeps_growing_after_a_resume(self):
+        bundle = self.bundle()
+        with self.assertRaises(jobs.Cancelled):
+            self.fetch(cancel=lambda: os.path.isfile(os.path.join(bundle, "subjects", "sub-0003.f16.npy")))
+        before = len(self.events)
+        self.fetch(resume=True)
+        shown = [e["subjects"] for e in self.events[before:] if e["event"] == "progress"]
+        self.assertGreaterEqual(shown[0], 2, "the subjects of the finished archive are counted again from the first line")
+        self.assertEqual(shown, sorted(shown))
+        self.assertEqual(shown[-1], 5)
 
 
 class FetchIntegrityTest(FetchConnectomeBase):
@@ -678,6 +905,24 @@ class FetchIntegrityTest(FetchConnectomeBase):
         self.assertEqual(len(self.warnings("checksum_override")), 1)
         self.assertEqual(connectome.ConnectomeBundle.open(summary["path"]).provenance["source"]["checksumOverride"], True)
 
+    def test_a_damaged_gzip_member_is_reported_as_damaged_upstream_not_as_an_exception(self):
+        # The provider serves an archive whose member has a wrong gzip CRC32 and lists the MD5 of exactly those bytes (damaged
+        # upstream): the job ends with a plain, resume-less error that names the archive, not with an unhandled exception
+        data = bytearray(self.archives[1])
+        with tarfile.open(fileobj=io.BytesIO(bytes(data))) as tar:
+            member = next(m for m in tar.getmembers() if m.isfile() and m.name.endswith(".nii.gz"))
+        data[member.offset_data + member.size - 8] ^= 0xFF  # the first byte of the CRC32 in the gzip trailer
+        self.addCleanup(self.server.files[1001].__setitem__, "data", self.server.files[1001]["data"])  # the server is shared by the tests
+        self.server.files[1001]["data"] = bytes(data)
+        with self.assertRaises(jobs.JobError) as ctx:
+            self.fetch()
+        self.assertEqual(ctx.exception.code, "damaged_member")
+        self.assertEqual(ctx.exception.fields["file"], "GSP1000_v2_01.tar")
+        message = str(ctx.exception)
+        self.assertIn("GSP1000_v2_01.tar", message)
+        self.assertIn("damaged upstream", message)
+        self.assertNotIn("Traceback", message)
+
     def test_a_truncated_archive_stops_and_is_resumable(self):
         # The provider cuts the connection for good after some bytes (a signed URL whose budget never renews)
         original = fetchconnectome.MAX_FAILURES
@@ -688,6 +933,29 @@ class FetchIntegrityTest(FetchConnectomeBase):
         self.assertEqual(fetchconnectome.MAX_FAILURES, original)
         self.server.token_budget = None
         self.assertEqual(self.fetch(resume=True)["subjects"], 5)
+
+
+    def test_a_provider_that_cannot_be_reached_gives_a_plain_message_without_the_exception_text(self):
+        import requests
+
+        raw = ("HTTPSConnectionPool(host='127.0.0.1', port=18471): Max retries exceeded with url: /s3/5000?exp=1794212481&sig=4f712ddc "
+               "(Caused by NewConnectionError(\"Failed to establish a new connection: [Errno 111] Connection refused\"))")
+        real_get = requests.Session.get
+
+        def get(session, url, *args, **kwargs):
+            if "/api/access/datafile/" in url:
+                raise requests.ConnectionError(raw)
+            return real_get(session, url, *args, **kwargs)
+
+        with mock.patch.object(requests.Session, "get", get), \
+                mock.patch.object(fetchconnectome, "MAX_FAILURES", 0), mock.patch.object(fetchconnectome, "RETRY_DELAYS_S", (0.0,)):
+            with self.assertRaises(jobs.JobError) as ctx:
+                self.fetch()
+        message = str(ctx.exception)
+        self.assertEqual(ctx.exception.code, "network")
+        for leak in ("HTTPSConnectionPool", "Errno", "sig=", "exp=", "NewConnectionError", "Max retries"):
+            self.assertNotIn(leak, message)
+        self.assertIn("Resume when you are online again", message)
 
 
 class FetchPlatformTest(FetchConnectomeBase):
@@ -795,6 +1063,10 @@ class FetchLeadDbsTest(unittest.TestCase):
                 self.assertTrue(np.array_equal(a.load_subject(subject_id).data, b.load_subject(subject_id).data), subject_id)
             self.assertEqual(a.subsets, b.subsets)
             self.assertEqual(a.provenance["source"]["doi"], DOI)
+            self.assertEqual(a.provenance["source"]["tag"], "GSPtest")  # the dataset tag of dataset_info.json survives the fetch
+            self.assertEqual(a.provenance["source"]["citation"], b.provenance["source"]["citation"])
+            self.assertEqual(leaddbs.leaddbs_label(a), leaddbs.leaddbs_label(b))
+            self.assertEqual(leaddbs.leaddbs_label(a), "GSPtestxFullSet")
             self.assertEqual(a.metadata["mask"]["policy"], "volsurf")
         finally:
             server.close()
@@ -804,6 +1076,167 @@ class FetchLeadDbsTest(unittest.TestCase):
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
+
+
+class FetchLeadDbsSubsetTest(unittest.TestCase):
+    """A named subset of a Lead-DBS entry: the bundle holds exactly its subjects, however they are spread over the archives."""
+
+    N = 8
+    NAMED = {"Full Set": 8, "First 4 Subjects": 4, "First 2 Subjects": 2, "First Subject": 1}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp(prefix="lnm-fetch-leaddbs-subset-")
+        cls._no_proxy = os.environ.get("NO_PROXY"), os.environ.get("no_proxy")
+        os.environ["NO_PROXY"] = os.environ["no_proxy"] = "127.0.0.1,localhost"
+        rng = np.random.default_rng(4)
+        dataset = os.path.join(cls.root, "dataset")
+        os.makedirs(os.path.join(dataset, "vol"))
+        shape = (5, 6, 4)
+        mask = np.zeros(shape, dtype=bool)
+        mask[1:4, 1:5, 1:3] = True
+        outidx = np.sort(np.ravel_multi_index(np.nonzero(mask), shape, order="F")) + 1
+        cls.subjects = [f"sub{i:02d}" for i in range(1, cls.N + 1)]
+        sub_ids = np.empty((cls.N, 1), dtype=object)
+        cls.runs = {}
+        for index, subject in enumerate(cls.subjects):
+            sub_ids[index, 0] = np.array([subject, f"{subject}_run1.mat"], dtype=object)
+            path = os.path.join(dataset, "vol", f"{subject}_run1.mat")
+            sio.savemat(path, {"gmtc": (50 + rng.standard_normal((10, len(outidx)))).astype(np.float32)})
+            with open(path, "rb") as f:
+                cls.runs[subject] = f.read()
+        spm_mat = np.array([[-2.0, 0, 0, 92], [0, 2, 0, -128], [0, 0, 2, -74], [0, 0, 0, 1]])
+        sio.savemat(os.path.join(dataset, "dataset_volsurf.mat"), {"vol": {"outidx": outidx.astype(np.float64)[:, np.newaxis], "space": {"dim": np.array([shape], np.float64), "mat": spm_mat, "fname": "space.nii"}, "subIDs": sub_ids}})
+        info = {"name": "GSP subset (test)", "tag": "GSPsubset", "type": "fMRI_timecourses",
+                "subsets": [{"name": name, "subs": list(range(1, n + 1)) if n > 1 else 1} for name, n in cls.NAMED.items()]}
+        with open(os.path.join(dataset, "dataset_info.json"), "w", encoding="utf-8") as f:
+            json.dump(info, f)
+        cls.metadata = {}
+        for name in ("dataset_info.json", "dataset_volsurf.mat"):
+            with open(os.path.join(dataset, name), "rb") as f:
+                cls.metadata[name] = f.read()
+        cls.server = FakeDataverse()
+        cls.next_id = 3000
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.close()
+        shutil.rmtree(cls.root, ignore_errors=True)
+        for key, value in zip(("NO_PROXY", "no_proxy"), cls._no_proxy, strict=True):
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def setUp(self):
+        self.server.reset()
+        self.dest = tempfile.mkdtemp(prefix="lnm-fetch-leaddbs-subset-dest-")
+        self.addCleanup(shutil.rmtree, self.dest, True)
+        self.events = []
+
+    def entry(self, layout):
+        """An entry whose archives hold ``layout`` (subjects per archive, in order); returns (entry, archive file ids)."""
+        entry = copy.deepcopy(catalog.load_catalog().get("gsp1000-kktjqc"))
+        api = f"https://dataverse.invalid/api/datasets/:persistentId/?persistentId=doi:{DOI}"
+        entry.update({"id": "fake-leaddbs-" + "-".join(str(n) for n in layout), "title": "GSP1000 Preprocessed Connectome for Lead-DBS (fake)"})
+        entry["source"].update({"api": api, "doi": DOI})
+        entry["terms"].update({"api": api})
+        files, ids, start = [], [], 0
+        for index, count in enumerate(layout):
+            data = _tar([(f"GSP1000-LeadDBS/vol/{subject}_run1.mat", self.runs[subject]) for subject in self.subjects[start : start + count]])
+            start += count
+            file_id = type(self).next_id = type(self).next_id + 1
+            self.server.add(file_id, f"GSP1000_leadDBS_{index:02d}.tar", data, folder="GSP1000-LeadDBS/vol")
+            files.append({"name": f"GSP1000_leadDBS_{index:02d}.tar", "folder": "GSP1000-LeadDBS/vol", "id": file_id, "size": len(data), "checksum": {"algo": "md5", "value": _md5(data)}, "role": "archive"})
+            ids.append(file_id)
+        for name, data in self.metadata.items():
+            file_id = type(self).next_id = type(self).next_id + 1
+            self.server.add(file_id, name, data, folder="")
+            files.append({"name": name, "folder": "", "id": file_id, "size": len(data), "checksum": {"algo": "md5", "value": _md5(data)}, "role": "metadata"})
+        entry["files"] = files
+        entry["size"] = sum(f["size"] for f in files)
+        entry["disk"] = {"subjects": self.N, "voxels": None, "timepoints_per_run": None, "runs_per_subject": [1, 1], "stored_bytes": None}
+        entry["population"]["n"] = self.N
+        entry["subsets"] = dict(self.NAMED)
+        self.assertEqual(catalog.validate_entry(entry), [])
+        return entry, ids
+
+    def emit(self, event, **fields):
+        self.events.append({"event": event, **fields})
+
+    def fetch(self, entry, subset, dest=None, **kwargs):
+        with _fast_retries():
+            return fetchconnectome.fetch_connectome(entry, dest or os.path.join(self.dest, re.sub(r"\W+", "_", str(subset))), TERMS_SHA, subset=subset, streams=2,
+                                                    server=self.server.url, emit=kwargs.pop("emit", self.emit), **kwargs)
+
+    def warnings(self, code):
+        return [e for e in self.events if e["event"] == "warning" and e.get("code") == code]
+
+    def assertExactSubset(self, summary, subset, n):
+        bundle = connectome.ConnectomeBundle.open(summary["path"])
+        self.assertEqual(bundle.subject_ids, self.subjects[:n])
+        self.assertEqual(summary["subjects"], n)
+        self.assertEqual(bundle.provenance["source"]["subset"], subset)
+        self.assertEqual(bundle.provenance["population"]["n"], n)
+        if subset in self.NAMED:
+            self.assertEqual(bundle.subsets[subset], self.subjects[:n])  # the bundle's own named subset is the one asked for
+        self.assertEqual(self.warnings("subset_differs"), [])
+        return bundle
+
+    def test_archives_that_hold_more_subjects_keep_only_the_named_subset(self):
+        entry, ids = self.entry((4, 4))
+        self.assertExactSubset(self.fetch(entry, "First Subject"), "First Subject", 1)
+        self.assertExactSubset(self.fetch(entry, "First 2 Subjects"), "First 2 Subjects", 2)
+        self.assertExactSubset(self.fetch(entry, "subjects:3"), "subjects:3", 3)
+        self.assertFalse(self.server.requests_for(ids[1]))  # the second archive is never needed
+        self.assertEqual(self.warnings("subset_more_archives"), [])
+
+    def test_a_destination_that_cannot_hold_the_lower_bound_is_refused_before_anything_is_downloaded(self):
+        """The Lead-DBS bundle size is known only from the mask in dataset_volsurf.mat, so the plan has no peak; the job still
+        refuses a destination with less free space than the lower bound (half of the float32 archives) instead of filling the disk.
+        """
+        entry, ids = self.entry((4, 4))
+        plan = catalog.disk_plan(entry)
+        self.assertIsNone(plan["peak"])
+        self.assertTrue(plan["peak_min"])
+        usage = shutil.disk_usage(self.dest)
+        with mock.patch.object(fetchconnectome.shutil, "disk_usage", return_value=usage._replace(free=plan["peak_min"] - 1)):
+            with self.assertRaises(jobs.JobError) as context:
+                self.fetch(entry, "all")
+        self.assertEqual(context.exception.code, "disk_space")
+        self.assertIn("at least", context.exception.message)
+        self.assertFalse([file_id for file_id in ids if self.server.requests_for(file_id)])
+        with mock.patch.object(fetchconnectome.shutil, "disk_usage", return_value=usage._replace(free=plan["peak_min"])):
+            self.assertExactSubset(self.fetch(entry, "First 2 Subjects"), "First 2 Subjects", 2)  # a subset needs less
+
+    def test_archives_that_hold_fewer_subjects_are_followed_by_the_next_ones(self):
+        entry, ids = self.entry((1, 1, 3, 3))  # "First 4 Subjects" is estimated in 2 archives, which hold 2 subjects
+        self.assertEqual(catalog.disk_plan(entry, "First 4 Subjects")["archives"], ["GSP1000_leadDBS_00.tar", "GSP1000_leadDBS_01.tar"])
+        summary = self.fetch(entry, "First 4 Subjects")
+        self.assertExactSubset(summary, "First 4 Subjects", 4)
+        self.assertEqual(summary["archives"], 3)
+        self.assertEqual([e["archive"] for e in self.warnings("subset_more_archives")], ["GSP1000_leadDBS_02.tar"])
+        self.assertFalse(self.server.requests_for(ids[3]))
+        self.assertIn("GSP1000_leadDBS_02.tar", [f["name"] for f in connectome.ConnectomeBundle.open(summary["path"]).provenance["source"]["files"]])
+        self.assertTrue(fetchconnectome.read_state(entry, os.path.dirname(summary["path"]))["complete"])
+
+    def test_a_fetch_cancelled_in_an_extra_archive_resumes_to_the_exact_subset(self):
+        entry, ids = self.entry((1, 1, 3, 3))
+        cancel = threading.Event()
+        dest = os.path.join(self.dest, "resumed")
+
+        def emit(event, **fields):
+            self.emit(event, **fields)
+            if event == "warning" and fields.get("code") == "subset_more_archives":
+                cancel.set()
+
+        with self.assertRaises(jobs.Cancelled):
+            self.fetch(entry, "First 4 Subjects", dest=dest, emit=emit, cancel=cancel)
+        self.assertFalse(os.path.isfile(os.path.join(fetchconnectome.bundle_path(entry, dest), "connectome.json")))
+        self.assertIsNotNone(fetchconnectome.unfinished_fetch(entry, dest))
+        summary = self.fetch(entry, "First 4 Subjects", dest=dest, resume=True)
+        self.assertExactSubset(summary, "First 4 Subjects", 4)
+        self.assertFalse(self.server.requests_for(ids[3]))
 
 
 class FetchCommandLineTest(FetchConnectomeBase):
@@ -883,6 +1316,47 @@ class FetchCommandLineTest(FetchConnectomeBase):
             proc.wait(timeout=120)
             self.assertEqual(proc.returncode, jobs.EXIT_CANCELLED, (wait, proc.stderr.read(), events[-1]))
             self.assertEqual(events[-1]["event"], "cancelled")
+
+    def test_the_command_stops_when_its_parent_process_is_gone(self):
+        """--parent-pid: the application passes its pid; when it crashes the job stops (resumable) instead of downloading on unseen.
+
+        The application starts the job through the PythonSlicer launcher, which outlives a crashed application, so the job's
+        own orphan watchdog never fires; only the parent watchdog stops it.
+        """
+        self.server.delay_s = 0.03
+        catalog_path = os.path.join(self.dest, "catalog.json")
+        data = copy.deepcopy(catalog.load_catalog().data)
+        data["entries"] = [self.entry]
+        with open(catalog_path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        out = os.path.join(self.dest, "out")
+        parent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+        self.addCleanup(parent.wait)
+        self.addCleanup(parent.kill)
+        env = {**os.environ, "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost", "PYTHONPATH": MODULE_DIR}
+        args = [sys.executable, "-m", "LesionNetworkMappingLib.fetchconnectome", "--entry", "fake-gsp", "--dest", out, "--terms-sha", TERMS_SHA, "--catalog", catalog_path,
+                "--server", self.server.url, "--streams", "1", "--parent-pid", str(parent.pid)]
+        proc = subprocess.Popen(args, cwd=MODULE_DIR, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        events = []
+        for line in proc.stdout:
+            if not line.startswith("{"):
+                continue
+            events.append(json.loads(line))
+            if events[-1]["event"] == "progress" and parent.poll() is None:
+                parent.kill()  # the application crashed
+                parent.wait()
+        proc.wait(timeout=120)
+        self.assertEqual(proc.returncode, jobs.EXIT_CANCELLED, (proc.stderr.read(), events[-1:]))
+        self.assertEqual(events[-1]["event"], "cancelled")
+        self.assertIsNone(fetchconnectome.running_fetch(self.entry, out))  # the lock is released: Resume can start
+        self.assertFalse(os.path.exists(fetchconnectome.lock_path(self.entry, out)))
+        self.assertIsNotNone(fetchconnectome.unfinished_fetch(self.entry, out))
+        self.assertIsNone(fetchconnectome.finished_fetch(self.entry, out))
+        self.server.delay_s = 0
+        proc, events = self._run("--entry", "fake-gsp", "--dest", out, "--terms-sha", TERMS_SHA, "--resume", "--parent-pid", str(os.getpid()))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(fetchconnectome.finished_fetch(self.entry, out), fetchconnectome.bundle_path(self.entry, out))
+        self.assertEqual(len(connectome.ConnectomeBundle.open(events[-1]["outputs"][0]).subject_ids), 5)
 
 
 if __name__ == "__main__":

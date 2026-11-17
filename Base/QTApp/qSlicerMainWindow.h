@@ -196,15 +196,38 @@ signals:
   /// emitted). A handler connected with a direct connection may set them:
   /// - "unsavedLesion": the summary is shown with the buttons "Save lesion...", "Don't save" and "Cancel";
   /// - "lesionSaved": the summary is shown with the buttons "Quit", "Save session..." and "Cancel";
+  /// - "quit" or "cancel": the application asked its own question; the application exits, or stays open;
   /// - empty (the default): the usual confirmation.
   /// \sa saveRequested()
   void closeSummaryRequested();
+
+  /// Emitted when Close Scene is about to ask whether to save a modified scene, after the main window property
+  /// SlicerStudioCloseMode is cleared. A handler connected with a direct connection may set it to "projectSaved":
+  /// the project is up to date on disk and nothing is asked, or to "cancel": the application asked its own question
+  /// and the scene stays open. "projectSaved" is honored by closeSummaryRequested() as well.
+  void closeSceneSummaryRequested();
 
   /// Emitted when the user chose "Save lesion..." in the exit confirmation. A handler connected with a direct
   /// connection saves and sets the main window property SlicerStudioSaveResult to "saved" (anything else,
   /// for example "cancelled", keeps the application open).
   /// \sa closeSummaryRequested()
   void saveRequested();
+
+  /// Emitted when the application is about to ask the "lesionSaved" exit question (Quit, Save session..., Cancel),
+  /// after the main window property SlicerStudioCloseAnswer is cleared. A handler connected with a direct connection
+  /// may show its own dialog and set the property to "quit", "save" or "cancel"; if it stays empty, the application
+  /// shows a standard message box.
+  /// \sa closeSummaryRequested()
+  void closeQuestionRequested();
+
+  /// Emitted before File > Load Scene (or a recently loaded scene that replaces the scene) clears the scene, after
+  /// the main window property SlicerStudioLoadSceneAnswer is cleared. A handler connected with a direct connection
+  /// may set it to "cancel": nothing is loaded (for example, the open project could not be saved and the user keeps
+  /// working in it). loadSceneFinished() is emitted afterwards in every case.
+  void loadSceneRequested();
+
+  /// Emitted after the load that loadSceneRequested() announced is done, cancelled or failed.
+  void loadSceneFinished();
 
 protected slots:
   virtual void onModuleLoaded(const QString& moduleName);

@@ -71,7 +71,7 @@ startup, or before the engine CLI sets the BLAS thread count) does not import nu
 import importlib
 
 _EXPORTS = {
-    "nifti": ["read_nifti", "read_nifti_header", "write_nifti", "write_like", "xform_disagreement"],
+    "nifti": ["read_nifti", "read_nifti_header", "write_nifti", "write_like", "xform_disagreement", "pixdim_disagreement"],
     "geometry": [
         "Grid",
         "resample_to_grid",
@@ -163,8 +163,9 @@ _EXPORTS = {
     "calibrate": ["NotCalibratable", "clopper_pearson", "empirical_fwer", "sensitivity_fpr", "planted_network", "fwer_verdict", "rate_summary", "estimate_seconds", "permutation_seconds", "null_studies"],
     "clusters": ["ClusterTable", "cluster_table", "atlas_labeler", "pair_homologues", "cluster_caption", "write_clusters"],
     "atlases": ["Atlas", "LabelRow", "LabelResult", "label_point", "label_points", "label_mask", "label_cluster", "load_cached", "network_of", "to_yeo7", "read_label_table", "mask_family"],
-    "coords": ["Focus", "foci_from_rows", "read_foci", "read_sleuth", "read_nimare_json", "mni2tal", "tal2mni", "to_mni", "sphere_occupancy", "spheres", "random_coordinate_null", "prepare_coordinates", "prepare_atrophy", "prepare_stimulation", "atrophy_seed", "stimulation_seed", "write_seed_set", "read_seed_record"],
-    "controlsets": ["AmbiguousSpaceError", "list_sets", "register_folder", "set_lesions", "map_controls", "study_control_lesions", "mismatch_report", "unregister", "content_sha256"],
+    "coords": ["Focus", "OutsideMaskError", "foci_from_rows", "read_foci", "read_sleuth", "read_nimare_json", "mni2tal", "tal2mni", "to_mni", "sphere_occupancy", "spheres", "random_coordinate_null", "prepare_coordinates", "prepare_atrophy", "prepare_stimulation",
+               "atrophy_seed", "stimulation_seed", "write_seed_set", "read_seed_record"],
+    "controlsets": ["AmbiguousSpaceError", "list_sets", "register_folder", "set_lesions", "map_controls", "study_control_lesions", "study_maps_cache_roots", "mismatch_report", "unregister", "content_sha256"],
     "fastmap": ["Tiling", "FastIndex", "build_tiling", "build_index", "load_index", "approximate_maps", "parcel_occupancy", "import_parcel_matrix", "compare_parcel_matrices", "lesion_allowed"],
     "figurefit": ["FigureFitError", "CutPlane", "FigureFit", "cut_plane", "fit_figure", "fit_2d", "apply_2d", "residual_chip", "make_record", "validate_record", "read_fit_json", "write_fit_json", "figure_ijk_to_ras", "image_sha256"],
     "figures": ["Figure", "Scene", "Layer", "Options", "MapInfo", "TileSpec", "PanelSpec", "load_volume", "display_grid", "reslice", "write_figure", "watermark_for", "triptych", "glass", "replication", "render_slice"],
@@ -189,10 +190,13 @@ _EXPORTS = {
         "plan_status",
         "save_lab_recipe",
         "to_pipeline_config",
+        "pipeline_recipe",
         "selected_recipe",
         "select_recipe",
         "compare_parameters",
         "describe_change",
+        "analysis_pending",
+        "analysis_follow",
     ],
     "reference": ["Reference", "load_reference", "reference_status", "select_seeds", "external_on_grid", "compare_to_external", "seeds_sha256", "subjects_data_sha256"],
     "roi": ["RoiError", "RoiResult", "roi_means", "roi_glm", "small_volume_fwe", "read_roi", "write_svc_mask"],

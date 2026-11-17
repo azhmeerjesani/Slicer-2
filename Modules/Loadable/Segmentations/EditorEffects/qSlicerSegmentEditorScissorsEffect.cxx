@@ -589,8 +589,16 @@ bool qSlicerSegmentEditorScissorsEffectPrivate::updateBrushModel(qMRMLWidget* vi
           // include at least the current slice
           halfSliceCutDepthPixel = 0.5;
         }
-        segmentationBounds_SliceXY[4] = -halfSliceCutDepthPixel;
-        segmentationBounds_SliceXY[5] = halfSliceCutDepthPixel;
+        // The stencil includes a slice whose centre lies on the lower face of the shape and excludes
+        // one whose centre lies on the upper face. When the half depth is a whole number of slices,
+        // both faces lie on slice centres: shift them down by a small fraction of a slice so that
+        // each of these slices is classified the same way, without depending on rounding, and so that
+        // the narrow gaps left between the shape and the regions excluded when working "outside"
+        // (see below) cannot contain a slice centre. Otherwise the slice on the upper face is neither
+        // in the shape nor in the excluded region, and erasing/filling "outside" changes it entirely.
+        const double sliceFaceShiftPixel = 0.002; // larger than brushZEpsilon
+        segmentationBounds_SliceXY[4] = -halfSliceCutDepthPixel - sliceFaceShiftPixel;
+        segmentationBounds_SliceXY[5] = halfSliceCutDepthPixel - sliceFaceShiftPixel;
       }
       break;
       default:

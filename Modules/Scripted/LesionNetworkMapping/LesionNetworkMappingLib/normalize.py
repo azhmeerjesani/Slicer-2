@@ -81,6 +81,7 @@ if __name__ == "__main__":
 
     set_blas_threads(sys.argv[1:])  # before numpy is imported: BLAS reads these variables once
 
+import errno
 import hashlib
 import json
 import math
@@ -277,6 +278,25 @@ def user_template_folders(dirs=()):
     return folders
 
 
+def _user_template_fields_ok(record):
+    """True when the fields read from a template.json have the types they are used with (as templates._recordIsUsable
+    in Studio): a record edited by hand with, say, ``"sha256": "abc"`` is skipped like an unreadable one.
+    """
+    for key in ("sha256", "files", "grid"):
+        if record.get(key) is not None and not isinstance(record[key], dict):
+            return False
+    for key in ("name", "space"):
+        if record.get(key) is not None and not isinstance(record[key], str):
+            return False
+    if not isinstance(record.get("id"), str):
+        return False
+    for key in ("sha256", "files"):
+        for value in (record.get(key) or {}).values():
+            if value is not None and not isinstance(value, (str, list)):
+                return False
+    return True
+
+
 def read_user_template(folder):
     """The template.json of a user template folder (with "folder" added), or None when it is missing or not one."""
     try:
@@ -285,6 +305,8 @@ def read_user_template(folder):
     except (OSError, ValueError):
         return None
     if not isinstance(record, dict) or record.get("schema") != USER_TEMPLATE_FORMAT or not record.get("id"):
+        return None
+    if not _user_template_fields_ok(record):
         return None
     record["folder"] = os.path.abspath(folder)
     return record
@@ -1330,7 +1352,12 @@ def normalize(
         brainsroiauto=brainsroiauto,
     )
 
-    os.makedirs(out, exist_ok=True)
+    try:
+        os.makedirs(out, exist_ok=True)
+    except OSError as exc:
+        if is_unwritable_error(exc):
+            raise jobs.JobError(f"The output folder {out} cannot be written: {exc.strerror or exc}", code="output_unwritable", path=out) from exc
+        raise
     try:
         free = shutil.disk_usage(out).free
     except OSError:
@@ -1339,7 +1366,12 @@ def normalize(
         raise jobs.JobError(f"Not enough free disk space in {out} ({free / 1e6:.0f} MB)", code="disk_full")
 
     lock = jobs.OutputLock(os.path.join(out, LOCK_NAME))
-    lock.acquire()
+    try:
+        lock.acquire()
+    except OSError as exc:
+        if is_unwritable_error(exc):
+            raise jobs.JobError(f"The output folder {out} cannot be written: {exc.strerror or exc}", code="output_unwritable", path=out) from exc
+        raise
     try:
         if lock.reclaimed is not None:
             _warn(f"Reclaimed a stale lock of process {lock.reclaimed.get('pid')} on {lock.reclaimed.get('host')}", "stale_lock", subject=sid)
@@ -1357,6 +1389,11 @@ def normalize(
         return _run(ctx, force, batch_progress, started)
     finally:
         lock.release()
+
+
+def is_unwritable_error(exc):
+    """Whether ``exc`` says a folder cannot be written (permission denied or read-only file system)."""
+    return isinstance(exc, PermissionError) or getattr(exc, "errno", None) in (errno.EACCES, errno.EPERM, errno.EROFS)
 
 
 def _remove_stale_work(out):
@@ -1425,6 +1462,7 @@ def _run(ctx, force, batch_progress, started):
     ctx.grid1 = template_grid(ctx.template_id)
     status = "error"
     error = None
+    failure = None
     try:
         ctx.cancel.raise_if_cancelled(done=0)
         _stage_costmask(ctx)
@@ -1444,24 +1482,52 @@ def _run(ctx, force, batch_progress, started):
         raise
     except jobs.JobError as exc:
         error = {"message": exc.message, "code": exc.code}
+        failure = exc
         raise
     except Exception as exc:
         error = {"message": str(exc) or type(exc).__name__, "code": "exception"}
         raise
     finally:
         if status != "done":
-            _record_failure(ctx, status, error, started)
+            _record_failure(ctx, status, error, started, failure)
         if not ctx.keep_work:
             shutil.rmtree(ctx.work, ignore_errors=True)
 
 
-def _record_failure(ctx, status, error, started):
-    """Keep the logs of a failed run and record its status without touching a previous complete result."""
+def _point_error_to_kept_log(ctx, exc, error, logs_out):
+    """Make a child failure name the log that was kept (``<out>/logs/last-error``), not the one in the work folder."""
+    log = exc.fields.get("log")
+    if not log or os.path.dirname(os.path.abspath(log)) != os.path.abspath(ctx.logs):
+        return
+    name = os.path.basename(log)
+    kept = os.path.join(logs_out, name)
+    if not os.path.isfile(kept):
+        return
+    relative = "/".join(os.path.relpath(kept, ctx.out).split(os.sep))
+    exc.fields["log"] = kept
+    for holder, key in ((exc, "message"), (error, "message")):
+        text = holder.get(key) if isinstance(holder, dict) else getattr(holder, key, None)
+        if isinstance(text, str) and text.endswith(f"see {name}"):
+            text = text[: -len(name)] + relative
+            if isinstance(holder, dict):
+                holder[key] = text
+            else:
+                setattr(holder, key, text)
+                holder.args = (text,)
+
+
+def _record_failure(ctx, status, error, started, exc=None):
+    """Keep the logs of a failed run and record its status without touching a previous complete result.
+
+    The logs of an error are copied to ``<out>/logs/last-error`` and ``exc`` (a JobError) is made to name them there.
+    """
     try:
         logs_out = os.path.join(ctx.out, "logs", f"last-{status}")
         if status == "error" and os.path.isdir(ctx.logs):
             shutil.rmtree(logs_out, ignore_errors=True)
             shutil.copytree(ctx.logs, logs_out)
+            if exc is not None and error is not None:
+                _point_error_to_kept_log(ctx, exc, error, logs_out)
         record = {
             "format": FORMAT,
             "version": NORMALIZE_VERSION,
@@ -1594,13 +1660,44 @@ def _moving_lesion_image(ctx):
     return ctx._moving_lesion
 
 
+def _mask_in_image_order(mask, mask_affine, shape, affine, tolerance=0.02):
+    """``mask`` re-indexed to the voxel order of the grid ``(shape, affine)``, or None when it is not the same grid.
+
+    The two grids hold the same voxel centres when every voxel of the image maps onto exactly one voxel of the mask
+    through a signed axis permutation (RAS and LAS copies, or a transposed copy): the array is then transposed and
+    flipped, with no interpolation. ``tolerance`` is in voxels.
+    """
+    np = _np()
+    to_mask = np.linalg.inv(np.asarray(mask_affine, dtype=np.float64)) @ np.asarray(affine, dtype=np.float64)
+    linear, offset = to_mask[:3, :3], to_mask[:3, 3]
+    signed = np.rint(linear)
+    if not np.allclose(linear, signed, atol=tolerance) or not np.allclose(np.abs(signed).sum(axis=0), 1) or not np.allclose(np.abs(signed).sum(axis=1), 1):
+        return None
+    # image axis j is mask axis axes[j], counted forward (sign +1) or backward (sign -1)
+    axes = [int(np.argmax(np.abs(signed[:, j]))) for j in range(3)]
+    flips = []
+    for j, axis in enumerate(axes):
+        negative = signed[axis, j] < 0
+        first = (mask.shape[axis] - 1) if negative else 0
+        if mask.shape[axis] != shape[j] or abs(offset[axis] - first) > tolerance:
+            return None
+        flips.append(negative)
+    out = np.transpose(mask, axes)
+    return out[tuple(slice(None, None, -1) if flip else slice(None) for flip in flips)]
+
+
 def _template_images(ctx):
     """(fixed array, mask bool, affine, SimpleITK fixed image) of the 2 mm template, cached."""
     if getattr(ctx, "_template_images", None) is None:
         fixed, affine = _read_float(ctx.template["files"]["fixed"])
-        mask, mask_affine = _read_float(ctx.template["files"]["mask"])
+        mask_path = ctx.template["files"]["mask"]
+        # a template you added may have a NRRD brain mask (Settings > Templates accepts NIfTI and NRRD, as BRAINSFit does)
+        mask, mask_affine = _read_float(mask_path) if _is_nifti(mask_path) else _read_image(mask_path)
         if mask.shape != fixed.shape or not _np().allclose(mask_affine, affine, atol=1e-3):
-            raise jobs.JobError("The template image and brain mask are not on the same grid", code="template_mismatch")
+            # the same voxel centres stored in another order (a LAS mask of a RAS image) are the same grid
+            mask = _mask_in_image_order(mask, mask_affine, fixed.shape, affine)
+            if mask is None:
+                raise jobs.JobError("The template image and brain mask are not on the same grid", code="template_mismatch")
         ctx._template_images = (fixed, mask >= 0.5, affine, _sitk().ReadImage(ctx.template["files"]["fixed"]))
     return ctx._template_images
 
@@ -1999,7 +2096,7 @@ def _stage_qc(ctx):
     method = {
         "stage": ctx.stage_used,
         "dilate_mm": ctx.dilate_mm,
-        "masking": not ctx.scan_only and ctx.dilate_mm >= 0,
+        "masking": ctx.dilate_mm >= 0,
         "cross_modality": ctx.cross_modality,
         "two_step": ctx.two_step,
         "scan_only": ctx.scan_only,
@@ -2322,22 +2419,45 @@ def check(template=None, template_dirs=(), brainsfit=None, brainsresample=None, 
     return report, bool(ok)
 
 
+def _user_template_missing_message(template_id, found):
+    """'Template user:<id> ("<name>"): its image <file> is missing from <folder>' for the required files of a user
+    template that are not on disk (None when none is missing).
+    """
+    missing = [role for role in REQUIRED_TEMPLATE_FILES if role in found["missing"]]
+    if not missing:
+        return None
+    record = _USER_TEMPLATES.get(template_id) or {}
+    listed = record.get("files") or {}
+    parts = []
+    for role in missing:
+        key, what = {"fixed": ("image", "image"), "mask": ("mask", "brain mask")}[role]
+        name = listed.get(key)
+        parts.append(f"its {what} {name}" if name else f"its {what} (not listed in template.json)")
+    where = f" from {record['folder']}" if record.get("folder") else ""
+    verb = "is" if len(parts) == 1 else "are"
+    return f'Template {template_id} ("{found["user"]["name"]}"): ' + " and ".join(parts) + f" {verb} missing{where}"
+
+
 def _check_user_template(template_id, template_dirs):
     """The ``check`` report of a user template."""
     try:
         found = find_template(template_id, dirs=template_dirs)
-        grid = template_grid(template_id)
     except jobs.JobError as exc:
         return {"usable": False, "message": exc.message, "files": {}}
+    files = {role: {"path": path, "found": bool(path), "sha256": found["sha256"].get(role)} for role, path in found["files"].items() if role != "reference"}
+    message = _user_template_missing_message(template_id, found)
+    if message:
+        return {"usable": False, "message": message, "name": found["user"]["name"], "space": found["user"]["space"], "files": files}
+    grid = template_grid(template_id)
     return {
-        "usable": not any(role in found["missing"] for role in REQUIRED_TEMPLATE_FILES),
+        "usable": True,
         "name": found["user"]["name"],
         "space": found["user"]["space"],
         "head_template": found["head_available"],
         "header_reference": True,
         "grid1": {"id": grid.grid_id, "shape": list(grid.shape), "affine": grid.affine.tolist()},
         "terms": "your own template (its licence is yours to check)",
-        "files": {role: {"path": path, "found": bool(path), "sha256": found["sha256"].get(role)} for role, path in found["files"].items() if role != "reference"},
+        "files": files,
     }
 
 
@@ -2542,6 +2662,27 @@ def _inbox_values(study, row, result):
 # Command line
 
 
+def _check_lines(report):
+    """The readable lines of a ``check`` report for the text output: one per tool (found or not, version, path or
+    reason), one per template (usable or not, with the reason when not) and the folders searched.
+    """
+    lines = []
+    for name, info in (report.get("executables") or {}).items():
+        if info.get("found"):
+            lines.append(f"  {name}: found, version {info.get('version') or 'unknown'} ({info.get('path')})")
+        else:
+            lines.append(f"  {name}: not found" + (f" ({info['message']})" if info.get("message") else ""))
+    for template_id, info in (report.get("templates") or {}).items():
+        if info.get("usable"):
+            lines.append(f"  template {template_id}: usable" + (f" ({info['name']})" if info.get("name") else ""))
+        else:
+            reason = info.get("message") or "; ".join(f"{role} file missing" for role, item in (info.get("files") or {}).items() if not item.get("found"))
+            lines.append(f"  template {template_id}: not usable" + (f": {reason}" if reason else ""))
+    if report.get("search_dirs"):
+        lines.append("  template folders searched: " + ", ".join(str(folder) for folder in report["search_dirs"]))
+    return lines
+
+
 class _EventStream:
     """Standard output filter: JSON event lines as ASCII (non-ASCII characters as JSON unicode escapes) or as readable text."""
 
@@ -2575,7 +2716,10 @@ class _EventStream:
         if name in ("warning", "error"):
             return f"{head} [{event.get('code')}] {event.get('message')}"
         if name == "result":
-            return f"{head} {event.get('kind')} {event.get('status') or ''} {event.get('path') or event.get('reason') or ''}".rstrip()
+            first = f"{head} {event.get('kind')} {event.get('status') or ''} {event.get('path') or event.get('reason') or ''}".rstrip()
+            if event.get("kind") == "check":
+                return "\n".join([first] + _check_lines(event))
+            return first
         return f"{head} " + " ".join(f"{key}={value}" for key, value in event.items() if key not in ("event", "t") and not isinstance(value, (dict, list)))
 
     def flush(self):
@@ -2698,11 +2842,27 @@ def _split_command(argv):
     return "", argv
 
 
+def _usage_text():
+    """Usage line, one-sentence description and command list for ``normalize`` without a command or with ``--help``."""
+    summary = " ".join(__doc__.split("\n\n")[0].split())
+    return (
+        f"usage: python -m LesionNetworkMappingLib.normalize [-h] {{{','.join(COMMANDS)}}} ...\n\n{summary}\n\n"
+        "commands:\n"
+        "  run     normalize one scan (and its lesion) to the template; 'run' is implied when the first argument is an option\n"
+        "  batch   normalize every subject of a study folder\n"
+        "  warp    warp another image with the transform of a finished run\n"
+        "  check   report whether BRAINSFit, BRAINSResample and the template files are available\n\n"
+        "example:\n"
+        "  python -m LesionNetworkMappingLib.normalize run --scan S [--lesion L] --out DIR\n\n"
+        "Use 'python -m LesionNetworkMappingLib.normalize <command> --help' for the options of a command."
+    )
+
+
 def main(argv):
     """Command-line entry point (see the module documentation); events go to standard output."""
     command, rest = _split_command(argv)
     if command is None:
-        print(__doc__, file=sys.stderr)
+        print(jobs.command_text(_usage_text()), file=sys.stderr)
         if not argv:
             jobs.emit("error", code="usage", message=f"Give a command: {', '.join(COMMANDS)}")
             return jobs.EXIT_USAGE
@@ -2722,8 +2882,10 @@ def main(argv):
         jobs.emit("result", kind="check", **report)
         if not ok:
             missing = [name for name in ("BRAINSFit", "BRAINSResample") if not report["executables"][name]["found"]]
+            wanted = DEFAULT_TEMPLATE if args.template in (None, "", "auto") else args.template
+            reason = (report["templates"].get(wanted) or {}).get("message")
             raise jobs.JobError(
-                "Normalization is not available: " + (f"{', '.join(missing)} not found" if missing else "the template files are missing"),
+                "Normalization is not available: " + (f"{', '.join(missing)} not found" if missing else (reason or "the template files are missing")),
                 code="executable_missing" if missing else "template_missing",
             )
         jobs.emit("done", outputs=[], elapsed=round(jobs.elapsed(), 3), run_id=None)
@@ -2739,8 +2901,15 @@ def main(argv):
             return jobs.EXIT_OK
         subjects = [item.strip() for item in args.subjects.split(",") if item.strip()] if args.subjects else None
         result = batch(args.study, subjects=subjects, force=args.force, cancel=cancel, **_run_options(args))
+        failed = result["counts"].get("failed", 0)
+        if failed:
+            # The exit code stays 1 (a script sees the failure); this event gives the runner the reason instead of "exit code 1"
+            ok = sum(result["counts"].get(status, 0) for status in ("done", "reused"))
+            reason = next((entry.get("reason") for entry in result["subjects"] if entry["status"] == "failed" and entry.get("reason")), None)
+            message = f"{ok} of {len(result['subjects'])} normalized, {failed} failed" if ok else f"No subject was normalized ({failed} failed)"
+            jobs.emit("error", code="subjects_failed", message=message + (f": {reason}" if reason else ""), partial=bool(ok), counts=result["counts"])
         jobs.emit("done", outputs=[entry.get("out") for entry in result["subjects"] if entry.get("out")], elapsed=round(jobs.elapsed(), 3), run_id=None, counts=result["counts"], template=result["template"])
-        return jobs.EXIT_ERROR if result["counts"].get("failed") else jobs.EXIT_OK
+        return jobs.EXIT_ERROR if failed else jobs.EXIT_OK
 
 
 def _events_mode(argv):

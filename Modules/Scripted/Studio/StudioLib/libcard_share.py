@@ -7,6 +7,9 @@ The STUDY card "Share" says when the study was last exported for sharing (from t
   per column. Free text, tracer and reviewer names and dates are off by default and marked; paths are never offered.
 - **Lesion masks** (opt-in, template space only) with the identifiability warning; own-patient masks need an explicit
   choice (share them or leave them out), which is recorded; optional fMRIPrep and lacuna aliases.
+- **Template**: a study drawn on a template the user added (A-10) always names it (id, name, space, sha256) in the
+  export's metadata; **Include the template file** (off by default) also copies the image, unchanged (its licence is the
+  user's responsibility).
 - **Maps** (opt-in): the study's unthresholded group maps, and a NeuroVault-ready folder (nothing is uploaded).
 - **Licence**: an explicit choice. CC0 is pre-selected for the user's own masks only; with GSP-derived maps there is no
   default, the GSP data use terms note is shown and must be acknowledged.
@@ -111,8 +114,19 @@ def exportWork(progress, cancel, studyPath, out, options, stages):
                                 cancel=cancel)
 
 
+def templateDirs():
+    """The Templates folder of the Slicer Studio folder (where the templates the user added live), as a tuple; () when unknown."""
+    try:
+        from . import templates
+
+        return (templates.templatesFolder(),)
+    except Exception:
+        logging.debug(f"Studio share: no Templates folder:\n{traceback.format_exc()}")
+        return ()
+
+
 def _importForWorker():
-    for name in ("share", "export", "nifti", "study", "schema", "jobs"):
+    for name in ("share", "export", "nifti", "study", "schema", "jobs", "normalize"):
         _lnm(name)
 
 
@@ -145,6 +159,8 @@ class ShareDialog:
         self.result = None
         self.error = None
         self.plan = None
+        self._exportOutput = None  # the output when Export was pressed
+        self._exportedTo = None  # the output that the last export wrote successfully
         share = _share()
         self._mapped = share.map_plan(self.study.path)
         self._gspMaps = any(entry["gsp"] for entry in self._mapped)
@@ -246,6 +262,24 @@ class ShareDialog:
         aliasRow.addStretch(1)
         layout.addLayout(aliasRow)
 
+        # The template the user added (A-10): always named in the metadata; the file only on request (off by default)
+        self._template = share.template_identity(self.study)
+        self._templateDirs = templateDirs()
+        self.templateHeader = self._header(_("Template"))
+        layout.addWidget(self.templateHeader)
+        self.templateLabel = library._cardLabel("StudioShareTemplateNote", 12, "text2")
+        if self._template:
+            self.templateLabel.setText(_("Drawn on your template {name} ({space}). Its id, name, space and checksum are written in the "
+                                         "export's metadata.").format(name=self._template.get("name") or self._template.get("id"),
+                                                                      space=self._template.get("space") or _("MNI")))
+        layout.addWidget(self.templateLabel)
+        self.templateCheck = qt.QCheckBox(_("Include the template file"))
+        self.templateCheck.setObjectName("StudioShareIncludeTemplate")
+        self.templateCheck.setToolTip(_(share.TEMPLATE_LICENCE_NOTE))
+        layout.addWidget(self.templateCheck)
+        for widget in (self.templateHeader, self.templateLabel, self.templateCheck):
+            widget.setVisible(bool(self._template))
+
         layout.addWidget(self._header(_("Maps")))
         count = len(self._mapped)
         self.mapsCheck = qt.QCheckBox((_("Include {n} unthresholded group map") if count == 1 else _("Include {n} unthresholded group maps")).format(n=count))
@@ -324,7 +358,7 @@ class ShareDialog:
         self._timer.setInterval(PREVIEW_DELAY_MS)
         self._timer.connect("timeout()", self.preview)
         for check in (self.pseudonymCheck, self.includeExcludedCheck, self.lesionsCheck, self.fmriprepCheck, self.lacunaCheck, self.mapsCheck,
-                      self.neurovaultCheck, self.gspCheck, self.zipCheck):
+                      self.neurovaultCheck, self.gspCheck, self.zipCheck, self.templateCheck):
             check.connect("toggled(bool)", lambda _checked: self.schedulePreview())
         self.ownCombo.connect("currentIndexChanged(int)", lambda _index: self.schedulePreview())
         self.licenceCombo.connect("currentIndexChanged(int)", lambda _index: self.schedulePreview())
@@ -334,11 +368,15 @@ class ShareDialog:
         from .libcard_cohort import _Worker
 
         self.worker = _Worker(self._onDone, self._onProgress)
+        self._fitted = False
         self.preview()
         self._fitToScreen()
+        self._fitted = True
 
-    def _fitToScreen(self, fraction=0.9):
-        """Open tall enough to show every option without scrolling, but never taller than most of the screen."""
+    def _fitToScreen(self, fraction=0.9, growOnly=False):
+        """Open tall enough to show every option without scrolling, but never taller than most of the screen.
+        With growOnly the dialog is only made taller (ticking options adds rows; the user's own resizing is kept).
+        """
 
         def hint(widget):
             size = widget.sizeHint
@@ -353,6 +391,10 @@ class ShareDialog:
             available = available() if callable(available) else available
             width = min(width, int(available.width() * fraction))
             height = min(height, int(available.height() * fraction))
+        if growOnly:
+            if height <= self.dialog.height:
+                return
+            width = max(width, self.dialog.width)
         self.dialog.resize(width, height)
 
     @staticmethod
@@ -421,6 +463,8 @@ class ShareDialog:
             "licence_text": str(self.licenceEdit.toPlainText()) or None,
             "terms_acknowledged": bool(self.gspCheck.checked),
             "zip": bool(self.zipCheck.checked),
+            "include_template": bool(self._template) and bool(self.templateCheck.checked),
+            "template_dirs": self._templateDirs,
             "software": {"version": _studioVersion(), "code_url": _share().CODE_URL},
         }
 
@@ -482,11 +526,44 @@ class ShareDialog:
         output = self.output()
         if not output:
             items.append({"id": "output", "label": _("Output chosen"), "status": "blocker", "detail": _("Choose a folder or a .zip file.")})
+        elif output == self._exportedTo:
+            pass  # the output this dialog just wrote: the success line says so; the exists-blocker would read as a failure
         elif os.path.exists(output) and (not os.path.isdir(output) or os.listdir(output)):
             items.append({"id": "output", "label": _("Output chosen"), "status": "blocker", "detail": _("It already exists; choose a new name or an empty folder.")})
+        if output and output != self._exportedTo and not any(item["id"] == "output" for item in items):
+            try:
+                share.check_outside_study(self.study, output)
+            except share.ShareError as e:
+                items.append({"id": "output", "label": _("Output chosen"), "status": "blocker", "detail": str(e)})
+        if output and not any(item["id"] == "output" for item in items):
+            folder = self.unwritableFolder(output)
+            if folder:
+                items.append({"id": "output", "label": _("Output chosen"), "status": "blocker",
+                              "detail": _("The folder {folder} cannot be written. Choose another folder.").format(folder=folder)})
         self.items = items
         self.checklistLabel.setText(self.checklistHtml(items))
         self._updateButtons()
+        if self._fitted:
+            self._fitToScreen(growOnly=True)  # options and checklist rows appear as boxes are ticked
+
+    def unwritableFolder(self, output):
+        """The folder the export would have to write into when it cannot be written (the output itself when it is an existing
+        empty folder, else its nearest existing parent), else None.
+        """
+        if os.name == "nt":
+            return None  # the read-only attribute of a folder does not stop writing there
+        if os.path.isdir(output) and not self.zipCheck.checked:
+            folder = output
+        else:
+            folder = os.path.dirname(output)
+        while folder and not os.path.exists(folder):
+            parent = os.path.dirname(folder)
+            if parent == folder:
+                break
+            folder = parent
+        if folder and os.path.isdir(folder) and not os.access(folder, os.W_OK | os.X_OK):
+            return folder
+        return None
 
     @staticmethod
     def checklistHtml(items):
@@ -508,23 +585,37 @@ class ShareDialog:
 
     def _updateButtons(self):
         busy = self.worker.isBusy()
-        self.exportButton.setEnabled(not busy and not self.blocking())
-        self.exportButton.setToolTip("" if not self.blocking() else _("Resolve the checklist items marked ✕ first"))
+        done = bool(self._exportedTo) and self.output() == self._exportedTo  # exported already: change the output to export again
+        self.exportButton.setEnabled(not busy and not self.blocking() and not done)
+        self.exportButton.setToolTip(_("Resolve the checklist items marked ✕ first") if self.blocking() else _("Already exported; choose another output to export again") if done else "")
         self.cancelButton.setText(_("Stop") if busy else _("Close") if self.result else _("Cancel"))
 
     # Export
 
     def export(self):
         self._timer.stop()
+        if self.worker.isBusy():
+            return False
+        # The worker reads the study from disk: the open subject's edits in Draw are written first (as Done, Alt+arrows and
+        # the warp do), or nothing is exported (a stale or missing lesion would be shared while the export says it worked)
+        session = self.session
+        if session.study is self.study and hasattr(session, "writeCurrent") and session.current() is not None and session.isDirty():
+            sid = session.current()
+            if not session.writeCurrent():
+                self.preview()
+                self.progressLabel.setText(_("Not exported: the edits of {sid} could not be written").format(sid=sid))
+                return False
         self.preview()
-        if self.blocking() or self.worker.isBusy():
+        if self.blocking():
             return False
         if hasattr(self.session, "flush"):
             self.session.flush()  # the worker reads the saved study
         _importForWorker()
         stages = {"participants": _("Participants…"), "lesions": _("Lesion masks"), "maps": _("Maps"), "neurovault": _("NeuroVault folder"),
-                  "verify": _("Checking the files…")}
+                  "template": _("Template file"), "verify": _("Checking the files…")}
         self.result, self.error = None, None
+        self._exportedTo = None
+        self._exportOutput = self.output()
         self.progressLabel.setText(_("Exporting…"))
         started = self.worker.start(exportWork, studyPath=self.study.path, out=self.output(), options=self.options(), stages=stages)
         self._updateButtons()
@@ -557,6 +648,7 @@ class ShareDialog:
             self.progressLabel.setText(_("Not exported: {error}").format(error=error))
         else:
             path = result["path"]
+            self._exportedTo = self._exportOutput
             self.progressLabel.setText(_("Exported {n} files to {name}").format(n=len(result["files"]), name=os.path.basename(path)))
             _toast(_("Study exported for sharing · {n} files").format(n=len(result["files"])), 6000, action=lambda: showPath(path), actionText=_("Show"))
             refreshCards()
@@ -572,7 +664,9 @@ class ShareDialog:
 def showPath(path):
     """Show an exported folder (or the folder of a zip file) in the file manager."""
     folder = path if os.path.isdir(path) else os.path.dirname(path)
-    qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(folder))
+    from . import projects
+
+    projects.showInFileManager(folder)
 
 
 _dialogs = []  # open dialogs (kept alive)

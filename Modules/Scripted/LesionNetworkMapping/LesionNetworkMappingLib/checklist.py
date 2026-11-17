@@ -1,9 +1,10 @@
-"""Reporting checklist (15 items) and battery strip (6 dots) derived from the run registry and files (standard library only).
+"""Reporting checklist (15 items) and battery strip (6 dots) derived from the run registry and files (standard library only; the calibration evidence of item F8 uses calibrate).
 
 Addendum §3.11 and the reviewer checklist of the 2026 debate (research notes, validation §8). Every
 item is evaluated only from what was run and written: the study (``participants.tsv``, ``study.json``),
 the run registry (``derivatives/lnm/runs.jsonl``) and the files of the runs (see
-:class:`.methods.Records`). Each evaluation is a dict::
+:class:`.methods.Records`). Item F8 also reads the newest pipeline calibration (``calibration.json``,
+:func:`.calibrate.group_checklist_evidence`), imported only when a calibration was run. Each evaluation is a dict::
 
     {"id": "A1", "number": 1, "title", "status": "done" | "not_run" | "na" | "flagged",
      "value": short text, "evidence": [run ids, or "file:<path relative to the root>"]}
@@ -105,7 +106,11 @@ def _a2_lesion_set(records):
     dice = summary.get("dice") or {}
     if isinstance(dice, dict) and dice.get("median") is not None:
         value += f"; median pairwise Dice {methods._number(dice['median'])}"
-    return DONE, value, [_file_evidence(records, records.path(*methods.LESIONSET_JSON))]
+    path = records.lesionset_path()
+    evidence = _file_evidence(records, path)
+    if os.path.isabs(evidence[len("file:"):]):
+        evidence = "file:" + os.path.basename(path)  # an output folder outside the root: the file next to checklist.md, never a local path
+    return DONE, value, [evidence]
 
 
 def _a3_control_set(records):
@@ -151,9 +156,12 @@ def _c5_seed_statistic(records):
     maps = records.map_records()
     if not maps:
         return NOT_RUN, "no network-mapping run", []
-    seeds = sorted({"probabilistic" if record.get("probabilistic") else "binarized" if record.get("probabilistic") is False else methods.NOT_RECORDED for record in maps})
+    lesion_maps = [record for record in maps if not (record.get("seeds") or {}).get("kind")]
+    seeds = sorted({"probabilistic" if record.get("probabilistic") else "binarized" if record.get("probabilistic") is False else methods.NOT_RECORDED for record in lesion_maps})
+    # Coordinate, atrophy and stimulation runs (seeds.json): named by their seed kind, not as lesions
+    kinds = sorted({f"{record['seeds']['kind']} seeds" for record in maps if record not in lesion_maps})
     statistics = sorted({str(record.get("statistic") or methods.NOT_RECORDED) for record in maps})
-    value = f"fractional occupancy seeds ({', '.join(seeds)} lesions); map statistic {', '.join(statistics)}"
+    value = f"fractional occupancy seeds ({'; '.join(([', '.join(seeds) + ' lesions'] if seeds else []) + kinds)}); map statistic {', '.join(statistics)}"
     inputs = sorted({str((data.get("inputs") or {}).get("input")) for _, data in records.group_records("glm.json", "glm") + records.group_records("slnm.json", "slnm") if (data.get("inputs") or {}).get("input")})
     if inputs:
         value += f"; group input {', '.join(inputs)}"
@@ -181,20 +189,37 @@ def _d6_thresholds(records):
 def _e7_overlap_null(records):
     nulls = records.done_runs("nulls")
     overlap = records.done_runs("cohort")
+    # The pipeline's overlap stage runs in-process and registers no cohort run: only its pipeline.json records it
+    overlap_stage = records.pipeline_stage_runs("overlap")
     if nulls:
         modes = {str((records.summary(record) or {}).get("mode") or (records.params(record) or {}).get("mode") or "") for record in nulls}
         if "fast" in modes:
             return FLAGGED, "null reference computed in the approximate (fast) mode", [record["id"] for record in nulls]
         return DONE, f"null reference: {len(nulls)} run(s)", [record["id"] for record in nulls]
-    if overlap:
-        return FLAGGED, "overlap maps without a null reference", [record["id"] for record in overlap]
+    if overlap or overlap_stage:
+        return FLAGGED, "overlap maps without a null reference", [record["id"] for record in overlap + overlap_stage]
     return NOT_RUN, "no overlap or null run", []
 
 
+def _calibration(records, groups):
+    """(status, value, evidence) of the pipeline calibration of the group analyses (L-48), or None without one."""
+    if not records.done_runs("calibration"):
+        return None
+    from . import calibrate  # numpy: imported only when a calibration was run
+
+    return calibrate.group_checklist_evidence(records.root, groups, run_records=records.runs)
+
+
 def _f8_design(records):
-    groups = records.group_records("glm.json", "glm") + records.group_records("slnm.json", "slnm")
+    glm_records = records.group_records("glm.json", "glm")
+    slnm_records = records.group_records("slnm.json", "slnm")
+    groups = glm_records + slnm_records
+    calibration = _calibration(records, [("glm", data) for _, data in glm_records] + [("slnm", data) for _, data in slnm_records])
     if not groups:
-        return NOT_RUN, "no group analysis", []
+        if calibration is None:
+            return NOT_RUN, "no group analysis", []
+        status, value, evidence = calibration
+        return (FLAGGED if status == FLAGGED else NOT_RUN), "no group analysis; calibration: " + value, evidence
     flags = []
     for run_id, data in groups:
         label = run_id or "analysis"
@@ -208,6 +233,13 @@ def _f8_design(records):
             flags.append(f"{label}: {len(data['warnings'])} design warning(s)")
     evidence = [run_id for run_id, _ in groups if run_id]
     value = f"{len(groups)} group analysis(es); permutation inference with FWE (primary) and FDR"
+    if calibration is not None:
+        status, text, calibration_evidence = calibration
+        evidence += calibration_evidence
+        if status == FLAGGED:
+            flags.append("calibration: " + text)
+        else:
+            value += "; calibration: " + text
     return (FLAGGED, value + "; " + "; ".join(flags), evidence) if flags else (DONE, value, evidence)
 
 
@@ -228,8 +260,16 @@ def _g9_reference_qa(records):
     return DONE, value, evidence
 
 
+def _comparison_without_references(records, record):
+    """A Compare card export that compared no reference map of the library (only this study's own maps)."""
+    if record.get("kind") != "comparison":
+        return False
+    summary = records.summary(record)
+    return isinstance(summary, dict) and summary.get("n_reference_maps") == 0
+
+
 def _g10_cross_condition(records):
-    runs = records.done_runs(CROSS_CONDITION_KINDS)
+    runs = [record for record in records.done_runs(CROSS_CONDITION_KINDS) if not _comparison_without_references(records, record)]
     if not runs:
         return NOT_RUN, "no comparison with maps of unrelated conditions", []
     return DONE, f"{len(runs)} comparison run(s)", [record["id"] for record in runs]
@@ -292,10 +332,27 @@ def _i13_connectome_robustness(records):
     return (DONE if second and split_half else FLAGGED), ", ".join(parts), evidence
 
 
+def _newest_bundle(records):
+    """Newest exported bundle folder publication/<UTC>[-n]/ that holds a manifest.json (or None)."""
+    parent = records.path("derivatives", "lnm", "publication")
+    try:
+        names = sorted(name for name in os.listdir(parent) if os.path.isfile(os.path.join(parent, name, "manifest.json")))
+    except OSError:
+        return None
+    return os.path.join(parent, names[-1]) if names else None
+
+
 def _j14_sharing(records):
+    # The Report card's bundle export writes publication/<UTC>[-n]/manifest.json; the flat paths are accepted too
+    bundle = _newest_bundle(records)
     manifest_path = records.path(*PUBLICATION_MANIFEST)
+    if bundle and not os.path.isfile(manifest_path):
+        manifest_path = os.path.join(bundle, "manifest.json")
     manifest = methods._read_json(manifest_path)
-    neurovault = [path for path in (records.path(*NEUROVAULT_IMAGES), records.path("derivatives", "lnm", "publication", *NEUROVAULT_IMAGES)) if os.path.isfile(path)]
+    candidates = [records.path(*NEUROVAULT_IMAGES), records.path("derivatives", "lnm", "publication", *NEUROVAULT_IMAGES)]
+    if bundle:
+        candidates.append(os.path.join(bundle, *NEUROVAULT_IMAGES))
+    neurovault = [path for path in candidates if os.path.isfile(path)]
     if manifest is None and not neurovault:
         return NOT_RUN, "no publication manifest or NeuroVault folder", []
     evidence = ([_file_evidence(records, manifest_path)] if manifest is not None else []) + [_file_evidence(records, path) for path in neurovault]
@@ -307,11 +364,31 @@ def _j14_sharing(records):
     return DONE, f"publication manifest with {len(manifest.get('files') or [])} file(s)", evidence
 
 
+def _k15_evidence(records, path):
+    # Files outside the study root are cited relative to their output folder, never by absolute path
+    shown = records.relpath(path)
+    if os.path.isabs(shown):
+        for top in records.include_dirs:
+            rel = os.path.relpath(path, top)
+            if not rel.startswith(".."):
+                return "file:" + rel.replace(os.sep, "/")
+    return f"file:{shown}"
+
+
 def _k15_wording(records):
     found, violations = [], []
-    for folder, folders, names in os.walk(records.path("derivatives")):
-        # Pruned by folder name below derivatives/ (never by the study's own absolute path)
-        folders[:] = sorted(name for name in folders if name != "cache" and not name.startswith("."))
+    bundles = os.path.normpath(records.path("derivatives", "lnm", "publication"))
+    # The run's own output folder(s) (Records include_dirs) when given, so a BIDS-App run or a pipeline
+    # export outside the study checks the files it just wrote and never an earlier run's; else derivatives/
+    roots = list(records.include_dirs) or [records.path("derivatives")]
+    walks = (step for top in roots for step in os.walk(top))
+    for folder, folders, names in walks:
+        # Pruned by folder name below derivatives/ (never by the study's own absolute path); the exported
+        # bundles under derivatives/lnm/publication/ hold copies of the methods, not the study's own
+        folders[:] = sorted(
+            name for name in folders
+            if name != "cache" and not name.startswith(".") and os.path.normpath(os.path.join(folder, name)) != bundles
+        )
         for name in sorted(names):
             if name in WORDING_FILES:
                 path = os.path.join(folder, name)
@@ -322,10 +399,10 @@ def _k15_wording(records):
                 except (OSError, UnicodeDecodeError):
                     continue
                 if bad:
-                    violations.append(f"{records.relpath(path)}: {', '.join(sorted(set(bad)))}")
+                    violations.append(f"{_k15_evidence(records, path)[5:]}: {', '.join(sorted(set(bad)))}")
     if not found:
         return NOT_RUN, "no generated methods or report", []
-    evidence = [_file_evidence(records, path) for path in found]
+    evidence = [_k15_evidence(records, path) for path in found]
     if violations:
         return FLAGGED, "banned wording: " + "; ".join(violations), evidence
     return DONE, f"{len(found)} file(s) use the neutral wording and cite both sides of the debate", evidence

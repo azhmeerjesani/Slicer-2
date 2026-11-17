@@ -1,0 +1,422 @@
+"""Export never silently replaces the maps of another lesion that has the same name (BB-1).
+
+Two lesions with the same run name (two segmentations both called "Lesion", files with the same name, or before the
+fix any two names written in another script, which all became "-Lesion") exported into one folder: the second export
+copied its maps over the first lesion's ``<name>_conn-<label>_desc-*_funcmap.nii.gz`` and rewrote its sidecar, and the
+only feedback was the toast "Exported · conn-<label>". ``export.foreign_lesions`` finds such files and the Export card
+asks before replacing them (or exports into another folder).
+
+The library tests run without Slicer's GUI::
+
+    cd Modules/Scripted/LesionNetworkMapping
+    PythonSlicer -m unittest Testing/Python/LesionNetworkMappingExportCollisionTest.py -v
+
+The Export card tests need the Slicer application and are skipped under a plain PythonSlicer.
+"""
+
+import json
+import os
+import shutil
+import sys
+import tempfile
+import unittest
+
+MODULE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if MODULE_DIR not in sys.path:
+    sys.path.insert(0, MODULE_DIR)
+
+from LesionNetworkMappingLib import export
+
+try:
+    import slicer
+
+    _HAS_APP = getattr(slicer, "app", None) is not None
+except ImportError:
+    _HAS_APP = False
+
+BUNDLE = {"name": "Synthetic demo", "label": "SYNTHETIC", "n_voxels": 10, "n_subjects": 120}
+
+
+class _Helpers:
+    def setUp(self):
+        self.work = tempfile.mkdtemp(prefix="lnm-export-collision-")
+        self.dest = os.path.join(self.work, "Results", export.run_dir_name(BUNDLE["name"]))
+
+    def tearDown(self):
+        shutil.rmtree(self.work, ignore_errors=True)
+
+    def runMeta(self, patient, name="Lesion"):
+        """A finished run of one lesion named ``name`` whose lesion file is ``patient``'s (its maps hold ``patient``)."""
+        runDir = os.path.join(self.work, "runs", patient)
+        os.makedirs(runDir, exist_ok=True)
+        maps = {}
+        for key in ("AvgR", "AvgFz", "T"):
+            path = os.path.join(runDir, f"{name}_{key}.nii.gz")
+            with open(path, "wb") as f:
+                f.write(f"{patient}-{key}".encode())
+            maps[key] = path
+        meta = {"status": "done", "n": 120, "bundle": BUNDLE, "maps": {name: maps},
+                "lesions": [{"name": name, "file": f"lesion/{name}.nii.gz", "sha256": export.subjects_sha256([patient])}]}
+        with open(os.path.join(runDir, "run.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f)
+        return runDir, meta
+
+    def write(self, meta, dest=None):
+        return export.write_run(dest or self.dest, meta["maps"], [entry["name"] for entry in meta["lesions"]], BUNDLE, run_meta=meta)
+
+    def mapContents(self, dest=None):
+        dest = dest or self.dest
+        return {name: open(os.path.join(dest, name), "rb").read().decode() for name in sorted(os.listdir(dest)) if name.endswith(".nii.gz")}
+
+
+class LesionNetworkMappingExportSignTest(_Helpers, unittest.TestCase):
+    """A map shown and binarized with + or - only is described as that tail in the sidecar and methods.md (BB-1)."""
+
+    def export(self, rule, sign):
+        from LesionNetworkMappingLib import thresholds
+
+        _runDir, meta = self.runMeta("patient1")
+        resolved = thresholds.resolve(thresholds.normalize_rule(rule), 120, 6360)
+        files = self.write_with(meta, rule, resolved, sign)
+        with open(files["sidecars"][0], encoding="utf-8") as f:
+            sidecar = json.load(f)
+        with open(files["methods"], encoding="utf-8") as f:
+            methods = f.read()
+        return sidecar["threshold"], methods
+
+    def write_with(self, meta, rule, resolved, sign):
+        return export.write_run(self.dest, meta["maps"], [entry["name"] for entry in meta["lesions"]], BUNDLE, run_meta=meta, rule=rule, resolved=resolved, sign=sign)
+
+    def test_negative_tail_of_custom_t(self):
+        threshold, methods = self.export({"kind": "custom_t", "value": 6.0, "reference_n": 120}, "neg")
+        self.assertEqual(threshold["sign"], "neg")
+        self.assertIn("T ≤ -6", threshold["derived"])
+        self.assertNotIn("|T|", threshold["derived"])
+        self.assertIn("T ≤ -6", methods)
+        self.assertIn("one-sided p_unc", methods)
+        self.assertNotIn("|T| ≥", methods)
+
+    def test_positive_tail_of_fz(self):
+        threshold, methods = self.export({"kind": "fz_abs", "value": 0.05}, "pos")
+        self.assertEqual(threshold["sign"], "pos")
+        self.assertIn("Fz ≥ 0.05", threshold["derived"])
+        self.assertIn("mean Fz ≥ 0.05", methods)
+        self.assertNotIn("|mean Fz|", methods)
+
+    def test_both_tails_keep_the_absolute_value_text(self):
+        for sign in (None, "both"):
+            threshold, methods = self.export({"kind": "custom_t", "value": 6.0, "reference_n": 120}, sign)
+            self.assertNotIn("sign", threshold)
+            self.assertIn("|T| ≥ 6", threshold["derived"])
+            self.assertIn("|T| ≥ 6", methods)
+            self.assertIn("two-sided p_unc", methods)
+
+
+class LesionNetworkMappingExportCollisionLibTest(_Helpers, unittest.TestCase):
+    def test_other_lesion_of_the_same_name_is_foreign(self):
+        _runDir, first = self.runMeta("patient1")
+        self.assertEqual(export.foreign_lesions(self.dest, first), [], "an empty or missing folder holds no other lesion")
+        self.write(first)
+        self.assertEqual(export.foreign_lesions(self.dest, first), [], "exporting the same lesion again updates its own files")
+        _runDir, second = self.runMeta("patient2")
+        self.assertEqual(export.foreign_lesions(self.dest, second), ["Lesion"])
+        _runDir, renamed = self.runMeta("patient2", name="Lesion2")
+        self.assertEqual(export.foreign_lesions(self.dest, renamed), [], "a lesion of another name replaces nothing")
+
+    def test_lesion_of_another_name_keeps_the_run_level_files_of_the_first(self):
+        """A second lesion exported into the folder of the first: provenance.json, methods.md and reproduce.sh cover both."""
+        _runDir, first = self.runMeta("patient1")
+        self.write(first)
+        _runDir, second = self.runMeta("patient2", name="Lesion2")
+        files = self.write(second)
+        with open(files["provenance"], encoding="utf-8") as f:
+            provenance = json.load(f)
+        firstFiles = sorted(name for name in os.listdir(self.dest) if name.startswith("Lesion_"))
+        self.assertEqual(len(firstFiles), 4, "the first lesion's three maps and sidecar stay")
+        self.assertEqual([lesion["name"] for lesion in provenance["lesions"]], ["Lesion2"], "the top level describes this export's run")
+        self.assertEqual([[lesion["name"] for lesion in record["lesions"]] for record in provenance["earlier_runs"]], [["Lesion"]])
+        self.assertEqual(provenance["earlier_runs"][0]["N"], 120)
+        listed = sorted(name for name in os.listdir(self.dest) if name != "provenance.json")
+        self.assertEqual(sorted(provenance["files"]), listed, "provenance.json lists every file of the folder")
+        with open(files["reproduce"], encoding="utf-8") as f:
+            script = f.read()
+        self.assertIn("lesion/Lesion2.nii.gz", script)
+        self.assertIn("lesion/Lesion.nii.gz", script, "reproduce.sh also recomputes the first lesion")
+        self.assertIn('--out "$OUT/earlier-1"', script)
+        if shutil.which("sh"):
+            import subprocess
+
+            self.assertEqual(subprocess.run(["sh", "-n", files["reproduce"]], check=False).returncode, 0, "reproduce.sh is valid shell")
+        with open(files["methods"], encoding="utf-8") as f:
+            methods = f.read()
+        self.assertIn("earlier export 1 in this folder (Lesion)", methods)
+        self.assertEqual(methods.count("For each of N = 120 subjects"), 2, "methods.md describes both runs")
+
+        # The first lesion exported again: its own record is replaced, the second lesion's becomes the earlier one
+        provenance = json.load(open(self.write(first)["provenance"], encoding="utf-8"))
+        self.assertEqual([lesion["name"] for lesion in provenance["lesions"]], ["Lesion"])
+        self.assertEqual([[lesion["name"] for lesion in record["lesions"]] for record in provenance["earlier_runs"]], [["Lesion2"]])
+        self.assertEqual(sorted(provenance["files"]), listed)
+
+        # A lesion of the same name replaced (as asked): the replaced lesion is not described any more
+        os.remove(export.sidecar_path(self.dest, "Lesion2", BUNDLE["name"]))
+        _runDir, third = self.runMeta("patient3")
+        provenance = json.load(open(self.write(third)["provenance"], encoding="utf-8"))
+        self.assertNotIn("earlier_runs", provenance, "Lesion was replaced and Lesion2's sidecar is gone")
+
+    def test_maps_without_a_readable_sidecar_count_as_foreign(self):
+        _runDir, first = self.runMeta("patient1")
+        self.write(first)
+        sidecar = export.sidecar_path(self.dest, "Lesion", BUNDLE["name"])
+        with open(sidecar, "w", encoding="utf-8") as f:
+            f.write("{not json")
+        self.assertEqual(export.foreign_lesions(self.dest, first), ["Lesion"])
+        os.remove(sidecar)
+        self.assertEqual(export.foreign_lesions(self.dest, first), ["Lesion"])
+
+
+@unittest.skipUnless(_HAS_APP, "needs the Slicer application")
+class LesionNetworkMappingExportCollisionCardTest(_Helpers, unittest.TestCase):
+    """The Export card asks before an export replaces another lesion's maps, and can export into another folder."""
+
+    def setUp(self):
+        super().setUp()
+        import qt
+
+        from LesionNetworkMappingUI import card_export
+
+        self.qt, self.card_export = qt, card_export
+        self.settings = qt.QSettings()
+        self.savedFolder = self.settings.value(card_export.LAST_FOLDER_SETTING)
+        self.realDialog = qt.QFileDialog.getExistingDirectory
+        qt.QFileDialog.getExistingDirectory = lambda *args: os.path.join(self.work, "Results")
+        self.questions = []
+
+    def tearDown(self):
+        self.qt.QFileDialog.getExistingDirectory = self.realDialog
+        if self.savedFolder is None:
+            self.settings.remove(self.card_export.LAST_FOLDER_SETTING)
+        else:
+            self.settings.setValue(self.card_export.LAST_FOLDER_SETTING, self.savedFolder)
+        super().tearDown()
+
+    def card(self, runDir, answer, study=None):
+        """An Export card whose run is ``runDir`` and whose question is answered with ``answer`` (exportTo: export.export_run)."""
+        card = self.card_export.ExportCard.__new__(self.card_export.ExportCard)
+
+        class Run:
+            pass
+
+        run = Run()
+        run.runDir, run.n, run.partial = runDir, 120, False
+        bundle = Run()
+        bundle.name, bundle.n_subjects = BUNDLE["name"], 120
+        ctx = Run()
+        ctx.bundle = bundle
+        card.ctx = ctx
+        card._run = lambda: run
+        card.studyDestination = lambda: study
+
+        def askReplace(destination, names, otherDestination):
+            self.questions.append((destination, list(names), otherDestination))
+            return answer
+
+        card.askReplace = askReplace
+        card.exportTo = lambda destination: (export.export_run(runDir, destination), destination)[1]
+        return card
+
+    def test_second_lesion_of_the_same_name_does_not_replace_the_first(self):
+        firstDir, _meta = self.runMeta("patient1")
+        self.assertEqual(self.card(firstDir, "replace").export(), self.dest)
+        self.assertEqual(self.questions, [], "nothing to replace: no question")
+        first = self.mapContents()
+        secondDir, _meta = self.runMeta("patient2")
+
+        # Cancel: nothing is written
+        self.assertIsNone(self.card(secondDir, None).export())
+        self.assertEqual(self.questions, [(self.dest, ["Lesion"], self.dest + "-2")])
+        self.assertEqual(self.mapContents(), first)
+
+        # Export into another folder: the first lesion's maps stay
+        self.assertEqual(self.card(secondDir, "new").export(), self.dest + "-2")
+        self.assertEqual(self.mapContents(), first)
+        self.assertTrue(all(text.startswith("patient2") for text in self.mapContents(self.dest + "-2").values()))
+
+        # The same lesion exported again updates its own files without a question
+        del self.questions[:]
+        self.assertEqual(self.card(firstDir, None).export(), self.dest)
+        self.assertEqual(self.questions, [])
+
+        # A third lesion of the same name: the next free folder is offered; Replace replaces, as asked
+        thirdDir, _meta = self.runMeta("patient3")
+        self.assertEqual(self.card(thirdDir, "replace").export(), self.dest)
+        self.assertEqual(self.questions[-1], (self.dest, ["Lesion"], self.dest + "-3"))
+        self.assertTrue(all(text.startswith("patient3") for text in self.mapContents().values()))
+
+    def test_study_export_asks_without_another_folder(self):
+        firstDir, _meta = self.runMeta("patient1")
+        self.card(firstDir, None, study=self.dest).export()
+        first = self.mapContents()
+        secondDir, _meta = self.runMeta("patient2")
+        self.assertIsNone(self.card(secondDir, None, study=self.dest).export())
+        self.assertEqual(self.questions, [(self.dest, ["Lesion"], None)])
+        self.assertEqual(self.mapContents(), first)
+
+
+@unittest.skipUnless(_HAS_APP, "needs the Slicer application")
+class LesionNetworkMappingExportUnwritableFolderTest(_Helpers, unittest.TestCase):
+    """A folder the user cannot write is said in plain words, without errno, a hidden file name or a logged traceback (BB-1)."""
+
+    def permissionError(self, name):
+        import errno
+
+        return PermissionError(errno.EACCES, "Permission denied", os.path.join(self.work, "rodest", name))
+
+    def test_message_names_the_folder_only(self):
+        from LesionNetworkMappingUI import widgets
+
+        message = widgets.unwritableMessage(self.permissionError(".clusters-abc.tmp"))
+        self.assertIn(os.path.join(self.work, "rodest"), message)
+        self.assertIn("cannot be written", message)
+        for noise in ("Errno", "Permission denied", ".tmp", "clusters-"):
+            self.assertNotIn(noise, message)
+        self.assertIsNone(widgets.unwritableMessage(ValueError("x")))
+        self.assertIsNone(widgets.unwritableMessage(FileNotFoundError(2, "No such file", "x")))
+
+    def test_unwritable_destination_is_refused_up_front(self):
+        from unittest import mock
+
+        from LesionNetworkMappingUI import widgets
+
+        ro = os.path.join(self.work, "rodest")
+        os.makedirs(ro, exist_ok=True)
+        real = os.access
+
+        def fake(path, mode, *args, **kwargs):  # root can write everywhere: pretend this one folder is read-only
+            return False if os.fspath(path) == ro else real(path, mode, *args, **kwargs)
+
+        with mock.patch("os.access", fake):
+            for dest in (os.path.join(ro, "MyConn.lnmc"), os.path.join(ro, "Connectomes", "x")):
+                message = widgets.unwritableProblem(dest)
+                self.assertIn(ro, message)
+                self.assertIn("cannot be written. Choose another folder.", message)
+                self.assertNotIn("Errno", message)
+            self.assertIsNone(widgets.unwritableProblem(os.path.join(self.work, "MyConn.lnmc")))
+        self.assertIsNone(widgets.unwritableProblem(os.path.join(ro, "MyConn.lnmc")))
+        self.assertIsNone(widgets.unwritableProblem(""))
+
+    def test_cards_show_plain_message_and_log_no_traceback(self):
+        import logging
+        from unittest import mock
+
+        from LesionNetworkMappingUI import card_clusters, card_export
+
+        class Label:
+            text = ""
+
+            def setText(self, text):
+                self.text = text
+
+            def show(self):
+                pass
+
+        class Records(logging.Handler):
+            def __init__(self):
+                super().__init__()
+                self.records = []
+
+            def emit(self, record):
+                self.records.append(record)
+
+        handler = Records()
+        logging.getLogger().addHandler(handler)
+        try:
+            # Export card
+            card = card_export.ExportCard.__new__(card_export.ExportCard)
+
+            class Run:
+                runDir, partial = "x", False
+
+            card._run = Run
+
+            class Ctx:
+                rule = {"kind": "top_pct"}
+                logic = mock.Mock()
+
+            Ctx.logic.exportRun.side_effect = self.permissionError("conn-Synthetic")
+            card.ctx = Ctx()
+            card.resultLabel = Label()
+            with self.assertRaises(PermissionError):
+                card.exportTo(os.path.join(self.work, "rodest"))
+            self.assertIn("cannot be written", card.resultLabel.text)
+            self.assertNotIn("Errno", card.resultLabel.text)
+
+            # Clusters card
+            clusters = card_clusters.ClustersCard.__new__(card_clusters.ClustersCard)
+            clusters.table = object()
+            clusters.caption = lambda: ""
+            clusters.exportLabel = Label()
+            from LesionNetworkMappingLib import clusters as clusterLib
+
+            with mock.patch.object(clusterLib, "write_clusters", side_effect=self.permissionError(".clusters-j5tss4g2.tmp")):
+                with self.assertRaises(PermissionError):
+                    clusters.exportTo(self.work)
+            self.assertIn("cannot be written", clusters.exportLabel.text)
+            self.assertNotIn(".tmp", clusters.exportLabel.text)
+            self.assertNotIn("Errno", clusters.exportLabel.text)
+        finally:
+            logging.getLogger().removeHandler(handler)
+        self.assertTrue(handler.records)
+        for record in handler.records:
+            self.assertIsNone(record.exc_info, "an expected permission error is logged without a traceback")
+            self.assertLess(record.levelno, logging.ERROR)
+
+
+@unittest.skipUnless(_HAS_APP, "needs the Slicer application")
+class LesionNetworkMappingReportReadOnlyStudyTest(_Helpers, unittest.TestCase):
+    """The publication bundle of a read-only study explains itself in plain words, with no errno and no logged traceback (BB-1)."""
+
+    def test_report_card_says_read_only_without_traceback(self):
+        import errno
+        import logging
+        from unittest import mock
+
+        from LesionNetworkMappingUI import card_report
+
+        class Label:
+            text = ""
+
+            def setText(self, text):
+                self.text = text
+
+            def show(self):
+                pass
+
+        class Records(logging.Handler):
+            def __init__(self):
+                super().__init__()
+                self.records = []
+
+            def emit(self, record):
+                self.records.append(record)
+
+        card = card_report.ReportCard.__new__(card_report.ReportCard)
+        card.root = lambda: self.work
+        card.resultLabel = Label()
+        handler = Records()
+        logging.getLogger().addHandler(handler)
+        try:
+            with mock.patch.object(card_report, "exportBundle", side_effect=PermissionError(errno.EACCES, "Permission denied", self.work)):
+                self.assertIsNone(card.exportBundle())
+        finally:
+            logging.getLogger().removeHandler(handler)
+        self.assertIn("read-only", card.resultLabel.text)
+        self.assertNotIn("Errno", card.resultLabel.text)
+        self.assertTrue(handler.records)
+        for record in handler.records:
+            self.assertIsNone(record.exc_info)
+            self.assertLess(record.levelno, logging.ERROR)
+
+
+if __name__ == "__main__":
+    unittest.main()

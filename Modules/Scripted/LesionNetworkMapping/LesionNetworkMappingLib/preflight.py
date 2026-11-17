@@ -31,12 +31,14 @@ the process and in ``<study>/.studio/cache/lesion_sha256.json``; a preflight has
   auto-segmented unreviewed lesions, native-space lesions and normalized lesions with norm_qc != pass
   (all excluded unless overridden with ``overrides``); a normalized lesion whose native lesion
   changed since normalization (stale); flipped lesions; a 2D-share difference > 20 points between
-  groups; missing score values; case reports without record_id and doi; an N-dependent threshold
-  rule mismatch; the GSR banner of symmetric |T| rules; warn-level design checks.
+  groups; 2D tracings in a study that has not chosen how they are used (trace_policy.extrude_2d: they
+  are mapped as drawn); missing score values; case reports without record_id and doi; an N-dependent
+  threshold rule mismatch; the GSR banner of symmetric |T| rules; warn-level design checks.
 - Information: radiological (left-handed) storage; ambiguous grids (2009c/2009a); lesions of unknown
   space against a known connectome; lesions stored as floating point (possibly non-binary); non-ASCII
   paths (official Slicer 5.12.4 needs a UTF-8 locale to read them); rows that are not included
-  (include = 0, false or no, as ``Study.analysis_rows`` reads it); hashes deferred to a later
+  (include = 0, false or no, as ``Study.analysis_rows`` reads it) and lesions marked QC fail (qc = fail,
+  excluded as ``Study.analysis_rows`` excludes them); hashes deferred to a later
   preflight; info-level design checks.
 
 The report is a JSON-compatible dict; :func:`save_report` writes it to
@@ -89,6 +91,9 @@ CACHE_COPIES = 1
 DISK_HEADROOM_BYTES = 256 * 1024**2
 NORMALIZATION_JSON = "normalization.json"
 MAX_LISTED = 5
+#: The exclusion reason of a lesion whose recorded space is not a known MNI template space (Talairach, a misspelt label),
+#: with a template connectome (the "native_space" check; not "native space: ...", which the pipeline normalizes)
+EXCLUDED_NOT_MNI = "space not MNI: transform to MNI first"
 #: sha256 cache of lesion files in a study: {"version", "files": {path relative to the study: [size, mtime_ns, sha256]}}
 HASH_CACHE_RELPATH = (studylib.PRIVATE_DIR, "cache", "lesion_sha256.json")
 HASH_CACHE_VERSION = 1
@@ -107,6 +112,7 @@ FIX_ACCEPT_TERMS = "accept-terms"  # scroll to the Connectome card's terms
 FIX_INCLUDE = "include-anyway"  # override a warn-level exclusion (recorded in provenance)
 FIX_PROBABILISTIC = "probabilistic"  # map fractional lesions with --probabilistic
 FIX_FREE_DISK = "free-disk"
+FIX_TWO_D_POLICY = "two-d-policy"  # choose how 2D tracings are used in the study (study.json trace_policy.extrude_2d)
 
 # Assertion failure codes (assert_run_outputs)
 SIDECAR_FIELDS = {
@@ -187,6 +193,32 @@ def _count(n, word, plural=None):
     return f"{n} {word if n == 1 else plural or word + 's'}"
 
 
+def _native_space_message(sids, details):
+    """The message of the "native_space" check: lesions in a native space, or (``details``: {sid: space label}) in a
+    space that is not a known MNI template space (Talairach, a misspelt label; ``geometry.is_mni_space``).
+    """
+    others = sorted({str(label) for sid, label in details.items() if sid in sids and label})
+    native = [sid for sid in sids if not details.get(sid)]
+    verb = "is" if len(sids) == 1 else "are"
+    if not others:
+        return f"{_count(len(sids), 'lesion')} {verb} in native space and not yet normalized ({_listed(sids)}): normalize to MNI in the Library."
+    where = "in native space or in" if native else "in"
+    return (f"{_count(len(sids), 'lesion')} {verb} {where} a space that is not a known MNI template space ({', '.join(others)}) and not yet "
+            f"normalized ({_listed(sids)}): normalize to MNI in the Library, or set the space if it is already an MNI template.")
+
+
+def _space_unknown_message(conn_family):
+    def message(sids, details):
+        recorded = sorted({str(label) for sid, label in details.items() if sid in sids and label})
+        if recorded and len(recorded) == len(sids):
+            return (f"The space of {_count(len(sids), 'lesion')} is an MNI template of no known family ({', '.join(recorded)}: {_listed(sids)}): "
+                    f"{'it is' if len(sids) == 1 else 'they are'} assumed to be in the connectome's family ({conn_family}).")
+        return (f"The space of {_count(len(sids), 'lesion')} is not recorded and {'its' if len(sids) == 1 else 'their'} grid is not a known template grid "
+                f"({_listed(sids)}): {'it is' if len(sids) == 1 else 'they are'} assumed to be in the connectome's space ({conn_family}).")
+
+    return message
+
+
 def _number(text):
     return schema._number(text)
 
@@ -223,7 +255,8 @@ def measure_lesion(path, connectome_grid=None, connectome_mask=None, header=None
     :return: (values, hygiene): values holds volume_ml, n_parts, fractional_sum (the lesion's sum on the
       connectome grid; None without ``connectome_grid``, since a sum on another grid would later be
       trusted against the connectome), qc_flags codes (list), lesion_mtime and lesion_size; hygiene is
-      ``lesionops.hygiene``'s result (outside_pct relative to ``connectome_mask``).
+      ``lesionops.hygiene``'s result (outside_pct relative to ``connectome_mask``) with "dimensionality",
+      that of ``lesionops.detect_dimensionality`` (of the file: an extruded tracing is 3D).
     """
     stat = os.stat(path)
     data, affine, file_header = nifti.read_nifti(path)
@@ -232,6 +265,7 @@ def measure_lesion(path, connectome_grid=None, connectome_mask=None, header=None
             raise ValueError(f"The lesion is not a 3D image (shape {data.shape})")
         data = data.reshape(data.shape[:3])
     result = lesionops.hygiene(data, affine, header=header or file_header, connectome_grid=connectome_grid, brain_mask=connectome_mask, multifocal=multifocal)
+    result["dimensionality"] = _dimensionality(data, affine)
     fractional_sum = None
     if connectome_grid is not None:
         fractional_sum = result["connectome_sum"] if result["connectome_sum"] is not None else 0.0  # None: an empty lesion
@@ -246,19 +280,40 @@ def measure_lesion(path, connectome_grid=None, connectome_mask=None, header=None
     return values, result
 
 
-def remeasure(study, sids, bundle=None, post=False):
+def _dimensionality(data, affine):
+    """``lesionops.detect_dimensionality`` of a lesion (on its bounding box): "2D", "multi2D", "3D" or None (empty)."""
+    occupied = np.asarray(data) > 0
+    found = np.argwhere(occupied)
+    if len(found) == 0:
+        return None
+    low, high = found.min(axis=0), found.max(axis=0) + 1
+    shift = np.eye(4)
+    shift[:3, 3] = low
+    crop = occupied[low[0] : high[0], low[1] : high[1], low[2] : high[2]]
+    return lesionops.detect_dimensionality(crop, np.asarray(affine, dtype=np.float64) @ shift)["dimensionality"]
+
+
+def remeasure(study, sids, bundle=None, post=False, outside=False):
     """The "re-measure" fix: measure the lesions of ``sids`` again (voxel reads).
 
     :param bundle: the connectome; without it fractional_sum is None (posted as n/a, which clears a
       value measured on another grid; a preflight then estimates it from volume_ml).
     :param post: post the values to the study inbox (``Study.post_results``, source "preflight"); the
       session merges them (single-writer rule: this never writes participants.tsv).
+    :param outside: also give outside_brain_pct, the share of the lesion outside the connectome's mask (needs ``bundle``).
     :return: {sid: values} (qc_flags joined with ";", keeping the row's flags that the hygiene checks
-      do not compute, such as side_mismatch, csf and duplicate); unreadable files are left out.
+      do not compute, such as side_mismatch, csf and duplicate; dimensionality when the row has none, as
+      for a lesion file that was not drawn in Draw); unreadable files are left out.
     """
     study = _as_study(study)
     bundle = _as_bundle(bundle)
     grid = bundle.grid if bundle is not None else None
+    mask = None
+    if outside and bundle is not None:
+        try:
+            mask = (bundle.mask, bundle.affine)
+        except (OSError, ValueError):
+            mask = None
     hygiene_codes = ("nonbinary", "empty", "subvoxel", "outside", "xform", "grid", "multipart")
     out = {}
     for sid in sids:
@@ -267,9 +322,13 @@ def remeasure(study, sids, bundle=None, post=False):
         if not path or not os.path.isfile(path):
             continue
         try:
-            values, _ = measure_lesion(path, connectome_grid=grid, multifocal=row.get("multifocal") == "1")
-        except (OSError, EOFError, ValueError, ArithmeticError, IndexError):
+            values, result = measure_lesion(path, connectome_grid=grid, connectome_mask=mask, multifocal=row.get("multifocal") == "1")
+        except (OSError, EOFError, ValueError, ArithmeticError, IndexError, MemoryError):
             continue
+        if mask is not None:
+            values["outside_brain_pct"] = None if result["outside_pct"] is None else round(result["outside_pct"], 2)
+        if schema.is_missing(row.get("dimensionality")) and result.get("dimensionality"):
+            values["dimensionality"] = result["dimensionality"]  # never over Draw's (an extruded tracing's file is 3D)
         kept = [code for code in _flags(row) if code not in hygiene_codes]
         codes = set(kept) | set(values["qc_flags"])
         values["qc_flags"] = ";".join(code for code in lesionops.QC_FLAGS if code in codes) or None
@@ -440,11 +499,29 @@ class _Hasher:
         self.changed = False
 
 
-def _subset_study(study, sids):
-    """An in-memory copy of a study that holds only these rows (for the shared design checks; never saved)."""
+def _subset_study(study, sids, measured=None):
+    """An in-memory copy of a study that holds only these rows (for the shared design checks; never saved).
+
+    :param measured: {sid: values} that this preflight measured (stale or missing metrics): a missing
+      volume_ml is filled from them, as the run fills it from the lesion it maps (otherwise a study
+      without stored volumes, such as one made from a BIDS dataset, loses every subject to the
+      default lesion-volume covariate).
+    """
     keep = set(sids)
-    rows = [row for row in study.subjects if row["participant_id"] in keep]
-    return studylib.Study(study.path, dict(study.metadata), study.columns, rows, study.dictionary)
+    measured = measured or {}
+    column = designlib.VOLUME_COLUMN
+    rows = []
+    for row in study.subjects:  # copies
+        if row["participant_id"] not in keep:
+            continue
+        volume = (measured.get(row["participant_id"]) or {}).get(column)
+        if schema.is_missing(row.get(column)) and volume is not None:
+            row[column] = f"{volume:.6g}"
+        rows.append(row)
+    columns = list(study.columns)
+    if column not in columns and any(column in row for row in rows):
+        columns.append(column)
+    return studylib.Study(study.path, dict(study.metadata), columns, rows, study.dictionary)
 
 
 # Preflight
@@ -552,6 +629,7 @@ def run_preflight(
     outside_against = {}  # sid -> "brain" or "connectome": the mask of the row's outside share
     hasher = _Hasher(study.path, hash_budget)
     deferred = {}  # sid -> what waits for a hash ("duplicates", "normalization")
+    dimensionality = {}  # sid -> dimensionality of a row that has none, from the voxels a stale row's measurement read
 
     def exclude(sid, reason):
         excluded.setdefault(sid, reason)
@@ -560,22 +638,32 @@ def run_preflight(
         collector.add(check_id, "block", sid, message_fn, fix or _library_fix(), "subject", True)
         exclude(sid, reason)
 
-    def warn_exclusion(check_id, sid, message_fn, reason, fix_label):
+    def warn_exclusion(check_id, sid, message_fn, reason, fix_label, detail=None):
         overridden = check_id in overrides
 
         def message(sids, details, base=message_fn):
             text = base(sids, details)
             return text + (" Included anyway (override recorded)." if overridden else " They are excluded unless you include them anyway.")
 
-        collector.add(check_id, "warn", sid, message, lambda sids: _fix(FIX_INCLUDE, fix_label, check=check_id, subjects=sids), "subject", not overridden)
+        collector.add(check_id, "warn", sid, message, lambda sids: _fix(FIX_INCLUDE, fix_label, check=check_id, subjects=sids), "subject", not overridden, detail)
         if not overridden:
             exclude(sid, reason)
 
     for row in study.subjects:
         sid = row["participant_id"]
-        if not studylib._included(row):  # the analyses' own test (Study.analysis_rows): 0, false, no
+        if not studylib._included(row):  # the analyses' own test (Study.analysis_rows, study.is_included)
             collector.add("include_off", "info", sid, lambda sids, _d: f"{_count(len(sids), 'subject')} with include = 0 {'is' if len(sids) == 1 else 'are'} not analysed: {_listed(sids)}.")
             exclude(sid, studylib.EXCLUDED_INCLUDE)
+            continue
+        if studylib.qc_failed(row):  # marked "QC fail" in the Library: never analysed (Study.analysis_rows)
+            collector.add(
+                "qc_fail",
+                "info",
+                sid,
+                lambda sids, _d: f"{_count(len(sids), 'lesion')} marked QC fail {'is' if len(sids) == 1 else 'are'} not analysed: {_listed(sids)}.",
+                _library_fix(),
+            )
+            exclude(sid, studylib.EXCLUDED_QC)
             continue
         path = study.abspath(row.get("lesion"))
         if not path or not os.path.isfile(path):
@@ -615,11 +703,13 @@ def run_preflight(
                     except (OSError, ValueError):
                         connectome_mask.append(None)
                 values, result = measure_lesion(path, conn_grid, connectome_mask[0] if connectome_mask else None, header, row.get("multifocal") == "1")
-            except (OSError, EOFError, ValueError, ArithmeticError, IndexError) as exc:
+            except (OSError, EOFError, ValueError, ArithmeticError, IndexError, MemoryError) as exc:  # MemoryError: a lesion too large for this machine
                 subject_block("lesion_unreadable", sid, lambda sids, d: f"{_count(len(sids), 'lesion file')} cannot be read: {_listed(sids)} ({next(iter(d.values()))}).", "lesion file unreadable")
                 collector.items["lesion_unreadable"]["details"][sid] = f"{type(exc).__name__}: {exc}"
                 continue
             measured[sid] = {**values, "qc_flags": ";".join(values["qc_flags"]) or None}
+            if schema.is_missing(row.get("dimensionality")) and result.get("dimensionality"):
+                dimensionality[sid] = result["dimensionality"]
             volume_ml, fractional_sum = values["volume_ml"], values["fractional_sum"]
             flags = sorted(set(flags) - {"nonbinary", "empty", "subvoxel", "outside", "xform", "grid", "multipart"} | set(values["qc_flags"]))
             if result["outside_pct"] is not None:
@@ -633,6 +723,17 @@ def run_preflight(
             fractional_sum = estimate if fractional_sum is None else min(fractional_sum, estimate)
 
         # Empty and sub-voxel lesions
+        # A lesion with volume that fills no connectome voxel at all lies outside the connectome grid (wrong
+        # header or space): it is not empty, so the message names that cause (as the engine does).
+        outside_grid = fractional_sum is not None and fractional_sum <= 0 and volume_ml is not None and volume_ml > 0 and "empty" not in flags
+        if outside_grid:
+            subject_block(
+                "lesion_outside_grid",
+                sid,
+                lambda sids, _d: f"{_count(len(sids), 'lesion')} {'lies' if len(sids) == 1 else 'lie'} outside the template or connectome and {'does' if len(sids) == 1 else 'do'} not overlap it: {_listed(sids)}. Check {'its' if len(sids) == 1 else 'their'} header or space.",
+                "lesion outside the connectome",
+            )
+            continue
         if (volume_ml is not None and volume_ml <= 0) or (fractional_sum is not None and fractional_sum <= 0) or "empty" in flags:
             subject_block("lesion_empty", sid, lambda sids, _d: f"{_count(len(sids), 'lesion')} {'is' if len(sids) == 1 else 'are'} empty: {_listed(sids)}.", "empty lesion")
             continue
@@ -704,22 +805,19 @@ def run_preflight(
                 detail=list(match.candidates),
             )
         family = geometry.space_family(space) if space else (match.family if match is not None else "unknown")
-        if family == "unknown" and conn_family not in (None, "unknown"):
-            collector.add(
-                "space_unknown",
-                "info",
-                sid,
-                lambda sids, _d: f"The space of {_count(len(sids), 'lesion')} is not recorded and {'its' if len(sids) == 1 else 'their'} grid is not a known template grid ({_listed(sids)}): {'it is' if len(sids) == 1 else 'they are'} assumed to be in the connectome's space ({conn_family}).",
-                _library_fix("Set the space"),
-            )
+        # A recorded space that is not a known MNI template space (Talairach, a misspelt label) is treated like a native one
+        not_mni = space is not None and family != "native" and not geometry.is_mni_space(space)
+        if family == "unknown" and not not_mni and conn_family not in (None, "unknown"):
+            collector.add("space_unknown", "info", sid, _space_unknown_message(conn_family), _library_fix("Set the space"), detail=str(space) if space else None)
         normalized = not schema.is_missing(row.get("norm_method"))
-        if family == "native" and not normalized:
+        if (family == "native" or (not_mni and conn_family not in (None, "unknown"))) and not normalized:
             warn_exclusion(
                 "native_space",
                 sid,
-                lambda sids, _d: f"{_count(len(sids), 'lesion')} {'is' if len(sids) == 1 else 'are'} in native space and not yet normalized ({_listed(sids)}): normalize to MNI in the Library.",
-                "native space: not normalized",
+                _native_space_message,
+                EXCLUDED_NOT_MNI if not_mni else "native space: not normalized",
                 "Include native lesions anyway",
+                detail=str(space) if not_mni else None,
             )
         if normalized and row.get("norm_qc") != "pass":
             warn_exclusion(
@@ -790,8 +888,21 @@ def run_preflight(
     for column, confirmed in study.score_columns():
         if not confirmed:
             continue
+        numeric = study.column_spec(column).type == "numeric"
         for row in included_rows:
-            if schema.is_missing(row.get(column)):
+            value = row.get(column)
+            if numeric and not schema.is_missing(value) and schema._number(value) is None:
+                # Present but not a number (a typo, a decimal comma such as "8,5"): the score analyses drop it too
+                collector.add(
+                    "nonnumeric_scores",
+                    "warn",
+                    row["participant_id"],
+                    lambda sids, d: f"{_count(len(sids), 'subject')} {'has' if len(sids) == 1 else 'have'} a value of {', '.join(sorted(set(d.values())))} that is not a number ({_listed(sids)}); score analyses exclude them. Fix the value, for example a decimal comma to a point.",
+                    _library_fix(),
+                    "run",
+                    detail=column,
+                )
+            elif schema.is_missing(value):
                 collector.add(
                     "missing_scores",
                     "warn",
@@ -847,9 +958,10 @@ def run_preflight(
         if path and not _is_ascii(path):
             run_checks.append(Check("non_ascii_path", "info", [], f"The {label} path has non-ASCII characters: official 3D Slicer 5.12 reads it only with a UTF-8 locale.", None, "run", detail={"which": label}))
     run_checks.extend(_rule_checks(recipe_rule, bundle, n_subjects))
-    design_checks = _design_checks(study, included, design_spec)
+    design_checks = _design_checks(study, included, design_spec, measured)
     if design_spec is None:
         run_checks.extend(_dimensionality_share(study, included_rows))
+    run_checks.extend(_two_d_policy(study, included_rows, dimensionality))
     run_checks.extend(design_checks)
 
     all_checks = checks + run_checks
@@ -1018,7 +1130,7 @@ def _family_checks(families, conn_family, transforms):
                 sids,
                 f"{_count(len(sids), 'lesion')} {'is' if len(sids) == 1 else 'are'} in the {family} template family but the connectome is {target}"
                 + (": a transform is available." if have else ": without a template-family transform the lesions are placed a few millimetres off in deep structures."),
-                _fix(FIX_TRANSFORM, "Transform the lesions to the connectome space", source=family, target=target, available=have),
+                _fix(FIX_TRANSFORM, "Transform the lesions", source=family, target=target, available=have),
                 "subject",
                 detail={"family": family, "connectome": target},
             ),
@@ -1067,15 +1179,18 @@ def _design_dict(spec):
         return None
 
 
-def _design_checks(study, included, design_spec):
-    """The shared design checks (``design.build_design``) on the subjects this preflight includes."""
+def _design_checks(study, included, design_spec, measured=None):
+    """The shared design checks (``design.build_design``) on the subjects this preflight includes.
+
+    :param measured: {sid: values} measured by this preflight; they fill missing volumes (see :func:`_subset_study`).
+    """
     if design_spec is None:
         return []
     if not included:
         return []
     try:
         spec = designlib.as_spec(design_spec)
-        built = designlib.build_design(_subset_study(study, included), spec)
+        built = designlib.build_design(_subset_study(study, included, measured), spec)
     except (OSError, ValueError) as exc:  # DesignError is a ValueError
         return [Check("design.error", "block", [], f"The design cannot be built: {exc}", None, "run")]
     out = []
@@ -1106,6 +1221,35 @@ def _dimensionality_share(study, rows):
         text = ", ".join(f"{level} {share:.0f}%" for level, share in shares.items())
         return [Check("dimensionality_share", "warn", [], f"The share of 2D tracings differs between groups by more than {designlib.DIMENSIONALITY_SHARE_LIMIT:.0f} points ({text}): consider dimensionality as a covariate.", None, "run", detail=shares)]
     return []
+
+
+def two_d_policy_chosen(study):
+    """True when the study says how 2D tracings are used (study.json ``trace_policy.extrude_2d``)."""
+    value = (study.trace_policy or {}).get("extrude_2d")
+    if isinstance(value, dict):
+        value = value.get("mode")
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _two_d_policy(study, rows, found=None):
+    """2D and multi2D tracings in a study that has not chosen how they are used: they are mapped as drawn (single slices).
+
+    The 2D extrusion is a study-level forced choice (SPEC_LNM_ADDENDUM 3.10); Draw asks for it on Done, but lesion files
+    imported into a study were never drawn there. ``found``: {sid: dimensionality} of rows without the column (measured now).
+    """
+    if two_d_policy_chosen(study):
+        return []
+    found = found or {}
+    sids = [row["participant_id"] for row in rows if (found.get(row["participant_id"]) if schema.is_missing(row.get("dimensionality")) else row.get("dimensionality")) in designlib.TWO_D_LEVELS]
+    if not sids:
+        return []
+    many = len(sids) != 1
+    message = (
+        f"{_count(len(sids), 'lesion')} {'are' if many else 'is'} 2D (single-slice) {'tracings' if many else 'a tracing'} ({_listed(sids)}) and the study "
+        f"has not chosen how 2D tracings are used: {'they are' if many else 'it is'} mapped as {'single slices' if many else 'a single slice'}. "
+        "Choose once: keep single-slice or extrude."
+    )
+    return [Check("two_d_no_policy", "warn", sids, message, _fix(FIX_TWO_D_POLICY, "Choose how 2D tracings are used", subjects=sids), "run")]
 
 
 def _report(study, bundle, checks, included, excluded, measured, settings, started):
@@ -1442,6 +1586,15 @@ def assert_run_outputs(run_json_or_outputs, expected_n, kind="map", reference_he
 
     # Maps: existence, header, values
     maps = [os.fspath(path) for path in found["maps"]]
+    # The participant of each map of a maps.tsv: a failure names it, not only the map's file (a cache name)
+    owners = {}
+    if found["rows"]:
+        from .cohortmaps import MAP_KEYS
+
+        for row in found["rows"]:
+            for key in MAP_KEYS:
+                if row.get("participant_id") and not schema.is_missing(row.get(key)):
+                    owners.setdefault(os.path.normpath(os.fspath(row[key])), row["participant_id"])
     if not maps:
         failures.append(_failure("no_outputs", "The run lists no output maps.", found["record_path"] or found["folder"]))
     try:
@@ -1481,7 +1634,11 @@ def assert_run_outputs(run_json_or_outputs, expected_n, kind="map", reference_he
             if not finite.all():
                 failures.append(_failure("non_finite", f"{os.path.basename(path)} has {int(values.size - np.count_nonzero(finite))} non-finite values.", path, count=int(values.size - np.count_nonzero(finite))))
             elif (found["value_maps"] is None or path in found["value_maps"]) and (values.size == 0 or float(values.max()) == float(values.min())):
-                failures.append(_failure("constant_map", f"{os.path.basename(path)} has the same value everywhere (zero variance).", path))
+                if n is not None and n < 2 and "_desc-T_" in os.path.basename(path) and values.size and not values.any():
+                    continue  # a T map needs 2 subjects: it is all zero at N=1 by design (no T threshold), not an error
+                owner = owners.get(os.path.normpath(path))
+                what = f"The map of {owner} ({os.path.basename(path)})" if owner else os.path.basename(path)
+                failures.append(_failure("constant_map", f"{what} has the same value everywhere (zero variance).", path))
 
     # Sidecars
     required = SIDECAR_FIELDS.get(kind, DEFAULT_SIDECAR_FIELDS)

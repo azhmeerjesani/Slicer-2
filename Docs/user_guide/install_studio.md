@@ -176,6 +176,15 @@ folder (`SlicerStudioData` in your home folder unless you pass `--data`), in
 asks as the desktop application does). See
 [Where Slicer Studio saves your work](studio_projects.md).
 
+## Extensions
+
+The Extensions Manager offers the extensions of the official 3D Slicer build
+that Slicer Studio is based on. Only extensions written in Python work in
+Slicer Studio. Extensions with compiled (C++) parts, such as MarkupsToModel,
+were built for official 3D Slicer and cannot run here: they still install, but
+the Extensions Manager shows them as incompatible, says why, and keeps them
+disabled. Use official 3D Slicer for those extensions.
+
 ## Updates
 
 Slicer Studio updates itself from the public releases of its repository,
@@ -227,22 +236,27 @@ account or costs anything.
    Studio. The usual question about unsaved changes appears; unsaved work is also
    autosaved and offered for recovery when the new version starts.
 4. After Slicer Studio has closed, the new version replaces the old one and
-   starts. If anything goes wrong, the previous version is put back, and the next
-   start says why.
+   starts. If anything goes wrong, the previous version is put back and starts
+   instead, and it says why. While another Slicer Studio window of the same
+   installation is open, the update is not installed: Update now says so, and
+   you close the other window first.
 
 On macOS, if the Applications folder is not writable for you, macOS asks for an
 administrator password; you can instead quit, open the downloaded disk image and
 drag Slicer Studio to Applications. If Slicer Studio runs from the disk image or
 from the Downloads folder (macOS "App Translocation"), move it to Applications
 first. On Linux, the folder of the package must be writable; otherwise extract the
-new package yourself. **Install when I quit** installs the downloaded update the
+new package yourself. When Slicer Studio cannot install an update itself, it keeps
+the checked package in your Downloads folder and names its full path.
+**Install when I quit** installs the downloaded update the
 next time you quit, without restarting.
 
 ### Web version
 
 `slicer_studio_web.py` checks for a new release when it starts Slicer Studio. A
-required update stops it with instructions; an optional one prints a notice. To
-update, run:
+required update stops it with instructions; an optional one prints a notice.
+While the release has no Linux package yet, a required update only prints a
+warning and Slicer Studio starts. To update, run:
 
 ```console
 python3 slicer_studio_web.py update
@@ -251,7 +265,9 @@ python3 slicer_studio_web.py update
 It downloads the launcher bundle and the Linux package of the latest release,
 checks their size and SHA-256 checksum, unpacks the new launcher next to the old
 one (or in the cache folder when run from a source tree) and builds the Docker
-image from the verified package. Start the new version with
+image from the verified package. The package is deleted after a successful build; with `--no-build`
+it stays in the launcher's cache folder (`updates/<version>` inside it, which the command prints) until the next
+`update` removes it. Start the new version with
 `python3 <new launcher folder>/slicer_studio_web.py run --recreate`.
 `--no-update-check` (or the environment variable
 `SLICER_STUDIO_UPDATE_FEED=off`) skips the check.

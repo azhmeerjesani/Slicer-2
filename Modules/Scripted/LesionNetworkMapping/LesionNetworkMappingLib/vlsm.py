@@ -110,6 +110,35 @@ def contrast_desc(design):
     return "vlsm" + label[:1].upper() + label[1:]
 
 
+def sign_coding(record):
+    """What a positive value of a VLSM statistic map means, from a vlsm.json record ("stat", "test", "contrast", "n_per_level").
+
+    The outcome is the binary lesion value of each voxel and the predictors are the group or the score, so a positive
+    T (and its Hedges g or partial r) means lesion at the voxel goes with the contrast's direction: the "negative"
+    score contrast (-1 on the score) flips the sign compared with the two-sided map. F maps have no sign.
+    """
+    record = record if isinstance(record, dict) else {}
+    contrast = record.get("contrast") if isinstance(record.get("contrast"), dict) else {}
+    spec = contrast.get("spec")
+    if record.get("stat") == "F" or spec == "F":
+        return "F statistic and partial eta squared are not signed: larger values mean lesion location differs more between the groups."
+    adjusted = " (after the covariates)" if record.get("covariates") else ""
+    if record.get("test") == "continuous":
+        columns = contrast.get("columns") or []
+        score = str(columns[1]) if len(columns) > 1 and columns[1] else "score"
+        score = score if score.lower().endswith("score") else score + " score"
+        lower = spec == "negative"
+        flip = " The contrast is -1 on the score, so the sign is flipped compared with the two-sided map." if lower else ""
+        return (f"Positive values: lesion at the voxel goes with a {'lower' if lower else 'higher'} {score}{adjusted}; negative values: "
+                f"lesion goes with a {'higher' if lower else 'lower'} score.{flip}")
+    levels = [str(level) for level in (record.get("n_per_level") or {})]
+    if record.get("test") in designlib.GROUP_TESTS and len(levels) >= 2:
+        first, second = (levels[1], levels[0]) if spec == "B>A" else (levels[0], levels[1])
+        return f"Positive values: the voxel is lesioned more often in {first} than in {second}{adjusted}; negative values: the opposite."
+    label = contrast.get("label")
+    return f"Positive values: lesion at the voxel goes with a positive contrast {label} ({spec})." if label and spec else "not recorded"
+
+
 def output_path(out_dir, space, desc, suffix="map"):
     """``<out_dir>/group_space-<sp>_desc-<desc>_<suffix>.nii.gz`` (letters and digits only in ``desc``)."""
     if not re.fullmatch(r"[A-Za-z0-9]+", desc):
@@ -150,7 +179,7 @@ def min_lesion_rule(min_lesions=DEFAULT_MIN_LESIONS, min_percent=DEFAULT_MIN_PER
     if len(parts) == 2:
         return f"max({parts[0]}, {parts[1]})"
     if parts:
-        return parts[0] + (" lesions" if min_lesions else "")
+        return parts[0] + ((" lesion" if int(min_lesions) == 1 else " lesions") if min_lesions else "")
     return "1 lesion"
 
 
@@ -253,6 +282,20 @@ def _check(level, code, message, detail=None):
     return designlib.Check(level, code, message, detail)
 
 
+class NoLesionsError(designlib.DesignError):
+    """No lesion of the study could be loaded (``excluded`` is {reason: [sids]}, ``space`` the space of the grid)."""
+
+    def __init__(self, excluded, space):
+        reasons = "; ".join(f"{reason}: {len(sids)}" for reason, sids in excluded.items())
+        super().__init__(f"No lesion could be loaded ({reasons or 'the study has no lesions'})")
+        self.excluded = {reason: list(sids) for reason, sids in excluded.items()}
+        self.space = space
+
+    def all_for_space(self):
+        """True when every lesion was excluded for being in another space family than the grid's."""
+        return bool(self.excluded) and all(lesionset.excluded_for_space(reason) for reason in self.excluded)
+
+
 def prepare(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESIONS, min_percent=DEFAULT_MIN_PERCENT, n_perm=None, occ=None, binarize_at=BINARIZE_AT,
             template_dirs=(), cancel=None, progress=None, memmap_path=None):
     """Build the design of a VLSM on a study's lesions and the lesion matrix of its subjects.
@@ -274,8 +317,7 @@ def prepare(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LES
     if occ is None:
         occ = load_lesions(study, grid=grid, space=space, template_dirs=template_dirs, cancel=cancel, progress=progress)
     if not len(occ):
-        excluded = "; ".join(f"{reason}: {len(sids)}" for reason, sids in occ.excluded.items())
-        raise designlib.DesignError(f"No lesion could be loaded ({excluded or 'the study has no lesions'})")
+        raise NoLesionsError(occ.excluded, occ.space)
     volumes = {sid: f"{float(volume):.6g}" for sid, volume in zip(occ.sids, occ.volumes_ml, strict=True)}
     subset, filled = glm._subset_study(study, set(occ.sids), volumes)
     design = designlib.build_design(subset, spec)
@@ -450,7 +492,8 @@ def vlsm(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESION
     :param emit: ``emit(event, **fields)`` for job events (default: none).
     :param design_path: the design.json the spec was read from (recorded).
     :return: vlsm.json content with absolute paths (``record`` is its path).
-    :raises design.DesignError: an invalid spec; ``jobs.JobError`` (exit code 2) for a blocked design.
+    :raises design.DesignError: an invalid spec, or (:class:`NoLesionsError`) a ``space`` no lesion of the study is in the
+      family of; ``jobs.JobError`` (exit code 2) for a blocked design.
     """
     from .export import DISCLAIMER, LIBRARY_VERSION, now_iso, versions
     from .study import Study
@@ -483,6 +526,8 @@ def vlsm(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESION
     try:
         prepared = prepare(study, spec, occ=occ, min_lesions=min_lesions, min_percent=min_percent, n_perm=n_perm)
     except designlib.DesignError as exc:
+        if space is not None and isinstance(exc, NoLesionsError) and exc.all_for_space():
+            raise  # the caller's space is one no lesion of the study can use: its error, not the design's (main names --space)
         raise jobs.JobError(f"The design cannot be built: {exc}", code="design_blocked", exit_code=jobs.EXIT_USAGE) from None
     design = prepared.design
     if design.blocking:
@@ -518,7 +563,6 @@ def vlsm(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESION
         record = {"format": FORMAT_NAME, "version": FORMAT_VERSION, "run_id": run_id, "status": "running", "argv": list(argv or []), "start": now_iso(), "end": None}
         two_sided = design.tails == 2 and design.stat != "F"
         tfce_grid = tfcelib.TfceGrid(matrix.tested_mask()) if spec.inference.get("tfce") else None
-        _remove_previous_outputs(out_dir)
         emit("stage", name="permutations", index=2, total=3, total_permutations=prepared.count - 1, run_id=run_id, n=design.n, p=design.p, n_voxels=matrix.n_voxels, min_count=matrix.min_count, stat=design.stat,
              tails=design.tails, design_type=design.design_type, permute=design.permute, permute_reason=design.permute_reason, n_perm=prepared.count, exhaustive=prepared.exhaustive,
              tfce=tfce_grid is not None, tfce_eta_s=tfcelib.tfce_eta(tfce_grid, prepared.count, two_sided) if tfce_grid is not None else None)
@@ -538,6 +582,8 @@ def vlsm(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESION
 
         emit("stage", name="write", index=3, total=3)
         tic = time.monotonic()
+        # Only now that this run has its result: a run stopped or failed before this keeps the earlier finished result of out_dir
+        _remove_previous_outputs(out_dir)
         paths = write_maps(glm_result, prepared, out_dir, space_label, fwe=bool(spec.inference.get("fwe", True)), fdr=bool(spec.inference.get("fdr", True)))
         design_json, design_tsv = designlib.save_design(design, out_dir)
         lesions_tsv = write_lesions_tsv(os.path.join(out_dir, LESIONS_TSV), lesion_rows(prepared))
@@ -594,7 +640,16 @@ def vlsm(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESION
             **numbers,
             "fwe": {**numbers["fwe"], "enabled": bool(spec.inference.get("fwe", True)), "primary": True},
             "fdr": {**numbers["fdr"], "enabled": bool(spec.inference.get("fdr", True))},
-            "tfce": {"enabled": tfce_grid is not None, **(numbers.get("tfce_fwe") or {})},
+            "tfce": {
+                "enabled": tfce_grid is not None,
+                "H": tfcelib.DEFAULT_H,
+                "E": tfcelib.DEFAULT_E,
+                "steps": tfcelib.DEFAULT_STEPS,
+                "connectivity": tfcelib.DEFAULT_CONNECTIVITY,
+                "two_sided": two_sided,
+                "eta_s": tfcelib.tfce_eta(tfce_grid, prepared.count, two_sided) if tfce_grid is not None else None,
+                **(numbers.get("tfce_fwe") or {}),
+            },
             "clusters": {"alpha": CLUSTER_ALPHA, "inference": "fwe", "connectivity": CONNECTIVITY, "n": len(found), "table": found[:50],
                          "note": "Clusters of the voxels with FWE p <= 0.05 are descriptive (no cluster-extent inference)."},
             "cluster_inference": None,
@@ -610,6 +665,7 @@ def vlsm(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESION
             "disclaimer": DISCLAIMER,
         })
         record.pop("tfce_fwe", None)
+        record["sign_coding"] = sign_coding(record)
         json_path = os.path.join(out_dir, VLSM_JSON)
         write_record(json_path, record)
         outputs = [*paths.values(), design_json, design_tsv, lesions_tsv, json_path]
@@ -617,8 +673,8 @@ def vlsm(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESION
             emit("result", kind="vlsm", path=path)
         if run_id:
             runs.update(run_root, run_id, status="done", ended=record["end"], outputs=[os.path.basename(path) for path in outputs],
-                        summary={"n": design.n, "n_voxels": matrix.n_voxels, "n_perm": int(result.n_perm), "fwe_significant": numbers["fwe"]["n_significant"], "min_p": result.min_p,
-                                 "design_type": design.design_type})
+                        summary={"n": design.n, "n_voxels": matrix.n_voxels, "n_perm": int(result.n_perm), "fwe_significant": numbers["fwe"]["n_significant"],
+                                 "fwe_min_p": numbers["fwe"]["min_p"], "min_attainable_p": result.min_p, "design_type": design.design_type})
         emit("done", outputs=outputs, elapsed=round(time.monotonic() - started, 3), run_id=run_id, n_perm=int(result.n_perm), n_voxels=matrix.n_voxels)
         out = read_record(json_path)
         out["record"] = json_path
@@ -629,7 +685,9 @@ def vlsm(study, spec=None, grid=None, space=None, min_lesions=DEFAULT_MIN_LESION
     except jobs.Cancelled as exc:
         if record is not None:
             record.update({"status": "cancelled", "end": now_iso(), "stop_reason": exc.reason, "permutations_done": exc.done})
-            write_record(os.path.join(out_dir, VLSM_JSON), record)
+            previous = read_record(out_dir)
+            if not previous or previous.get("status") != "done":  # never replace a finished result's record with a stub
+                write_record(os.path.join(out_dir, VLSM_JSON), record)
         if run_id:
             runs.update(run_root, run_id, status="cancelled", ended=now_iso())
         raise
@@ -673,11 +731,8 @@ def _world(ijk, affine):
 
 
 def _passing(p, alpha):
-    """p <= alpha, also for p stored in float32: a permutation p of exactly alpha (for example 50/1000) is read back as
-    float32(0.05), slightly above the float64 0.05.
-    """
-    p = np.asarray(p, dtype=np.float64)
-    return np.isfinite(p) & (p <= float(alpha) * (1.0 + 1e-6))
+    """p <= alpha, also for p stored in float32 (see :func:`glm.passes_alpha`, the one rule of the cohort pipeline)."""
+    return glm.passes_alpha(p, alpha)
 
 
 def _cluster_list(stat3d, p3d, affine, alpha, sign, voxel_ml, min_voxels=1, masks=False):
@@ -855,6 +910,53 @@ def _parser():
     return parser
 
 
+_TEMPLATE_SPACES = ("MNI152NLin2009cAsym", "MNI152NLin2009aAsym", "MNI152NLin2009bAsym", "MNI152NLin6Asym", "MNI152Lin", "MNIColin27", "MNIPediatricAsym")
+
+
+def _check_study_option(study):
+    """A usage error (exit 2) naming ``--study`` when its folder does not exist or is not a study folder."""
+    from .study import STUDY_JSON
+
+    path = os.fspath(study)
+    if not (os.path.isfile(os.path.join(path, STUDY_JSON)) or (os.path.basename(path) == STUDY_JSON and os.path.isfile(path))):
+        what = "is not a study folder (it has no study.json)" if os.path.isdir(path) else "does not exist"
+        raise jobs.JobError(f"The --study folder {what}: {study}", code="usage", exit_code=jobs.EXIT_USAGE)
+
+
+def _space_option_error(space, exc):
+    """The usage error naming ``--space`` when no lesion is in its family (``exc`` is the :class:`NoLesionsError`).
+
+    The label is not checked up front: a user's own template label (any label outside the known families) is valid
+    when the study's lesions carry it, so only a label that no lesion of the study can use is an error.
+    """
+    from .geometry import space_family
+
+    reasons = "; ".join(f"{reason}: {len(sids)}" for reason, sids in exc.excluded.items())
+    known = f"known: {', '.join(_TEMPLATE_SPACES)}, their usual aliases, or the label the study's lesions carry"
+    if space_family(space) == "unknown":
+        message = f"Unknown --space {space} ({known}): no lesion of the study is in its family ({reasons})"
+    else:
+        message = f"No lesion of the study is in the family of --space {space} ({reasons}; {known})"
+    return jobs.JobError(message, code="usage", exit_code=jobs.EXIT_USAGE)
+
+
+def _check_grid_option(grid, space):
+    """Refuse an unusable --grid up front (exit 2, naming the option and the accepted values) instead of the raw
+    FileNotFoundError / ValueError of reading it, which ended as exit 1 without saying which option was wrong.
+    """
+    if grid is None or grid == lesionset.TEMPLATE_GRID:
+        return
+    accepted = "template2mm, a grid id, a NIfTI image or a connectome bundle folder"
+    try:
+        lesionset.resolve_grid(None, grid, space)
+    except lesionset.GridSpaceError:
+        return  # reported with the --space remedy by main
+    except FileNotFoundError:
+        raise jobs.JobError(f"The --grid {grid} does not exist (accepted: {accepted})", code="usage", exit_code=jobs.EXIT_USAGE) from None
+    except (OSError, ValueError, KeyError) as exc:
+        raise jobs.JobError(f"The --grid {grid} cannot be used: {exc} (accepted: {accepted})", code="usage", exit_code=jobs.EXIT_USAGE) from None
+
+
 def main(argv=None):
     """Command-line entry point (see the module docstring); returns the exit code."""
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -866,10 +968,12 @@ def main(argv=None):
                 raise jobs.JobError(f"--seed must not be negative, got {args.seed}", code="usage", exit_code=jobs.EXIT_USAGE)
             if args.min_lesions < 0 or not 0 <= args.min_percent <= 100:
                 raise jobs.JobError("--min-lesions must not be negative and --min-percent must be in [0, 100]", code="usage", exit_code=jobs.EXIT_USAGE)
+            _check_study_option(args.study)
             try:
                 spec = designlib.DesignSpec.load(args.design) if args.design else designlib.DesignSpec()
             except (OSError, ValueError) as exc:
                 raise jobs.JobError(f"The design {args.design} cannot be read: {exc}", code="usage", exit_code=jobs.EXIT_USAGE) from None
+            _check_grid_option(args.grid, args.space)
             dtype = None if args.precision == "auto" else np.dtype(args.precision)
             record = vlsm(args.study, spec, grid=args.grid, space=args.space, min_lesions=args.min_lesions, min_percent=args.min_percent, n_perm=args.perm, seed=args.seed,
                           out_dir=args.out, tfce=True if args.tfce else None, batch=args.batch, dtype=dtype, run_root=args.run_root, parent_runs=args.parent_run,
@@ -881,7 +985,11 @@ def main(argv=None):
     except (jobs.Cancelled, jobs.JobError):
         raise
     except designlib.DesignError as exc:
+        if args.command == "run" and args.space is not None and isinstance(exc, NoLesionsError) and exc.all_for_space():
+            raise _space_option_error(args.space, exc) from None
         raise jobs.JobError(f"The design cannot be built: {exc}", code="design_blocked", exit_code=jobs.EXIT_USAGE) from None
+    except lesionset.GridSpaceError as exc:
+        raise jobs.JobError(f"Pass --space for this grid: {exc}", code="usage", exit_code=jobs.EXIT_USAGE) from None
     except (OSError, ValueError, KeyError) as exc:
         raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None
 

@@ -4,10 +4,16 @@ The card says where the cohort analysis of the open study stands, in one line, f
 ``derivatives/lnm/conn-*/pipeline.json`` and ``.pipeline/progress.json`` (on study open and every 5 s while it is
 visible):
 
-- "Cohort analysis: up to date · finished 2 h ago", "3 new or changed lesions" (the staleness plan of the last run's
-  settings, ``pipeline.plan`` in a worker thread: file reads and hashing only), "Never run",
+- "Cohort analysis: up to date · finished 2 h ago", "3 new or changed lesions", "Cohort analysis: design changed since
+  the last run" (the staleness plan of the last run's settings, ``pipeline.plan`` in a worker thread: file reads and
+  hashing only; the design is the analysed subjects with their groups, scores and covariates), "Never run",
   "Running · Network maps 34%" (a run of this application or of another process), "Stopped", "Failed".
 - [Open in Map] shows Map with Seed = Cohort and the Run everything card; [Open report] opens the last report.
+
+The plan depends on the run's settings and on the study's design files (participants.tsv and study.json, by size and
+modification time, ``studyStamp``): a QC key, a Case section field, a column role or a removed subject that the session
+saves to participants.tsv, or an edit by another program, plans again (the 5 s refresh and the study save listener
+notice it), so the line never stays "up to date" for a design that the last run did not analyse.
 
 A StudySession Done hook (order 900; it returns ``{}`` and only schedules a timer) shows the toast "All N lesions traced ·
 run the cohort analysis in Map" once per session when every included subject is traced. In Classic the Studio module
@@ -33,6 +39,10 @@ REFRESH_MS = 5000
 DONE_HOOK_ORDER = 900
 #: The "all traced" check runs this long after Done (the row is updated by then)
 ALL_TRACED_DELAY_MS = 300
+#: While a consequence toast (with its action) is on screen the "all traced" toast waits: it is asked again this
+#: often, at most ``ALL_TRACED_MAX_WAITS`` times (the consequence goes at the next input)
+ALL_TRACED_WAIT_MS = 1000
+ALL_TRACED_MAX_WAITS = 300
 #: The staleness plan runs this long after the last change (Done, study opened)
 PLAN_DELAY_MS = 1500
 #: Height of the card (SPEC 3.1 card rhythm)
@@ -132,6 +142,8 @@ def stateLine(analysis, plan=None, liveModel=None):
         return _("Cohort analysis: stopped"), "text2"
     if stale:
         return (_("{n} new or changed lesion") if stale == 1 else _("{n} new or changed lesions")).format(n=stale), "warning"
+    if plan is not None and cardPipeline is not None and record.get("status") in ("done", "done_with_failures") and cardPipeline.designChanged(plan, record):
+        return _("Cohort analysis: design changed since the last run"), "warning"
     if record.get("status") == "done_with_failures":
         failed = len(record.get("failed_stages") or [])
         return (_("Cohort analysis: finished with {n} failed stage") if failed == 1 else _("Cohort analysis: finished with {n} failed stages")).format(n=failed), "warning"
@@ -139,6 +151,22 @@ def stateLine(analysis, plan=None, liveModel=None):
         age = cardPipeline.formatAge(record.get("updated")) if cardPipeline is not None else ""
         return (_("Cohort analysis: up to date · finished {age}").format(age=age) if age else _("Cohort analysis: up to date")), "success"
     return _("Cohort analysis: never run"), "text2"
+
+
+#: The study files that the design of the plan is read from (``studyStamp``)
+DESIGN_FILES = ("participants.tsv", "study.json")
+
+
+def studyStamp(studyPath):
+    """``[[name, size, mtime_ns], …]`` of the study's :data:`DESIGN_FILES` (one ``stat`` each; None for a missing file)."""
+    stamp = []
+    for name in DESIGN_FILES:
+        try:
+            info = os.stat(os.path.join(studyPath, name))
+            stamp.append([name, info.st_size, info.st_mtime_ns])
+        except (OSError, TypeError):
+            stamp.append([name, None, None])
+    return stamp
 
 
 def planConfig(analysis):
@@ -168,6 +196,7 @@ class AnalysisCard:
         self.analysis = None
         self.plan = None
         self.planKey = None
+        self.requestedKey = None  # the key of the last plan asked of the worker (not asked again while it is current)
         self.studyPath = None
         self.widget = qt.QWidget()
         self.widget.setObjectName("StudioAnalysisLibraryCard")
@@ -192,8 +221,9 @@ class AnalysisCard:
         layout.addLayout(top)
         self.line = qt.QLabel()
         self.line.setObjectName("StudioAnalysisLine")
-        self.line.setTextFormat(qt.Qt.PlainText)
-        self.line.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+        # One line in a card of a fixed height: a long state ("Cohort analysis failed (open Map for the details)") is
+        # elided with "…" to the width of the card (and its tooltip holds the whole text), never cut off mid-word
+        ui.elideLabel(self.line)
         library._setFont(self.line, 12)
         self._level = "text2"
         ui.bindStyleSheet(self.line, lambda: f"QLabel#StudioAnalysisLine {{ color: {ui.token(self._level).name()}; }}")
@@ -235,32 +265,43 @@ class AnalysisCard:
         self.session = session
         studyPath = session.study.path
         if studyPath != self.studyPath:
-            self.studyPath, self.plan, self.planKey = studyPath, None, None
+            self.studyPath, self.plan, self.planKey, self.requestedKey = studyPath, None, None, None
             self.schedulePlan()
         try:
             self.analysis = latestAnalysis(studyPath)
         except Exception:
             logging.error(f"Studio Library: the cohort analysis state could not be read:\n{traceback.format_exc()}")
             self.analysis = None
+        # The design changed since the last plan (the session saved participants.tsv, another program edited it, a run
+        # ended with other settings): plan again, so that the line does not keep the verdict of the old design
+        key = self._planKey()
+        if key is not None and key != self.planKey and key != self.requestedKey and not self.planTimer.isActive():
+            self.schedulePlan()
         self.show()
 
     def show(self):
         text, level = stateLine(self.analysis, self.plan if self.planKey == self._planKey() else None, self._liveModel())
-        if str(self.line.text) != text:
-            self.line.setText(text)
-            self.line.setToolTip(text)
+        if self.lineText() != text:
+            ui.setElidedText(self.line, text)
         if level != self._level:
             self._level = level
             ui.bindStyleSheet(self.line, lambda: f"QLabel#StudioAnalysisLine {{ color: {ui.token(self._level).name()}; }}")
         self.openReportButton.setVisible(self.reportPath() is not None)
 
+    def lineText(self):
+        """The whole text of the state line (the label shows it elided to its width)."""
+        return str(self.line.property("studioFullText") or "")
+
     def _onTimer(self):
         if library._isAlive(self.widget) and self.widget.isVisible():
             self.refresh()
 
-    def _planKey(self):
-        config = planConfig(self.analysis)
-        return json.dumps(config, sort_keys=True, default=str) if config is not None else None
+    def _planKey(self, config=None):
+        """What the plan depends on: the run's settings and the stamp of the study's design files."""
+        config = config if config is not None else planConfig(self.analysis)
+        if config is None:
+            return None
+        return json.dumps({"config": config, "study": studyStamp(self.studyPath)}, sort_keys=True, default=str)
 
     def schedulePlan(self):
         self.planTimer.start()
@@ -277,7 +318,8 @@ class AnalysisCard:
         config = planConfig(self.analysis)
         if config is None or (self.analysis.get("status") or {}).get("status") == "running":
             return
-        self.worker.request(json.dumps(config, sort_keys=True, default=str), config)
+        self.requestedKey = self._planKey(config)
+        self.worker.request(self.requestedKey, config)
 
     def _onPlan(self, key, summary, error):
         if error or key != self._planKey():
@@ -335,21 +377,32 @@ _hookedSessions = set()
 
 def allTraced(study):
     """``(n, traced)``: the included subjects and whether every one of them is traced (or mapped)."""
-    rows = [row for row in study.subjects if str(row.get("include", "1")).strip() == "1"]
+    import importlib
+
+    isIncluded = importlib.import_module("LesionNetworkMappingLib.study").is_included
+    rows = [row for row in study.subjects if isIncluded(row)]
     return len(rows), bool(rows) and all(row.get("status") in TRACED for row in rows)
 
 
-def _checkAllTraced(session):
+def _checkAllTraced(session, waits=0):
     studyUi = library._studyUi()
     if studyUi is None or session is not studyUi.session():
         return
-    for card in list(_cards):
-        card.schedulePlan()
+    if waits == 0:
+        for card in list(_cards):
+            card.schedulePlan()
     n, traced = allTraced(session.study)
     if not traced or n < 2 or id(session) in _toastedSessions:
         return
-    _toastedSessions.add(id(session))
     shell = library._shell()
+    # A consequence of an automatic action that carries an action ("No more cases of <paper> · New case from this
+    # paper") stays until the next input: this confirmation must not replace it, so it waits for the input
+    # (the study is checked again then: the action may have made a lesion untraced)
+    visible = getattr(shell, "consequenceVisible", None)
+    if visible is not None and visible() and waits < ALL_TRACED_MAX_WAITS:
+        qt.QTimer.singleShot(ALL_TRACED_WAIT_MS, lambda: _checkAllTraced(session, waits + 1))
+        return
+    _toastedSessions.add(id(session))
     text = (_("The lesion is traced · run the cohort analysis in Map") if n == 1 else _("All {n} lesions traced · run the cohort analysis in Map").format(n=n))
     if shell is None:
         logging.info(f"Studio: {text}")
@@ -376,11 +429,20 @@ def _onSession(session):
         _hookedSessions.add(id(session))
 
 
+def _onSaved(session):
+    """Study save listener: participants.tsv was written, so the cards re-read the state and plan again if it changed."""
+    for card in list(_cards):
+        if library._isAlive(card.widget):
+            card.refresh()
+
+
 def _install():
     studyUi = library._studyUi()
     if studyUi is None:
         return
     studyUi.addListener(_onSession)
+    if hasattr(studyUi, "addSaveListener"):
+        studyUi.addSaveListener(_onSaved)
     _onSession(studyUi.session())
 
 

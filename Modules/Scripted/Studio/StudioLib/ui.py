@@ -22,6 +22,7 @@ there is no application-wide stylesheet.
 
 import html
 import os
+import re
 
 import qt
 import slicer
@@ -240,7 +241,7 @@ def _deleteOrphansAtExit():
 
 def removeStudioEventFilters(widget):
     """Remove the shared Python event filters of this module (``wrapRow()``/``noticeLine()`` wrapping, ``installButtonKeys()``,
-    ``elideLabel()``)
+    ``elideLabel()``, ``wrapCheckBox()``)
     from ``widget`` and its children.
 
     Call it before deleting a widget from Python (``widget.delete()``): the destruction of its layout sends events to the widget,
@@ -248,7 +249,7 @@ def removeStudioEventFilters(widget):
     """
     if not _isAlive(widget):
         return
-    filters = [instance for instance in (_wrapFilter, _buttonKeys, _elideFilter) if instance is not None]
+    filters = [instance for instance in (_wrapFilter, _buttonKeys, _elideFilter, _checkLabelFilter) if instance is not None]
     if not filters:
         return
     for target in (widget, *widget.findChildren("QWidget")):
@@ -268,6 +269,86 @@ def removePaletteListener(callback):
         _listeners.remove(callback)
 
 
+def layoutContentsMargins(layout):
+    """The contents margins of ``layout`` (a QMargins) with Qt 5 and Qt 6: Qt 6 declares the ``contentsMargins`` property
+    on QLayout, and PythonQt then gives the property value instead of the getter method.
+    """
+    margins = layout.contentsMargins
+    return margins() if callable(margins) else margins
+
+
+def readingOrderFocusWidgets(root):
+    """The widgets under ``root`` that Tab can reach, in reading order: layout order, depth first (top to bottom in a
+    vertical layout, left to right in a horizontal one), whether they are shown now or not. The keyboard focus chain of
+    Qt follows the creation order of the widgets, which differs from the layout order when a row is created late (a
+    card that a module adds) or placed above a row that was created before it.
+    """
+    # The lists keep the wrappers alive, so that id() stays the key of one widget (PythonQt gives one wrapper per widget
+    # while a reference to it exists; == between wrappers is slow for hundreds of widgets)
+    result = []
+    resultIds = set()
+    visited = []
+    visitedIds = set()
+    window = root.window()
+
+    def addWidget(widget):
+        if int(widget.focusPolicy) & int(qt.Qt.TabFocus):
+            target = widget
+            while target.focusProxy() is not None:
+                target = target.focusProxy()
+            if not int(target.focusPolicy) & int(qt.Qt.TabFocus):
+                # A composite whose proxy never takes Tab focus (the combo box inside a qMRMLNodeComboBox hands its focus
+                # to the node selector, which has no focus policy): Qt ignores setTabOrder() for such a widget, which
+                # would leave the chain unlinked there. The widget itself is the stop (arrangeTabOrder() lifts its proxy).
+                target = widget
+            if id(target) not in resultIds and target.window() == window:
+                result.append(target)
+                resultIds.add(id(target))
+
+    def visitLayout(layout):
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            widget = item.widget()
+            if widget is not None:
+                visitWidget(widget)
+            elif item.layout() is not None:
+                visitLayout(item.layout())
+
+    def visitWidget(widget):
+        if id(widget) in visitedIds or (widget.isWindow() and widget != root):
+            return
+        visited.append(widget)
+        visitedIds.add(id(widget))
+        addWidget(widget)
+        layout = widget.layout()
+        if layout is not None:
+            visitLayout(layout)
+        # The children that no layout holds (the viewport of a scroll area, the parts of a tab widget), in creation order
+        for child in widget.children():
+            if child.isWidgetType():
+                visitWidget(child)
+
+    visitWidget(root)
+    return result
+
+
+def arrangeTabOrder(root):
+    """Make the Tab order of the widgets under ``root`` follow their reading order (readingOrderFocusWidgets())."""
+    widgets = readingOrderFocusWidgets(root)
+    # QWidget.setTabOrder() puts the focus proxy of a widget in its place: a widget that is its own stop although it has a
+    # proxy (see readingOrderFocusWidgets()) is arranged without the proxy, which is put back afterwards
+    lifted = [(widget, widget.focusProxy()) for widget in widgets if widget.focusProxy() is not None]
+    for widget, _proxy in lifted:
+        widget.setFocusProxy(None)
+    try:
+        for index in range(1, len(widgets)):
+            qt.QWidget.setTabOrder(widgets[index - 1], widgets[index])
+    finally:
+        for widget, proxy in lifted:
+            widget.setFocusProxy(proxy)
+    return widgets
+
+
 def _isAlive(widget):
     try:
         widget.objectName
@@ -285,6 +366,7 @@ def _refresh():
     _lastApplicationFontPx = fontPixelSize
     _refreshFonts()
     _refreshIconTiles()
+    _refreshClearIcons()
     for entry in list(_boundStyleSheets):
         widget, function = entry
         if not _isAlive(widget):
@@ -341,7 +423,7 @@ _ICON_TINTS = {
     "normal": ("text2", "text", "accent-fg", "text-disabled"),
     "strong": ("text", "text", "accent-fg", "text-disabled"),
     "accent": ("accent-fg", "accent-fg", "accent-fg", "text-disabled"),
-    "onAccent": ("#ffffff", "#ffffff", "#ffffff", "text-disabled"),
+    "onAccent": ("highlighted-text", "highlighted-text", "highlighted-text", "text-disabled"),
     "danger": ("danger", "danger", "danger", "text-disabled"),
     "warning": ("warning", "warning", "warning", "text-disabled"),
 }
@@ -395,7 +477,7 @@ def icon(name, size=18, role="normal"):
 
     The icon is tinted for each state: normal = text2, active (hover) = text, checked = accent-fg,
     disabled = text-disabled. ``role`` selects another tint set: "strong" (text), "accent", "onAccent"
-    (white, for icons on an accent fill), "danger" or "warning".
+    (the palette's HighlightedText, white on the default accent and dark on a light accent, for icons on an accent fill), "danger" or "warning".
     Pixmaps are rendered at 1x and at the device pixel ratio. Icons are cached per palette.
     """
     global _iconCachePaletteKey
@@ -533,7 +615,20 @@ def setRole(widget, role):
     style = widget.style()
     style.unpolish(widget)
     style.polish(widget)
+    refreshCheckBoxHint(widget)
     widget.update()
+
+
+def refreshCheckBoxHint(widget):
+    """Drop the cached size hint of a check box after its slicerRole changed.
+
+    A QCheckBox caches its sizeHint() until a StyleChange event (a change of the role alone sends none), so a check box
+    that became a switch after its first layout kept the hint of a plain check box and its label was cut beside the
+    track. Other widgets are left alone.
+    """
+    if widget is not None and widget.inherits("QCheckBox"):
+        widget.updateGeometry()
+        slicer.app.sendEvent(widget, qt.QEvent(qt.QEvent.StyleChange))
 
 
 #
@@ -585,6 +680,23 @@ def _register(widget, designPx, weight, letterSpacing):
         _fontRegistryPruneSize = max(256, 2 * len(_fontRegistry))
 
 
+#: Dynamic property that ``qSlicerStyle`` sets on a widget with a role font (``slicerRole``): the font it set. The style
+#: sizes that font again when the application font changes.
+_ROLE_FONT_PROPERTY = "_slicerRoleFont"
+
+
+def _hasStyleRoleFont(widget):
+    """True if the font of ``widget`` is the role font of the style, which follows the application font by itself."""
+    try:
+        stored = widget.property(_ROLE_FONT_PROPERTY)
+        if stored is None:
+            return False
+        font = widget.font
+        return stored.pixelSize() == font.pixelSize() and abs(stored.pointSizeF() - font.pointSizeF()) < 1e-6 and stored.weight() == font.weight()
+    except Exception:
+        return False
+
+
 def _isStudioWidget(widget):
     """True if ``widget`` or the closest named part of the window above it is a Studio widget (``Studio*`` object name).
 
@@ -606,7 +718,8 @@ def _refreshStudioWidgetFonts(previousApplicationFontPx):
       as set on the widget, so it no longer follows the application font. Under each topmost Studio stylesheet, the
       widgets whose font the application did not set get an empty font (the inherited one again), then the stylesheet
       is set again, which polishes them with the new font and the font rules of the stylesheets.
-    - A Studio widget with a pixel font set directly (``widget.setFont()``, not ``_font()``) joins the ``_font()``
+    - A Studio widget with a pixel font set directly (``widget.setFont()``, not ``_font()``, and not a role font of the
+      style: ``qSlicerStyle`` sizes those again itself) joins the ``_font()``
       registry with the same ratio to the previous application font, so that ``_refreshFonts()`` resizes it now and
       after each later change.
     """
@@ -618,7 +731,12 @@ def _refreshStudioWidgetFonts(previousApplicationFontPx):
     for widget in mainWindow.findChildren("QWidget"):
         if widget.styleSheet and str(widget.objectName).startswith("Studio"):
             styled.append(widget)
-        if widget.testAttribute(qt.Qt.WA_SetFont) and widget.font.pixelSize() > 0 and not widget.property(_FONT_REGISTERED_PROPERTY):
+        if (
+            widget.testAttribute(qt.Qt.WA_SetFont)
+            and widget.font.pixelSize() > 0
+            and not widget.property(_FONT_REGISTERED_PROPERTY)
+            and not _hasStyleRoleFont(widget)
+        ):
             explicit.append(widget)
     for index, root in enumerate(styled):
         # isAncestorOf() is also true for the widget itself
@@ -764,6 +882,37 @@ def _refreshIconTiles():
     _iconTiles[:] = alive
 
 
+#: Line edits whose clear button shows the Lucide "x" icon (``setClearButton()``)
+_clearEdits = []
+
+
+def _paintClearIcon(lineEdit):
+    """Qt's clear button is a private ``QLineEditIconButton`` child (a tool button); its icon is replaced."""
+    for button in lineEdit.findChildren("QToolButton"):
+        if button.inherits("QLineEditIconButton"):
+            button.setIcon(icon("x", 14))
+
+
+def setClearButton(lineEdit):
+    """Enable the clear button of ``lineEdit`` with the Lucide "x" line icon (text2, text on hover) instead of the
+    platform's filled circle-x icon (VISUAL 3: Lucide line icons throughout). The icon follows the palette.
+    """
+    lineEdit.setClearButtonEnabled(True)
+    _paintClearIcon(lineEdit)
+    _ensureWatcher()
+    _clearEdits.append(lineEdit)
+
+
+def _refreshClearIcons():
+    alive = []
+    for lineEdit in _clearEdits:
+        if not _isAlive(lineEdit):
+            continue
+        alive.append(lineEdit)
+        _paintClearIcon(lineEdit)
+    _clearEdits[:] = alive
+
+
 def switch(text="", objectName=None):
     """Return a ``qt.QCheckBox`` drawn as a switch: its text on the left, the switch on its right edge."""
     widget = qt.QCheckBox(text)
@@ -876,7 +1025,10 @@ def listRow(iconName, text, value=None, callback=None, objectName="StudioListRow
     iconLabel.setProperty("studioIconName", iconName)
     iconLabel.setFixedSize(16, 16)
     layout.addWidget(iconLabel)
-    textLabel = label(text, "body", "text", "StudioListRowText")
+    # Elided ("…") when the row is narrow (a large app font, a scroll bar): never cut in the middle of a word. The whole text
+    # is the tooltip of the label while it is elided
+    textLabel = elideLabel(label(text, "body", "text", "StudioListRowText"))
+    setElidedText(textLabel, text)
     layout.addWidget(textLabel, 1)
     valueLabel = label(value or "", "caption", "text3", "StudioListRowValue")
     layout.addWidget(valueLabel)
@@ -910,7 +1062,8 @@ class _ElideFilter(qt.QObject):
     """Elides the text of a one-line label to its width when it is resized (``elideLabel()``)."""
 
     def eventFilter(self, obj, event):
-        if event.type() == qt.QEvent.Resize:
+        # A resize and a font change (a larger application font) both change how much of the text fits
+        if event.type() in (qt.QEvent.Resize, qt.QEvent.FontChange):
             _showElided(obj)
         return False
 
@@ -918,19 +1071,57 @@ class _ElideFilter(qt.QObject):
 _elideFilter = None
 
 
+def _elidedPath(metrics, text, width):
+    """``text`` (a folder path) elided to ``width``: the middle is replaced by "…", the last two folders stay visible."""
+    if metrics.horizontalAdvance(text) <= width:
+        return text
+    parts = text.rstrip("/\\").rsplit("/", 2)
+    if len(parts) < 3:
+        return metrics.elidedText(text, qt.Qt.ElideMiddle, width)
+    head, tail = parts[0], "/" + parts[1] + "/" + parts[2]
+    tailWidth = metrics.horizontalAdvance(tail)
+    if tailWidth + metrics.horizontalAdvance("…") * 2 > width:
+        return metrics.elidedText(text, qt.Qt.ElideLeft, width)
+    return metrics.elidedText(head, qt.Qt.ElideMiddle, width - tailWidth) + tail
+
+
 def _showElided(label):
     text = str(label.property("studioFullText") or "")
     width = int(label.width) - int(label.contentsMargins().left()) - int(label.contentsMargins().right())
-    # Before the label is laid out its width says nothing: the whole text is shown
-    shown = label.fontMetrics().elidedText(text, qt.Qt.ElideRight, width) if width > 40 else text
+    # Before the label is laid out its width says nothing: the whole text is shown. A label that is laid out but very
+    # narrow (squeezed by its neighbours) still shows an ellipsis instead of a clipped half word
+    shown = text
+    if width > 8:
+        if label.property("studioElideMode") == "path":
+            shown = _elidedPath(label.fontMetrics(), text, width)
+        else:
+            shown = label.fontMetrics().elidedText(text, qt.Qt.ElideRight, width)
+    if label.property("studioElideHug"):
+        # The label is as wide as its whole text at most (a chip stays a pill around its text). Its padding is the
+        # difference between its size hint and its text; 2 px of slack keeps a rounding difference from eliding
+        label.ensurePolished()
+        metrics = label.fontMetrics()
+        padding = max(0, int(label.sizeHint.width()) - metrics.horizontalAdvance(str(label.text)))
+        fullWidth = metrics.horizontalAdvance(text) + padding + 2
+        if int(label.maximumWidth) != fullWidth:
+            label.setMaximumWidth(fullWidth)
+            # Lay out now, so that a longer text is elided to the width the label gets, not to the one it had
+            parent = label.parentWidget()
+            if parent is not None and parent.layout() is not None:
+                parent.layout().activate()
+        if width > 8:
+            shown = metrics.elidedText(text, qt.Qt.ElideRight, int(label.width) - padding)
     if str(label.text) != shown:
         label.setText(shown)
-    label.setToolTip(text if shown != text else "")
+    fullToolTip = str(label.property("studioFullToolTip") or "")
+    label.setToolTip(fullToolTip or (text if shown != text else ""))
 
 
-def elideLabel(label):
+def elideLabel(label, mode="right", hug=False):
     """Make ``label`` a one-line label whose text is elided ("…") to its width; set its text with ``setElidedText()``.
     The whole text is the tooltip while it is elided. The label never widens its container (Ignored width).
+    ``mode`` "path" is for folder paths: the middle is elided and the last two folders stay visible.
+    ``hug`` keeps the label no wider than its whole text (for a chip, whose background would otherwise fill the row).
     """
     global _elideFilter
     if _elideFilter is None:
@@ -939,14 +1130,22 @@ def elideLabel(label):
     label.setTextFormat(qt.Qt.PlainText)
     label.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
     label.setProperty("studioElided", True)
+    label.setProperty("studioElideMode", mode)
+    label.setProperty("studioElideHug", bool(hug))
     label.installEventFilter(_elideFilter)
     return label
 
 
-def setElidedText(label, text):
-    """Set the text of an ``elideLabel()``."""
+def setElidedText(label, text, toolTip=None):
+    """Set the text of an ``elideLabel()``. ``toolTip`` is the tooltip to show always (default: the whole text while elided)."""
     label.setProperty("studioFullText", text or "")
+    label.setProperty("studioFullToolTip", toolTip or "")
     _showElided(label)
+
+
+def setListRowText(row, text):
+    """Change the text of a ``listRow()`` (elided to the row width)."""
+    setElidedText(row.findChild("QLabel", "StudioListRowText"), text)
 
 
 def setListRowValue(row, value):
@@ -1074,6 +1273,16 @@ def tooltip(name, key=None, description=None):
     return escaped if escaped == text else f"<qt>{escaped}</qt>"
 
 
+def nameOfToolTip(toolTip):
+    """Return the name part ("Name" of "Name · key · description") of a Studio tooltip.
+
+    An icon-only button has no text, so this is its accessible name: a screen reader announces the
+    accessible name, and the tooltip is only the description.
+    """
+    text = html.unescape(re.sub(r"</?qt>", "", str(toolTip)))
+    return text.split(" · ")[0].strip()
+
+
 def _relativeLuminance(color):
     color = qt.QColor(color)
 
@@ -1193,6 +1402,13 @@ def installButtonKeys(button):
     return button
 
 
+def removeButtonKeys(button):
+    """Undo ``installButtonKeys(button)`` (nothing happens if it was not installed). Return ``button``."""
+    if _buttonKeys is not None:
+        button.removeEventFilter(_buttonKeys)
+    return button
+
+
 #
 # Height-for-width rows and notice lines
 #
@@ -1220,17 +1436,38 @@ class _WrapFilter(qt.QObject):
             layout = obj.layout()
             if layout is not None and hasattr(layout, "setDirection"):
                 threshold = obj.property("studioWrapWidth") or WRAP_ROW_WIDTH
+                if obj.property("studioWrapAuto"):
+                    threshold = _sideBySideWidth(layout)
                 direction = qt.QBoxLayout.TopToBottom if obj.width < threshold else qt.QBoxLayout.LeftToRight
                 if layout.direction() != direction:
                     layout.setDirection(direction)
         return False
 
 
+def _sideBySideWidth(layout):
+    """The width that the items of the box layout ``layout`` need side by side: the sum of their minimum widths (what the
+    layout gives a row that is as narrow as it can be) and the spacings. Items that are not shown count for nothing.
+    """
+    widths = []
+    for index in range(layout.count()):
+        item = layout.itemAt(index)
+        if item is not None and not item.isEmpty():
+            widths.append(item.minimumSize().width())
+    margins = layoutContentsMargins(layout)
+    spacing = layout.spacing
+    spacing = spacing() if callable(spacing) else spacing
+    return sum(widths) + max(0, len(widths) - 1) * max(0, spacing) + margins.left() + margins.right()
+
+
 def _installWrap(widget, width):
+    """Make ``widget`` (with a box layout) stack its items when it is narrower than ``width`` px, or, with ``width`` None,
+    when it is narrower than its items need side by side.
+    """
     global _wrapFilter
     if _wrapFilter is None:
         _wrapFilter = _WrapFilter()
-    widget.setProperty("studioWrapWidth", int(width))
+    widget.setProperty("studioWrapAuto", width is None)
+    widget.setProperty("studioWrapWidth", int(width or 0))
     policy = qt.QSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
     policy.setHeightForWidth(True)
     widget.setSizePolicy(policy)
@@ -1238,7 +1475,8 @@ def _installWrap(widget, width):
 
 
 def wrapRow(widgets, width=WRAP_ROW_WIDTH, spacing=6):
-    """Return a widget that lays ``widgets`` out in a row, stacked when it is narrower than ``width`` px.
+    """Return a widget that lays ``widgets`` out in a row, stacked when it is narrower than ``width`` px (with ``width`` None:
+    when it is narrower than the widgets need side by side, so that it follows the application font).
 
     Its horizontal size policy is Ignored: a row never makes its container (the inspector) wider.
     """
@@ -1250,6 +1488,70 @@ def wrapRow(widgets, width=WRAP_ROW_WIDTH, spacing=6):
     for widget in widgets:
         layout.addWidget(widget)
     _installWrap(row, width)
+    return row
+
+
+def wrapLayout(rowLayout, spacing=6):
+    """Like ``wrapRow()`` (stacks when narrower than its items need side by side) for a box layout that is not yet in a
+    widget or layout: return the widget that holds ``rowLayout``, to add to a layout in its place.
+    """
+    row = qt.QWidget()
+    row.setObjectName("StudioWrapRow")
+    rowLayout.setContentsMargins(0, 0, 0, 0)
+    rowLayout.setSpacing(spacing)
+    row.setLayout(rowLayout)
+    _installWrap(row, None)
+    return row
+
+
+class _CheckLabelFilter(qt.QObject):
+    """A click on the text of a ``wrapCheckBox()`` toggles its check box."""
+
+    def eventFilter(self, obj, event):
+        if event.type() == qt.QEvent.MouseButtonRelease:
+            row = obj.parentWidget()
+            checkBox = row.findChild("QCheckBox") if row is not None else None
+            if checkBox is not None and checkBox.isEnabled():
+                checkBox.click()
+        return False
+
+
+_checkLabelFilter = None
+
+
+def wrapCheckBox(checkBox):
+    """Return a row with ``checkBox`` and its text as a word-wrapped label (a QCheckBox draws its text on one line, so a long
+    text would make the inspector wider). The check box keeps its object name, state and signals; its text moves to the label
+    and stays the accessible name. Its row has an Ignored horizontal size policy: it never widens its container.
+    """
+    global _checkLabelFilter
+    if _checkLabelFilter is None:
+        _checkLabelFilter = _CheckLabelFilter()
+    text = str(checkBox.text)
+    checkBox.setText("")
+    checkBox.setAccessibleName(text)
+    row = qt.QWidget()
+    row.setObjectName("StudioWrapCheckBoxRow")
+    layout = qt.QHBoxLayout(row)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(6)
+    layout.addWidget(checkBox, 0, qt.Qt.AlignTop)
+    label = qt.QLabel(text)
+    label.setObjectName("StudioWrapCheckBoxText")
+    label.setWordWrap(True)
+    label.setTextFormat(qt.Qt.PlainText)
+    label.setToolTip(checkBox.toolTip)
+    # setSizePolicy() replaces the height-for-width flag that setWordWrap() set: keep it, or the row is laid out for two
+    # lines at every width. The text starts at the top, level with the first line of the check box.
+    labelPolicy = qt.QSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+    labelPolicy.setHeightForWidth(True)
+    label.setSizePolicy(labelPolicy)
+    label.setAlignment(qt.Qt.AlignLeft | qt.Qt.AlignTop)
+    label.installEventFilter(_checkLabelFilter)
+    layout.addWidget(label, 1)
+    policy = qt.QSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+    policy.setHeightForWidth(True)
+    row.setSizePolicy(policy)
     return row
 
 
@@ -1326,6 +1628,7 @@ DIALOG_BACKDROP_ALPHA = 0.6
 PALETTE_BACKDROP_ALPHA = 0.5
 #: Width of the numeric fields of a settings page
 SETTINGS_NUMBER_WIDTH = 88
+SETTINGS_NUMBER_PADDING = 32  # frame, spin buttons and a small margin around the text of a numberField()
 
 
 class Backdrop(qt.QWidget):
@@ -1549,7 +1852,13 @@ def numberField(minimum, maximum, value, suffix="", objectName=None):
     spinBox.setValue(int(value))
     spinBox.setSuffix(suffix)
     spinBox.setAlignment(qt.Qt.AlignRight | qt.Qt.AlignVCenter)
-    spinBox.setFixedWidth(SETTINGS_NUMBER_WIDTH)
+    # 88 px at the default font; wider when the widest text (the larger of the maximum and the current value, with the
+    # unit) needs more at a larger app font, so the unit is never cut ("2048 M").
+    metrics = qt.QFontMetrics(spinBox.font)
+    widest = max(
+        (metrics.horizontalAdvance(text) if hasattr(metrics, "horizontalAdvance") else metrics.width(text))
+        for text in (f"{int(maximum)}{suffix}", f"{int(value)}{suffix}"))
+    spinBox.setFixedWidth(max(SETTINGS_NUMBER_WIDTH, widest + SETTINGS_NUMBER_PADDING))
     spinBox.setMinimumHeight(COMPACT_HEIGHT + 2)
     return spinBox
 
@@ -1569,7 +1878,7 @@ def folderCard(iconName="folder", objectName="StudioFolderCard"):
     column.setSpacing(2)
     pathLabel = label("", "name", "text", f"{objectName}Path")
     pathLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
-    pathLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+    elideLabel(pathLabel, "path")
     column.addWidget(pathLabel)
     metaLabel = label("", "caption", "text3", f"{objectName}Meta", wrap=True)
     metaLabel.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)

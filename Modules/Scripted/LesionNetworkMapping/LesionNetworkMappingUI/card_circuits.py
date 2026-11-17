@@ -27,6 +27,7 @@ import slicer
 from slicer.i18n import tr as _
 
 from . import ORDER_CIRCUITS, widgets
+from .card_clusters import formatCoordinate
 
 #: Fork-only settings (SPEC Appendix B): the radius of peak seeds and the default radius of targets
 SEED_RADIUS_SETTING = "Studio/LNM/Circuits/SeedRadiusMm"
@@ -94,9 +95,12 @@ def _number(value, digits=3):
 
 
 def whereText(x, y, z):
-    """"L 38 · A 44 · S 26": direction letters, never a minus sign (USABILITY §7.5); RAS (MNI) mm."""
+    """"L 38 · A 44 · S 26": direction letters, never a minus sign (USABILITY §7.5); RAS (MNI) mm.
+
+    Rounded half away from zero like the Clusters card (``formatCoordinate``), not half to even.
+    """
     def part(value, negative, positive):
-        return f"{negative if value < 0 else positive} {abs(value):.0f}"
+        return f"{negative if value < 0 else positive} {formatCoordinate(abs(value))}"
 
     return " · ".join((part(x, "L", "R"), part(y, "P", "A"), part(z, "I", "S")))
 
@@ -208,7 +212,7 @@ class CircuitsCard:
         self.radiusSpin.setToolTip(_("Radius of the sphere around the peak"))
         self.radiusSpin.connect("valueChanged(double)", self._onSeedRadius)
         sourceRow.addWidget(self.radiusSpin)
-        layout.addLayout(sourceRow)
+        widgets.addWrapRow(layout, sourceRow)
         nameRow = qt.QHBoxLayout()
         nameRow.addWidget(qt.QLabel(_("Name")))
         self.nameEdit = qt.QLineEdit()
@@ -217,7 +221,7 @@ class CircuitsCard:
         self.nameEdit.setToolTip(_("The circuit's name: its files are circuit-<name>_…, its damage scores dmg_<name>"))
         self.nameEdit.connect("textEdited(QString)", lambda text: self.nameEdit.setProperty("autoName", False))
         nameRow.addWidget(self.nameEdit, 1)
-        layout.addLayout(nameRow)
+        widgets.addWrapRow(layout, nameRow)
         self.sourceLabel = _label("LNMCircuitsSourceText", "secondaryText")
         layout.addWidget(self.sourceLabel)
         seedRow = qt.QHBoxLayout()
@@ -225,7 +229,7 @@ class CircuitsCard:
         self.seedButton.connect("clicked()", self.seedThis)
         seedRow.addWidget(self.seedButton)
         seedRow.addStretch(1)
-        layout.addLayout(seedRow)
+        widgets.addWrapRow(layout, seedRow)
         self.seedProgress = widgets.progressRow(objectNamePrefix="LNMCircuitsSeed")
         self.seedProgress.widget.hide()
         layout.addWidget(self.seedProgress.widget)
@@ -239,6 +243,10 @@ class CircuitsCard:
         self.circuitCombo = qt.QComboBox()
         self.circuitCombo.setObjectName("LNMCircuitsCircuitCombo")
         self.circuitCombo.setToolTip(_("The circuits made here (in the study's derivatives/lnm/circuits), or a circuit map opened from a file"))
+        # Circuit names may be long: the combo shares the row with two buttons and never widens the inspector (its size
+        # hint is the width of its longest item)
+        self.circuitCombo.setSizeAdjustPolicy(qt.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.circuitCombo.setMinimumContentsLength(8)
         self.circuitCombo.connect("currentIndexChanged(int)", self._onCircuitChanged)
         circuitRow.addWidget(self.circuitCombo, 1)
         self.openButton = _button(_("Open…"), "LNMCircuitsOpenButton", "ghost", _("Open a circuit map (a NIfTI on the connectome grid)"))
@@ -247,7 +255,7 @@ class CircuitsCard:
         self.showButton = _button(_("Show"), "LNMCircuitsShowButton", "ghost", _("Show the circuit's T map as the Result map"))
         self.showButton.connect("clicked()", self.showCircuit)
         circuitRow.addWidget(self.showButton)
-        layout.addLayout(circuitRow)
+        widgets.addWrapRow(layout, circuitRow)
         self.circuitLabel = _label("LNMCircuitsCircuitText", "secondaryText")
         layout.addWidget(self.circuitLabel)
 
@@ -263,7 +271,7 @@ class CircuitsCard:
         self.thresholdSpin.setToolTip(_("Threshold of the % of each lesion inside the circuit; auto: the circuit's voxels for a binary circuit, no % otherwise"))
         damageRow.addWidget(self.thresholdSpin)
         damageRow.addStretch(1)
-        layout.addLayout(damageRow)
+        widgets.addWrapRow(layout, damageRow)
         frozenRow = qt.QHBoxLayout()
         frozenRow.addWidget(qt.QLabel(_("Frozen sha256")))
         self.frozenEdit = qt.QLineEdit()
@@ -280,7 +288,7 @@ class CircuitsCard:
         self.provenanceChip.setObjectName("LNMCircuitsProvenanceChip")
         scoreRow.addWidget(self.provenanceChip)
         scoreRow.addStretch(1)
-        layout.addLayout(scoreRow)
+        widgets.addWrapRow(layout, scoreRow)
         self.damageLabel = _label("LNMCircuitsDamageText", "secondaryText")
         layout.addWidget(self.damageLabel)
         self.damageColumns = [
@@ -304,7 +312,7 @@ class CircuitsCard:
         self.associationButton = _button(_("Test association"), "LNMCircuitsAssociationButton", tip=_("AUC / r of the damage scores with the outcome, with bootstrap CIs (frozen circuits only)"))
         self.associationButton.connect("clicked()", self.testAssociation)
         associationRow.addWidget(self.associationButton)
-        layout.addLayout(associationRow)
+        widgets.addWrapRow(layout, associationRow)
         self.associationLabel = _label("LNMCircuitsAssociationText", "secondaryText")
         self.associationLabel.hide()
         layout.addWidget(self.associationLabel)
@@ -326,7 +334,7 @@ class CircuitsCard:
         self.importButton = _button(_("Import CSV…"), "LNMCircuitsImportButton", "ghost", _("A CSV or TSV with label, x, y, z and radius (RAS/MNI mm), or a markups .fcsv or .mrk.json file"))
         self.importButton.connect("clicked()", self.importTargets)
         targetRow.addWidget(self.importButton)
-        layout.addLayout(targetRow)
+        widgets.addWrapRow(layout, targetRow)
         self.targetsFile = None
         self.targetsFileLabel = _label("LNMCircuitsTargetsFile", "secondaryText")
         self.targetsFileLabel.hide()
@@ -342,7 +350,7 @@ class CircuitsCard:
         self.targetRadiusSpin.connect("valueChanged(double)", lambda value: _settings().setValue(TARGET_RADIUS_SETTING, f"{value:g}"))
         radiusRow.addWidget(self.targetRadiusSpin)
         radiusRow.addStretch(1)
-        layout.addLayout(radiusRow)
+        widgets.addWrapRow(layout, radiusRow)
         gmRow = qt.QHBoxLayout()
         self.gmLabel = _label("LNMCircuitsGmText", "secondaryText")
         gmRow.addWidget(self.gmLabel, 1)
@@ -352,7 +360,7 @@ class CircuitsCard:
         self.chooseGmButton = _button(_("Choose…"), "LNMCircuitsChooseGmButton", "ghost", _("A gray-matter probability NIfTI (TemplateFlow name tpl-<space>_…_label-GM_probseg) of the circuit's family"))
         self.chooseGmButton.connect("clicked()", self.chooseGmPrior)
         gmRow.addWidget(self.chooseGmButton)
-        layout.addLayout(gmRow)
+        widgets.addWrapRow(layout, gmRow)
         self.targetsButton = _button(_("Score targets"), "LNMCircuitsTargetsButton", tip=_("Mean and peak circuit value in each target's sphere and their percentiles among 1000 random gray-matter spheres of the same radius"))
         self.targetsButton.connect("clicked()", self.scoreTargets)
         layout.addWidget(self.targetsButton)
@@ -498,6 +506,9 @@ class CircuitsCard:
             return
         try:
             view.selectionModel().connect("currentRowChanged(QModelIndex,QModelIndex)", lambda *args: self.refreshSource())
+            # Remaking the table (a new threshold, a sort, a cleared table) resets the model and drops the selected row without
+            # currentRowChanged: follow the reset too, so the line names the seed Seed this will use (the crosshair when no row is selected)
+            view.model().connect("modelReset()", lambda *args: self.refreshSource())
             self._clustersConnected = True
         except Exception:
             logging.debug("Lesion network mapping: the Circuits card cannot follow the cluster selection", exc_info=True)
@@ -525,8 +536,12 @@ class CircuitsCard:
         return rows[row], table, source
 
     def _groupMapPath(self):
-        """(path, desc) of the group map shown by the Cohort card when it is a binary (conjunction or sensitivity) map."""
-        from LesionNetworkMappingLib import display
+        """(path, desc) of the group map shown by the Cohort card when it is a binary (conjunction or sensitivity) map.
+
+        Only a map the last cohort run in that folder made counts: one its cohort.json does not list is a left-over of an
+        earlier run (a re-run without the conjunction leaves the old one in place), not the current result.
+        """
+        from LesionNetworkMappingLib import circuits, display
 
         node = None
         for candidate in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
@@ -543,16 +558,37 @@ class CircuitsCard:
         wanted = [desc] if desc else ["conj", "sens"]
         for prefix in wanted:
             for name in names:
-                if name.startswith("group_") and f"_desc-{prefix}" in name and name.endswith("_map.nii.gz"):
+                if name.startswith("group_") and f"_desc-{prefix}" in name and name.endswith("_map.nii.gz") \
+                        and not circuits.superseded_output(os.path.join(folder, name)):
                     return os.path.join(folder, name), name.split("_desc-", 1)[1].split("_", 1)[0]
         return None, desc
 
-    def _resultMapPath(self):
-        """The file of the current result's T map (the parent of a cluster or peak seed from the Result map), or None."""
+    def _resultMapPath(self, statistic=None):
+        """The file of the current result's map of ``statistic`` ("T", "Fz" or "r"; default the one the Result card shows).
+
+        It is the parent of a cluster or peak seed from the Result map: the file the cluster was cut from, not its T sibling.
+        """
+        import re
+
+        if statistic is None:
+            statistic = getattr(self.ctx.parameterNode, "statistic", None) or "T"
+        label = {"T": "T", "Fz": "AvgRFz", "r": "AvgR"}.get(statistic)
+        if label is None:
+            return None
         run = self.ctx.currentRun
         for path in getattr(run, "outputs", None) or []:
-            if "_desc-T" in os.path.basename(path) and os.path.isfile(path):
+            match = re.search(r"_desc-(AvgRFz|AvgR|T)(?=[^A-Za-z]|PreviewN|Subset|_funcmap)", os.path.basename(path))
+            if match and match.group(1) == label and os.path.isfile(path):
                 return path
+        if run is None:
+            # A map file shown as the result (Library, browsing, this card's Show) has no run: its file, or its sibling
+            # of ``statistic``, is the parent, so a circuit cut from a circuit's map keeps that circuit's lineage
+            widget = mapWidget()
+            loaded = getattr(widget, "loadedMap", None) if widget is not None else None
+            if loaded:
+                path = loaded.get("path") if loaded.get("statistic") == statistic else (loaded.get("siblings") or {}).get(statistic)
+                if path and os.path.isfile(path):
+                    return path
         return None
 
     def mapSigns(self, path):
@@ -594,6 +630,8 @@ class CircuitsCard:
                 return SeedSource(kind, error=error)
             # A signed map (+1 / -1, the Cohort card's sign "both") seeds one sign at a time; an unsigned one its non-zero voxels
             positive, negative = self.mapSigns(path)
+            if not positive and not negative:
+                return SeedSource(kind, error=_("The conjunction map has no voxel: there is nothing to seed. Loosen the threshold or the sensitivity in the Cohort card."))
             signed = positive and negative
             sign = self.seedSign() if signed else ("neg" if negative else "both")
             name = ("Conj" if desc.startswith("conj") else "Sens") + SIGN_SUFFIX[sign]
@@ -608,15 +646,17 @@ class CircuitsCard:
             if row is None:
                 return SeedSource(kind, error=_("Select a cluster in the Clusters card."))
             mask = (np.asarray(table.cluster_vector).reshape(source.grid.shape) == int(row["cluster"])).astype(np.uint8)
-            parent = getattr(source, "path", None) or (self._resultMapPath() if source.key == "result" else None)
-            text = _("Seed: cluster {id} of {map} ({voxels:,} voxels, {threshold}; peak {where}).").format(
-                id=row["cluster"], map=source.name, voxels=int(mask.sum()), threshold=source.thresholdText(), where=whereText(*row["xyz"]))
+            parent = getattr(source, "path", None) or (self._resultMapPath(source.statistic) if source.key == "result" else None)
+            nVoxels = int(mask.sum())
+            seedText = _("Seed: cluster {id} of {map} ({voxels:,} voxel, {threshold}; peak {where}).") if nVoxels == 1 else _("Seed: cluster {id} of {map} ({voxels:,} voxels, {threshold}; peak {where}).")
+            text = seedText.format(
+                id=row["cluster"], map=source.name, voxels=nVoxels, threshold=source.thresholdText(), where=whereText(*row["xyz"]))
             return SeedSource(kind, parent=parent, name=f"Cluster{row['cluster']}", text=text, roiData=(mask, np.asarray(source.grid.affine)))
         # Peak sphere: the selected cluster's peak, else the crosshair
         radius = float(self.radiusSpin.value)
         if row is not None:
             peak = tuple(float(v) for v in row["xyz"])
-            parent = getattr(source, "path", None) or (self._resultMapPath() if source.key == "result" else None)
+            parent = getattr(source, "path", None) or (self._resultMapPath(source.statistic) if source.key == "result" else None)
             origin = _("peak of cluster {id}").format(id=row["id"])
         else:
             crosshair = slicer.mrmlScene.GetFirstNodeByClass("vtkMRMLCrosshairNode") if slicer.mrmlScene is not None else None
@@ -660,7 +700,7 @@ class CircuitsCard:
         folder = self.circuitsFolder()
         candidate, counter = name, 2
         while os.path.exists(os.path.join(folder, f"circuit-{candidate}")):
-            candidate, counter = f"{name}{counter}", counter + 1
+            candidate, counter = f"{name}Run{counter}", counter + 1
         return candidate, os.path.join(folder, f"circuit-{candidate}")
 
     def seedThis(self):
@@ -708,8 +748,15 @@ class CircuitsCard:
         if self._cleanedUp:
             return
         self.seedProgress.update()
+        if job.state in ("failed", "cancelled"):
+            from .cohort_vlsm import _removeUnfinished
+
+            _removeUnfinished(out)  # no circuit.json: the folder holds nothing, and the next seed gets the same name
         if job.state == "failed":
-            self._setNotice(_("The circuit could not be made: {reason}").format(reason=job.failureReason))
+            import re
+
+            reason = re.sub(r"^\s*[A-Za-z_][\w.]*(Error|Exception):\s*", "", str(job.failureReason or ""))
+            self._setNotice(_("The circuit could not be made: {reason}").format(reason=reason or _("unknown error")))
         elif job.state == "cancelled":
             self._setNotice(_("Stopped: a circuit that did not finish has no maps."))
         else:
@@ -791,6 +838,26 @@ class CircuitsCard:
         self._refreshGm()
         self._refreshTargetsState()
 
+    @staticmethod
+    def _bareMapText(path):
+        """The circuit line of a map without circuit.json: its source when the run record beside it (slnm.json, glm.json, ...) names the lesions."""
+        from LesionNetworkMappingLib import circuits
+
+        try:
+            parent = circuits.parent_record(path)
+        except Exception:
+            parent = {}
+        lesions = parent.get("lesions") or {}
+        count = len(lesions.get("sha256") or []) or len(lesions.get("participants") or [])
+        if count:
+            kind = parent.get("kind") or os.path.splitext(parent.get("record") or "")[0]
+            parts = [_("A circuit map from a file"), _("from the {kind} run beside it").format(kind=kind)]
+            if parent.get("run_id"):
+                parts.append(_("run {id}").format(id=parent["run_id"]))
+            parts.append(_("made from {n} lesion(s)").format(n=count))
+            return " · ".join(parts)
+        return _("A circuit map from a file: its provenance is not recorded (declare it frozen with its sha256 if an independent study fixed it).")
+
     def _showCircuitInfo(self):
         record = self.currentCircuitRecord()
         path = self.currentCircuitPath()
@@ -799,7 +866,7 @@ class CircuitsCard:
             self.circuitLabel.setText("")
             return
         if record is None:
-            self.circuitLabel.setText(_("A circuit map from a file: its provenance is not recorded (declare it frozen with its sha256 if an independent study fixed it)."))
+            self.circuitLabel.setText(self._bareMapText(path))
             return
         parent = record.get("parent") or {}
         seed = record.get("seed") or {}
@@ -808,7 +875,8 @@ class CircuitsCard:
             peak = seed.get("peak_xyz") or (0, 0, 0)
             parts.append(_("{radius:g} mm sphere at {where}").format(radius=seed.get("radius_mm") or 0, where=whereText(*peak)))
         else:
-            voxels = _("{voxels:,} seed voxels").format(voxels=int(seed.get("voxels_in_mask") or 0))
+            nSeed = int(seed.get("voxels_in_mask") or 0)
+            voxels = (_("{voxels:,} seed voxel") if nSeed == 1 else _("{voxels:,} seed voxels")).format(voxels=nSeed)
             if seed.get("sign") in ("pos", "neg"):
                 voxels += " (" + SIGN_TEXT[seed["sign"]] + ")"
             parts.append(voxels)
@@ -825,12 +893,30 @@ class CircuitsCard:
             parts.append(made)
         bundle = record.get("bundle") or {}
         parts.append(f"{bundle.get('name') or '?'} · N={record.get('n')}")
-        self.circuitLabel.setText(" · ".join(parts))
+        text = " · ".join(parts)
+        if self.staleText(record):
+            text += "\n" + self.staleText(record)
+        self.circuitLabel.setText(text)
+
+    @staticmethod
+    def staleText(record):
+        """A sentence when the map this circuit was seeded from has changed since (re-run), else ""."""
+        from LesionNetworkMappingLib import circuits
+
+        try:
+            changed = circuits.parent_changed(record)
+        except Exception:
+            changed = False
+        if not changed:
+            return ""
+        run = (record.get("parent") or {}).get("run_id")
+        return _("Out of date: the map this circuit was seeded from has changed since{run}. Seed again to update; until then this is not the current result.").format(
+            run=" " + _("(run {id})").format(id=run) if run else "")
 
     def openCircuit(self, path=None):
         """Add a circuit map from a file (a dialog when ``path`` is None); return its path or None."""
         if path is None:
-            path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Open a circuit map"), self.circuitsFolder() or "", _("NIfTI (*.nii *.nii.gz)"))
+            path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Open a circuit map"), self.circuitsFolder() or widgets.dialogStartFolder(), _("NIfTI (*.nii *.nii.gz)"))
         if not path:
             return None
         path = os.path.abspath(path)
@@ -923,10 +1009,11 @@ class CircuitsCard:
             widgets.setChipLevel(self.provenanceChip, "ok", _("Frozen · {sha}…").format(sha=provenance["sha256"][:8]))
             self.circularBanner.hide()
         else:
-            widgets.setChipLevel(self.provenanceChip, "warn", _("Same cohort"))
             from LesionNetworkMappingLib import circuits
 
-            widgets.setBannerText(self.circularBanner, circuits.CIRCULARITY_MESSAGE)
+            known = bool(provenance.get("overlap"))
+            widgets.setChipLevel(self.provenanceChip, "warn", _("Same cohort") if known else _("Independence not established"))
+            widgets.setBannerText(self.circularBanner, circuits.circularity_message(provenance.get("overlap")))
             self.circularBanner.show()
         self.provenanceChip.setToolTip(provenance["basis"])
         rows = []
@@ -938,6 +1025,9 @@ class CircuitsCard:
         text = _("{n} lesion(s) scored ({basis}).").format(n=len(damage["rows"]), basis=provenance["basis"]) + posted
         if excluded:
             text += " " + _("{n} left out (no occupancy).").format(n=excluded)
+        stale = self.staleText(self.currentCircuitRecord())
+        if stale:
+            text += " " + stale
         if damage.get("threshold") is None and not damage.get("binary"):
             text += " " + _("% in: set a threshold above (e.g. the Result card's T threshold); with auto it is computed for binary circuits only.")
         self.damageLabel.setText(text)
@@ -1040,7 +1130,7 @@ class CircuitsCard:
             return None, None
         try:
             resource = fetch.find_resource(resourceId, ("templates",))
-            path = fetch.cached_path(resource)
+            path = fetch.cached_path(resource, fetch.app_cache_dir())
         except Exception:
             return None, None
         return (path, resource.get("space")) if path else (None, None)
@@ -1070,7 +1160,7 @@ class CircuitsCard:
 
     def chooseGmPrior(self, path=None):
         if path is None:
-            path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Choose a gray-matter probability"), "", _("NIfTI (*.nii *.nii.gz)"))
+            path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Choose a gray-matter probability"), widgets.dialogStartFolder(), _("NIfTI (*.nii *.nii.gz)"))
         if not path:
             return None
         self.gmFile = os.path.abspath(path)
@@ -1093,12 +1183,14 @@ class CircuitsCard:
             if _exec(box) != qt.QMessageBox.Ok:
                 return False
         state = {"text": _("Downloading {title}…").format(title=resource.title), "error": None, "done": False}
+        cache = fetch.app_cache_dir()  # resolved here: the thread never reads the application settings
 
         def work():
             try:
-                fetch.fetch(resource)
+                fetch.fetch(resource, cache=cache)
             except Exception as exc:
-                state["error"] = f"{type(exc).__name__}: {exc}"
+                logging.info(f"Lesion network mapping: the GM prior could not be downloaded: {exc!r}")
+                state["error"] = fetch.user_message(exc)  # a sentence, never the exception class
             state["done"] = True
 
         thread = threading.Thread(target=work, name="lnm-gm-fetch", daemon=True)
@@ -1130,7 +1222,7 @@ class CircuitsCard:
     def importTargets(self, path=None):
         """Use a CSV/TSV/.fcsv file of targets (a dialog when ``path`` is None)."""
         if path is None:
-            path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Import targets"), "", _("Targets (*.csv *.tsv *.fcsv *.mrk.json *.txt)"))
+            path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Import targets"), widgets.dialogStartFolder(), _("Targets (*.csv *.tsv *.fcsv *.mrk.json *.txt)"))
         if not path:
             return None
         self.targetsFile = os.path.abspath(path)
@@ -1192,7 +1284,10 @@ class CircuitsCard:
             with slicer.util.WaitCursor():
                 self.targets = circuits.score_targets(targets, path, gm, circuit_space=space, gm_space=gmSpace, out_dir=self.targetsFolder(), run_root=self.registryRoot())
         except Exception as exc:
-            logging.exception("Lesion network mapping: the targets could not be scored")
+            if isinstance(exc, ValueError):
+                logging.warning(f"Lesion network mapping: the targets could not be scored: {exc}")  # a refusal of the input, not a failure
+            else:
+                logging.exception("Lesion network mapping: the targets could not be scored")
             self.targets = None
             self._showTargets()
             self.targetsLabel.setText(_("The targets could not be scored: {error}").format(error=exc))
@@ -1210,7 +1305,8 @@ class CircuitsCard:
         rows = []
         for row in result["rows"]:
             where = whereText(row["x"], row["y"], row["z"])
-            tip = _("{radius:g} mm sphere, {voxels} voxels; peak percentile {peak}; {gm}").format(
+            tipText = _("{radius:g} mm sphere, {voxels} voxel; peak percentile {peak}; {gm}") if row["voxels"] == 1 else _("{radius:g} mm sphere, {voxels} voxels; peak percentile {peak}; {gm}")
+            tip = tipText.format(
                 radius=row["radius_mm"], voxels=row["voxels"], peak=_number(row["percentile_peak"], 3), gm=_("centre in gray matter") if row["in_gm"] else _("centre outside gray matter"))
             if row["note"]:
                 tip += f"; {row['note']}"

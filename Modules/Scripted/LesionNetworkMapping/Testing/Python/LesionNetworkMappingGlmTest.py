@@ -347,6 +347,31 @@ class DesignRunTest(_StudyTestCase):
         self.assertTrue(np.array_equal(result.p_fwe, p_fwe))
         self.assertEqual(result.label, "caseVsControl")
 
+    def test_alpha_rule_is_one_rule_for_card_map_and_float32(self):
+        """glm.json (the card), the written float32 PFwe map and the p <= alpha rule of the pipeline give the same count."""
+        rows = [(f"sub-{level[:2]}{index}", {"group": level, "volume_ml": 10.0 + index}) for level in ("case", "control") for index in range(5)]
+        design = designlib.build_design(self.make_study(rows), DesignSpec(covariates=[], volume_off_reason="alpha rule test"))
+        glm_result = glm.run(design, self.rng.standard_normal((design.n, 8)), dtype=np.float64)
+        p_exact = np.array([50 / 1000, 0.049, 0.051, 0.05, 1.0, np.nan, 0.0, 51 / 1000])
+        stored = p_exact.astype(np.float32)  # what the NIfTI holds: 50/1000 reads back as 0.0500000007
+        self.assertGreater(float(stored[0]), 0.05)
+        expected = [True, True, False, True, False, False, True, False]
+        self.assertEqual(glm.passes_alpha(p_exact, 0.05).tolist(), expected)
+        self.assertEqual(glm.passes_alpha(stored, 0.05).tolist(), expected)
+        glm_result.result.p_fwe = p_exact.copy()
+        glm_result.result.q_fdr = p_exact.copy()
+        summary = glm.summary(glm_result, alpha=0.05)
+        self.assertEqual(summary["fwe"]["n_significant"], 4)
+        self.assertEqual(summary["fdr"]["n_significant"], 4)
+        note = summary["fdr"]["note"]  # typographic, like the card's pre-run line
+        self.assertIn("q \u2264 0.05", note)
+        self.assertNotIn("<=", note)
+        self.assertEqual(int(np.count_nonzero(glm.passes_alpha(stored, 0.05))), summary["fwe"]["n_significant"])
+        # The same rule serves the VLSM clusters
+        from LesionNetworkMappingLib import vlsm
+
+        self.assertEqual(vlsm._passing(stored, 0.05).tolist(), expected)
+
     def test_exhaustive_p_is_exact(self):
         rows = [(f"sub-{level[:2]}{index}", {"group": level, "volume_ml": 10.0 + index}) for level in ("case", "control") for index in range(5)]
         study = self.make_study(rows)
@@ -425,6 +450,78 @@ class DesignRunTest(_StudyTestCase):
             np.testing.assert_array_equal(r32.p_unc, r64.p_unc, f"mean {mean}")
             np.testing.assert_array_equal(r32.p_fwe, r64.p_fwe, f"mean {mean}")
             self.assertGreaterEqual(r32.p_unc.min(), 2 / 1024)  # the all -1 flip always ties
+
+    def test_perfect_separation_voxel_gets_the_smallest_p(self):
+        # A voxel lesioned in every case and in no control fits the groups exactly: SSE sits at its
+        # floor, kappa is about 1 / SSE_RTOL and the tie tolerance (TIE_RTOL * kappa) is far above 1.
+        # Its threshold must stay positive: it has the most extreme statistic, so p_unc = p_fwe = 1 / (K + 1)
+        n1, n0 = 16, 10
+        group = np.r_[np.ones(n1), np.zeros(n0)]
+        Y = np.zeros((n1 + n0, 3))
+        Y[:, 0] = group  # perfect separation
+        Y[:, 1] = group
+        Y[[0, 1], 1] = 0.0
+        Y[n1, 1] = 1.0  # strong but imperfect
+        Y[:, 2] = self.rng.integers(0, 2, n1 + n0)
+        volume = self.rng.uniform(5.0, 60.0, n1 + n0)
+        for X, C in ((np.c_[group, 1 - group], np.array([[1.0, -1.0]])), (np.c_[group, 1 - group, volume - volume.mean()], np.array([[1.0, -1.0, 0.0]]))):
+            for dtype, tails, stat in ((np.float32, 1, "t"), (np.float64, 2, "t"), (np.float64, 1, "v")):
+                rng = np.random.default_rng(3)
+                perms = [np.arange(n1 + n0)] + [rng.permutation(n1 + n0) for _ in range(199)]
+                groups = group.astype(int) if stat == "v" else None
+                r = glm.permutation_test(Y, X, C, perms, stat=stat, tails=tails, dtype=dtype, variance_groups=groups)
+                label = f"{X.shape[1]} columns, {np.dtype(dtype).name}, tails {tails}, {stat}"
+                self.assertGreater(r.stat[0], r.stat[1], label)
+                self.assertEqual(r.p_unc[0], 1 / 200, label)
+                self.assertEqual(r.p_fwe[0], 1 / 200, label)
+                self.assertLessEqual(r.p_fwe[0], r.p_fwe[1], label)
+        # v with one variance group constant (its SSE at the floor): v keeps a finite limit, so kappa stays
+        # small and p matches a count with a tight tolerance
+        Yv = np.zeros((n1 + n0, 1))
+        Yv[:n1, 0] = 1.0
+        Yv[[0, 3, 5, 9], 0] = 0.0
+        rng = np.random.default_rng(5)
+        perms = [np.arange(n1 + n0)] + [rng.permutation(n1 + n0) for _ in range(199)]
+        X, C = np.c_[group, 1 - group], np.array([[1.0, -1.0]])
+        r = glm.permutation_test(Yv, X, C, perms, stat="v", tails=1, dtype=np.float64, variance_groups=group.astype(int))
+        engine = glm.FreedmanLane(X, C, "v", group.astype(int), "permutation", np.float64)
+        prepared = engine.prepare(Yv)
+        self.assertLess(prepared.kappa[0], glm.KAPPA_MAX_FLOAT32)
+        null = engine.null_statistics(prepared, perms[1:])[:, 0]
+        self.assertEqual(r.p_unc[0], (1 + np.sum(null >= r.stat[0] * (1 - 1e-6))) / 200)
+        # The bound keeps the threshold positive for any conditioning, and below the observed value
+        threshold = glm._threshold(np.array([5.0, -5.0]), np.float64, False, np.array([1e15, 1e15]))
+        self.assertTrue(0 < threshold[0] < 5.0)
+        self.assertLess(threshold[1], -5.0)
+
+    def test_v_with_one_constant_group_keeps_a_tight_tie_tolerance(self):
+        # VLSM voxels that no control covers: the control group has no residual variance. Welch v stays
+        # finite there, so its conditioning kappa must not come from that group's (floored) SSE: kappa about
+        # 1e12 widened the tie tolerance to TIE_RTOL_MAX and nulls 10% below the observed v counted as
+        # exceedances (a voxel with p = 0.0005 got p = 0.11). p must match a count with a tight tolerance.
+        rng = np.random.default_rng(2)
+        n1, n0 = 16, 10
+        n = n1 + n0
+        group = np.r_[np.ones(n1), np.zeros(n0)]
+        Y = np.zeros((n, 60))
+        Y[:n1] = rng.uniform(0, 1, (n1, 60)) * (rng.uniform(0, 1, (n1, 60)) < 0.5)
+        Y[:n1] += rng.normal(0, 0.05, (1, 60))
+        Y[n1:, 30:] = 1.0  # cases vary, controls constant at 1 (also the A<B side)
+        Y[:n1, 30:] = 1.0 + Y[:n1, :30]
+        X, C = np.c_[group, 1 - group], np.array([[1.0, -1.0]])
+        perms = [np.arange(n)] + [rng.permutation(n) for _ in range(999)]
+        engine = glm.FreedmanLane(X, C, "v", group.astype(int), "permutation", np.float64)
+        prepared = engine.prepare(Y)
+        self.assertLess(float(prepared.kappa.max()), glm.KAPPA_MAX_FLOAT32)
+        null = engine.null_statistics(prepared, perms[1:])
+        for dtype in (np.float32, np.float64):
+            for tails in (1, 2):
+                r = glm.permutation_test(Y, X, C, perms, stat="v", tails=tails, dtype=dtype, variance_groups=group.astype(int))
+                observed = np.abs(r.stat) if tails == 2 else r.stat
+                values = np.abs(null) if tails == 2 else null
+                tight = (1 + np.sum(values >= observed * (1 - 1e-4), axis=0)) / len(perms)
+                np.testing.assert_allclose(r.p_unc, tight, atol=1e-12, err_msg=f"{np.dtype(dtype).name}, tails {tails}")
+                self.assertLess(float(np.min(r.p_unc)), 0.01)
 
     def test_type_one_error_is_calibrated(self):
         # Null data with a nuisance (volume) effect: the FWE rate over 200 simulations is within the
@@ -521,12 +618,18 @@ class TfceTest(unittest.TestCase):
         self.assertAlmostEqual(grid.max_enhanced(vector), float(np.abs(tfce.tfce(full, mask)).max()))
         # The ETA scales with the box and the permutations; two-sided is twice one-sided
         reference = tfce.tfce_eta((91, 109, 91), 1, two_sided=False)
-        self.assertAlmostEqual(reference, 0.95, places=6)
-        self.assertAlmostEqual(tfce.tfce_eta((91, 109, 91), 1000), 1900.0, places=3)
-        self.assertAlmostEqual(tfce.tfce_eta(None, 1000, box_voxels=91 * 109 * 91), 1900.0, places=3)
+        self.assertAlmostEqual(reference, 1.3 + tfce.SECONDS_PER_MAP_OVERHEAD, places=6)
+        # Regression (tfce-eta-underestimates-on-mni-box): measured 2.3-2.8 s per two-sided map on the MNI box
+        # (about 2.6 s, addendum 3.4), 16 ms per one-sided map on a 20 x 24 x 20 box; the old 1.6 s / 11 ms were too low
+        self.assertGreaterEqual(tfce.tfce_eta((91, 109, 91), 1), 2.5)
+        self.assertLessEqual(tfce.tfce_eta((91, 109, 91), 1), 2.8)
+        self.assertGreaterEqual(tfce.tfce_eta((20, 24, 20), 1, two_sided=False), 0.015)
+        self.assertAlmostEqual(tfce.tfce_eta((91, 109, 91), 1000), 2 * 1000 * reference, places=3)
+        self.assertAlmostEqual(tfce.tfce_eta(None, 1000, box_voxels=91 * 109 * 91), 2 * 1000 * reference, places=3)
+        self.assertAlmostEqual(tfce.tfce_eta((91, 109, 91), 10, seconds_per_voxel=1e-6), 2 * 10 * 1e-6 * 91 * 109 * 91)
         with self.assertRaises(TypeError):
             tfce.tfce_eta(228483, 1000)  # an in-mask count is not a box
-        self.assertAlmostEqual(tfce.tfce_eta(grid, 10, two_sided=False), 10 * 12 * 16 * 8 * tfce.SECONDS_PER_BOX_VOXEL)
+        self.assertAlmostEqual(tfce.tfce_eta(grid, 10, two_sided=False), 10 * (12 * 16 * 8 * tfce.SECONDS_PER_BOX_VOXEL + tfce.SECONDS_PER_MAP_OVERHEAD))
         self.assertAlmostEqual(tfce.tfce_eta(mask, 10, two_sided=False), tfce.tfce_eta(grid, 10, two_sided=False))
         with self.assertRaises(ValueError):
             tfce.structure(8)

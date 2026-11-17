@@ -39,6 +39,9 @@
 // qMRML includes
 #include "qMRMLSliceView.h"
 
+// Qt includes
+#include <QPoint>
+
 // VTK includes
 #include <vtkSmartPointer.h>
 #include <vtkWeakPointer.h>
@@ -77,6 +80,9 @@ protected:
   vtkMRMLScene* MRMLScene;
   vtkMRMLSliceNode* MRMLSliceNode;
   QColor InactiveBoxColor;
+  /// Global position of the pointer at the last Leave event of the view (see qMRMLSliceView::enterEvent).
+  QPoint LastLeaveGlobalPos;
+  bool HasLeft;
 };
 
 #endif

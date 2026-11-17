@@ -68,6 +68,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import warnings
 
 PACKAGE = __package__ or "LesionNetworkMappingLib"
 LIB_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -77,7 +78,7 @@ LEVELS = ("participant", "group")
 #: Stages of the participant level; the other stages of pipeline.STAGES run at the group level only
 PARTICIPANT_STAGES = ("prepare", "preflight", "normalize", "reference", "maps", "qa", "export", "finish")
 DEFERRED = "deferred to the group level (slicer-lnm ... group)"
-NOT_SELECTED = "not selected (--participant-label)"
+NOT_SELECTED = "not selected (--participant-label)"  # pipeline.NOT_SELECTED
 #: Study written for a BIDS input, relative to the output folder
 STUDY_RELPATH = ("sourcedata", "slicer-lnm-study")
 STUDY_NAME = "slicer-lnm BIDS input"
@@ -87,6 +88,8 @@ FIGURE_MAP_DESC = "meanT"
 LOCK_POLL_S = 5.0
 _ENTITY = re.compile(r"^([a-zA-Z0-9]+)-([a-zA-Z0-9]+)$")
 _NIFTI = re.compile(r"\.nii(?:\.gz)?$", re.IGNORECASE)
+#: BIDS space label of a user template ("user:<id>" -> "user<Id>", normalize.template_label)
+_USER_SPACE = re.compile(r"^user[A-Z0-9][A-Za-z0-9]*$")
 
 
 # Version
@@ -155,14 +158,22 @@ def library_commands():
 
 def run_library_command(name, argv):
     """Run ``python -m LesionNetworkMappingLib.<name> <argv>`` in this process; return its exit code."""
-    saved = sys.argv
+    from . import jobs
+
+    saved, saved_prog = sys.argv, jobs.APP_PROG
     sys.argv = [f"{PROG} {name}", *argv]
+    # runpy (alter_sys) replaces sys.argv[0] by the module's file, so the parsers and hints take the name from jobs.APP_PROG
+    jobs.APP_PROG = PROG
     try:
-        runpy.run_module(f"{PACKAGE}.{name}", run_name="__main__", alter_sys=True)
+        with warnings.catch_warnings():
+            # jobs is imported above (APP_PROG), so runpy warns that it runs a module that is already in sys.modules: expected here
+            warnings.filterwarnings("ignore", message=".*found in sys.modules after import of package", category=RuntimeWarning)
+            runpy.run_module(f"{PACKAGE}.{name}", run_name="__main__", alter_sys=True)
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
     finally:
         sys.argv = saved
+        jobs.APP_PROG = saved_prog
     return 0
 
 
@@ -199,7 +210,47 @@ def _choice_key(path):
     entities = bids_entities(path)[0]
     space = entities.get("space", "")
     # template-space masks first (they need no normalization), then the shortest path (raw data before derivatives)
-    return (not space.upper().startswith("MNI"), path.count(os.sep), path)
+    return (not (space.upper().startswith("MNI") or _USER_SPACE.match(space)), path.count(os.sep), path)
+
+
+def _sidecar_space(path):
+    """The template space that the JSON sidecar of a BIDS file names (``SlicerStudio.space``, then ``SpatialReference``,
+    as normalize and Study.write_lesion_sidecar write them), or None when it names no template of a known family.
+    """
+    from .geometry import space_family
+
+    try:
+        with open(_NIFTI.sub("", path) + ".json", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    studio = data.get("SlicerStudio")
+    for value in ((studio or {}).get("space") if isinstance(studio, dict) else None, data.get("SpatialReference")):
+        if isinstance(value, str) and space_family(value) not in ("native", "unknown"):
+            return value
+    return None
+
+
+def bids_lesion_space(path):
+    """The template space of a BIDS lesion mask, or None when its grid decides (no space entity, or a subject space).
+
+    A ``space`` entity of a known template family (MNI152NLin2009cAsym, ...) is the dataset's statement. Another label
+    (e.g. "user<Id>" of a user template, as ``normalize --template user:<id>`` names its outputs) is resolved through
+    the file's sidecar; a user-template label without one keeps the label: the lesion is on that template's own grid.
+    """
+    from .geometry import space_family
+
+    space = (bids_entities(path) or ({}, None))[0].get("space")
+    if not space:
+        return None
+    family = space_family(space)
+    if family == "native":
+        return None
+    if family != "unknown":
+        return space
+    return _sidecar_space(path) or (space if _USER_SPACE.match(space) else None)
 
 
 def find_bids_lesions(input_dir, skip=()):
@@ -227,23 +278,35 @@ def normalize_labels(labels):
     return sorted(set(out))
 
 
-def prepare_bids_study(input_dir, output_dir, group_column=None, group_map=None, score_columns=(), emit=None):
+def prepare_bids_study(input_dir, output_dir, group_column=None, group_map=None, score_columns=(), emit=None, bundle=None):
     """Create or update the study of a BIDS dataset in ``<output_dir>/sourcedata/slicer-lnm-study``; return (study path, summary).
 
     Only the lesion masks (:func:`is_lesion_file`) are added, one per subject (template space first; the
     others are reported), and only the participants.tsv rows of those subjects are imported.
+
+    With ``bundle`` (the run's connectome) the lesion metrics are measured and stored in the study, as the Studio session
+    does for its studies (volume_ml, n_parts, fractional_sum, outside_brain_pct, qc_flags and the file's mtime and size):
+    the preflight then trusts them and does not warn on every run that the metrics of an unchanged input "were measured now".
+    They are measured again by every run, so that they always describe the lesion files and the connectome of that run
+    (the study is shared by the runs of an output folder, which may use different connectomes).
     """
     from . import pipeline
-    from .study import Study
+    from .study import Study, is_missing
 
     study_path = os.path.join(os.path.abspath(output_dir), *STUDY_RELPATH)
     lesions = find_bids_lesions(input_dir, skip=[output_dir])
     if not lesions:
         raise ValueError(f"No lesion mask (*_label-lesion_mask, *_desc-lesion_mask or *_label-lesion_roi .nii[.gz]) in {input_dir}")
+    folded = {}
+    for sid in lesions:
+        twin = folded.setdefault(sid.casefold(), sid)
+        if twin != sid:  # the study names files after subject ids
+            raise ValueError(f"Subjects {twin} and {sid} differ only in letter case: on macOS they would share files. Rename one of them.")
     chosen = [paths[0] for paths in lesions.values()]
     skipped = [{"participant_id": sid, "path": os.path.relpath(path, input_dir).replace(os.sep, "/"), "reason": "another lesion mask was chosen"}
                for sid, paths in lesions.items() for path in paths[1:]]
     participants = os.path.join(input_dir, "participants.tsv")
+    given_volumes = set()  # subjects whose volume_ml the dataset's participants.tsv gives (kept, not measured over)
     with tempfile.TemporaryDirectory(prefix="slicer-lnm-") as tmp:
         table = None
         if os.path.isfile(participants):
@@ -251,6 +314,7 @@ def prepare_bids_study(input_dir, output_dir, group_column=None, group_map=None,
             id_column = "participant_id" if "participant_id" in columns else columns[0]
             kept = [row for row in rows if row.get(id_column) in lesions]
             if kept:
+                given_volumes = {row[id_column] for row in kept if "volume_ml" in columns and not is_missing(row.get("volume_ml"))}
                 table = os.path.join(tmp, "participants.tsv")
                 with open(table, "w", encoding="utf-8", newline="") as f:
                     f.write("\t".join(columns) + "\n")
@@ -258,26 +322,61 @@ def prepare_bids_study(input_dir, output_dir, group_column=None, group_map=None,
                         f.write("\t".join(row.get(column, "") for column in columns) + "\n")
         summary = pipeline.init_study(chosen[0], study_path, participants=table, name=STUDY_NAME, score_columns=list(score_columns or ()), group_column=group_column, group_map=group_map,
                                       lesion_rule=LESION_RULE)
-    from .geometry import space_family
 
     study = Study.open(study_path)
     report = study.add_files(chosen, lesion_rule=LESION_RULE)
+    # A chosen lesion mask that add_files could not read or use (corrupt, not 3D) is named in a warning and kept in the
+    # subject's row, so that the pipeline excludes the subject as "lesion file unreadable", not as "lesion file missing"
+    unusable = []
+    chosen_paths = {os.path.abspath(path) for path in chosen}
+    for item in report["skipped"]:
+        path = os.path.abspath(item["path"])
+        if path in chosen_paths and (item["reason"].startswith("unreadable") or item["reason"].startswith("not a 3D")):
+            entities = bids_entities(path)[0]
+            sid = f"sub-{entities['sub']}"
+            relative = study.relpath(path)
+            if sid not in study:
+                study.add_subject(sid, {"lesion": relative, "status": "traced"})
+            elif is_missing(study.subject(sid).get("lesion")):
+                study.set(sid, lesion=relative)
+            unusable.append({"path": path, "message": f"{os.path.relpath(path, input_dir).replace(os.sep, '/')}: lesion file cannot be used ({item['reason']})", "participant_id": sid})
     for path in chosen:
-        # The BIDS space entity is the dataset's statement: a template space (MNI152NLin2009cAsym, ...) is not re-detected from the grid
-        entities = bids_entities(path)[0]
-        sid, space = f"sub-{entities['sub']}", entities.get("space")
-        if space and space_family(space) not in ("native", "unknown") and study.subject(sid).get("space") != space:
+        # The BIDS space entity is the dataset's statement: a template space (MNI152NLin2009cAsym, ...) is not re-detected
+        # from the grid, and a user template's space (space-user<Id>, whose grid is not a standard one) is not read as native
+        sid, space = f"sub-{bids_entities(path)[0]['sub']}", bids_lesion_space(path)
+        if space and study.subject(sid).get("space") != space:
             study.set(sid, space=space)
+    if bundle is not None:
+        _store_lesion_metrics(study, [f"sub-{bids_entities(path)[0]['sub']}" for path in chosen], bundle, given_volumes)
     study.save()
     for item in report["warnings"]:
         summary.setdefault("warnings", []).append(item)
+    for item in unusable:
+        summary.setdefault("warnings", []).append({"path": item["path"], "message": item["message"]})
     summary["lesion_files"] = len(chosen)
     summary["other_lesion_files"] = skipped
     if emit is not None:
-        emit("info", code="bids_study", message=f"BIDS input: {len(chosen)} lesion masks; study {os.path.join(*STUDY_RELPATH)} ({len(study)} subjects)")
+        emit("info", code="bids_study", message=f"BIDS input: {len(chosen)} lesion mask{'' if len(chosen) == 1 else 's'}; study {os.path.join(*STUDY_RELPATH)} ({len(study)} subject{'' if len(study) == 1 else 's'})")
+        for item in unusable:
+            emit("warning", code="bids_lesion_unreadable", participant_id=item["participant_id"], message=item["message"])
         for item in skipped:
             emit("warning", code="bids_lesion_skipped", participant_id=item["participant_id"], message=f"{item['path']}: {item['reason']}")
     return study_path, summary
+
+
+def _store_lesion_metrics(study, sids, bundle, keep_volume=()):
+    """Measure the lesions of ``sids`` against the connectome and write the values to the study rows (not saved).
+
+    :param keep_volume: subjects whose volume_ml the dataset gave: it is kept, not measured over.
+
+    A lesion that cannot be read has no values: the preflight of the run excludes it as unreadable.
+    """
+    from . import preflight
+
+    for sid, values in preflight.remeasure(study, [sid for sid in sids if sid in study], bundle, outside=True).items():
+        if sid in keep_volume:
+            values.pop("volume_ml", None)
+        study.set(sid, values)
 
 
 # Pipeline configuration
@@ -297,12 +396,16 @@ def _json_value(text, what):
 def design_options(path):
     """PipelineConfig fields of a design.json (format slicer-lnm-design) that the pipeline's GLM and sLNM stages can honour.
 
-    :raises ValueError: for a design the pipeline cannot run (another group column or levels, an ANOVA,
-      transforms, blocks, permutation scheme or variance groups); run ``slicer-lnm glm --design`` for those.
+    :raises ValueError: for a design the pipeline cannot run (another group column or levels, levels that
+      select the subjects of a continuous or one-sample test, an ANOVA, transforms, blocks, permutation
+      scheme or variance groups); run ``slicer-lnm glm --design`` for those.
     """
     from . import design
 
-    spec = design.DesignSpec.load(path)
+    try:
+        spec = design.DesignSpec.load(path)
+    except (OSError, ValueError) as exc:  # a missing or broken file: name the option and the file, not the exception class
+        raise ValueError(f"The file of --design cannot be read: {path} ({exc})") from None
     unsupported = []
     if spec.test == "anova":
         unsupported.append("test anova")
@@ -315,6 +418,9 @@ def design_options(path):
             unsupported.append(f"contrast {spec.contrast}")
     if spec.test == "continuous" and spec.contrast != "two_sided":
         unsupported.append(f"contrast {spec.contrast}")
+    if spec.test in ("continuous", "one_sample") and spec.levels is not None:
+        # The levels select the subjects of these tests; the pipeline's sLNM and maps use every mapped lesion
+        unsupported.append(f"levels {spec.levels} of {spec.group_column} (a subject selection)")
     for key, default in (("transforms", {}), ("block_column", None), ("permute", "auto"), ("variance_groups", False), ("restrict_to_mixed_blocks", False)):
         value = getattr(spec, key)
         if value and value != default:
@@ -338,7 +444,7 @@ def design_options(path):
 
 
 #: argparse destination -> PipelineConfig field of the options passed through as they are
-_PASSTHROUGH = ("preview_n", "preview_seed", "sensitivity", "specificity", "nulls", "null_seed", "perm_seed", "alpha", "scores", "native", "include_unreviewed", "strict", "memory_budget_gb",
+_PASSTHROUGH = ("preview_n", "preview_seed", "sensitivity", "specificity", "nulls", "null_seed", "perm_seed", "alpha", "scores", "native", "include_unreviewed", "strict", "allow_rule_anyway", "memory_budget_gb",
                 "template", "atlas", "atlas_labels", "figure_convention", "recompute", "build_references", "slicer", "nice")
 
 
@@ -355,10 +461,20 @@ def build_config(args, study_path, emit=None):
             raise ValueError(f"Unknown recipe {args.recipe!r}")
         converted = recipes.to_pipeline_config(recipe, study_path)
         values.update(converted["config"])
+        outside = converted.get("outside_pipeline") or []
+        # pipeline.json "recipe" (read by methods and the report), with the steps this run does not do
+        values["recipe"] = recipes.pipeline_recipe(converted)
         if emit is not None and converted.get("unavailable"):
             emit("info", code="recipe_steps", message=f"Recipe {recipe.id}: not available in this build: {', '.join(converted['unavailable'])}")
+        if emit is not None:
+            for step in outside:  # never skipped silently (as 'slicer-lnm recipes config' says)
+                emit("info", code="recipe_step_outside", step=step["id"], message=f"Recipe {recipe.id}: step {step['id']} ({step['label']}) is not part of the pipeline: run it from {step['where']}")
     if args.pipeline_config:
-        values.update(pipeline.PipelineConfig.load(args.pipeline_config).to_json())
+        try:
+            values.update(pipeline.PipelineConfig.load(args.pipeline_config).to_json())
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"The file of --pipeline-config cannot be read: {args.pipeline_config} ({exc})") from None
+        values.pop("participant_label", None)  # the subjects of this run are --participant-label's (default: all)
     if args.design:
         values.update(design_options(args.design))
     for name in _PASSTHROUGH:
@@ -375,6 +491,9 @@ def build_config(args, study_path, emit=None):
         values["report"] = False
     if args.threads:
         values["threads"] = args.threads
+    labels = normalize_labels(getattr(args, "participant_label", None))
+    if labels:
+        values["participant_label"] = labels  # in pipeline.json "config": reproduce_pipeline.sh selects the same subjects
     for key in ("template", "atlas", "atlas_labels"):
         if values.get(key):
             values[key] = os.path.abspath(values[key])
@@ -387,7 +506,14 @@ def build_config(args, study_path, emit=None):
         "parent_pid": None,
     })
     values.pop("out", None)
-    return pipeline.PipelineConfig.from_json(values)
+    try:
+        return pipeline.PipelineConfig.from_json(values)
+    except ValueError as exc:
+        if "--no-volume-covariate" not in str(exc):
+            raise
+        # The shared pipeline message names the 'pipeline run' option, which slicer-lnm does not have.
+        where = "volume_off_reason in the design file" if args.design else "volume_off_reason in the pipeline configuration"
+        raise ValueError(f"Turning the lesion-volume covariate off needs a reason: set {where}, or keep volume_ml among the covariates") from None
 
 
 # Level runs
@@ -399,27 +525,19 @@ def _runner_class():
     class LevelRunner(pipeline.Runner):
         """A pipeline run restricted to a BIDS-App level and to the selected participants."""
 
-        def __init__(self, config, emit, cancel, argv, level, labels):
-            super().__init__(config, emit, cancel, argv)
+        def __init__(self, config, emit, cancel, argv, level, labels, lock=None):
+            if labels:
+                # The selection is part of the configuration (pipeline.json "config"), so that reproduce_pipeline.sh
+                # ('pipeline run --config pipeline.json') analyses the same subjects; pipeline.Runner._select applies it.
+                config.participant_label = sorted(set(labels))
+                config.validate()
+            super().__init__(config, emit, cancel, argv, lock=lock)
             self.level = level
-            self.labels = set(labels) if labels else None
-            self._selected = False
-
-        def _select(self):
-            if self.labels is None or self._selected:
-                return
-            self._selected = True
-            dropped = []
-            for row in self.rows:
-                if row["participant_id"] not in self.labels and row["status"] != "excluded":
-                    row["status"], row["reason"] = "excluded", NOT_SELECTED
-                    dropped.append(row["participant_id"])
-            if dropped:
-                self.info(f"{len(dropped)} subjects not selected by --participant-label", code="not_selected")
-
-        def _snapshot(self, rows):
-            self._select()
-            super()._snapshot([row for row in rows if row["status"] in ("compute", "reuse")])
+            self.labels = set(config.participant_label) if config.participant_label else None
+            # The output folder holds exactly the application's file set (no runs.jsonl of its own): the run registers in the study
+            self.registry_root_override = config.study
+            # the output folder lies beside the study: its run folders are registered relative to it, so the study holds no local path
+            self.portable_registry = True
 
         def _stage(self, name):
             if self.level == "participant" and name not in PARTICIPANT_STAGES:
@@ -438,11 +556,14 @@ def _runner_class():
     return LevelRunner
 
 
-def run_level(config, level, labels=None, emit=None, cancel=None, argv=None):
-    """Run one BIDS-App level of the pipeline; return the exit code (see the module docstring)."""
+def run_level(config, level, labels=None, emit=None, cancel=None, argv=None, lock=None):
+    """Run one BIDS-App level of the pipeline; return the exit code (see the module docstring).
+
+    :param lock: the output lock of the run folder when the caller holds it already (:func:`_take_lock`).
+    """
     from . import pipeline
 
-    runner = _runner_class()(config, emit if emit is not None else pipeline.Emitter(config.events), cancel, argv, level, labels)
+    runner = _runner_class()(config, emit if emit is not None else pipeline.Emitter(config.events), cancel, argv, level, labels, lock=lock)
     try:
         return runner.run()
     except pipeline.PipelineError as exc:
@@ -470,7 +591,7 @@ def render_figures(presets, out, config, emit):
     import contextlib
     import io
 
-    from . import export, figures, jobs, pipeline
+    from . import export, figures, jobs, pipeline, thresholds
     from .connectome import ConnectomeBundle
 
     bundle = ConnectomeBundle.open(config.bundle)
@@ -491,6 +612,16 @@ def render_figures(presets, out, config, emit):
                 emit("warning", code="figure", message=f"Figure {preset}: the group map {os.path.basename(group_map)} was not written")
                 continue
             args += ["--map", group_map, "--mask", os.path.join(out, pipeline.PRIVATE_DIR, pipeline.MASK_NAME), "--statistic", "mean T", "--title", "Mean T across lesions (descriptive)"]
+            if preset == "pair":
+                # The pair preset is a thresholded map with its unthresholded companion (figures.pair refuses to draw
+                # without a threshold): the run's primary rule with the run's N and V, as the report's mean T montage
+                # and the meanT cluster table, when that rule gives a |T| at all
+                rule = thresholds.normalize_rule(config.rule)
+                if not (rule["kind"] in thresholds.SYMMETRIC_T_KINDS or (rule["kind"] == "top_pct" and rule.get("statistic") == "T")):
+                    emit("warning", code="figure", message=f"Figure {preset} not written: the primary rule ({thresholds.rule_label(rule)}) applies to mean Fz, not to T, so it gives no threshold for the mean T map")
+                    continue
+                n = (data.get("subjects") or {}).get("n") or bundle.n_subjects
+                args += ["--rule", json.dumps(rule), "--n", str(int(n)), "--v", str(int(bundle.n_voxels))]
         if config.template:
             args += ["--template", config.template]
         if config.figure_convention:
@@ -508,19 +639,35 @@ def render_figures(presets, out, config, emit):
     return written
 
 
-def _wait_for_lock(out, wait_s, emit):
-    """Wait until no pipeline run holds ``out`` (at most ``wait_s`` seconds); return True when it is free."""
+def _with_parents(path):
+    """``path`` and each of its parent folders, innermost first."""
+    while True:
+        yield path
+        parent = os.path.dirname(path)
+        if parent == path:
+            return
+        path = parent
+
+
+def _take_lock(out, wait_s, emit):
+    """Take the output lock of the run folder ``out``, waiting at most ``wait_s`` seconds while another run holds it.
+
+    Return the held :class:`jobs.OutputLock` (the run uses it and releases it), or None when another run still holds
+    the folder. The lock is taken before anything is written to the output folder (the study of a BIDS input is shared
+    by the runs that write there), so that a run refused with exit code 75 changes nothing.
+    """
     from . import jobs, pipeline
 
     lock = jobs.OutputLock(os.path.join(out, pipeline.PRIVATE_DIR, pipeline.LOCK_NAME))
     deadline = time.monotonic() + max(float(wait_s or 0), 0.0)
     told = False
     while True:
-        holder = lock.read()
-        if not os.path.exists(lock.path) or lock.is_stale(holder):
-            return True
+        try:
+            return lock.acquire()
+        except jobs.Locked as exc:
+            holder = exc.holder
         if time.monotonic() >= deadline:
-            return False
+            return None
         if not told:
             emit("info", code="waiting_for_lock", message=f"Another run (process {(holder or {}).get('pid')}) writes to {os.path.basename(out)}: waiting")
             told = True
@@ -563,6 +710,7 @@ def _parser(commands=()):
     parser.add_argument("--native", choices=pipeline.NATIVE_MODES, default=None)
     parser.add_argument("--include-unreviewed", action="store_true", default=None)
     parser.add_argument("--strict", action="store_true", default=None)
+    parser.add_argument("--allow-rule-anyway", action="store_true", default=None, help="apply a threshold rule that is refused for the connectome's N (recorded)")
     parser.add_argument("--memory-budget-gb", type=float, default=None)
     parser.add_argument("--template", default=None, help="background template NIfTI of the figures and the report")
     parser.add_argument("--atlas", default=None)
@@ -582,10 +730,38 @@ def _parser(commands=()):
     return parser
 
 
+def _events_option(argv):
+    """The value of --events in ``argv`` (``--events X`` or ``--events=X``; the last one wins); "auto" when absent or invalid."""
+    from . import pipeline
+
+    value = "auto"
+    for index, item in enumerate(argv):
+        if item == "--":
+            break
+        if item == "--events" and index + 1 < len(argv):
+            value = argv[index + 1]
+        elif item.startswith("--events="):
+            value = item.split("=", 1)[1]
+    return value if value in pipeline.EVENT_MODES else "auto"
+
+
+def usage_message(exc):
+    """The text of a usage error: a ValueError (RecipeError, DesignError, ...) carries a message written for the user, so the
+    Python class name is left out; other exception types keep it (a bare KeyError text would be only a quoted key).
+    """
+    return str(exc) if isinstance(exc, ValueError) else f"{type(exc).__name__}: {exc}"
+
+
 def _main(argv):
     from . import jobs, pipeline
 
-    args = _parser(library_commands()).parse_args(argv)
+    parser = _parser(library_commands())
+    # Usage errors of the parser itself follow --events too (read from the arguments before they are parsed): text on a
+    # terminal or with --events text, like the errors found later in this command; JSON events otherwise
+    early = pipeline.Emitter(_events_option(argv))
+    if early.mode == "text":
+        parser.error_emit = early
+    args = parser.parse_args(argv)
     emit = pipeline.Emitter(args.events)
     if args.subject_list:
         emit("error", code="usage", message="--subject-list is not available in this build: the cohort pipeline maps every connectome subject, or --preview N random subjects")
@@ -602,43 +778,99 @@ def _main(argv):
     if not os.path.isdir(args.connectome):
         emit("error", code="usage", message=f"The connectome bundle does not exist: {args.connectome}")
         return jobs.EXIT_USAGE
+    blocker = next((path for path in _with_parents(output_dir) if os.path.exists(path) and not os.path.isdir(path)), None)
+    if blocker is not None:  # a file where the output folder (or one of its parents) should be: makedirs would fail later with a traceback
+        what = "The output folder is a file" if blocker == output_dir else f"The output folder cannot be created: {blocker} is a file"
+        emit("error", code="usage", message=f"{what}: {args.output_dir}" if blocker == output_dir else f"{what} (output folder {args.output_dir})")
+        return jobs.EXIT_USAGE
+    for option in ("template", "atlas", "atlas_labels", "design", "pipeline_config"):
+        path = getattr(args, option, None)
+        if path is not None and not os.path.isfile(path):
+            emit("error", code="usage", message=f"The file of --{option.replace('_', '-')} does not exist: {path}")
+            return jobs.EXIT_USAGE
+    problem = pipeline.figure_option_error(args.template, args.figure_convention)
+    if problem:
+        emit("error", code="usage", message=problem)
+        return jobs.EXIT_USAGE
     from .connectome import ConnectomeBundle
     from .export import run_dir_name
     from .study import Study
 
+    # A BIDS input is never written (docs: "nothing in the input folder is written"): conn-<label>/ and sourcedata/ in
+    # the dataset itself would be scanned as competing lesion masks by the next run
+    if os.path.realpath(input_dir) == os.path.realpath(output_dir) and not Study.is_study(input_dir):
+        emit("error", code="usage", message="The output folder must not be the BIDS input folder (nothing in the input folder is written); use a subfolder such as derivatives/slicer-lnm")
+        return jobs.EXIT_USAGE
     try:
         bundle = ConnectomeBundle.open(args.connectome)
     except (OSError, ValueError) as exc:
         emit("error", code="bundle", message=f"The connectome cannot be opened: {exc}")
         return jobs.EXIT_ERROR
-    os.makedirs(output_dir, exist_ok=True)
+    bids = not Study.is_study(input_dir)
+    if bids:
+        study_path = os.path.join(output_dir, *STUDY_RELPATH)  # written by prepare_bids_study once the run holds its output lock
+    else:
+        study_path = input_dir
+        for option in ("group_column", "group_map"):
+            if getattr(args, option):
+                emit("warning", code="study_input", message=f"--{option.replace('_', '-')} applies to a BIDS input; the study's own columns are used")
     try:
-        if Study.is_study(input_dir):
-            study_path = input_dir
-            for option in ("group_column", "group_map"):
-                if getattr(args, option):
-                    emit("warning", code="study_input", message=f"--{option.replace('_', '-')} applies to a BIDS input; the study's own columns are used")
-        else:
-            study_path, _summary = prepare_bids_study(input_dir, output_dir, args.group_column, args.group_map, [name.strip() for name in args.score_columns.split(",") if name.strip()], emit)
-        labels = normalize_labels(args.participant_label)
-        if labels:
-            missing = sorted(set(labels) - set(Study.open(study_path).subject_ids))
-            if missing:
-                emit("error", code="usage", message=f"Participant label(s) not in the input: {', '.join(missing)}")
-                return jobs.EXIT_USAGE
         config = build_config(args, study_path, emit)
-    except jobs.Locked as exc:
-        emit("error", code="locked", message=exc.message)
-        return jobs.EXIT_LOCKED
     except (OSError, ValueError, TypeError, KeyError) as exc:
-        emit("error", code="usage", message=f"{type(exc).__name__}: {exc}")
+        emit("error", code="usage", message=usage_message(exc))
         return jobs.EXIT_USAGE
+    if not config.accept_terms:  # refused before anything is written: the study of a BIDS input and the run folders are created only for a run that can start
+        emit("error", code="terms_not_accepted", message=f"The data use terms of the connectome {bundle.name} must be accepted (--accept-terms).", data_use_terms=bundle.data_use_terms, connectome=bundle.name)
+        return pipeline.EXIT_TERMS
     out = os.path.join(output_dir, run_dir_name(bundle.name, config.preview_n))
     config.out = out
-    if not _wait_for_lock(out, args.lock_wait, emit):
+    # The output lock comes first: the study of a BIDS input is shared by every run writing to this output folder, and a
+    # run refused with exit code 75 must not rewrite it (the run holding the folder would read another run's groups)
+    created = [path for path in (output_dir, out, os.path.join(out, pipeline.PRIVATE_DIR)) if not os.path.isdir(path)]
+    try:
+        lock = _take_lock(out, args.lock_wait, emit)
+    except OSError as exc:  # the output folder cannot be created (permissions, a race with another process)
+        emit("error", code="usage", message=f"The output folder cannot be created: {args.output_dir} ({exc.strerror or exc})")
+        return jobs.EXIT_USAGE
+    if lock is None:
         emit("error", code="locked", message=f"Another run still writes to {os.path.basename(out)} after {args.lock_wait:g} s")
         return jobs.EXIT_LOCKED
-    code = run_level(config, args.analysis_level, labels, emit=emit, cancel=args.cancel_file, argv=argv)
+    ran = False
+    try:
+        try:
+            labels = normalize_labels(args.participant_label)
+            if bids and labels:
+                # Refused before the study is written: it would stay in the output folder of a run that never started. The study
+                # of this run holds the lesion masks of the input and the subjects of an earlier run's study (it is extended).
+                known = set(find_bids_lesions(input_dir, skip=[output_dir]))
+                if known and Study.is_study(study_path):
+                    known |= set(Study.open(study_path).subject_ids)
+                missing = sorted(set(labels) - known) if known else []
+                if missing:
+                    emit("error", code="usage", message=f"Participant label(s) not in the input: {', '.join(missing)}")
+                    return jobs.EXIT_USAGE
+            if bids:
+                prepare_bids_study(input_dir, output_dir, args.group_column, args.group_map, [name.strip() for name in args.score_columns.split(",") if name.strip()], emit, bundle)
+            if labels:
+                missing = sorted(set(labels) - set(Study.open(study_path).subject_ids))
+                if missing:
+                    emit("error", code="usage", message=f"Participant label(s) not in the input: {', '.join(missing)}")
+                    return jobs.EXIT_USAGE
+        except jobs.Locked as exc:
+            emit("error", code="locked", message=exc.message)
+            return jobs.EXIT_LOCKED
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            emit("error", code="usage", message=usage_message(exc))
+            return jobs.EXIT_USAGE
+        ran = True
+        code = run_level(config, args.analysis_level, labels, emit=emit, cancel=args.cancel_file, argv=argv, lock=lock)
+    finally:
+        lock.release()
+        for path in [] if ran else reversed(created):  # the empty folders of a run that stopped before its first stage
+            try:
+                os.rmdir(path)
+            except OSError:
+                pass
     if code == jobs.EXIT_OK:
         write_dataset_description(study_path, output_dir)
         if presets and args.analysis_level == "group":

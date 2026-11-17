@@ -25,7 +25,9 @@ how much the conclusion depends on the connectome; it is not split-half sampling
 **Lesion split-half** (:func:`lesion_split_half`; Ferguson 2019). The lesions are split at random into two
 halves (``n_splits`` times, seeded, optionally within strata); each split gives the spatial r of the two
 halves' overlap maps, the Dice of their sensitivity maps and, with a design, the r of their GLM t maps,
-computed from sufficient statistics (XᵀX, XᵀY, Σy²) of each half.
+computed from sufficient statistics (XᵀX, XᵀY, Σy²) of each half. The overlap and sensitivity maps threshold
+the T maps; the GLM is fitted to the maps of the design's input (``design.json`` "input": AvgFz for "Fz", the
+default, or T), so that it is the GLM of the Contrast tab.
 
 **Leave-one-lesion-out influence** (:func:`leave_one_lesion_out`). Removing one lesion is a downdate of the
 overlap counts and of the GLM's sufficient statistics (no refit): the sensitivity map's Dice against the
@@ -54,6 +56,9 @@ Command line (JSON events, see ``jobs``; exit codes 0 done, 1 error, 2 usage, 3 
         [--n-splits 1000] [--seed 0] [--rule JSON] [--overlap 90] [--study DIR --design design.json] [--strata COLUMN]
     python -m LesionNetworkMappingLib.robustness influence --maps maps.tsv --out DIR [--rule JSON] [--overlap 90]
         [--study DIR --design design.json] [--top-k 5]
+    (sweep, replicate, splithalf and influence also take [--participants participants.tsv [--group-column group]]:
+    the lesions are then the cases when it names any, as the classic overlap of ``cohort.py``, so that the primary
+    is the Overlap tab's sensitivity map; splithalf and influence with --design keep the design's rows)
     python -m LesionNetworkMappingLib.robustness seeds --study DIR --bundle B --out DIR [--variants a,b,...]
         [--coordinates coords.tsv] [--rule JSON] [--overlap 90] [--no-maps]
     python -m LesionNetworkMappingLib.robustness consolidate --study DIR --side L|R --out DIR
@@ -145,6 +150,21 @@ def _rule_statistic(rule):
     return "Fz" if rule["kind"] == "fz_abs" else "T"
 
 
+def rule_column(rule):
+    """The maps.tsv column a threshold rule applies to, as in the Overlap tab (``cohort.rule_statistic``):
+    "T" for the T rules, "AvgFz" (the mean Fz maps) for ``fz_abs`` and for ``top_pct`` on Fz.
+    """
+    from . import cohort as cohort_lib
+
+    return cohort_lib.MAP_COLUMNS[_rule_statistic(thresholds.normalize_rule(rule))]
+
+
+def _check_statistic(rule, statistic):
+    """Refuse to apply a rule to maps of another statistic (an |Fz| rule on T maps would keep nearly every voxel)."""
+    if _rule_statistic(rule) != statistic:
+        raise ValueError(f"The rule {sweep_label(rule)} needs {_rule_statistic(rule)} maps; these are {statistic} maps")
+
+
 def _scores(maps, sign):
     import numpy as np
 
@@ -165,7 +185,9 @@ def _resolve(rule, n, v, gsr, values=None):
 def _threshold_maps(maps, rule, n, v, sign, gsr):
     """Binary per-lesion maps (L, V) of a rule and the resolved threshold(s).
 
-    Fixed rules resolve once; top-x% rules resolve on each lesion's map (a tuple of Resolved).
+    Fixed rules resolve once; top-x% rules resolve on each lesion's map (a tuple of Resolved). A top-x% rule's own
+    sign chooses its cut-off (the top x% of T, -T or |T|); every rule then keeps the voxels of ``sign`` at or past
+    the cut, as the Overlap tab's maps (``cohort.group_maps``, ``cohort.binarize_maps``) do.
     Comparisons are made in float64, one lesion at a time (as :func:`thresholds.fraction_connected`).
     """
     import numpy as np
@@ -174,7 +196,6 @@ def _threshold_maps(maps, rule, n, v, sign, gsr):
     if rule["kind"] == "top_pct":
         resolved = tuple(_resolve(rule, n, v, gsr, values=row) for row in maps)
         cuts = [r.value for r in resolved]
-        sign = rule["sign"]
     else:
         resolved = _resolve(rule, n, v, gsr)
         cuts = [resolved.value] * maps.shape[0]
@@ -266,8 +287,8 @@ def threshold_sweep(
     :param primary_overlap: the fixed primary overlap criterion, in % of lesions.
     :param rules: rule dicts or :func:`DEFAULT_RULES` entries; default: ``DEFAULT_RULES(n, statistic, sign)``.
     :param overlaps: overlap criteria in %; default :data:`DEFAULT_OVERLAPS`.
-    :param sign: sign used by fixed (T/Fz) rules: "both" (|map| ≥ t), "pos" or "neg". Top-x% rules
-      use their own sign.
+    :param sign: sign of the voxels kept by every rule (the Overlap tab's sign): "both" (|map| ≥ t), "pos" or "neg".
+      A top-x% rule's own sign only chooses its cut-off (the top x% of T, -T or |T|), as in ``cohort.group_maps``.
     :param voxel_volume_ml: volume of one voxel in ml; default from ``grid`` (else ``ml`` is None).
     :param grid: ``geometry.Grid`` of the maps, needed for peak persistence.
     :param mask_indices: flat C-order grid indices of the V voxels (default: the maps cover the grid).
@@ -302,6 +323,7 @@ def threshold_sweep(
 
     # Primary
     primary_rule = thresholds.normalize_rule(primary_rule)
+    _check_statistic(primary_rule, statistic)
     binary, primary_resolved = _threshold_maps(maps, primary_rule, n, v, sign, gsr)
     counts = binary.sum(axis=0)
     primary_overlap_map = counts * (100.0 / n_lesions)
@@ -310,10 +332,9 @@ def threshold_sweep(
     if grid is not None:
         world = _voxel_world(grid, mask_indices, n_vox)
         if peak_world is None and primary_binary.any():
-            primary_sign = primary_rule.get("sign", sign)
             mean_score = np.zeros(n_vox, dtype=np.float64)
             for lesion_map in maps:
-                mean_score += np.nan_to_num(_scores(lesion_map.astype(np.float64), primary_sign), nan=-np.inf)
+                mean_score += np.nan_to_num(_scores(lesion_map.astype(np.float64), sign), nan=-np.inf)
             candidates = np.flatnonzero(primary_overlap_map == primary_overlap_map[primary_binary].max())
             peak_world = world[candidates[np.argmax(mean_score[candidates])]]
         if peak_world is not None:
@@ -571,11 +592,43 @@ class Cohort:
         self.info = info or {}
         self.statistic = statistic
         self.run_id = run_id
+        self.maps_sha256 = None  # the identity of the maps.tsv the maps were read from (:func:`maps_sha256`), when known
 
     def subset(self, ids):
         index = {sid: row for row, sid in enumerate(self.ids)}
         rows = [index[sid] for sid in ids]
-        return Cohort(self.maps[rows], ids, self.n, self.grid, self.mask_indices, self.gsr, self.label, self.info, self.statistic, self.run_id)
+        subset = Cohort(self.maps[rows], ids, self.n, self.grid, self.mask_indices, self.gsr, self.label, self.info, self.statistic, self.run_id)
+        subset.maps_sha256 = self.maps_sha256
+        return subset
+
+
+def maps_sha256(rows):
+    """The identity of a cohort's per-lesion maps: SHA-256 of the sorted (participant_id, cache key) pairs of its maps.tsv rows.
+
+    The cache key covers the lesion's bytes, the connectome and its subjects and the mapping options (cohortmaps'
+    ``lesions_sha256``); rows without a key use their lesion_sha256. Mapping the same lesions again gives the same value.
+    """
+    from . import runs
+
+    pairs = []
+    for row in rows:
+        key = row.get("key")
+        if key in (None, "", NA):
+            key = row.get("lesion_sha256")
+        pairs.append((str(row.get("participant_id")), str(key)))
+    return runs.params_sha256(sorted(pairs))
+
+
+def maps_tsv_sha256(maps_tsv):
+    """:func:`maps_sha256` of a maps.tsv file."""
+    from . import cohortmaps
+
+    return maps_sha256(cohortmaps.read_maps_tsv(maps_tsv, resolve_paths=False))
+
+
+def _cohort_maps(cohort):
+    """{"run_id", "maps_sha256"} of the cohort maps a run used: a run whose maps are not the current ones is marked stale in the Robust card."""
+    return {"run_id": cohort.run_id, "maps_sha256": getattr(cohort, "maps_sha256", None)}
 
 
 def bundle_cohort_info(bundle, n=None):
@@ -608,8 +661,16 @@ def cohort_from(maps, info, ids, label=None):
                   info=info.get("info") or {k: v for k, v in info.items() if k not in ("grid", "mask_indices")})
 
 
+#: statistic ("T" or "Fz") of a maps.tsv column
+_COLUMN_STATISTIC = {"T": "T", "AvgFz": "Fz"}
+
+
 def load_cohort(maps_tsv, column="T", label=None):
-    """The :class:`Cohort` of a cohortmaps run (its maps.tsv, with cohortmaps.json beside it)."""
+    """The :class:`Cohort` of a cohortmaps run (its maps.tsv, with cohortmaps.json beside it).
+
+    :param column: the maps.tsv column: "T", or "AvgFz" (the mean Fz maps; the cohort's ``statistic`` is then "Fz").
+      :func:`rule_column` gives the column a threshold rule needs.
+    """
     from . import cohort as cohort_lib
     from . import cohortmaps
     from .geometry import Grid
@@ -627,8 +688,27 @@ def load_cohort(maps_tsv, column="T", label=None):
     n = record.get("n")
     if n is None:
         n = cohort_lib._n_from_header(rows[0]["T"]) if "T" in rows[0] else None
-    return Cohort(maps, [row["participant_id"] for row in rows], n, Grid(shape, affine), indices, gsr=bundle.get("gsr"),
-                  label=label or bundle.get("label") or "A", info=bundle, statistic=column, run_id=record.get("run_id"))
+    cohort = Cohort(maps, [row["participant_id"] for row in rows], n, Grid(shape, affine), indices, gsr=bundle.get("gsr"),
+                    label=label or bundle.get("label") or "A", info=bundle, statistic=_COLUMN_STATISTIC.get(column, column), run_id=record.get("run_id"))
+    cohort.maps_sha256 = maps_sha256(rows)
+    return cohort
+
+
+def case_subset(cohort, participants, group_column="group"):
+    """The lesions of the primary overlap: the cohort's cases when ``participants`` (a participants.tsv with
+    ``group_column``) names any of its lesions "case", else the whole cohort (as ``cohort.group_maps``, the Overlap
+    tab's sensitivity map, which is over the cases). Returns ``(cohort, ids left out)``.
+    """
+    if not participants:
+        return cohort, []
+    from .cohort import read_groups
+
+    groups = read_groups(participants, group_column)
+    cases = [sid for sid in cohort.ids if str(groups.get(sid) or "").strip().lower() == "case"]
+    if not cases or len(cases) == len(cohort.ids):
+        return cohort, []
+    kept = set(cases)
+    return cohort.subset(cases), [sid for sid in cohort.ids if sid not in kept]
 
 
 def _pearson_rows(a, b):
@@ -767,6 +847,8 @@ def compare_cohorts(cohort_a, cohort_b, rule, sign="both", overlap_pct=DEFAULT_S
     """
     np = _np()
     rule = thresholds.normalize_rule(rule)
+    _check_statistic(rule, cohort_a.statistic)
+    _check_statistic(rule, cohort_b.statistic)
     ids_b = set(cohort_b.ids)
     ids = [sid for sid in cohort_a.ids if sid in ids_b]
     if not ids:
@@ -902,8 +984,8 @@ def write_connectomes_tsv(rows, path):
     return _write_tsv(path, CONNECTOMES_COLUMNS, rows)
 
 
-def _cohortmaps_cohort(lesions, bundle, out_dir, label, emit, run_root, parents, options, cancel=None):
-    """Map ``lesions`` on ``bundle`` with cohortmaps into ``out_dir``; return (Cohort, cohortmaps run id)."""
+def _cohortmaps_cohort(lesions, bundle, out_dir, label, emit, run_root, parents, options, cancel=None, column="T"):
+    """Map ``lesions`` on ``bundle`` with cohortmaps into ``out_dir``; return (Cohort of the maps.tsv ``column``, cohortmaps run id)."""
     from . import cohort as cohort_lib
     from . import cohortmaps
 
@@ -920,8 +1002,9 @@ def _cohortmaps_cohort(lesions, bundle, out_dir, label, emit, run_root, parents,
     record = cohortmaps.run(lesions, bundle, out_dir, emit=inner, run_root=run_root, parent_runs=parents, cancel=cancel, **(options or {}))
     rows = cohortmaps.read_maps_tsv(record["maps_tsv"])
     info = bundle_cohort_info(bundle, n=record.get("n"))
-    maps = cohort_lib.load_masked([row["T"] for row in rows], info["mask_indices"], info["grid"].shape)
-    cohort = Cohort(maps, [row["participant_id"] for row in rows], record.get("n"), info["grid"], info["mask_indices"], gsr=info.get("gsr"), label=label or info["label"], info=info["info"], run_id=record.get("run_id"))
+    maps = cohort_lib.load_masked([row[column] for row in rows], info["mask_indices"], info["grid"].shape)
+    cohort = Cohort(maps, [row["participant_id"] for row in rows], record.get("n"), info["grid"], info["mask_indices"], gsr=info.get("gsr"), label=label or info["label"], info=info["info"],
+                    statistic=_COLUMN_STATISTIC.get(column, column), run_id=record.get("run_id"))
     return cohort, record.get("run_id")
 
 
@@ -958,7 +1041,8 @@ def replicate_on(maps_a, info_a, bundle_b, lesions, rule, out, ids=None, sign="b
         run_b = cohort_b.run_id
     else:
         label_b = bundle_cohort_info(bundle_b)["label"]
-        cohort_b, run_b = _cohortmaps_cohort(lesions, bundle_b, os.path.join(out, f"cohortmaps_conn-{label_b}"), label_b, emit, run_root, parents, cohortmaps_options, cancel)
+        cohort_b, run_b = _cohortmaps_cohort(lesions, bundle_b, os.path.join(out, f"cohortmaps_conn-{label_b}"), label_b, emit, run_root, parents, cohortmaps_options, cancel,
+                                             column=rule_column(rule))
     if cohort_a.label == cohort_b.label:
         # a relabelled copy: the caller's Cohort is not modified
         cohort_b = Cohort(cohort_b.maps, cohort_b.ids, cohort_b.n, cohort_b.grid, cohort_b.mask_indices, gsr=cohort_b.gsr, label=f"{cohort_b.label}-B",
@@ -986,7 +1070,7 @@ def replicate_on(maps_a, info_a, bundle_b, lesions, rule, out, ids=None, sign="b
                      connectome_a={"label": cohort_a.label, "n": cohort_a.n, "v": cohort_a.v, "manifest_sha256": (cohort_a.info or {}).get("manifest_sha256"), "run_id": cohort_a.run_id},
                      connectome_b={"label": cohort_b.label, "n": cohort_b.n, "v": cohort_b.v, "manifest_sha256": (cohort_b.info or {}).get("manifest_sha256"), "run_id": run_b},
                      resolved_a=_resolved_json(result["resolved_a"]), resolved_b=_resolved_json(result["resolved_b"]), common_voxels=result["common_voxels"],
-                     summary=summary, flagged=flagged, outputs={"connectomes": _relative(tsv, out)})
+                     summary=summary, flagged=flagged, outputs={"connectomes": _relative(tsv, out)}, cohort_maps=_cohort_maps(cohort_a))
     _write_json(os.path.join(out, "replicate.json"), record)
     record["rows"] = result["rows"]
     return record
@@ -1023,6 +1107,17 @@ def _design_arrays(design, n_lesions):
     if C.shape[0] != 1 or C.shape[1] != X.shape[1]:
         raise ValueError("Split-half and influence need a one-row (t) contrast with one weight per design column")
     return X, C[0]
+
+
+def _glm_rows(glm_maps, shape):
+    """The (L, V) float64 maps the GLM is fitted to (a :class:`Cohort` or an array), checked against the threshold maps' shape."""
+    np = _np()
+    if isinstance(glm_maps, Cohort):
+        glm_maps = glm_maps.maps
+    Y = np.asarray(glm_maps, dtype=np.float64)
+    if Y.shape != tuple(shape):
+        raise ValueError(f"The GLM maps have shape {Y.shape}, the thresholded maps {tuple(shape)}")
+    return Y
 
 
 def glm_t(XtX, XtY, yy, n, c):
@@ -1106,7 +1201,8 @@ def split_indices(n_lesions, n_splits=DEFAULT_SPLITS, seed=0, strata=None):
     return first, second
 
 
-def lesion_split_half(maps, n_splits=DEFAULT_SPLITS, seed=0, rule=None, n=None, v=None, gsr=None, sign="both", overlap_pct=DEFAULT_SENSITIVITY_PCT, design=None, strata=None, batch=None, cancel=None):
+def lesion_split_half(maps, n_splits=DEFAULT_SPLITS, seed=0, rule=None, n=None, v=None, gsr=None, sign="both", overlap_pct=DEFAULT_SENSITIVITY_PCT, design=None, strata=None, batch=None, cancel=None,
+                      glm_maps=None):
     """Lesion split-half stability (Ferguson 2019): distributions over ``n_splits`` random half splits.
 
     :param maps: (L, V) per-lesion maps (T maps for T rules) or a :class:`Cohort` (then ``n``, ``v`` and ``gsr`` come from it).
@@ -1115,6 +1211,8 @@ def lesion_split_half(maps, n_splits=DEFAULT_SPLITS, seed=0, rule=None, n=None, 
     :param overlap_pct: sensitivity criterion (% of the half's lesions).
     :param design: optional GLM (``design.Design``, {"X", "C"} or (X, C), rows in map order, one-row contrast):
       the t maps of the two halves are computed from their sufficient statistics and correlated.
+    :param glm_maps: optional (L, V) maps (or a :class:`Cohort`) the GLM is fitted to, rows as ``maps``: the maps of
+      the design's input (AvgFz for input "Fz"); default ``maps``.
     :param strata: optional label per lesion; splits are made within strata (e.g. groups of a two-group design).
     :param cancel: optional ``jobs.CancelToken`` (or Event/callable), checked before each batch of splits.
     :return: {"label", "n_splits", "seed", "half_size", "left_out", "r_overlap", "dice_sensitivity", "r_glm_t"
@@ -1122,12 +1220,13 @@ def lesion_split_half(maps, n_splits=DEFAULT_SPLITS, seed=0, rule=None, n=None, 
       "rule", "overlap_pct"}.
     """
     np = _np()
+    rule = thresholds.normalize_rule(rule)
     if isinstance(maps, Cohort):
+        _check_statistic(rule, maps.statistic)
         n, v, gsr, maps = maps.n, maps.v, maps.gsr, maps.maps
     maps = np.asarray(maps, dtype=np.float32)
     n_lesions, n_vox = maps.shape
     v = n_vox if v is None else int(v)
-    rule = thresholds.normalize_rule(rule)
     binary, _resolved = _threshold_maps(maps, rule, n, v, sign, gsr)
     binary = binary.astype(np.float32)
     first, second = split_indices(n_lesions, n_splits, seed, strata)
@@ -1137,7 +1236,7 @@ def lesion_split_half(maps, n_splits=DEFAULT_SPLITS, seed=0, rule=None, n=None, 
     r_overlap = np.full(n_splits, np.nan)
     dice = np.full(n_splits, np.nan)
     r_glm = np.full(n_splits, np.nan) if X is not None else None
-    Y = maps.astype(np.float64) if X is not None else None
+    Y = _glm_rows(maps if glm_maps is None else glm_maps, maps.shape) if X is not None else None
     Y2 = Y * Y if X is not None else None
     for start in range(0, n_splits, batch):
         _check_cancel(cancel, done=start)
@@ -1206,19 +1305,27 @@ def _peak_index(t, sign):
     return int(np.argmax(np.abs(t)))
 
 
-def leave_one_lesion_out(maps, design=None, ids=None, rule=None, n=None, v=None, gsr=None, sign="both", overlap_pct=DEFAULT_SENSITIVITY_PCT, top_k=DEFAULT_TOP_K, grid=None, mask_indices=None, cancel=None):
+def _has_influence(value):
+    return value is not None and value > 1e-12
+
+
+def leave_one_lesion_out(maps, design=None, ids=None, rule=None, n=None, v=None, gsr=None, sign="both", overlap_pct=DEFAULT_SENSITIVITY_PCT, top_k=DEFAULT_TOP_K, grid=None, mask_indices=None, cancel=None,
+                         glm_maps=None):
     """Leave-one-lesion-out influence, by downdates (no refit).
 
     For each lesion i: the sensitivity map of the other L - 1 lesions (overlap counts minus lesion i's binary map)
     against the full sensitivity map (Dice, voxels that change) and, with a design, the GLM t map without row i
     (:meth:`SufficientStatistics.t_without`): t at the full peak, the change, the new peak value and, with a grid,
-    how far the peak moved.
+    how far the peak moved. The sensitivity maps threshold ``maps`` (T maps for T rules); the GLM is fitted to
+    ``glm_maps`` (the maps of the design's input, AvgFz for input "Fz"; rows as ``maps``), default ``maps``.
 
     :return: {"rows" (one per lesion, in map order; keys of :data:`INFLUENCE_COLUMNS`), "top" (the ``top_k`` most
-      influential participant ids, ranked by |Δt at the peak| with a design, else by 1 - Dice), "peak" (full GLM peak)}.
+      influential participant ids, plus any lesion with the same influence as the last one, ranked by |Δt at the peak| with a design, else by 1 - Dice; lesions with no influence are never listed, so
+      empty when no single lesion changes the result), "peak" (full GLM peak)}.
     """
     np = _np()
     if isinstance(maps, Cohort):
+        _check_statistic(thresholds.normalize_rule(rule), maps.statistic)
         ids = ids or maps.ids
         n, v, gsr, grid, mask_indices, maps = maps.n, maps.v, maps.gsr, maps.grid, maps.mask_indices, maps.maps
     maps = np.asarray(maps, dtype=np.float32)
@@ -1238,7 +1345,7 @@ def leave_one_lesion_out(maps, design=None, ids=None, rule=None, n=None, v=None,
     stats_ = t_full = None
     peak = None
     if X is not None:
-        stats_ = SufficientStatistics(maps, X, c)
+        stats_ = SufficientStatistics(_glm_rows(maps if glm_maps is None else glm_maps, maps.shape), X, c)
         t_full = stats_.t()
         if t_full is None:
             raise ValueError("The design has no residual degrees of freedom or the contrast is not estimable")
@@ -1269,11 +1376,17 @@ def leave_one_lesion_out(maps, design=None, ids=None, rule=None, n=None, v=None,
             item["influence"] = None if dice_value is None else 1.0 - dice_value
         rows.append(item)
     order = sorted(range(n_lesions), key=lambda index: -(rows[index]["influence"] if rows[index]["influence"] is not None else -1.0))
+    cut = rows[order[min(top_k, n_lesions) - 1]]["influence"] if top_k >= 1 else None
     for rank, index in enumerate(order, start=1):
         rows[index]["rank"] = rank
-        rows[index]["top_k"] = rank <= top_k
-    return {"label": INFLUENCE_LABEL, "rows": rows, "top": [rows[index]["participant_id"] for index in order[:top_k]], "peak": peak, "rule": rule,
-            "overlap_pct": float(overlap_pct), "influence": "|Δt at the GLM peak|" if stats_ is not None else "1 - Dice of the sensitivity map"}
+        # A lesion is only "most influential" if removing it changes something: tied zeros keep map order and must not be listed.
+        # Lesions with the same influence as the one at the cut-off are all listed (the order among ties is arbitrary).
+        value = rows[index]["influence"]
+        tied = cut is not None and value is not None and math.isclose(value, cut, rel_tol=1e-9, abs_tol=1e-12)
+        rows[index]["top_k"] = (rank <= top_k or tied) and _has_influence(value)
+    top = [rows[index]["participant_id"] for index in order if rows[index]["top_k"]]
+    return {"label": INFLUENCE_LABEL, "rows": rows, "top": top, "peak": peak, "rule": rule,
+            "overlap_pct": float(overlap_pct), "sign": sign, "influence": "|Δt at the GLM peak|" if stats_ is not None else "1 - Dice of the sensitivity map"}
 
 
 def write_influence_tsv(result, path):
@@ -1347,21 +1460,66 @@ def _sphere_volume(centres, radius, spacing=1.0, margin=2.0):
 
 
 def read_coordinates(path):
-    """{participant_id: [(x, y, z), ...]} from a TSV with participant_id, x, y, z (RAS mm)."""
+    """{participant_id: [(x, y, z), ...]} from a TSV with participant_id, x, y, z (RAS mm).
+
+    :raises ValueError: that names the file, the data row (the first row after the header is row 1) and the column
+      of the first wrong value (missing, not a number, NaN or infinite), or says that a column is missing or that
+      the file has no rows. A file that cannot be read raises a ``ValueError`` too.
+    """
     from .study import read_tsv
 
-    columns, rows = read_tsv(path)
+    name = os.path.basename(os.fspath(path))
+    try:
+        columns, rows = read_tsv(path)
+    except OSError as exc:
+        raise ValueError(f"{name} cannot be read: {exc.strerror or exc}") from None
     for column in ("participant_id", "x", "y", "z"):
         if column not in columns:
-            raise ValueError(f"{path} has no {column} column")
+            hint = " It looks comma-separated: save it as a tab-separated table (TSV)." if len(columns) == 1 and "," in columns[0] else ""
+            raise ValueError(f"{name} has no {column} column (the columns are participant_id, x, y, z, separated by tabs).{hint}")
+    if not rows:
+        raise ValueError(f"{name} has no rows: add one row per seed (participant_id, x, y, z).")
     out = {}
-    for row in rows:
-        out.setdefault(row["participant_id"], []).append(tuple(float(row[axis]) for axis in "xyz"))
+    for number, row in enumerate(rows, start=1):
+        sid = row["participant_id"]
+        if sid == "n/a":
+            raise ValueError(f"{name}, row {number}: participant_id is missing")
+        point = []
+        for axis in "xyz":
+            value = row[axis]
+            if value == "n/a":
+                raise ValueError(f"{name}, row {number}, column {axis}: the value is missing (a number in mm is needed)")
+            try:
+                number_value = float(value)
+            except ValueError:
+                raise ValueError(f"{name}, row {number}, column {axis}: {value!r} is not a number (RAS mm)") from None
+            if not math.isfinite(number_value):
+                raise ValueError(f"{name}, row {number}, column {axis}: {value!r} is not a finite number (RAS mm)")
+            point.append(number_value)
+        out.setdefault(sid, []).append(tuple(point))
     return out
 
 
-def _build_variant(variant, sid, source, folder, coordinates, primary_probabilistic):
-    """Write one variant file of a lesion into ``folder``; return (entry, path or None for the unchanged source, probabilistic)."""
+def _sphere_in_mask(volume, affine, bundle):
+    """Whether any voxel of the sphere volume (local grid ``affine``) falls on a voxel of the connectome's brain mask."""
+    np = _np()
+    points = np.argwhere(np.asarray(volume) > 0)
+    if not len(points):
+        return False
+    world = points @ np.asarray(affine)[:3, :3].T + np.asarray(affine)[:3, 3]
+    ijk = np.rint((world - np.asarray(bundle.affine)[:3, 3]) @ np.linalg.inv(np.asarray(bundle.affine)[:3, :3]).T).astype(int)
+    mask = bundle.mask
+    ok = np.all((ijk >= 0) & (ijk < np.asarray(mask.shape)), axis=1)
+    ijk = ijk[ok]
+    return bool(len(ijk) and mask[ijk[:, 0], ijk[:, 1], ijk[:, 2]].any())
+
+
+def _build_variant(variant, sid, source, folder, coordinates, primary_probabilistic, bundle=None):
+    """Write one variant file of a lesion into ``folder``; return (entry, path or None for the unchanged source, probabilistic).
+
+    With ``bundle``, a sphere that has no voxel in the connectome's brain mask is not used: the lesion keeps its primary
+    seed (action "kept", with a "warning"), so the empty seed is not counted as a changed lesion with Dice 0.
+    """
     np = _np()
     from . import lesionops, nifti
 
@@ -1373,6 +1531,10 @@ def _build_variant(variant, sid, source, folder, coordinates, primary_probabilis
             return entry, None, primary_probabilistic
         radius = float(variant[len("sphere"):])
         volume, affine = _sphere_volume(centres, radius)
+        if bundle is not None and not _sphere_in_mask(volume, affine, bundle):
+            warning = "the sphere has no voxel in the connectome's brain mask (check the coordinates and their space); the primary seed is kept"
+            entry.update(action="kept", note=warning, warning=warning)
+            return entry, None, primary_probabilistic
         path = os.path.join(folder, _variant_name(sid, variant))
         nifti.write_nifti(path, volume, affine)
         entry["note"] = f"{len(centres)} coordinate(s), radius {radius:g} mm"
@@ -1451,7 +1613,9 @@ def seed_variants(study, variants=DEFAULT_VARIANTS, out=None, bundle=None, lesio
     :param probabilistic: how the primary seeds are mapped (cohortmaps' ``probabilistic``: False maps every non-zero
       voxel of the primary file as lesion, recorded as ``primary_binarization`` in variants.json).
     :param cancel: optional ``jobs.CancelToken`` (or Event/callable), checked before each variant and inside the mappings.
-    :return: the record written to ``<out>/variants.json``; with ``compare`` its "rows" are in seeds.tsv.
+    :return: the record written to ``<out>/variants.json``; with ``compare`` its "rows" are in seeds.tsv and its
+      "comparisons" summarise each applicable variant over the lesions it changed ("median_lesion_r",
+      "median_lesion_dice"; unchanged lesions match the primary by construction) with the group-mean map's "group_r".
     """
     from . import cohortmaps, jobs
     from .export import file_sha256
@@ -1472,13 +1636,23 @@ def seed_variants(study, variants=DEFAULT_VARIANTS, out=None, bundle=None, lesio
     os.makedirs(out, exist_ok=True)
     manifest = {}
     variant_lesions = {}
+    mask_bundle = None
+    if bundle is not None and any(name.startswith("sphere") for name in variants):
+        from .connectome import ConnectomeBundle
+
+        mask_bundle = ConnectomeBundle.open(bundle) if isinstance(bundle, (str, os.PathLike)) else bundle
+    in_run = {sid for sid, _path in lesions}
+    not_in_study = sorted(sid for sid in (coordinates or {}) if sid not in in_run) if any(name.startswith("sphere") for name in variants) else []
+    if not_in_study:
+        emit("warning", code="coordinates_not_in_study",
+             message=f"{len(not_in_study)} participant(s) of the coordinates file are not among the study's analysed lesions and are ignored: {', '.join(not_in_study[:20])}{' ...' if len(not_in_study) > 20 else ''}")
     for variant in variants:
         _check_cancel(cancel)
         folder = os.path.join(out, "variants", variant)
         os.makedirs(folder, exist_ok=True)
         entries, seeds, kinds = [], [], []
         for sid, source in lesions:
-            entry, path, prob = _build_variant(variant, sid, source, folder, coordinates, probabilistic)
+            entry, path, prob = _build_variant(variant, sid, source, folder, coordinates, probabilistic, mask_bundle)
             used = path or source
             entry.update(source=_relative(source, out), source_sha256=file_sha256(source), output=_relative(used, out), probabilistic=prob)
             if entry.get("source_traced"):
@@ -1497,7 +1671,7 @@ def seed_variants(study, variants=DEFAULT_VARIANTS, out=None, bundle=None, lesio
         maps_dir = os.path.join(out, "maps")
         options = dict(cohortmaps_options or {})
         options.setdefault("cache_root", cohortmaps.default_cache_root(study.path))
-        primary, primary_run = _cohortmaps_cohort([(sid, path) for sid, path in lesions], bundle, os.path.join(maps_dir, "primary"), "primary", emit, run_root, parents, {**options, "probabilistic": probabilistic}, cancel)
+        primary, primary_run = _cohortmaps_cohort([(sid, path) for sid, path in lesions], bundle, os.path.join(maps_dir, "primary"), "primary", emit, run_root, parents, {**options, "probabilistic": probabilistic}, cancel, column=rule_column(rule))
         parents.append(primary_run)
         for variant in variants:
             if not manifest[variant]["applicable"]:
@@ -1505,14 +1679,18 @@ def seed_variants(study, variants=DEFAULT_VARIANTS, out=None, bundle=None, lesio
                 continue
             # Fractional files are mapped with fractional weights; for binary files the weights are the same either way
             cohort_v, run_v = _cohortmaps_cohort(variant_lesions[variant], bundle, os.path.join(maps_dir, variant), variant, emit, run_root, [primary_run],
-                                                 {**options, "probabilistic": manifest[variant]["probabilistic"]}, cancel)
+                                                 {**options, "probabilistic": manifest[variant]["probabilistic"]}, cancel, column=rule_column(rule))
             parents.append(run_v)
             result = compare_cohorts(primary, cohort_v, rule, sign=sign, overlap_pct=overlap_pct)
             changed = {entry["participant_id"]: entry["action"] in CHANGED_ACTIONS for entry in manifest[variant]["lesions"]}
             for row in result["rows"]:
                 rows.append({"variant": variant, "map": row["map"], "kind": row["kind"], "changed": changed.get(row["participant_id"]) if row["participant_id"] else manifest[variant]["changed"],
                              "r": row["r"], "dice": row["dice"], "peaks_persist": row["peaks_persist"], "note": row["note"] or ("approximate (mirror)" if variant == "flipped" and row["kind"] == "lesion" else "")})
-            comparisons[variant] = {"median_lesion_r": result["median_lesion_r"], "group_r": result["group_r"], "run_id": run_v}
+            # Lesions the variant left unchanged keep their primary seed, so their r and Dice are 1 by construction:
+            # the summary is over the changed lesions, else a variant that inverts a few maps reads as 1.00
+            moved = [row for row in result["rows"] if row["kind"] == "lesion" and changed.get(row["participant_id"])]
+            comparisons[variant] = {"median_lesion_r": _median_or_none(row["r"] for row in moved), "median_lesion_dice": _median_or_none(row["dice"] for row in moved),
+                                    "median_over": "changed lesions", "n_changed": len(moved), "group_r": result["group_r"], "run_id": run_v}
         write_seeds_tsv(rows, os.path.join(out, SEEDS_TSV))
     _check_cancel(cancel)
     summary = {"seed_variants": list(variants), "comparisons": comparisons}
@@ -1521,10 +1699,18 @@ def seed_variants(study, variants=DEFAULT_VARIANTS, out=None, bundle=None, lesio
     record = _record("seeds", out, run_id, study=_relative(study.path, out), rule=rule, sign=sign, overlap_pct=overlap_pct, primary_probabilistic=probabilistic,
                      primary_binarization=PRIMARY_FRACTIONAL if probabilistic else PRIMARY_NONZERO,
                      note="Derived seed files only; the study's lesions/ folder is never modified.", mirror_note=None if "flipped" not in variants else _mirror_caveat(),
-                     variants=manifest, comparisons=comparisons)
+                     variants=manifest, comparisons=comparisons, coordinates_not_in_study=not_in_study)
     _write_json(os.path.join(out, VARIANTS_JSON), record)
     record["rows"] = rows
     return record
+
+
+def _median_or_none(values):
+    """Median of the finite values, or None."""
+    np = _np()
+    finite = np.asarray([value for value in values if value is not None], dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    return float(np.median(finite)) if finite.size else None
 
 
 def _mirror_caveat():
@@ -1618,8 +1804,8 @@ def connectome_split_half(run):
     """Summary of the connectome split-half of an engine run with ``--split-half`` (odd vs even subjects).
 
     :param run: the engine's output folder (its qa.json), qa.json or run.json, or their dict (or the "done" event).
-    :return: {"label": :data:`CONNECTOME_SPLIT_HALF_LABEL`, "n_odd", "n_even", "r" ({lesion: r}), "median_r",
-      "min_r", "small_halves" (fewer than 500 subjects per half), "rows" (connectomes.tsv rows)}.
+    :return: {"label": :data:`CONNECTOME_SPLIT_HALF_LABEL`, "bundle" (the connectome's name in qa.json, or None), "n_odd",
+      "n_even", "r" ({lesion: r}), "median_r", "min_r", "small_halves" (fewer than 500 subjects per half), "rows" (connectomes.tsv rows)}.
     """
     import json
 
@@ -1645,6 +1831,7 @@ def connectome_split_half(run):
              "r": r, "dice": None, "peaks_persist": None, "flag": "", "note": note} for name, r in values.items()]
     return {
         "label": CONNECTOME_SPLIT_HALF_LABEL,
+        "bundle": label,
         "n_odd": n_odd,
         "n_even": n_even,
         "r": values,
@@ -1721,6 +1908,9 @@ def build_parser():
     seeds.add_argument("--no-maps", action="store_true", help="only build the variant files and the manifest")
     seeds.add_argument("--cache", default=None, help="cohortmaps cache (default: the study's)")
     seeds.add_argument("--budget-gb", type=float, default=None, help="memory budget of one engine pass in GB")
+    for sub in (sweep, replicate, splithalf, influence):
+        sub.add_argument("--participants", default=None, help="participants.tsv: the overlap is over its cases when it names any (as the classic overlap of cohort.py)")
+        sub.add_argument("--group-column", default="group", help="group column of --participants (default: group)")
     consolidate = command("consolidate", "derived seeds with every lesion on one hemisphere (mirrored)", maps=False)
     consolidate.add_argument("--study", required=True, help="study folder")
     consolidate.add_argument("--side", required=True, help="hemisphere to consolidate on: L or R")
@@ -1728,15 +1918,18 @@ def build_parser():
 
 
 def _design_for(study_path, design_path, ids):
-    """(X, C) of a design.json built on the study, with its rows in the order of ``ids`` (maps without a design row are dropped)."""
+    """(X, C, kept ids, input) of a design.json built on the study, with its rows in the order of ``ids`` (maps without
+    a design row are dropped); input is the design's map statistic ("Fz" or "T", see ``glm.MAP_COLUMNS``).
+    """
     from . import design as design_lib
 
-    built = design_lib.build_design(study_path, design_lib.DesignSpec.load(design_path))
+    spec = design_lib.DesignSpec.load(design_path)
+    built = design_lib.build_design(study_path, spec)
     if built.blocking:
         raise ValueError("The design is blocked: " + "; ".join(check.message for check in built.blocking))
     rows = {sid: index for index, sid in enumerate(built.sids)}
     keep = [sid for sid in ids if sid in rows]
-    return built.X[[rows[sid] for sid in keep]], built.C, keep
+    return built.X[[rows[sid] for sid in keep]], built.C, keep, spec.input
 
 
 def _strata_for(study_path, column, ids):
@@ -1749,6 +1942,21 @@ def _strata_for(study_path, column, ids):
     if missing:
         raise ValueError(f"Strata: {len(missing)} map(s) have no row in the study ({', '.join(missing[:5])})")
     return [study.value(sid, column) for sid in ids]
+
+
+def _cases_of(args, cohort):
+    """``case_subset`` of the cohort for the command's --participants; a missing file is an input error."""
+    from . import jobs
+
+    participants = getattr(args, "participants", None)
+    if participants and not os.path.isfile(participants):
+        raise jobs.JobError(f"participants file not found: {participants}", code="input")
+    return case_subset(cohort, participants, getattr(args, "group_column", "group"))
+
+
+def _lesion_set(cohort, left_out):
+    """{"lesions": "cases" or "all", "n_lesions", "lesions_left_out": [ids that are not cases]} of a run's record."""
+    return {"lesions": "cases" if left_out else "all", "n_lesions": len(cohort.ids), "lesions_left_out": list(left_out)}
 
 
 def _run_root(args, out, study=None):
@@ -1771,19 +1979,24 @@ def main(argv=None):
     cancel = jobs.CancelToken(args.cancel_file)
     try:
         if args.command == "sweep":
-            cohort = load_cohort(args.maps)
+            # the maps of the rule's statistic, as in the Overlap tab: AvgFz for the Fz rules, else T
+            cohort, left_out = _cases_of(args, load_cohort(args.maps, column=rule_column(rule)))
             cancel.raise_if_cancelled()
-            rows = threshold_sweep(cohort.maps, cohort.n, cohort.v, rule, args.overlap, sign=args.sign, grid=cohort.grid, mask_indices=cohort.mask_indices, gsr=cohort.gsr)
+            rows = threshold_sweep(cohort.maps, cohort.n, cohort.v, rule, args.overlap, sign=args.sign, grid=cohort.grid, mask_indices=cohort.mask_indices, gsr=cohort.gsr,
+                                   statistic=cohort.statistic)
             write_sweep_tsv(rows, os.path.join(out, SWEEP_TSV))
             flip = conclusion_flips(rows)
             summary = {"conclusion_flips": flip["text"] if flip else None, "settings": len(rows)}
-            run_id = _register(_run_root(args, out), out, "sweep", {"rule": rule, "overlap_pct": args.overlap, "sign": args.sign}, parents=[*parents, cohort.run_id], summary=summary, outputs=[SWEEP_TSV])
-            _write_json(os.path.join(out, "sweep.json"), _record("sweep", out, run_id, rule=rule, overlap_pct=args.overlap, sign=args.sign, summary=summary))
+            lesion_set = _lesion_set(cohort, left_out)
+            run_id = _register(_run_root(args, out), out, "sweep", {"rule": rule, "overlap_pct": args.overlap, "sign": args.sign, "lesions": lesion_set["lesions"]}, parents=[*parents, cohort.run_id],
+                               summary=summary, outputs=[SWEEP_TSV])
+            _write_json(os.path.join(out, "sweep.json"), _record("sweep", out, run_id, rule=rule, overlap_pct=args.overlap, sign=args.sign, summary=summary, cohort_maps=_cohort_maps(cohort), **lesion_set))
             outputs = [os.path.join(out, SWEEP_TSV)]
         elif args.command == "replicate":
-            cohort = load_cohort(args.maps)
+            cohort, _left_out = _cases_of(args, load_cohort(args.maps, column=rule_column(rule)))
             rows = cohortmaps.read_maps_tsv(args.maps)
-            lesions = [(row["participant_id"], row["lesion"], row.get("lesion_sha256")) for row in rows]
+            kept = set(cohort.ids)
+            lesions = [(row["participant_id"], row["lesion"], row.get("lesion_sha256")) for row in rows if row["participant_id"] in kept]
             options = {"budget_bytes": cohortmaps._budget_bytes(args.budget_gb), "threads": args.threads, "resume": args.resume}
             if args.cache:
                 options["cache_root"] = args.cache
@@ -1795,39 +2008,50 @@ def main(argv=None):
             cancel.raise_if_cancelled()
             result = connectome_split_half(args.connectome_run)
             write_connectomes_tsv(result["rows"], os.path.join(out, CONNECTOMES_TSV))
-            summary = {"split_half": {key: result[key] for key in ("label", "n_odd", "n_even", "median_r", "min_r", "small_halves")}}
+            summary = {"split_half": {key: result[key] for key in ("label", "bundle", "n_odd", "n_even", "median_r", "min_r", "small_halves")}}
             run_id = _register(_run_root(args, out), out, "connectome_split_half", {}, parents=parents, summary=summary, outputs=[CONNECTOMES_TSV])
             _write_json(os.path.join(out, "connectome_split_half.json"), _record("connectome_split_half", out, run_id, **{k: v for k, v in result.items() if k != "rows"}))
             outputs = [os.path.join(out, CONNECTOMES_TSV)]
         elif args.command in ("splithalf", "influence"):
-            cohort = load_cohort(args.maps)
-            design = None
+            cohort = load_cohort(args.maps, column=rule_column(rule))
+            left_out = []
+            if not args.design:
+                # with a design the lesions are the design's rows (its GLM may compare the cases with the controls)
+                cohort, left_out = _cases_of(args, cohort)
+            design = glm_maps = glm_input = None
             if args.design:
+                from . import glm
+
                 if not args.study:
                     raise jobs.JobError("--design needs --study", code="usage", exit_code=jobs.EXIT_USAGE)
-                X, C, keep = _design_for(args.study, args.design, cohort.ids)
+                X, C, keep, glm_input = _design_for(args.study, args.design, cohort.ids)
                 cohort = cohort.subset(keep)
                 design = (X, C)
+                # The GLM is the Contrast tab's: fitted to the maps of the design's input (AvgFz for "Fz"); the
+                # overlap and sensitivity maps threshold the maps of the rule's statistic.
+                glm_maps = cohort if glm_input == cohort.statistic else load_cohort(args.maps, column=glm.MAP_COLUMNS[glm_input]).subset(keep)
             if args.command == "splithalf":
                 strata = _strata_for(args.study, args.strata, cohort.ids) if args.strata and args.study else None
-                result = lesion_split_half(cohort, n_splits=args.n_splits, seed=args.seed, rule=rule, sign=args.sign, overlap_pct=args.overlap, design=design, strata=strata, cancel=cancel)
+                result = lesion_split_half(cohort, n_splits=args.n_splits, seed=args.seed, rule=rule, sign=args.sign, overlap_pct=args.overlap, design=design, strata=strata, cancel=cancel, glm_maps=glm_maps)
                 write_splithalf_tsv(result, os.path.join(out, SPLITHALF_TSV))
                 arrays = {key: result[key] for key in ("r_overlap", "dice_sensitivity", "r_glm_t") if result[key] is not None}
                 np.savez_compressed(os.path.join(out, SPLITHALF_NPZ), **arrays)
                 summary = {"lesion_split_half": {metric: values.get("median") for metric, values in result["summary"].items()}, "label": result["label"]}
-                params = {"rule": rule, "sign": args.sign, "overlap_pct": args.overlap, "n_splits": args.n_splits, "design": bool(design), "strata": args.strata}
+                params = {"rule": rule, "sign": args.sign, "overlap_pct": args.overlap, "n_splits": args.n_splits, "design": bool(design), "glm_input": glm_input, "strata": args.strata,
+                          "lesions": _lesion_set(cohort, left_out)["lesions"]}
                 outputs = [SPLITHALF_TSV, SPLITHALF_NPZ]
                 fields = {k: v for k, v in result.items() if k not in arrays}
             else:
-                result = leave_one_lesion_out(cohort, design=design, rule=rule, sign=args.sign, overlap_pct=args.overlap, top_k=args.top_k, cancel=cancel)
+                result = leave_one_lesion_out(cohort, design=design, rule=rule, sign=args.sign, overlap_pct=args.overlap, top_k=args.top_k, cancel=cancel, glm_maps=glm_maps)
                 write_influence_tsv(result, os.path.join(out, INFLUENCE_TSV))
                 summary = {"influence_top": result["top"], "influence": result["influence"]}
-                params = {"rule": rule, "sign": args.sign, "overlap_pct": args.overlap, "design": bool(design), "top_k": args.top_k}
+                params = {"rule": rule, "sign": args.sign, "overlap_pct": args.overlap, "design": bool(design), "glm_input": glm_input, "top_k": args.top_k,
+                          "lesions": _lesion_set(cohort, left_out)["lesions"]}
                 outputs = [INFLUENCE_TSV]
                 fields = {k: v for k, v in result.items() if k != "rows"}
             run_id = _register(_run_root(args, out, args.study), out, args.command, params, parents=[*parents, cohort.run_id], summary=summary, outputs=outputs,
                                seeds={"splits": args.seed} if args.command == "splithalf" else None)
-            _write_json(os.path.join(out, f"{args.command}.json"), _record(args.command, out, run_id, **fields))
+            _write_json(os.path.join(out, f"{args.command}.json"), _record(args.command, out, run_id, glm_input=glm_input, cohort_maps=_cohort_maps(cohort), **fields, **_lesion_set(cohort, left_out)))
             outputs = [os.path.join(out, name) for name in outputs]
         elif args.command == "seeds":
             variants = [name.strip() for name in args.variants.split(",") if name.strip()]

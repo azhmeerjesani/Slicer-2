@@ -21,6 +21,7 @@ here imports Qt or Slicer, so the tests run the whole swap in a temporary folder
 ``xattr`` and ``open`` commands on Linux).
 """
 
+import calendar
 import json
 import os
 import plistlib
@@ -57,13 +58,40 @@ LAUNCHER_ENVIRONMENT = ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_
 
 HELPER_SCRIPT = r"""#!/bin/sh
 # Slicer Studio update helper (written by StudioLib/updates_install.py). It waits for the application to exit,
-# swaps the installed version with the new one, restores the previous version if anything fails, and relaunches.
-# Arguments: pid target staged backup result relaunch kind check [keepBackup]
+# swaps the installed version with the new one, restores the previous version if anything fails, and relaunches (the
+# new version, or the kept previous one after a failure, so that the failure is shown at once).
+# Arguments: pid target staged backup result relaunch kind check [keepBackup [otherPid...]]
+# The swap waits for every other Slicer Studio window of this installation too: the otherPids that the application
+# found when it started the helper and, on Linux, every process whose executable is inside the installation.
 set -u
 pid="$1"; target="$2"; staged="$3"; backup="$4"; result="$5"; relaunch="$6"; kind="$7"; check="$8"; keep="${9:-1}"
+if [ "$#" -ge 9 ]; then shift 9; else shift "$#"; fi
+# The installation folder as a find -lname pattern (its own wildcard characters escaped)
+pattern="$(printf '%s' "$target" | sed 's/[][*?\\]/\\&/g')/*"
 
 log() { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*"; }
-fail() { log "failed: $*"; printf 'failed %s\n' "$*" > "$result"; exit 1; }
+# Starts the application again (the new version, or the previous one when the swap failed and it was kept)
+relaunch_application() {
+  [ "$relaunch" = "1" ] || return 0
+  if [ "$kind" = "macos" ]; then
+    [ -e "$target" ] || { log "nothing to relaunch"; return 0; }
+    log "relaunching"
+    open -n "$target" || log "relaunch failed"
+  else
+    [ -x "$target/Slicer" ] || { log "nothing to relaunch"; return 0; }
+    log "relaunching"
+    nohup "$target/Slicer" >/dev/null 2>&1 &
+  fi
+}
+# exited=1 once the application has exited: from then on a failure still relaunches what is installed (the kept
+# previous version), so the user sees the failure message right away instead of an application that vanished
+exited=0
+fail() {
+  log "failed: $*"
+  printf 'failed %s\n' "$*" > "$result"
+  [ "$exited" = "1" ] && relaunch_application
+  exit 1
+}
 
 log "waiting for process $pid to exit"
 waited=0
@@ -74,6 +102,29 @@ while kill -0 "$pid" 2>/dev/null; do
   fi
   sleep 0.5
 done
+exited=1
+# Another window of this installation still runs: replacing the folder under it would mix two versions in one process
+others_running() {
+  for other in "$@"; do
+    [ "$other" = "$pid" ] && continue
+    kill -0 "$other" 2>/dev/null && return 0
+  done
+  if [ -d /proc/self ]; then
+    [ -n "$(find /proc/[0-9]*/exe -maxdepth 0 -lname "$pattern" 2>/dev/null | head -n 1)" ] && return 0
+  fi
+  return 1
+}
+if others_running "$@"; then
+  log "waiting for the other Slicer Studio windows of this installation to close"
+  waited=0
+  while others_running "$@"; do
+    waited=$((waited + 1))
+    if [ "$waited" -gt __EXIT_WAIT_TICKS__ ]; then
+      fail "another Slicer Studio window of this installation stayed open; nothing was changed"
+    fi
+    sleep 0.5
+  done
+fi
 log "installing $staged as $target"
 [ -e "$staged/$check" ] || fail "the new version is incomplete; nothing was changed"
 if [ -e "$backup" ]; then
@@ -99,14 +150,7 @@ if [ "$kind" = "macos" ]; then
 fi
 printf 'ok\n' > "$result"
 log "installed"
-if [ "$relaunch" = "1" ]; then
-  log "relaunching"
-  if [ "$kind" = "macos" ]; then
-    open -n "$target" || log "relaunch failed"
-  else
-    nohup "$target/Slicer" >/dev/null 2>&1 &
-  fi
-fi
+relaunch_application
 exit 0
 """.replace("__EXIT_WAIT_TICKS__", str(EXIT_WAIT_S * 2))
 
@@ -118,6 +162,40 @@ class InstallError(Exception):
         Exception.__init__(self, message)
         #: Text that explains how to install the update by hand, or None
         self.manualSteps = manualSteps
+
+
+class OtherWindowsOpen(InstallError):
+    """Another Slicer Studio window runs from the installation: the update cannot replace it now (nothing was changed)."""
+
+    def __init__(self, message, pids=()):
+        InstallError.__init__(self, message)
+        #: The processes of the other windows
+        self.pids = list(pids)
+
+
+class InstallCancelled(InstallError):
+    """The preparation of an update was cancelled (``cancelled()`` turned True); nothing was changed."""
+
+    def __init__(self):
+        InstallError.__init__(self, "The update was cancelled.")
+
+
+def _checkCancelled(cancelled):
+    if cancelled is not None and cancelled():
+        raise InstallCancelled()
+
+
+# Ends the errors about the content of a release file: installing that file by hand would not help
+RELEASE_FILE_WRONG = " The release file is wrong: the installed version was kept."
+
+
+def manualSteps(kind, packagePath, target):
+    """How to install the package ``packagePath`` (named by its full path: the user must find it) by hand."""
+    if kind == "macos":
+        return ("To install the update by hand, quit Slicer Studio, open the disk image "
+                f"{packagePath} and drag Slicer Studio to the Applications folder, replacing the old one.")
+    return (f"To install the update by hand, quit Slicer Studio, extract {packagePath} and replace the folder "
+            f"{target} with the extracted folder.")
 
 
 #
@@ -179,6 +257,56 @@ def _removeTree(path):
         shutil.rmtree(path)
 
 
+def _parentPid(pid):
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as f:
+            return int(f.read().rsplit(")", 1)[1].split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def processesRunningFrom(target, ownPid=None):
+    """The processes whose executable is inside ``target`` (Linux: read from ``/proc``; elsewhere, and for the processes
+    of other users, nothing is found), except ``ownPid`` (default: this process), its parents (the launcher) and its
+    children.
+    """
+    if not target or not os.path.isdir("/proc/self"):
+        return []
+    ownPid = os.getpid() if ownPid is None else ownPid
+    prefix = os.path.realpath(target).rstrip(os.sep) + os.sep
+    family = {ownPid}
+    parent = ownPid
+    while parent and parent > 1:
+        parent = _parentPid(parent)
+        if parent:
+            family.add(parent)
+    found = []
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return []
+    for name in names:
+        if not name.isdigit() or int(name) in family:
+            continue
+        try:
+            executable = os.readlink(f"/proc/{name}/exe")
+        except OSError:
+            continue  # gone, a kernel thread, or the process of another user
+        if executable.startswith(prefix):
+            found.append(int(name))
+    # A child of this process (for example a PythonSlicer worker) ends with it
+    children = set()
+    for pid in found:
+        current, seen = pid, set()
+        while current and current > 1 and current not in seen:
+            if current == ownPid:
+                children.add(pid)
+                break
+            seen.add(current)
+            current = _parentPid(current)
+    return sorted(pid for pid in found if pid not in children)
+
+
 def removeInBackground(path, onDone=None):
     """Delete the folder ``path`` in a background thread (for example the previous version after an update)."""
 
@@ -218,17 +346,19 @@ class PreparedInstall:
         self.package = package
         self.launched = False
 
-    def helperArguments(self, pid, resultPath, relaunch):
+    def helperArguments(self, pid, resultPath, relaunch, waitFor=()):
         # With administrator rights the previous version belongs to root: the helper removes it after the swap
         keepBackup = "0" if self.needsAdmin else "1"
-        return [str(pid), self.target, self.staged, self.backup, resultPath, "1" if relaunch else "0", self.kind, self.check, keepBackup]
+        others = [str(other) for other in waitFor if isinstance(other, int) and other > 0 and other != pid]
+        return [str(pid), self.target, self.staged, self.backup, resultPath, "1" if relaunch else "0", self.kind, self.check, keepBackup] + others
 
-    def launch(self, stateDir, pid=None, relaunch=True, record=None, env=None, popen=subprocess.Popen):
+    def launch(self, stateDir, pid=None, relaunch=True, record=None, env=None, popen=subprocess.Popen, waitFor=()):
         """Write the helper and the install record to ``stateDir`` and start the helper, detached.
 
-        The helper waits for the process ``pid`` (default: this process) to exit. ``record`` is merged into the
-        install record (for example the autosave session to offer for recovery). Return the helper process (or
-        the ``osascript`` process that starts it with administrator rights).
+        The helper waits for the process ``pid`` (default: this process) to exit, and for the processes ``waitFor``
+        (other Slicer Studio windows of the installation; on Linux it also looks for them itself). ``record`` is merged
+        into the install record (for example the autosave session to offer for recovery). Return the helper process
+        (or the ``osascript`` process that starts it with administrator rights).
         """
         os.makedirs(stateDir, exist_ok=True)
         pid = os.getpid() if pid is None else pid
@@ -248,12 +378,15 @@ class PreparedInstall:
             "backup": self.backup,
             "relaunch": bool(relaunch),
             "admin": bool(self.needsAdmin),
-            "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "log": logPath,
+            # The process the helper waits for: while it (or the helper) runs and no result is written, the install is
+            # still pending, and another Slicer Studio that starts meanwhile must leave the record and the staged copy alone
+            "pid": int(pid),
         }
         data.update(record or {})
         writeRecord(stateDir, data)
-        arguments = ["/bin/sh", scriptPath] + self.helperArguments(pid, resultPath, relaunch)
+        arguments = ["/bin/sh", scriptPath] + self.helperArguments(pid, resultPath, relaunch, waitFor)
         environment = cleanEnvironment(env)
         if self.needsAdmin:
             # The log belongs to this user (the helper appends to it as root)
@@ -272,6 +405,10 @@ class PreparedInstall:
             with open(logPath, "ab") as log:
                 process = popen(arguments, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, env=environment,
                                 close_fds=True, start_new_session=True)
+            helperPid = getattr(process, "pid", None)
+            if isinstance(helperPid, int) and helperPid > 0:
+                data["helperPid"] = helperPid
+                writeRecord(stateDir, data)
         self.launched = True
         return process
 
@@ -317,15 +454,15 @@ def _safeMembers(archive, root):
     return members, tops.pop(), total
 
 
-def prepareLinux(packagePath, target, expectedVersion, stagingParent=None):
+def prepareLinux(packagePath, target, expectedVersion, stagingParent=None, cancelled=None):
     """Extract the Linux package ``packagePath`` next to ``target`` and check it. Return a ``PreparedInstall``.
 
-    Raise ``InstallError`` (nothing installed, nothing changed next to ``target``) on any problem.
+    Raise ``InstallError`` (nothing installed, nothing changed next to ``target``) on any problem, and
+    ``InstallCancelled`` (the staging folder removed) when ``cancelled()`` turns True during the extraction.
     """
     if not target or not os.path.isdir(target):
         raise InstallError("The installed application folder was not found.")
-    manual = (f"To install the update by hand, quit Slicer Studio, extract {os.path.basename(packagePath)} and replace the folder "
-              f"{target} with the extracted folder.")
+    manual = manualSteps("linux", packagePath, target)
     if not isWritable(target):
         raise InstallError(f"Slicer Studio cannot replace itself: the folder {os.path.dirname(target)} is not writable.", manual)
     root = stagingRoot(target, stagingParent)
@@ -338,17 +475,26 @@ def prepareLinux(packagePath, target, expectedVersion, stagingParent=None):
             free = _freeBytes(root)
             if free is not None and free < total + FREE_SPACE_MARGIN:
                 raise InstallError(f"Not enough free disk space next to {target}: {total + FREE_SPACE_MARGIN >> 20} MB are needed.", manual)
+
+            def checkedMembers():
+                # Cancel is looked at before each file (a package has tens of thousands of them)
+                for member in members:
+                    _checkCancelled(cancelled)
+                    yield member
+
+            _checkCancelled(cancelled)
             if hasattr(tarfile, "data_filter"):
-                archive.extractall(root, members=members, filter="data")
+                archive.extractall(root, members=checkedMembers(), filter="data")
             else:
-                archive.extractall(root, members=members)
+                archive.extractall(root, members=checkedMembers())
+            _checkCancelled(cancelled)
         staged = os.path.join(root, top)
         for required in ("Slicer", os.path.join("bin", "SlicerApp-real")):
             if not os.path.exists(os.path.join(staged, required)):
-                raise InstallError(f"The package is not a Slicer Studio package ({required} is missing).", manual)
+                raise InstallError(f"The package is not a Slicer Studio package ({required} is missing)." + RELEASE_FILE_WRONG)
         stagedVersion = linuxPackageVersion(staged)
         if stagedVersion is not None and stagedVersion != str(expectedVersion):
-            raise InstallError(f"The package contains Slicer Studio {stagedVersion}, not {expectedVersion}.", manual)
+            raise InstallError(f"The package contains Slicer Studio {stagedVersion}, not {expectedVersion}." + RELEASE_FILE_WRONG)
     except InstallError:
         _removeTree(root)
         raise
@@ -406,14 +552,14 @@ def _readPlist(appPath):
         return None
 
 
-def prepareMacOS(dmgPath, target, expectedVersion, env=None, stagingParent=None):
+def prepareMacOS(dmgPath, target, expectedVersion, env=None, stagingParent=None, cancelled=None):
     """Copy the application of the disk image ``dmgPath`` to a staging folder next to ``target`` (the installed
     ``.app``). Return a ``PreparedInstall``; ``needsAdmin`` is set when the folder of ``target`` is not writable.
 
-    Raise ``InstallError`` (with manual steps) on any problem; the installed application is never touched here.
+    Raise ``InstallError`` (with manual steps) on any problem, and ``InstallCancelled`` (the staging folder removed)
+    when ``cancelled()`` is True between the steps; the installed application is never touched here.
     """
-    manual = ("To install the update by hand, quit Slicer Studio, open the disk image "
-              f"{os.path.basename(dmgPath)} and drag Slicer Studio to the Applications folder, replacing the old one.")
+    manual = manualSteps("macos", dmgPath, target)
     if not target or not os.path.isdir(target):
         raise InstallError("The installed application was not found.", manual)
     if isTranslocated(target):
@@ -432,11 +578,13 @@ def prepareMacOS(dmgPath, target, expectedVersion, env=None, stagingParent=None)
     try:
         _run(["hdiutil", "attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", mountPoint, dmgPath], env=env)
         attached = True
+        _checkCancelled(cancelled)
         apps = sorted(name for name in os.listdir(mountPoint) if name.endswith(".app") and os.path.isdir(os.path.join(mountPoint, name)))
         if not apps:
-            raise InstallError("The disk image contains no application.", manual)
+            raise InstallError("The disk image contains no application." + RELEASE_FILE_WRONG)
         staged = os.path.join(root, os.path.basename(target))
         _run(["ditto", os.path.join(mountPoint, apps[0]), staged], env=env)
+        _checkCancelled(cancelled)
     except InstallError:
         _removeTree(root)
         raise
@@ -467,7 +615,7 @@ def prepareMacOS(dmgPath, target, expectedVersion, env=None, stagingParent=None)
         problem = f"The disk image contains Slicer Studio {newInfo.get('CFBundleShortVersionString')}, not {expectedVersion}."
     if problem:
         _removeTree(root)
-        raise InstallError(problem, manual)
+        raise InstallError(problem + RELEASE_FILE_WRONG)
     return PreparedInstall("macos", target, staged, expectedVersion, os.path.join("Contents", "Info.plist"), needsAdmin=needsAdmin, package=dmgPath)
 
 
@@ -498,6 +646,14 @@ def readRecord(stateDir):
     except OSError:
         result = None
     return (record if isinstance(record, dict) else None), result
+
+
+def recordStartTime(record):
+    """When the helper of ``record`` was started (seconds since the epoch), or None."""
+    try:
+        return calendar.timegm(time.strptime(str(record.get("started") or ""), "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, OverflowError):
+        return None
 
 
 def clearRecord(stateDir):

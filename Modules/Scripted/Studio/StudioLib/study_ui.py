@@ -7,6 +7,13 @@ A study is a plain folder (``LesionNetworkMappingLib.study``): ``study.json``, `
   that already has a ``participants.tsv`` is adopted in place: its columns and their order are kept, a backup is
   written once to ``.studio/participants.orig.tsv`` and the values of a group column ("patient", "HC", "1"...) are
   mapped to case / control / exclude (``groupMappingProposal()``); the original text is kept in ``group_original``.
+  A yes / no or 0 / 1 flag column that is not named like a group ("aphasia", "smoker") is never proposed as the groups.
+  Any other participants table (a ``participants.csv`` in the folder, the table that was opened, a BIDS table of the
+  parent folder shown on the folder card) is imported into the study with the same group mapping (``studyTable()``).
+  The routes without the folder card (New study…, Create study of a participants table or of the loaded set) show the
+  same group-mapping step first (``askGroupMapping()``, L-01).
+  Another column named like a study column but holding other values (a "status" of "alive" / "deceased") is kept as
+  ``status_original``, so that tracing never overwrites it.
 - ``StudySession`` is ``shell.studySession`` (SPEC 2.10): ``study``, ``current()``, ``open(sid)``, ``next()``,
   ``previous()``, ``done()``, ``markDirty()`` and the extension points of the LNM addendum (``addDoneHook()``,
   ``addOpenHook()``, ``next(queue=…)``, ``flush()``, ``applyInbox()`` / ``mergeInbox()``, ``isDirty()``,
@@ -19,7 +26,8 @@ A study is a plain folder (``LesionNetworkMappingLib.study``): ``study.json``, `
   ``lesions/<sid>_space-<space>_desc-lesion_mask.nii.gz`` (a lesion already under ``lesions/`` is overwritten; one
   anywhere else, including ``derivatives/`` and the files of an adopted folder, is never modified: the row is
   repointed), with its BIDS sidecar, updates ``participants.tsv`` (status traced, volume, parts, gaps, centroid,
-  trace time) and opens the next untraced subject. ``Alt+←/→`` write the same way without marking the subject traced.
+  trace time) and opens the next untraced subject. ``Alt+←/→`` write the same way without marking the subject traced;
+  such a write that changes the voxels of an approved or rejected lesion reopens its review (→ pending, audited).
   Leaving a subject never fails because of its lesion's content: an erased lesion writes nothing (its file is kept,
   a toast says so) and edits that cancel out (paint, then undo) leave the file and the row untouched.
 - A subject switch pauses the rendering of the views (one render when it ends) instead of showing a wait cursor that
@@ -40,15 +48,23 @@ A study is a plain folder (``LesionNetworkMappingLib.study``): ``study.json``, `
   (``throughputText``, from ``trace_seconds``).
 - Nothing is written outside the study folder; ``participants.tsv`` is written only on the main thread, through
   ``Study.save()`` (lock and merge). Jobs post to ``.studio/inbox``; the session merges the inbox when a study is
-  opened, when Library is shown and on request. ``.studio/session.json`` holds a heartbeat (every 15 s) while the
+  opened, when Library is shown and on request. A job result that repoints the open subject (its scan, lesion or space)
+  never applies under its open scene: it waits while the subject has edits that are not written (retried), else the
+  subject is left, the result merged and the subject opened again (BB-1). ``.studio/session.json`` holds a heartbeat (every 15 s) while the
   study is open, and the trace queue; it is kept with ``heartbeat_epoch`` 0 when the study is closed.
+- **Two windows on one study**: opening a study whose ``session.json`` is the live heartbeat of another process says so
+  (a warning toast; the other window is told at its next heartbeat), and closing never marks that other session closed.
+  A lesion file that another window wrote after this one opened the subject is never replaced silently: it is copied
+  to ``.studio/conflicts/`` first and a toast names the copy.
 
 The session works in Studio and in Classic (the Studio module panel lists the subjects there). Settings: only
 ``Studio/RecentStudies`` (a JSON list of the recently opened studies).
 """
 
 import contextlib
+import datetime
 import importlib
+import io
 import json
 import logging
 import os
@@ -73,11 +89,22 @@ MAX_RECENT_STUDIES = 10
 #: .studio/session.json is refreshed this often while a study is open (A-04's ``pipeline init`` refuses a live one)
 HEARTBEAT_INTERVAL_MS = 15000
 SESSION_FILE = "session.json"
+#: A heartbeat younger than this is a live session (as ``pipeline.SESSION_STALE_S`` of A-04's ``pipeline init``)
+SESSION_STALE_S = 60.0
+#: Folder of .studio/ that keeps a lesion file another window wrote before this one replaced it
+CONFLICTS_DIR = "conflicts"
+#: A lesion file that this session did not read and that changed this long before its subject was opened (or later) is
+#: taken as written by another window (file times can be this coarse)
+CONFLICT_MTIME_SLACK_S = 2.0
 #: participants.tsv is saved this long after the last change (changes are kept in memory meanwhile)
 SAVE_DELAY_MS = 400
 #: How long a save waits for .studio/participants.lock on the main thread before it is retried from a timer
 SAVE_LOCK_TIMEOUT_S = 0.5
 SAVE_RETRY_MS = 2000
+#: A job result for the open subject's scan, lesion or space waits while its edits are not written; the merge is retried this often
+INBOX_RETRY_MS = 1500
+#: The row columns that say which files (and grid) the open subject's scene shows
+INBOX_SCENE_COLUMNS = ("scan", "lesion", "space")
 #: Tracing time stops counting after this long without an edit (SPEC 5.5)
 IDLE_PAUSE_S = 120.0
 #: Backup of an adopted participants table (written once)
@@ -85,6 +112,9 @@ ADOPT_BACKUP = "participants.orig.tsv"
 ADOPT_DICTIONARY_BACKUP = "participants.orig.json"
 #: Column that keeps the original text of a mapped "group" column
 GROUP_ORIGINAL_COLUMN = "group_original"
+#: An adopted column named like a study column with fixed values (status, qc, include, group) but holding other values
+#: ("alive", "deceased") is kept as "<name>_original"; the study column gets its default values
+ORIGINAL_SUFFIX = "_original"
 #: Node attribute of the subject's nodes (a participant id, never a path)
 SUBJECT_ATTRIBUTE = "Studio.StudySubject"
 #: The default tracing template: the bundled MNI152NLin2009cAsym 2 mm brain (works offline)
@@ -132,10 +162,19 @@ GROUP_WORDS = {
 GROUP_COLUMN_CANDIDATES = ("group", "diagnosis", "dx", "cohort", "condition", "patient", "is_patient", "case_control",
                            "casecontrol", "subject_type", "participant_type", "type", "arm")
 GROUP_TARGETS = ("case", "control", "exclude")
+#: Values of a yes / no flag: a column of these that is not named like a group (``GROUP_COLUMN_CANDIDATES``) is a symptom
+#: or other flag ("aphasia", "smoker"), never proposed as the study groups
+FLAG_WORDS = ("0", "1", "yes", "no", "y", "n", "true", "false")
 
 
 class Blocking(Exception):
     """Raised by a Done hook (``StudySession.addDoneHook()``) to stop Done → next; the message is shown inline."""
+
+
+class StudyFileError(ValueError):
+    """A study cannot be opened because its study.json is missing, unreadable or damaged; the message is plain words that
+    can be shown to the user as they are (no parser message, no traceback).
+    """
 
 
 #
@@ -209,6 +248,11 @@ def _renderPaused():
         slicer.app.resumeRender()
 
 
+def _plainOSError(error):
+    from . import autosave
+    return autosave.plainOSError(error)
+
+
 def _replaceFile(source, destination):
     """``os.replace``, retried while another program holds the file (``autosave_io.replaceWithRetry``)."""
     try:
@@ -245,12 +289,39 @@ def _commitCaseStripEdit(studySession):
         return True, ""
 
 
+def _caseStripEditing():
+    """True while a case strip field is being edited (its value is saved when the case is left)."""
+    try:
+        from . import casestrip
+    except ImportError:
+        return False
+    strip = getattr(casestrip, "_strip", None)
+    try:
+        return strip is not None and casestrip._isAlive(strip.widget) and bool(strip.isEditing())
+    except Exception:
+        return False
+
+
 def _toast(shell, text, **kwargs):
     shell = _currentShell(shell)
     if shell is not None:
         shell.toast(text, **kwargs)
     else:
         logging.info(f"Studio study: {text}")
+
+
+def _sidList(sids, shown=5):
+    """``"sub-01, sub-02 and 3 more"``: the first ``shown`` participant ids of a list, for a message."""
+    sids = list(sids)
+    if len(sids) <= shown:
+        return ", ".join(sids)
+    return _("{sids} and {count} more").format(sids=", ".join(sids[:shown]), count=len(sids) - shown)
+
+
+def _showFolder(folder):
+    from . import projects
+
+    projects.showInFileManager(folder)
 
 
 def _isAlive(qobject):
@@ -265,9 +336,56 @@ def _now():
     return _lnm("study").now_iso()
 
 
+def _fileStamp(path):
+    """``(normcase path, mtime_ns, size)`` of a file, None when it does not exist."""
+    try:
+        stat = os.stat(path)
+    except (OSError, TypeError, ValueError):
+        return None
+    return (os.path.normcase(os.path.abspath(path)), stat.st_mtime_ns, stat.st_size)
+
+
+def _liveOtherSession(record):
+    """``record`` (the content of a study's ``.studio/session.json``) when it is the heartbeat of another live session, else
+    None: younger than ``SESSION_STALE_S``, of another process, and on this host a process that still exists.
+    """
+    if not isinstance(record, dict):
+        return None
+    try:
+        beat = float(record.get("heartbeat_epoch") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if beat <= 0.0 or time.time() - beat > SESSION_STALE_S:
+        return None
+    if record.get("host") == socket.gethostname():
+        pid = record.get("pid")
+        if pid == os.getpid():
+            return None
+        try:
+            if pid and not _lnm("jobs").pid_alive(pid):
+                return None
+        except ImportError:
+            pass
+    return record
+
+
 def _isNifti(path):
     lower = str(path).lower()
     return lower.endswith(".nii") or lower.endswith(".nii.gz")
+
+
+def _imageDataProblem(path):
+    """Why the image data of the NIfTI file ``path`` cannot be read in full (cut short, damaged), else None.
+
+    The volume and segmentation readers read such a file without an error: the missing part comes back as zeros.
+    """
+    if not path or not _isNifti(path):
+        return None
+    try:
+        return _lnm("nifti").image_data_problem(path)
+    except Exception:
+        logging.error(f"Studio: {path} could not be checked:\n{traceback.format_exc()}")
+        return None
 
 
 def _isInside(path, folder):
@@ -276,6 +394,69 @@ def _isInside(path, folder):
     except ValueError:
         return False
     return relative != ".." and not relative.startswith(".." + os.sep) and not os.path.isabs(relative)
+
+
+def _samePath(first, second):
+    return os.path.normcase(os.path.realpath(first)) == os.path.normcase(os.path.realpath(second))
+
+
+def studyFolderProblem(folder):
+    """Why ``folder`` cannot become a new study, or None (A-09 layout): the Slicer Studio folder or a folder that holds it,
+    its Projects/, Studies/ and LNM/ folders, a project or a folder inside one, LNM/'s folders, or a folder inside another
+    study. Their NIfTI files belong to projects and to other studies; a study goes in its own folder (Studies/<name>/).
+    """
+    if not folder:
+        return None
+    folder = os.path.abspath(str(folder))
+    try:
+        from . import projects
+    except ImportError:
+        projects = None
+    if projects is not None and projects.isEnabled():
+        rootPath = projects.root()
+        if _samePath(folder, rootPath):
+            return _("This is the Slicer Studio folder: choose or create a folder inside Studies/ for the study")
+        if _isInside(rootPath, folder):
+            return _("{name} holds the Slicer Studio folder, whose projects and studies would become subjects: "
+                     "choose the folder of your study's files").format(name=os.path.basename(folder) or folder)
+        studiesPath = projects.studiesFolder(rootPath)
+        if _samePath(folder, studiesPath):
+            return _("Studies/ holds your studies: choose or create a folder inside it (one folder per study)")
+        projectsPath = projects.projectsFolder(rootPath)
+        if _samePath(folder, projectsPath):
+            return _("Projects/ holds your projects, not a study: choose or create a folder inside Studies/")
+        if _isInside(folder, projectsPath):
+            project = projects.projectOfPath(folder, rootPath)
+            name = os.path.basename(project) if project else os.path.basename(folder)
+            return _("This folder is part of the project {name}: choose or create a folder inside Studies/ for the study").format(name=name)
+        lnmPath = projects.lnmFolder(rootPath)
+        if _isInside(folder, lnmPath):
+            return _("LNM/ holds lesion network mapping data, not a study: choose or create a folder inside Studies/")
+    studyModule = _lnm("study")
+    if not studyModule.Study.is_study(folder):
+        parent = os.path.dirname(folder)
+        while parent and parent != os.path.dirname(parent):
+            if studyModule.Study.is_study(parent):
+                return _("This folder is inside the study {name}: open that study, or choose a folder outside it").format(
+                    name=os.path.basename(parent))
+            parent = os.path.dirname(parent)
+    return None
+
+
+def _outsideOtherStudies(files, folder):
+    """``files`` without those inside another study (a subfolder of ``folder`` with a study.json): never subjects of this one."""
+    studyModule = _lnm("study")
+    folder = os.path.normcase(os.path.realpath(folder))
+    cache = {}
+
+    def inStudy(directory):
+        if os.path.normcase(directory) == folder or os.path.dirname(directory) == directory:
+            return False
+        if directory not in cache:
+            cache[directory] = studyModule.Study.is_study(directory) or inStudy(os.path.dirname(directory))
+        return cache[directory]
+
+    return [path for path in files if not (_isInside(path, folder) and inStudy(os.path.dirname(os.path.realpath(path))))]
 
 
 #
@@ -299,8 +480,9 @@ def groupMappingProposal(columns, rows):
 
     :return: ``(column, {value: "case" | "control" | "exclude" | None})`` for the first column of
       ``GROUP_COLUMN_CANDIDATES`` (or any column) whose values are all recognized words, ``(column, mapping)`` with None
-      targets for a "group" column with unknown values (the user chooses), or None when there is nothing to map (no
-      group column, or a "group" column that already holds case / control / n/a only).
+      targets for a "group" column with unknown values, or for another column named like a group (``diagnosis``, ...)
+      with a case value, a control value and other values ("MCI", "unknown": the user chooses), or None when there is
+      nothing to map (no group column, or a "group" column that already holds case / control / n/a only).
     """
     lowered = {str(column).lower(): column for column in columns if column != "participant_id"}
 
@@ -325,29 +507,67 @@ def groupMappingProposal(columns, rows):
             continue
         targets = {value: groupTarget(value) for value in columnValues}
         if all(target in ("case", "control", "exclude") for target in targets.values()) and {"case", "control"} & set(targets.values()):
-            if column.lower() not in GROUP_COLUMN_CANDIDATES and set(targets.values()) <= {"case", "control"} and all(
-                    value in ("0", "1") for value in columnValues):
-                continue  # a 0/1 column that is not named like a group (for example "include" or a symptom flag)
+            if column.lower() not in GROUP_COLUMN_CANDIDATES and all(value.lower() in FLAG_WORDS for value in columnValues):
+                continue  # a 0/1, yes/no or true/false column that is not named like a group ("include", a symptom flag)
+            return column, targets
+    # A column named like a group whose values include one Studio does not know ("MCI", "unknown", "TIA") besides a
+    # case and a control value: still the groups, with the unknown values left to the user (None)
+    for column in ordered:
+        if column.lower() not in GROUP_COLUMN_CANDIDATES:
+            continue
+        columnValues = values(column)
+        if not 2 <= len(columnValues) <= 6:
+            continue
+        targets = {value: groupTarget(value) for value in columnValues}
+        if {"case", "control"} <= set(targets.values()):
             return column, targets
     return None
 
 
+#: A number written with a decimal comma ("54,5", "-0,25")
+_DECIMAL_COMMA = re.compile(r"^([+-]?\d+),(\d+)$")
+
+
 def readTable(path):
-    """(columns, rows) of a participants table (.tsv, or .csv with commas)."""
+    """(columns, rows) of a participants table (.tsv, or .csv separated by commas or semicolons).
+
+    A semicolon-separated .csv is what Excel saves in a decimal-comma locale: its numbers like "54,5" are read as "54.5".
+    """
     study = _lnm("study")
     if str(path).lower().endswith(".csv"):
         import csv
 
-        with open(path, encoding="utf-8-sig", newline="") as f:
-            reader = csv.reader(f)
-            table = [row for row in reader if any(cell.strip() for cell in row)]
+        with open(path, "rb") as f:
+            text = study.decode_table(f.read(), path)  # TableError (a ValueError) for a table that is not UTF-8
+        header = next((line for line in text.splitlines() if line.strip()), "")
+        delimiter = _importer().tableDelimiter(header, path)
+        table = [row for row in csv.reader(io.StringIO(text, newline=""), delimiter=delimiter) if any(cell.strip() for cell in row)]
         if not table:
             return [], []
+        if delimiter == ";":
+            table = [table[0]] + [[_DECIMAL_COMMA.sub(r"\1.\2", cell.strip()) for cell in row] for row in table[1:]]
         columns = [name.strip() for name in table[0]]
         rows = [{column: (value.strip() or study.NA) for column, value in zip(columns, row + [""] * (len(columns) - len(row)), strict=False)}
                 for row in table[1:]]
         return columns, rows
     return study.read_tsv(path)
+
+
+def studyTable(folder, table=None):
+    """The participants table that a study of ``folder`` imports (its groups and scores): ``table`` (the table that was
+    opened, or the one the folder card shows), else the folder's ``participants.csv`` when it has no participants.tsv.
+    None when there is none to import, and for the folder's own participants.tsv, which is adopted in place instead.
+    """
+    studyModule = _lnm("study")
+    folder = os.path.abspath(folder)
+    tsvPath = os.path.join(folder, studyModule.PARTICIPANTS_TSV)
+    if table is not None:
+        table = os.path.abspath(str(table))
+        return None if os.path.normcase(table) == os.path.normcase(tsvPath) else table
+    csvPath = os.path.join(folder, "participants.csv")
+    if not os.path.isfile(tsvPath) and os.path.isfile(csvPath):
+        return csvPath
+    return None
 
 
 def applyGroupMapping(rows, column, mapping):
@@ -371,29 +591,156 @@ def applyGroupMapping(rows, column, mapping):
     return changed
 
 
+def _execDialog(dialog):
+    """Run a dialog modally (``exec()`` in Qt 6 PythonQt, ``exec_()`` in Qt 5); True when it was accepted."""
+    run = getattr(dialog, "exec", None) or dialog.exec_
+    return bool(run())
+
+
+class GroupMappingDialog:
+    """The group-mapping step (L-01) of the routes that create a study without the folder card (New study…, Create study
+    of a participants table or of the loaded set): the proposed group column and a combo per value (Case, Control,
+    Exclude, —), as the folder card shows them. Create study accepts, Cancel creates nothing.
+    """
+
+    ROWS_SHOWN = 8  # rows visible at once; more values scroll
+
+    def __init__(self, column, mapping, parent=None, tableName="participants.tsv"):
+        self.column = column
+        self.dialog = qt.QDialog(parent or slicer.util.mainWindow())
+        self.dialog.setObjectName("StudioGroupMappingDialog")
+        self.dialog.setWindowTitle(_("New study: groups"))
+        self.dialog.setMinimumWidth(400)
+        layout = qt.QVBoxLayout(self.dialog)
+        self.titleLabel = qt.QLabel(_("{table} has groups in column '{column}'. Choose the study group of each value:").format(
+            table=tableName, column=column))
+        self.titleLabel.setObjectName("StudioGroupMappingTitle")
+        self.titleLabel.setWordWrap(True)
+        layout.addWidget(self.titleLabel)
+        rowsWidget = qt.QWidget()
+        rowsWidget.setObjectName("StudioGroupMappingRows")
+        rowsLayout = qt.QVBoxLayout(rowsWidget)
+        rowsLayout.setContentsMargins(0, 0, 0, 0)
+        rowsLayout.setSpacing(4)
+        self.combos = {}
+        targets = ((_("Case"), "case"), (_("Control"), "control"), (_("Exclude"), "exclude"), ("—", None))
+        for value, target in mapping.items():
+            row = qt.QHBoxLayout()
+            row.setSpacing(8)
+            valueLabel = qt.QLabel(f"{value}  →")
+            valueLabel.setObjectName("StudioGroupMappingValue")
+            row.addWidget(valueLabel, 1)
+            combo = qt.QComboBox()
+            combo.setObjectName("StudioGroupMappingCombo")
+            for text, data in targets:
+                combo.addItem(text, data)
+            combo.setCurrentIndex(next(index for index, (_text, data) in enumerate(targets) if data == target))
+            row.addWidget(combo)
+            rowsLayout.addLayout(row)
+            self.combos[value] = combo
+        if len(mapping) <= self.ROWS_SHOWN:
+            layout.addWidget(rowsWidget)
+        else:
+            scroll = qt.QScrollArea()
+            scroll.setObjectName("StudioGroupMappingScroll")
+            scroll.setFrameShape(qt.QFrame.NoFrame)
+            scroll.setWidgetResizable(True)
+            scroll.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+            scroll.setWidget(rowsWidget)
+            scroll.setFixedHeight(self.ROWS_SHOWN * (qt.QComboBox().sizeHint.height() + 4))
+            layout.addWidget(scroll)
+        note = qt.QLabel(_("— leaves the group empty. Your {table} keeps its columns; you can change groups later.").format(table=tableName))
+        note.setObjectName("StudioGroupMappingNote")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        buttons = qt.QHBoxLayout()
+        buttons.addStretch(1)
+        self.cancelButton = qt.QPushButton(_("Cancel"))
+        self.cancelButton.setObjectName("StudioGroupMappingCancelButton")
+        self.cancelButton.connect("clicked()", self.dialog.reject)
+        buttons.addWidget(self.cancelButton)
+        self.createButton = qt.QPushButton(_("Create study"))
+        self.createButton.setObjectName("StudioGroupMappingCreateButton")
+        self.createButton.setDefault(True)
+        self.createButton.connect("clicked()", self.dialog.accept)
+        buttons.addWidget(self.createButton)
+        layout.addLayout(buttons)
+
+    def mapping(self):
+        """{value: "case" | "control" | "exclude" | None} as chosen."""
+        return {value: combo.itemData(combo.currentIndex) for value, combo in self.combos.items()}
+
+
+def askGroupMapping(folder, parent=None, table=None):
+    """The group-mapping step (L-01) before a study is made of ``folder`` without the folder card.
+
+    The table is the one ``createStudy(folder=folder, table=table)`` uses: the folder's participants.tsv to adopt, else
+    the table it imports (``studyTable()``: ``table``, or the folder's participants.csv).
+
+    :return: the ``createStudy`` keywords: ``{}`` when there is nothing to map (no participants table, or no group
+      column proposed), ``{"groupColumn", "groupMapping"}`` as chosen in ``GroupMappingDialog``, or None when the user
+      cancelled (no study is created).
+    """
+    if not folder:
+        return {}
+    studyModule = _lnm("study")
+    folder = os.path.abspath(folder)
+    tablePath = studyTable(folder, table)
+    if tablePath is None:
+        tablePath = os.path.join(folder, studyModule.PARTICIPANTS_TSV)
+        if not os.path.isfile(tablePath) or studyModule.Study.is_study(folder):
+            return {}
+    try:
+        columns, rows = readTable(tablePath)
+        if os.path.basename(tablePath) == studyModule.PARTICIPANTS_TSV and "participant_id" in columns:
+            checkParticipantIds(tablePath, rows)  # refused before the groups are asked
+        proposal = groupMappingProposal(columns, rows)
+    except (OSError, ValueError):
+        return {}  # createStudy says what is wrong with the table
+    if proposal is None:
+        return {}
+    column, mapping = proposal
+    dialog = GroupMappingDialog(column, mapping, parent, tableName=os.path.basename(tablePath))
+    try:
+        if not _execDialog(dialog.dialog):
+            return None
+        return {"groupColumn": column, "groupMapping": dialog.mapping()}
+    finally:
+        dialog.dialog.deleteLater()
+
+
 #
 # Templates and connectome space
 #
 
 
-def registeredConnectomeSpace():
-    """The space of the first registered connectome bundle (``Studio/LNM/Connectomes`` → connectome.json ``space``;
-    a GSP1000 bundle without one is MNI152NLin6Asym), else None.
+def registeredConnectomeSpaces():
+    """The spaces of the registered connectome bundles, in registration order (``Studio/LNM/Connectomes`` → connectome.json
+    ``space``; a GSP1000 bundle without one is MNI152NLin6Asym). Bundles that do not open or name no space are left out.
     """
     value = qt.QSettings().value("Studio/LNM/Connectomes")
     paths = [value] if isinstance(value, str) else list(value or [])
+    spaces = []
     for path in paths:
         try:
             with open(os.path.join(str(path), "connectome.json"), encoding="utf-8") as f:
                 manifest = json.load(f)
         except (OSError, ValueError):
             continue
-        spaceName = manifest.get("space") if isinstance(manifest, dict) else None
+        if not isinstance(manifest, dict):
+            continue
+        spaceName = manifest.get("space")
         if spaceName:
-            return str(spaceName)
-        if "gsp" in str(manifest.get("name", "")).lower():
-            return GSP_SPACE
-    return None
+            spaces.append(str(spaceName))
+        elif "gsp" in str(manifest.get("name", "")).lower():
+            spaces.append(GSP_SPACE)
+    return spaces
+
+
+def registeredConnectomeSpace():
+    """The space of the first registered connectome bundle (see :func:`registeredConnectomeSpaces`), else None."""
+    spaces = registeredConnectomeSpaces()
+    return spaces[0] if spaces else None
 
 
 def _userDefaultTemplate():
@@ -492,29 +839,57 @@ def _newMetadata(studyModule, folder, name, template):
     }
 
 
+def _makeDirs(path, root, made):
+    """``os.makedirs(path, exist_ok=True)``; the folders that were created (parents first) are appended to ``made``."""
+    missing = []
+    current = path
+    while current != root and not os.path.isdir(current):
+        missing.append(current)
+        current = os.path.dirname(current)
+    os.makedirs(path, exist_ok=True)
+    made.extend(reversed(missing))
+
+
+class ParticipantTableError(ValueError):
+    """The participants table of the user's folder cannot be used (a repeated id): a problem with the user's file, not a program error."""
+
+    user_problem = True
+
+
+def checkParticipantIds(path, rows):
+    """Refuse a participants table that repeats an id, or has ids that differ only in letter case (ids name the lesion files).
+
+    :raises ParticipantTableError: with a message that names the table and the id.
+    """
+    studyModule = _lnm("study")
+    seen = {}
+    for row in rows:
+        sid = studyModule.participant_label(row["participant_id"])
+        twin = seen.get(sid.casefold())
+        if twin == sid:
+            raise ParticipantTableError(_("{path}: {id} appears twice (after normalizing the ids to sub-<label>)").format(path=path, id=sid))
+        if twin is not None:
+            raise ParticipantTableError(_("{path}: {id} differs from {other} only in letter case: on macOS they would share files").format(path=path, id=sid, other=twin))
+        seen[sid.casefold()] = sid
+
+
 def adoptFolder(folder, name=None, groupColumn=None, groupMapping=None, template=None):
     """Make a study of a folder that has a participants.tsv (adopt in place) and return the opened ``Study``.
 
     The table's columns and their order are kept (the missing standard columns are appended); its rows keep their
     values, except the ids (normalized to "sub-<label>", the original in ``source_id``) and the group mapping
-    (``applyGroupMapping()``). participants.tsv and participants.json are backed up once to ``.studio/``.
+    (``applyGroupMapping()``). A column named like a study column with fixed values (status, qc, include, group) that
+    holds other values ("alive", "deceased"), and a space column of other values than spaces (a field strength of 3T), is
+    kept as ``<name>_original`` (``_keepClashingColumns()``; the returned
+    study's ``adoptedRenames`` lists them). participants.tsv and participants.json are backed up once to ``.studio/``.
     """
     studyModule = _lnm("study")
     folder = os.path.abspath(folder)
     tsvPath = os.path.join(folder, studyModule.PARTICIPANTS_TSV)
     privateDir = os.path.join(folder, studyModule.PRIVATE_DIR)
-    for subfolder in (studyModule.LESIONS_DIR, studyModule.DERIVATIVES_DIR, os.path.join(studyModule.PRIVATE_DIR, "thumbs"),
-                      os.path.join(studyModule.PRIVATE_DIR, "journal")):
-        os.makedirs(os.path.join(folder, subfolder), exist_ok=True)
-    backup = os.path.join(privateDir, ADOPT_BACKUP)
-    if not os.path.exists(backup):
-        shutil.copy2(tsvPath, backup)
     dictionaryPath = os.path.join(folder, studyModule.PARTICIPANTS_JSON)
     dictionary = {}
     if os.path.isfile(dictionaryPath):
-        dictionaryBackup = os.path.join(privateDir, ADOPT_DICTIONARY_BACKUP)
-        if not os.path.exists(dictionaryBackup):
-            shutil.copy2(dictionaryPath, dictionaryBackup)
         try:
             with open(dictionaryPath, encoding="utf-8-sig") as f:
                 dictionary = json.load(f)
@@ -526,13 +901,10 @@ def adoptFolder(folder, name=None, groupColumn=None, groupMapping=None, template
     if "participant_id" not in columns:
         raise ValueError(_("{path} has no participant_id column").format(path=tsvPath))
     added = []
-    seen = set()
+    checkParticipantIds(tsvPath, rows)
     for row in rows:
         original = row["participant_id"]
         sid = studyModule.participant_label(original)
-        if sid in seen:
-            raise ValueError(_("{path}: {id} appears twice (after normalizing the ids to sub-<label>)").format(path=tsvPath, id=sid))
-        seen.add(sid)
         if sid != original:
             row["participant_id"] = sid
             if studyModule.is_missing(row.get("source_id")):
@@ -545,14 +917,169 @@ def adoptFolder(folder, name=None, groupColumn=None, groupMapping=None, template
             added.append(GROUP_ORIGINAL_COLUMN)
             for row in rows:
                 row.setdefault(GROUP_ORIGINAL_COLUMN, studyModule.NA)
-    ordered = ["participant_id"] + [column for column in columns if column != "participant_id"]
+    for row in rows:  # file paths that point inside the folder are stored relative to it (the study stays movable)
+        for column in ("scan", "lesion"):
+            value = row.get(column)
+            if not studyModule.is_missing(value) and os.path.isabs(value) and studyModule._is_relative_to(os.path.abspath(value), folder):
+                row[column] = os.path.relpath(os.path.abspath(value), folder).replace(os.sep, "/")
+    columns = [column for column in columns if column != "participant_id"]
+    renamed = _keepClashingColumns(studyModule, columns + added, rows, dictionary, folder)
+    columns = [renamed.get(column, column) for column in columns]
+    ordered = ["participant_id"] + columns
     ordered += [column for column in studyModule.STANDARD_COLUMNS if column not in ordered]
     ordered += [column for column in added if column not in ordered]
     template = template or defaultTemplate()
-    studyObject = studyModule.Study(folder, _newMetadata(studyModule, folder, name, template), ordered, rows, dictionary)
-    # The new study.json is written next to the user's table, without the merge of a later save (nothing else writes it yet)
-    studyObject.save(merge=False)
-    return studyModule.Study.open(folder)
+    # Everything that can fail on the user's table has been checked: only now the folders and the backups are made, so a
+    # table that cannot be adopted leaves the folder as it was (and a retry backs up the table that is adopted then).
+    # What this call made is removed again when the rest fails.
+    made = []
+    try:
+        for subfolder in (studyModule.LESIONS_DIR, studyModule.DERIVATIVES_DIR, os.path.join(studyModule.PRIVATE_DIR, "thumbs"),
+                          os.path.join(studyModule.PRIVATE_DIR, "journal")):
+            _makeDirs(os.path.join(folder, subfolder), folder, made)
+        for source, backupName in ((tsvPath, ADOPT_BACKUP), (dictionaryPath, ADOPT_DICTIONARY_BACKUP)):
+            backup = os.path.join(privateDir, backupName)
+            if os.path.isfile(source) and not os.path.exists(backup):
+                shutil.copy2(source, backup)
+                made.append(backup)
+        studyObject = studyModule.Study(folder, _newMetadata(studyModule, folder, name, template), ordered, rows, dictionary)
+        # The new study.json is written next to the user's table, without the merge of a later save (nothing else writes it yet)
+        studyObject.save(merge=False)
+        opened = studyModule.Study.open(folder)
+    except BaseException:
+        if not os.path.exists(os.path.join(folder, studyModule.STUDY_JSON)):
+            for path in reversed(made):
+                try:
+                    os.rmdir(path) if os.path.isdir(path) else os.remove(path)
+                except OSError:
+                    pass
+        raise
+    opened.adoptedRenames = renamed
+    return opened
+
+
+#: Study columns that hold a path to an image relative to the study (SPEC 5.5)
+PATH_COLUMNS = ("scan", "lesion")
+
+
+def _isImagePath(studyModule, value, folder):
+    """Whether a cell of an adopted scan or lesion column names an image: a NIfTI file name, or a file in ``folder``."""
+    value = str(value).strip()
+    if value.lower().endswith(studyModule.NIFTI_EXTENSIONS):
+        return True
+    return bool(folder) and os.path.isfile(os.path.join(folder, value))
+
+
+def _keepClashingColumns(studyModule, columns, rows, dictionary, folder=None):
+    """Keep the user's columns that are named like a study column with fixed values but hold other values.
+
+    A "status" column of "alive" / "deceased" is renamed to ``status_original`` (its values, position and data dictionary
+    entry unchanged) and the study's own column gets its default values (an "include" column of yes / no / true / false or
+    1.0 / 0.0 keeps its meaning as 1 / 0, ``study.include_value``), so that tracing never overwrites the user's values. A study column that already holds
+    allowed values only is the study's column; its empty cells get the default. ``columns`` (without participant_id),
+    ``rows`` and ``dictionary`` are changed in place.
+
+    A "scan" or "lesion" column whose cells are not all image paths (a clinical "lesion" column of yes / no, "left MCA")
+    is kept the same way as ``lesion_original``, and the study's own column starts empty (n/a), so that the folder's
+    scans and lesion files are paired by ``Study.add_files`` and tracing never overwrites the user's values. A path is a
+    NIfTI file name or a file in ``folder``; a column of paths (also of missing files) is the study's column.
+    A "space" column whose cells are not all spaces (``study.is_space_value``: "native" or a template id; a field
+    strength of 1.5T / 3T) is kept the same way as ``space_original``: the study's space column starts empty, so that
+    ``Study.add_files`` sets it from the files' grids and lesions are never named or shared with the user's values.
+
+    :return: {old name: new name} of the renamed columns.
+    """
+    renamed = {}
+    for column in (*PATH_COLUMNS, "space"):
+        if column not in columns:
+            continue
+        values = [row.get(column, studyModule.NA) for row in rows]
+        if column == "space":
+            if all(studyModule.is_space_value(value) for value in values):
+                continue
+        elif all(studyModule.is_missing(value) or _isImagePath(studyModule, value, folder) for value in values):
+            continue
+        target = _originalName(studyModule, column, columns, rows, dictionary)
+        columns[columns.index(column)] = target
+        for row in rows:
+            row[target] = row.pop(column, studyModule.NA)
+            row[column] = studyModule.NA
+        if column in dictionary:
+            dictionary[target] = dictionary.pop(column)
+        renamed[column] = target
+        logging.info(f"Studio: the adopted column {column} holds other values than {'spaces' if column == 'space' else 'image paths'}; kept as {target}")
+    for column, allowed in studyModule.ALLOWED_VALUES.items():
+        if column not in columns:
+            continue
+        default = studyModule.DEFAULTS.get(column, studyModule.NA)
+        values = [str(row.get(column, studyModule.NA)).strip() for row in rows]
+        if all(studyModule.is_missing(value) or value in allowed for value in values):
+            for row in rows:
+                if studyModule.is_missing(row.get(column)):
+                    row[column] = default
+            continue
+        target = _originalName(studyModule, column, columns, rows, dictionary)
+        columns[columns.index(column)] = target
+        for row, value in zip(rows, values, strict=True):
+            row[target] = row.pop(column, studyModule.NA)
+            mapped = studyModule.include_value(value) if column == "include" else None
+            row[column] = mapped or default
+        if column in dictionary:
+            dictionary[target] = dictionary.pop(column)
+        renamed[column] = target
+        logging.info(f"Studio: the adopted column {column} holds other values than the study's ({', '.join(allowed)}); kept as {target}")
+    return renamed
+
+
+def _originalName(studyModule, column, columns, rows, dictionary):
+    """``<column>_original`` (``_original2``, ... when the table already uses that name) for a renamed adopted column."""
+    target, number = column + ORIGINAL_SUFFIX, 2
+    while target in columns or target in dictionary or any(target in row for row in rows):
+        target, number = f"{column}{ORIGINAL_SUFFIX}{number}", number + 1
+    return target
+
+
+def _importClashingColumns(studyModule, columns, rows):
+    """Keep the columns of a table imported into a study that are named like a study column with fixed values but hold other
+    values (``_keepClashingColumns()`` of adopting a folder, for an open study), or a "space" column that holds other
+    values than spaces (``study.is_space_value``; a field strength of 1.5T / 3T).
+
+    Such a column ("status" of alive / deceased) is renamed to ``<name>_original`` (a name the table does not use yet), so
+    that the import keeps its values without changing the study's own column (tracing status, QC). An include column keeps
+    the values that mean 1 or 0 (``study.include_value``: yes / no, 1.0 / 0.0) in the study's include column. A column whose
+    values are all allowed values (in any spelling that ``study.canonical_value`` reads) or missing is the study's column.
+    ``columns`` (without or with participant_id) and ``rows`` are changed in place.
+
+    :return: {old name: new name} of the renamed columns.
+    """
+    renamed = {}
+    for column in (*studyModule.ALLOWED_VALUES, "space"):
+        if column not in columns:
+            continue
+        values = [row.get(column, studyModule.NA) for row in rows]
+        if column == "space":
+            if all(studyModule.is_space_value(value) for value in values):
+                continue
+        elif all(studyModule.is_missing(value) or studyModule.canonical_value(column, value) is not None for value in values):
+            continue
+        target, number = column + ORIGINAL_SUFFIX, 2
+        while target in columns:
+            target, number = f"{column}{ORIGINAL_SUFFIX}{number}", number + 1
+        columns[columns.index(column)] = target
+        keepInclude = column == "include"
+        if keepInclude:
+            columns.append(column)
+        for row, value in zip(rows, values, strict=True):
+            row[target] = row.pop(column, studyModule.NA)
+            mapped = studyModule.include_value(value) if keepInclude else None
+            row[column] = mapped if mapped is not None else studyModule.NA  # a missing cell leaves the study's value
+        if not keepInclude:
+            for row in rows:
+                row.pop(column, None)
+        renamed[column] = target
+        allowed = studyModule.ALLOWED_VALUES.get(column) or ("native", "template spaces")
+        logging.info(f"Studio: the imported column {column} holds other values than the study's ({', '.join(allowed)}); kept as {target}")
+    return renamed
 
 
 def _commonFolder(files):
@@ -565,12 +1092,27 @@ def _commonFolder(files):
         return folders[0]
 
 
-def createStudy(files, shell=None, folder=None, groupColumn=None, groupMapping=None, name=None, openIt=True):
+def _creationMessage(how, name, n):
+    """The toast of a made or opened study; "1 subject" in the singular (``how``: created, adopted or opened)."""
+    one = n == 1
+    text = {
+        "created": _("Study {name} created: 1 subject") if one else _("Study {name} created: {n} subjects"),
+        "adopted": _("Study {name} created in place: 1 subject (participants.tsv kept, backup in .studio)") if one else _(
+            "Study {name} created in place: {n} subjects (participants.tsv kept, backup in .studio)"),
+        "opened": _("Study {name}: 1 subject") if one else _("Study {name}: {n} subjects"),
+    }[how]
+    return text.format(name=name, n=n)
+
+
+def createStudy(files, shell=None, folder=None, groupColumn=None, groupMapping=None, name=None, openIt=True, table=None):
     """Create a study of NIfTI files (a dropped folder, a loaded set) and open it; return the ``StudySession``.
 
     The study folder is ``folder``, else the folder that holds the files. A folder that already is a study is opened
     (and the files are added to it); a folder with a participants.tsv is adopted in place (``adoptFolder()``).
     Scans and lesions are paired by subject id from their file names, reading only their headers: no node is created.
+    The participants table ``studyTable(folder, table)`` (the table that was opened or shown, else the folder's
+    participants.csv) is imported into the study (groups and scores); ``groupColumn`` and ``groupMapping`` then apply
+    to that table, else to the adopted participants.tsv.
     """
     if not isAvailable():
         raise RuntimeError(_("Studies need the lesion network mapping library, which is not part of this build"))
@@ -579,9 +1121,20 @@ def createStudy(files, shell=None, folder=None, groupColumn=None, groupMapping=N
     folder = os.path.abspath(folder or _commonFolder(files) or "")
     if not folder or not os.path.isdir(folder):
         raise ValueError(_("Choose a study folder"))
+    # Studio's own folders (Studies/, Projects/, a project, ...) and folders inside a study never become a study
+    problem = studyFolderProblem(folder)
+    if problem:
+        raise ValueError(problem)
     # The study's own application files and network maps are never subjects
     excluded = [os.path.join(folder, studyModule.PRIVATE_DIR), os.path.join(folder, studyModule.DERIVATIVES_DIR, "lnm")]
     files = [path for path in files if not any(_isInside(path, other) for other in excluded)]
+    # Nor are the files of another study in a subfolder
+    files = _outsideOtherStudies(files, folder)
+    # A participants table that is not the folder's own participants.tsv is imported, with the group mapping
+    importPath = studyTable(folder, table)
+    importGroups = (groupColumn, groupMapping)
+    if importPath is not None:
+        groupColumn = groupMapping = None
     startTime = time.perf_counter()
     if studyModule.Study.is_study(folder):
         studyObject = studyModule.Study.open(folder)
@@ -599,28 +1152,98 @@ def createStudy(files, shell=None, folder=None, groupColumn=None, groupMapping=N
         studyObject = studyModule.Study.create(folder, name, template=template, software=_softwareRecord())
         studyObject.trace_policy = defaultTracePolicy(template)
         how = "created"
-    report = studyObject.add_files(files) if files else {"added": [], "updated": [], "skipped": [], "pairs": {}, "warnings": []}
+    # Ids come from the file names, else from the subject folders below the study folder (patient01/T1.nii.gz), never
+    # from the folders above it
+    report = studyObject.add_files(files, root=folder) if files else {"added": [], "updated": [], "skipped": [], "pairs": {}, "warnings": []}
     gridRows = _gridCandidates(studyObject)
     _applyGridAnswers(studyObject, gridRows)
+    imported, importProblem = None, None
+    if importPath is not None:
+        try:
+            imported = _importTable(studyObject, importPath, *importGroups)
+        except (OSError, ValueError) as exc:
+            # The study is made all the same; the toast says why the table was not imported (Import can do it later)
+            importProblem = str(exc)
+            logging.warning(f"Studio: {os.path.basename(importPath)} was not imported into the new study: {exc}")
     studyObject.save()
     elapsed = time.perf_counter() - startTime
     logging.info(f"Studio: study {studyObject.name} {how} in {elapsed * 1000:.0f} ms ({len(studyObject)} subjects, {len(files)} files)")
     if not openIt:
         return studyObject
     session = openStudy(studyObject, shell)
+    if session is None:
+        # The open project could not be saved and the user keeps working in it: the study is made, Library opens it later
+        text = _creationMessage("opened" if how == "opened" else "created", studyObject.name, len(studyObject))
+        _toast(_currentShell(shell), text, ms=5000, action=lambda: _showFolder(folder), actionText=_("Show folder"), level="consequence")
+        return None
     session.creationReport = {"how": how, "seconds": elapsed, "report": report, "files": len(files)}
     session._gridRows = gridRows
     shell = _currentShell(shell)
-    message = {
-        "created": _("Study {name} created: {n} subjects"),
-        "adopted": _("Study {name} created in place: {n} subjects (participants.tsv kept, backup in .studio)"),
-        "opened": _("Study {name}: {n} subjects"),
-    }[how].format(name=studyObject.name, n=len(studyObject))
+    message = _creationMessage(how, studyObject.name, len(studyObject))
+    if imported is not None:
+        message += " · " + _("{table} imported").format(table=os.path.basename(importPath))
+    elif importProblem:
+        message += " · " + _("{table} not imported: {reason}").format(table=os.path.basename(importPath), reason=importProblem)
+    renames = dict(getattr(studyObject, "adoptedRenames", None) or {})
+    renames.update((imported or {}).get("renamed") or {})
+    for column, kept in renames.items():
+        message += " · " + _("your {column} column is kept as {kept}").format(column=column, kept=kept)
+    noId = _noSubjectId(report)
     if report.get("skipped"):
-        message += " · " + (_("1 file skipped") if len(report["skipped"]) == 1 else _("{n} files skipped").format(n=len(report["skipped"])))
-    _toast(shell, message, ms=5000, action=lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(folder)), actionText=_("Show folder"),
-           level="consequence")
+        message += " · " + skippedText(report)
+    _toast(shell, message, ms=5000 if not (importProblem or noId) else 10000, action=lambda: _showFolder(folder), actionText=_("Show folder"),
+           level="consequence" if not importProblem else "warning")
     return session
+
+
+def _noSubjectId(report):
+    """The number of files that ``Study.add_files`` skipped for want of a subject id."""
+    return sum(1 for item in (report or {}).get("skipped") or () if item.get("reason") == "no subject id")
+
+
+def skippedText(report):
+    """"4 files skipped (...)": the files that ``Study.add_files`` skipped, with how to name files that had no subject id."""
+    skipped = len((report or {}).get("skipped") or ())
+    text = _("1 file skipped") if skipped == 1 else _("{n} files skipped").format(n=skipped)
+    noId = _noSubjectId(report)
+    if noId:
+        text += " " + _("({n} without a subject id: name the files or their folders by subject, as patient01_T1.nii.gz or "
+                        "patient01/T1.nii.gz, or set the ID rule in Import)").format(n=noId)
+    return text
+
+
+class ReadOnlyStudyError(ValueError):
+    """The study folder cannot be written: the message says so (a problem with the user's setup, not a program error)."""
+
+    user_problem = True
+
+
+def _importTable(studyObject, path, groupColumn=None, groupMapping=None):
+    """Merge a participants table into ``studyObject`` (not saved): ``StudySession.importTable()`` without a session."""
+    columns, rows = readTable(path)
+    if groupColumn is None:
+        proposal = groupMappingProposal(columns, rows)
+        if proposal is not None:
+            groupColumn, groupMapping = proposal
+    if groupColumn and groupMapping:
+        applyGroupMapping(rows, groupColumn, groupMapping)
+        columns = list(columns) + [column for column in ("group", "include", GROUP_ORIGINAL_COLUMN) if column not in columns and any(column in row for row in rows)]
+    studyModule = _lnm("study")
+    columns = list(columns)
+    renamed = _importClashingColumns(studyModule, columns, rows)
+    temporary = os.path.join(studyObject.path, studyModule.PRIVATE_DIR, f"import-{os.getpid()}.tsv")
+    os.makedirs(os.path.dirname(temporary), exist_ok=True)
+    studyModule.write_tsv(temporary, columns, rows)
+    try:
+        result = studyObject.import_tsv(temporary)
+    except ValueError as exc:
+        # The reason names the user's table, not the temporary copy
+        raise ValueError(str(exc).replace(temporary, os.path.basename(path))) from exc
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(temporary)
+    result["renamed"] = renamed
+    return result
 
 
 def _gridCandidates(studyObject):
@@ -648,6 +1271,72 @@ def _gridCandidates(studyObject):
     return found
 
 
+def _tagAnsweredGridSpace(studyObject, row, path, segmentationNode):
+    """Tag the lesion of ``row`` (read from ``path``) with the space answered for its ambiguous registry grid
+    (``Studio.Space`` "<space> <resolution>"): the study's ``grid_answers`` for that grid, else the row's ``space`` when
+    it is one of the grid's candidates. Draw's space line and Map's seed space then name the user's answer instead of
+    the grid's default space. A ``Studio.Space`` that names another space than the grid's candidates (a template's) is
+    left as it is. Return the value set, or None.
+    """
+    if segmentationNode is None:
+        return None
+    if not path or not _isNifti(path) or not os.path.isfile(path):
+        return None
+    try:
+        header = _lnm("nifti").read_nifti_header(path)
+        match = _lnm("geometry").detect_grid_candidates(header["shape"][:3], header["affine"])
+    except (OSError, ValueError):
+        return None
+    if match is None or not match.ambiguous:
+        return None
+    answer = studyObject.grid_answers.get(match.grid_id)
+    if not answer:
+        rowSpace = row.get("space")
+        answer = None if _missing(rowSpace) else str(rowSpace)
+    existing = segmentationNode.GetAttribute(space.SPACE_ATTRIBUTE)
+    if answer not in match.candidates or (existing and existing.partition(" ")[0] not in match.candidates):
+        return None
+    resolution = match.resolution
+    try:
+        value = f"{answer} {float(resolution):g}" if resolution is not None else answer
+    except (TypeError, ValueError):
+        value = answer
+    segmentationNode.SetAttribute(space.SPACE_ATTRIBUTE, value)
+    return value
+
+
+def _tagRecordedRowSpace(row, segmentationNode):
+    """Tag the opened lesion of ``row`` with the MNI space the study records for it (``Studio.Space`` "<space> <voxel
+    size>") when nothing else names its space: no ``Studio.Space`` yet and a grid that is no known MNI grid (a cropped or
+    resampled MNI lesion). participants.tsv, the BIDS name and the pipeline (Run everything, Map's cohort mode) treat the
+    lesion as in that space, so Draw's space line and single-lesion Map do too, instead of calling it scanner space and
+    offering to normalize it a second time. A native or unrecognized row space changes nothing. Return the value set, or
+    None.
+    """
+    if segmentationNode is None or segmentationNode.GetAttribute(space.SPACE_ATTRIBUTE):
+        return None
+    rowSpace = row.get("space") if row else None
+    if _missing(rowSpace):
+        return None
+    rowSpace = str(rowSpace).strip()
+    try:
+        if not _lnm("geometry").is_mni_space(rowSpace):
+            return None
+    except Exception:
+        return None
+    if " " in rowSpace or space.spaceOf(segmentationNode) is not None:
+        return None
+    grid = space.gridOf(segmentationNode)
+    box = space.worldBox(*grid) if grid is not None else None
+    value = rowSpace
+    if box is not None:
+        resolution = float(box[1].min())
+        if resolution > 0:
+            value = f"{rowSpace} {round(resolution, 3):g}"
+    segmentationNode.SetAttribute(space.SPACE_ATTRIBUTE, value)
+    return value
+
+
 def _applyGridAnswers(studyObject, gridRows):
     answers = studyObject.grid_answers
     for gridId, entry in gridRows.items():
@@ -657,6 +1346,55 @@ def _applyGridAnswers(studyObject, gridRows):
         for sid in entry["sids"]:
             if studyObject.subject(sid).get("space") != answer:
                 studyObject.set(sid, space=answer)
+            _renameLesionForSpace(studyObject, sid, answer)
+
+
+def _renameLesionForSpace(studyObject, sid, space):
+    """Rename the lesion file (and sidecar) that Studio wrote under ``lesions/`` with another space in its BIDS name (the
+    guessed space, before an ambiguous grid was answered) to ``space``, and point the row at it. Return the new absolute
+    path, or None when nothing was renamed (no such file, another name, or the new name is taken).
+    """
+    try:
+        studyModule = _lnm("study")
+        row = studyObject.subject(sid)
+        current = studyObject.abspath(row.get("lesion"))
+        lesionsDir = os.path.join(studyObject.path, studyModule.LESIONS_DIR)
+        if not current or not os.path.isfile(current) or not _isNifti(current) or not _isInside(current, lesionsDir):
+            return None
+        if os.path.dirname(os.path.abspath(current)) != os.path.abspath(lesionsDir):
+            return None
+        match = re.fullmatch(re.escape(sid) + r"_space-([A-Za-z0-9]+)_desc-lesion_mask(\.nii(?:\.gz)?)", os.path.basename(current))
+        if match is None or match.group(1) == space or not re.fullmatch(r"[A-Za-z0-9]+", space):
+            return None
+        target = os.path.join(lesionsDir, f"{sid}_space-{space}_desc-lesion_mask{match.group(2)}")
+        if os.path.lexists(target):
+            return None
+        moves = [(current, target)]
+        oldSidecar = studyObject.lesion_sidecar_path(sid)
+        if os.path.isfile(oldSidecar):
+            moves.append((oldSidecar, os.path.join(lesionsDir, os.path.basename(target)[:-len(match.group(2))] + ".json")))
+        done = []
+        try:
+            for source, destination in moves:
+                if os.path.lexists(destination):
+                    raise OSError(f"{destination} exists")
+                _replaceFile(source, destination)
+                done.append((source, destination))
+        except OSError:
+            for source, destination in reversed(done):
+                with contextlib.suppress(OSError):
+                    os.replace(destination, source)
+            raise
+        studyObject.set(sid, lesion=studyObject.relpath(target))
+        if len(moves) > 1:
+            try:  # the moved sidecar names the new space too (file name, row and sidecar agree)
+                studyObject.write_lesion_sidecar(sid, studio={"space": space})
+            except Exception:
+                logging.warning(f"Studio: the sidecar of {sid} could not be updated to the space {space}:\n{traceback.format_exc()}")
+        return target
+    except Exception:
+        logging.warning(f"Studio: the lesion file of {sid} could not be renamed to the answered space {space}:\n{traceback.format_exc()}")
+        return None
 
 
 #
@@ -665,6 +1403,20 @@ def _applyGridAnswers(studyObject, gridRows):
 
 _session = None
 _listeners = []
+#: Tracing that a closing study could not write because its folder was moved, renamed or disconnected:
+#: [{"identity", "sid", "data", "matrix"}] (``StudySession._keepUnwritten``). The study opened from its new place gets it
+#: in its journal, where Draw offers it for recovery (``StudySession._takeKept``).
+_kept = []
+
+
+def _studyIdentity(studyObject):
+    """What a study keeps when its folder is moved or renamed: its ``study.json`` name and creation time (its whole
+    metadata when it has no creation time).
+    """
+    metadata = studyObject.metadata if isinstance(getattr(studyObject, "metadata", None), dict) else {}
+    if metadata.get("created"):
+        return ("created", str(metadata.get("name")), str(metadata.get("created")))
+    return ("metadata", json.dumps(metadata, sort_keys=True, default=str))
 
 
 def session():
@@ -683,6 +1435,30 @@ def removeListener(callback):
         _listeners.remove(callback)
 
 
+_saveListeners = []
+
+
+def addSaveListener(callback):
+    """``callback(session)`` when a save of participants.tsv has finished (saved or failed), so a view that shows
+    ``saveStatus()`` can refresh just that line; ``addListener`` callbacks are not called for it.
+    """
+    if callback not in _saveListeners:
+        _saveListeners.append(callback)
+
+
+def removeSaveListener(callback):
+    while callback in _saveListeners:
+        _saveListeners.remove(callback)
+
+
+def _notifySaved(studySession):
+    for callback in list(_saveListeners):
+        try:
+            callback(studySession)
+        except Exception:
+            logging.error(f"Studio: study save listener failed:\n{traceback.format_exc()}")
+
+
 def _notify(studySession=None):
     for callback in list(_listeners):
         try:
@@ -691,23 +1467,53 @@ def _notify(studySession=None):
             logging.error(f"Studio: study listener failed:\n{traceback.format_exc()}")
 
 
+def _readStudy(studyModule, path):
+    """``Study.open(path)``; a damaged or unreadable study.json raises ``StudyFileError`` with a plain message."""
+    try:
+        return studyModule.Study.open(path)
+    except OSError as error:
+        raise StudyFileError(_("The study in {folder} cannot be opened: study.json cannot be read ({reason}). Check that the "
+                               "folder and its study.json are still there and that you may read them.").format(
+            folder=_studyFolder(path), reason=_plainOSError(error))) from error
+    except ValueError as error:
+        # json.JSONDecodeError and UnicodeDecodeError are ValueErrors; "Not a study" is a study.json of another kind
+        if isinstance(error, (json.JSONDecodeError, UnicodeDecodeError)) or str(error).startswith("Not a study"):
+            raise StudyFileError(_("The study in {folder} cannot be opened: its study.json is damaged or is not a study "
+                                   "file. Restore study.json from a backup or from a copy of the study folder (your "
+                                   "subjects' images and lesion masks in the folder are not touched), then open the study "
+                                   "again.").format(folder=_studyFolder(path))) from error
+        raise StudyFileError(_("The study in {folder} cannot be opened: {reason}").format(
+            folder=_studyFolder(path), reason=error)) from error
+
+
+def _studyFolder(path):
+    path = os.path.abspath(path)
+    return os.path.dirname(path) if os.path.basename(path) == "study.json" else path
+
+
 def openStudy(pathOrStudy, shell=None, subject=None, showLibrary=True):
     """Open a study (a folder, its study.json or a ``Study``) as the current session and return it.
 
     The study that was open is closed first. In Studio, Library shows its subject list. With ``subject``, that subject
-    is opened in Draw.
+    is opened in Draw. Return None if nothing was opened: the open project could not be saved and the user keeps
+    working in it (``autosave.confirmReplaceProject``).
     """
     global _session
     studyModule = _lnm("study")
-    studyObject = pathOrStudy if isinstance(pathOrStudy, studyModule.Study) else studyModule.Study.open(str(pathOrStudy))
+    studyObject = pathOrStudy if isinstance(pathOrStudy, studyModule.Study) else _readStudy(studyModule, str(pathOrStudy))
     if _session is not None:
         if os.path.normcase(_session.study.path) == os.path.normcase(studyObject.path):
             # The study is already open: its session (with its in-memory changes) is kept
             if subject:
                 _session.open(subject)
             return _session
+    if not _confirmReleaseProject():
+        return None  # the open project could not be saved and the user keeps working in it
+    if _session is not None:
         closeStudy()
     shell = _currentShell(shell)
+    # The open project is saved as it is shown and stops here (a study saves its own files) before its lesions are hidden
+    _releaseProjectForStudy()
     studySession = StudySession(studyObject, shell)
     _session = studySession
     from . import shell as shellModule
@@ -715,11 +1521,13 @@ def openStudy(pathOrStudy, shell=None, subject=None, showLibrary=True):
     live = shellModule._shell
     if live is not None:
         live.studySession = studySession
-    # A study replaces the loaded set of U-07: its lesions are hidden and no longer stepped through
+    # A study replaces the loaded set of U-07 and the work that was open (W3-07: only the current subject is shown): their
+    # lesions are hidden (they stay in the scene) and the loaded set is no longer stepped through
     importer = _importer()
     loaded = importer._loadedSet
     if loaded is not None:
         loaded.forget(hideLesions=True)
+    studySession._hiddenOutside = _hideLesionsOutsideStudy(importer)
     recordRecentStudy(studyObject.path, studyObject.name)
     _registerWithAutosave()
     _connectQuit()
@@ -735,6 +1543,54 @@ def openStudy(pathOrStudy, shell=None, subject=None, showLibrary=True):
     if subject:
         studySession.open(subject)
     return studySession
+
+
+def _confirmReleaseProject():
+    """True if the open project (if any) is saved, or its save failed and the user chose to go on (a copy was saved, or
+    Open without saving); False if the user keeps working in it. As for Open project and Open scene: a study releases the
+    project, and a save that fails (disk full, folder not writable) would otherwise drop its edits silently at the next
+    New project or Close scene of the study.
+    """
+    try:
+        from . import autosave
+    except ImportError:
+        return True
+    service = autosave.instance()
+    if service is None:
+        return True
+    return service.confirmReplaceProject(_("Open study"))
+
+
+def _releaseProjectForStudy():
+    """Save and release the open project (A-09), as autosave's next poll would once the study is open; never after the
+    project's lesions are hidden (the project would be saved with them hidden).
+    """
+    try:
+        from . import autosave
+    except ImportError:
+        return
+    service = autosave.instance()
+    if service is None:
+        return
+    try:
+        service.releaseProjectForStudy()
+    except Exception:
+        logging.error(f"Studio: the open project could not be saved before the study opened:\n{traceback.format_exc()}")
+
+
+def _hideLesionsOutsideStudy(importer):
+    """Hide every segmentation that is not a study subject's (a project's lesion, a lesion drawn or loaded before): on the
+    same template grid, it would be drawn over each subject's scan while Draw says the subject's lesion is empty. Return
+    the nodes that were shown (``StudySession.close()`` shows them again).
+    """
+    hidden = []
+    for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):
+        displayNode = node.GetDisplayNode()
+        if node.GetAttribute(SUBJECT_ATTRIBUTE) or displayNode is None or not displayNode.GetVisibility():
+            continue
+        importer._setLesionVisible(node, False)
+        hidden.append(node)
+    return hidden
 
 
 _quitConnected = [False]
@@ -777,8 +1633,18 @@ def openStudyDialog(shell=None):
     if not isAvailable():
         _toast(shell, _("Studies are not available in this build"))
         return None
-    start = (recentStudies() or [{}])[0].get("path") or _importer()._lastDirectory()
-    folder = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Open study"), os.path.dirname(start) if start else "")
+    # Starts where the studies are: the parent of the newest recent study (so that it is listed), else Studies/ of the
+    # Slicer Studio folder (as New study… does), else the last open folder itself (a folder: no dirname of it)
+    recent = (recentStudies() or [{}])[0].get("path")
+    created = None
+    if recent:
+        start = os.path.dirname(recent)
+    else:
+        start, created = _studiesFolder()
+        start = start or _importer()._lastDirectory()
+    folder = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Open study"), start or "")
+    if created and os.path.isdir(created) and not os.listdir(created):
+        os.rmdir(created)  # created for the dialog only: never leave an empty folder
     if not folder:
         return None
     studyModule = _lnm("study")
@@ -811,7 +1677,8 @@ def _studiesFolder():
 
 def newStudyDialog(shell=None):
     """New study…: choose a folder (the dialog starts in Studies/ of the Slicer Studio folder); its NIfTI files (if any)
-    become the subjects, its participants.tsv is adopted.
+    become the subjects, its participants.tsv is adopted (a participants.csv is imported). Studies/ itself and Studio's other own folders are refused with
+    a warning (``studyFolderProblem()``): a study goes in a folder of its own.
     """
     if not isAvailable():
         _toast(shell, _("Studies are not available in this build"))
@@ -822,11 +1689,22 @@ def newStudyDialog(shell=None):
         os.rmdir(created)  # created for the dialog only: never leave an empty folder
     if not folder:
         return None
+    problem = studyFolderProblem(folder)
+    if problem:
+        _toast(shell, problem, ms=8000, level="warning")
+        return None
     niftiFiles, _isDicom = _importer().scanFolder(folder)
     studyModule = _lnm("study")
     privateDir = os.path.join(folder, studyModule.PRIVATE_DIR)
     niftiFiles = [path for path in niftiFiles if not _isInside(path, privateDir)]
-    return createStudy(niftiFiles, shell, folder=folder)
+    groups = askGroupMapping(folder)
+    if groups is None:
+        return None
+    try:
+        return createStudy(niftiFiles, shell, folder=folder, **groups)
+    except ParticipantTableError as e:
+        _toast(shell, str(e), ms=8000, level="warning")
+        return None
 
 
 def openParticipantsTable(path, shell=None):
@@ -834,17 +1712,30 @@ def openParticipantsTable(path, shell=None):
     shell = _currentShell(shell)
     columns, rows = readTable(path)
     shown = [column for column in columns if column != "participant_id"][:4]
-    summary = _("{name}: {n} participants ({columns})").format(name=os.path.basename(path), n=len(rows), columns=", ".join(shown) or "participant_id")
+    summary = (_("{name}: {n} participant ({columns})") if len(rows) == 1 else _("{name}: {n} participants ({columns})")).format(name=os.path.basename(path), n=len(rows), columns=", ".join(shown) or "participant_id")
     if _session is not None:
         result = _session.importTable(path)
-        _toast(shell, summary + " · " + _("{added} added, {updated} updated in {study}").format(
-            added=len(result["added"]), updated=len(result["updated"]), study=_session.study.name), ms=5000, level="consequence")
+        text = summary + " · " + _("{added} added, {updated} updated in {study}").format(
+            added=len(result["added"]), updated=len(result["updated"]), study=_session.study.name)
+        renamed = result.get("renamed") or {}
+        if renamed:
+            text += " · " + _("kept {columns} (other values than the study's)").format(
+                columns=", ".join(_("{column} as {original}").format(column=column, original=original) for column, original in renamed.items()))
+        _toast(shell, text, ms=5000 if not renamed else 8000, level="consequence")
         return result
     folder = os.path.dirname(os.path.abspath(path))
-    if shell is not None:
+    problem = studyFolderProblem(folder) if shell is not None else None
+    if problem:
+        shell.toast(summary + " · " + problem, ms=8000, level="warning")
+    elif shell is not None:
         def create():
+            # The table that was opened supplies the groups and the scores (adopted in place when it is the folder's
+            # participants.tsv, else imported)
+            groups = askGroupMapping(folder, table=path)
+            if groups is None:
+                return
             niftiFiles, _isDicom = _importer().scanFolder(folder)
-            createStudy(niftiFiles, shell, folder=folder)
+            createStudy(niftiFiles, shell, folder=folder, table=path, **groups)
 
         shell.toast(summary, ms=8000, action=create, actionText=_("Create study"), level="consequence")
     return None
@@ -983,12 +1874,44 @@ def _contentStamp(segmentationNode):
 # Lesion metrics (worker-safe: numpy only)
 #
 
+#: MNI templates whose lesions get the share outside the brain: the bundled 2009c mask, and the NLin6Asym mask once the user
+#: downloaded it (Normalize options' "Download NLin6Asym 2 mm" or SampleData; it is never downloaded automatically)
+BRAIN_MASK_SPACES = ("MNI152NLin2009cAsym", "MNI152NLin6Asym")
 _brainMask = None
+_brainMasks = {}  # (space, path, mtime, size) of a downloaded mask -> (data, affine), or None when unreadable
+_verifiedMaskFiles = {}  # (path, mtime, size, expected sha256) -> whether the file has that sha256
 
 
-def brainMaskFile():
-    """Path of the bundled MNI152NLin2009cAsym 2 mm brain mask, or None."""
-    return sampleFile(BRAIN_MASK_SAMPLE)
+def brainMaskFile(space="MNI152NLin2009cAsym"):
+    """Path of the 2 mm brain mask of an MNI template, or None.
+
+    MNI152NLin2009cAsym: the bundled mask. MNI152NLin6Asym: the mask the user downloaded (found where Normalize and Smart fill find
+    it, ``normalize_controller.templateFile``), only when its sha256 is the one of ``normalize.TEMPLATES``.
+    """
+    if space == "MNI152NLin2009cAsym":
+        return sampleFile(BRAIN_MASK_SAMPLE)
+    if space not in BRAIN_MASK_SPACES:
+        return None
+    try:
+        from LesionNetworkMappingUI import normalize_controller
+
+        path = normalize_controller.templateFile(space, "mask")
+        expected = _lnm("normalize").TEMPLATES[space]["files"]["mask"]["sha256"]
+        if not path:
+            return None
+        stat = os.stat(path)
+    except Exception:
+        return None
+    key = (path, stat.st_mtime, stat.st_size, expected)
+    if key not in _verifiedMaskFiles:
+        import hashlib
+
+        try:
+            with open(path, "rb") as stream:
+                _verifiedMaskFiles[key] = hashlib.sha256(stream.read()).hexdigest() == expected
+        except OSError:
+            return None
+    return path if _verifiedMaskFiles[key] else None
 
 
 def outsideBrainPercent(maskIndicesIjk, ijkToRas, brainMask):
@@ -1008,13 +1931,15 @@ def metricsValues(maskKji, ijkToRas, lesionSpace=None, brainMask=None):
     """participants.tsv values of a lesion mask (worker-safe): volume_ml, n_parts, gaps, centroid, outside_brain_pct."""
     from . import lesioncard
 
-    metrics = lesioncard.computeLesionMetrics(maskKji, None, ijkToRas)
+    # Gaps along S (the lesion z-extent): the k axis of a sagittal or coronal acquisition is R or A
+    axis = lesioncard.nearestArrayAxis(ijkToRas, (0.0, 0.0, 1.0))[0] if ijkToRas is not None else 0
+    metrics = lesioncard.computeLesionMetrics(maskKji, None, ijkToRas, axis=axis)
     values = {"volume_ml": round(metrics["ml"], 6), "n_parts": metrics["parts"], "gaps": len(metrics["gaps"])}
     centroid = metrics["centroid_ras"] or (None, None, None)
     for axis, value in zip(("x", "y", "z"), centroid, strict=True):
         values["centroid_" + axis] = None if value is None else round(value, 2)
     outside = None
-    if brainMask is not None and lesionSpace == "MNI152NLin2009cAsym" and metrics["voxels"]:
+    if brainMask is not None and lesionSpace in BRAIN_MASK_SPACES and metrics["voxels"]:
         kk, jj, ii = np.nonzero(maskKji)
         outside = outsideBrainPercent(np.c_[ii, jj, kk], ijkToRas, brainMask)
     values["outside_brain_pct"] = None if outside is None else round(outside, 2)
@@ -1022,6 +1947,30 @@ def metricsValues(maskKji, ijkToRas, lesionSpace=None, brainMask=None):
     values["_centroid"] = metrics["centroid_ras"]
     values["_spansBoth"] = metrics["spans_both"]
     return values
+
+
+#: participants.tsv metrics that tell whether a lesion file's voxels changed (its mtime alone also changes on a copy)
+CONTENT_METRICS = ("volume_ml", "n_parts", "centroid_x", "centroid_y", "centroid_z")
+
+
+def _metricsDiffer(before, values):
+    """True when the stored metrics ``before`` ({column: text}) and the new ``values`` describe different voxels (tolerant
+    of rounding: 0.01 % of the volume, 0.05 mm of the centroid; a metric that was not stored is not compared).
+    """
+    for key in CONTENT_METRICS:
+        old, new = before.get(key), values.get(key)
+        if _missing(old):
+            continue  # not measured before (an older study, or a volume written without the other metrics)
+        if new is None:
+            return True
+        try:
+            old, new = float(old), float(new)
+        except (TypeError, ValueError):
+            return True
+        tolerance = 1e-4 * max(abs(old), abs(new)) if key == "volume_ml" else (0.05 if key.startswith("centroid") else 0.0)
+        if abs(old - new) > tolerance + 1e-9:
+            return True
+    return False
 
 
 def _fileMetrics(path, lesionSpace, brainMask):
@@ -1035,7 +1984,24 @@ def _fileMetrics(path, lesionSpace, brainMask):
     return values, stat.st_mtime, stat.st_size
 
 
-def _loadBrainMask():
+def _loadBrainMask(space="MNI152NLin2009cAsym"):
+    """The brain mask ``(data, affine)`` of an MNI template (``brainMaskFile``), or None (main thread: a small file, read once)."""
+    if space != "MNI152NLin2009cAsym":
+        path = brainMaskFile(space)
+        if path is None:
+            return None  # not cached: a later download is found
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return None
+        key = (space, path, stat.st_mtime, stat.st_size)
+        if key not in _brainMasks:
+            try:
+                data, affine, _header = _lnm("nifti").read_nifti(path)
+                _brainMasks[key] = (data, affine)
+            except Exception:
+                _brainMasks[key] = None
+        return _brainMasks[key]
     global _brainMask
     if _brainMask is None:
         path = brainMaskFile()
@@ -1060,7 +2026,8 @@ def _missing(value):
 
 
 def isIncluded(row):
-    return str((row or {}).get("include", "1")).strip().lower() not in ("0", "false", "no")
+    """True unless the row's include value means 0: the study library's own test (``study.is_included``)."""
+    return _lnm("study").is_included(row)
 
 
 def normalizeDoi(text):
@@ -1501,6 +2468,7 @@ class StudySession:
         self._templateFiles = {}  # template volume node ID -> its NIfTI file
         self._gridReference = None  # the file whose header the lesion is written with
         self._openStamp = None
+        self._sidecarText = ("", "")  # the Notes and SourceReference of the current lesion's sidecar (see _sidecarTextChanged)
         self._dirty = False
         self._markedDirty = False  # markDirty(): an edit that the lesion's voxels do not show (always written)
         self._activeSeconds = 0.0
@@ -1510,14 +2478,24 @@ class StudySession:
         self._swallowNext = False
         self._lastSaveTime = None
         self._lastSaveError = None
+        self.lastInboxRejected = []  # [(file, participant id or None, message)] that the last applyInbox() rejected
+        self.lastInboxHeld = []  # [(file, [participant ids])] that the last applyInbox() held back (the open subject's edits)
+        self._inboxReloading = False
+        self._inboxRetryTimer = qt.QTimer()
+        self._inboxRetryTimer.setSingleShot(True)
+        self._inboxRetryTimer.setInterval(INBOX_RETRY_MS)
+        self._inboxRetryTimer.connect("timeout()", self._onInboxRetry)
         self._removed = []  # undo records of "Remove from study"
+        self._paperCaseCounts = {}  # "New case from this paper": sid -> (record_id, n_cases before, n_cases set), for Undo
         self.creationReport = None
         self._gridRows = {}
         self._metricsWriter = None
         self._metricsPending = set()
+        self._metricsBefore = {}  # sid -> (lesion_mtime, {metric: text}) of a measured lesion whose file changed since
         self._closed = False
         self._queue = None  # the active trace queue: {"key", "record"} (L-45)
         self._queuePosition = None  # the last subject opened while the queue was active
+        self._queueHandled = set()  # subjects that Done passed in this pass of the queue (queues whose todo is their membership)
         self._prefetched = {}  # sid -> result of _prefetchCase (main thread only)
         self._prefetchPending = set()
         self._cropCache = {}  # sid -> figure crop thumbnail of the current case ({} when it has none)
@@ -1536,6 +2514,14 @@ class StudySession:
         self._heartbeatTimer.setInterval(HEARTBEAT_INTERVAL_MS)
         self._heartbeatTimer.connect("timeout()", self._writeHeartbeat)
         self._startedAt = _now()
+        self._otherSession = None  # the last heartbeat seen of another live session of this study (two windows)
+        self._warnedSessions = set()  # (host, pid) of the other sessions this one was told about
+        self._lesionStamp = None  # (normcase path, mtime_ns, size) of the current lesion file as read or written here
+        self._openedEpoch = None  # time.time() when the current subject was opened
+        self._hiddenOutside = []  # segmentations of the work that was open, hidden while the study is open (openStudy)
+        self._folderGoneSaid = False  # the "study folder moved or renamed" toast was shown (until the folder is back)
+        self.readOnly = False  # the study folder cannot be written (a shared or locked study): changes cannot be saved
+        self._readOnlySaid = False
 
     # Identity (A-01b records these in every autosave slot)
 
@@ -1566,6 +2552,10 @@ class StudySession:
         The trace queue and the position of the last session (``.studio/session.json``) are restored first.
         """
         self._restoreQueue()
+        if not self._studyWritable():
+            self._markReadOnly()
+        # Another window with this study open: said now, before this session's heartbeat replaces the other one's
+        self._noticeOtherSession(_liveOtherSession(self._readSessionRecord()))
         self._writeHeartbeat()
         self._heartbeatTimer.start()
         self._sceneCloseTag = slicer.mrmlScene.AddObserver(slicer.mrmlScene.EndCloseEvent, self._onSceneClosed)
@@ -1581,6 +2571,7 @@ class StudySession:
             self._journal = journal.Journal(self)
         except ImportError:
             self._journal = None
+        self._takeKept()
         self.applyInbox()
         self.computeMissingMetrics()
 
@@ -1592,7 +2583,11 @@ class StudySession:
             return
         try:
             if self._current is not None:
-                self._leave(write=True)
+                if self.folderAvailable():
+                    self._leave(write=True)
+                else:
+                    # Nothing can be written at the old path: the tracing is kept for the study opened from its new place
+                    self._keepUnwritten()
         except Exception:
             logging.error(f"Studio: the current subject could not be written when the study closed:\n{traceback.format_exc()}")
         self._removeSubjectNodes()
@@ -1601,10 +2596,17 @@ class StudySession:
             if node is not None and node.GetAttribute(SUBJECT_ATTRIBUTE) == "template":
                 _removeNode(nodeId)
         self._templateCache.clear()
-        self.flush()
+        # The work that was open before the study (a project continues) is shown again as it was
+        hidden, self._hiddenOutside = self._hiddenOutside, []
+        for node in hidden:
+            if slicer.mrmlScene.IsNodePresent(node):
+                _importer()._setLesionVisible(node, True)
+        if not self.flush():
+            self._keepUnsaved()
         self._closed = True
         self._saveTimer.stop()
         self._heartbeatTimer.stop()
+        self._inboxRetryTimer.stop()
         for tag in (self._sceneCloseTag, self._sceneClosingTag):
             if tag is not None:
                 slicer.mrmlScene.RemoveObserver(tag)
@@ -1637,6 +2639,7 @@ class StudySession:
         self._observer.dispose()
         if self._journal is not None:
             self._journal.detach()
+        self._hiddenOutside = []
         self._current = None
         self._nodeIds = {"scan": None, "segmentation": None}
         self._templateCache.clear()
@@ -1649,6 +2652,89 @@ class StudySession:
 
     # Heartbeat (.studio/session.json)
 
+    def folderAvailable(self):
+        """True while the study folder is where it was opened (its ``study.json`` is there).
+
+        A study folder that was moved, renamed or deleted (or a drive that was disconnected) while the study is open is not
+        written to: ``makedirs`` on the old path would leave a stray ``.studio`` folder there, and the user's tracing
+        in it would not be found when the study is opened from its new place.
+        """
+        return _lnm("study").Study.is_study(self.study.path)
+
+    def _folderGoneText(self):
+        return _("The study folder {name} was moved, renamed or is not connected, so nothing can be saved in it. Open the study "
+                 "again from its new place (Open study…); your tracing is still on screen").format(name=self.study.name)
+
+    def _checkFolder(self, sayOnce=False):
+        """True when the study folder is there. When it is not, ``sayOnce`` shows the plain message once (until the folder
+        is back); the callers write nothing.
+        """
+        if self.folderAvailable():
+            self._folderGoneSaid = False
+            return True
+        if sayOnce and not self._folderGoneSaid:
+            self._folderGoneSaid = True
+            logging.warning(f"Studio: the study folder {self.study.path} is gone (moved, renamed or not connected): nothing is written")
+            _toast(self._shell, self._folderGoneText(), ms=15000, level="warning", toolTip=self.study.path)
+        return False
+
+    def _keepUnwritten(self):
+        """The study closes while its folder is moved, renamed or disconnected (the user opens it from its new place, as
+        the folder-gone message says): the current subject's tracing that is not written yet is kept in memory
+        (``_kept``) and goes to the journal of this study when it is opened again (``_takeKept``), where Draw offers it
+        for recovery. Nothing is written at the old path.
+        """
+        sid = self._current
+        if sid is None:
+            return
+        if self.isDirty():
+            self._applyPendingSmartFill()
+            mask = lesionMask(self.segmentationNode())
+            if mask is None:
+                # Everything was erased: an empty journal records it (as the journal itself does)
+                data, matrix = np.zeros((1, 1, 1), np.uint8), np.eye(4)
+            else:
+                data = np.ascontiguousarray(np.transpose(mask[0], (2, 1, 0))).astype(np.uint8)
+                matrix = np.array(mask[1], dtype=float)
+            identity = _studyIdentity(self.study)
+            _kept[:] = [entry for entry in _kept if (entry["identity"], entry["sid"]) != (identity, sid)]
+            _kept.append({"identity": identity, "sid": sid, "data": data, "matrix": matrix})
+            logging.warning(f"Studio: the study folder {self.study.path} is gone: the unwritten tracing of {sid} is kept until the study is opened again")
+            _toast(self._shell, _("The tracing of {sid} could not be saved: the study folder {name} was moved or renamed. It is kept "
+                                  "until you open the study from its new place (Open study…) in this window").format(sid=sid, name=self.study.name),
+                   ms=15000, level="warning", toolTip=self.study.path)
+        if self._journal is not None:
+            self._journal.detach()
+
+    def _takeKept(self):
+        """Write the tracing that this study kept when it was closed from a folder that was gone (``_keepUnwritten``) to
+        the journal of its subject here: opening the subject offers it for recovery. Return the subjects.
+        """
+        identity = _studyIdentity(self.study)
+        taken = []
+        for entry in list(_kept):
+            sid = entry["sid"]
+            if entry["identity"] != identity or sid not in self.study:
+                continue
+            if self._journal is not None:
+                path = self._journal.path(sid)
+            else:
+                path = os.path.join(self.study.path, _lnm("study").PRIVATE_DIR, "journal", f"{sid}.nii.gz")
+            try:
+                from . import journal
+
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                journal.writeJournalFile(path, entry["data"], entry["matrix"])
+            except Exception:
+                logging.error(f"Studio: the kept tracing of {sid} could not be written to the journal:\n{traceback.format_exc()}")
+                continue
+            _kept.remove(entry)
+            taken.append(sid)
+        if taken:
+            _toast(self._shell, _("The unsaved tracing of {sids} is offered for recovery: open the subject and press Recover").format(
+                sids=", ".join(taken)), ms=15000, level="consequence")
+        return taken
+
     def _sessionFile(self):
         studyModule = _lnm("study")
         return os.path.join(self.study.path, studyModule.PRIVATE_DIR, SESSION_FILE)
@@ -1658,10 +2744,116 @@ class StudySession:
             return
         self._writeSessionRecord()
 
+    def _readSessionRecord(self):
+        try:
+            with open(self._sessionFile(), encoding="utf-8") as f:
+                record = json.load(f)
+        except (OSError, ValueError):
+            return None
+        return record if isinstance(record, dict) else None
+
+    def _noticeOtherSession(self, other):
+        """Another live session has this study open (``other``: its heartbeat): remember it, and say so once per session."""
+        if other is None:
+            return
+        self._otherSession = other
+        key = (other.get("host"), other.get("pid"))
+        if key in self._warnedSessions:
+            return
+        self._warnedSessions.add(key)
+        logging.warning(f"Studio: the study {self.study.name} is also open in process {other.get('pid')} on {other.get('host')}")
+        _toast(self._shell, _("Study {name} is also open in another Slicer Studio window (process {pid} on {host}). Trace each "
+                              "subject in one window only.").format(name=self.study.name, pid=other.get("pid"), host=other.get("host")),
+               ms=12000, level="warning")
+
+    def _studyWritable(self):
+        """False when the study folder (or its ``.studio`` folder) cannot be written by this user."""
+        folder = self.study.path
+        private = os.path.join(folder, _lnm("study").PRIVATE_DIR)
+        if os.path.isdir(private):
+            folder = private
+        return os.access(folder, os.W_OK | os.X_OK)
+
+    def _requireWritable(self, notDone):
+        """A change that needs the study folder is refused with a plain message (``ReadOnlyStudyError``) when the folder
+        cannot be written, before anything is written (no temporary file name, no errno).
+        """
+        if self._studyWritable():
+            self._clearReadOnly()  # the folder can be written again (write access was given back): the change is done
+            return
+        self.readOnly = True
+        raise ReadOnlyStudyError(f"{self.readOnlyText()} {notDone}")
+
+    def _clearReadOnly(self):
+        """The study folder can be written again (write access was given back during the session): the session saves,
+        the top bar stops saying "Read-only", and imports, added files, agreement and the heartbeat work again.
+
+        Called only once the folder was found writable (``_studyWritable``) or a write succeeded. The read-only notice is
+        not shown again if the folder becomes read-only again (the top bar says so): a folder whose subfolders stay
+        read-only would otherwise repeat it after every heartbeat.
+        """
+        if not self.readOnly:
+            return
+        self.readOnly = False
+        logging.info(f"Studio: the study {self.study.path} can be written again: changes are saved")
+        _notifySaved(self)
+
+    def readOnlyText(self):
+        return _("The study {name} is read-only: you can look at it and trace, but changes cannot be saved. Ask for write access, "
+                 "or open a copy of the study folder.").format(name=self.study.name)
+
+    def _markReadOnly(self):
+        """The study folder cannot be written: say so once (a warning line in the log and a toast), and write nothing."""
+        self.readOnly = True
+        if self._readOnlySaid:
+            return
+        self._readOnlySaid = True
+        logging.warning(f"Studio: the study {self.study.path} is read-only (Permission denied): changes cannot be saved")
+        _toast(self._shell, self.readOnlyText(), ms=15000, level="warning", toolTip=self.study.path)
+
     def _writeSessionRecord(self, closed=False):
         """``.studio/session.json``: the heartbeat while the study is open (``heartbeat_epoch`` 0 once closed), the
         current subject and the trace queue with its position (L-45).
+
+        Another live session of the study (a second window) is noticed here; closing never marks it closed: its heartbeat
+        is left (or put back) for ``pipeline init`` and the next session, with ``left`` (host and pid of the window that
+        closed), from which the other window knows that it is alone again.
         """
+        if not self._checkFolder(sayOnce=not closed):
+            return
+        if self.readOnly:
+            if not self._studyWritable():
+                return  # nothing can be written (said once when the study opened)
+            self._clearReadOnly()  # write access was given back: the heartbeat (and two-window detection) resumes
+        record = self._readSessionRecord()
+        other = _liveOtherSession(record)
+        if self._otherSession is not None and isinstance(record, dict):
+            own = record.get("pid") == os.getpid() and record.get("host") == socket.gethostname()
+            left = record.get("left") if own else None
+            if own:
+                # This window's own record: the other window forgets itself there ("left") when it closes the study
+                gone = isinstance(left, dict) and (left.get("host"), left.get("pid")) == (
+                    self._otherSession.get("host"), self._otherSession.get("pid"))
+            else:
+                gone = other is None  # the other window's record is no longer live (it closed the study, or it is gone)
+            if gone:
+                self._otherSession = None  # so closing this window does not put the old heartbeat of that window back
+        if closed:
+            if other is None:
+                other = _liveOtherSession(self._otherSession)
+            if other is not None:
+                # The study stays open in the other window: its heartbeat is left (or put back), with a note that this
+                # window left, so that the other window does not put this window's heartbeat back when it closes
+                try:
+                    kept = dict(other, left={"host": socket.gethostname(), "pid": os.getpid()})
+                    _lnm("schema").write_text_atomic(self._sessionFile(), json.dumps(kept) + "\n")
+                except PermissionError:
+                    self._markReadOnly()
+                except OSError:
+                    logging.warning(f"Studio: cannot write the study heartbeat:\n{traceback.format_exc()}")
+                return
+        else:
+            self._noticeOtherSession(other)
         content = {"format": "slicer-studio-session", "pid": os.getpid(), "host": socket.gethostname(), "app": "Slicer Studio",
                    "started": self._startedAt, "heartbeat": _now(), "heartbeat_epoch": 0 if closed else time.time(), "subject": self._current}
         if closed:
@@ -1672,6 +2864,8 @@ class StudySession:
             path = self._sessionFile()
             os.makedirs(os.path.dirname(path), exist_ok=True)
             _lnm("schema").write_text_atomic(path, json.dumps(content) + "\n")
+        except PermissionError:
+            self._markReadOnly()
         except OSError:
             logging.warning(f"Studio: cannot write the study heartbeat:\n{traceback.format_exc()}")
 
@@ -1689,6 +2883,7 @@ class StudySession:
         self._queue = {"key": record["key"], "record": record.get("record")}
         position = record.get("position")
         self._queuePosition = position if position in self.study else None
+        self._queueHandled = set()
 
     # Saving participants.tsv (main thread only)
 
@@ -1701,8 +2896,16 @@ class StudySession:
         self.flush(lockTimeout=SAVE_LOCK_TIMEOUT_S)
 
     def flush(self, lockTimeout=2.0):
-        """Save pending participants.tsv changes now (main thread). Return True if saved."""
+        """Save pending participants.tsv changes now (main thread). Return True if saved.
+
+        Nothing is written while the study folder is moved, renamed or disconnected (the files would recreate a stray study
+        at the old path); the changes stay in memory.
+        """
         self._saveTimer.stop()
+        if not self.folderAvailable():
+            self._lastSaveError = self._folderGoneText()
+            _notifySaved(self)
+            return False
         jobs = _lnm("jobs")
         try:
             self.study.save(lock_timeout=lockTimeout)
@@ -1711,17 +2914,76 @@ class StudySession:
             if not self._closed:
                 self._saveTimer.start(SAVE_RETRY_MS)
             return False
+        except PermissionError as e:
+            # Expected for a study folder that cannot be written: plain words, one warning line, no traceback
+            self._markReadOnly()
+            self._lastSaveError = _("{name} is read-only").format(name=self.study.name)
+            logging.warning(f"Studio: cannot save the study {self.study.path}: {e}")
+            # no toast here: _markReadOnly() announced it once (a repeat would replace the confirmation of each edit)
+            _notifySaved(self)
+            return False
         except Exception as e:
             self._lastSaveError = str(e)
-            logging.error(f"Studio: cannot save the study {self.study.path}:\n{traceback.format_exc()}")
+            if getattr(e, "user_problem", False):
+                # participants.tsv on disk cannot be read (another program saved it so): the message says what to do
+                logging.warning(f"Studio: cannot save the study {self.study.path}: {e}")
+            else:
+                logging.error(f"Studio: cannot save the study {self.study.path}:\n{traceback.format_exc()}")
             _toast(self._shell, _("The study could not be saved: {error}").format(error=e), ms=6000, level="warning")
+            _notifySaved(self)
             return False
         self._lastSaveTime = time.time()
         self._lastSaveError = None
+        if self.readOnly and self._studyWritable():
+            self._clearReadOnly()  # the save worked: the folder can be written again
+        _notifySaved(self)  # the view drew "Saving…" while the save timer was active
         return True
+
+    def unsavedSubjects(self):
+        """The subjects whose study changes are not in participants.tsv yet (a save failed or is pending)."""
+        try:
+            changed, added, removed = self.study.unsaved_rows()
+        except Exception:
+            logging.error(f"Studio: the unsaved changes of the study could not be listed:\n{traceback.format_exc()}")
+            return []
+        return sorted(set(changed) | set(added) | set(removed))
+
+    def saveErrorText(self):
+        """Why the study changes are not saved (the last save error, or the table being in use by another program)."""
+        return self._lastSaveError or _("participants.tsv is in use by another program")
+
+    def _keepUnsaved(self):
+        """The study closes while its changes could not be saved in participants.tsv (another program made the table
+        unreadable, or keeps it locked): the changed cells are posted to the study's inbox, which the next session merges
+        once the table can be read (a study has no Save: closing never loses them). Return the subjects kept.
+        """
+        if not self.folderAvailable():
+            return []  # nothing is written at the old path (see flush)
+        if self.readOnly:
+            # A read-only study has no inbox to post to either: the changes are lost, which was said once (_markReadOnly)
+            logging.warning(f"Studio: the study {self.study.path} is read-only: its changes of this session are not saved")
+            return []
+        try:
+            path, kept, notKept = self.study.keep_unsaved(self.saveErrorText(), source="studio-unsaved")
+        except Exception:
+            logging.error(f"Studio: the unsaved study changes could not be kept:\n{traceback.format_exc()}")
+            _toast(self._shell, _("The study changes could not be saved or kept: {error}").format(error=self.saveErrorText()),
+                   ms=15000, level="warning")
+            return []
+        if notKept:
+            logging.warning(f"Studio: the subjects added or removed in this session are not kept in {self.study.path}: {', '.join(notKept)}")
+        if kept:
+            logging.warning(f"Studio: the study changes of {', '.join(kept)} could not be saved in participants.tsv "
+                            f"({self.saveErrorText()}); they are kept in {path} for the next session")
+            _toast(self._shell, _("The study changes of {sids} could not be saved in participants.tsv. They are kept and added "
+                                  "when you open study {name} again (after the table is repaired)").format(sids=_sidList(kept), name=self.study.name),
+                   ms=15000, level="warning", toolTip=self.saveErrorText())
+        return kept
 
     def saveStatus(self):
         """``(text, timestamp)`` for the save status of the top bar (A-01b)."""
+        if self.readOnly:
+            return _("Read-only: changes are not saved"), self._lastSaveTime
         if self._lastSaveError:
             return _("Study not saved"), self._lastSaveTime
         if self._saveTimer.isActive():
@@ -1731,14 +2993,42 @@ class StudySession:
             return _("Journal saved"), journalTime
         return _("All changes saved"), self._lastSaveTime
 
-    def applyInbox(self):
-        """Merge the values that jobs posted to .studio/inbox (on open, when Library is shown, on request). Return the files applied."""
+    def applyInbox(self, report=True):
+        """Merge the values that jobs posted to .studio/inbox (on open, when Library is shown, on request). Return the files applied.
+
+        Files that the merge rejects (unknown subject, invalid value, unreadable file) are moved to
+        ``.studio/inbox/rejected/``; ``lastInboxRejected`` lists them and, with ``report``, a toast says that
+        they were not merged and why (``inboxRejectedText()``).
+
+        A result that changes the open subject's scan, lesion or space (a normalization, a warp) never applies under the
+        open scene, which Done would then write with the new row's name and space: while the subject has edits that are
+        not written (or a case strip field is being edited), its file stays in the inbox (``lastInboxHeld``) and the merge is
+        retried every ``INBOX_RETRY_MS``; otherwise the subject is left (its notes written), the result merged and the
+        subject opened again.
+        """
         jobs = _lnm("jobs")
+        known = len(self.study.inbox_errors)
+        current = self._current
+        # The rows of the subjects whose results waited: a lesion written meanwhile is kept as their native lesion
+        waited = {sid: dict(self.study.subject(sid)) for _path, sids in self.lastInboxHeld for sid in sids if sid in self.study}
         try:
-            applied = self.study.apply_inbox(save=False)
+            applied = self.study.apply_inbox(save=False, hold=self._inboxHold(current))
+            held = list(self.study.inbox_held)
+            if held and not self._inboxReloading and not self.isDirty() and not _caseStripEditing() and self._leaveForInbox():
+                # The subject is closed: nothing of its scene can be written with the new row
+                try:
+                    applied += self.study.apply_inbox(save=False)
+                    held = list(self.study.inbox_held)
+                finally:
+                    self._reopenAfterInbox(current)
+            applied += self._keepWrittenLesions(waited, applied)
         except Exception:
             logging.error(f"Studio: the study inbox could not be merged:\n{traceback.format_exc()}")
             return []
+        self.lastInboxHeld = held
+        if held and not self._closed:
+            self._inboxRetryTimer.start()
+        self.lastInboxRejected = list(self.study.inbox_errors[known:])
         if applied:
             try:
                 self.study.save(lock_timeout=SAVE_LOCK_TIMEOUT_S)
@@ -1746,7 +3036,101 @@ class StudySession:
             except jobs.Locked:
                 self.scheduleSave()
             _notify(self)
+            if not self._closed:
+                # A result that repoints the lesion or space (normalization, warp) leaves the metrics of the native file on the row
+                self.computeMissingMetrics(outsideEdits=False)
+        if self.lastInboxRejected and report:
+            _toast(self._shell, self.inboxRejectedText(), ms=9000, level="warning")
         return applied
+
+    def _inboxHold(self, current):
+        """``hold`` of ``Study.apply_inbox``: values that change the scan, lesion or space of the open subject ``current``."""
+        if current is None or current not in self.study:
+            return None
+        isMissing = _lnm("study").is_missing
+
+        def hold(sid, values):
+            if sid != current:
+                return False
+            row = self.study.subject(sid)
+            for column in INBOX_SCENE_COLUMNS:
+                if column not in values:
+                    continue
+                new, old = values[column], row.get(column)
+                if (isMissing(new) and isMissing(old)) or (not isMissing(new) and not isMissing(old) and str(new) == str(old)):
+                    continue
+                return True
+            return False
+
+        return hold
+
+    def _keepWrittenLesions(self, waited, applied):
+        """A result that waited for its subject's edits moved the row off a native lesion that is not the one it was made
+        from (Done wrote the tracing to another file meanwhile): that lesion becomes the row's ``lesion_native`` (the result
+        is then Stale), as the normalization manager keeps a lesion edited during its job. Return the files applied.
+        """
+        studyModule = _lnm("study")
+        isMissing = studyModule.is_missing
+        merged = {sid for _path, sids in applied for sid in sids}
+        kept = {}
+        for sid, before in waited.items():
+            lesion = before.get("lesion")
+            if sid not in merged or sid not in self.study or isMissing(lesion) or not (isMissing(before.get("space")) or before.get("space") == "native"):
+                continue
+            row = self.study.subject(sid)
+            if row.get("lesion") == lesion or row.get("lesion_native") == lesion or isMissing(row.get("space")) or row.get("space") == "native":
+                continue
+            kept[sid] = lesion
+        if not kept:
+            return []
+        audit = [{"event": "norm_lesion_edited", "sid": sid, "lesion_native": path, "by": "studio", "at": _now()} for sid, path in kept.items()]
+        studyModule.Study.post_results(self.study.path, {sid: {"lesion_native": path} for sid, path in kept.items()}, "inbox-edited", audit=audit)
+        _toast(self._shell, _("The lesion of {sids} was edited while it was normalized: it is marked Stale (Redo or Re-warp)").format(
+            sids=", ".join(sorted(kept))), ms=8000, level="consequence")
+        return self.study.apply_inbox(save=False, hold=self._inboxHold(self._current))
+
+    def _leaveForInbox(self):
+        """Close the open subject (its notes and case strip are written) before a result repoints its row. Return True if closed."""
+        if self._current is None:
+            return False
+        if not self._leave(write=True):
+            return False
+        self._removeSubjectNodes()
+        self._current = None
+        self._inboxReloading = True
+        return True
+
+    def _reopenAfterInbox(self, sid):
+        """Open ``sid`` again after the merge, with the files its row points at now (the workspace stays)."""
+        try:
+            if sid is not None and sid in self.study and self._current is None and not self.open(sid, switchToDraw=False):
+                shell = _currentShell(self._shell)
+                if shell is not None:
+                    # The breadcrumb never names a subject that is not open
+                    shell.setBreadcrumb(self.study.name, None, onClick=lambda: showSubjectSwitcher(shell))
+        finally:
+            self._inboxReloading = False
+
+    def _onInboxRetry(self):
+        if not self._closed and self.lastInboxHeld:
+            self.applyInbox()
+
+    def inboxRejectedText(self, rejected=None):
+        """Sentence for the job results that the last merge rejected ("" when none): how many files and why."""
+        rejected = self.lastInboxRejected if rejected is None else rejected
+        files = list(dict.fromkeys(path for path, _sid, _message in rejected))
+        if not files:
+            return ""
+        reasons = []
+        for _path, sid, message in rejected:
+            message = message if len(message) <= 80 else message[:77] + "…"
+            reason = f"{sid}: {message}" if sid else message
+            if reason not in reasons:
+                reasons.append(reason)
+        shown = "; ".join(reasons[:3]) + (" …" if len(reasons) > 3 else "")
+        if len(files) == 1:
+            return _("1 job result was not merged ({reasons}). It is kept in .studio/inbox/rejected.").format(reasons=shown)
+        return _("{n} job results were not merged ({reasons}). They are kept in .studio/inbox/rejected.").format(n=len(files), reasons=shown)
 
     mergeInbox = applyInbox
 
@@ -1761,34 +3145,44 @@ class StudySession:
         self.scheduleSave()
         _notify(self)
 
+    def setSubjectValues(self, valuesBySid):
+        """Set different cells for several subjects (``{sid: {column: value}}``, see ``Study.set``) with ONE notice and save.
+
+        A background result that fills a column for many subjects (lesion QC's dimensionality of 300 lesions) writes them
+        here: ``setValues`` per subject sent one notice each, and each notice refreshed the whole Library on the main thread
+        (a 300-subject study froze the GUI for seconds, BB-1).
+        """
+        if not valuesBySid:
+            return
+        try:
+            for sid, values in valuesBySid.items():
+                self.study.set(sid, values)
+                self._cropCache.pop(sid, None)
+        finally:
+            self.scheduleSave()
+            _notify(self)
+
     def setQc(self, sids, value, column="qc"):
         """P / X / U: ``value`` in pass, fail, unreviewed (``column``: qc, or a filter's qcColumn such as norm_qc)."""
         self.setValues(sids, {column: value})
 
     def importTable(self, path, groupColumn=None, groupMapping=None):
-        """Merge a participants table into the study (``Study.import_tsv``) with the group mapping. Return its report."""
-        columns, rows = readTable(path)
-        if groupColumn is None:
-            proposal = groupMappingProposal(columns, rows)
-            if proposal is not None:
-                groupColumn, groupMapping = proposal
-        if groupColumn and groupMapping:
-            applyGroupMapping(rows, groupColumn, groupMapping)
-            columns = list(columns) + [column for column in ("group", "include", GROUP_ORIGINAL_COLUMN) if column not in columns and any(column in row for row in rows)]
-        studyModule = _lnm("study")
-        temporary = os.path.join(self.study.path, studyModule.PRIVATE_DIR, f"import-{os.getpid()}.tsv")
-        studyModule.write_tsv(temporary, columns, rows)
-        try:
-            result = self.study.import_tsv(temporary)
-        finally:
-            with contextlib.suppress(OSError):
-                os.remove(temporary)
+        """Merge a participants table into the study (``Study.import_tsv``) with the group mapping. Return its report.
+
+        A column named like a study column with fixed values that holds other values ("status" of alive / deceased) is
+        imported as ``<name>_original`` (``_importClashingColumns()``; the report's ``renamed`` lists them), as adopting a
+        folder keeps it: the study's own column is not changed, except include, which takes the values that keep their
+        meaning (yes / no, 1.0 / 0.0). A table that still cannot be imported raises ValueError with a reason that names it.
+        """
+        self._requireWritable(_("The table was not imported."))
+        result = _importTable(self.study, path, groupColumn, groupMapping)
         self.flush()
         _notify(self)
         return result
 
     def addFiles(self, paths):
         """Add scans and lesions to the study (header-only); return the ``Study.add_files`` report."""
+        self._requireWritable(_("The files were not added."))
         report = self.study.add_files(paths)
         gridRows = _gridCandidates(self.study)
         _applyGridAnswers(self.study, gridRows)
@@ -1800,19 +3194,21 @@ class StudySession:
 
     def removeSubjects(self, sids):
         """Remove subjects from the study (their files are kept). Undo with ``undoRemove()``. Return the number removed."""
-        rows = self.study.subjects
-        order = [row["participant_id"] for row in rows]
-        record = [(order.index(sid), self.study.subject(sid)) for sid in sids if sid in self.study]
-        if not record:
+        if not any(sid in self.study for sid in sids):
             return 0
         if self._current in sids:
-            self._leave(write=True)
+            # The open subject is written first, so that the rows kept for Undo name its lesion (BB-1); a lesion that
+            # could not be written keeps it open and in the study (a toast says why)
+            if not self._leave(write=True):
+                return 0
             self._removeSubjectNodes()
             self._current = None
             shell = _currentShell(self._shell)
             if shell is not None:
                 # The breadcrumb never names a subject that is not open (nor in the study any more)
                 shell.setBreadcrumb(self.study.name, None, onClick=lambda: showSubjectSwitcher(shell))
+        order = [row["participant_id"] for row in self.study.subjects]
+        record = [(order.index(sid), self.study.subject(sid)) for sid in sids if sid in self.study]
         for _index, row in record:
             self.study.remove_subject(row["participant_id"])
         self._removed.append(record)
@@ -1850,14 +3246,30 @@ class StudySession:
         answers = self.study.grid_answers
         answers[gridId] = spaceName
         self.study.grid_answers = answers
+        before = self._gridReference
         _applyGridAnswers(self.study, self._gridRows)
+        if self._current is not None and self._current in self.study:
+            moved = self.study.abspath(self.study.subject(self._current).get("lesion"))
+            if before and moved and os.path.normcase(os.path.abspath(before)) != os.path.normcase(os.path.abspath(moved)) and os.path.isfile(moved) \
+                    and not os.path.isfile(before) and os.path.basename(before).startswith(f"{self._current}_space-"):
+                self._gridReference = moved
+                self._lesionStamp = _fileStamp(moved)
+            # The open lesion is in the answered space too (Draw's space line, Map's seed space)
+            segmentationNode = self.segmentationNode()
+            if segmentationNode is not None and self._gridReference:
+                _tagAnsweredGridSpace(self.study, self.study.subject(self._current), self._gridReference, segmentationNode)
         self.flush()
         _notify(self)
 
     # Lesion metrics on import (R5), computed off the main thread, written on it
 
-    def computeMissingMetrics(self):
-        """Compute the metrics of lesion files whose row has none (or whose file changed) in the background."""
+    def computeMissingMetrics(self, outsideEdits=True):
+        """Compute the metrics of lesion files whose row has none (or whose file changed) in the background.
+
+        :param outsideEdits: a measured lesion whose voxels changed is an edit made outside Studio: its row is stamped
+          ``modified`` and an approved or rejected review is reopened, like an edit in Draw (False for the inbox, whose
+          results repoint the lesion on purpose).
+        """
         studyModule = _lnm("study")
         work = []
         for row in self.study.subjects:
@@ -1873,6 +3285,11 @@ class StudySession:
             cached = row.get("lesion_mtime") == studyModule.format_value(round(stat.st_mtime, 3)) and row.get("lesion_size") == str(stat.st_size)
             if known and (cached or studyModule.is_missing(row.get("lesion_mtime"))):
                 continue
+            if known and outsideEdits:
+                # A measured lesion whose file changed outside Studio: _onMetrics compares the new metrics with these
+                self._metricsBefore[sid] = (row.get("lesion_mtime"), {key: row.get(key) for key in CONTENT_METRICS})
+            else:
+                self._metricsBefore.pop(sid, None)
             work.append((sid, path, None if studyModule.is_missing(row.get("space")) else row["space"]))
         if not work:
             return 0
@@ -1880,10 +3297,10 @@ class StudySession:
             from . import autosave_io
 
             self._metricsWriter = autosave_io.BackgroundWriter()
-        brainMask = _loadBrainMask()
+        brainMasks = {space: _loadBrainMask(space) for space in BRAIN_MASK_SPACES}
         for sid, path, lesionSpace in work:
             self._metricsPending.add(sid)
-            self._metricsWriter.submit(_fileMetrics, path, lesionSpace, brainMask,
+            self._metricsWriter.submit(_fileMetrics, path, lesionSpace, brainMasks.get(lesionSpace),
                                        onDone=lambda result, sid=sid: self._onMetrics(sid, result),
                                        onError=lambda error, sid=sid: self._onMetricsError(sid, error))
         return len(work)
@@ -1894,15 +3311,41 @@ class StudySession:
             return
         values, mtime, size = result
         values = {key: value for key, value in values.items() if not key.startswith("_")}
+        before = self._metricsBefore.pop(sid, None)
+        row = self.study.subject(sid)
+        # Changed outside Studio (and not rewritten by Studio meanwhile): like an edit in Draw, the lesion is modified now
+        # and an approval or rejection of the earlier voxels is reopened (an approval is for the voxels that were reviewed)
+        changed = before is not None and row.get("lesion_mtime") == before[0] and _metricsDiffer(before[1], values)
         values["lesion_mtime"] = round(mtime, 3)
         values["lesion_size"] = size
+        if changed:
+            values["modified"] = _lnm("study").now_iso()
         self.study.set(sid, values)
+        if changed:
+            self._reopenAfterOutsideEdit(sid)
         self.scheduleSave()
         if not self._metricsPending:
             _notify(self)
 
+    def _reopenAfterOutsideEdit(self, sid):
+        """Reopen the review of ``sid`` (approved or rejected -> pending, audited ``via`` "outside") after its lesion file
+        was changed by another program, and record the new state in the lesion sidecar.
+        """
+        rules = _reviewRules()
+        row = self.study.subject(sid)
+        if rules is None or rules.status_of(row) not in ("approved", "rejected"):
+            return
+        target = rules.status_after_done(self.study, row, edited=True)
+        if not target:
+            return
+        reviewValues = self._reopenReview(sid, target, via="outside")
+        if reviewValues:
+            with contextlib.suppress(ValueError, OSError):
+                self.study.write_lesion_sidecar(sid, studio=reviewValues)
+
     def _onMetricsError(self, sid, error):
         self._metricsPending.discard(sid)
+        self._metricsBefore.pop(sid, None)
         logging.warning(f"Studio: the lesion metrics of {sid} could not be computed: {error}")
 
     def waitForMetrics(self, timeoutS=30.0):
@@ -1989,6 +3432,9 @@ class StudySession:
 
         importer = _importer()
         template = templates.templateForStudyRecord(record)
+        if template is not None and not template.isAvailable():
+            # Registered, but its image file was deleted: as good as not on this computer (the notice offers to add it again)
+            template = None
         if template is not None:
             with importer._ownLoad():
                 node = importer.loadTemplateVolume(template)
@@ -2009,6 +3455,37 @@ class StudySession:
         self._templateFiles[node.GetID()] = _storagePath(node) or sampleFile(sampleName)
         return node
 
+    def _tagTemplateLesionSpace(self, row, segmentationNode):
+        """Tag a lesion drawn on the study's own template with that template's space (``Studio.Space``) when its grid is not
+        recognized: the template is not on this computer (A-10 step 5: the case opens on the built-in template of its family
+        with the mismatch notice, and the lesion stays an MNI lesion, as the study, participants.tsv and the sidecar say).
+        """
+        from . import templates
+
+        record = self.templateRecord()
+        if not templates.isUserStudyRecord(record) or segmentationNode.GetAttribute(space.SPACE_ATTRIBUTE):
+            return
+        recordSpace = str(record.get("space") or record.get("id") or "")
+        rowSpace = row.get("space")
+        if not recordSpace or recordSpace.lower() in ("native", "scanner", "orig", "individual"):
+            return
+        if not _missing(rowSpace) and str(rowSpace) != recordSpace:
+            return
+        if space.spaceOf(segmentationNode) is not None:
+            return
+        resolution = record.get("res")
+        grid = space.gridOf(segmentationNode)
+        box = space.worldBox(*grid) if grid is not None else None
+        try:
+            resolution = float(resolution) if resolution is not None else None
+        except (TypeError, ValueError):
+            resolution = None
+        if resolution is not None and (box is None or abs(float(box[1].min()) - resolution) > 0.01):
+            # Not on a grid of that template's voxel size: the lesion file says nothing reliable about its space
+            return
+        value = f"{recordSpace} {resolution:g}" if resolution is not None else recordSpace
+        segmentationNode.SetAttribute(space.SPACE_ATTRIBUTE, value)
+
     def _offerMissingTemplate(self, record):
         """The notice of a study template that is not on this computer (once per session); Add it… reopens the case on it."""
         if getattr(self, "_missingTemplateOffered", False):
@@ -2020,8 +3497,12 @@ class StudySession:
 
             def added(template):
                 # The cached fallback is forgotten: the next case (or this one, reopened) uses the added template
-                self._templateCache.pop(str(record.get("source")), None)
+                fallbackId = self._templateCache.pop(str(record.get("source")), None)
                 self._missingTemplateOffered = False
+                # The case that is open on the fallback is reopened on the added template (its edits are written first)
+                volume = self.volumeNode()
+                if self._current is not None and fallbackId is not None and volume is not None and volume.GetID() == fallbackId:
+                    self.open(self._current, switchToDraw=False, reload=True)
 
             templates_ui.offerMissingStudyTemplate(record, _currentShell(), onAdded=added)
         except Exception:
@@ -2096,6 +3577,7 @@ class StudySession:
         if key is None:
             self._queue = None
             self._queuePosition = None
+            self._queueHandled = set()
         else:
             if key == QUEUE_PAPER and record is None and self._current is not None:
                 record = recordOf(self.study.subject(self._current))
@@ -2104,6 +3586,7 @@ class StudySession:
                 raise ValueError(_("This case names no paper (DOI or record)") if key == QUEUE_PAPER else f"Unknown queue {key!r}")
             self._queue = {"key": key, "record": spec.get("record")}
             self._queuePosition = self._current if self._current is not None and _safe(spec["predicate"], self.study.subject(self._current)) else None
+            self._queueHandled = set()  # a new pass
         self._writeHeartbeat()
         self._schedulePrefetch()
         _notify(self)
@@ -2156,18 +3639,37 @@ class StudySession:
 
         Generalizes ``Study.next_subject(after, status)`` (W3-07): with a queue (a key, a spec, a predicate ``fn(row)``, or
         by default the active queue) the first subject after ``after`` in table order, wrapping around, that the queue still
-        has to do; without one, the next untraced subject (W3-07). Return its participant_id, or None.
+        has to do; without one, the next untraced subject (W3-07), and when none is left the next one still in progress (a
+        subject left half-traced by Alt+←/→ is not done, so Done never reports a study traced while one is open). Return its
+        participant_id, or None.
         """
         after = after if after is not None else (self._current or self._queuePosition)
         spec = self._resolveQueue(queue)
         if spec is None:
-            return self.study.next_subject(after, status="untraced")
+            return self.study.next_subject(after, status="untraced") or self.study.next_subject(after, status="inprogress")
         ids = self.study.subject_ids
         start = ids.index(after) + 1 if after in ids else 0
+        # A queue whose todo is its membership (Flagged, Needs review, ...) does not drop a case when Done is pressed on it
+        # (a QC flag such as "multipart" stays): the cases that Done already passed in this pass are not offered again, so
+        # that the queue ends instead of cycling
+        handled = self._queueHandled if queue is None and spec.get("todo") is spec.get("predicate") else ()
         for sid in ids[start:] + ids[:start]:
-            if sid != after and _safe(spec["todo"], self.study.subject(sid)):
+            if sid != after and sid not in handled and _safe(spec["todo"], self.study.subject(sid)):
                 return sid
         return None
+
+    def resumeTarget(self):
+        """The subject that the study's primary action opens when nothing is selected and no case is open (L-45): with an active
+        queue, the restored queue position when the queue still has it to do, else the queue's next case; None without a queue
+        (the caller then falls back to the next untraced subject) or when the queue has nothing left.
+        """
+        spec = self.queue()
+        if spec is None:
+            return None
+        position = self._queuePosition
+        if position in self.study and _safe(spec["todo"], self.study.subject(position)):
+            return position
+        return self.next_subject(None)
 
     def _stepTarget(self, delta, queue=None):
         """The subject Alt+→ (``delta`` 1) or Alt+← (-1) opens in a queue (default: the active one), without wrapping."""
@@ -2342,17 +3844,26 @@ class StudySession:
 
     # Opening subjects
 
-    def open(self, sid, switchToDraw=True):
+    def open(self, sid, switchToDraw=True, reload=False):
         """Open a subject: write the current one's edits, load the scan (or the study template) and the lesion, and
-        edit the lesion in Draw. Return True if the subject is open.
+        edit the lesion in Draw. Return True if the subject is open. Opening the subject that is already open changes
+        nothing, unless ``reload`` (its edits are written and it is loaded again, for example on another template).
         """
         if sid is None or sid not in self.study:
             return False
         shell = _currentShell(self._shell)
-        if sid == self._current and self.segmentationNode() is not None:
+        if sid == self._current and self.segmentationNode() is not None and not reload:
             if switchToDraw:
                 self._showDraw(shell)
             return True
+        # A scan that the table names but that is not on disk (moved, renamed, a drive that is not connected) is never
+        # replaced by the study template: the lesion would be traced on another image and saved as the subject's
+        missingScan = self._missingFile(sid, "scan")
+        if missingScan is not None:
+            logging.warning(f"Studio: the scan of {sid} is missing: {missingScan[1]}")
+            self._sayMissing(shell, sid, "scan", missingScan)
+            return False
+        missingLesion = self._missingFile(sid, "lesion")
         startTime = time.perf_counter()
         try:
             from . import autosave
@@ -2366,7 +3877,11 @@ class StudySession:
             if self._current is not None and not self._leave(write=True):
                 return False
             try:
-                self._load(sid)
+                damaged = self._load(sid)
+            except _importer().RefusedFileError as e:
+                logging.warning(f"Studio: {sid} was not opened: {e}")  # planned refusal: no traceback
+                _toast(shell, _("{sid} could not be opened: {error}").format(sid=sid, error=e), ms=6000, level="warning")
+                return False
             except Exception as e:
                 logging.error(f"Studio: cannot open {sid}:\n{traceback.format_exc()}")
                 _toast(shell, _("{sid} could not be opened: {error}").format(sid=sid, error=e), ms=6000, level="warning")
@@ -2391,7 +3906,81 @@ class StudySession:
             self._showDraw(shell)
         # The next case of the queue is read while this one is traced
         self._schedulePrefetch()
+        if missingLesion is not None:
+            # Last: a traced subject shown with an empty lesion is said, and stays said until the next input
+            self._sayMissing(shell, sid, "lesion", missingLesion)
+        elif damaged:
+            self._sayDamaged(shell, sid, damaged)
         return True
+
+    def subjectOfFile(self, path):
+        """participant_id of the subject whose scan or lesion (as the table names it) is the file ``path``, else None."""
+        if not path or not os.path.exists(path):
+            return None
+        target = os.path.normcase(os.path.realpath(path))
+        for row in self.study.subjects:
+            for column in ("scan", "lesion"):
+                try:
+                    filePath = self.study.abspath(row.get(column))
+                except Exception:
+                    filePath = None
+                if filePath and os.path.normcase(os.path.realpath(filePath)) == target:
+                    return row.get("participant_id")
+        return None
+
+    def _missingFile(self, sid, column):
+        """``(table path, absolute path)`` of the ``scan`` or ``lesion`` of ``sid`` when the table names a file that is
+        not on disk, else None (no file named, or the file is there).
+        """
+        value = self.study.subject(sid).get(column)
+        if _lnm("study").is_missing(value):
+            return None
+        path = self.study.abspath(value)
+        if path and os.path.isfile(path):
+            return None
+        return str(value), path or str(value)
+
+    def _sayMissing(self, shell, sid, column, missing):
+        """Tell the user that the scan or lesion file of ``sid`` is missing (a consequence: it stays until the next input)."""
+        tablePath, path = missing
+        if not self._checkFolder():
+            _toast(shell, self._folderGoneText(), ms=8000, level="consequence", toolTip=self.study.path)
+            return
+        if column == "scan":
+            text = _("{sid} was not opened: its scan {file} is missing (moved, renamed, or on a drive that is not connected)")
+        else:
+            text = _("The lesion of {sid} is missing: {file} (moved, renamed, or on a drive that is not connected). "
+                     "An empty lesion is shown; Done saves a new one")
+        text = text.format(sid=sid, file=tablePath)
+        folder = os.path.dirname(path)
+        if not os.path.isdir(folder):
+            folder = self.study.path
+        _toast(shell, text, ms=8000, action=lambda: _showFolder(folder), actionText=_("Show folder"), level="consequence",
+               toolTip=path)
+
+    def _sayDamaged(self, shell, sid, damaged):
+        """Tell the user that the scan or lesion file of ``sid`` is damaged (``{column: (table path, path, reason)}`` from
+        ``_load()``): the readers show the part they could not read as zeros, without an error. A consequence: it stays
+        until the next input.
+        """
+        scan, lesion = damaged.get("scan"), damaged.get("lesion")
+        if scan is not None and lesion is not None:
+            text = _("The scan and the lesion file of {sid} are damaged: {scan} and {file} cannot be read in full (cut short "
+                     "or corrupted). The part of the scan that could not be read is black; an empty lesion is shown and Done "
+                     "saves a new one").format(sid=sid, scan=scan[0], file=lesion[0])
+        elif lesion is not None:
+            text = _("The lesion file of {sid} is damaged: {file} cannot be read in full (cut short or corrupted). An empty "
+                     "lesion is shown; Done saves a new one").format(sid=sid, file=lesion[0])
+        else:
+            text = _("The scan of {sid} is damaged: {file} cannot be read in full (cut short or corrupted). The part that "
+                     "could not be read is black").format(sid=sid, file=scan[0])
+        entries = [entry for entry in (scan, lesion) if entry is not None]
+        folder = os.path.dirname(entries[-1][1])
+        if not os.path.isdir(folder):
+            folder = self.study.path
+        toolTip = "\n".join(f"{path}: {reason}" for _tablePath, path, reason in entries)
+        _toast(shell, text, ms=8000, action=lambda: _showFolder(folder), actionText=_("Show folder"), level="consequence",
+               toolTip=toolTip)
 
     def _showDraw(self, shell):
         if shell is None:
@@ -2403,24 +3992,52 @@ class StudySession:
             shell.switchTo("draw")
 
     def _load(self, sid):
+        """Load the scan and the lesion of ``sid`` and make it the current subject. Return ``{column: (table path, path,
+        reason)}`` of the scan and lesion files that cannot be read in full (a damaged lesion is not read: an empty one is
+        shown, as for a missing file).
+        """
         importer = _importer()
         row = self.study.subject(sid)
         scanPath = self.study.abspath(row.get("scan"))
         lesionPath = self.study.abspath(row.get("lesion"))
         if scanPath and not os.path.isfile(scanPath):
-            logging.warning(f"Studio: the scan of {sid} is missing: {scanPath}")
-            scanPath = None
+            # Never the template in its place (``open()`` says so before the current subject is left)
+            raise FileNotFoundError(_("the scan {file} is missing").format(file=row.get("scan")))
         if lesionPath and not os.path.isfile(lesionPath):
             logging.warning(f"Studio: the lesion of {sid} is missing: {lesionPath}")
             lesionPath = None
         previous = dict(self._nodeIds)
         previousVolume = self.volumeNode()
         self._cropCache = {}
+        # The lesion file as it is before it is read: a later change of it is another window's (see _write)
+        openedEpoch = time.time()
+        lesionStamp = _fileStamp(lesionPath) if lesionPath else None
         prefetched = self._takePrefetchedLesion(sid, lesionPath)
         self.lastSwitchPrefetched = prefetched is not None
+        # A file cut short reads without an error, the missing part as zeros: a damaged lesion would open empty or with
+        # part of its voxels, as if it were traced so (a prefetched lesion was read in full)
+        damaged = {}
+        for column, path in (("scan", scanPath), ("lesion", None if prefetched is not None else lesionPath)):
+            problem = _imageDataProblem(path)
+            if problem:
+                logging.warning(f"Studio: the {column} file of {sid} is damaged: {path}: {problem}")
+                damaged[column] = (str(row.get(column)), path, problem)
+        if "lesion" in damaged:
+            # Its stamp is kept: a Done that writes the subject's file under lesions/ replaces the damaged file, not another
+            # window's version
+            lesionPath = None
         with importer._ownLoad():
             if scanPath:
-                volumeNode = slicer.util.loadVolume(scanPath, {"singleFile": True, "show": False})
+                volumeClasses = ("vtkMRMLVolumeNode", "vtkMRMLStorageNode")
+                existingNodes = set().union(*(importer._sceneNodeIds(className) for className in volumeClasses))
+                try:
+                    volumeNode = slicer.util.loadVolume(scanPath, {"singleFile": True, "show": False})
+                except Exception as e:
+                    if importer._isAllocationFailure(e) or importer._isNiftiTooLargeForMemory(scanPath, e):
+                        # too large for the memory: a plain refusal (no reader text, paths or traceback), nothing left behind
+                        importer._removeNodesNotIn(existingNodes, volumeClasses)
+                        raise importer.RefusedFileError(importer._tooLargeMessage(scanPath)) from e
+                    raise
                 # The file's name, without the "_2" that the scene adds for a name it used before (an earlier subject switch)
                 volumeNode.SetName(importer._baseName(scanPath))
                 volumeNode.SetAttribute(SUBJECT_ATTRIBUTE, sid)
@@ -2437,6 +4054,12 @@ class StudySession:
                 gridReference = scanPath or self._templateFiles.get(volumeNode.GetID()) or _storagePath(volumeNode)
         segmentationNode.SetName(sid)
         segmentationNode.SetAttribute(SUBJECT_ATTRIBUTE, sid)
+        if lesionPath:
+            _tagAnsweredGridSpace(self.study, row, lesionPath, segmentationNode)
+        if not scanPath and lesionPath:
+            self._tagTemplateLesionSpace(row, segmentationNode)
+        if lesionPath:
+            _tagRecordedRowSpace(row, segmentationNode)
         displayNode = segmentationNode.GetDisplayNode()
         if displayNode is not None:
             displayNode.SetVisibility(True)
@@ -2448,12 +4071,17 @@ class StudySession:
         self._nodeIds = {"scan": volumeNode.GetID(), "segmentation": segmentationNode.GetID()}
         self._current = sid
         self._gridReference = gridReference
+        self._lesionStamp = lesionStamp
+        self._openedEpoch = openedEpoch
         self._openStamp = _contentStamp(segmentationNode)
+        # The Notes and source reference of the lesion's sidecar are shown again (Draw's Lesion card) and kept on rewrite
+        self._sidecarText = self._restoreSidecarText(sid, segmentationNode)
         self._dirty = False
         self._markedDirty = False
         self._activeSeconds = 0.0
         self._lastActivity = None
         self._observer.observe(segmentationNode)
+        return damaged
 
     def _context(self, sid):
         return {"session": self, "study": self.study, "row": self.study.subject(sid) if sid in self.study else {},
@@ -2468,40 +4096,62 @@ class StudySession:
         """Leave the current subject: write its edits (Lightroom: no Save), stop the journal. Return False to stay."""
         if self._current is None:
             return True
-        stripSaved = True
-        if write:
-            self._applyPendingSmartFill()
-            _commitDrawCardEdits()
-            # A case strip field being edited is saved too; an invalid value keeps the case open (after the lesion is
-            # written: a closing study still writes it)
-            stripSaved, reason = _commitCaseStripEdit(self)
-            if not stripSaved:
-                _toast(self._shell, _("{sid} stays open: {reason}").format(sid=self._current, reason=reason), ms=6000, level="warning")
-            if self.isDirty():
-                mask = lesionMask(self.segmentationNode())
-                if mask is None:
-                    # Erasing every voxel never traps the user on the subject: nothing is written, the file is kept
-                    self._leaveEmpty()
-                elif not self._markedDirty and self._sameAsLesionFile(mask):
-                    # Edits that cancel out (paint, then undo): the file and the row stay as they are
-                    if self._journal is not None:
-                        self._journal.discard(self._current)
-                else:
-                    try:
-                        self._write(status=None, runHooks=False, mask=mask)
-                    except Blocking as e:
-                        _toast(self._shell, str(e), ms=6000, level="warning")
-                        return False
-                    except Exception as e:
-                        logging.error(f"Studio: cannot write the lesion of {self._current}:\n{traceback.format_exc()}")
-                        _toast(self._shell, _("The lesion of {sid} could not be written: {error}").format(sid=self._current, error=e), ms=6000,
-                               level="warning")
-                        return False
-        if not stripSaved:
+        if write and not self.writeCurrent():
             return False
         if self._journal is not None:
             self._journal.detach()
         return True
+
+    def writeCurrent(self):
+        """Write the current subject's edits now; the subject stays open (``_leave()`` and the close prompt: a study has
+        no Save). Return True when nothing is left unwritten (also when there was nothing to write), False when the
+        lesion or a case strip field could not be written (a toast says why).
+        """
+        if self._current is None:
+            return True
+        self._applyPendingSmartFill()
+        _commitDrawCardEdits()
+        # A case strip field being edited is saved too; an invalid value keeps the case open (after the lesion is
+        # written: a closing study still writes it)
+        stripSaved, reason = _commitCaseStripEdit(self)
+        if not stripSaved:
+            _toast(self._shell, _("{sid} stays open: {reason}").format(sid=self._current, reason=reason), ms=6000, level="warning")
+        if self.isDirty():
+            mask = lesionMask(self.segmentationNode())
+            if mask is None:
+                # Erasing every voxel never traps the user on the subject: nothing is written, the file is kept
+                self._leaveEmpty()
+            elif not self._markedDirty and self._sameAsLesionFile(mask):
+                # Edits that cancel out (paint, then undo): the file and the row stay as they are
+                if self._journal is not None:
+                    self._journal.discard(self._current)
+            else:
+                try:
+                    result = self._write(status=None, runHooks=False, mask=mask)
+                    if result.get("conflict"):
+                        _toast(self._shell, self._conflictText(result), ms=15000, level="consequence", toolTip=result["conflict"])
+                except Blocking as e:
+                    _toast(self._shell, str(e), ms=6000, level="warning")
+                    return False
+                except OSError as e:
+                    # Expected (a folder that cannot be written, a full disk): plain words, a warning without a traceback
+                    logging.warning(f"Studio: cannot write the lesion of {self._current}: {e}")
+                    _toast(self._shell, _("The lesion of {sid} could not be written: {error}").format(sid=self._current, error=_plainOSError(e)),
+                           ms=6000, level="warning")
+                    return False
+                except Exception as e:
+                    logging.error(f"Studio: cannot write the lesion of {self._current}:\n{traceback.format_exc()}")
+                    _toast(self._shell, _("The lesion of {sid} could not be written: {error}").format(sid=self._current, error=e), ms=6000,
+                           level="warning")
+                    return False
+        # Notes or a source reference typed without a mask edit are written too (to the lesion's sidecar)
+        segmentationNode = self.segmentationNode()
+        if segmentationNode is not None and self._sidecarTextChanged(segmentationNode):
+            error = self._writeSidecar(self._current, segmentationNode)
+            if error is not None:
+                _toast(self._shell, _("The notes of {sid} could not be written: {error}").format(sid=self._current, error=error), ms=6000,
+                       level="warning")
+        return stripSaved
 
     def _leaveEmpty(self):
         """Leave a subject whose lesion was erased: nothing is written, its lesion file (if any) is kept, it says so."""
@@ -2571,6 +4221,52 @@ class StudySession:
         except (OSError, ValueError):
             return None
 
+    def _changedElsewhere(self, target):
+        """True when the lesion file ``target`` was written by another program (a second window of the study) since this
+        session opened the subject: it is not the file as this session read or wrote it, or, when this session did not
+        read it, it changed after the subject was opened.
+        """
+        stamp = _fileStamp(target)
+        if stamp is None:
+            return False
+        known = self._lesionStamp
+        if known is not None and known[0] == stamp[0]:
+            return known != stamp
+        try:
+            modified = os.stat(target).st_mtime
+        except OSError:
+            return False
+        return self._openedEpoch is not None and modified >= self._openedEpoch - CONFLICT_MTIME_SLACK_S
+
+    def noteLesionWritten(self, sid, path):
+        """This program rewrote the lesion file of the open subject ``sid`` outside ``_write`` (the 2D extrusion of
+        ``lesionqc.regenerate``): it is not another window's change.
+        """
+        if sid is not None and sid == self._current:
+            self._lesionStamp = _fileStamp(path)
+
+    def _keepConflictCopy(self, target):
+        """Copy the lesion file ``target`` to ``.studio/conflicts/`` before it is replaced; return the copy's path."""
+        studyModule = _lnm("study")
+        folder = os.path.join(self.study.path, studyModule.PRIVATE_DIR, CONFLICTS_DIR)
+        name = os.path.basename(target)
+        extension = ".nii.gz" if name.lower().endswith(".nii.gz") else os.path.splitext(name)[1]
+        stem = name[:-len(extension)] if extension else name
+        stamp = time.strftime("%Y%m%dT%H%M%S")
+        os.makedirs(folder, exist_ok=True)
+        copy = os.path.join(folder, f"{stem}_{stamp}{extension}")
+        counter = 2
+        while os.path.exists(copy):
+            copy = os.path.join(folder, f"{stem}_{stamp}-{counter}{extension}")
+            counter += 1
+        shutil.copy2(target, copy)
+        return copy
+
+    def _conflictText(self, result):
+        """The toast of a write that kept another window's version of the lesion (``result["conflict"]``)."""
+        return _("{sid} was also saved in another Slicer Studio window. Your tracing is saved; the other version is kept as "
+                 "{copy}").format(sid=result["sid"], copy=self.study.relpath(result["conflict"]))
+
     def _write(self, status=None, runHooks=False, mask=None):
         """Write the current lesion (see the module docstring) and update its row. Return a result dict.
 
@@ -2582,6 +4278,8 @@ class StudySession:
         segmentationNode = self.segmentationNode()
         if sid is None or segmentationNode is None:
             raise Blocking(_("No subject is open"))
+        if not self._checkFolder():
+            raise Blocking(self._folderGoneText())
         nifti = _lnm("nifti")
         studyModule = _lnm("study")
         if mask is None:
@@ -2597,9 +4295,12 @@ class StudySession:
         spaceName = rowSpace or self._spaceOfReference() or self.study.space or "native"
         if not re.fullmatch(r"[A-Za-z0-9]+", spaceName):
             spaceName = "native"
-        brainMask = _loadBrainMask() if spaceName == "MNI152NLin2009cAsym" else None
+        brainMask = _loadBrainMask(spaceName) if spaceName in BRAIN_MASK_SPACES else None
         values = metricsValues(array, ijkToRas, spaceName, brainMask)
         target, reviewEdit = self._lesionTarget(sid, row, spaceName)
+        # An approval (or rejection) is for the voxels that were reviewed: a write without Done (leaving the subject, the
+        # close prompt) that changes them reopens the review (→ pending, audited); on Done the review Done hook does it
+        reopenReview = None if runHooks else self._reviewAfterEdit(row, mask)
         extras = {}
         if runHooks:
             ctx = self._context(sid)
@@ -2611,14 +4312,23 @@ class StudySession:
         os.makedirs(os.path.dirname(target), exist_ok=True)
         extension = ".nii.gz" if target.lower().endswith(".nii.gz") else ".nii"
         temporary = f"{target[:-len(extension)]}.{os.getpid()}.tmp{extension}"
+        conflict = None
         try:
             nifti.write_like(temporary, array, ijkToRas, reference, dtype=np.uint8, descrip="Slicer Studio lesion")
+            # Another window wrote this subject's lesion since it was opened here: its version is kept, not lost
+            if self._changedElsewhere(target):
+                try:
+                    conflict = self._keepConflictCopy(target)
+                except OSError as e:
+                    raise Blocking(_("The lesion of {sid} was changed in another window and could not be kept: {error}").format(sid=sid, error=e)) from e
+                logging.warning(f"Studio: the lesion of {sid} was changed by another program; that version was kept as {conflict}")
             _replaceFile(temporary, target)
         except ValueError as e:
             raise Blocking(_("The lesion of {sid} cannot be written on its grid: {error}").format(sid=sid, error=e)) from e
         finally:
             with contextlib.suppress(OSError):
                 os.remove(temporary)
+        self._lesionStamp = _fileStamp(target)
         self._prefetched.pop(sid, None)
         # Row values
         method = row.get("trace_method")
@@ -2652,11 +4362,13 @@ class StudySession:
         self.study.set(sid, updates)
         stat = os.stat(target)
         self.study.set(sid, lesion_mtime=round(stat.st_mtime, 3), lesion_size=stat.st_size)
-        self._writeSidecar(sid, segmentationNode)
+        reviewValues = self._reopenReview(sid, reopenReview) if reopenReview else None
+        self._writeSidecar(sid, segmentationNode, studio=reviewValues)
         self.flush(lockTimeout=SAVE_LOCK_TIMEOUT_S)
         # The written file now defines the grid; the edits are written
         self._gridReference = target
         self._openStamp = _contentStamp(segmentationNode)
+        self._recordSaved(segmentationNode, target)
         self._dirty = False
         self._markedDirty = False
         self._activeSeconds = 0.0
@@ -2664,28 +4376,109 @@ class StudySession:
         if self._journal is not None:
             self._journal.discard(sid)
         _notify(self)
-        return {"sid": sid, "path": target, "values": updates}
+        return {"sid": sid, "path": target, "values": updates, "conflict": conflict}
 
-    def _writeSidecar(self, sid, segmentationNode):
-        """The BIDS sidecar of the lesion (``Study.write_lesion_sidecar``) with Draw's Notes and source reference (W2-05)."""
-        draw = _draw()
-        notesKey = getattr(draw, "NOTES_ATTRIBUTE", "Studio.LesionNotes")
-        referenceKey = getattr(draw, "SOURCE_REFERENCE_ATTRIBUTE", "Studio.LesionSourceReference")
+    def _reviewAfterEdit(self, row, mask):
+        """The review state of the current subject after its lesion is written with ``mask`` without Done: "pending" when
+        an approved or rejected lesion gets other voxels (``review.status_after_done``, edited), else None (kept).
+        """
+        rules = _reviewRules()
+        if rules is None or rules.status_of(row) not in ("approved", "rejected") or self._sameAsLesionFile(mask):
+            return None
+        return rules.status_after_done(self.study, row, edited=True)
+
+    def _reopenReview(self, sid, target, via="leave"):
+        """Move the review of ``sid`` to ``target`` after its reviewed lesion was rewritten without Done (audited, ``via``
+        "leave", or "outside" for a file changed by another program). Return the ``SlicerStudio`` sidecar values of the
+        new review state, or None when it was not recorded.
+        """
+        rules = _lnm("review")
         try:
-            path = self.study.write_lesion_sidecar(sid, studio={"generated_by": f"Slicer Studio {slicer.app.applicationVersion}"})
+            from . import review as studioReview
+
+            who = studioReview.storedRaterName() or studioReview.UNNAMED
+        except Exception:
+            who = "unnamed"
+        try:
+            rules.apply_transition(self.study, sid, target, who, extra={"via": via, "edited": True})
+        except Exception:
+            logging.error(f"Studio: the review of {sid} could not be reopened after its lesion changed:\n{traceback.format_exc()}")
+            return None
+        return {"review": rules.sidecar_values(self.study, self.study.subject(sid))["review"]}
+
+    @staticmethod
+    def _recordSaved(segmentationNode, path):
+        """Draw's save record of the lesion: it was just written to ``path`` (so the Lesion card reads "Saved · <file>"
+        and the close prompt does not report changes, also when the subject stays open after Done).
+        """
+        draw = _draw()
+        records = getattr(draw, "_savedRecords", None) if draw is not None else None
+        if not isinstance(records, dict):
+            return
+        savedTime = datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        reference = vtk.vtkWeakReference()
+        reference.Set(segmentationNode)
+        records[segmentationNode.GetID()] = (reference, path, _contentStamp(segmentationNode), savedTime)
+        segmentationNode.SetAttribute(getattr(draw, "SAVED_FILE_ATTRIBUTE", "Studio.LesionSavedFile"), os.path.basename(path))
+        segmentationNode.SetAttribute(getattr(draw, "SAVED_TIME_ATTRIBUTE", "Studio.LesionSavedTime"), savedTime)
+
+    @staticmethod
+    def _sidecarTextKeys():
+        """``((sidecar key, node attribute), ...)`` of Draw's Notes and source reference (W2-05)."""
+        draw = _draw()
+        return (("Notes", getattr(draw, "NOTES_ATTRIBUTE", "Studio.LesionNotes")),
+                ("SourceReference", getattr(draw, "SOURCE_REFERENCE_ATTRIBUTE", "Studio.LesionSourceReference")))
+
+    def _restoreSidecarText(self, sid, segmentationNode):
+        """Set the ``Notes`` and ``SourceReference`` of the subject's lesion sidecar on its lesion node (a value already on
+        the node wins), as ``importer.restoreSidecarText`` does for a lesion opened alone. Return the sidecar's values.
+        """
+        try:
+            sidecar = self.study.read_lesion_sidecar(sid) or {}
+        except (OSError, ValueError):
+            sidecar = {}
+        values = []
+        for key, attribute in self._sidecarTextKeys():
+            value = sidecar.get(key)
+            value = value if isinstance(value, str) else ""
+            if value and segmentationNode.GetAttribute(attribute) is None:
+                segmentationNode.SetAttribute(attribute, value)
+            values.append(value)
+        return tuple(values)
+
+    def _sidecarTextChanged(self, segmentationNode):
+        """True when the lesion's Notes or source reference differ from what its sidecar holds."""
+        current = tuple(segmentationNode.GetAttribute(attribute) or "" for _key, attribute in self._sidecarTextKeys())
+        return current != tuple(self._sidecarText)
+
+    def _writeSidecar(self, sid, segmentationNode, studio=None):
+        """The BIDS sidecar of the lesion (``Study.write_lesion_sidecar``) with Draw's Notes and source reference (W2-05).
+        A value cleared on the lesion is removed from the sidecar. ``studio``: more ``SlicerStudio`` values. Return None,
+        or the error when it was not written.
+        """
+        try:
+            path = self.study.write_lesion_sidecar(sid, studio={"generated_by": f"Slicer Studio {slicer.app.applicationVersion}", **(studio or {})})
             with open(path, encoding="utf-8") as f:
                 content = json.load(f)
-            notes = segmentationNode.GetAttribute(notesKey) or ""
-            reference = segmentationNode.GetAttribute(referenceKey) or ""
             changed = False
-            for key, value in (("Notes", notes), ("SourceReference", reference)):
+            for key, attribute in self._sidecarTextKeys():
+                value = segmentationNode.GetAttribute(attribute)
+                if value is None:
+                    continue  # never set on this lesion: the sidecar's value is kept
                 if value and content.get(key) != value:
                     content[key] = value
                     changed = True
+                elif not value and key in content:
+                    del content[key]
+                    changed = True
             if changed:
                 _lnm("schema").write_text_atomic(path, json.dumps(content, indent=2, ensure_ascii=False) + "\n")
-        except Exception:
+        except Exception as e:
             logging.warning(f"Studio: the sidecar of {sid} could not be written:\n{traceback.format_exc()}")
+            return e
+        if sid == self._current:
+            self._sidecarText = tuple(segmentationNode.GetAttribute(attribute) or "" for _key, attribute in self._sidecarTextKeys())
+        return None
 
     def done(self, writeLesion=True):
         """Done → next: write the lesion (status traced, metrics), then open ``next_subject()``: the next case of the active
@@ -2725,14 +4518,22 @@ class StudySession:
         except Blocking as e:
             _toast(shell, str(e), ms=6000, level="warning")
             return None
+        except OSError as e:
+            logging.warning(f"Studio: Done could not write the lesion of {sid}: {e}")
+            _toast(shell, _("The lesion of {sid} could not be saved: {error}").format(sid=sid, error=_plainOSError(e)), ms=6000, level="warning")
+            return None
         except Exception as e:
             logging.error(f"Studio: Done failed for {sid}:\n{traceback.format_exc()}")
             _toast(shell, _("The lesion of {sid} could not be saved: {error}").format(sid=sid, error=e), ms=6000, level="warning")
             return None
-        if result.get("path"):
+        if result.get("conflict"):
+            _toast(shell, self._conflictText(result), ms=15000, level="consequence", toolTip=result["conflict"])
+        elif result.get("path"):
             _toast(shell, _("Saved {name}").format(name=os.path.basename(result["path"])), ms=2500, toolTip=result["path"])
         # The active trace queue decides the next case (L-45); without one, the next untraced subject (W3-07)
         spec = self.queue()
+        if spec is not None:
+            self._queueHandled.add(sid)
         nextSid = self.next_subject(sid)
         if nextSid is None and spec is None:
             _toast(shell, _("All subjects of {study} are traced").format(study=self.study.name), ms=4000, level="consequence")
@@ -2792,6 +4593,12 @@ class StudySession:
             self._swallowNext = False
             return self._current
         self._swallowNext = False
+        if status is None and queue is None:
+            # Alt+←/→ in a second tracing or an adjudication follow that pass: the session has no subject then (L-44)
+            adjudicate = sys.modules.get("StudioLib.adjudicate")
+            agreement = adjudicate.state() if adjudicate is not None else None
+            if agreement is not None and agreement.session is self:
+                return agreement.step(delta)
         if status is None and queue is None and self._queue is not None:
             # Alt+←/→ follow the active trace queue (L-45)
             spec = self.queue()
@@ -2843,7 +4650,7 @@ class StudySession:
         """Add a subject without a scan ("sub-case001"...) whose lesion is drawn on the study template, and open it."""
         studyModule = _lnm("study")
         number = 1
-        while f"sub-{CASE_PREFIX}{number:03d}" in self.study:
+        while self.study.id_taken(f"sub-{CASE_PREFIX}{number:03d}"):
             number += 1
         sid = f"sub-{CASE_PREFIX}{number:03d}"
         record = self.templateRecord()
@@ -2866,7 +4673,7 @@ class StudySession:
         if not label:
             label = re.sub(r"\d+$", "", caseLabel(str(row.get("participant_id", ""))[4:])) or CASE_PREFIX
         number = 1
-        while f"sub-{label}{number:02d}" in self.study:
+        while self.study.id_taken(f"sub-{label}{number:02d}"):
             number += 1
         return f"sub-{label}{number:02d}"
 
@@ -2897,6 +4704,7 @@ class StudySession:
         last = max((index for index, other in enumerate(rows) if recordOf(other) == paper), default=len(rows) - 1)
         rows.insert(last + 1, moved)
         self.flush()
+        self._syncPaperCaseCount(newSid, values.get("record_id"))
         previous = self._current
         if not self.open(newSid, switchToDraw=switchToDraw):
             return newSid
@@ -2905,6 +4713,41 @@ class StudySession:
                action=lambda: self._undoNewCase(newSid, previous), actionText=_("Undo"), level="consequence")
         _notify(self)
         return newSid
+
+    def _syncPaperCaseCount(self, sid, recordId):
+        """Raise ``n_cases`` of the paper's record in sources/records.tsv to its linked study rows, as "Add cases…" on the
+        Sources card does, so the PRISMA case count and the Sources summary include ``sid``. Nothing is written for a case
+        with no record in records.tsv, a read-only or unavailable study folder, or an unreadable records.tsv.
+        """
+        if _missing(recordId) or self.readOnly or not self.folderAvailable():
+            return
+        try:
+            sources = _lnm("sources")
+            records = sources.Records.open(self.study)
+            before = sources.sync_case_count(self.study, records, str(recordId))
+            if before is None:
+                return
+            records.save()
+            self._paperCaseCounts[sid] = (str(recordId), before, records.get(str(recordId))["n_cases"])
+        except Exception as e:
+            logging.warning(f"Studio: the case count of record {recordId} in sources/records.tsv was not updated: {e}")
+
+    def _restorePaperCaseCount(self, sid):
+        """Undo of :meth:`_syncPaperCaseCount` for ``sid``, while records.tsv still holds the count it set."""
+        recordId, before, after = self._paperCaseCounts.pop(sid, (None, None, None))
+        if recordId is None or self.readOnly or not self.folderAvailable():
+            return
+        try:
+            sources = _lnm("sources")
+            records = sources.Records.open(self.study)
+            row = records.get(recordId)
+            if row["n_cases"] != after:
+                return  # changed since: keep it
+            row["n_cases"] = before
+            sources.sync_case_count(self.study, records, recordId)  # never below the cases still linked
+            records.save()
+        except Exception as e:
+            logging.warning(f"Studio: the case count of record {recordId} in sources/records.tsv was not restored: {e}")
 
     def _undoNewCase(self, sid, previous):
         """Undo "New case from this paper" while the new case is untouched: remove it and go back to the case it came from."""
@@ -2916,8 +4759,10 @@ class StudySession:
             return False
         if previous in self.study:
             self.open(previous, switchToDraw=False)
-        self.removeSubjects([sid])
+        if not self.removeSubjects([sid]):
+            return False
         self._removed.pop()  # not offered by "Undo remove"
+        self._restorePaperCaseCount(sid)
         return True
 
     def newCaseFromClipboardFigure(self, sid=None, shell=None):
@@ -2944,22 +4789,45 @@ class StudySession:
 
 
 def canWarpToConnectomeSpace(studySession, sid):
-    """True when the subject's lesion is on a 2009 template grid and the connectome space is MNI152NLin6Asym."""
+    """True when the subject's lesion is on a 2009 template grid and the connectome space is MNI152NLin6Asym.
+
+    The connectome space is that of a registered connectome bundle, or the study's ``trace_policy`` space: the policy copies the
+    connectome space only when the study is created, so a study made (or adopted) before its NLin6 connectome was registered
+    still says 2009c there.
+    """
     if studySession is None or sid not in studySession.study:
         return False
     row = studySession.study.subject(sid)
     lesion = studySession.study.abspath(row.get("lesion"))
-    target = studySession.study.trace_policy.get("space")
-    if not lesion or not os.path.isfile(lesion) or target != "MNI152NLin6Asym":
+    if not lesion or not os.path.isfile(lesion):
         return False
     geometry = _lnm("geometry")
-    return geometry.space_family(str(row.get("space") or "")) == "2009"
+    if geometry.space_family(str(row.get("space") or "")) != "2009":
+        return False
+    target = "MNI152NLin6Asym"
+    return studySession.study.trace_policy.get("space") == target or target in registeredConnectomeSpaces()
+
+
+def _lesionEditedDuringWarp(studySession, sid, originalLesion, lesionStamp):
+    """True when the lesion that a warp of ``sid`` read (``originalLesion``, file stamp ``lesionStamp``) is not the subject's
+    lesion any more: the row points at another file, the file was written again, or the open subject has edits not written.
+    """
+    studyObject = studySession.study
+    if sid not in studyObject or studyObject.subject(sid).get("lesion") != originalLesion:
+        return True
+    if _fileStamp(studyObject.abspath(originalLesion)) != lesionStamp:
+        return True
+    return _session is studySession and studySession.current() == sid and studySession.isDirty()
 
 
 def warpToConnectomeSpace(sid, transformPath=None, referencePath=None, shell=None):
     """Warp a subject's 2009c lesion to MNI152NLin6Asym with the transforms CLI (two background jobs: the fractional
     ``desc-lesionProb`` and the binarized ``desc-lesion`` at 0.5). The originals are kept; the row is repointed through the
     inbox with ``trace_template`` and the transform's sha256 (in the audit record and the lesion sidecar).
+
+    The jobs read the lesion file: edits of the open subject that are not written yet are written first (the subject stays
+    open). A lesion edited while the jobs run (written, or still unwritten when they finish) was not the one warped: the row is
+    then not repointed, and a toast asks to warp it again.
 
     :return: the first job, or None when cancelled.
     """
@@ -2970,12 +4838,10 @@ def warpToConnectomeSpace(sid, transformPath=None, referencePath=None, shell=Non
     from LesionNetworkMappingUI import jobrunner
 
     studyObject = studySession.study
-    row = studyObject.subject(sid)
-    lesion = studyObject.abspath(row["lesion"])
     target = "MNI152NLin6Asym"
     transformPath = transformPath or slicer.util.settingsValue(WARP_TRANSFORM_KEY, "")
     if not transformPath or not os.path.isfile(transformPath):
-        transformPath = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Transform MNI152NLin2009cAsym → MNI152NLin6Asym"), "",
+        transformPath = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Transform MNI152NLin2009cAsym → MNI152NLin6Asym"), _importer().dialogStartFolder(),
                                                        _("ITK transform") + " (tpl-MNI152NLin6Asym_from-MNI152NLin2009cAsym*.h5 *.h5 *.tfm *.txt)")
         if not transformPath:
             return None
@@ -2991,6 +4857,17 @@ def warpToConnectomeSpace(sid, transformPath=None, referencePath=None, shell=Non
         referencePath = sampleFile(NLIN6_2MM_SAMPLE)
         if referencePath is None:
             raise RuntimeError(_("The MNI152NLin6Asym template could not be downloaded"))
+    # The jobs warp the file: the open subject's edits are written to it first, or nothing is warped
+    if studySession.current() == sid and studySession.isDirty() and not studySession.writeCurrent():
+        _toast(shell, _("{sid} was not warped: its edits could not be written").format(sid=sid), ms=6000, level="warning")
+        return None
+    if not canWarpToConnectomeSpace(studySession, sid):
+        _toast(shell, _("{sid} has no MNI152NLin2009cAsym lesion to warp").format(sid=sid))
+        return None
+    row = studyObject.subject(sid)
+    originalLesion = row["lesion"]
+    lesion = studyObject.abspath(originalLesion)
+    lesionStamp = _fileStamp(lesion)
     studyModule = _lnm("study")
     lesionsDir = os.path.join(studyObject.path, studyModule.LESIONS_DIR)
     probability = os.path.join(lesionsDir, f"{sid}_space-{target}_desc-lesionProb_mask.nii.gz")
@@ -3004,6 +4881,15 @@ def warpToConnectomeSpace(sid, transformPath=None, referencePath=None, shell=Non
         if not job.succeeded():
             _toast(shell, _("Warping {sid} failed: {reason}").format(sid=sid, reason=job.failureReason or job.state), ms=6000, level="warning")
             return
+        if _lesionEditedDuringWarp(studySession, sid, originalLesion, lesionStamp):
+            # The warp is of a lesion that is no longer the subject's: its result would drop the edits from the analysis
+            for path in (probability, binary):
+                with contextlib.suppress(OSError):
+                    os.remove(path)
+            logging.info(f"Studio: the warp of {sid} was not applied: its lesion was edited while it ran")
+            _toast(shell, _("The lesion of {sid} was edited while it was warped: the warp was not applied. Warp it again.").format(sid=sid),
+                   ms=8000, level="warning")
+            return
         provenance = (job.doneEvent or {}).get("provenance") or {}
         audit = {"event": "warp", "sid": sid, "from": sourceSpace, "to": target, "transform": os.path.basename(str(transformPath)),
                  "transform_sha256": provenance.get("transform_sha256"), "original": row["lesion"],
@@ -3012,12 +4898,17 @@ def warpToConnectomeSpace(sid, transformPath=None, referencePath=None, shell=Non
                                       "warp", audit)
         if _session is studySession:
             studySession.applyInbox()
-            try:
-                studyObject.write_lesion_sidecar(sid, studio={"warped_from": row["lesion"], "trace_template": sourceSpace,
-                                                              "transform": os.path.basename(str(transformPath)),
-                                                              "transform_sha256": provenance.get("transform_sha256")})
-            except Exception:
-                logging.warning(f"Studio: the sidecar of the warped lesion of {sid} could not be written:\n{traceback.format_exc()}")
+            if sid in studyObject and studyObject.subject(sid).get("lesion") != studyObject.relpath(binary):
+                # Held back while the subject's edits are not written (StudySession.applyInbox): the sidecar of the lesion that is
+                # still open is not changed; the audit record keeps the warp's provenance
+                logging.info(f"Studio: the warp of {sid} is merged when its edits are written")
+            else:
+                try:
+                    studyObject.write_lesion_sidecar(sid, studio={"warped_from": row["lesion"], "trace_template": sourceSpace,
+                                                                  "transform": os.path.basename(str(transformPath)),
+                                                                  "transform_sha256": provenance.get("transform_sha256")})
+                except Exception:
+                    logging.warning(f"Studio: the sidecar of the warped lesion of {sid} could not be written:\n{traceback.format_exc()}")
         _toast(shell, _("{sid} warped to {space} (the original is kept)").format(sid=sid, space=target), ms=4000, level="consequence")
 
     def binarize(job):
@@ -3049,10 +4940,12 @@ class SubjectSwitcher:
         layout = qt.QVBoxLayout(self.widget)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
+        from . import ui
+
         self.search = qt.QLineEdit()
         self.search.setObjectName("StudioSubjectSwitcherSearch")
         self.search.setPlaceholderText(_("Search subjects"))
-        self.search.setClearButtonEnabled(True)
+        ui.setClearButton(self.search)
         self.search.connect("textChanged(QString)", self._fill)
         self.search.connect("returnPressed()", self._openCurrent)
         layout.addWidget(self.search)
@@ -3069,8 +4962,6 @@ class SubjectSwitcher:
         if anchor is not None:
             point = anchor.mapToGlobal(qt.QPoint(0, anchor.height))
             self.widget.move(point)
-        from . import ui
-
         ui.bindStyleSheet(self.widget, lambda: (
             f"QFrame#StudioSubjectSwitcher {{ background-color: {ui.token('card').name()}; border: 1px solid {ui.token('border').name()}; "
             "border-radius: 8px; }"))
@@ -3155,10 +5046,28 @@ def showSubjectSwitcher(shell=None):
 #
 
 
+def _agreementContext():
+    """``{"queue", "subject"}`` of the active second tracing or adjudication (``adjudicate.state()``), or None.
+
+    The study session has no subject then (the state released it, L-44): the autosave names the state's subject apart, so
+    that recovery reopens the state, never the first tracing of a blind second tracing.
+    """
+    adjudicate = sys.modules.get("StudioLib.adjudicate")
+    state = adjudicate.state() if adjudicate is not None else None
+    if state is None or state.session is not _session or not state.current:
+        return None
+    return {"queue": state.queue, "subject": state.current}
+
+
 def _autosaveContext():
     if _session is None:
         return {}
-    return {"study": {"path": _session.study.path, "name": _session.study.name, "subject": _session.current()}}
+    study = {"path": _session.study.path, "name": _session.study.name, "subject": _session.current()}
+    agreementContext = _agreementContext()
+    if agreementContext is not None:
+        study["subject"] = None
+        study["agreement"] = agreementContext
+    return {"study": study}
 
 
 def _slotStudy(slot):
@@ -3173,9 +5082,51 @@ def _canRecover(slot):
     return bool(record and record.get("path") and isAvailable() and _lnm("study").Study.is_study(record["path"]))
 
 
+#: Node attributes of the nodes that reopening a study restores itself (its subject's scan and lesion, the study template,
+#: the tracings of a second tracing or an adjudication): ``adjudicate.NODE_ATTRIBUTE`` is "Studio.AgreementSubject"
+_STUDY_NODE_ATTRIBUTES = (SUBJECT_ATTRIBUTE, "Studio.AgreementSubject")
+
+
+def _restoredByStudy(info):
+    """True for an autosaved node (``recovery.otherDataScene()``) that reopening the study restores itself."""
+    return any(info["attributes"].get(name) for name in _STUDY_NODE_ATTRIBUTES)
+
+
 def _recover(slot):
     record = _slotStudy(slot)
-    openStudy(record["path"], subject=record.get("subject") or None)
+    agreementRecord = record.get("agreement") if isinstance(record.get("agreement"), dict) else None
+    if agreementRecord and agreementRecord.get("subject"):
+        # A second tracing or an adjudication: the study opens and the state reopens its subject (a second tracing then
+        # offers its journal); the subject itself is never opened by the session (blinding)
+        session = openStudy(record["path"])
+        if session is None:
+            return  # the open project could not be saved and the user keeps working in it
+        _reopenAgreement(session, agreementRecord.get("queue"), agreementRecord["subject"])
+    else:
+        if openStudy(record["path"], subject=record.get("subject") or None) is None:
+            return  # the open project could not be saved and the user keeps working in it
+    # The study restores its subject (its journal holds the edits of the lesion); the other autosaved data of the scene
+    # (point lists, tables, models... that the recovery card lists) is added to it (SPEC 9.9: Recover loads the scene)
+    if hasattr(slot, "scenePath"):
+        from . import recovery
+
+        recovery.recoverOtherData(slot, _restoredByStudy)
+
+
+def _reopenAgreement(session, queue, sid):
+    """Start the second tracing or adjudication of an autosave at ``sid`` when it still waits in its queue."""
+    if session is None or sid not in session.study:
+        return False
+    try:
+        from . import adjudicate
+    except ImportError:
+        return False
+    row = session.study.subject(sid)
+    if queue == adjudicate.QUEUE_SECOND and adjudicate.secondTodo(row):
+        return adjudicate.startSecondTracing(sid=sid) is not None
+    if queue == adjudicate.QUEUE_ADJUDICATE and adjudicate.needsAdjudication(row):
+        return adjudicate.startAdjudication(sid=sid) is not None
+    return False
 
 
 #
@@ -3184,6 +5135,8 @@ def _recover(slot):
 
 
 def _paletteEntries(shell=None):
+    from . import ui
+
     if not isAvailable():
         return []
     entries = [
@@ -3217,7 +5170,7 @@ def _paletteEntries(shell=None):
         for spec in availableQueues(row):
             entries.append({"id": f"study.queue.{spec['key']}", "title": _("Trace queue: {queue}").format(queue=spec["label"]), "category": _("Action"),
                             "synonyms": ["queue", "next case", "worklist"], "callback": lambda key=spec["key"]: _setQueueAction(key, shell),
-                            "description": _("Done → next and Alt+←/→ follow this queue")})
+                            "description": _("Done → next and {keys} follow this queue").format(keys=ui.keyText("Alt+Left") + "/" + ui.keyText("Alt+Right"))})
     return entries
 
 

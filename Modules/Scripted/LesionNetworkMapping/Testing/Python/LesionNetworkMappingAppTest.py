@@ -41,7 +41,7 @@ for folder in (MODULE_DIR, TEST_DIR):
 import numpy as np
 
 import lnm_pipeline_fixture as fixture
-from LesionNetworkMappingLib import app, cohortmaps, connectome, export, nifti, pipeline
+from LesionNetworkMappingLib import app, cohortmaps, connectome, export, nifti, pipeline, runs
 from LesionNetworkMappingLib.study import Study, read_tsv
 
 TOLERANCE = 1e-5
@@ -63,6 +63,20 @@ def _env(**extra):
         else:
             env[key] = value
     return env
+
+
+def _plain_python():
+    """The Python interpreter itself, never a launcher.
+
+    Under ``Slicer --testing`` ``sys.executable`` is the build tree's PythonSlicer launcher, which puts the
+    build tree's qt-scripted-modules ahead of PYTHONPATH. A fake bundle must not use it: it needs an interpreter
+    that honours PYTHONPATH, like the PythonSlicer of a real bundle does with its own library.
+    """
+    base = getattr(sys, "_base_executable", "") or ""
+    for candidate in (base, os.path.join(sys.base_prefix, "bin", "python3"), sys.executable):
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK) and "pythonslicer" not in os.path.basename(os.path.realpath(candidate)).lower():
+            return candidate
+    return sys.executable
 
 
 def _events(text):
@@ -186,6 +200,198 @@ class AppHelpersTest(unittest.TestCase):
             design.DesignSpec(test="two_group", block_column="dataset", permute="within").save(path)
             with self.assertRaisesRegex(ValueError, "block_column"):
                 app.design_options(path)
+            # Levels select the subjects of continuous and one-sample tests: the pipeline cannot honour that,
+            # so the design is refused instead of running the sLNM on every subject
+            for test, extra in (("continuous", {"score_column": "aphasia_score"}), ("one_sample", {})):
+                design.DesignSpec(test=test, group_column="group", levels=["case"], **extra).save(path)
+                with self.assertRaisesRegex(ValueError, r"levels \['case'\].*slicer-lnm glm --design"):
+                    app.design_options(path)
+            design.DesignSpec(test="one_sample").save(path)
+            self.assertEqual(app.design_options(path)["specificity"], "off")
+
+    def test_design_without_volume_names_a_slicer_lnm_remedy(self):
+        """A design that leaves out volume_ml must not send slicer-lnm users to 'pipeline run --no-volume-covariate'."""
+        from LesionNetworkMappingLib import design
+
+        parser = app._parser()
+        with tempfile.TemporaryDirectory() as tmp:
+            base = ["in", "out", "group", "--connectome", "c", "--accept-terms"]
+            path = os.path.join(tmp, "noage.json")
+            design.DesignSpec(test="two_group", covariates=["age"]).save(path)
+            with self.assertRaises(ValueError) as caught:
+                app.build_config(parser.parse_args(base + ["--design", path]), tmp)
+            self.assertIn("volume_off_reason", str(caught.exception))
+            self.assertNotIn("--no-volume-covariate", str(caught.exception))
+            design.DesignSpec(test="two_group", covariates=["age"], volume_off_reason="age-matched cohort").save(path)
+            config = app.build_config(parser.parse_args(base + ["--design", path]), tmp)
+            self.assertEqual((config.covariates, config.volume_off_reason), (["age"], "age-matched cohort"))
+
+    def test_bad_seed_and_relocation_values_are_refused_up_front(self):
+        """A negative seed or a non-numeric --null-relocations is a usage error that names the option, before any stage runs (BB-1)."""
+        parser = app._parser()
+        base = ["in", "out", "group", "--connectome", "c", "--accept-terms"]
+        with tempfile.TemporaryDirectory() as tmp:
+            for extra, expected in ((["--preview", "5", "--preview-seed", "-1"], "--preview-seed must not be negative"),
+                                    (["--null-seed", "-3"], "--null-seed must not be negative"),
+                                    (["--perm-seed", "-2"], "--perm-seed must not be negative"),
+                                    (["--null-relocations", "abc"], "--null-relocations must be auto or a number")):
+                with self.assertRaises(ValueError, msg=extra) as caught:
+                    app.build_config(parser.parse_args(base + extra), tmp)
+                self.assertIn(expected, str(caught.exception))
+            config = app.build_config(parser.parse_args(base + ["--preview", "5", "--preview-seed", "0", "--null-seed", "7", "--perm-seed", "3", "--null-relocations", "12"]), tmp)
+            self.assertEqual((config.preview_seed, config.null_seed, config.perm_seed, config.null_relocations), (0, 7, 3, 12))
+        for key in ("preview_seed", "null_seed", "perm_seed"):
+            with self.assertRaises(ValueError):
+                pipeline.PipelineConfig(**{key: -1})
+            with self.assertRaises(ValueError):
+                pipeline.PipelineConfig(**{key: "x"})
+
+    def test_recipe_is_recorded_and_outside_steps_reported(self):
+        """--recipe records the recipe for pipeline.json and methods, and names the steps the pipeline does not run (BB-1)."""
+        from LesionNetworkMappingLib import methods
+
+        parser = app._parser()
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            args = parser.parse_args(["in", "out", "group", "--connectome", "c", "--accept-terms", "--recipe", "comprehensive_battery"])
+            config = app.build_config(args, tmp, emit=lambda event, **fields: events.append((event, fields)))
+        self.assertEqual((config.recipe["id"], config.recipe["outside_pipeline"]), ("comprehensive_battery", ["validation", "robustness"]))
+        outside = [fields for event, fields in events if fields.get("code") == "recipe_step_outside"]
+        self.assertEqual([fields["step"] for fields in outside], ["validation", "robustness"])
+        self.assertIn("Map ▸ Validate", outside[0]["message"])
+        # A run option: not in pipeline.json "config" (stage fingerprints unchanged), but kept by a rerun of pipeline.json
+        self.assertNotIn("recipe", config.to_json(analysis_only=True))
+        self.assertNotIn("recipe", pipeline.PipelineConfig().to_json())
+        content = {"format": pipeline.FORMAT_NAME, "config": config.to_json(analysis_only=True), "recipe": config.recipe}
+        self.assertEqual(pipeline.PipelineConfig.from_json(content).recipe, config.recipe)
+
+        class Records:
+            def pipeline(self):
+                return {"recipe": config.recipe, "stages": []}, "pipeline-1"
+
+        text = methods.pipeline_section(Records()).text()
+        self.assertIn("(run pipeline-1; recipe comprehensive_battery).", text)
+        self.assertIn("Recipe steps outside the pipeline (not part of this run): validation, robustness.", text)
+
+    def test_parser_usage_errors_follow_events_mode(self):
+        """A missing or invalid argument is reported like the command's other errors: text with --events text or on a terminal, JSON otherwise."""
+        code, events, out, err = cli("x", "--threads", "0", "--events", "text")
+        self.assertEqual(code, 2)
+        self.assertEqual(events, [], out)
+        self.assertIn("error (usage): Invalid arguments: argument --threads: must be at least 1", out)
+        self.assertIn("usage:", err)
+        code, events, out, _err = cli("x", "--events=text")
+        self.assertEqual(code, 2)
+        self.assertEqual(events, [], out)
+        self.assertIn("error (usage): Invalid arguments: the following arguments are required", out)
+        # JSON stays the machine protocol (--events json, and auto without a terminal)
+        for extra in (("--events", "json"), ()):
+            code, events, out, _err = cli("x", *extra)
+            self.assertEqual((code, events[-1]["event"], events[-1]["code"]), (2, "error", "usage"), out)
+        self.assertEqual(app._events_option(["a", "--events", "text", "--events=json"]), "json")
+        self.assertEqual(app._events_option(["--events", "bogus"]), "auto")
+        self.assertEqual(app._events_option(["--events"]), "auto")
+
+    @unittest.skipUnless(os.name == "posix", "needs a pseudo-terminal")
+    def test_parser_usage_errors_are_text_on_a_terminal(self):
+        import pty
+
+        master, slave = pty.openpty()
+        try:
+            process = subprocess.Popen([sys.executable, "-m", "LesionNetworkMappingLib.app", "x"], cwd=MODULE_DIR, env=_env(), stdout=slave, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+            os.close(slave)
+            slave = None
+            _stdout, _stderr = process.communicate(timeout=120)
+            chunks = []
+            try:
+                while True:
+                    data = os.read(master, 4096)
+                    if not data:
+                        break
+                    chunks.append(data)
+            except OSError:
+                pass
+        finally:
+            if slave is not None:
+                os.close(slave)
+            os.close(master)
+        output = b"".join(chunks).decode("utf-8", "replace")
+        self.assertEqual(process.returncode, 2)
+        self.assertIn("error (usage): Invalid arguments: the following arguments are required", output)
+        self.assertNotIn('{"event"', output)
+
+    def test_library_command_usage_and_hints_name_slicer_lnm(self):
+        """Run as ``slicer-lnm <command>``, usage lines and hints name ``slicer-lnm <command>`` (a copied ``python -m`` command fails in the app's wrapper and the wheel)."""
+        # qa has its own argparse subclass; jobs runs its own file a second time as __main__ (runpy), whose APP_PROG is None
+        for args, prog in ((("vlsm", "--nosuch"), "slicer-lnm vlsm"), (("vlsm", "run", "--help"), "slicer-lnm vlsm run"), (("calibrate", "--help"), "slicer-lnm calibrate"),
+                           (("normalize", "check", "--help"), "slicer-lnm normalize check"), (("reference", "build", "--help"), "slicer-lnm reference build"),
+                           (("qa", "--nosuch"), "slicer-lnm qa"), (("qa", "degree", "--help"), "slicer-lnm qa degree"), (("jobs", "--help"), "slicer-lnm jobs"),
+                           (("jobs", "selftest", "--help"), "slicer-lnm jobs selftest")):
+            _code, _events_unused, out, err = cli(*args)
+            self.assertIn(f"usage: {prog}", out + err, args)  # qa's own parser prints --help on standard output
+            self.assertNotIn("python -m", out + err, args)
+        # normalize without a command prints its usage text
+        _code, _events_unused, _out, err = cli("normalize")
+        self.assertIn("slicer-lnm normalize run --scan", err)
+        self.assertNotIn("python -m", err)
+        # run directly as a module, the python -m form stays
+        _code, _events_unused, _out, err = cli("--nosuch", module="vlsm")
+        self.assertIn("usage: python -m LesionNetworkMappingLib.vlsm", err)
+        _code, _events_unused, _out, err = cli("--nosuch", module="qa")
+        self.assertIn("usage: python -m LesionNetworkMappingLib.qa", err)
+        _code, _events_unused, _out, err = cli("--help", module="jobs")
+        self.assertIn("usage: python -m LesionNetworkMappingLib.jobs", err)
+        from LesionNetworkMappingLib import jobs, recipes
+
+        text = "build them with 'python -m LesionNetworkMappingLib.reference build'"
+        self.assertEqual(jobs.command_text(text), text)
+        self.assertIsNone(jobs.APP_PROG)
+        # the "where" of a step outside the pipeline (recipes config) names the roi command the same way
+        import copy
+
+        darby = recipes.find_recipe("darby2019_cnm", recipes.load_recipes())
+        with_roi = recipes.Recipe(dict(copy.deepcopy(darby.data), steps=[*darby.steps, "roi"]), origin=darby.origin, path=darby.path)
+        where = {step["id"]: step["where"] for step in recipes.to_pipeline_config(with_roi, module_available=lambda name: True)["outside_pipeline"]}
+        self.assertEqual(where["roi"], "command line: python -m LesionNetworkMappingLib.roi glm")
+        # regression: no Map control named "Recipe (ROI inference)" exists, so no text may point to one
+        self.assertNotIn("Map ▸ Recipe", " ".join(recipes.MANUAL_STEP_PLACES.values()))
+        with mock.patch.object(jobs, "APP_PROG", "slicer-lnm"):
+            self.assertEqual(jobs.command_text(text), "build them with 'slicer-lnm reference build'")
+            self.assertEqual(jobs.JsonArgumentParser(prog="python -m LesionNetworkMappingLib.glm").prog, "slicer-lnm glm")
+            where = {step["id"]: step["where"] for step in recipes.to_pipeline_config(with_roi, module_available=lambda name: True)["outside_pipeline"]}
+            self.assertEqual(where["roi"], "command line: slicer-lnm roi glm")
+        # run_library_command sets the name for the library hints and restores it afterwards
+        seen = {}
+
+        def probe(*_a, **_k):
+            seen["prog"] = jobs.APP_PROG
+
+        with mock.patch.object(app.runpy, "run_module", probe):
+            app.run_library_command("glm", [])
+        self.assertEqual(seen["prog"], "slicer-lnm")
+        self.assertIsNone(jobs.APP_PROG)
+
+    def test_library_command_help_texts(self):
+        # 'slicer-lnm jobs' prints no runpy RuntimeWarning, and 'slicer-lnm normalize --help' prints a usage line, not the developer docstring
+        import io
+        import warnings
+        from contextlib import redirect_stderr
+
+        from LesionNetworkMappingLib import app
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            err = io.StringIO()
+            with redirect_stderr(err):
+                self.assertEqual(app.run_library_command("jobs", ["selftest", "--help"]), 0)
+        self.assertEqual([str(w.message) for w in caught if issubclass(w.category, RuntimeWarning)], [])
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertEqual(app.run_library_command("normalize", ["--help"]), 0)
+        text = err.getvalue()
+        self.assertTrue(text.startswith("usage: slicer-lnm normalize"), text[:80])
+        for internal in (":mod:", "A-10", "never imports slicer", "standard library at import"):
+            self.assertNotIn(internal, text)
 
     def test_usage_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -197,6 +403,75 @@ class AppHelpersTest(unittest.TestCase):
             self.assertIn("poster", events[-1]["message"])
             code, events, _out, _err = cli(tmp, os.path.join(tmp, "out"), "group", "--connectome", os.path.join(tmp, "missing.lnmc"), "--events", "json")
             self.assertEqual(code, 2)
+            # An output folder that is a file (or sits below one) is a usage error with text output, not a NotADirectoryError traceback
+            blocker = os.path.join(tmp, "out_is_a_file.txt")
+            with open(blocker, "w", encoding="utf-8") as f:
+                f.write("x")
+            for output, text in ((blocker, "The output folder is a file"), (os.path.join(blocker, "sub"), "The output folder cannot be created")):
+                code, events, _out, err = cli(tmp, output, "group", "--connectome", tmp, "--events", "json")
+                self.assertEqual((code, events[-1]["code"]), (2, "usage"), output)
+                self.assertIn(text, events[-1]["message"])
+                self.assertNotIn("Traceback", err)
+            self.assertEqual(app.usage_message(ValueError("--x is bad")), "--x is bad")
+            self.assertTrue(app.usage_message(KeyError("k")).startswith("KeyError"))
+            code, events, _out, _err = cli("engine", "--bundle", os.path.join(tmp, "nope"), "--lesion", os.path.join(tmp, "l.nii.gz"), "--out", os.path.join(tmp, "e"))
+            self.assertEqual((code, events[-1]["code"]), (2, "usage"))
+            self.assertIn("--bundle", events[-1]["message"])
+            self.assertNotIn("FileNotFoundError", events[-1]["message"])
+            code, _events_unused, out_text, err = cli(tmp, blocker, "group", "--connectome", tmp, "--events", "text")
+            self.assertEqual(code, 2)
+            self.assertIn("error (usage): The output folder is a file", out_text + err)
+            self.assertNotIn("Traceback", err)
+            # An explicit file option that names nothing is a usage error, not a silent fallback (black report background)
+            for option in ("--template", "--atlas", "--atlas-labels"):
+                code, events, _out, _err = cli(tmp, os.path.join(tmp, "out"), "group", "--connectome", tmp, option, os.path.join(tmp, "nosuch.nii.gz"), "--events", "json")
+                self.assertEqual(code, 2, option)
+                self.assertIn(option, events[-1]["message"])
+                self.assertIn("nosuch.nii.gz", events[-1]["message"])
+            # A missing --design / --pipeline-config file names the option and the file, not a raw FileNotFoundError
+            for option in ("--design", "--pipeline-config"):
+                code, events, _out, _err = cli(tmp, os.path.join(tmp, "out"), "group", "--connectome", tmp, option, os.path.join(tmp, "nosuch.json"), "--events", "json")
+                self.assertEqual(code, 2, option)
+                self.assertIn(option, events[-1]["message"])
+                self.assertIn("nosuch.json", events[-1]["message"])
+                self.assertNotIn("FileNotFoundError", events[-1]["message"])
+            # ... and so does a broken one (no JSONDecodeError text alone)
+            broken = os.path.join(tmp, "broken.json")
+            with open(broken, "w", encoding="utf-8") as f:
+                f.write("{not json")
+            with self.assertRaises(ValueError) as caught:
+                app.design_options(broken)
+            self.assertIn("--design", str(caught.exception))
+            self.assertIn("broken.json", str(caught.exception))
+            args = app._parser().parse_args(["in", "out", "group", "--connectome", "c", "--accept-terms", "--pipeline-config", broken])
+            with self.assertRaises(ValueError) as caught:
+                app.build_config(args, tmp, None)
+            self.assertIn("--pipeline-config", str(caught.exception))
+            self.assertIn("broken.json", str(caught.exception))
+            # A figure convention typo or a template that is no NIfTI image is refused at once, not after the whole run (the report is the last stage)
+            code, events, _out, _err = cli(tmp, os.path.join(tmp, "out"), "group", "--connectome", tmp, "--figure-convention", "radiologic", "--events", "json")
+            self.assertEqual(code, 2)
+            self.assertIn("--figure-convention", events[-1]["message"])
+            self.assertIn("radiologic", events[-1]["message"])
+            garbage = os.path.join(tmp, "garbage.nii.gz")
+            with open(garbage, "w", encoding="utf-8") as f:
+                f.write("not a nifti")
+            code, events, _out, _err = cli(tmp, os.path.join(tmp, "out"), "group", "--connectome", tmp, "--template", garbage, "--events", "json")
+            self.assertEqual(code, 2)
+            self.assertIn("--template", events[-1]["message"])
+            self.assertIn("garbage.nii.gz", events[-1]["message"])
+            # the same for the pipeline's own commands (plan/run take --figure-convention and --template; report re-renders only)
+            code, events, _out, err = cli("report", "--out", tmp, "--figure-convention", "bogus", module="pipeline")
+            self.assertEqual((code, events[-1]["code"]), (2, "usage"))
+            self.assertNotIn("Traceback", err)
+            code, events, _out, _err = cli("report", "--out", tmp, "--template", garbage, module="pipeline")
+            self.assertEqual((code, events[-1]["code"]), (2, "usage"))
+            code, events, _out, _err = cli("report", "--out", tmp, "--template", os.path.join(tmp, "nosuch.nii.gz"), module="pipeline")
+            self.assertEqual((code, events[-1]["code"]), (2, "usage"))
+            code, events, _out, _err = cli("plan", "--study", tmp, "--bundle", tmp, "--figure-convention", "bogus", module="pipeline")
+            self.assertEqual((code, events[-1]["code"]), (2, "usage"))
+            self.assertIsNone(pipeline.figure_option_error(None, None))
+            self.assertIsNone(pipeline.figure_option_error("auto", "radiological"))
             code, _events, _out, err = cli(tmp, os.path.join(tmp, "out"), "sideways", "--connectome", tmp)
             self.assertEqual(code, 2)
             code, _events, out, _err = cli("--version")
@@ -233,7 +508,7 @@ class AppLevelsTest(unittest.TestCase):
                 if os.path.isfile(path):
                     cls.participant_maps[(sid, key)] = volume(path)
         # group level
-        cls.group = cli(*level_args, "group", "--connectome", cls.fx["bundle"], *COMMON, *BIDS_OPTIONS, "--figures", "glass")
+        cls.group = cli(*level_args, "group", "--connectome", cls.fx["bundle"], *COMMON, *BIDS_OPTIONS, "--figures", "glass,pair")
         cls.group_json = read_json(os.path.join(cls.out, pipeline.PIPELINE_JSON)) if os.path.isfile(os.path.join(cls.out, pipeline.PIPELINE_JSON)) else {}
         # the application's path: the pipeline command line on the study (Library ▸ Analysis, Map ▸ Run everything)
         cls.gui = cli("run", "--study", cls.fx["study"], "--bundle", cls.fx["bundle"], "--accept-terms", "--perm", "1000", "--events", "json", "--threads", "2", module="pipeline")
@@ -296,6 +571,26 @@ class AppLevelsTest(unittest.TestCase):
             for key, column in keys.items():
                 expected = volume(self.inprocess[sid][column])
                 np.testing.assert_allclose(self.participant_maps[(sid, key)], expected, rtol=0, atol=TOLERANCE, err_msg=f"{sid} {key}")
+
+    def test_blocked_rule_remedy_is_an_option_slicer_lnm_accepts(self):
+        """A real run blocked by a rule refused for the connectome's N (exit 5) names remedies that slicer-lnm accepts:
+        every --option of the hint is one of its options, and the run repeated with it is not blocked (BB-1).
+        """
+        rule = json.dumps({"kind": "t_convention", "value": 7.0, "reference_n": 1000})
+        args = [self.bids, os.path.join(self.tmp, "refused rule out"), "participant", "--connectome", self.fx["bundle"], *COMMON, *BIDS_OPTIONS, "--rule", rule]
+        code, events, _stdout, stderr = cli(*args)
+        error = last_event(events)
+        self.assertEqual(code, pipeline.EXIT_BLOCKED, stderr[-2000:] + str(error))
+        self.assertEqual(error["code"], "blocked")
+        hints = " ".join([*error["fixes"], *(block.get("fix") or "" for block in error["blocks"])])
+        named = set(re.findall(r"--[a-z][a-z-]*", hints))
+        self.assertIn("--allow-rule-anyway", named, hints)
+        accepted = {option for action in app._parser()._actions for option in action.option_strings}
+        self.assertFalse(named - accepted, f"the remedy names options slicer-lnm does not have: {sorted(named - accepted)}")
+        code, events, _stdout, stderr = cli(*args, *sorted(named))
+        self.assertEqual(code, 0, stderr[-2000:] + str(last_event(events)))
+        saved = read_json(os.path.join(args[1], self.run_name, pipeline.PIPELINE_JSON))
+        self.assertIn("allow_rule_anyway", json.dumps(saved))
 
     # Group level
 
@@ -386,6 +681,17 @@ class AppLevelsTest(unittest.TestCase):
         failing = [line for line in result.stdout.splitlines() if line.startswith("FAIL") and "reproduce_pipeline.sh" not in line]
         self.assertEqual(failing, [], result.stdout[-3000:])
 
+    def test_study_run_registry_holds_no_absolute_run_folders(self):
+        self.assertDone(self.participant)
+        study_root = os.path.join(self.output, "sourcedata", "slicer-lnm-study")
+        records = runs.read_records(study_root)
+        self.assertTrue([record for record in records if record.get("dir")])
+        self.assertEqual([record["dir"] for record in records if isinstance(record.get("dir"), str) and os.path.isabs(record["dir"])], [])
+        with open(os.path.join(study_root, "derivatives", "lnm", "runs.jsonl"), encoding="utf-8") as f:
+            self.assertNotIn(self.tmp, f.read())
+        folders = {os.path.realpath(runs.run_dir(study_root, record)) for record in records if record.get("dir")}
+        self.assertIn(os.path.realpath(self.out), folders)
+
     def test_figures(self):
         self.assertDone(self.group)
         folder = os.path.join(self.out, "figures", "slicer-lnm-glass")
@@ -395,6 +701,32 @@ class AppLevelsTest(unittest.TestCase):
             self.assertFalse(os.path.isdir(folder))
             return
         self.assertTrue(os.path.isfile(os.path.join(folder, "slicer-lnm-glass.png")), os.listdir(os.path.join(self.out, "figures")) if os.path.isdir(os.path.join(self.out, "figures")) else None)
+
+    def test_pair_figure_is_thresholded_by_the_primary_rule(self):
+        """--figures pair draws the mean T map thresholded by the run's primary rule (with the run's N) plus its unthresholded
+        companion: it used to pass no rule, which gave one unthresholded panel captioned "Thresholded and unthresholded map".
+        """
+        self.assertDone(self.group)
+        try:
+            import PIL  # noqa: F401
+        except ImportError:
+            self.skipTest("Pillow is not available")
+        folder = os.path.join(self.out, "figures", "slicer-lnm-pair")
+        warnings = [event["message"] for event in self.group[1] if event["event"] == "warning" and event.get("code") == "figure"]
+        self.assertTrue(os.path.isfile(os.path.join(folder, "slicer-lnm-pair.png")), warnings)
+        meta = read_json(os.path.join(folder, "figure.json"))
+        self.assertEqual([panel["mode"] for panel in meta["panels"]], ["hard", "unthresholded"])
+        self.assertTrue(meta["caption"].startswith("Thresholded and unthresholded map of"), meta["caption"])
+        resolved = next(iter(meta["thresholds"].values()))
+        self.assertEqual(resolved["rule"]["kind"], "fwe_bonferroni")
+        self.assertEqual((resolved["n"], resolved["v"]), (self.group_json["subjects"]["n"], self.bundle.n_voxels))
+        # A primary rule that gives no |T| (an Fz effect size) leaves the pair out with a warning, not a mislabeled figure
+        events = []
+        config = mock.Mock(bundle=self.fx["bundle"], study=self.group_json.get("study") or self.fx["study"], template=None, figure_convention=None, rule={"kind": "fz_abs", "value": 0.05})
+        written = app.render_figures(["pair"], self.out, config, lambda event, **fields: events.append({"event": event, **fields}))
+        self.assertEqual(written, [])
+        self.assertEqual([event["event"] for event in events], ["warning"])
+        self.assertIn("applies to mean Fz, not to T", events[0]["message"])
 
     def test_study_folder_input_shares_the_application_cache(self):
         self.assertDone(self.study_run)
@@ -419,6 +751,357 @@ class AppLevelsTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("sub-99", events[-1]["message"])
 
+    def test_reproduce_pipeline_keeps_participant_label(self):
+        """reproduce_pipeline.sh of a --participant-label run analyses the same subjects and writes the same group maps: the
+        selection used to live in the level runner only, so 'pipeline run --config pipeline.json' re-ran every subject (BB-1).
+        """
+        self.assertEqual(app.NOT_SELECTED, pipeline.NOT_SELECTED)
+        selected = [sid for index, sid in enumerate(self.sids) if index % 4 != 1]  # cases and controls stay in both groups
+        output = os.path.join(self.tmp, "labels group out")
+        labels = [sid if index % 2 else sid[len("sub-"):] for index, sid in enumerate(selected)]  # with and without "sub-"
+        code, events, _stdout, stderr = cli(self.bids, output, "group", "--connectome", self.fx["bundle"], "--participant-label", *labels, *COMMON, *BIDS_OPTIONS)
+        self.assertEqual(code, 0, stderr[-2000:] + str(last_event(events)))
+        out = os.path.join(output, self.run_name)
+        original = read_json(os.path.join(out, pipeline.PIPELINE_JSON))
+        self.assertEqual(original["config"]["participant_label"], sorted(selected))
+
+        def analysed(data):
+            rows = data["inputs"]["rows"]
+            return sorted(row["participant_id"] for row in rows if row["status"] != "excluded"), sorted(row["participant_id"] for row in rows if row["reason"] == pipeline.NOT_SELECTED)
+
+        self.assertEqual(analysed(original)[1], sorted(set(self.sids) - set(selected)))
+        self.assertTrue(analysed(original)[0] and set(analysed(original)[0]) <= set(selected), analysed(original))
+        reproduced = os.path.join(self.tmp, "labels reproduced")
+        env = _env(ACCEPT_TERMS="1", PYTHONSLICER=sys.executable, LNM_LIBRARY_DIR=MODULE_DIR, OUT=reproduced, SLICER_LNM=None)
+        result = subprocess.run(["sh", os.path.join(out, pipeline.REPRODUCE_PIPELINE)], cwd=out, env=env, capture_output=True, text=True, encoding="utf-8", timeout=600, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        copy = read_json(os.path.join(reproduced, pipeline.PIPELINE_JSON))
+        self.assertEqual(analysed(copy), analysed(original))
+        self.assertEqual(copy["config"]["participant_label"], sorted(selected))
+        group_maps = sorted(name for name in os.listdir(out) if name.startswith("group_") and name.endswith("_map.nii.gz"))
+        self.assertTrue(group_maps)
+        for name in group_maps:
+            np.testing.assert_allclose(volume(os.path.join(reproduced, name)), volume(os.path.join(out, name)), atol=TOLERANCE, err_msg=name, equal_nan=True)
+        # a run without labels stores none (earlier configurations are unchanged); --pipeline-config does not carry them over
+        self.assertNotIn("participant_label", self.group_json["config"])
+        args = app._parser().parse_args([self.bids, output, "group", "--connectome", self.fx["bundle"], "--pipeline-config", os.path.join(out, pipeline.PIPELINE_JSON), "--accept-terms"])
+        self.assertIsNone(app.build_config(args, os.path.join(output, *app.STUDY_RELPATH)).participant_label)
+
+    def test_refused_run_writes_nothing(self):
+        """A run refused with exit code 75 (another run holds the output folder) writes nothing there: it used to rewrite
+        the shared study of the BIDS input with its own --group-map first, and the running run then analysed those groups (BB-1).
+        """
+        from LesionNetworkMappingLib import jobs
+
+        output = os.path.join(self.tmp, "locked out")
+        lock_path = os.path.join(output, self.run_name, pipeline.PRIVATE_DIR, pipeline.LOCK_NAME)
+        lock = jobs.OutputLock(lock_path).acquire()  # the run that writes there
+        try:
+            code, events, _stdout, stderr = cli(self.bids, output, "group", "--connectome", self.fx["bundle"], *COMMON, "--group-map", "patient=control,HC=case", "--lock-wait", "0")
+            written = file_set(output)
+        finally:
+            lock.release()
+        self.assertEqual((code, last_event(events)["code"]), (jobs.EXIT_LOCKED, "locked"), stderr[-2000:])
+        self.assertEqual(written, {os.path.relpath(lock_path, output).replace(os.sep, "/")})
+        # the study of a finished run is left as it is by a refused run (the lock of a running one is held)
+        study_tsv = os.path.join(self.output, *app.STUDY_RELPATH, "participants.tsv")
+        before = tree_digest(self.output)
+        lock = jobs.OutputLock(os.path.join(self.out, pipeline.PRIVATE_DIR, pipeline.LOCK_NAME)).acquire()
+        try:
+            code, _events, _stdout, _stderr = cli(self.bids, self.output, "group", "--connectome", self.fx["bundle"], *COMMON, "--group-map", "patient=control,HC=case", "--lock-wait", "0")
+        finally:
+            lock.release()
+        self.assertEqual(code, jobs.EXIT_LOCKED)
+        self.assertEqual(tree_digest(self.output), before)
+        self.assertEqual(read_tsv(study_tsv)[1][0]["group"], "case")
+
+    def test_option_errors_are_plain_messages(self):
+        """Usage errors of option values read as plain messages, without the Python class name (ValueError:, RecipeError:)."""
+        output = os.path.join(self.tmp, "option errors out")
+        for option, value, text in (("--preview", "0", "--preview must be at least 1"), ("--perm", "999", "--perm must be at least"), ("--alpha", "1", "alpha"), ("--recipe", "nonexist", "ecipe")):
+            code, events, _stdout, stderr = cli(self.bids, output, "participant", "--connectome", self.fx["bundle"], "--accept-terms", option, value, "--events", "json")
+            self.assertEqual((code, events[-1]["code"]), (2, "usage"), (option, stderr[-500:]))
+            self.assertNotRegex(events[-1]["message"], r"^\w*(Error|Exception):", option)
+            self.assertIn(text, events[-1]["message"])
+        code, _events, out_text, err = cli(self.bids, output, "participant", "--connectome", self.fx["bundle"], "--accept-terms", "--preview", "0", "--events", "text")
+        self.assertEqual(code, 2)
+        self.assertIn("error (usage): --preview must be at least 1", out_text + err)
+        self.assertFalse(os.path.exists(output))
+
+    def test_run_refused_before_its_first_stage_leaves_no_output_folder(self):
+        """Without --accept-terms (exit 4) or with an unknown --participant-label (exit 2) the run stops before its first
+        stage: the new output folder stays absent (it kept conn-<label>/.pipeline and the whole study of the BIDS input, BB-1).
+        """
+
+        def everything(folder):
+            return sorted(os.path.relpath(os.path.join(root, name), folder).replace(os.sep, "/") for root, dirs, files in os.walk(folder) for name in dirs + files)
+
+        refused = [arg for arg in COMMON if arg != "--accept-terms"]
+        output = os.path.join(self.tmp, "terms out")
+        code, events, _stdout, stderr = cli(self.bids, output, "participant", "--connectome", self.fx["bundle"], *refused, *BIDS_OPTIONS)
+        self.assertEqual((code, last_event(events)["code"]), (4, "terms_not_accepted"), stderr[-2000:])
+        self.assertFalse(os.path.exists(output), everything(output) if os.path.isdir(output) else None)
+        output = os.path.join(self.tmp, "label out")
+        code, events, _stdout, stderr = cli(self.bids, output, "participant", "--connectome", self.fx["bundle"], "--participant-label", "99", *COMMON, *BIDS_OPTIONS)
+        self.assertEqual((code, last_event(events)["code"]), (2, "usage"), stderr[-2000:])
+        self.assertIn("sub-99", last_event(events)["message"])
+        self.assertFalse(os.path.exists(output), everything(output) if os.path.isdir(output) else None)
+        # a study folder as input: no conversion, and the empty run folders of the refused run are removed too
+        output = os.path.join(self.tmp, "study terms out")
+        code, events, _stdout, stderr = cli(self.fx["study"], output, "participant", "--connectome", self.fx["bundle"], *refused)
+        self.assertEqual((code, last_event(events)["code"]), (4, "terms_not_accepted"), stderr[-2000:])
+        self.assertFalse(os.path.exists(output), everything(output) if os.path.isdir(output) else None)
+        # an output folder that existed stays as it was
+        output = os.path.join(self.tmp, "kept out")
+        os.makedirs(output)
+        code, _events, _stdout, _stderr = cli(self.bids, output, "participant", "--connectome", self.fx["bundle"], *refused, *BIDS_OPTIONS)
+        self.assertEqual(code, 4)
+        self.assertEqual(everything(output), [])
+
+    def test_output_folder_is_not_the_input_folder(self):
+        # The BIDS input is never written: output == input would put conn-<label>/ and sourcedata/ into the dataset,
+        # and the next run would scan the snapshots there as competing lesion masks
+        before = file_set(self.bids)
+        for output in (self.bids, os.path.join(self.bids, "derivatives", "..")):
+            code, events, _stdout, _stderr = cli(self.bids, output, "participant", "--connectome", self.fx["bundle"], *COMMON, *BIDS_OPTIONS)
+            self.assertEqual((code, events[-1]["code"]), (2, "usage"))
+            self.assertIn("output folder", events[-1]["message"])
+        self.assertEqual(file_set(self.bids), before)
+
+
+class CorruptLesionMessagesTest(unittest.TestCase):
+    """An unreadable lesion file is named and called unreadable (not "missing") by the engine and the BIDS-App."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="lnm-corrupt-")
+        cls.fx = fixture.make_fixture(os.path.join(cls.tmp, "f"), n_cases=3, n_controls=3, extra_rows=False)
+        cls.bundle = connectome.ConnectomeBundle.open(cls.fx["bundle"])
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def corrupt_file(self, name):
+        path = os.path.join(self.tmp, name)
+        with open(path, "wb") as f:
+            f.write(b"hello\n")
+        return path
+
+    def test_prepare_lesion_names_an_unreadable_file(self):
+        from LesionNetworkMappingLib import engine
+
+        path = self.corrupt_file("not a nifti.nii.gz")
+        with self.assertRaises(ValueError) as context:
+            engine.prepare_lesion(path, self.bundle)
+        message = str(context.exception)
+        self.assertIn(path, message)
+        self.assertIn("cannot be read", message)
+        # a truncated gzip stream is an EOFError, not a bad header
+        truncated = os.path.join(self.tmp, "truncated.nii.gz")
+        study = Study.open(self.fx["study"])
+        with open(study.abspath(study.subject("sub-01")["lesion"]), "rb") as f:
+            blob = f.read()
+        with open(truncated, "wb") as f:
+            f.write(blob[: len(blob) // 2])
+        with self.assertRaises(ValueError) as context:
+            engine.prepare_lesion(truncated, self.bundle)
+        self.assertIn(truncated, str(context.exception))
+
+    def test_engine_error_event_names_the_file(self):
+        path = self.corrupt_file("odd lesion.nii.gz")
+        code, events, _stdout, _stderr = cli("--bundle", self.fx["bundle"], "--lesion", path, "--out", os.path.join(self.tmp, "engine out"), module="engine")
+        self.assertEqual(code, 1)
+        self.assertIn(path, last_event(events)["message"])
+
+    def test_bids_app_text_uses_singular_for_one_lesion_and_subject(self):
+        root = os.path.join(self.tmp, "singular")
+        os.makedirs(root)
+        bids = make_bids(root, self.fx["study"])
+        for path in app.find_bids_lesions(bids)["sub-03"][1:]:
+            os.remove(path)
+        for sid in list(app.find_bids_lesions(bids)):
+            if sid != "sub-03":
+                for path in app.find_bids_lesions(bids)[sid]:
+                    os.remove(path)
+        events = []
+        emit = lambda kind, **fields: events.append({"event": kind, **fields})  # noqa: E731
+        app.prepare_bids_study(bids, os.path.join(self.tmp, "one out"), group_map="patient=case,HC=control", emit=emit)
+        message = next(event["message"] for event in events if event.get("code") == "bids_study")
+        self.assertIn("1 lesion mask;", message)
+        self.assertIn("(1 subject)", message)
+        line = pipeline.Emitter(mode="text").text("start", {"run_id": "r", "n_rows": 1, "n_compute": 1, "n_reuse": 0, "n_excluded": 0, "estimate_s": 9})
+        self.assertIn(": 1 subject, 1 to map", line)
+        line = pipeline.Emitter(mode="text").text("start", {"run_id": "r", "n_rows": 2, "n_compute": 2, "n_reuse": 0, "n_excluded": 0, "estimate_s": 9})
+        self.assertIn(": 2 subjects, 2 to map", line)
+
+    def test_bids_app_reports_an_unreadable_lesion_as_unreadable(self):
+        bids = make_bids(self.tmp, self.fx["study"])
+        target = os.path.join(bids, "sub-03", "anat", f"sub-03_space-{SPACE}_label-lesion_mask.nii.gz")
+        if not os.path.isfile(target):
+            target = next(path for path in app.find_bids_lesions(bids)["sub-03"])
+        with open(target, "wb") as f:
+            f.write(b"hello\n")
+        events = []
+        emit = lambda kind, **fields: events.append({"event": kind, **fields})  # noqa: E731
+        study_path, _summary = app.prepare_bids_study(bids, os.path.join(self.tmp, "bids out"), group_map="patient=case,HC=control", emit=emit)
+        warnings = [event for event in events if event["event"] == "warning" and event.get("code") == "bids_lesion_unreadable"]
+        self.assertEqual([event["participant_id"] for event in warnings], ["sub-03"])
+        self.assertIn(os.path.basename(target), warnings[0]["message"])
+        self.assertNotIn(self.tmp, warnings[0]["message"])
+        study = Study.open(study_path)
+        self.assertTrue(study.subject("sub-03")["lesion"].endswith(os.path.basename(target)))
+        config = pipeline.PipelineConfig(study=study.path, bundle=self.fx["bundle"], accept_terms=True, nulls="off")
+        excluded = pipeline._builtin_row_checks(study, config)
+        self.assertEqual(excluded["sub-03"], "lesion file unreadable")
+        self.assertNotIn("sub-01", excluded)
+
+
+class BidsStudyMetricsTest(unittest.TestCase):
+    """The study that the BIDS app writes keeps the lesion metrics, so that an unchanged input is not reported as stale on every run."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="lnm-bids-metrics-")
+        cls.fx = fixture.make_fixture(os.path.join(cls.tmp, "f"), n_cases=3, n_controls=3, extra_rows=False)
+        cls.bundle = connectome.ConnectomeBundle.open(cls.fx["bundle"])
+        cls.bids = make_bids(cls.tmp, cls.fx["study"])
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def stale(self, study_path):
+        from LesionNetworkMappingLib import preflight
+
+        report = preflight.run_preflight(Study.open(study_path), self.bundle, accepted_terms=True)
+        return [check for check in report["checks"] if check["id"] == "metrics_stale"], report
+
+    def test_metrics_are_stored_and_trusted_by_the_next_preflight(self):
+        output = os.path.join(self.tmp, "stored out")
+        plain, _summary = app.prepare_bids_study(self.bids, os.path.join(self.tmp, "plain out"), group_map="patient=case,HC=control")
+        self.assertEqual({row["volume_ml"] for row in Study.open(plain).subjects}, {"n/a"}, "without the connectome nothing is measured")
+        self.assertTrue(self.stale(plain)[0], "the preflight of such a study still measures and says so")
+        study_path, _summary = app.prepare_bids_study(self.bids, output, group_map="patient=case,HC=control", bundle=self.bundle)
+        study = Study.open(study_path)
+        for row in study.subjects:
+            path = study.abspath(row["lesion"])
+            self.assertNotEqual(row["volume_ml"], "n/a", row["participant_id"])
+            self.assertEqual(int(float(row["lesion_size"])), os.path.getsize(path))
+            self.assertAlmostEqual(float(row["lesion_mtime"]), os.stat(path).st_mtime, places=2)
+            self.assertNotEqual(row["fractional_sum"], "n/a")
+        stale, report = self.stale(study_path)
+        self.assertEqual(stale, [])
+        self.assertEqual(report["measured"], {})
+        # a second run on the same output gives the same rows and still no stale metrics
+        again, _summary = app.prepare_bids_study(self.bids, output, group_map="patient=case,HC=control", bundle=self.bundle)
+        self.assertEqual(Study.open(again).subjects, study.subjects)
+        self.assertEqual(self.stale(again)[0], [])
+
+    def test_a_dataset_volume_is_kept(self):
+        bids = os.path.join(self.tmp, "bids volume")
+        shutil.copytree(self.bids, bids)
+        with open(os.path.join(bids, "participants.tsv"), encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        with open(os.path.join(bids, "participants.tsv"), "w", encoding="utf-8") as f:
+            f.write("\n".join([lines[0] + "\tvolume_ml"] + [f"{line}\t{index + 1}.5" for index, line in enumerate(lines[1:])]) + "\n")
+        for _attempt in (1, 2):
+            study_path, _summary = app.prepare_bids_study(bids, os.path.join(self.tmp, "volume out"), group_map="patient=case,HC=control", bundle=self.bundle)
+            study = Study.open(study_path)
+            self.assertEqual([row["volume_ml"] for row in study.subjects], [f"{index + 1}.5" for index in range(len(study))])
+            self.assertEqual(self.stale(study_path)[0], [])
+
+    def test_a_changed_lesion_is_measured_again(self):
+        bids = os.path.join(self.tmp, "bids changed")
+        shutil.copytree(self.bids, bids)
+        output = os.path.join(self.tmp, "changed out")
+        study_path, _summary = app.prepare_bids_study(bids, output, group_map="patient=case,HC=control", bundle=self.bundle)
+        before = float(Study.open(study_path).subject("sub-04")["volume_ml"])
+        study = Study.open(study_path)
+        path = study.abspath(study.subject("sub-04")["lesion"])
+        data, affine, _header = nifti.read_nifti(path)
+        data = (data > 0).astype(np.uint8)
+        data[tuple(np.argwhere(data > 0)[:200].T)] = 0  # 200 voxels less: the file differs from the stored metrics
+        nifti.write_nifti(path, data, affine)
+        os.utime(path, ns=(os.stat(path).st_atime_ns, os.stat(path).st_mtime_ns + 10**9))
+        study_path, _summary = app.prepare_bids_study(bids, output, group_map="patient=case,HC=control", bundle=self.bundle)
+        self.assertLess(float(Study.open(study_path).subject("sub-04")["volume_ml"]), before)
+        self.assertEqual(self.stale(study_path)[0], [])
+
+    def test_a_run_does_not_warn_that_the_metrics_were_measured_now(self):
+        output = os.path.join(self.tmp, "run out")
+        for _attempt in (1, 2):
+            code, events, _stdout, stderr = cli(self.bids, output, "participant", "--connectome", self.fx["bundle"], *COMMON, *BIDS_OPTIONS)
+            self.assertEqual(code, 0, stderr[-2000:])
+            self.assertNotIn("metrics_stale", [event.get("code") for event in events if event["event"] == "warning"])
+        record = read_json(os.path.join(output, export.run_dir_name(self.bundle.name), pipeline.PIPELINE_JSON))
+        self.assertEqual([text for text in record.get("warnings", []) if "lesion metrics" in text], [])
+
+
+class UserTemplateSpaceTest(unittest.TestCase):
+    """BIDS lesions on a user template (space-user<Id>, as ``normalize --template user:<id>`` names them, on the
+    template's own grid, which header detection does not know) are template-space lesions, not native ones.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="lnm-user-space-")
+        cls.fx = fixture.make_fixture(os.path.join(cls.tmp, "f"), n_cases=3, n_controls=3, extra_rows=False)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def make_user_bids(self, name, sidecar):
+        """A BIDS dataset whose lesions are named like normalize's user-template outputs; ``sidecar``: JSON content or None."""
+        from LesionNetworkMappingLib import normalize
+
+        study = Study.open(self.fx["study"])
+        bids = os.path.join(self.tmp, name)
+        lines = ["participant_id\tgroup\taphasia_score"]
+        for row in study.subjects:
+            sid = row["participant_id"]
+            lesion_name = normalize.output_names(sid, "T1w", "user:icbm-2009b-0-5-mm")["lesion"]
+            self.assertIn("_space-userIcbm2009b05Mm_", lesion_name)
+            target = os.path.join(bids, "derivatives", "normalize", sid, "anat", lesion_name)
+            os.makedirs(os.path.dirname(target))
+            shutil.copyfile(study.abspath(row["lesion"]), target)
+            if sidecar is not None:
+                with open(target[: -len(".nii.gz")] + ".json", "w", encoding="utf-8") as f:
+                    json.dump(sidecar, f)
+            lines.append(f"{sid}\t{'patient' if row['group'] == 'case' else 'HC'}\t{row['aphasia_score']}")
+            # the subject's native lesion (the input of normalize), in the raw data: the template one is chosen
+            native = os.path.join(bids, sid, "anat", f"{sid}_label-lesion_mask.nii.gz")
+            os.makedirs(os.path.dirname(native))
+            shutil.copyfile(study.abspath(row["lesion"]), native)
+        with open(os.path.join(bids, "participants.tsv"), "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        return bids
+
+    def check_study(self, bids, expected_space):
+        study_path, _summary = app.prepare_bids_study(bids, os.path.join(self.tmp, os.path.basename(bids) + " out"), group_map="patient=case,HC=control")
+        study = Study.open(study_path)
+        self.assertEqual(len(study), 6)
+        for row in study.subjects:
+            self.assertIn("_space-userIcbm2009b05Mm_", row["lesion"])
+            self.assertEqual(row["space"], expected_space)
+        config = pipeline.PipelineConfig(study=study.path, bundle=self.fx["bundle"], accept_terms=True, nulls="off")
+        self.assertEqual(pipeline._builtin_row_checks(study, config), {})
+
+    def test_sidecar_names_the_template_space(self):
+        sidecar = {"Type": "Lesion", "SpatialReference": "MNI152NLin2009bAsym", "Resolution": "0.5 mm", "SlicerStudio": {"space": "MNI152NLin2009bAsym"}}
+        self.check_study(self.make_user_bids("bids sidecar", sidecar), "MNI152NLin2009bAsym")
+
+    def test_without_sidecar_the_label_is_the_space(self):
+        self.check_study(self.make_user_bids("bids bare", None), "userIcbm2009b05Mm")
+
+    def test_bids_lesion_space(self):
+        self.assertEqual(app.bids_lesion_space("sub-01_space-MNI152NLin6Asym_desc-lesion_mask.nii.gz"), "MNI152NLin6Asym")
+        self.assertIsNone(app.bids_lesion_space("sub-01_space-T1w_desc-lesion_mask.nii.gz"))
+        self.assertIsNone(app.bids_lesion_space("sub-01_desc-lesion_mask.nii.gz"))
+        self.assertIsNone(app.bids_lesion_space(os.path.join(self.tmp, "sub-01_space-custom_desc-lesion_mask.nii.gz")))
+        self.assertEqual(app.bids_lesion_space(os.path.join(self.tmp, "sub-01_space-userMyBrain_desc-lesion_mask.nii.gz")), "userMyBrain")
+
 
 class ReproduceEntryPointTest(unittest.TestCase):
     """reproduce.sh runs ``slicer-lnm engine`` when slicer-lnm is on PATH, else PythonSlicer (export.reproduce_script)."""
@@ -436,6 +1119,7 @@ class ReproduceEntryPointTest(unittest.TestCase):
         run_dir = os.path.join(cls.tmp, "run")
         code, _events, _out, err = cli("--bundle", syn["path"], "--lesion", cls.lesion, "--out", run_dir, "--run-json", os.path.join(run_dir, "run.json"), "--threads", "1", module="engine")
         assert code == 0, err
+        cls.run_dir = run_dir
         cls.files = export.export_run(run_dir, os.path.join(cls.tmp, "export"))
         cls.script = cls.files["reproduce"]
         cls.original = {os.path.basename(path): volume(path) for path in cls.files["maps"]}
@@ -507,6 +1191,59 @@ class ReproduceEntryPointTest(unittest.TestCase):
         self.reproduce("named slicer-lnm", PATH=self.bin_python, SLICER_LNM=os.path.join(self.bin_lnm, "slicer-lnm"))
         self.assertEqual(list(self.logged()), ["slicer-lnm"])
 
+    def test_posix_locale_gets_utf8_before_pythonslicer(self):
+        """Under the C or POSIX locale the PythonSlicer launcher drops non-ASCII characters from its arguments (BB-1: a study folder
+        'Étude' reached the engine as 'tude'): both generated scripts export a UTF-8 character locale before the call.
+        """
+        import types
+
+        if sys.platform != "linux":
+            self.skipTest("the UTF-8 locale is exported on Linux only")
+        folder = os.path.join(self.tmp, "Étude locale")
+        os.makedirs(folder, exist_ok=True)
+        stub = os.path.join(folder, "PythonSlicer")
+        with open(stub, "w", encoding="utf-8") as f:
+            f.write('#!/bin/sh\necho "CT=${LC_CTYPE:-} ALL=${LC_ALL:-}" > "$(dirname "$0")/seen.txt"\n')
+        os.chmod(stub, 0o755)
+        pipeline_script = os.path.join(folder, pipeline.REPRODUCE_PIPELINE)
+        with mock.patch.object(pipeline, "_slicer_lnm_executable", return_value=""):
+            pipeline.Runner._write_reproduce_pipeline(types.SimpleNamespace(path=lambda name: os.path.join(folder, name), current_outputs=[]))
+        self.assertTrue(os.path.exists(pipeline_script))
+        cases = (({}, "CT=C.UTF-8 ALL="), ({"LANG": "C"}, "CT=C.UTF-8 ALL="), ({"LANG": "en_US.UTF-8"}, "CT= ALL="), ({"LC_ALL": "C"}, "CT= ALL=C.UTF-8"), ({"LC_ALL": "C", "LC_CTYPE": "de_DE.utf8"}, "CT=de_DE.utf8 ALL=C.UTF-8"))
+        for script in (pipeline_script, self.script):
+            for extra, expected in cases:
+                with self.subTest(script=os.path.basename(script), env=extra):
+                    seen = os.path.join(folder, "seen.txt")
+                    if os.path.exists(seen):
+                        os.remove(seen)
+                    environment = {"PATH": "/usr/bin:/bin", "PYTHONSLICER": stub, "ACCEPT_TERMS": "1", "OUT": os.path.join(folder, "out"), **extra}
+                    subprocess.run([shutil.which("sh"), script], env=environment, capture_output=True, text=True, timeout=60, check=False)
+                    with open(seen, encoding="utf-8") as f:
+                        self.assertEqual(f.read().strip(), expected)
+
+    def test_writer_commands_without_path(self):
+        """Neither command on PATH (a venv that is not activated, a Studio export): the commands that wrote the script run."""
+        system_path = os.pathsep.join(path for path in ("/usr/bin", "/bin") if os.path.isdir(path))
+        cases = (("baked slicer-lnm", os.path.join(self.bin_lnm, "slicer-lnm"), "slicer-lnm"), ("baked pythonslicer", "", "PythonSlicer"))
+        for name, slicer_lnm, expected in cases:
+            with self.subTest(name):
+                for path in (os.path.join(self.bin_lnm, "slicer-lnm.log"), os.path.join(self.bin_python, "PythonSlicer.log")):
+                    if os.path.exists(path):
+                        os.remove(path)
+                with (
+                    mock.patch.object(pipeline, "_slicer_lnm_executable", return_value=slicer_lnm),
+                    mock.patch.object(pipeline, "_python_executable", return_value=os.path.join(self.bin_python, "PythonSlicer")),
+                    mock.patch.object(export.shutil, "which", return_value=None),
+                ):
+                    script = export.export_run(self.run_dir, os.path.join(self.tmp, f"export {name}"))["reproduce"]
+                environment = {key: value for key, value in os.environ.items() if key not in ("PYTHONPATH", "PYTHONSLICER", "SLICER_LNM")}
+                environment.update({"OUT": os.path.join(self.tmp, name), "SLICER_LNM_OFFLINE": "1", "PATH": system_path})
+                result = subprocess.run([shutil.which("sh"), script], env=environment, capture_output=True, text=True, timeout=300, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+                self.assertEqual(list(self.logged()), [expected])
+                for name_, original in self.original.items():
+                    np.testing.assert_allclose(volume(os.path.join(self.tmp, name, name_)), original, rtol=0, atol=TOLERANCE, err_msg=name_)
+
 
 class PackagingTest(unittest.TestCase):
     """pyproject.toml, the container recipes and the DMG wrapper of build_dmg.sh."""
@@ -547,6 +1284,17 @@ class PackagingTest(unittest.TestCase):
             # the pinned versions are those of the PythonSlicer that runs this test
             self.assertEqual((np.__version__, scipy.__version__), ("2.4.6", "1.17.1"))
 
+    def test_fake_bundle_python_honours_pythonpath(self):
+        """The interpreter of the fake bundle imports a library from PYTHONPATH before anything else (also under Slicer --testing)."""
+        with tempfile.TemporaryDirectory(prefix="lnm path ") as tmp:
+            with open(os.path.join(tmp, "lnm_marker_module.py"), "w", encoding="utf-8") as f:
+                f.write("WHERE = 'pythonpath'\n")
+            env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+            env["PYTHONPATH"] = tmp
+            result = subprocess.run([_plain_python(), "-c", "import sys, lnm_marker_module; print(sys.path.index(sys.argv[1]), len(sys.path))", tmp], capture_output=True, text=True, env=env, check=False, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertLessEqual(int(result.stdout.split()[0]), 1, result.stdout)  # right after the script directory entry
+
     def test_dmg_wrapper_with_spaces_and_symlink(self):
         bash = shutil.which("bash")
         if bash is None or sys.platform == "win32":
@@ -567,7 +1315,7 @@ class PackagingTest(unittest.TestCase):
             os.makedirs(os.path.join(contents, "bin"))
             python = os.path.join(contents, "bin", "PythonSlicer")
             with open(python, "w", encoding="utf-8") as f:
-                f.write(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+                f.write(f'#!/bin/sh\nexec "{_plain_python()}" "$@"\n')
             os.chmod(python, 0o755)
             command = f'source "{DMG_SCRIPT}"; DRY_RUN=0; SOURCE_DIR="{REPO_DIR}"; install_lnm_wrapper "$1"'
             result = subprocess.run([bash, "-c", command, "test", app_dir], capture_output=True, text=True, check=False)

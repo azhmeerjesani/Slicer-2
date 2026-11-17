@@ -21,7 +21,8 @@ always restore the Classic interface. They cover:
   behaviours, the error log docking, the names and platform keys, F10 / Alt menus, F6 regions, Space and
   Enter on focused buttons, no invisible Tab stop over the Library canvas, the inspector edge handle and the
   consequence toasts;
-- PageUp and PageDown stepping the slice view under the pointer when the focus is on the inspector.
+- PageUp and PageDown stepping the slice view under the pointer when the focus is on the inspector;
+- Tab and Shift+Tab leaving the Studio and Map tables (no keyboard trap), the arrow keys moving between the rows.
 """
 
 import os
@@ -82,6 +83,15 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
     def _pump(self, count=4):
         for index in range(count):
             slicer.app.processEvents()
+
+    def _settle(self, seconds=0.3):
+        """Process events for some time, so that the events of the display (a real pointer entry) arrive."""
+        import time
+
+        end = time.time() + seconds
+        while time.time() < end:
+            slicer.app.processEvents()
+            time.sleep(0.01)
 
     def _applyStudio(self):
         from StudioLib import shell
@@ -265,6 +275,40 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIsNone(self.mainWindow.findChild("QToolButton", "StudioExitFocusModeButton"))
         self.assertTrue(self.mainWindow.menuBar().isVisible())
 
+    def test_2b_focus_mode_keys_show_pill_and_toast(self):
+        """F11 and Ctrl+6 reach the main window's setFocusMode (not shell.setFocusMode): the "Show panels" pill and
+        the consequence toast must appear all the same, once.
+        """
+        studioShell = self._applyStudio()
+        if not hasattr(self.mainWindow, "setFocusMode"):
+            self.skipTest("The main window has no setFocusMode: Studio installs its own keys")
+        studioShell.switchTo("draw")
+        self._pump()
+        pill = studioShell._focusModePill
+        self.assertFalse(pill.isVisible())
+        before = len(studioShell.recentMessages())
+        self.mainWindow.setFocusMode(True)  # what the key actions (WindowMaximizeViewAction) do
+        self._pump()
+        self.assertTrue(studioShell.focusMode())
+        self.assertTrue(pill.isVisible())
+        self.assertIn("Panels hidden", studioShell.toastText())
+        texts = [text for when, text, level in studioShell.recentMessages()[before:] if "Panels hidden" in text]
+        self.assertEqual(len(texts), 1)
+        # Showing the panels again through the key route removes the pill and the toast
+        self.mainWindow.setFocusMode(False)
+        self._pump()
+        self.assertFalse(studioShell.focusMode())
+        self.assertFalse(pill.isVisible())
+        self.assertNotIn("Panels hidden", studioShell.toastText())
+        # The menu route still shows one toast only
+        before = len(studioShell.recentMessages())
+        studioShell.toggleFocusMode()
+        self._pump()
+        texts = [text for when, text, level in studioShell.recentMessages()[before:] if "Panels hidden" in text]
+        self.assertEqual(len(texts), 1)
+        studioShell.setFocusMode(False)
+        self._pump()
+
     def test_3_escape_stack(self):
         """Esc leaves place / window-level mode, then a maximized view, then the focus mode (NAV-08)."""
         studioShell = self._applyStudio()
@@ -426,6 +470,87 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 settings.remove("Studio/Mode")
             else:
                 settings.setValue("Studio/Mode", savedMode)
+
+    def test_4b_classic_round_trip_restores_classic_module(self):
+        """Classic -> Studio -> Classic shows the Classic module again (USABILITY P4), also when it has no workspace."""
+        studioShell = self._applyStudio()
+        settings = qt.QSettings()
+        savedMode = settings.value("Studio/Mode")
+        try:
+            studioShell.classic(persist=False)
+            slicer.util.selectModule("Volumes")
+            self._pump()
+            studioShell.studio()
+            self._pump()
+            self.assertTrue(studioShell.isActive())
+            studioShell.classic(persist=False)
+            self._pump()
+            self.assertEqual(studioShell.currentModuleName(), "Volumes")
+
+            # A module that the user opened on purpose in Studio stays
+            studioShell.studio()
+            self._pump()
+            studioShell.switchTo("draw")
+            self._pump()
+            studioShell.classic(persist=False)
+            self._pump()
+            self.assertEqual(studioShell.currentModuleName(), "SegmentEditor")
+
+            # Leaving Studio does not carry a stale module into the next round trip
+            studioShell.studio()
+            self._pump()
+            studioShell.classic(persist=False)
+            self._pump()
+            self.assertEqual(studioShell.currentModuleName(), "SegmentEditor")
+        finally:
+            if savedMode is None:
+                settings.remove("Studio/Mode")
+            else:
+                settings.setValue("Studio/Mode", savedMode)
+
+    def test_4c_classic_round_trip_restores_classic_layout(self):
+        """Classic -> Studio -> Classic shows the view layout chosen in Classic again, not Studio's (USABILITY P4, P11)."""
+        studioShell = self._applyStudio()
+        settings = qt.QSettings()
+        savedMode = settings.value("Studio/Mode")
+        layoutManager = slicer.app.layoutManager()
+        conventional = slicer.vtkMRMLLayoutNode.SlicerLayoutConventionalView
+        try:
+            studioShell.classic(persist=False)
+            layoutManager.setLayout(conventional)
+            self._pump()
+            for _ in range(2):
+                studioShell.studio()
+                self._pump()
+                # A workspace that has its own layout replaces the Classic one while Studio is on
+                studioShell.switchTo("draw")
+                self._pump()
+                self.assertNotEqual(layoutManager.layout, conventional, layoutManager.layout)
+                studioShell.classic(persist=False)
+                self._pump()
+                self.assertEqual(layoutManager.layout, conventional)
+        finally:
+            if savedMode is None:
+                settings.remove("Studio/Mode")
+            else:
+                settings.setValue("Studio/Mode", savedMode)
+
+    def test_5b_reset_window_keeps_inspector_right(self):
+        """View > Appearance > Reset to default docks the Studio inspector on the right again."""
+        mainWindow = self.mainWindow
+        action = mainWindow.findChild("QAction", "WindowToolbarsResetToDefaultAction")
+        self.assertIsNotNone(action)
+        studioShell = self._applyStudio()
+        try:
+            dock = mainWindow.findChild("QDockWidget", "PanelDockWidget")
+            self.assertEqual(mainWindow.dockWidgetArea(dock), qt.Qt.RightDockWidgetArea)
+            action.trigger()
+            self._pump(8)
+            self.assertEqual(mainWindow.dockWidgetArea(dock), qt.Qt.RightDockWidgetArea)
+            self.assertTrue(dock.isVisible())
+        finally:
+            studioShell.dispose()
+            self._pump()
 
     def test_5_toolbar_toggle_honoured(self):
         """View > Toolbars shows a toolbar in Studio and remembers it; Classic is unchanged (NAV-03, CM-08)."""
@@ -650,6 +775,49 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
 
         self.assertEqual(len(shell.ESCAPE_LADDER), 6)
         self.assertTrue(all(len(rung) == 2 for rung in shell.ESCAPE_LADDER))
+
+    def test_8c_lesion_name_escape_restores_name(self):
+        """Esc in the Lesion card's name field with unsent edits restores the name; a later focus-out commits nothing."""
+        from StudioLib import lesioncard
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self._pump()
+        committed = []
+        edit = lesioncard._NameEdit(committed.append)
+        edit.setParent(self.mainWindow.centralWidget())
+        edit.resize(240, 28)
+        edit.show()
+        _keepAlive.append(edit)
+        edit.setName("Lesions (sub-07_T1w)")
+        other = qt.QLineEdit(self.mainWindow.centralWidget())
+        other.show()
+        _keepAlive.append(other)
+        if not self._focus(edit):
+            self.skipTest("the main window cannot take the keyboard focus here")
+        self.assertEqual(str(edit.text), "Lesions (sub-07_T1w)")
+        edit.selectAll()
+        edit.insert("zzz")
+        self.assertTrue(edit.isModified())
+        self.assertEqual(str(edit.text), "zzz")
+        # Esc is consumed by the field and puts the name back
+        # (the field takes the shortcut override, so no shortcut runs, and the key press then reaches the field)
+        self.assertTrue(self._sendEscape(edit, qt.QEvent.ShortcutOverride).isAccepted())
+        self.assertTrue(self._sendEscape(edit).isAccepted())
+        self._pump()
+        self.assertEqual(str(edit.text), "Lesions (sub-07_T1w)")
+        self.assertFalse(edit.isModified())
+        # Moving the focus away commits nothing
+        self.assertTrue(self._focus(other))
+        self._pump(8)
+        self.assertEqual(committed, [])
+        self.assertEqual(edit.name(), "Lesions (sub-07_T1w)")
+        # Enter still commits an edited name
+        self.assertTrue(self._focus(edit))
+        edit.selectAll()
+        edit.insert("new name")
+        edit._onEditingFinished()
+        self.assertEqual(committed, ["new name"])
 
     def test_8b_escape_with_spinbox(self):
         """A spin box does not keep Esc; a line edit with unsent text and an open item editor do (USABILITY 3)."""
@@ -927,6 +1095,68 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             else:
                 settings.setValue("Studio/PanelWidth", savedWidth)
 
+    def test_11b_inspector_notice_shows_all_wrapped_lines(self):
+        """A notice whose wrapped lines need more than its sizeHint (a title that wraps, an explanation line) is given its
+        height-for-width: the slot is not capped at the notice's sizeHint and no line is cut off (ENG-22).
+        """
+        from StudioLib import ui
+
+        settings = qt.QSettings()
+        savedWidth = settings.value("Studio/PanelWidth")
+        try:
+            studioShell = self._applyStudio()
+            studioShell.switchTo("draw")
+            studioShell.panelWidth = 340
+            self._pump(10)
+            notice = qt.QFrame()
+            notice.setObjectName("StudioTestWrappedNotice")
+            notice.setProperty("studioNoticeLine", True)
+            notice.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred)
+            layout = qt.QVBoxLayout(notice)
+            layout.setContentsMargins(12, 6, 8, 6)
+            layout.setSpacing(4)
+            title = qt.QLabel("Adjudicate \u00b7 sub-02 \u00b7 1 of 1")
+            title.setWordWrap(True)
+            layout.addWidget(title)
+            detail = qt.QLabel()
+            detail.setWordWrap(True)
+            detail.setTextFormat(qt.Qt.PlainText)
+            detail.setText(
+                "A (red): first tracing by AB \u00b7 B (blue): second tracing by CD\n"
+                "Dice 0.00 \u00b7 centroid distance 30.0 mm \u00b7 volumes 1.47 / 1.47 mL\n"
+                "The consensus becomes the lesion (rater = consensus); both tracings are kept, every choice is recorded")
+            layout.addWidget(detail)
+            _keepAlive.append(notice)
+            studioShell.setInspectorNotice(notice, key="wrapped", workspace="draw")
+            self._pump(10)
+            slot = self.mainWindow.findChild("QWidget", "StudioInspectorNotice")
+            self.assertTrue(notice.isVisible())
+            # Narrow enough that the explanation needs several lines: the layout's sizeHint is shorter than its height-for-width
+            needed = notice.heightForWidth(notice.width)
+            self.assertGreater(needed, 0)
+            self.assertGreaterEqual(notice.height, needed, "notice %d px, needs %d" % (notice.height, needed))
+            self.assertGreaterEqual(detail.height, detail.heightForWidth(detail.width), "the last line of the notice is cut off")
+            self.assertGreaterEqual(slot.height, slot.heightForWidth(slot.width))
+            # A notice of one short line is not stretched
+            short = ui.noticeLine("Download the template?")
+            _keepAlive.append(short)
+            studioShell.setInspectorNotice(short, key="short", workspace="draw")
+            self._pump(10)
+            self.assertLessEqual(slot.height, short.heightForWidth(short.width) + 20)
+            # Spare height in the inspector never goes to the notice (a tall empty box above the tools): the slot
+            # is capped at its height-for-width, for a one-line notice and for a wrapped one
+            self.assertLessEqual(slot.maximumHeight, slot.heightForWidth(slot.width) + 2, "the notice slot may take spare height")
+            studioShell.setInspectorNotice(notice, key="wrapped2", workspace="draw")
+            self._pump(10)
+            self.assertLessEqual(slot.maximumHeight, slot.heightForWidth(slot.width) + 2)
+            self.assertGreaterEqual(slot.maximumHeight, slot.heightForWidth(slot.width), "the cap cuts off the last line")
+            studioShell.setInspectorNotice(None)
+        finally:
+            if savedWidth is None:
+                settings.remove("Studio/PanelWidth")
+            else:
+                settings.setValue("Studio/PanelWidth", savedWidth)
+
     def test_12_help_and_menu_hooks(self):
         """'?' shows the help of the current tool from the hook and links the module help; '⋯' shows hook items."""
         from StudioLib import shell, workspaces
@@ -998,6 +1228,33 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         # The header buttons are reachable with Tab
         for button in (header.helpButton, header.moreButton, header.closeButton):
             self.assertEqual(button.focusPolicy, qt.Qt.TabFocus)
+
+    def test_12b_library_help_names_current_keys(self):
+        """The Library help (module help text) names the D-U1 keys: Alt+1..5, Ctrl+5 as inspector key, F6 regions, Hide panels."""
+        import re
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("library")
+        self._pump()
+
+        def plain(html):
+            return " ".join(re.sub("<[^>]+>", " ", html).replace("&gt;", ">").split())
+
+        shown = plain(studioShell.panelHeader.helpHtml())
+        for text in (shown, plain(slicer.util.getModule("Studio").helpText)):
+            self.assertIn("Alt+1..5 change the view layout", text)
+            self.assertIn("Ctrl+\\ (or Ctrl+5) shows or hides the inspector", text)
+            self.assertIn("F6 and Shift+F6 move the keyboard focus", text)
+            self.assertIn("F11 (or Ctrl+6) hides or shows the panels", text)
+            for stale in ("Alt+1..4", "(or F6)", "focus mode"):
+                self.assertNotIn(stale, text)
+        # The keys the help names do what it says
+        from StudioLib import shell
+
+        self.assertEqual(shell.INSPECTOR_SHORTCUT, "Ctrl+\\")
+        self.assertEqual(shell.INSPECTOR_ALTERNATE_SHORTCUT, "Ctrl+5")
+        self.assertEqual(tuple(shell.FOCUS_MODE_SHORTCUTS), ("F11", "Ctrl+6"))
+        self.assertEqual(tuple(shell.FOCUS_REGION_SHORTCUTS), ("F6", "Shift+F6"))
 
     def test_13_scene_root_directory(self):
         """The Save dialog (Ctrl+S) never opens in the application folder: Studio sets the scene root, Classic restores it."""
@@ -1148,6 +1405,81 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         focused = hoverGivesFocus()
         if focused is not None:
             self.assertFalse(focused, "hovering a view gives it the keyboard focus in Classic")
+
+    def test_15b_popup_close_does_not_move_focus_to_view(self):
+        """Closing a popup (Search palette, a menu) with the pointer resting over a view leaves the keyboard focus on the
+        control that had it. Qt sends an Enter event to the view under the resting pointer when the popup closes, and
+        focus follows mouse took it (BB-1). Only the pointer entering the view (it moved since it left) gives it the focus.
+        """
+        sliceWidget = slicer.vtkMRMLSliceIntersectionWidget
+        if not hasattr(sliceWidget, "SetPageStepSlices"):
+            self.skipTest("this build has no Studio navigation behaviours (W3-02a)")
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self._settle()
+        self.assertTrue(slicer.app.property("SlicerFocusFollowsMouse"))
+        self.mainWindow.activateWindow()
+        self._settle()
+        if slicer.app.activeWindow() != self.mainWindow:
+            self.skipTest("the main window cannot be activated on this display")
+        views = [("slice", self._redSliceView())]
+        threeDWidget = self.layoutManager.threeDWidget(0) if self.layoutManager.threeDViewCount > 0 else None
+        if threeDWidget is not None and threeDWidget.threeDView().isVisible():
+            views.append(("3D", threeDWidget.threeDView()))
+        # A button that can take the focus, standing for the tile or button that had it before the popup
+        panel = qt.QPushButton("Focus target", self.mainWindow)
+        panel.move(0, 0)
+        panel.show()
+        self.addCleanup(panel.deleteLater)
+        self._settle()
+
+        def enterEvent(view):
+            point = qt.QPointF(10, 10)
+            if hasattr(qt, "QEnterEvent"):
+                return qt.QEnterEvent(point, point, qt.QPointF(view.mapToGlobal(qt.QPoint(10, 10))))
+            return qt.QEvent(qt.QEvent.Enter)
+
+        for name, view in views:
+            vtkWidget = view.VTKWidget()
+            where = view.mapToGlobal(qt.QPoint(view.width // 2, view.height // 2))
+            qt.QCursor.setPos(where)
+            self._settle()
+            hit = qt.QApplication.widgetAt(qt.QCursor.pos())
+            if hit is None or not (hit == view or view.isAncestorOf(hit)):
+                self.skipTest("the pointer cannot be put over the view on this display")
+            # The pointer leaves the view under the popup that opens (it does not move), then the popup closes.
+            panel.setFocus()
+            self._settle()
+            self.assertNotEqual(slicer.app.focusWidget(), vtkWidget, "the focus target cannot be given the focus on this display")
+            qt.QApplication.sendEvent(view, qt.QEvent(qt.QEvent.Leave))
+            qt.QApplication.sendEvent(view, enterEvent(view))
+            self._settle()
+            self.assertNotEqual(slicer.app.focusWidget(), vtkWidget, f"the {name} view took the focus with a resting pointer")
+            # The pointer moves out of the view and back in: the view takes the focus
+            qt.QCursor.setPos(qt.QPoint(where.x() + 5, where.y() + 5))
+            self._settle()
+            qt.QApplication.sendEvent(view, qt.QEvent(qt.QEvent.Leave))
+            qt.QCursor.setPos(where)
+            self._settle()
+            qt.QApplication.sendEvent(view, enterEvent(view))
+            self._settle()
+            self.assertEqual(slicer.app.focusWidget(), vtkWidget, f"the {name} view did not take the focus when the pointer entered it")
+
+        # A real menu popup closed over the resting pointer
+        name, view = views[0]
+        vtkWidget = view.VTKWidget()
+        qt.QCursor.setPos(view.mapToGlobal(qt.QPoint(view.width // 2, view.height // 2)))
+        self._settle()
+        panel.setFocus()
+        self._settle()
+        menu = qt.QMenu(self.mainWindow)
+        menu.addAction("An entry")
+        menu.popup(view.mapToGlobal(qt.QPoint(view.width // 4, view.height // 4)))
+        self._settle()
+        menu.close()
+        self._settle()
+        menu.deleteLater()
+        self.assertNotEqual(slicer.app.focusWidget(), vtkWidget, "the view took the focus when a menu closed over the resting pointer")
 
     def test_16_error_log_bottom(self):
         """In Studio the error log opens at the bottom; Classic restores where it was."""
@@ -1303,21 +1635,77 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertIn("canvas", regions)
         self.assertNotIn("view", regions)
 
+    def test_19b_f6_focuses_shown_view(self):
+        """F6 to the views focuses a view that is shown (USABILITY 9.1: no invisible focus stops): the maximized view
+        rather than the hidden last hovered one, the view of a one-up layout, and the 3D view of the 3D-only layout.
+        """
+        from StudioLib import layouts
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
+        self._pump(8)
+        if not self._focus(studioShell.topBar.menuButton):
+            self.skipTest("the main window cannot take the keyboard focus here")
+
+        def focusViewRegion():
+            self._focus(studioShell.topBar.menuButton)
+            for _step in range(3):
+                self._activateShortcut(studioShell, "F6")
+                if studioShell.focusRegion() == "view":
+                    break
+            self.assertEqual(studioShell.focusRegion(), "view")
+            focusWidget = slicer.app.focusWidget()
+            self.assertIsNotNone(focusWidget)
+            self.assertTrue(focusWidget.isVisible(), f"F6 focused a hidden {focusWidget.className()}")
+            return focusWidget
+
+        def sliceFocusWidget(name):
+            sliceView = self.layoutManager.sliceWidget(name).sliceView()
+            return sliceView.VTKWidget() if hasattr(sliceView, "VTKWidget") else sliceView
+
+        # Red was hovered last, then Yellow was maximized: the shown Yellow view gets the focus
+        studioShell.hoverTracker.lastSliceViewName = "Red"
+        self.assertEqual(focusViewRegion(), sliceFocusWidget("Red"))
+        self.assertEqual(layouts.maximizeView("Yellow"), "Yellow")
+        self._pump(8)
+        self.assertFalse(self.layoutManager.sliceWidget("Red").isVisible())
+        self.assertEqual(focusViewRegion(), sliceFocusWidget("Yellow"))
+        layouts.restoreMaximized()
+        self._pump(8)
+        # One-up Green
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpGreenSliceView)
+        self._pump(8)
+        studioShell.hoverTracker.lastSliceViewName = "Red"
+        self.assertEqual(focusViewRegion(), sliceFocusWidget("Green"))
+        # 3D only: the 3D view
+        self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUp3DView)
+        self._pump(8)
+        threeDView = self.layoutManager.threeDWidget(0).threeDView()
+        threeDFocus = threeDView.VTKWidget() if hasattr(threeDView, "VTKWidget") else threeDView
+        self.assertEqual(focusViewRegion(), threeDFocus)
+
     def test_20_button_keys_in_draw(self):
         """Space and Enter press a focused top bar button also in Draw (before the Segment Editor's Space shortcut)."""
         studioShell = self._applyStudio()
         studioShell.switchTo("draw")
         self._pump()
         libraryButton = studioShell.topBar.workspaceButtons["library"]
-        self.assertTrue(int(libraryButton.focusPolicy) & int(qt.Qt.TabFocus))
+        drawButton = studioShell.topBar.workspaceButtons["draw"]
+        # The switcher has one Tab stop, the current tab (Draw); the arrow keys reach the other tabs
+        self.assertTrue(int(drawButton.focusPolicy) & int(qt.Qt.TabFocus))
+        self.assertEqual(int(libraryButton.focusPolicy), int(qt.Qt.NoFocus))
         if not self._focus(studioShell.topBar.menuButton):
             self.skipTest("the main window cannot take the keyboard focus here")
-        # Tab reaches the Library tab
+        # Tab enters the switcher on the Draw tab, Left moves to the Library tab
         for _step in range(40):
-            if slicer.app.focusWidget() == libraryButton:
+            if slicer.app.focusWidget() == drawButton:
                 break
             self._sendKey(slicer.app.focusWidget(), qt.Qt.Key_Tab)
             self._pump(1)
+        self.assertEqual(slicer.app.focusWidget(), drawButton)
+        self._sendKey(drawButton, qt.Qt.Key_Left)
+        self._pump(1)
         self.assertEqual(slicer.app.focusWidget(), libraryButton)
         for key in (qt.Qt.Key_Space, qt.Qt.Key_Return, qt.Qt.Key_Enter):
             studioShell.switchTo("draw")
@@ -1337,6 +1725,67 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._sendKey(backButton, qt.Qt.Key_Return, text="\r")
         self._pump()
         self.assertEqual(studioShell.currentWorkspace(), "draw")
+
+    def test_20b_tool_option_buttons_keys_in_draw(self):
+        """Space and Enter press a focused "More tools ▾" and a focused tool option button (Threshold's Apply) in Draw,
+        before the Segment Editor's window-wide Space shortcut (which would pause the tool instead).
+        """
+        volume, segmentation = self._loadScanAndSegmentation()
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        self._pump(10)
+        editor = slicer.modules.SegmentEditorWidget.editor
+        editor.setSegmentationNode(segmentation)
+        editor.setSourceVolumeNode(volume)
+        self._pump(10)
+        moreTools = self.mainWindow.findChild("QToolButton", "SegmentEditorMoreToolsButton")
+        self.assertIsNotNone(moreTools)
+        self.assertTrue(moreTools.isVisible())
+
+        def press(button, key):
+            """The key as Qt delivers it to the focused button: the shortcut override, then the press and the release."""
+            text = " " if key == qt.Qt.Key_Space else "\r"
+            override = self._sendKey(button, key, eventType=qt.QEvent.ShortcutOverride)
+            self.assertTrue(override.isAccepted(), f"the shortcut override of {key} is not taken by {button.objectName}")
+            self._sendKey(button, key, text=text)
+            self._sendKey(button, key, eventType=qt.QEvent.KeyRelease, text=text)
+            self._pump()
+
+        if not self._focus(moreTools):
+            self.skipTest("the main window cannot take the keyboard focus here")
+        for key in (qt.Qt.Key_Space, qt.Qt.Key_Return, qt.Qt.Key_Enter):
+            self.assertTrue(self._focus(moreTools))
+            before = bool(moreTools.checked)
+            press(moreTools, key)
+            self.assertEqual(bool(moreTools.checked), not before, f"More tools, key {key}")
+        moreTools.setChecked(False)
+        self._pump()
+        clicks = []
+        for key in (qt.Qt.Key_Space, qt.Qt.Key_Return, qt.Qt.Key_Enter):
+            editor.setActiveEffectByName("Threshold")
+            self._pump(6)
+            applyButton = next((button for button in self.mainWindow.findChildren("QPushButton")
+                                if button.objectName == "SegmentEditorThresholdEffectApply" and button.isVisible()), None)
+            self.assertIsNotNone(applyButton, "no visible Apply button of Threshold")
+
+            def onClicked(key=key):
+                clicks.append(key)
+
+            applyButton.connect("clicked()", onClicked)
+            self.assertTrue(self._focus(applyButton))
+            press(applyButton, key)
+            # Only this slot: the effect's own Apply slot stays connected
+            applyButton.disconnect("clicked()", onClicked)
+            self.assertEqual(clicks.count(key), 1, f"Apply of Threshold, key {key}")
+        # Classic gives the official keys back (leaving Draw removes the Studio key filter)
+        studioShell.dispose()
+        self._pump()
+        editor.setActiveEffectByName("Threshold")
+        self._pump(6)
+        self.assertFalse(bool(applyButton.property("studioButtonKeys")))
+        self.assertTrue(self._focus(applyButton))
+        override = self._sendKey(applyButton, qt.Qt.Key_Space, eventType=qt.QEvent.ShortcutOverride)
+        self.assertFalse(override.isAccepted(), "the classic tool options keep the Space shortcut of the Segment Editor")
 
     def test_21_no_invisible_tab_stop(self):
         """Over the Library canvas, Tab never lands on a covered view widget; the policies come back exactly."""
@@ -1509,10 +1958,16 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         studioShell.setInspectorVisible(False)
         self._pump()
         self.assertFalse(handle.isVisible())
+        studioShell._onInspectorHiddenByUser()
+        self._pump()
+        # The toast names only controls that exist: no handle over the Library canvas
+        self.assertIn("Library tab", studioShell.toastText())
+        self.assertNotIn("\u2039", studioShell.toastText())
         studioShell.switchTo("draw")
         studioShell.toggleInspector()
         self._pump()
         self.assertTrue(handle.isVisible())
+        self.assertIn("\u2039", studioShell.toastText())
         studioShell.classic(persist=False)
         self._pump()
         self.assertIsNone(self.mainWindow.findChild("QToolButton", "StudioInspectorHandle"))
@@ -1568,6 +2023,46 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(len(studioShell.recentMessages()), 20)
         self.assertEqual(studioShell.recentMessages()[-1][1], "message 29")
 
+    def test_23b_recent_messages_popover_shows_whole_messages(self):
+        """Recent messages: every message is readable in full (wrapped within the window) and no scroll bar covers a row."""
+        studioShell = self._applyStudio()
+        longText = "Inspector hidden \u00b7 click the Draw tab or the \u2039 handle to show it " * 4
+        studioShell.toast("Saved", 10)
+        studioShell.toast("Inspector hidden \u00b7 click the Draw tab or the \u2039 handle to show it", 10)
+        studioShell.toast(longText.strip(), 10)
+        info = {}
+
+        def inspect():
+            popup = qt.QApplication.activePopupWidget()
+            try:
+                listWidget = self.mainWindow.findChild("QListWidget", "StudioRecentMessagesList")
+                fm = listWidget.fontMetrics()
+                width = fm.horizontalAdvance if hasattr(fm, "horizontalAdvance") else fm.width
+                info["widths"] = [width(part) for i in range(listWidget.count) for part in listWidget.item(i).text().split("\n")]
+                info["items"] = [listWidget.item(i).text() for i in range(listWidget.count)]
+                info["viewport"] = listWidget.viewport().width
+                info["hScroll"] = listWidget.horizontalScrollBar().isVisible()
+                info["vScroll"] = listWidget.verticalScrollBar().isVisible()
+                info["height"] = listWidget.height
+                info["rows"] = sum(listWidget.sizeHintForRow(i) for i in range(listWidget.count))
+                info["listWidth"] = listWidget.width
+                info["windowWidth"] = self.mainWindow.width
+            finally:
+                if popup is not None:
+                    popup.close()
+
+        qt.QTimer.singleShot(600, inspect)
+        studioShell.showRecentMessages()
+        self._pump()
+        self.assertIn("widths", info, "the popover was not shown")
+        self.assertLessEqual(max(info["widths"]), info["viewport"], info)
+        self.assertFalse(info["hScroll"], info)
+        self.assertLessEqual(info["listWidth"], info["windowWidth"], info)
+        if not info["vScroll"]:
+            self.assertGreaterEqual(info["height"], info["rows"], info)
+        words = " ".join(" ".join(item.split()) for item in info["items"])
+        self.assertIn("click the Draw tab or the \u2039 handle to show it", words)
+
     def test_24_module_selection_leaves_startup_layout(self):
         """Draw or Map entered by a module selection replace the startup layout by theirs; a chosen layout is kept (D5)."""
         from StudioLib import workspaces
@@ -1619,6 +2114,335 @@ class StudioNavigationTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         slicer.util.selectModule(ws.moduleName)
         self._pump()
         self.assertEqual(self.layoutManager.layout, conventional)
+
+    def test_26_tables_do_not_trap_tab(self):
+        """Tab and Shift+Tab leave the Studio and Map tables in one press (SPEC 2.9: Tab is focus traversal, always);
+        the arrow keys still move between the rows. Qt's default (tabKeyNavigation) moves Tab from cell to cell and wraps
+        from the last cell to the first, so the focus never left the Report checklist, the peaks table or the study table.
+        """
+        from LesionNetworkMappingUI import widgets
+        from StudioLib import library
+
+        studioShell = self._applyStudio()
+        studioShell.switchTo("map")
+        self._pump(6)
+        studioShell.switchTo("library")
+        self._pump(6)
+        # Every table of Studio and of Map (LNM*) that exists now, plus the study table and the shared table helper
+        studyList = library.StudyList()
+        _keepAlive.append(studyList)
+        # (the Map module widget leaves the main window when another workspace is shown)
+        mapWidget = slicer.modules.lesionnetworkmapping.widgetRepresentation()
+        tables = [table for parent in (self.mainWindow, mapWidget) for table in parent.findChildren("QTableView")
+                  if table.objectName.startswith(("Studio", "LNM"))]
+        names = {table.objectName for table in tables}
+        for name in ("LNMReportChecklist", "LNMPeaksTable"):
+            self.assertIn(name, names)
+        helperTable = widgets.tableView(["a", "b", "c"])
+        tables += [studyList.table, helperTable]
+        trapping = sorted({table.objectName for table in tables if table.tabKeyNavigation})
+        self.assertEqual(trapping, [], "tables that keep Tab inside")
+
+        # Behaviour: a filled table between two buttons gives the focus away on one Tab and one Shift+Tab
+        window = qt.QWidget()
+        _keepAlive.append(window)
+        layout = qt.QVBoxLayout(window)
+        before = qt.QPushButton("before")
+        after = qt.QPushButton("after")
+        helperTable.setRowCount(4)
+        for row in range(4):
+            for column in range(3):
+                helperTable.setItem(row, column, qt.QTableWidgetItem(f"{row},{column}"))
+        layout.addWidget(before)
+        layout.addWidget(helperTable)
+        layout.addWidget(after)
+        window.show()
+        window.activateWindow()
+        self._pump(6)
+        try:
+            helperTable.setFocus(qt.Qt.TabFocusReason)
+            self._pump()
+            if slicer.app.focusWidget() != helperTable:
+                self.skipTest("the test window cannot take the keyboard focus here")
+            helperTable.setCurrentCell(0, 0)
+            self._sendKey(helperTable, qt.Qt.Key_Down)
+            self._pump()
+            self.assertEqual(helperTable.currentRow(), 1, "the Down arrow does not move to the next row")
+            self._sendKey(helperTable, qt.Qt.Key_Tab)
+            self._pump()
+            self.assertEqual(slicer.app.focusWidget(), after, "Tab stayed in the table")
+            helperTable.setFocus(qt.Qt.TabFocusReason)
+            self._pump()
+            self._sendKey(helperTable, qt.Qt.Key_Backtab, qt.Qt.ShiftModifier)
+            self._pump()
+            self.assertEqual(slicer.app.focusWidget(), before, "Shift+Tab stayed in the table")
+        finally:
+            window.hide()
+
+    def test_25b_pointer_already_over_view_keeps_the_keys(self):
+        """The pointer is over a slice view when Draw is entered (a scan was opened): Draw's focus on its tool tile must
+        not take Home, End, the arrow keys, f and b away from the view (focus follows the mouse only on entering a
+        view, and no enter event follows). The view under the pointer takes the focus; with Focus follows mouse off
+        the tile keeps it.
+        """
+        volume, segmentation = self._loadScanAndSegmentation()
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        slicer.util.setSliceViewerLayers(background=volume, fit=True)
+        self._pump(10)
+        sliceView = self._redSliceView()
+        renderWidget = sliceView.VTKWidget()
+        logic = self.layoutManager.sliceWidget("Red").sliceLogic()
+        self.mainWindow.activateWindow()
+        qt.QCursor.setPos(sliceView.mapToGlobal(qt.QPoint(sliceView.width // 2, sliceView.height // 2)))
+        self._pump()
+        hit = qt.QApplication.widgetAt(qt.QCursor.pos())
+        if hit is None or not (hit == sliceView or sliceView.isAncestorOf(hit)):
+            self.skipTest("the pointer cannot be put over the view on this display")
+        if not self.mainWindow.isActiveWindow:
+            self.skipTest("the main window cannot be activated on this display")
+        self.assertTrue(slicer.app.property("SlicerFocusFollowsMouse"))
+        studioShell.switchTo("library")
+        self._pump()
+        studioShell.switchTo("draw")
+        self._pump(10)
+        self.assertEqual(slicer.app.focusWidget(), renderWidget, "Draw's focus stayed on a tile with the pointer over the view")
+        bounds = [0.0] * 6
+        logic.GetLowestVolumeSliceBounds(bounds)
+        middle = (bounds[4] + bounds[5]) / 2.0
+        logic.SetSliceOffset(middle)
+        self._pump()
+        for key, expected in ((qt.Qt.Key_End, "above"), (qt.Qt.Key_Home, "below")):
+            self._sendKey(renderWidget, key)
+            self._pump()
+            offset = logic.GetSliceOffset()
+            self.assertTrue(offset > middle if expected == "above" else offset < middle, f"key {key} did not move the view ({offset})")
+            logic.SetSliceOffset(middle)
+            self._pump()
+        # The pointer over the inspector: the tile keeps the focus (nothing to give to a view)
+        scrollArea = self._dock().findChild("QScrollArea", "ScrollArea")
+        qt.QCursor.setPos(scrollArea.mapToGlobal(qt.QPoint(scrollArea.width // 2, scrollArea.height // 2)))
+        self._pump()
+        studioShell.switchTo("library")
+        self._pump()
+        studioShell.switchTo("draw")
+        self._pump(10)
+        self.assertNotEqual(slicer.app.focusWidget(), renderWidget, "The view took the focus with the pointer over the inspector")
+        # Focus follows mouse off: the tile keeps the focus although the pointer is over the view
+        qt.QCursor.setPos(sliceView.mapToGlobal(qt.QPoint(sliceView.width // 2, sliceView.height // 2)))
+        self._pump()
+        slicer.app.setProperty("SlicerFocusFollowsMouse", False)
+        try:
+            studioShell.switchTo("library")
+            self._pump()
+            studioShell.switchTo("draw")
+            self._pump(10)
+            self.assertNotEqual(slicer.app.focusWidget(), renderWidget, "The view took the focus with Focus follows mouse off")
+        finally:
+            slicer.app.setProperty("SlicerFocusFollowsMouse", True)
+        slicer.mrmlScene.RemoveNode(segmentation)
+        slicer.mrmlScene.RemoveNode(volume)
+
+    def test_25c_layout_key_over_view_keeps_the_keys(self):
+        """Alt+2 (Single) or Alt+3 pressed with the pointer over a slice view: the view now under the still pointer has
+        the keys. The new layout hid or moved the view that had the focus, Qt gave it to an inspector button, and no
+        enter event followed: Up, Home and End were lost (BB-1). After Alt+3 over Red the pointer is over another view,
+        which takes the keys (they used to step Red). A widget outside the views that has the focus keeps it.
+        """
+        from StudioLib import layouts, shell
+
+        volume, segmentation = self._loadScanAndSegmentation()
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        slicer.util.setSliceViewerLayers(background=volume, fit=True)
+        studioShell.setLayoutFromPicker("focus")
+        self._pump(10)
+        self.mainWindow.activateWindow()
+        self._pump()
+        if not self.mainWindow.isActiveWindow:
+            self.skipTest("the main window cannot be activated on this display")
+        self.assertTrue(slicer.app.property("SlicerFocusFollowsMouse"))
+
+        def pointAt(name, fx=0.5, fy=0.5):
+            """Put the pointer over view ``name`` and give it the focus, as entering it does. Return its render widget."""
+            sliceView = self.layoutManager.sliceWidget(name).sliceView()
+            qt.QCursor.setPos(sliceView.mapToGlobal(qt.QPoint(int(sliceView.width * fx), int(sliceView.height * fy))))
+            self._pump()
+            _hovered, view = shell.Shell._hoveredSliceView()
+            if view != sliceView:
+                self.skipTest("the pointer cannot be put over the view on this display")
+            studioShell.hoverTracker._onEnter(name)
+            renderWidget = sliceView.VTKWidget()
+            renderWidget.setFocus(qt.Qt.MouseFocusReason)
+            self._pump()
+            self.assertEqual(slicer.app.focusWidget(), renderWidget)
+            return renderWidget
+
+        def assertKeysGoToHoveredView(context):
+            self._pump(10)
+            _hovered, view = shell.Shell._hoveredSliceView()
+            self.assertIsNotNone(view, f"{context}: no view under the pointer")
+            name = next(name for name in self.layoutManager.sliceViewNames() if self.layoutManager.sliceWidget(name).sliceView() == view)
+            focusWidget = slicer.app.focusWidget()
+            self.assertEqual(focusWidget, view.VTKWidget(),
+                             f"{context}: the focus is on {focusWidget.className() if focusWidget else None} "
+                             f"{focusWidget.objectName if focusWidget else ''}, not on {name} under the pointer")
+            # End and Home, sent where Qt sends keys (the focus widget), step the view under the pointer
+            logic = self.layoutManager.sliceWidget(name).sliceLogic()
+            bounds = [0.0] * 6
+            logic.GetLowestVolumeSliceBounds(bounds)
+            logic.SetSliceOffset((bounds[4] + bounds[5]) / 2.0)
+            self._pump()
+            before = logic.GetSliceOffset()
+            self._sendKey(slicer.app.focusWidget(), qt.Qt.Key_End)
+            self._pump()
+            self.assertNotEqual(logic.GetSliceOffset(), before, f"{context}: End did not move {name}")
+            return name
+
+        # Alt+2 over Yellow and over Green: the hovered view is enlarged and keeps the keys
+        for name in ("Yellow", "Green"):
+            pointAt(name, 0.45, 0.55)
+            studioShell.setLayoutFromPicker("single")
+            self.assertEqual(layouts.maximizedViewNames(), [name])
+            self.assertEqual(assertKeysGoToHoveredView(f"Alt+2 over {name}"), name)
+            studioShell.setLayoutFromPicker("focus")
+            self._pump(10)
+        # Alt+3 over Yellow: Yellow keeps the keys; over Red: the view now under the pointer takes them
+        pointAt("Yellow", 0.45, 0.55)
+        studioShell.setLayoutFromPicker("fourup")
+        assertKeysGoToHoveredView("Alt+3 over Yellow")
+        studioShell.setLayoutFromPicker("focus")
+        self._pump(10)
+        pointAt("Red", 0.45, 0.55)
+        studioShell.setLayoutFromPicker("fourup")
+        assertKeysGoToHoveredView("Alt+3 over Red")
+        # A button outside the views that the user gave the focus to (Tab) keeps it after a layout key
+        studioShell.setLayoutFromPicker("focus")
+        self._pump(10)
+        pointAt("Green", 0.45, 0.55)
+        button = studioShell.topBar.layoutButton
+        button.setFocus(qt.Qt.TabFocusReason)
+        self._pump()
+        self.assertEqual(slicer.app.focusWidget(), button)
+        studioShell.setLayoutFromPicker("single")
+        self._pump(10)
+        self.assertEqual(layouts.maximizedViewNames(), ["Green"])
+        self.assertEqual(slicer.app.focusWidget(), button, "A layout key took the focus from the top bar button")
+        slicer.mrmlScene.RemoveNode(segmentation)
+        slicer.mrmlScene.RemoveNode(volume)
+
+    def test_25d_search_layout_and_esc_restore_keep_the_keys(self):
+        """A layout chosen in Search (setLayoutByUser) and Esc restoring a maximized view leave the keys with the view
+        under the still pointer (BB-1): the focus used to land on an inspector button or on another view.
+        """
+        from StudioLib import layouts, shell
+
+        volume, segmentation = self._loadScanAndSegmentation()
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        slicer.util.setSliceViewerLayers(background=volume, fit=True)
+        studioShell.setLayoutFromPicker("focus")
+        self._pump(10)
+        self.mainWindow.activateWindow()
+        self._pump()
+        if not self.mainWindow.isActiveWindow:
+            self.skipTest("the main window cannot be activated on this display")
+
+        def pointAtRed():
+            sliceView = self.layoutManager.sliceWidget("Red").sliceView()
+            qt.QCursor.setPos(sliceView.mapToGlobal(qt.QPoint(int(sliceView.width * 0.3), int(sliceView.height * 0.3))))
+            self._pump()
+            _hovered, view = shell.Shell._hoveredSliceView()
+            if view != sliceView:
+                self.skipTest("the pointer cannot be put over the view on this display")
+            studioShell.hoverTracker._onEnter("Red")
+            sliceView.VTKWidget().setFocus(qt.Qt.MouseFocusReason)
+            self._pump()
+
+        def assertFocusOnHoveredView(context):
+            self._pump(10)
+            _hovered, view = shell.Shell._hoveredSliceView()
+            self.assertIsNotNone(view, context)
+            focusWidget = slicer.app.focusWidget()
+            self.assertEqual(focusWidget, view.VTKWidget(),
+                             f"{context}: the focus is on {focusWidget.className() if focusWidget else None}")
+
+        pointAtRed()
+        # Search runs the layout actions of the View menu ("Four-Up") and the Studio layouts (setLayoutByUser)
+        from StudioLib import palette
+
+        layoutMenu = self.mainWindow.findChild("QMenu", "LayoutMenu")
+        fourUp = next(action for path, action in palette._menuActions(layoutMenu) if str(action.text).replace("&", "") == "Four-Up")
+        palette._triggerLayoutAction(studioShell, fourUp)
+        assertFocusOnHoveredView("Search Four-Up")
+        studioShell.setLayoutFromPicker("focus")
+        self._pump(10)
+        pointAtRed()
+        studioShell.topBar.setLayoutByUser(layouts.ROW_LAYOUT_ID)
+        assertFocusOnHoveredView("Search Row")
+        studioShell.setLayoutFromPicker("focus")
+        self._pump(10)
+        pointAtRed()
+        studioShell.setLayoutFromPicker("single")
+        self._pump(10)
+        pointAtRed()
+        self.assertTrue(studioShell.handleEscape())
+        self.assertEqual(layouts.maximizedViewNames(), [])
+        assertFocusOnHoveredView("Esc restores the layout")
+        slicer.mrmlScene.RemoveNode(segmentation)
+        slicer.mrmlScene.RemoveNode(volume)
+
+    def test_25e_layout_key_without_hovered_view_keeps_the_view_focus(self):
+        """Keyboard-only use (BB-1): F6 put the keys on Red and the pointer rests on the top bar. A layout key (Alt+3,
+        Alt+4, Alt+2) or Search used to move the keys to an inspector button; Red, still shown, keeps them now.
+        """
+        from StudioLib import layouts, shell
+
+        volume, segmentation = self._loadScanAndSegmentation()
+        studioShell = self._applyStudio()
+        studioShell.switchTo("draw")
+        slicer.util.setSliceViewerLayers(background=volume, fit=True)
+        studioShell.setLayoutFromPicker("focus")
+        self._pump(10)
+        self.mainWindow.activateWindow()
+        self._pump()
+        if not self.mainWindow.isActiveWindow:
+            self.skipTest("the main window cannot be activated on this display")
+        topBar = studioShell.topBar
+        qt.QCursor.setPos(topBar.menuButton.mapToGlobal(qt.QPoint(2, 2)))
+        self._pump()
+        _hovered, view = shell.Shell._hoveredSliceView()
+        if view is not None:
+            self.skipTest("the pointer cannot be put outside the views on this display")
+        redFocus = self.layoutManager.sliceWidget("Red").sliceView().VTKWidget()
+
+        def redHasFocus(context):
+            self._pump(10)
+            focusWidget = slicer.app.focusWidget()
+            self.assertEqual(focusWidget, redFocus,
+                             f"{context}: the focus is on {focusWidget.className() if focusWidget else None} "
+                             f"{focusWidget.objectName if focusWidget else ''}")
+
+        for context, change in (
+            ("Alt+3", lambda: studioShell.setLayoutFromPicker("fourup")),
+            ("Alt+4", lambda: studioShell.setLayoutFromPicker("row")),
+            ("Alt+2", lambda: studioShell.setLayoutFromPicker("single")),
+            ("Search layout", lambda: topBar.runLayoutChange(lambda: self.layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView))),
+        ):
+            studioShell.setLayoutFromPicker("focus")
+            self._pump(10)
+            if layouts.isMaximized():
+                layouts.restoreMaximized()
+                self._pump(10)
+            redFocus.setFocus(qt.Qt.TabFocusReason)
+            self._pump()
+            self.assertEqual(slicer.app.focusWidget(), redFocus)
+            if context == "Alt+2":
+                studioShell.hoverTracker.lastSliceViewName = "Red"
+            change()
+            redHasFocus(context)
+        slicer.mrmlScene.RemoveNode(segmentation)
+        slicer.mrmlScene.RemoveNode(volume)
 
     def test_25_page_keys_step_the_hovered_view(self):
         """PageUp and PageDown step the slice view under the pointer also when the focus is on a tool tile of Draw (they

@@ -229,6 +229,29 @@ class TemplatesNormalizeTest(unittest.TestCase):
             json.dump(record, f)
         self.assertTrue(normalize.find_template("user:changed", dirs=[changed_dir])["warnings"])
 
+    def test_damaged_template_json_is_skipped(self):
+        """A template.json edited by hand with a field of the wrong type is skipped like an unreadable one (as the GUI does):
+        the study's own template is still found, and a requested damaged template is plainly "missing", not an AttributeError.
+        """
+        from LesionNetworkMappingLib.study import Study
+
+        damaged_dir = os.path.join(self.tmp, "damaged-templates")
+        shutil.copytree(self.templates_dir, damaged_dir)
+        for name, change in (("Damaged sha", {"sha256": "abc"}), ("Damaged files", {"files": "x"}), ("Damaged grid", {"grid": []})):
+            folder = os.path.join(damaged_dir, name)
+            os.makedirs(folder)
+            with open(os.path.join(folder, normalize.USER_TEMPLATE_JSON), "w", encoding="utf-8") as f:
+                json.dump(dict(self.record, id=name.lower().replace(" ", "-"), **change), f)
+            self.assertIsNone(normalize.read_user_template(folder))
+        record = {"id": "MNI152NLin2009bAsym", "res": 2, "source": "user:my-2009b-brain", "name": "My 2009b brain",
+                  "space": "MNI152NLin2009bAsym", "sha256": self.record["sha256"]["image"]}
+        own = Study.create(os.path.join(self.tmp, "studies", "own-damaged"), name="own-damaged", template=record)
+        self.assertEqual(normalize._study_template(own, "auto", [damaged_dir]), ("user:my-2009b-brain", None))
+        for slug in ("damaged-sha", "damaged-files"):
+            with self.assertRaises(jobs.JobError) as caught:
+                normalize.find_template(f"user:{slug}", dirs=[damaged_dir])
+            self.assertEqual(caught.exception.code, "template_missing")
+
     def test_study_auto_template(self):
         """A study made on a user template normalizes to it ("auto"), found by checksum; else the built-in fallback."""
         from LesionNetworkMappingLib.study import Study
@@ -271,6 +294,26 @@ class TemplatesNormalizeTest(unittest.TestCase):
         self.assertEqual(entry["grid1"]["id"], "user:my-2009b-brain")
         code, _events, stderr = _cli("check", "--template", "bogus")
         self.assertEqual(code, jobs.EXIT_USAGE, stderr)
+
+    def test_check_names_the_missing_file_of_a_user_template(self):
+        """A user template whose image or brain mask file was deleted is reported by file and folder, not by an internal message."""
+        broken_dir = os.path.join(self.tmp, "broken")
+        folder, _record = make_user_template(broken_dir, "Broken one", "broken-one", "MNI", self.image, self.mask)
+        os.remove(os.path.join(folder, os.path.basename(self.image)))
+        folder2, _record2 = make_user_template(broken_dir, "Broken two", "broken-two", "MNI", self.image, self.mask)
+        os.remove(os.path.join(folder2, os.path.basename(self.mask)))
+        entry = normalize._check_user_template("user:broken-one", [broken_dir])
+        self.assertFalse(entry["usable"])
+        self.assertNotIn("find_template", entry["message"])
+        self.assertIn('Template user:broken-one ("Broken one")', entry["message"])
+        self.assertIn(f"its image {os.path.basename(self.image)} is missing from {folder}", entry["message"])
+        self.assertFalse(entry["files"]["fixed"]["found"])
+        entry = normalize._check_user_template("user:broken-two", [broken_dir])
+        self.assertFalse(entry["usable"])
+        self.assertIn(f"its brain mask {os.path.basename(self.mask)} is missing from {folder2}", entry["message"])
+        code, events, stderr = _cli("check", "--template", "user:broken-one", "--template-dir", broken_dir)
+        self.assertNotEqual(code, 0)
+        self.assertNotIn("find_template", json.dumps(events), stderr[-2000:])
 
     @unittest.skipUnless(_tools_available(), "BRAINSFit/BRAINSResample or the bundled template are not available (run with PythonSlicer)")
     def test_normalize_to_user_template(self):

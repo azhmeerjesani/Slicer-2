@@ -583,7 +583,9 @@ def _degree_command(args):
 
 def main(argv=None):
     """Command-line entry point; returns the process exit code."""
-    parser = _ArgumentParser(prog="python -m LesionNetworkMappingLib.qa", description="Connectome QA jobs.")
+    from . import jobs
+
+    parser = _ArgumentParser(prog=jobs.command_text("python -m LesionNetworkMappingLib.qa"), description="Connectome QA jobs.")
     commands = parser.add_subparsers(dest="command", required=True, parser_class=_ArgumentParser)
     degree = commands.add_parser("degree", help="compute the connectome degree map (derived/degree.npy and degree.json)")
     degree.add_argument("--bundle", required=True, help="connectome bundle directory (.lnmc)")

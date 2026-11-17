@@ -12,7 +12,7 @@ import qt
 import slicer
 from slicer.i18n import tr as _
 
-from . import ui, updates
+from . import projects, ui, updates
 
 PANEL_OBJECT_NAME = "StudioUpdatesSettingsPanel"
 
@@ -64,7 +64,7 @@ class UpdatesSettingsPanel(ctk.ctkSettingsPanel):
         row(_("This version"), self.versionLabel)
         self.latestLabel = qt.QLabel()
         self.latestLabel.setObjectName("StudioUpdatesLatestLabel")
-        self.latestLabel.setOpenExternalLinks(True)
+        projects.routeLinks(self.latestLabel)
         self.latestLabel.setTextFormat(qt.Qt.RichText)
         row(_("Latest release"), self.latestLabel, last=True)
         # Word-wrapped text outside the rows: a row does not grow for a wrapped label
@@ -77,7 +77,7 @@ class UpdatesSettingsPanel(ctk.ctkSettingsPanel):
 
         self.notesBrowser = qt.QTextBrowser()
         self.notesBrowser.setObjectName("StudioUpdatesNotes")
-        self.notesBrowser.setOpenExternalLinks(True)
+        projects.routeLinks(self.notesBrowser)
         self.notesBrowser.setMaximumHeight(160)
         layout.addWidget(self.notesBrowser)
 
@@ -154,6 +154,7 @@ class UpdatesSettingsPanel(ctk.ctkSettingsPanel):
             self.latestLabel.text = " · ".join(parts) + " · " + link
             if manifest.notes and hasattr(self.notesBrowser, "setMarkdown"):
                 self.notesBrowser.setMarkdown(manifest.notes)
+                updates._flattenHeadings(self.notesBrowser)
             else:
                 self.notesBrowser.setPlainText(manifest.notes)
             self.notesBrowser.setVisible(bool(manifest.notes) and status.available)
@@ -186,13 +187,12 @@ class UpdatesSettingsPanel(ctk.ctkSettingsPanel):
             if status.available and service is not None and service.unavailableReason():
                 parts.append(service.unavailableReason())
         if service is not None and service.lastError is not None:
-            parts.append(_("The last check failed: {error}").format(error=service.lastError))
+            parts.append(_("The last check failed. {error}").format(error=updates.sentence(service.lastError)))
         last = updates.settingsValue("LastCheck")
         if last:
-            try:
-                parts.append(_("Last checked {time}.").format(time=time.strftime("%Y-%m-%d %H:%M", time.strptime(last, "%Y-%m-%dT%H:%M:%S"))))
-            except ValueError:
-                pass
+            lastTime = updates.parseTime(last)
+            if lastTime is not None:
+                parts.append(_("Last checked {time}.").format(time=time.strftime("%Y-%m-%d %H:%M", time.localtime(lastTime))))
         elif updates.channel() != "release" and updates.feedOverride() is None:
             parts.append(_("A development build does not check by itself: use Check now."))
         return " ".join(parts)

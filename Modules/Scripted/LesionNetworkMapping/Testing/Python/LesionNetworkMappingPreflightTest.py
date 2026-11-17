@@ -219,6 +219,46 @@ class SubjectLevelBlockTest(_Fixture):
         self.assertEqual(_check(self.preflight(), "lesion_subvoxel")["subjects"], ["sub-small"])
 
 
+    def test_header_claiming_a_huge_grid_is_unreadable_not_a_failed_check(self):
+        # A header that says 32000^3 voxels on a 50 KB file (BB-1): numpy tried to allocate the claimed terabytes and the
+        # MemoryError aborted the whole check; the lesion is excluded like any unreadable file, the others are checked.
+        self.add_many(3)
+        path = self.write_lesion("sub-lies")
+        with gzip.open(path, "rb") as f:
+            raw = bytearray(f.read())
+        raw[40:48] = np.array([3, 32000, 32000, 32000], "<i2").tobytes()
+        with open(path, "wb") as f:
+            f.write(gzip.compress(bytes(raw)))
+        self.study.add_subject("sub-lies", lesion=self.study.relpath(path), space=SPACE, volume_ml=1)
+        with self.assertRaises(ValueError):
+            nifti.read_nifti(path)
+        report = self.preflight()
+        check = _check(report, "lesion_unreadable")
+        self.assertEqual((check["level"], check["subjects"]), ("block", ["sub-lies"]))
+        self.assertEqual(report["counts"]["included"], 3)
+        self.assertFalse(report["blocked"])
+        self.assertTrue(self.preflight(strict=True)["blocked"])
+
+    def test_lesion_outside_the_grid_is_not_called_empty(self):
+        # 451-like voxels that lie 480 mm away from the connectome grid: excluded, but named by the real cause
+        affine = np.array(self.bundle.affine, dtype=float)
+        affine[:3, 3] += 480.0
+        self.add_many(3)
+        self.add("sub-far", data=self.lesion_array(), affine=affine, fresh=False)
+        report = self.preflight()
+        self.assertNotIn("lesion_empty", _ids(report))
+        self.assertNotIn("lesion_subvoxel", _ids(report))
+        check = _check(report, "lesion_outside_grid")
+        self.assertEqual(check["level"], "block")
+        self.assertEqual(check["subjects"], ["sub-far"])
+        self.assertIn("outside the template or connectome", check["message"])
+        self.assertNotIn("empty", check["message"])
+        self.assertEqual(report["excluded"]["sub-far"], "lesion outside the connectome")
+        # A truly empty lesion is still called empty
+        self.add("sub-empty", data=np.zeros(self.bundle.shape, np.uint8))
+        self.assertEqual(_check(self.preflight(), "lesion_empty")["subjects"], ["sub-empty"])
+
+
 class RunLevelBlockTest(_Fixture):
     def test_terms_not_accepted(self):
         self.add_many(3)
@@ -278,6 +318,19 @@ class RunLevelBlockTest(_Fixture):
         error = self.preflight(design_spec={"test": "two_group", "covariates": ["age"]})
         self.assertIn("design.error", _ids(error, "block"))
 
+    def test_design_volume_covariate_uses_measured_volumes(self):
+        # A study without stored volumes (as made from a BIDS dataset): the default lesion-volume covariate
+        # takes the volumes this preflight measures, as the run does, instead of dropping every subject.
+        for index in range(10):
+            data = self.lesion_array(radius=2 + index % 3)
+            self.add(f"sub-{index:02d}", data, fresh=False, group="case" if index < 5 else "control", volume_ml="n/a", fractional_sum="n/a")
+        report = self.preflight(design_spec=design.DesignSpec(test="two_group").to_dict())
+        self.assertEqual(design.DesignSpec(test="two_group").covariates, [design.VOLUME_COLUMN])
+        self.assertEqual(len(report["measured"]), 10)
+        self.assertNotIn("design.error", _ids(report), report["checks"])
+        self.assertFalse(report["blocked"], [check["message"] for check in report["checks"] if check["level"] == "block"])
+        self.assertTrue(all(self.study.value(sid, design.VOLUME_COLUMN) is None for sid in self.study.subject_ids))  # the study is not changed
+
     def test_disk_space(self):
         self.add_many(3)
         usage = shutil.disk_usage(self.tmp)
@@ -318,6 +371,44 @@ class RunLevelBlockTest(_Fixture):
         self.assertEqual(sorted(report["excluded"]), sorted(excluded["include=0"]))
         self.assertEqual(sorted(report["excluded"]), ["sub-003", "sub-004"])
         self.assertEqual(sorted(_check(report, "include_off")["subjects"]), ["sub-003", "sub-004"])
+
+    def test_qc_fail_excluded_by_every_analysis(self):
+        # A lesion marked "QC fail" in the Library is left out by the Cohort card's analyses (Study.analysis_rows:
+        # map lesions, Overlap, Contrast, Symptom, VLSM) and by preflight, as Run everything leaves it out
+        from LesionNetworkMappingLib import study as studylib
+
+        paths = {}
+        for index in range(4):
+            paths[f"sub-a{index}"] = self.add(f"sub-a{index}", group="case")
+        for index in range(4):
+            self.add(f"sub-b{index}", group="control")
+        self.study.set("sub-a1", qc="fail")
+        self.study.set("sub-b2", qc="fail")
+        self.study.set("sub-b3", qc="pass")
+        failed = ["sub-a1", "sub-b2"]
+        rows, excluded = self.study.analysis_rows()
+        self.assertEqual(sorted(excluded.get(studylib.EXCLUDED_QC, [])), failed)
+        self.assertEqual(len(rows), 6)
+        self.assertNotIn("sub-a1", [row["participant_id"] for row in self.study.analysis_rows(include_only=False)[0]])
+        self.assertIn("sub-a1", [row["participant_id"] for row in self.study.analysis_rows(exclude_qc_fail=False)[0]])
+        lesions, excluded = cohortmaps.study_lesions(self.study)
+        self.assertEqual(sorted(sid for sid, _path, _sha in lesions), sorted(row["participant_id"] for row in rows))
+        self.assertEqual(sorted(excluded.get(studylib.EXCLUDED_QC, [])), failed)
+        built = design.build_design(self.study, {"test": "two_group", "levels": ["case", "control"]})
+        self.assertEqual(len(built.sids), 6)
+        self.assertEqual(sorted(built.excluded.get(studylib.EXCLUDED_QC, [])), failed)
+        report = self.preflight()
+        self.assertEqual({sid: report["excluded"][sid] for sid in failed}, dict.fromkeys(failed, studylib.EXCLUDED_QC))
+        self.assertEqual(sorted(sid for sid in self.study.subject_ids if sid not in report["excluded"]), sorted(row["participant_id"] for row in rows))
+        check = _check(report, "qc_fail")
+        self.assertEqual((check["level"], sorted(check["subjects"]), check["fix"]["id"]), ("info", failed, preflight.FIX_LIBRARY))
+        self.assertIn("QC fail", check["message"])
+        self.assertFalse(report["blocked"], report["checks"])
+        # A QC-failed lesion whose file is gone is reported as QC fail, not as a missing file that blocks a strict run
+        os.remove(paths["sub-a1"])
+        strict = self.preflight(strict=True)
+        self.assertEqual(strict["excluded"]["sub-a1"], studylib.EXCLUDED_QC)
+        self.assertNotIn("lesion_missing", _ids(strict))
 
 
 class WarningTest(_Fixture):
@@ -402,6 +493,33 @@ class WarningTest(_Fixture):
             json.dump({"inputs": {"lesion": {"sha256": preflight._sha256(native)}}}, f)
         self.assertNotIn("norm_stale", _ids(self.preflight()))
 
+    def test_recorded_non_mni_space_is_excluded_like_native(self):
+        """A lesion recorded in Talairach (a study space label that is not MNI) or in a misspelt space is excluded with the
+        native_space warning; before the fix it was included with an info note saying its space was "not recorded"
+        (BB-1 bug non-mni-declared-space-talairach-mapped-as-mni). "MNI" (an MNI template of no known family) stays included.
+        """
+        self.add_many(3)
+        self.add("sub-tal", space="Talairach")
+        self.add("sub-typo", space="MNI512NLin6Asym")
+        self.add("sub-native", space="native")
+        self.add("sub-other", space="MNI")
+        report = self.preflight()
+        check = _check(report, "native_space")
+        self.assertEqual(check["level"], "warn")
+        self.assertEqual(sorted(check["subjects"]), ["sub-native", "sub-tal", "sub-typo"])
+        self.assertIn("Talairach", check["message"])
+        self.assertIn("not a known MNI template space", check["message"])
+        self.assertEqual(report["excluded"]["sub-tal"], preflight.EXCLUDED_NOT_MNI)
+        self.assertEqual(report["excluded"]["sub-typo"], preflight.EXCLUDED_NOT_MNI)
+        self.assertEqual(report["excluded"]["sub-native"], "native space: not normalized")
+        self.assertIn("sub-other", report["included"])
+        unknown = _check(report, "space_unknown")
+        self.assertEqual(unknown["subjects"], ["sub-other"])
+        self.assertNotIn("not recorded", unknown["message"])
+        # The override includes them, as for native lesions
+        report = self.preflight(overrides=["native_space"])
+        self.assertIn("sub-tal", report["included"])
+
     def test_cohort_columns(self):
         self.add_many(3, group="case", dimensionality="2D", flipped="1", source_type="case_report", doi="10.1/x")
         self.add_many(3, prefix="sub-k", group="control", dimensionality="3D")
@@ -415,11 +533,44 @@ class WarningTest(_Fixture):
         self.assertEqual(sorted(_check(report, "flipped")["subjects"]), ["sub-001", "sub-002", "sub-003"])
         self.assertEqual(_check(report, "missing_scores")["subjects"], ["sub-002"])
         self.assertEqual(_check(report, "case_report_source")["subjects"], ["sub-001"])
+        self.assertNotIn("nonnumeric_scores", _ids(report))
+        # A value that is present but not a number is named too (a decimal comma, a typo), not silently dropped
+        self.study.set("sub-003", aphasia="8,5")
+        report = self.preflight()
+        self.assertEqual(_check(report, "nonnumeric_scores")["subjects"], ["sub-003"])
+        self.assertEqual(_check(report, "missing_scores")["subjects"], ["sub-002"])
+        self.assertIn("not a number", _check(report, "nonnumeric_scores")["message"])
+        self.study.set("sub-003", aphasia=3)
         share = _check(report, "dimensionality_share")
         self.assertEqual(share["detail"], {"case": 100.0, "control": 0.0})
         # With a design the design's own dimensionality check is used (not duplicated)
         with_design = self.preflight(design_spec={"test": "two_group", "levels": ["case", "control"]})
         self.assertNotIn("dimensionality_share", _ids(with_design))
+
+    def test_two_d_tracings_without_a_policy(self):
+        """BB-1: 2D tracings in a study that has not chosen how they are used (trace_policy.extrude_2d) are mapped as single
+        slices: a warning says so, also for lesion files that were never drawn in Draw (no dimensionality column yet, read
+        from the voxels of a stale row), and remeasure() gives such a row its dimensionality.
+        """
+        self.add_many(3)
+        slab = np.zeros(self.bundle.shape, np.uint8)
+        slab[5:9, 6:10, 7] = 1  # one axial slice
+        self.add("sub-2dfile", data=slab, fresh=False)  # an imported file: measured now, no dimensionality column
+        self.add("sub-2drow", data=slab, dimensionality="2D")  # drawn in Draw (column recorded)
+        self.add("sub-3drow", dimensionality="3D")
+        report = self.preflight()
+        check = _check(report, "two_d_no_policy")
+        self.assertEqual((check["level"], check["scope"]), ("warn", "run"))
+        self.assertEqual(check["subjects"], ["sub-2dfile", "sub-2drow"])
+        self.assertEqual(check["fix"]["id"], preflight.FIX_TWO_D_POLICY)
+        self.assertIn("mapped as single slices", check["message"])
+        self.assertFalse(report["blocked"])
+        values = preflight.remeasure(self.study, ["sub-2dfile", "sub-2drow"])
+        self.assertEqual(values["sub-2dfile"]["dimensionality"], "2D")
+        self.assertNotIn("dimensionality", values["sub-2drow"])  # never over Draw's (an extruded tracing's file is 3D)
+        for policy in ({"mode": "single"}, {"mode": "fractional", "total_mm": 2.0}, "binary_pm"):
+            self.study.trace_policy = {**self.study.trace_policy, "extrude_2d": policy}
+            self.assertNotIn("two_d_no_policy", _ids(self.preflight()))
 
     def test_rule_checks(self):
         self.add_many(3)
@@ -631,6 +782,23 @@ class AssertRunOutputsTest(_Fixture):
         nifti.write_nifti(path, np.zeros_like(data), affine)
         self.assertEqual(self.codes(preflight.assert_run_outputs(folder, self.bundle.n_subjects, reference_header=self.bundle)), ["constant_map"])
 
+    def test_one_subject_t_map_is_not_a_constant_map_failure(self):
+        """At N=1 the T map is all zero by design (no T threshold): it must not fail the run; Fz and r still must vary."""
+        folder = os.path.join(self.tmp, "one subject")
+        os.makedirs(folder)
+        shape = (4, 4, 4)
+        varied = np.arange(64, dtype=np.float32).reshape(shape)
+        affine = np.eye(4)
+        paths = {}
+        for key, data in (("AvgR", varied), ("AvgRFz", varied * 0.5), ("T", np.zeros(shape, dtype=np.float32))):
+            paths[key] = os.path.join(folder, f"Lesion_conn-LocalN1_desc-{key}_funcmap.nii.gz")
+            nifti.write_nifti(paths[key], data, affine)
+        self.assertEqual(preflight.assert_run_outputs({"maps": list(paths.values()), "n": 1}, 1), [])
+        # With 2 subjects a constant T map is still an error, and so is a constant Fz map at N=1
+        self.assertEqual(self.codes(preflight.assert_run_outputs({"maps": list(paths.values()), "n": 2}, 2)), ["constant_map"])
+        nifti.write_nifti(paths["AvgRFz"], np.zeros(shape, dtype=np.float32), affine)
+        self.assertEqual(self.codes(preflight.assert_run_outputs({"maps": list(paths.values()), "n": 1}, 1)), ["constant_map"])
+
     def test_wrong_n(self):
         failures = preflight.assert_run_outputs(os.path.join(self.run_dir, "run.json"), 100)
         self.assertEqual(self.codes(failures), ["wrong_n"])
@@ -700,6 +868,26 @@ class AssertRunOutputsTest(_Fixture):
         self.assertEqual(preflight.assert_run_outputs(folder, self.bundle.n_subjects, expected_lesions=2), [])
         self.assertEqual(self.codes(preflight.assert_run_outputs(tsv, self.bundle.n_subjects, expected_lesions=3)), ["wrong_lesion_count"])
         self.assertEqual(self.codes(preflight.assert_run_outputs(tsv, 50, expected_lesions=2)), ["wrong_n"])
+
+    def test_constant_map_names_its_participant(self):
+        """A constant map of a maps.tsv is named by its participant, not only by its file (a cache name)."""
+        folder = os.path.join(self.tmp, "cohort constant")
+        os.makedirs(folder)
+        record = self.run_record(self.run_dir)
+        maps = next(iter(record["maps"].values()))
+        flat = {}
+        for key, path in maps.items():
+            flat[key] = os.path.join(folder, "lesion-5a1b45d615e2_" + os.path.basename(path))
+            shutil.copyfile(path, flat[key])
+        data, affine, _ = nifti.read_nifti(flat["AvgR"])
+        nifti.write_nifti(flat["AvgR"], np.zeros_like(np.asarray(data, dtype=np.float32)), affine)
+        rows = [{"participant_id": "sub-01", "lesion": "x.nii.gz", **maps}, {"participant_id": "sub-03", "lesion": "y.nii.gz", **flat}]
+        cohortmaps.write_maps_tsv(os.path.join(folder, cohortmaps.MAPS_TSV), rows)
+        with open(os.path.join(folder, cohortmaps.COHORTMAPS_JSON), "w", encoding="utf-8") as f:
+            json.dump({"format": cohortmaps.FORMAT_NAME, "status": "done", "n": self.bundle.n_subjects, "bundle": record["bundle"]}, f)
+        failures = preflight.assert_run_outputs(os.path.join(folder, cohortmaps.MAPS_TSV), self.bundle.n_subjects, kind="cohortmaps", expected_lesions=2)
+        self.assertEqual(self.codes(failures), ["constant_map"])
+        self.assertTrue(failures[0]["message"].startswith("The map of sub-03 (lesion-5a1b45d615e2_"), failures[0]["message"])
 
 
 class GroupRecordTest(_Fixture):

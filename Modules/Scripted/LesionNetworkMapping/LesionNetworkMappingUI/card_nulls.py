@@ -17,6 +17,10 @@ the lesions are mapped first when they are not).
   with a toggle, the classic rule's false-positive-rate sentence, the minimum attainable p and q, the voxel counts, the group QA
   percentile and, in fast mode, the parity gate's exclusions. Every output says whether it is exact-pooled or approximate.
 - **Permanent caption** (``nulls.CAPTION``, addendum §3.6) under the card at all times.
+- **Locked analysis plan** (L-39): when the study's locked plan has null models, the card follows the plan's kinds, K,
+  mode and seed (``recipes.analysis_parameters``, scope "nulls_card"); a kind outside the planned kinds or another K,
+  mode or seed is shown in the Recipe header's reason row and holds Run until its reason is recorded
+  (``nulls_card.nulls.k`` in ``analysis_plan_deviations.jsonl``), as the Cohort card's Contrast and Symptom tabs do.
 
 The run's folder is ``<cohort maps folder>/nulls-<kind>-<mode>`` (nulls.json, the five maps with sidecars, no absolute path); the
 Cohort card's folder is where the QA card looks for the group QA, and the card tells the QA card to look again when a run ends
@@ -120,8 +124,14 @@ def _statusText(job):
     return f"{text} · {eta}" if eta else text
 
 
+_CURRENT = object()  # showState(): the cohort's current maps.tsv
+
+
 class NullsCard:
     """Controller of the Nulls card (see the module docstring)."""
+
+    #: recipes.ANALYSIS_SCOPES key: the kind, K, mode and seed follow the locked analysis plan (card_recipe.analysisTabs)
+    PLAN_SCOPE = "nulls_card"
 
     def __init__(self, ctx):
         self.ctx = ctx
@@ -134,6 +144,7 @@ class NullsCard:
         self.shownDesc = None
         self.lastMap = "sensNullExcess"  # the map of the table that the bias toggle returns to
         self.volumeId = None
+        self.mapScope = None  # the scope (cohort maps folder, connectome) of the map this card put in the slice views
         self.fast = manager_fastindex.FastModeState()
         self.controlSet = self._readControlSet()
         self.estimateSeconds = None
@@ -143,6 +154,7 @@ class NullsCard:
         self._kPoolValues = {"exact": 20, "fast": 100}  # K_pool of each mode (their defaults differ), kept when the mode changes
         self._kPoolMode = "exact"
         self._referenceOk = {}
+        self._planShown = []  # the plan changes the Recipe header was last asked to show
         self._timer = qt.QTimer()
         self._timer.setSingleShot(True)
         self._timer.setInterval(DESIGN_DELAY_MS)
@@ -163,6 +175,7 @@ class NullsCard:
         self._buildResults(layout)
         self.captionLabel = label(self._caption(), "LNMNullsCaption", "caption")
         layout.addWidget(self.captionLabel)
+        ctx.bundleChanged.append(self._onBundleChanged)
         for name in ("studyChanged", "bundleChanged", "ruleChanged", "computeEnabledChanged", "runChanged"):
             getattr(ctx, name).append(self.scheduleRefresh)
         ctx.runner.jobFinished.append(self._onJobFinished)
@@ -242,22 +255,32 @@ class NullsCard:
         spin.connect("valueChanged(int)", lambda v: self.onSettingsChanged())
         return spin
 
+    @staticmethod
+    def _addFormRow(grid, label, field):
+        row = grid.rowCount()
+        grid.addWidget(label, row, 0, qt.Qt.AlignLeft | qt.Qt.AlignVCenter)
+        grid.addWidget(field, row, 1)
+
     def _buildSettings(self, layout):
-        form = qt.QFormLayout()
-        form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
+        # A grid, not a QFormLayout: a QFormLayout keeps the vertical spacing of hidden rows (blank gaps),
+        # a QGridLayout skips rows whose widgets are all hidden.
+        form = qt.QGridLayout()
+        form.setColumnStretch(1, 1)
+        form.setVerticalSpacing(6)
+        form.setHorizontalSpacing(6)
         self.kSpin = self._spin("LNMNullsK", MIN_K, MAX_K, DEFAULT_K, _("Null cohorts: the permutation p has the floor 1 / (K + 1). Fast mode computes at most 10,000."), 100)
         self.kLabel = qt.QLabel(_("Null cohorts (K)"))
-        form.addRow(self.kLabel, self.kSpin)
+        self._addFormRow(form, self.kLabel, self.kSpin)
         self.kPoolSpin = self._spin("LNMNullsKPool", 1, 1000, 20, _("Relocations of each lesion that are mapped; every null cohort draws one per lesion (exact default 20, fast default 100)."), 5)
         self.kPoolSpin.connect("valueChanged(int)", self.onKPoolChanged)
         self.kPoolLabel = qt.QLabel(_("Relocations per lesion (K_pool)"))
-        form.addRow(self.kPoolLabel, self.kPoolSpin)
+        self._addFormRow(form, self.kPoolLabel, self.kPoolSpin)
         self.topSpin = self._spin("LNMNullsTopPct", 1, 50, TOP_PCT_DEFAULT, _("Fast mode has no T and no exact Fz scale: a lesion's map passes where it is in the top x% of |value| in the brain mask."))
         self.topLabel = qt.QLabel(_("Rank rule: top x %"))
-        form.addRow(self.topLabel, self.topSpin)
+        self._addFormRow(form, self.topLabel, self.topSpin)
         self.seedSpin = self._spin("LNMNullsSeed", 0, 1000000, 0, _("Seed of the relocations and the null cohorts (the same seed gives the same nulls)"))
         self.seedLabel = qt.QLabel(_("Seed"))
-        form.addRow(self.seedLabel, self.seedSpin)
+        self._addFormRow(form, self.seedLabel, self.seedSpin)
         self.strengthCombo = qt.QComboBox()
         self.strengthCombo.setObjectName("LNMNullsStrength")
         self.strengthCombo.addItem(_("Signed μC_r"), "signed")
@@ -265,7 +288,7 @@ class NullsCard:
         self.strengthCombo.setToolTip(_("The map whose value each relocated lesion keeps: the signed mean connectivity (default) or the absolute hubness (recorded)"))
         self.strengthCombo.connect("currentIndexChanged(int)", lambda index: self.onSettingsChanged())
         self.strengthLabel = qt.QLabel(_("Strength map"))
-        form.addRow(self.strengthLabel, self.strengthCombo)
+        self._addFormRow(form, self.strengthLabel, self.strengthCombo)
         layout.addLayout(form)
         self.controlRow = qt.QWidget()
         controlLayout = qt.QHBoxLayout(self.controlRow)
@@ -327,6 +350,10 @@ class NullsCard:
         self.approxBanner.setObjectName("LNMNullsApproximateBanner")
         self.approxBanner.hide()
         inner.addWidget(self.approxBanner)
+        self.warningsBanner = widgets.banner("", level="warn")
+        self.warningsBanner.setObjectName("LNMNullsWarningsBanner")
+        self.warningsBanner.hide()
+        inner.addWidget(self.warningsBanner)
         self.staleLabel = label("", "LNMNullsStale", "secondaryText")
         self.staleLabel.hide()
         inner.addWidget(self.staleLabel)
@@ -389,7 +416,7 @@ class NullsCard:
         if path:
             return os.path.dirname(path)
         widget = _mapWidget()
-        return widget.cohortOutputDir() if widget is not None and hasattr(widget, "cohortOutputDir") else None
+        return widget.cohortOutputDir(ownOnly=True) if widget is not None and hasattr(widget, "cohortOutputDir") else None
 
     def outDir(self, kind=None, mode=None):
         """The run folder of a kind and mode: ``<cohort maps folder>/nulls-<kind>-<mode>``."""
@@ -436,7 +463,15 @@ class NullsCard:
         widget = _mapWidget()
         groups = ((getattr(widget, "cohortInfo", None) or {}).get("groups")) or {}
         cases = int(groups.get("case") or 0)
-        return cases if cases >= 2 and cases <= mapped else mapped
+        return cases if cases >= 1 and cases <= mapped else mapped
+
+    def studyLesionCount(self):
+        """Lesions of the study known before mapping (the cohort info of the Map module), same rule as lesionCount()."""
+        widget = _mapWidget()
+        info = getattr(widget, "cohortInfo", None) or {}
+        total = int(info.get("n") or 0)
+        cases = int((info.get("groups") or {}).get("case") or 0)
+        return cases if cases >= 1 and cases <= total else total
 
     def participantsPath(self):
         study = self.ctx.study
@@ -456,7 +491,7 @@ class NullsCard:
 
     def chooseControlSet(self, how):
         """Choose the control set (``how``: "pool-folder", "pool-tsv" or "pool-maps") with a file dialog."""
-        start = os.path.dirname(self.controlSet["path"]) if self.controlSet else os.path.expanduser("~")
+        start = os.path.dirname(self.controlSet["path"]) if self.controlSet else widgets.dialogStartFolder(os.path.expanduser("~"))
         if how == "pool-folder":
             path = qt.QFileDialog.getExistingDirectory(self.widget, _("Folder of control lesion masks (NIfTI)"), start)
         else:
@@ -474,7 +509,11 @@ class NullsCard:
         self.scheduleRefresh()
 
     def hasReference(self):
-        """Whether the connectome has reference maps (rl_strength needs μC_r or the hubness map)."""
+        """Whether the connectome has reference maps (rl_strength needs μC_r or the hubness map).
+
+        The answer is kept per bundle (load_reference checks every file); a reference build that finishes, another
+        bundle and new cohort maps forget it.
+        """
         bundle = self.ctx.bundle
         if bundle is None:
             return False
@@ -555,9 +594,15 @@ class NullsCard:
             return False, _("Choose a connectome in the Connectome card.")
         if self.running():
             return False, _("Mapping the lesions first…") if self.job is None or self.job.isFinished() else _("The null models are running…")
+        pending = self.planPending()
+        if pending:
+            return False, _("Changed after the analysis plan was locked: {changes}. Give the reason in the Recipe header (top of Map), or use the plan's settings.").format(
+                changes="; ".join(change["description"] for change in pending))
         mode = self.effectiveMode()
         if mode == "fast" and not self.fast.enabled:
             prefix = _("rl_overlap runs in fast mode only. ") if self.kind == "rl_overlap" else ""
+            if self.kind != "rl_overlap" and self.planMode() == "fast":
+                prefix = _("The locked analysis plan runs the null models in fast mode (choose Exact and give the reason to run them exactly). ")
             return False, prefix + self.fast.reason
         if self.kind == "empirical_pool" and self.controlSet is None:
             return False, _("Choose the control set (Control set…): a folder of lesion masks, a lesions table or the maps.tsv of mapped control lesions.")
@@ -576,6 +621,8 @@ class NullsCard:
             enabled, reason = widget.cohortComputeState() if widget is not None else (False, _("The Map module is not available."))
             if not enabled:
                 return False, reason
+            if 0 < self.studyLesionCount() < 2:
+                return False, _("The null models need at least 2 lesions.")
             return True, _("Run maps the lesions first (cohort maps), then runs the null models.")
         if self.lesionCount() < 2:
             return False, _("The null models need at least 2 lesions.")
@@ -594,12 +641,16 @@ class NullsCard:
             self._scope = scope
             self.result = None
             self.notice = ""
+            self.hideMapOfOtherScope()
             if not self.running():
                 self.progress.setJob(None)
                 self.progress.widget.hide()
         self.fast = manager_fastindex.fastModeState(self.ctx.bundle, mapsTsv) if self.ctx.bundle is not None else manager_fastindex.FastModeState(reason=_("Choose a connectome in the Connectome card."))
-        if self.mode == "fast" and not self.fast.enabled:
-            self.mode = "exact"  # fast mode is gone (another cohort, an out-of-date parity report): never run it silently
+        if self.mode == "fast" and not self.fast.enabled and self.planMode() != "fast":
+            # fast mode is gone (another cohort, an out-of-date parity report): never run it silently. A locked plan
+            # with fast null models keeps fast (Run waits for the fast index): falling back to exact would be a change
+            # from the plan that the user never made.
+            self.mode = "exact"
         self._updating = True
         try:
             self.showKinds()
@@ -609,6 +660,83 @@ class NullsCard:
             self._updating = False
         self.showState(mapsTsv)
         self.showResult()
+        self.showPlanPending()
+
+    #
+    # Locked analysis plan
+    #
+
+    def hideMapOfOtherScope(self):
+        """Another study or connectome is open: take the nulls map of the previous one out of the slice views (the card
+        no longer shows that result either), so that it is not read as a result of the one open now; return whether it was.
+        """
+        if self.mapScope is None or self.mapScope == self._scope:
+            return False
+        from LesionNetworkMappingLib import display
+
+        self.mapScope = None
+        return display.hideForeground(self.volume())
+
+    def planValues(self):
+        """{recipes.NULLS_CARD_FIELDS field: value} of the run the card would start."""
+        return {"nulls.kinds": [self.kind], "nulls.k": self.kValue(), "nulls.mode": self.effectiveMode(), "seeds.nulls": int(self.seedSpin.value)}
+
+    def studyPath(self):
+        study = self.ctx.study
+        return os.fspath(study.path) if study is not None and getattr(study, "path", None) else None
+
+    def planPending(self):
+        """Changes of the card's settings from the locked plan that wait for a reason (recipes.analysis_pending)."""
+        from LesionNetworkMappingLib import recipes
+
+        path = self.studyPath()
+        if not path or self._cleanedUp:
+            return []
+        try:
+            return recipes.analysis_pending(path, self.PLAN_SCOPE, self.planValues())
+        except (recipes.RecipeError, TypeError, ValueError, OSError):
+            logging.exception("Lesion network mapping: the null model settings could not be compared with the locked analysis plan")
+            return []
+
+    def planMode(self):
+        """The null models mode ("exact", "fast" or "off") the card follows under the locked plan, or None without one."""
+        from LesionNetworkMappingLib import recipes
+
+        path = self.studyPath()
+        if not path or self._cleanedUp:
+            return None
+        try:
+            values = recipes.analysis_parameters(path, self.PLAN_SCOPE)
+        except (recipes.RecipeError, TypeError, ValueError, OSError):
+            return None
+        return values.get("nulls.mode") if values else None
+
+    def showPlanPending(self):
+        """Let the Recipe header show (or stop showing) the card's changes from the locked plan."""
+        pending = [change["description"] for change in self.planPending()]
+        if pending == self._planShown:
+            return
+        self._planShown = pending
+        header = self.ctx.card("recipe")
+        if header is not None and hasattr(header, "refresh"):
+            header.refresh()
+
+    def applyPlanValues(self, values):
+        """Set the kind, K, mode and seed to ``values`` (recipes.analysis_parameters); nothing when the plan has no null models."""
+        if not values or values.get("nulls.mode") == "off":
+            return
+        kinds = [kind for kind in values.get("nulls.kinds") or [] if kind in KIND_IDS]
+        if kinds and self.kind not in kinds:
+            self.kind = kinds[0]
+            self.kindButtons[self.kind].setChecked(True)
+        if values.get("nulls.mode") in MODES:
+            self.mode = values["nulls.mode"]  # fast without the fast index: Run says why (runState), never exact silently
+        if values.get("nulls.k") is not None:
+            self.kSpin.setValue(int(values["nulls.k"]))
+        if values.get("seeds.nulls") is not None:
+            self.seedSpin.setValue(int(values["seeds.nulls"]))
+        self.notice = ""
+        self.scheduleRefresh()
 
     def showKinds(self):
         if not self.kindButtons[self.kind].isChecked():
@@ -723,7 +851,9 @@ class NullsCard:
         extra = _(" (without mapping the control set)") if self.kind == "empirical_pool" else ""
         return _("Estimated time: about {time}{extra}.").format(time=duration(details["seconds"]), extra=extra)
 
-    def showState(self, mapsTsv):
+    def showState(self, mapsTsv=_CURRENT):
+        if mapsTsv is _CURRENT:  # the Recipe header after a reason was recorded
+            mapsTsv = self.currentMapsTsv()
         enabled, reason = self.runState()
         self.runButton.setEnabled(enabled)
         reasonText = self.notice or reason
@@ -733,8 +863,9 @@ class NullsCard:
             self.statusLabel.setText(_("The lesions are not mapped with this connectome yet: Run maps them first."))
         else:
             record = self.cohortRecord() or {}
-            self.statusLabel.setText(_("{n} lesions · N={subjects} connectome subjects · conn-{label}").format(
-                n=self.lesionCount(), subjects=record.get("n", "?"), label=(record.get("bundle") or {}).get("label", "?")))
+            count = self.lesionCount()
+            self.statusLabel.setText((_("{n} lesion · N={subjects} connectome subjects · conn-{label}") if count == 1 else _("{n} lesions · N={subjects} connectome subjects · conn-{label}")).format(
+                n=count, subjects=record.get("n", "?"), label=(record.get("bundle") or {}).get("label", "?")))
         self.statusLabel.setVisible(True)
         estimate = self.estimateText() if not self.running() else ""
         self.estimateLabel.setText(estimate)
@@ -771,6 +902,8 @@ class NullsCard:
         study = self.ctx.study
         if getattr(study, "path", None):
             args += ["--run-root", study.path]
+        # A stopped exact run keeps its engine batches: continue them (the engine discards them when the settings differ).
+        args.append("--resume")
         return args
 
     def run(self):
@@ -825,6 +958,9 @@ class NullsCard:
                     self._start(self.currentMapsTsv())
                     return
             self.showState(self.currentMapsTsv())
+        elif getattr(job, "kind", None) == "reference":  # built from the manager or the QA card: rl_strength can now run
+            self._referenceOk.clear()
+            self.scheduleRefresh()
         elif getattr(job, "kind", None) in ("cohortmaps", "fastindex", "fast-parity"):
             self.scheduleRefresh()
 
@@ -835,11 +971,20 @@ class NullsCard:
         _updateProgress(self.progress, force=event.get("event") != "progress")
 
     def onDone(self, job, folder=None):
+        from LesionNetworkMappingLib import nulls
+
         _updateProgress(self.progress, force=True)
+        # A run that does not finish leaves the earlier finished result of its folder in place (nulls.run removes it only when it writes)
+        kept = job.state in ("failed", "cancelled") and bool(folder) and os.path.isfile(os.path.join(folder, nulls.NULLS_JSON))
         if job.state == "failed":
-            self.notice = _("The null models failed: {reason}").format(reason=job.failureReason)
+            reason = str(job.failureReason or "").rstrip()
+            if kept and reason and not reason.endswith((".", "!", "?")):
+                reason += "."  # the next sentence must not run on
+            self.notice = _("The null models failed: {reason}").format(reason=reason)
+            if kept:
+                self.notice += " " + _("The earlier result is kept.")
         elif job.state == "cancelled":
-            self.notice = _("Stopped: a null run that did not finish has no results.")
+            self.notice = _("Stopped: the earlier result is kept.") if kept else _("Stopped: a null run that did not finish has no results.")
         else:
             self.notice = ""
         self.estimateLabel.hide()
@@ -848,7 +993,11 @@ class NullsCard:
             if self.result is not None and (folder is None or os.path.abspath(folder) == os.path.abspath(self.outDir())):  # not another kind's result when the choice changed during the run
                 self.showMap("sensNullExcess")
             self.pushGroupQa()
-            self.message(_("Null models done: the maps are in the Nulls card"))
+            mapsFolder = self.mapsFolder()
+            if folder is None or (mapsFolder and os.path.abspath(os.path.dirname(folder)) == os.path.abspath(mapsFolder)):
+                self.message(_("Null models done: the maps are in the Nulls card"))
+            else:  # another study or connectome is open now: the card shows that one
+                self.message(_("Null models done for another study or connectome: open it again to see the maps in the Nulls card"))
 
     def pushGroupQa(self):
         """Tell the QA card to look again: it reads the group QA percentile of the newest run next to the cohort maps (``ctx.runChanged``)."""
@@ -901,14 +1050,24 @@ class NullsCard:
             reasons.append(_("overlap criterion"))
         if record.get("sign") != sign:
             reasons.append(_("sign"))
-        if int(record.get("k") or 0) != self.kValue() and not (self.kind == "rl_cohort_shift" and self.effectiveMode() == "exact"):
+        # K asked for: a run can finish with fewer null cohorts (for example few shared cohort shifts fit), so compare what was requested
+        requestedK = record.get("k_requested")
+        if int(record.get("k") or 0 if requestedK is None else requestedK) != self.kValue() and not (self.kind == "rl_cohort_shift" and self.effectiveMode() == "exact"):
             reasons.append("K")
         if record.get("k_pool") is not None and self.usesPool() and int(record["k_pool"]) != int(self.kPoolSpin.value):
             reasons.append("K_pool")
         seed = (record.get("seeds") or {}).get("seed")
         if seed is not None and int(seed) != int(self.seedSpin.value):
             reasons.append(_("seed"))
+        if record.get("kind") == "rl_strength" and self.kind == "rl_strength" and NullsCard.recordStrength(record) != (self.strengthCombo.currentData or "signed"):
+            reasons.append(_("strength map"))
         return reasons
+
+    @staticmethod
+    def recordStrength(record):
+        """The strength map of an rl_strength record ('signed' when it does not say, as in older records)."""
+        design = record.get("design") if isinstance(record.get("design"), dict) else {}
+        return design.get("strength") or "signed"
 
     def showResult(self):
         folder = self.outDir()
@@ -920,11 +1079,20 @@ class NullsCard:
         approximate = bool(record.get("approximate"))
         widgets.setChipLevel(self.modeChip, "warn" if approximate else "ok", _("Approximate (fast mode)") if approximate else _("Exact pooled null"))
         statusTag = next((row[3] for row in KIND_ROWS if row[0] == record.get("kind")), record.get("kind_status") or "")
-        self.basisLabel.setText(_("{kind} [{status}] · {label} · K = {k}").format(kind=record.get("kind"), status=statusTag, label=record.get("mode_label"), k=record.get("k")))
+        basisText = _("{kind} [{status}] · {label} · K = {k}").format(kind=record.get("kind"), status=statusTag, label=record.get("mode_label"), k=record.get("k"))
+        requested = record.get("k_requested")
+        if requested is not None and record.get("k") is not None and int(requested) != int(record["k"]):
+            basisText += " " + _("(of {n} requested)").format(n=int(requested))
+        if record.get("kind") == "rl_strength":
+            basisText += " · " + (_("Strength map: Absolute hubness") if self.recordStrength(record) == "abs" else _("Strength map: Signed μC_r"))
+        self.basisLabel.setText(basisText)
         if approximate:
             widgets.setBannerText(self.approxBanner, _("Approximate: fast mode uses the parcel index (approximate z-scale, rank rules only); your observed map was recomputed in fast mode, like with like. "
                                                        "Fast-mode maps are never final observed maps."))
         self.approxBanner.setVisible(approximate)
+        warningsText = self.warningsText(record)
+        widgets.setBannerText(self.warningsBanner, warningsText)
+        self.warningsBanner.setVisible(bool(warningsText))
         stale = self.staleReasons(record)
         self.staleLabel.setText(_("Settings changed since this run ({names}): run again to update.").format(names=", ".join(stale)) if stale else "")
         self.staleLabel.setVisible(bool(stale))
@@ -935,7 +1103,7 @@ class NullsCard:
                                                                                                        text=inference.get("discreteness") or ""))
         self.countsLabel.setText(_("Voxels with p ≤ 0.05: {p:,} · q ≤ 0.05: {q:,} · FWE p ≤ 0.05: {f:,} (of {v:,} in the mask).").format(
             p=inference.get("n_p_05", 0), q=inference.get("n_q_05", 0), f=inference.get("n_fwe_05", 0), v=inference.get("n_voxels", 0)))
-        self.qaLabel.setText(self.groupQaText(record.get("group_qa")))
+        self.qaLabel.setText(self.groupQaText(record.get("group_qa"), strength=self.recordStrength(record) if record.get("kind") == "rl_strength" else None))
         self.parityLabel.setText(self.parityText(record))
         self.parityLabel.setVisible(bool(self.parityLabel.text))
         basis = _("approximate") if approximate else _("exact pooled")
@@ -952,7 +1120,25 @@ class NullsCard:
         self.biasCheck.setVisible(hasBias)
 
     @staticmethod
-    def groupQaText(group):
+    def warningsText(record):
+        """The banner text of a run's recorded warnings (nulls.json ``warnings``) and of a K too small to reach p ≤ 0.05, or ""."""
+        k = record.get("k")
+        lines = []
+        try:
+            belowMin = bool(record.get("below_min_k")) or (k is not None and int(k) < MIN_K)
+        except (TypeError, ValueError):
+            belowMin = False
+        if belowMin:
+            lines.append(_("Only {k} null cohorts: no voxel can reach p ≤ 0.05 (at least {n} are needed). Do not report these p-values.").format(k=k, n=MIN_K))
+        for item in record.get("warnings") or []:
+            text = item.get("message") if isinstance(item, dict) else item
+            code = item.get("code") if isinstance(item, dict) else None
+            if text and not (belowMin and code == "min_k"):
+                lines.append(str(text))
+        return "\n".join(lines)
+
+    @staticmethod
+    def groupQaText(group, strength=None):
         """The group QA line of a nulls record: the percentile of r(group map, μC_r) among the null cohorts' maps."""
         from .card_qa import ordinal
 
@@ -961,8 +1147,23 @@ class NullsCard:
         values = group.get("mean") if isinstance(group.get("mean"), dict) else group.get("overlap")
         if not isinstance(values, dict) or values.get("percentile") is None:
             return _("Group map QA: not calibrated.")
-        return _("Group map QA (shown in the QA card): r(group map, μC_r) is at the {p} percentile of {k} null cohorts' maps ({text}).").format(
-            p=ordinal(round(values["percentile"])), k=int(values.get("k") or 0), text=values.get("text") or "")
+        if str(group.get("statistic") or "").startswith("approximate"):
+            return _("Group map QA of the fast-mode map (approximate; the QA card uses an exact run when there is one): r(fast-mode map, μC_r) is at the {p} percentile of {k} null cohorts' maps ({text}).").format(
+                p=ordinal(round(values["percentile"])), k=int(values.get("k") or 0), text=values.get("text") or "")
+        from .card_qa import GROUP_QA_KIND, MATCHED_NULL_KINDS
+
+        kind = values.get("null_kind") or group.get("null_kind") or GROUP_QA_KIND
+        if kind in MATCHED_NULL_KINDS:
+            if strength == "abs":
+                where = _("not the QA card's verdict: these null cohorts keep each lesion's absolute hubness")
+            else:
+                where = _("not the QA card's verdict: these null cohorts keep each lesion's mean connectivity, μC_r")
+        elif kind == GROUP_QA_KIND:
+            where = _("shown in the QA card")
+        else:
+            where = _("shown in the QA card when there is no exact {kind} run").format(kind=GROUP_QA_KIND)
+        return _("Group map QA ({where}): r(group map, μC_r) is at the {p} percentile of {k} {kind} null cohorts' maps ({text}).").format(
+            where=where, p=ordinal(round(values["percentile"])), k=int(values.get("k") or 0), kind=kind, text=values.get("text") or "")
 
     @staticmethod
     def parityText(record):
@@ -970,7 +1171,7 @@ class NullsCard:
         parity = record.get("parity")
         if not record.get("approximate") or not isinstance(parity, dict):
             return ""
-        strata = ", ".join(parity.get("allowed_strata") or []) or _("none")
+        strata = manager_fastindex.strataText(parity.get("allowed_strata")) or _("none")
         text = _("Parity gate (median partial r ≥ {r:g}, top-10% Dice ≥ {d:g}): fast mode allowed for {strata}.").format(
             r=(parity.get("constants") or {}).get("partial_r", 0.0), d=(parity.get("constants") or {}).get("top10_dice", 0.0), strata=strata)
         left = [item.get("participant_id") for item in record.get("excluded") or [] if isinstance(item, dict) and "volume_ml" in item]  # the gate's exclusions carry the lesion's volume
@@ -1006,7 +1207,10 @@ class NullsCard:
             return None
         basis = _("approximate") if record.get("approximate") else _("exact pooled")
         title = f"Nulls {desc[len('sensNull'):]} ({record.get('kind')}, {basis}, K={record.get('k')})"
-        attributes = {VOLUME_ATTRIBUTE: "1", "Studio.Role": "statmap", display.GROUP_MAP_ATTRIBUTE: desc}
+        # On the cohort's connectome grid, in its template space (declared in connectome.json, also on a grid that is not standard)
+        bundle = self.ctx.bundle if self.ctx.bundle is not None else getattr(widget, "bundle", None)
+        attributes = {VOLUME_ATTRIBUTE: "1", "Studio.Role": "statmap", display.GROUP_MAP_ATTRIBUTE: desc,
+                      "Studio.Space": widget.logic.connectomeSpaceName(bundle)}
         volume = widget.logic.loadMap(path, title, self.volume(), saveWithScene=True, attributes=attributes)
         self.volumeId = volume.GetID()
         display.applyGroupMapDisplay(volume, desc)
@@ -1023,6 +1227,7 @@ class NullsCard:
         node = self.ctx.parameterNode
         display.showLayers(template, volume, node.opacity if node is not None else 0.8)
         self.shownDesc = desc
+        self.mapScope = self._scope
         if desc != BIAS_DESC:
             self.lastMap = desc
         return volume
@@ -1048,7 +1253,7 @@ class NullsCard:
     def showFolder(self):
         folder = self.result[0] if self.result is not None else None
         if folder and os.path.isdir(folder) and not slicer.app.testingEnabled():
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(folder))
+            widgets.showInFileManager(folder)
 
     #
     # Card protocol (called by the Map widget)
@@ -1064,16 +1269,20 @@ class NullsCard:
         self._referenceOk.clear()
         self.scheduleRefresh()
 
+    def _onBundleChanged(self):
+        self._referenceOk.clear()
+
     def onResultChanged(self):
         self.scheduleRefresh()
 
     def cleanup(self):
         self._cleanedUp = True
         self._timer.stop()
-        for name in ("studyChanged", "bundleChanged", "ruleChanged", "computeEnabledChanged", "runChanged"):
+        for name, callback in (("studyChanged", self.scheduleRefresh), ("bundleChanged", self.scheduleRefresh), ("bundleChanged", self._onBundleChanged),
+                               ("ruleChanged", self.scheduleRefresh), ("computeEnabledChanged", self.scheduleRefresh), ("runChanged", self.scheduleRefresh)):
             callbacks = getattr(self.ctx, name, [])
-            if self.scheduleRefresh in callbacks:
-                callbacks.remove(self.scheduleRefresh)
+            if callback in callbacks:
+                callbacks.remove(callback)
         finished = getattr(self.ctx.runner, "jobFinished", [])
         if self._onJobFinished in finished:
             finished.remove(self._onJobFinished)

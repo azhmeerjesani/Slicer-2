@@ -38,6 +38,14 @@ them, so the format stays "lnmc" version 1; see :data:`PROVENANCE_KEYS` and :fun
 
 ``ConnectomeWriter`` fills in "subjectsSha256" and "mask.sha256" when it finalizes a bundle.
 
+It also writes the data fingerprint :data:`NORMS_SHA256_KEY`, ``"subjectsNormsSha256": {id: sha256 of
+subjects/<id>.norms.npy}``, so that a bundle converted again into the same folder from other time series
+(same subject ids and mask) gets another connectome.json, and with it another manifest sha256: caches
+keyed on the manifest (cohort lesion maps) are then recomputed, and :func:`norms_fingerprint` lets the fast
+index notice the change without reading the data. Like the provenance keys it is optional (bundles written
+before it, and downloaded ones, lack it) and readers that do not know it ignore it; :func:`set_metadata`
+never changes it.
+
 The V voxels are the non-zero voxels of the mask in C order of the [i, j, k] array
 (``geometry.mask_indices``). With this layout the Pearson correlation of every voxel with a unit-norm
 seed is a single matrix product (see engine.py). A "float32" dtype (``<id>.f32.npy``) is also accepted.
@@ -82,6 +90,8 @@ _SUBJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 REQUIRED_KEYS = ("format", "version", "name", "shape", "affine", "nVoxels", "subjects", "dtype")
 # Optional provenance keys (format "lnmc" version 1.1); older readers ignore them
 PROVENANCE_KEYS = ("source", "kind", "mask", "subjectsSha256", "licence", "termsSha256", "acknowledgement", "preprocessing", "population", "trS", "subsets", "participants")
+# Data fingerprint written by ConnectomeWriter.finalize (never by set_metadata): {subject id: sha256 of <id>.norms.npy}
+NORMS_SHA256_KEY = "subjectsNormsSha256"
 # Other optional keys that set_metadata() may change
 DESCRIPTIVE_KEYS = ("description", "citation", "dataUseTerms", "space")
 KINDS = ("timeseries", "group_pca", "tractogram")
@@ -118,16 +128,59 @@ def _is_cancelled(cancel):
     return bool(cancel())
 
 
+_STALE_TMP_PATTERN = re.compile(r".+\.\d+(\.\d+)?\.tmp$")
+
+
+def _remove_quietly(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def _write_json_atomic(path, obj):
     tmp_path = f"{path}.{os.getpid()}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2)
-    os.replace(tmp_path, path)
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2)
+        os.replace(tmp_path, path)
+    except BaseException:
+        _remove_quietly(tmp_path)  # a full disk must not leave a partial file behind
+        raise
 
 
 def subjects_sha256(subject_ids):
     """Hex sha256 of a subject list: the UTF-8 ids, each followed by a newline, in the given order."""
     return hashlib.sha256("".join(f"{subject_id}\n" for subject_id in subject_ids).encode("utf-8")).hexdigest()
+
+
+def _file_sha256(path, block=1 << 20):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(block):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def norms_fingerprint(metadata, subject_ids=None):
+    r"""Fingerprint of the time series of ``subject_ids`` (default: all) from connectome.json alone, or None.
+
+    The value equals ``reference.subjects_data_sha256`` (sha256 over ``"<id>\t<sha256 of <id>.norms.npy>\n"``
+    per subject) but reads the per-subject sha256 recorded in :data:`NORMS_SHA256_KEY` instead of the files.
+    None when the manifest does not record them (bundles written before the key, downloaded bundles) or misses
+    one of the subjects.
+    """
+    recorded = metadata.get(NORMS_SHA256_KEY) if isinstance(metadata, dict) else None
+    if not isinstance(recorded, dict):
+        return None
+    ids = [entry.get("id") for entry in metadata.get("subjects", [])] if subject_ids is None else list(subject_ids)
+    digest = hashlib.sha256()
+    for subject_id in ids:
+        sha = recorded.get(subject_id)
+        if not isinstance(sha, str) or not _SHA256_PATTERN.match(sha):
+            return None
+        digest.update(f"{subject_id}\t{sha}\n".encode())
+    return digest.hexdigest()
 
 
 def mask_content_sha256(mask):
@@ -245,9 +298,13 @@ def _apply_metadata(metadata, keys):
 
 def _save_npy_atomic(path, array):
     tmp_path = f"{path}.{os.getpid()}.tmp"
-    with open(tmp_path, "wb") as f:
-        np.save(f, array)
-    os.replace(tmp_path, path)
+    try:
+        with open(tmp_path, "wb") as f:
+            np.save(f, array)
+        os.replace(tmp_path, path)
+    except BaseException:
+        _remove_quietly(tmp_path)  # a full disk must not leave a partial subject file in the bundle
+        raise
 
 
 def _read_npy(path, shape, dtype, out=None):
@@ -272,6 +329,28 @@ def _read_npy(path, shape, dtype, out=None):
                 raise ValueError(f"Truncated file: {path}")
             filled += n
     return out
+
+
+def not_a_bundle_hint(path):
+    """Why ``path`` is not a bundle and what to do next, or None when it is not one of the known cases.
+
+    Known cases: a bundle whose download or conversion is unfinished (only connectome.partial.json), and a folder
+    that holds exactly one finished ``.lnmc`` bundle (for example the destination chosen for a download).
+    """
+    path = os.path.abspath(os.fspath(path))
+    if os.path.isfile(os.path.join(path, MANIFEST_NAME)):
+        return None
+    if os.path.isfile(os.path.join(path, PARTIAL_MANIFEST_NAME)):
+        return "unfinished"
+    try:
+        inside = [
+            os.path.join(path, n)
+            for n in sorted(os.listdir(path))
+            if n.lower().endswith(".lnmc") and os.path.isfile(os.path.join(path, n, MANIFEST_NAME))
+        ]
+    except OSError:
+        return None
+    return inside[0] if len(inside) == 1 else None
 
 
 class ConnectomeBundle:
@@ -758,6 +837,9 @@ class ConnectomeWriter:
         manifest = os.path.join(self.path, MANIFEST_NAME)
         if os.path.exists(manifest) and not (overwrite or resume):
             raise FileExistsError(f"A connectome bundle already exists at {self.path}")
+        if os.path.exists(os.path.join(self.path, PARTIAL_MANIFEST_NAME)) and not (overwrite or resume):
+            # Without this, _remove_previous() deleted the subjects of a stopped conversion (hours of work for a large dataset)
+            raise FileExistsError(f"An interrupted conversion is at {self.path}: resume it, or overwrite it to start over")
         os.makedirs(os.path.join(self.path, "subjects"), exist_ok=True)
         self.mask = np.asarray(mask).reshape(np.asarray(mask).shape[:3]) != 0
         # Affines are stored as float32 in NIfTI headers; keep connectome.json identical to them.
@@ -777,8 +859,10 @@ class ConnectomeWriter:
             "dtype": dtype,
         }
         self._suffix, self._dtype = SUBJECT_DTYPES[dtype]
+        self._norms_sha256 = {}  # subject id -> sha256 of its norms file, for NORMS_SHA256_KEY
         if resume:
-            self._resume()
+            # Text left empty here is taken from the conversion being resumed (a resume without --terms-file keeps its terms)
+            self._resume(given={"name": bool(name), "description": bool(description), "citation": bool(citation), "dataUseTerms": bool(data_use_terms)})
         else:
             self._remove_previous()
         write_nifti(os.path.join(self.path, "mask.nii.gz"), self.mask.astype(np.uint8), self.affine, descrip="LNM connectome mask")
@@ -787,7 +871,16 @@ class ConnectomeWriter:
     def n_voxels(self):
         return len(self.mask_indices)
 
-    def _resume(self):
+    def _remove_stale_temporary_files(self):
+        """Delete ``<file>.<pid>.tmp`` files that a writer which was killed (or whose disk was full) left in the bundle."""
+        for folder in (self.path, os.path.join(self.path, "subjects"), os.path.join(self.path, "derived")):
+            if os.path.isdir(folder):
+                for name in os.listdir(folder):
+                    if _STALE_TMP_PATTERN.match(name):
+                        _remove_quietly(os.path.join(folder, name))
+
+    def _resume(self, given=None):
+        self._remove_stale_temporary_files()
         for name in (PARTIAL_MANIFEST_NAME, MANIFEST_NAME):
             path = os.path.join(self.path, name)
             if not os.path.isfile(path):
@@ -802,6 +895,9 @@ class ConnectomeWriter:
             if isinstance(saved, dict):
                 saved = {key: value for key, value in saved.items() if key in PROVENANCE_KEYS and key != "subjectsSha256"}
                 self.provenance = {**saved, **self.provenance}
+            for key, was_given in (given or {}).items():
+                if not was_given and isinstance(previous.get(key), str) and previous[key]:
+                    self.metadata[key] = previous[key]
             for entry in previous.get("subjects", []):
                 if all(os.path.isfile(p) for p in self._subject_files(entry["id"])):
                     self.metadata["subjects"].append(entry)
@@ -818,6 +914,7 @@ class ConnectomeWriter:
         """Delete a previous bundle's manifests (first, so that an interrupted overwrite never leaves
         a manifest describing new data), its subject files and derived degree maps.
         """
+        self._remove_stale_temporary_files()
         stale = [os.path.join(self.path, "derived", name) for name in ("degree.npy", "degree_fz.npy")]
         for name in (MANIFEST_NAME, PARTIAL_MANIFEST_NAME):
             path = os.path.join(self.path, name)
@@ -874,6 +971,7 @@ class ConnectomeWriter:
         _save_npy_atomic(data_path, data)
         _save_npy_atomic(norms_path, norms)
         self.metadata["subjects"].append({"id": subject_id, "runs": lengths})
+        self._norms_sha256[subject_id] = _file_sha256(norms_path)
         self.save_partial()
 
     def save_partial(self):
@@ -895,6 +993,13 @@ class ConnectomeWriter:
         provenance["mask"] = {**mask_info, "sha256": computed}
         provenance["subjectsSha256"] = subjects_sha256(entry["id"] for entry in self.metadata["subjects"])
         self.metadata = _apply_metadata(self.metadata, provenance)
+        # The data fingerprint: without it a conversion of other time series with the same ids and mask into the same
+        # folder wrote a byte-identical connectome.json, and caches of the old data were taken as current
+        norms_sha = {}
+        for entry in self.metadata["subjects"]:
+            subject_id = entry["id"]
+            norms_sha[subject_id] = self._norms_sha256.get(subject_id) or _file_sha256(self._subject_files(subject_id)[1])
+        self.metadata[NORMS_SHA256_KEY] = norms_sha
         _write_json_atomic(os.path.join(self.path, MANIFEST_NAME), self.metadata)
         partial = os.path.join(self.path, PARTIAL_MANIFEST_NAME)
         if os.path.exists(partial):
@@ -965,6 +1070,35 @@ def normalize_run(run, out=None, block=8192):
 
 
 # Converters
+
+
+def check_resumable(out_dir, subject_ids):
+    """Refuse a ``resume`` that would not continue an interrupted conversion of the same inputs into ``out_dir``.
+
+    A finished bundle (connectome.json without connectome.partial.json) has nothing to resume: converting into it
+    would add its subjects again under other ids, rename it and replace its terms. Subjects already written by the
+    interrupted conversion must all be among ``subject_ids`` (the subjects of the inputs), otherwise the inputs or the
+    runs grouping changed and the bundle would mix two conversions. Nothing to resume (an empty folder) is fine.
+    :raises FileExistsError: a finished bundle is at ``out_dir``.
+    :raises ValueError: the written subjects are not subjects of the inputs.
+    """
+    path = os.path.abspath(os.fspath(out_dir))
+    partial = os.path.join(path, PARTIAL_MANIFEST_NAME)
+    if not os.path.isfile(partial):
+        if os.path.isfile(os.path.join(path, MANIFEST_NAME)):
+            raise FileExistsError(f"{path} is a finished connectome bundle: there is no interrupted conversion to resume (overwrite it or choose another folder)")
+        return
+    try:
+        with open(partial, encoding="utf-8") as f:
+            written = [entry.get("id") for entry in json.load(f).get("subjects", []) if isinstance(entry, dict)]
+    except (OSError, ValueError, AttributeError):
+        return  # unreadable: the writer reports it
+    wanted = set(subject_ids)
+    foreign = [subject_id for subject_id in written if subject_id not in wanted]
+    if foreign:
+        shown = ", ".join(map(str, foreign[:3])) + (", ..." if len(foreign) > 3 else "")
+        raise ValueError(f"Cannot resume: the interrupted conversion at {path} holds subjects that are not in these inputs ({shown}); "
+                         "resume with the same inputs and runs grouping, or overwrite it")
 
 
 def _default_name(out_dir):
@@ -1046,6 +1180,8 @@ def from_nifti_timeseries(
         if not Grid(header["shape"][:3], header["affine"]).matches(mask_grid, atol=1e-3):
             raise ValueError(f"{path} is not on the mask grid (shape {header['shape'][:3]} vs {mask_grid.shape}, or different affine); resample it first")
 
+    if resume:
+        check_resumable(out_dir, groups)
     provenance = dict(provenance or {})
     if participants is not None:
         if not os.path.isfile(participants):
@@ -1055,7 +1191,7 @@ def from_nifti_timeseries(
         out_dir,
         mask,
         mask_affine,
-        name=name or _default_name(out_dir),
+        name=name,
         description=description,
         citation=citation,
         data_use_terms=data_use_terms,
@@ -1084,8 +1220,12 @@ def _copy_participants(source, bundle_path):
         target = os.path.join(bundle_path, name)
         if os.path.isfile(source_path) and not (os.path.exists(target) and os.path.samefile(source_path, target)):
             tmp_path = f"{target}.{os.getpid()}.tmp"
-            shutil.copyfile(source_path, tmp_path)
-            os.replace(tmp_path, target)
+            try:
+                shutil.copyfile(source_path, tmp_path)
+                os.replace(tmp_path, target)
+            except BaseException:
+                _remove_quietly(tmp_path)
+                raise
 
 
 def _loadmat(path, **kwargs):
@@ -1284,11 +1424,13 @@ def from_leaddbs(dataset_dir, out_dir, name=None, description="", citation="", d
     :return: bundle path, or None if cancelled.
     """
     dataset = _read_leaddbs_dataset(dataset_dir, max_subjects)
+    if resume:
+        check_resumable(out_dir, dataset.subject_ids)
     writer = ConnectomeWriter(
         out_dir,
         dataset.mask,
         dataset.affine,
-        name=name or _default_name(out_dir),
+        name=name,
         description=description,
         citation=citation or _leaddbs_citation_text(dataset.info),
         data_use_terms=data_use_terms,
@@ -1617,7 +1759,7 @@ def _drop_staging(bundle_path, subject_id):
 class _TarStreamConverter:
     """State of one :func:`from_tar_stream` call (see there)."""
 
-    def __init__(self, fileobj, out_dir, layout, name, mask_policy, mask_path, resume, start_offset, progress, cancel, provenance, description, citation, data_use_terms, dtype, overwrite, finalize, dataset_dir, grid):
+    def __init__(self, fileobj, out_dir, layout, name, mask_policy, mask_path, resume, start_offset, progress, cancel, provenance, description, citation, data_use_terms, dtype, overwrite, finalize, dataset_dir, grid, subjects=None):
         self.fileobj = fileobj
         self.path = os.path.abspath(os.fspath(out_dir))
         self.layout = layout
@@ -1640,6 +1782,9 @@ class _TarStreamConverter:
         self.user_subsets = self.provenance.pop("subsets", None)
         self.writer = None
         self.dataset = None
+        self.only = None if subjects is None else {str(s) for s in subjects}  # convert only these subjects (Lead-DBS)
+        if self.only is not None and layout != "leaddbs_vol":
+            raise ValueError("subjects (a subject subset to convert) is supported by the leaddbs_vol layout only")
         self.run_map = {}
         self.pending = {}  # subject id -> {"runs": {key: array or staged .npy path}, "first": absolute offset or None, "skip": bool}
         self.written = set()  # subjects written by this call
@@ -1653,6 +1798,8 @@ class _TarStreamConverter:
         if not resume:
             if os.path.isfile(manifests[0]) and not overwrite:
                 raise FileExistsError(f"A connectome bundle already exists at {self.path}")
+            if os.path.isfile(manifests[1]) and not overwrite:
+                raise FileExistsError(f"An interrupted conversion is at {self.path}: resume it, or overwrite it to start over")
             shutil.rmtree(_staging_dir(self.path), ignore_errors=True)
         existing = None
         if resume and os.path.isfile(os.path.join(self.path, "mask.nii.gz")) and any(os.path.isfile(p) for p in manifests):
@@ -1810,6 +1957,8 @@ class _TarStreamConverter:
             return
         subject_index, run_index = hit
         subject_id = self.dataset.subject_ids[subject_index]
+        if self.only is not None and subject_id not in self.only:
+            return  # not in the subject subset being converted
         if self.writer.has_subject(subject_id):
             _drop_staging(self.path, subject_id)
             return
@@ -1853,7 +2002,12 @@ class _TarStreamConverter:
             return
         if not getattr(tar, "lnm_end_marker", False):
             raise StreamIntegrityError(f"The archive stream ends at offset {self.start_offset + tar.offset} without the tar end-of-archive marker: the download is truncated or the archive damaged")
-        end = self.start_offset + tar.offset
+        yield from self.close(self.start_offset + tar.offset)
+
+    def close(self, end):
+        """Write or stage the pending subjects at the end of a stream (``end``: its archive offset) and finalize the
+        bundle when asked; yields their checkpoints and then the last ``{"done": True, ...}`` item.
+        """
         staged = []
         for subject_id in list(self.pending):
             entry = self.pending[subject_id]
@@ -1936,6 +2090,7 @@ def from_tar_stream(
     finalize=True,
     dataset_dir=None,
     grid=None,
+    subjects=None,
 ):
     """Convert one tar archive, read as a stream, into a bundle: a generator of checkpoints.
 
@@ -1999,13 +2154,32 @@ def from_tar_stream(
     :param finalize: write connectome.json at the end of this archive (False while more archives follow).
     :param dataset_dir: the Lead-DBS dataset folder (``leaddbs_vol`` only).
     :param grid: the expected run grid (a :class:`geometry.Grid`); None is :data:`GSP_RUN_GRID`, False any grid.
+    :param subjects: convert only these subject ids (``leaddbs_vol`` only, for example the ids of a named subset);
+      the run files of other subjects are skipped. None converts every subject.
     """
     if layout not in STREAM_LAYOUTS:
         raise ValueError(f"layout must be one of {', '.join(STREAM_LAYOUTS)}")
     if dtype not in SUBJECT_DTYPES:
         raise ValueError(f"dtype must be one of {sorted(SUBJECT_DTYPES)}")
-    converter = _TarStreamConverter(fileobj, out_dir, layout, name, mask_policy, mask_path, resume, start_offset, progress, cancel, provenance, description, citation, data_use_terms, dtype, overwrite, finalize, dataset_dir, grid)
+    converter = _TarStreamConverter(fileobj, out_dir, layout, name, mask_policy, mask_path, resume, start_offset, progress, cancel, provenance, description, citation, data_use_terms, dtype, overwrite, finalize, dataset_dir, grid, subjects)
     return converter.run()
+
+
+def finalize_stream(out_dir, layout="gsp_ilxiks", name=None, provenance=None, description="", citation="", data_use_terms="", dtype="float16", dataset_dir=None, grid=None):
+    """Finalize a bundle that :func:`from_tar_stream` converted with ``finalize=False`` (when the caller only knows
+    after the last archive that no other archive follows): the same last step as ``finalize=True``.
+
+    :return: the last item of :func:`from_tar_stream` (``{"done": True, "path", "subjects", "incomplete", ...}``).
+    """
+    if layout not in STREAM_LAYOUTS:
+        raise ValueError(f"layout must be one of {', '.join(STREAM_LAYOUTS)}")
+    converter = _TarStreamConverter(None, out_dir, layout, name, None, None, True, 0, None, None, provenance, description, citation, data_use_terms, dtype, False, True, dataset_dir, grid)
+    if converter.writer is None or not (converter.writer.metadata["subjects"] or converter.pending):
+        raise ValueError(f"{converter.path} has no converted subject, so there is nothing to finalize")
+    last = None
+    for last in converter.close(None):
+        pass
+    return last
 
 
 def make_synthetic(out_dir, shape=(20, 24, 20), n_subjects=6, runs=(30, 30), seed=0, amplitude=1.5, radius=3.0, affine=None, name="Synthetic", dtype="float16", overwrite=True):

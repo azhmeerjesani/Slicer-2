@@ -10,6 +10,8 @@ that they work in a study even when the Draw panel was never opened.
 """
 
 import logging
+import os
+import time
 import traceback
 
 from slicer.i18n import tr as _
@@ -37,9 +39,45 @@ def _flags(row):
     return [code for code in str(value).replace(",", ";").split(";") if code]
 
 
+#: Pseudo flag (not stored in ``qc_flags``) of a row linked from a control set whose lesion file cannot be found: the set
+#: is not registered on this computer (removed, or the study was opened on another computer), or its file was removed (BB-1)
+MISSING_CONTROL = "missing_control"
+MISSING_CONTROL_SHORT = "Not found"
+_REGISTERED_TTL = 2.0  # seconds a "set is registered" answer is reused (the list asks once per row)
+_registered = {}  # (registry folder, set name): (time, registered)
+
+
+def missingControlLesion(row):
+    """True for a row linked from a control set ("controlset:<name>/<rel>") whose lesion file cannot be found."""
+    lesion = row.get("lesion")
+    if row.get("source_type") != "control_db" or not isinstance(lesion, str) or not lesion.startswith("controlset:"):
+        return False
+    try:
+        from importlib import import_module
+
+        controlsets = import_module("LesionNetworkMappingLib.controlsets")
+        root = controlsets.registry_root(getattr(import_module("LesionNetworkMappingLib.study").Study, "controlset_root", None))
+        parsed = controlsets.parse_path(lesion)
+        if parsed is None:
+            return True
+        key, now = (root, parsed[0]), time.monotonic()
+        cached = _registered.get(key)
+        if cached is None or now - cached[0] > _REGISTERED_TTL:
+            try:
+                controlsets.load(parsed[0], root)
+                cached = (now, True)
+            except (OSError, ValueError):
+                cached = (now, False)
+            _registered[key] = cached
+        return not cached[1] or not os.path.isfile(controlsets.resolve_path(lesion, root))
+    except Exception:
+        logging.debug(f"Studio Library: a control lesion could not be resolved:\n{traceback.format_exc()}")
+        return False
+
+
 def hasFlags(row):
-    """The "Has flags" filter."""
-    return bool(_flags(row))
+    """The "Has flags" filter (also a control lesion that cannot be found)."""
+    return bool(_flags(row)) or missingControlLesion(row)
 
 
 def isTwoD(row):
@@ -50,9 +88,10 @@ def isTwoD(row):
 def flagsCell(row):
     """``(text, level, tooltip)`` of the Flags column: "Side, CSF +1", amber when there is a flag."""
     codes = _flags(row)
-    if not codes:
+    missing = missingControlLesion(row)
+    if not codes and not missing:
         return "—", "muted", ""
-    names = [_(FLAG_SHORT.get(code, code)) for code in codes]
+    names = ([_(MISSING_CONTROL_SHORT)] if missing else []) + [_(FLAG_SHORT.get(code, code)) for code in codes]
     text = ", ".join(names) if len(names) <= 2 else f"{names[0]}, {names[1]} +{len(names) - 2}"
     try:
         from importlib import import_module
@@ -60,8 +99,11 @@ def flagsCell(row):
         explanations = import_module("LesionNetworkMappingLib.lesionops").QC_FLAGS
     except ImportError:
         explanations = {}
-    tooltip = "\n".join(f"{_(FLAG_SHORT.get(code, code))}: {explanations.get(code, code)}" for code in codes)
-    return text, "warn", tooltip
+    lines = [f"{_(FLAG_SHORT.get(code, code))}: {explanations.get(code, code)}" for code in codes]
+    if missing:
+        lines.insert(0, _("{short}: the lesion file of this control row cannot be found (its control set is not registered on this "
+                          "computer, or the file was removed). Unlink or register the set again in Control sets.").format(short=_(MISSING_CONTROL_SHORT)))
+    return text, "warn", "\n".join(lines)
 
 
 COLUMNS = [{"key": "qc_flags", "header": "Flags", "width": 110, "valueFn": flagsCell}]

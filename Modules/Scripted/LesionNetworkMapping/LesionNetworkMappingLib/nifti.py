@@ -9,8 +9,10 @@ Slicer arrays from ``slicer.util.arrayFromVolume`` are indexed ``[k, j, i]``; tr
 them with ``array.transpose(2, 1, 0)`` and use the IJKToRAS matrix as the affine.
 """
 
+import contextlib
 import gzip
 import os
+import zlib
 
 import numpy as np
 
@@ -103,8 +105,22 @@ def _check_extension(path):
         raise ValueError(f"Only single-file NIfTI-1 images (.nii or .nii.gz) are supported: {path}")
 
 
+class CorruptCompressedDataError(ValueError, zlib.error):
+    """A .nii.gz whose deflate stream is damaged.
+
+    gzip raises ``zlib.error`` for this, which is not an OSError, EOFError or ValueError like the other unreadable-file
+    errors (bad gzip header or CRC, truncated stream, bad NIfTI header). Readers raise this subclass of both, so callers
+    that catch ``ValueError`` (or ``zlib.error``) treat the file as unreadable instead of failing as a whole.
+    """
+
+
+@contextlib.contextmanager
 def _open(path, mode):
-    return gzip.open(path, mode) if _is_gzip(path) else open(path, mode)
+    with gzip.open(path, mode) if _is_gzip(path) else open(path, mode) as f:
+        try:
+            yield f
+        except zlib.error as exc:
+            raise CorruptCompressedDataError(f"Corrupt compressed data ({exc}): {path}") from exc
 
 
 def _decode(value):
@@ -287,12 +303,88 @@ def read_nifti_header(path):
     return _parse_header(raw, path)
 
 
-def read_nifti(path, apply_scaling=True):
+def image_data_problem(path):
+    """Why the image data of a .nii or .nii.gz file cannot be read in full (a file cut short by a copy, a damaged
+    deflate stream), or None when it can.
+
+    Some readers (ITK's NIfTI reader) read such a file without an error and show the missing part as zeros. A header
+    that this module does not read (NIfTI-2, an unsupported datatype) and a file that cannot be opened are left to the
+    other readers: None. A .nii.gz whose gzip trailer gives the expected size is not decompressed (a truncated stream
+    ends in compressed data, whose last four bytes are that size by chance only); otherwise it is decompressed to its
+    end, so a file of several gzip members or with padding after the stream is complete when its data are.
+    """
+    try:
+        header = read_nifti_header(path)
+    except (EOFError, zlib.error) as exc:
+        return f"the header cannot be read ({exc})"
+    except (OSError, ValueError):
+        return None
+    offset = int(header["vox_offset"])
+    if offset < HEADER_SIZE:
+        offset = HEADER_SIZE + 4
+    expected = offset + int(np.prod(header["shape"], dtype=np.int64)) * header["dtype"].itemsize
+    try:
+        if not _is_gzip(path):
+            size = os.path.getsize(path)
+            return None if size >= expected else f"the image data are cut short ({size} of {expected} bytes)"
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            if f.tell() >= 4:
+                f.seek(-4, os.SEEK_END)
+                if int.from_bytes(f.read(4), "little") == expected % (1 << 32):
+                    return None
+    except OSError:
+        return None
+    total = 0
+    try:
+        with gzip.open(path, "rb") as f:
+            while True:
+                # read1: the data before an error are counted (read() would drop the data of the call that fails)
+                block = f.read1(1 << 20)
+                if not block:
+                    break
+                total += len(block)
+    except (EOFError, OSError, zlib.error) as exc:
+        # Data after the end of a complete stream (padding that gzip does not accept) do not hide the image
+        if total >= expected:
+            return None
+        return f"the compressed data are damaged or cut short ({exc})"
+    return None if total >= expected else f"the image data are cut short ({total} of {expected} bytes)"
+
+
+# Largest expansion of a deflate stream (zlib: about 1032 to 1); a .nii.gz cannot decompress to more than this many times
+# its own size, plus a margin for the gzip headers of several members.
+_MAX_DEFLATE_RATIO = 1032
+_GZIP_SLACK = 1 << 16
+
+
+def _check_data_fits_file(path, expected):
+    """Raise ValueError when a header claims more image data than the file can hold.
+
+    A header that overstates the image size (a damaged or hand-made file) would otherwise make numpy try to allocate
+    the claimed size before the short read is noticed, and fail with MemoryError (which callers that exclude unreadable
+    files do not expect) or take all the memory of the machine. Uncompressed files are compared with their size,
+    .nii.gz files with the most that deflate can expand to.
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return  # left to the read
+    limit = size * _MAX_DEFLATE_RATIO + _GZIP_SLACK if _is_gzip(path) else size
+    if expected > limit:
+        if _is_gzip(path):
+            raise ValueError(f"The NIfTI header claims {expected} bytes of image data, more than this {size}-byte compressed file can hold: {path}")
+        raise ValueError(f"Truncated NIfTI image data (the header claims {expected} bytes, the file has {size}): {path}")
+
+
+def read_nifti(path, apply_scaling=True, on_block=None):
     """Read a NIfTI-1 image.
 
     :param path: .nii or .nii.gz file.
     :param apply_scaling: apply scl_slope/scl_inter (when slope is non-zero and not an identity);
       the result is then floating point.
+    :param on_block: optional ``on_block(bytes_read, total_bytes)``, called after each block of image data is read
+      (progress); an exception it raises stops the read and is passed on (cancel).
     :return: (data, affine, header): data indexed [i, j, k, (t)] in file voxel order,
       4x4 float64 affine mapping voxel indices to RAS world mm, header dictionary.
     """
@@ -304,6 +396,7 @@ def read_nifti(path, apply_scaling=True):
         offset = int(header["vox_offset"])
         if offset < HEADER_SIZE:
             offset = HEADER_SIZE + 4
+        _check_data_fits_file(path, offset + count * dtype.itemsize)
         f.seek(offset)
         flat = np.empty(count, dtype=dtype)
         view = memoryview(flat.view(np.uint8))
@@ -314,6 +407,8 @@ def read_nifti(path, apply_scaling=True):
             if not n:
                 raise ValueError(f"Truncated NIfTI image data ({filled} of {len(view)} bytes): {path}")
             filled += n
+            if on_block is not None:
+                on_block(filled, len(view))
     if not dtype.isnative:
         flat = flat.astype(dtype.newbyteorder("="))
     data = flat.reshape(header["shape"], order="F")
@@ -464,6 +559,33 @@ def xform_disagreement(header):
         return 0.0
     corners = np.array([[i, j, k, 1.0] for i in (0, header["shape"][0] - 1) for j in (0, header["shape"][1] - 1) for k in (0, header["shape"][2] - 1)])
     difference = corners @ (header["sform"] - header["qform"]).T
+    return float(np.linalg.norm(difference[:, :3], axis=1).max())
+
+
+def pixdim_disagreement(header):
+    """Largest distance (mm) between the positions that the sform and ITK give to a voxel of a file without a qform.
+
+    ITK (and so Slicer) reads a file with an sform and no qform with the directions and origin of the sform but with
+    the voxel sizes of ``pixdim``, while FSL, nibabel and this module use the sform alone. When the two voxel sizes
+    differ (a header in which only the sform was set), the same file then lies at different places in different
+    programs. With both set, ITK uses the sform only when it agrees with the qform, whose voxel sizes are ``pixdim``
+    (see :func:`xform_disagreement`).
+
+    :param header: header dictionary (see :func:`read_nifti_header`).
+    :return: the distance over the corner voxels of the image (the maximum over the whole grid),
+      or 0.0 unless sform_code is set and qform_code is not.
+    """
+    if header["sform_code"] <= 0 or header["qform_code"] > 0:
+        return 0.0
+    sform = header["sform"]
+    # nifti1_io replaces a zero or non-finite voxel size with 1 before ITK uses it
+    zooms = np.array([v if v != 0.0 and np.isfinite(v) else 1.0 for v in header["pixdim"][1:4]], dtype=float)
+    norms = np.linalg.norm(sform[:3, :3], axis=0)
+    usable = norms > 0  # a zero column has no direction: left to the other checks
+    itk = sform.copy()
+    itk[:3, :3] = sform[:3, :3] * np.where(usable, zooms / np.where(usable, norms, 1.0), 1.0)
+    corners = np.array([[i, j, k, 1.0] for i in (0, header["shape"][0] - 1) for j in (0, header["shape"][1] - 1) for k in (0, header["shape"][2] - 1)])
+    difference = corners @ (sform - itk).T
     return float(np.linalg.norm(difference[:, :3], axis=1).max())
 
 

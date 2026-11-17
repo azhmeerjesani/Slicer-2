@@ -5,7 +5,7 @@ Draw (the tools), Views, and App with Library. It is generated each time it open
 
 - every Studio ``QShortcut`` of the main window (properties ``studioShortcut`` / ``studioDescription``), including the
   keys that a workspace installs when it is entered (``Shell.addWorkspaceShortcut()``), so the Draw keys are listed
-  in any workspace;
+  in any workspace, and the Map keys, which are listed before Map has been shown (``mappage.shortcutDescriptions()``);
 - the main window actions that have a key (File, Edit, View and Help, and the actions attached to the window);
 - the Segment Editor's live effect order: 1 to 0 and Shift+1 to Shift+0 pick the tools in the order of the Draw panel;
 - the keys of the Segment Editor and of the slice views (SPEC 5.4 and Appendix A), including the Smart fill and
@@ -42,6 +42,11 @@ CARD_INSET_Y = 24
 CARD_INSET_X = 32
 CARD_MAX_WIDTH = 1120
 CARD_RADIUS = 14
+#: The search field of the header: its width, and the narrowest it gets before the hint is hidden
+SEARCH_WIDTH = 240
+SEARCH_MIN_WIDTH = 120
+#: Space between the title, the hint, the search field and the close button
+HEADER_SPACING = 12
 
 #: Sections, in the order of the columns
 SECTION_DRAW = "Draw"
@@ -73,6 +78,11 @@ def _shellModule():
 
 def _isMacOS():
     return sys.platform == "darwin"
+
+
+def _controlGesture(gesture):
+    """"Ctrl+wheel", or "⌘+wheel" on macOS: the view interactor gets Qt::ControlModifier, which is the Command key there."""
+    return f"{'⌘' if _isMacOS() else 'Ctrl'}+{gesture}"
 
 
 def _native(key):
@@ -216,7 +226,12 @@ def _actionRows(shell, takenKeys):
         owners = associated(action) if associated is not None else []
         if not any(owner == mainWindow or str(owner.objectName) in _MENUS for owner in owners):
             continue
-        text = _ACTION_DESCRIPTIONS.get(str(action.objectName)) or str(action.text).replace("&", "").replace("…", "").strip()
+        # studioDescription describes what the key does (the text of the checkable Ctrl+Alt+0 action is its state)
+        text = (
+            _ACTION_DESCRIPTIONS.get(str(action.objectName))
+            or str(action.property("studioDescription") or "").strip()
+            or str(action.text).replace("&", "").replace("…", "").strip()
+        )
         if text:
             _addRow(rows, shortcuts, text)
     return rows
@@ -268,7 +283,7 @@ def _drawStaticRows():
         [["x"], _("Outline: remove the last point")],
         [["drag ↔", "Shift+wheel", "+ - = _"], _("Smart fill: tolerance")],
         [["Shift+click"], _("Smart fill: extend (click without moving)")],
-        [["Ctrl+click" if not _isMacOS() else "⌘+click"], _("Smart fill: remove (click without moving)")],
+        [[_controlGesture("click")], _("Smart fill: remove (click without moving)")],
         [["Return", "Enter"], _("Smart fill: apply")],
         [["Backspace"], _("Smart fill: discard the preview")],
     ]
@@ -281,10 +296,10 @@ def _viewRows():
         [["PageUp", "PageDown"], _("Several slices at once (Studio)")],
         [["Home", "End"], _("First / last slice")],
         [["Shift+move"], _("Move the crosshair: the other views follow")],
-        [["Ctrl+wheel", "right-drag"], _("Zoom")],
+        [[_controlGesture("wheel"), "right-drag"], _("Zoom")],
         [["middle-drag", "Shift+drag"], _("Pan")],
         [["left-drag"], _("Window/level, when no tool is active (Studio)")],
-        [["Ctrl+left-drag"], _("Blend the foreground and background")],
+        [[_controlGesture("left-drag")], _("Blend the foreground and background")],
         [["double-click"], _("Maximize the view; Esc restores")],
         [["r"], _("Reset the view (fit)")],
         [["g", "t"], _("Toggle label / foreground opacity")],
@@ -300,6 +315,18 @@ def _libraryRows():
         [["drop"], _("Drop files or a folder anywhere on the window to open them")],
     ]
     return rows
+
+
+def _mapRows():
+    """The keys of Map. Map installs them when it is first shown, but the sheet lists them in any workspace (README)."""
+    mapPage = sys.modules.get("StudioLib.mappage")
+    if mapPage is None:
+        try:
+            from . import mappage as mapPage
+        except Exception:
+            logging.debug("cheatsheet: the Map keys are not available:\n%s", traceback.format_exc())
+            return []
+    return [[[_portable(qt.QKeySequence(key))], description] for key, description in mapPage.shortcutDescriptions()]
 
 
 def _escapeRows():
@@ -326,7 +353,7 @@ def sections(shell):
     takenKeys = {key for rows in studioRows.values() for row in rows for key in row[0]}
     draw = _mergedRows(studioRows[SECTION_DRAW], _effectRows(), _drawStaticRows())
     views = _mergedRows(studioRows[SECTION_VIEWS], _viewRows())
-    app = _mergedRows(studioRows[SECTION_APP], _actionRows(shell, takenKeys))
+    app = _mergedRows(studioRows[SECTION_APP], _mapRows(), _actionRows(shell, takenKeys))
     library = _mergedRows(studioRows[SECTION_LIBRARY], _libraryRows())
     return [
         (SECTION_DRAW, _("Draw"), draw),
@@ -432,7 +459,7 @@ class CheatSheet:
         self.outerLayout = outer
 
         header = qt.QHBoxLayout()
-        header.setSpacing(12)
+        header.setSpacing(HEADER_SPACING)
         title = qt.QLabel(_("Keyboard shortcuts"))
         title.setObjectName("StudioCheatSheetTitle")
         header.addWidget(title)
@@ -443,8 +470,11 @@ class CheatSheet:
         field = qt.QLineEdit()
         field.setObjectName("StudioCheatSheetSearch")
         field.setPlaceholderText(_("Search keys"))
-        field.setClearButtonEnabled(True)
-        field.setFixedWidth(240)
+        ui.setClearButton(field)
+        # 240 px when there is room, narrower (down to 120) in a narrow window (USABILITY 9.4)
+        field.setMinimumWidth(SEARCH_MIN_WIDTH)
+        field.setMaximumWidth(SEARCH_WIDTH)
+        field.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
         header.addWidget(field)
         closeButton = qt.QToolButton()
         closeButton.setObjectName("StudioCheatSheetClose")
@@ -480,6 +510,14 @@ class CheatSheet:
         self._watching = False
         field.connect("textChanged(QString)", self._applyFilter)
         self._styled = None
+        # A theme switch from the top bar while the sheet is open: the style sheet takes the new tokens at once
+        ui.addPaletteListener(self._onPaletteChanged)
+
+    def _onPaletteChanged(self):
+        if not _isAlive(self.widget):
+            ui.removePaletteListener(self._onPaletteChanged)
+            return
+        self._style()
 
     def _style(self):
         key = slicer.app.palette().cacheKey()
@@ -602,6 +640,11 @@ class CheatSheet:
         card = cardRect(width, height)
         self.outerLayout.setContentsMargins(card.left() + MARGIN, card.top() + MARGIN - 8, width - card.right() - 1 + MARGIN,
                                             height - card.bottom() - 1 + MARGIN - 8)
+        # The title is never cut off: in a card too narrow for the title, the hint, the search field and the close button,
+        # the hint ("Ctrl+/ or Esc closes this list", also the tool tip of the close button) is hidden
+        needed = (self.title.sizeHint.width() + self.hint.sizeHint.width() + SEARCH_MIN_WIDTH + self.closeButton.sizeHint.width()
+                  + 3 * HEADER_SPACING)
+        self.hint.setVisible(card.width() - 2 * MARGIN >= needed)
 
     def updateGeometry(self):
         if not _isAlive(self.widget):
@@ -692,6 +735,7 @@ class CheatSheet:
             return
         self.close()
         self._watchWindow(False)
+        ui.removePaletteListener(self._onPaletteChanged)
         self.field.removeEventFilter(self._filter)
         self.widget.deleteLater()
         self.widget = None

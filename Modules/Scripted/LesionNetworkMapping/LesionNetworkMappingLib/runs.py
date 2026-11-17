@@ -9,7 +9,8 @@ root. The file is append-only JSON Lines; it is created on demand. Two kinds of 
     {"op": "update", "id", "updated", <fields>}   (for example status, summary, outputs, ended)
 
 ``load()`` folds them into {id: record}: later updates win, field by field. ``dir`` is relative to
-the root (with "/" separators) when the run folder lies inside it, absolute otherwise. ``parents``
+the root (with "/" separators) when the run folder lies inside it, absolute otherwise (with ".." segments instead
+when the registry was marked portable with :func:`set_portable`, as the registry of a slicer-lnm study is). ``parents``
 are the ids of the runs this run derives from (a GLM's cohort maps, a figure's GLM, ...), which
 makes the registry a provenance graph (``lineage()``, ``children()``).
 
@@ -56,6 +57,7 @@ KINDS = [
     "fastindex",
     "vlsm",
     "circuits",
+    "comparison",
     "export",
     "normalization",
     "pipeline",
@@ -166,6 +168,26 @@ def software():
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
+PORTABLE_MARKER = "portable"  # next to runs.jsonl; a file in the registry folder, so that subprocess stages see it too
+
+
+def _portable_marker(root):
+    return os.path.join(os.path.dirname(registry_path(root)), PORTABLE_MARKER)
+
+
+def set_portable(root):
+    """Mark the registry of ``root`` so that run folders outside ``root`` are stored relative to it (with ``..``) instead of absolute."""
+    marker = _portable_marker(root)
+    os.makedirs(os.path.dirname(marker), exist_ok=True)
+    if not os.path.exists(marker):
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write("run folders outside this study are stored relative to it\n")
+
+
+def is_portable(root):
+    return os.path.isfile(_portable_marker(root))
+
+
 def _relative_dir(root, folder):
     if folder is None:
         return None
@@ -177,7 +199,15 @@ def _relative_dir(root, folder):
     except ValueError:  # different drives
         inside = False
     if not inside:
-        return folder_abs
+        if not is_portable(root_abs):
+            return folder_abs
+        # a portable registry (set_portable) keeps folders beside it relative, with ".." segments, so it holds no local
+        # absolute path; only another drive has no relative form
+        try:
+            relative = os.path.relpath(folder_abs, root_abs)
+        except ValueError:
+            return folder_abs
+        return relative.replace(os.sep, "/")
     relative = os.path.relpath(folder_abs, root_abs)
     return relative.replace(os.sep, "/")
 
@@ -188,6 +218,23 @@ def run_dir(root, record):
     if not folder:
         return None
     return os.path.normpath(folder if os.path.isabs(folder) else os.path.join(os.fspath(root), *folder.split("/")))
+
+
+def absolute_records(root, runs):
+    """Copies of the folded records ``runs`` ({id: record}, from :func:`load`) of the registry of ``root`` with their
+    ``dir`` and spilled ``{"$file": ...}`` fields made absolute, so they can be read next to the records of another root
+    (in memory only: never write them back to a registry).
+    """
+    out = {}
+    for run_id, record in runs.items():
+        record = dict(record)
+        if record.get("dir"):
+            record["dir"] = run_dir(root, record)
+        for key, value in record.items():
+            if isinstance(value, dict) and set(value) == {"$file"} and isinstance(value["$file"], str) and not os.path.isabs(value["$file"]):
+                record[key] = {"$file": os.path.normpath(os.path.join(os.fspath(root), *value["$file"].split("/")))}
+        out[run_id] = record
+    return out
 
 
 def _encode(record):

@@ -10,6 +10,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 MODULE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if MODULE_DIR not in sys.path:
@@ -100,6 +101,43 @@ class PeakRegionsTest(unittest.TestCase):
             atlases._region_resources = originalResources
         self.assertEqual(len(loaded), 1)
 
+    def test_cerebellar_peaks_are_named_by_the_buckner_atlas(self):
+        # Neither Harvard-Oxford atlas covers the cerebellum; Get atlases (Clusters card) downloads the Buckner2011
+        # cerebellum atlas, so a cached Buckner atlas names a cerebellar peak instead of "Outside atlas"
+        self.assertIn("buckner2011-cerebellum-7n-1mm", atlases.PEAK_REGION_ATLASES)
+        data = np.zeros(SHAPE, np.int16)
+        data[12:16, 2:6, 2:6] = 6
+        data[8:12, 2:6, 8:12] = 4
+        # TemplateFlow's table spells "Netowrk6": the network comes from the label value (Yeo 2011 numbering)
+        buckner = atlases.Atlas("buckner2011-cerebellum-7n-1mm", data, AFFINE, {4: "Network4", 6: "Netowrk6"}, family="fsl6",
+                                space="MNI152NLin6Asym", networks="yeo7")
+        data17 = np.zeros(SHAPE, np.int16)
+        data17[2:6, 15:18, 2:6] = 12
+        buckner17 = atlases.Atlas("buckner2011-cerebellum-17n-1mm", data17, AFFINE, {12: "Network12"}, family="fsl6")
+        fake = {"harvard-oxford-subcortical-th25-2mm": subcortical(), "buckner2011-cerebellum-7n-1mm": buckner,
+                "buckner2011-cerebellum-17n-1mm": buckner17}
+        midline = world((10, 3, 10)) - np.array([1.0, 0.0, 0.0])  # x = 0: the vermis takes no side
+        points = [world((14, 3, 3)), midline, world((3, 16, 3)), world((4, 4, 4))]
+        with mock.patch.object(atlases.fetch, "is_cached", lambda resource, folder=None: resource.id in fake), \
+             mock.patch.object(atlases, "_region_atlas", lambda resource, folder: fake[resource.id]):
+            names = atlases.peak_regions(points, space="MNI152NLin6Asym", cache=tempfile.gettempdir())
+        self.assertEqual(names, ["R cerebellum (Cont network)", "Cerebellum (SalVentAttn network)", "L cerebellum (network 12)", "L caudate"])
+
+    def test_cluster_labels_of_the_buckner_atlas_fix_the_provider_typo(self):
+        # The Clusters card and clusters.tsv name a cerebellar label like the Result card, not "Netowrk6" / "Network7"
+        data = np.zeros(SHAPE, np.int16)
+        data[12:16, 2:6, 2:6] = 6
+        data[8:12, 2:6, 8:12] = 7
+        buckner = atlases.Atlas("buckner2011-cerebellum-7n-1mm", data, AFFINE, {6: "Netowrk6", 7: "Network7"}, family="fsl6",
+                                space="MNI152NLin6Asym", networks="yeo7")
+        occupancy = np.zeros(SHAPE)
+        occupancy[12:16, 2:6, 2:6] = 1
+        occupancy[8:12, 2:6, 8:12] = 1
+        result = atlases.label_mask(occupancy, AFFINE, [buckner], allow_cross_family=True)
+        names = sorted(row.label for row in result)
+        self.assertEqual(names, ["Cerebellum (Cont network)", "Cerebellum (Default network)"])
+        self.assertFalse(any("Netowrk" in str(detail["label"]) for detail in result.details))
+
     def test_outside_the_atlas_grid(self):
         names = atlases.peak_regions([[500.0, 0.0, 0.0]], atlases=[subcortical()])
         self.assertEqual(names, [atlases.OUTSIDE_ATLAS])
@@ -111,6 +149,19 @@ class PeakRegionsTest(unittest.TestCase):
         self.assertIsNone(atlases.peak_regions(point, space="MNI152NLin6Asym", atlases=[other]))
         self.assertEqual(atlases.peak_regions(point, space="MNI152NLin2009cAsym", atlases=[other]), ["L putamen"])
         self.assertEqual(atlases.peak_regions(point, space="MNI152NLin6Asym", atlases=[other, subcortical()]), ["L caudate"])
+
+    def test_space_family_with_a_detected_space_tuple(self):
+        # geometry.detect_space(grid) gives (space, resolution): the family filter still applies to that form (it used
+        # to read as an "unknown" family, so a 2009c map was named by FSL-family atlases and an FSL map by 2009 ones)
+        other = atlases.Atlas("other", subcortical().data, AFFINE, {3: "Left Putamen"}, family="2009")
+        point = [world((4, 4, 4))]
+        self.assertIsNone(atlases.peak_regions(point, space=("MNI152NLin2009cAsym", 2), atlases=[subcortical()]))
+        self.assertIsNone(atlases.peak_regions(point, space=("MNI152NLin6Asym", 2), atlases=[other]))
+        self.assertEqual(atlases.peak_regions(point, space=("MNI152NLin2009cAsym", 2), atlases=[subcortical(), other]), ["L putamen"])
+        with mock.patch.object(atlases.fetch, "is_cached", lambda resource, folder=None: resource.id == "harvard-oxford-subcortical-th25-2mm"), \
+             mock.patch.object(atlases, "_region_atlas", lambda resource, folder: subcortical()):
+            self.assertIsNone(atlases.peak_regions(point, space=("MNI152NLin2009cAsym", 2), cache=tempfile.gettempdir()))
+            self.assertEqual(atlases.peak_regions(point, space=("MNI152NLin6Asym", 2), cache=tempfile.gettempdir()), ["L caudate"])
 
     def test_no_atlas_cached_downloads_nothing(self):
         # An empty cache folder: no atlas, None ("nothing can be said"), and no file is written (nothing is downloaded)

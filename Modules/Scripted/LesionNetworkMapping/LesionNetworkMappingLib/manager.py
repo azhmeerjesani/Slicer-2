@@ -56,11 +56,40 @@ LOCK_NAME = ".manager-convert.lock"
 #
 
 
-def _format_bytes(count):
-    for unit, size in (("TB", 1e12), ("GB", 1e9), ("MB", 1e6), ("kB", 1e3)):
+_BYTE_UNITS = (("TB", 1e12), ("GB", 1e9), ("MB", 1e6), ("kB", 1e3))
+
+
+def format_bytes(count):
+    """"236 GB", "1.2 GB", "9 kB", "512 B": decimal units with three significant digits, as the providers state sizes.
+
+    Three significant digits would print 999.7 GB as "1e+03 GB" (exponent notation); a value that rounds to 1000 is
+    stated in the next larger unit ("1 TB") instead. Every size text of the module uses this one function.
+    """
+    for index, (unit, size) in enumerate(_BYTE_UNITS):
         if count >= size:
-            return f"{count / size:.3g} {unit}"
+            text = f"{count / size:.3g}"
+            if "e" in text:  # 999.5 <= value < 1000 (or beyond the largest unit): no exponent notation
+                if index:
+                    unit, size = _BYTE_UNITS[index - 1]
+                    text = f"{count / size:.3g}"
+                else:
+                    text = f"{count / size:.0f}"
+            return f"{text} {unit}"
     return f"{int(count)} B"
+
+
+_format_bytes = format_bytes
+
+
+def open_error_text(path, exc):
+    """A plain sentence for a bundle that cannot be opened (no Python exception class): a folder that is no longer there
+    says so and names the two ways out; any other problem keeps the exception's own text.
+    """
+    path = os.path.abspath(os.fspath(path))
+    if not os.path.isdir(path):
+        return (f"the connectome folder is no longer at {path} (it was moved or deleted, or its drive is not connected). "
+                "Use Manage… > Add bundle… to add it at its new place, or Remove it from the list.")
+    return str(exc) or type(exc).__name__
 
 
 def bundle_summary(path):
@@ -68,7 +97,8 @@ def bundle_summary(path):
 
     Keys: path, name, n_subjects, time_points (total over subjects), runs, n_voxels, size_bytes, size,
     voxel_mm, space, gsr (True/False/None), kind, licence, doi, version, has_degree, has_reference,
-    synthetic, error.
+    reference_status ("ok", "missing", "stale" or "corrupt": a quick check of derived/reference, without
+    hashing the subjects' time series or the map files), reference_reason, synthetic, error.
     """
     from .connectome import ConnectomeBundle
 
@@ -76,7 +106,7 @@ def bundle_summary(path):
     try:
         bundle = ConnectomeBundle.open(path)
     except Exception as exc:
-        row["error"] = f"{type(exc).__name__}: {exc}"
+        row["error"] = open_error_text(path, exc)
         return row
     metadata = getattr(bundle, "metadata", {}) or {}
     try:
@@ -97,7 +127,7 @@ def bundle_summary(path):
         "size_bytes": int(bundle.data_size_bytes),
         "size": _format_bytes(bundle.data_size_bytes),
         "voxel_mm": spacing[0] if max(spacing) - min(spacing) < 1e-3 else spacing,
-        "space": metadata.get("space"),
+        "space": _bundle_space(bundle, metadata),
         "gsr": gsr if gsr in (True, False) else None,
         "kind": provenance.get("kind") or "timeseries",
         "licence": provenance.get("licence"),
@@ -107,7 +137,31 @@ def bundle_summary(path):
         "has_reference": os.path.isfile(os.path.join(reference_dir, "reference.json")),
         "synthetic": "synthetic" in f"{bundle.name} {bundle.description}".lower(),
     })
+    row["reference_status"], row["reference_reason"] = _reference_status(bundle, reference_dir)
     return row
+
+
+def _bundle_space(bundle, metadata):
+    """Template space Map uses for the bundle: detected from its grid, else the declared metadata space, else None."""
+    from . import engine
+
+    try:
+        return engine.connectome_space(bundle)
+    except Exception:
+        return metadata.get("space")
+
+
+def _reference_status(bundle, reference_dir):
+    """(status, reason) of the bundle's reference maps of all subjects: whether reference.json exists is not enough,
+    since maps built before the connectome changed are rejected by the loader.
+    """
+    from . import reference
+
+    try:
+        entry = reference.reference_status(bundle, path=reference_dir, verify=False, check_data=False)[0]
+    except Exception as exc:
+        return "corrupt", f"{type(exc).__name__}: {exc}"
+    return entry["status"], entry["reason"]
 
 
 def provenance_line(row):
@@ -147,7 +201,10 @@ def _leaddbs_layout(dataset_dir):
 
     from . import connectome
 
-    vol = connectome._loadmat(os.path.join(dataset_dir, "dataset_volsurf.mat"))["vol"]
+    volsurf = os.path.join(dataset_dir, "dataset_volsurf.mat")
+    if not os.path.isfile(volsurf):
+        raise ValueError(f"Not a Lead-DBS connectome folder: dataset_volsurf.mat is missing from {dataset_dir}")
+    vol = connectome._loadmat(volsurf)["vol"]
     n_voxels = int(np.asarray(vol["outidx"]).size)
     entries = connectome._leaddbs_subject_entries(vol["subIDs"])
     files = []
@@ -193,6 +250,16 @@ def _mat_time_points(path, n_voxels):
     return None
 
 
+def input_problem(exc):
+    """A plain sentence for an unsuitable input folder (no exception class name, no errno text)."""
+    if isinstance(exc, FileNotFoundError):
+        name = os.path.basename(str(exc.filename or "")) or str(exc)
+        return f"File not found: {name}"
+    if isinstance(exc, (ValueError, KeyError)):
+        return str(exc.args[0]) if exc.args else type(exc).__name__
+    return f"{type(exc).__name__}: {exc}"
+
+
 def estimate_conversion(source, input_path, mask=None, out=None, dtype="float16", sample_runs=8):
     """Size of the bundle that a conversion would write, and the free space where it goes.
 
@@ -216,7 +283,11 @@ def estimate_conversion(source, input_path, mask=None, out=None, dtype="float16"
         time_points = 0
         for path in files:
             shape = read_nifti_header(path)["shape"]
-            time_points += int(shape[3]) if len(shape) > 3 else 1
+            if len(shape) < 4:
+                raise ValueError(f"This folder has no 4D time series: {os.path.basename(path)} is a {len(shape)}D image")
+            if int(shape[3]) < 2:
+                raise ValueError(f"{os.path.basename(path)} has only {int(shape[3])} volume: a time series needs at least 2")
+            time_points += int(shape[3])
         runs, subjects, exact = len(files), None, True
     else:
         n_voxels, files, subjects = _leaddbs_layout(input_path)
@@ -360,7 +431,14 @@ def _convert_main(argv):
     cancel = jobs.CancelToken(args.cancel_file)
     out = os.path.abspath(args.out)
     if os.path.isfile(os.path.join(out, "connectome.json")) and not (args.resume or args.overwrite):
-        raise jobs.JobError(f"A connectome bundle already exists at {out} (use --overwrite or --resume)", code="exists")
+        raise jobs.JobError(f"A connectome bundle already exists at {out} (use --overwrite to replace it)", code="exists")
+    if os.path.isfile(os.path.join(out, "connectome.partial.json")) and not (args.resume or args.overwrite):
+        # A stopped conversion: starting again would delete the subjects it already wrote
+        raise jobs.JobError(f"An interrupted conversion is at {out}: convert again with --resume to continue it, or with --overwrite to start over",
+                            code="interrupted")
+    if args.resume and os.path.isfile(os.path.join(out, "connectome.json")) and not os.path.isfile(os.path.join(out, "connectome.partial.json")):
+        # Resume only continues an interrupted conversion: into a finished bundle it would add its subjects again
+        raise jobs.JobError(f"{out} is a finished connectome bundle: there is no interrupted conversion to resume (use --overwrite to replace it, or choose another folder)", code="exists")
     terms = ""
     if args.terms_file:
         with open(args.terms_file, encoding="utf-8") as f:
@@ -375,7 +453,7 @@ def _convert_main(argv):
     except UnsupportedFormatError as exc:
         raise jobs.JobError(str(exc), code="unsupported_format", needs="h5py" if "h5py" in str(exc) else None) from None
     except Exception as exc:
-        raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None
+        raise jobs.JobError(input_problem(exc), code="input") from None
     jobs.emit("result", kind="estimate", **estimate)
     if estimate["enough"] is False and not args.resume:
         raise jobs.JobError(f"Not enough free space: the bundle needs about {estimate['size']}, {estimate['free']} are free", code="disk_space")
@@ -402,7 +480,7 @@ def _convert_main(argv):
         except connectome.UnsupportedFormatError as exc:
             raise jobs.JobError(str(exc), code="unsupported_format", needs="h5py" if "h5py" in str(exc) else None) from None
         except (OSError, ValueError, KeyError) as exc:
-            raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None
+            raise jobs.JobError(input_problem(exc), code="input") from None
         if path is None:
             raise jobs.Cancelled(reason="cancel file")
         keys = {}
@@ -431,7 +509,7 @@ def _estimate_main(argv):
     try:
         estimate = estimate_conversion(args.source, args.input, mask=args.mask, out=args.out, dtype=args.dtype)
     except Exception as exc:
-        raise jobs.JobError(f"{type(exc).__name__}: {exc}", code="input") from None
+        raise jobs.JobError(input_problem(exc), code="input") from None
     jobs.emit("result", kind="estimate", **estimate)
     jobs.emit("done", outputs=[], elapsed=round(jobs.elapsed(), 3), run_id=None, bytes=estimate["bytes"])
     return jobs.EXIT_OK

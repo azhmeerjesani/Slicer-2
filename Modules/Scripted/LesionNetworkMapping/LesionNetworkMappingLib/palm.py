@@ -400,7 +400,10 @@ def export_palm(design, maps, mask_path, out_dir, spec=None, allow_blocked=False
         "limitations": list(design.limitations),
         "palm_command": shlex.join(palm_args),
         "randomise_command": shlex.join(randomise_args),
-        "mask_source": os.path.abspath(os.fspath(mask_path)),
+        # Portable: the package is copied between machines and sits in shared derivatives, so no local path. The
+        # mask is the package's own MASK_FILE (hashed under "files"); the source is named by its file name only.
+        "mask_file": MASK_FILE,
+        "mask_source": os.path.basename(os.fspath(mask_path)),
         "files": {name: _sha256(path) for name, path in paths.items()},
     }
     paths[EXPORT_JSON] = _write(out_dir, EXPORT_JSON, json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")

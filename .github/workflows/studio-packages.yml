@@ -129,7 +129,7 @@ jobs:
             -DBUILD_TESTING:BOOL=OFF \
             -DSlicer_BUILD_DOCUMENTATION:BOOL=OFF \
             -DSlicer_USE_VTK_DEBUG_LEAKS:BOOL=OFF \
-            -DSlicer_BUILD_QT_DESIGNER_PLUGINS:BOOL=OFF \
+            -DSlicer_BUILD_QT_DESIGNER_PLUGINS:BOOL=ON \
             -DQt5_DIR:PATH=/usr/lib/x86_64-linux-gnu/cmake/Qt5 \
             -DSlicer_REQUIRED_QT_VERSION:STRING=5.15 \
             -DSlicer_USE_SYSTEM_OpenSSL:BOOL=ON \

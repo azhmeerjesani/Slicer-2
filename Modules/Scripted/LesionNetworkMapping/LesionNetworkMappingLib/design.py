@@ -11,7 +11,8 @@ Design types:
   case-control, Petersen 2026); labels are permuted within blocks.
 - ``cases_vs_control_database``: the group is nested in dataset or source (literature cases against a
   control-lesion database, Ferguson 2019). Exchange is free, and the confounds that cannot be adjusted
-  for (Cramér's V >= 0.9 with group) are listed in :attr:`Design.limitations` for the methods text.
+  for (Cramér's V >= 0.9 with group, and the nesting block column itself) are listed in
+  :attr:`Design.limitations` for the methods text.
   A dataset covariate collinear with group blocks the design with an explanation; it is never dropped.
 - ``continuous`` (symptom LNM: a score regressor) and ``one_sample`` (sign flipping; always warned).
 
@@ -70,6 +71,8 @@ NESTING_COLUMNS = ("dataset", "source_type")
 #: Columns whose association with group is reported as a limitation (Cramér's V >= CRAMERS_V_LIMIT)
 CONFOUND_COLUMNS = ("dataset", "source_type", "dimensionality", "etiology", "image_modality", "scanner")
 CRAMERS_V_LIMIT = 0.9
+#: Level of the block column for subjects without a value, in the Cramér's V of a cases-vs-control-database design
+_NO_BLOCK_LEVEL = "(none)"
 VIF_LIMIT = 5.0
 MIN_PER_GROUP = 10
 SKEW_LIMIT = 2.0
@@ -587,9 +590,12 @@ def variance_inflation(X, columns, skip=(INTERCEPT,)):
     """{column: VIF} = 1 / (1 - R²) of each column regressed on the others plus a constant.
 
     Constant columns and the names in ``skip`` are left out; perfectly collinear columns get inf.
+    A matrix with non-finite values (a refused transform) has no VIFs: the regressions would not converge.
     """
     X = np.asarray(X, dtype=np.float64)
     out = {}
+    if not np.all(np.isfinite(X)):
+        return out
     for index, name in enumerate(columns):
         values = X[:, index]
         total = float(np.sum((values - values.mean()) ** 2))
@@ -658,7 +664,7 @@ def build_design(study, spec=None, run_metas=None, maps=None):
         exclude(f"{spec.group_column} not in levels ({', '.join(levels)})", [value in levels for value in values])
         if spec.levels is None and len(levels) < 2:
             excluded_text = f" (excluded: {exclusions()})" if excluded else ""
-            raise DesignError(f"{spec.group_column} has {len(levels)} level(s) among the included subjects ({', '.join(levels) or 'none'}){excluded_text}; a {spec.test} test needs at least 2")
+            raise DesignError(f"{spec.group_column} has {len(levels)} level(s) among the included subjects ({', '.join(levels) or 'none'}){excluded_text}; a group comparison needs at least 2")
         if spec.test == "two_group" and len(levels) != 2:
             raise DesignError(f"A two-group test needs exactly 2 levels of {spec.group_column}; found {', '.join(levels)}. Choose the levels, or an ANOVA")
     elif selector is not None:
@@ -706,6 +712,12 @@ def build_design(study, spec=None, run_metas=None, maps=None):
             checks.append(Check("block", "invalid_transform", error))
         effect_columns = [np.ones(n), values - np.mean(values)]
         effect_names = [INTERCEPT, name]
+        if not error and np.all(np.isfinite(values)) and np.ptp(values) == 0:
+            # A score with one value for every lesion has no variance to map: say so, instead of the rank and
+            # estimability messages that its all-zero centred column would cause
+            constant_score = spec.score_column
+            shown = rows[0][spec.score_column]
+            checks.append(Check("block", "constant_score", f"{constant_score} has the same value ({shown}) for every included lesion: there is nothing to map", {"score": constant_score}))
         treatment_columns, treatment_names = effect_columns, effect_names
     else:
         effect_columns, effect_names = [np.ones(n)], [INTERCEPT]
@@ -791,12 +803,22 @@ def build_design(study, spec=None, run_metas=None, maps=None):
         for column in confounds:
             if column not in study.columns:
                 continue
-            value = _cramers_v([row.get(column) for row in rows], group_labels)
+            values = [row.get(column) for row in rows]
+            if column == block_column and design_type == "cases_vs_control_database":
+                # As in the nesting, subjects without a value of the block column form a level of their own
+                # (cases with no source_type against linked control-set rows with source_type=control_db)
+                values = [_NO_BLOCK_LEVEL if label == schema.NA else label for label in block_labels]
+            value = _cramers_v(values, group_labels)
             if value is None:
                 continue
             cramers_v[column] = value
             if value >= CRAMERS_V_LIMIT - 1e-12:
                 limitations.append(f"{column} (Cramér's V = {value:.2f} with {spec.group_column}) cannot be adjusted for in this design")
+        if design_type == "cases_vs_control_database" and cramers_v.get(block_column, 0.0) < CRAMERS_V_LIMIT - 1e-12:
+            # Partly nested: the blocks that hold a single level cannot be adjusted for either (free exchange
+            # says "limitations recorded", so the nesting itself is always one)
+            verb = "holds" if len(single_level) == 1 else "hold"
+            limitations.append(f"{block_column} {_blocks_text(single_level)} {verb} a single level of {spec.group_column} (cases vs a control database) and cannot be adjusted for in this design")
 
     # Exchangeability
     row_labels = _row_codes(X)
@@ -834,7 +856,10 @@ def build_design(study, spec=None, run_metas=None, maps=None):
     # Checks
     # The explanation of a collinear covariate comes before the rank and estimability checks it causes
     matrix = matrix_checks(X, C, columns)
-    if group_test:
+    # A column that an invalid transform made NaN has no rank (the SVD fails): matrix_checks and the
+    # invalid_transform check report it, so the collinearity explanation is skipped
+    finite = bool(np.all(np.isfinite(X)))
+    if group_test and finite:
         for column, indices in covariate_index.items():
             if not indices:
                 continue
@@ -854,11 +879,14 @@ def build_design(study, spec=None, run_metas=None, maps=None):
             else:
                 message = f"Covariate {column} is collinear with {spec.group_column} and the other columns; its effect cannot be separated from them. Remove it or change the design"
             checks.append(Check("block", "collinear_covariate", message, {"covariate": column}))
-    elif spec.test == "continuous":
+    elif spec.test == "continuous" and finite:
         for column, indices in covariate_index.items():
             reduced = np.delete(X, [len(effect_names) + index for index in indices], axis=1)
             if indices and _deficiency(X) > _deficiency(reduced):
                 checks.append(Check("block", "collinear_covariate", f"Covariate {column} is collinear with {spec.score_column} and the other columns; remove it", {"covariate": column}))
+    if any(check.code == "constant_score" for check in checks):
+        # Consequences of the constant score column, already explained by the check above
+        matrix = [check for check in matrix if check.code not in ("rank_deficient", "contrast_not_estimable")]
     checks.extend(matrix)
     if run_metas:
         from .export import check_poolable

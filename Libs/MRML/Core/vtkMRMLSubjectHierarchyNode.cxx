@@ -1619,6 +1619,27 @@ bool vtkMRMLSubjectHierarchyNode::vtkInternal::ResolveUnresolvedItems()
   // Mapping unresolved temporary IDs to new resolved IDs
   std::map<vtkIdType, vtkIdType> idMap;
 
+  // A data node has only one subject hierarchy item. Scenes saved by earlier versions may contain more than one item
+  // for the same data node (loading a scene with clearing the current scene added a second item for each data node).
+  // Such repeated items are not added: their children are added under the data node's first item, except the virtual
+  // items of a repeated virtual branch (e.g. the segments of a segmentation), which that first item already has.
+  std::map<vtkMRMLNode*, vtkIdType> dataNodeItems;
+  std::vector<vtkSubjectHierarchyItem*> itemsToVisit(1, this->SceneItem);
+  while (!itemsToVisit.empty())
+  {
+    vtkSubjectHierarchyItem* currentItem = itemsToVisit.back();
+    itemsToVisit.pop_back();
+    for (vtkSubjectHierarchyItem::ChildVector::iterator childIt = currentItem->Children.begin(); childIt != currentItem->Children.end(); ++childIt)
+    {
+      if (childIt->GetPointer()->DataNode.GetPointer())
+      {
+        dataNodeItems.insert(std::make_pair(childIt->GetPointer()->DataNode.GetPointer(), childIt->GetPointer()->ID));
+      }
+      itemsToVisit.push_back(childIt->GetPointer());
+    }
+  }
+  std::set<vtkIdType> skippedBranchIDs; // temporary IDs of the skipped items whose children are skipped too
+
   // Resolve each item and add it to its proper place in the tree under the scene
   unsigned int numberOfUnresolvedItems = this->UnresolvedItems->Children.size(); // Safeguard for checking if an item is resolved in each iteration
   while (this->UnresolvedItems->Children.size())
@@ -1636,6 +1657,13 @@ bool vtkMRMLSubjectHierarchyNode::vtkInternal::ResolveUnresolvedItems()
       }
       else
       {
+        if (skippedBranchIDs.count(item->TemporaryParentItemID))
+        {
+          // Child of a repeated virtual branch: skip it with its children
+          skippedBranchIDs.insert(item->TemporaryID);
+          this->UnresolvedItems->Children.erase(itemIt);
+          break;
+        }
         // Look for resolved parent
         std::map<vtkIdType, vtkIdType>::iterator parentIt = idMap.find(item->TemporaryParentItemID);
         if (parentIt == idMap.end())
@@ -1676,6 +1704,25 @@ bool vtkMRMLSubjectHierarchyNode::vtkInternal::ResolveUnresolvedItems()
         item->TemporaryDataNodeID = std::string();
       }
 
+      // Skip the item if its data node already has an item
+      std::map<vtkMRMLNode*, vtkIdType>::iterator dataNodeItemIt = (dataNode ? dataNodeItems.find(dataNode) : dataNodeItems.end());
+      if (dataNodeItemIt != dataNodeItems.end())
+      {
+        vtkWarningWithObjectMacro(this->External,
+                                  "ResolveUnresolvedItems: Data node " << dataNode->GetID() << " already has a subject hierarchy item, a repeated item is not added");
+        if (item->IsVirtualBranchParent())
+        {
+          skippedBranchIDs.insert(item->TemporaryID);
+        }
+        else
+        {
+          idMap[item->TemporaryID] = dataNodeItemIt->second;
+        }
+        item->DataNode = nullptr;
+        this->UnresolvedItems->Children.erase(itemIt);
+        break;
+      }
+
       // Add observer for item added event to allow item to be processed externally
       item->AddObserver(vtkMRMLSubjectHierarchyNode::SubjectHierarchyItemAddedEvent, this->External->ItemEventCallbackCommand);
 
@@ -1683,6 +1730,7 @@ bool vtkMRMLSubjectHierarchyNode::vtkInternal::ResolveUnresolvedItems()
       if (dataNode)
       {
         idMap[item->TemporaryID] = item->AddToTree(parentItem, dataNode);
+        dataNodeItems[dataNode] = idMap[item->TemporaryID];
       }
       else
       {

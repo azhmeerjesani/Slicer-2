@@ -116,6 +116,19 @@ class FamilyError(ValueError):
     """The gray-matter mask is not in the template family of the grid (or a space is unknown)."""
 
 
+class OutsideMaskError(ValueError):
+    """Seeds with no weight inside the connectome's brain mask (``labels``: their labels, in order).
+
+    Such a seed has no connectome time course: its map would be all zero and fail the run's checks.
+    """
+
+    def __init__(self, labels):
+        self.labels = list(labels)
+        one = len(self.labels) == 1
+        super().__init__(f"{', '.join(self.labels)} {'lies' if one else 'lie'} outside the connectome's brain mask: no connectome voxel to map from. "
+                         f"Remove {'it' if one else 'them'} (or check {'its' if one else 'their'} position and space) and map again.")
+
+
 class Focus(NamedTuple):
     """One reported coordinate (mm) with its study, coordinate space and optional sphere radius."""
 
@@ -151,7 +164,24 @@ def _number(text):
     text = str(text).strip()
     if text in ("", NA, "NA", "nan", "NaN"):
         return None
-    return float(text)
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"not a finite number: {text!r}")
+    return value
+
+
+def read_text(path):
+    """Text of a file: UTF-8 (with or without BOM), else Windows-1252 (what Excel writes in Western locales)."""
+    with open(path, "rb") as f:
+        data = f.read()
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        pass
+    try:
+        return data.decode("cp1252")
+    except UnicodeDecodeError:
+        raise ValueError(f"{os.path.basename(os.fspath(path))} is not a text file in UTF-8 or Windows-1252: save it as UTF-8 text") from None
 
 
 def _now():
@@ -220,21 +250,32 @@ def _sniff_delimiter(text):
     return None  # whitespace
 
 
+class _Row(dict):
+    """A table row (dict of text) that remembers the line of the file it came from (``line``)."""
+
+    line = None
+
+
 def read_table(path):
     """(columns, rows) of a CSV/TSV/whitespace table; columns are lower-case; rows are dicts of text.
 
     A table without a header (its first field is a number) gets the positional columns x, y, z, radius, study, space.
-    Lines starting with "#" are comments.
+    Lines starting with "#" are comments. A row with more (non-empty) fields than the header is an error rather than
+    being cut to the header: in a comma-separated table it usually means decimal commas ("-33,5"), which would otherwise
+    be read silently as other numbers.
     """
-    with open(path, encoding="utf-8-sig") as f:
-        text = f.read()
+    text = read_text(path)
     delimiter = _sniff_delimiter(text)
-    lines = [line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+    numbered = [(n, line) for n, line in enumerate(text.splitlines(), start=1) if line.strip() and not line.lstrip().startswith("#")]
+    lines = [line for _n, line in numbered]
     if delimiter is None:
         records = [line.split() for line in lines]
     else:
         records = list(csv.reader(lines, delimiter=delimiter))
-    records = [[cell.strip() for cell in record] for record in records if any(cell.strip() for cell in record)]
+    kept = [(n, [cell.strip() for cell in record]) for (n, _line), record in zip(numbered, records, strict=True)
+            if any(cell.strip() for cell in record)]
+    line_numbers = [n for n, _record in kept]  # file line of each record, so messages name the line the user sees
+    records = [record for _n, record in kept]
     if not records:
         return [], []
     try:
@@ -244,7 +285,18 @@ def read_table(path):
     except ValueError:
         header = [cell.lower() for cell in records[0]]
         body = records[1:]
-    rows = [dict(zip(header, record + [""] * (len(header) - len(record)), strict=False)) for record in body]
+    body_lines = line_numbers[len(records) - len(body):]
+    rows = []
+    for number, record in zip(body_lines, body, strict=True):
+        while len(record) > len(header) and not record[-1]:
+            record = record[:-1]  # trailing empty fields ("1,2,3,") are harmless
+        if len(record) > len(header):
+            hint = " Decimal commas? Write numbers with '.' (for example -33.5)." if delimiter == "," else ""
+            raise ValueError(f"{os.path.basename(os.fspath(path))}, row {number} has {len(record)} values for {len(header)} columns "
+                             f"({', '.join(header)}).{hint}")
+        row = _Row(zip(header, record + [""] * (len(header) - len(record)), strict=True))
+        row.line = number
+        rows.append(row)
     return header, rows
 
 
@@ -261,7 +313,8 @@ def foci_from_rows(columns, rows, default_space="MNI", default_study="study", wh
     if names["radius"] and names["diameter"]:
         raise ValueError(f"{where} has both a radius and a diameter column: keep one, so that the sphere size is explicit")
     foci = []
-    for number, row in enumerate(rows, start=2):
+    for index, row in enumerate(rows, start=2):
+        number = getattr(row, "line", None) or index  # file line when known (read_table), else count after a header
         try:
             x, y, z = (_number(row.get(names[axis])) for axis in ("x", "y", "z"))
             if x is None or y is None or z is None:
@@ -270,11 +323,18 @@ def foci_from_rows(columns, rows, default_space="MNI", default_study="study", wh
             if names["diameter"]:
                 diameter = _number(row.get(names["diameter"]))
                 radius = None if diameter is None else diameter / 2.0
+            if radius is not None and not (math.isfinite(radius) and 0 < radius <= MAX_RADIUS_MM):
+                label = "diameter" if names["diameter"] else "radius"
+                raise ValueError(f"the sphere {label} in the file must give a radius in (0, {MAX_RADIUS_MM:g}] mm, "
+                                 f"got a radius of {radius:g} mm")
             space = normalize_space(row.get(names["space"]) if names["space"] else None, default_space)
             study = (row.get(names["study"]) or "").strip() if names["study"] else ""
             subjects = _number(row.get(names["subjects"])) if names["subjects"] else None
         except ValueError as exc:
-            raise ValueError(f"{where}, row {number}: {exc}") from None
+            hint = ""
+            if any(re.fullmatch(r"[-+]?\d+,\d+", str(value or "").strip()) for value in row.values()):
+                hint = " Decimal commas? Write numbers with '.' (for example -33.5)."
+            raise ValueError(f"{where}, row {number}: {exc}.{hint}" if hint else f"{where}, row {number}: {exc}") from None
         foci.append(Focus(x, y, z, study or default_study, space, radius, None if subjects is None else int(subjects)))
     return foci
 
@@ -286,7 +346,11 @@ def read_csv(path, default_space="MNI", default_study=None):
     """
     columns, rows = read_table(path)
     study = default_study or re.sub(r"\.(csv|tsv|txt)$", "", os.path.basename(os.fspath(path)), flags=re.IGNORECASE)
-    return foci_from_rows(columns, rows, default_space, study, where=os.path.basename(os.fspath(path)))
+    name = os.path.basename(os.fspath(path))
+    foci = foci_from_rows(columns, rows, default_space, study, where=name)
+    if not foci:
+        raise ValueError(f"{name} holds no coordinates")
+    return foci
 
 
 _SLEUTH_REFERENCE = re.compile(r"^//\s*reference\s*=\s*(?P<space>.+?)\s*$", re.IGNORECASE)
@@ -301,8 +365,7 @@ def read_sleuth(path):
     ``//`` lines (its first one names the study, ``// Subjects=N`` gives the sample size), followed by one
     coordinate per line (a ``//`` line after coordinates starts the next block). Two blocks with the same name get " #2", " #3".
     """
-    with open(path, encoding="utf-8-sig") as f:
-        lines = f.read().splitlines()
+    lines = read_text(path).splitlines()
     space = None
     foci, used = [], {}
     name, subjects, in_coordinates, pending = None, None, False, False
@@ -334,8 +397,16 @@ def read_sleuth(path):
                 in_coordinates = False
             continue
         values = [value for value in _SLEUTH_NUMBERS.split(line) if value]
+        if len(values) > 3:
+            # Never keep the first 3 of more numbers: "-30,5 -55,2 10,1" (decimal commas) would become (-30, 5, -55)
+            decimal_commas = any(re.search(r"\d,\d", field) for field in re.split(r"[\s;]+", line))
+            hint = " Decimal commas? Write numbers with '.' (for example -33.5)." if decimal_commas else ""
+            raise ValueError(f"{os.path.basename(os.fspath(path))}, line {number} has {len(values)} numbers, "
+                             f"expected 3 (x y z): {raw!r}.{hint}")
         try:
-            x, y, z = (float(value) for value in values[:3])
+            x, y, z = (float(value) for value in values)
+            if not all(math.isfinite(v) for v in (x, y, z)):
+                raise ValueError("not finite")
         except ValueError:
             raise ValueError(f"{os.path.basename(os.fspath(path))}, line {number}: not a coordinate: {raw!r}") from None
         if space is None:
@@ -354,26 +425,54 @@ def read_nimare_json(path):
 
     Each contrast is a study named "<study>-<contrast>" (NiMARE's id); "talairach"/"TAL" spaces are marked TAL.
     """
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
+    name = os.path.basename(os.fspath(path))
+    text = read_text(path)
+    if not text.strip():
+        raise ValueError(f"{name} is empty: it holds no NiMARE dataset")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{name} is not valid JSON (line {exc.lineno}, column {exc.colno}): it is not a NiMARE dataset") from None
     if not isinstance(data, dict):
-        raise ValueError(f"{os.path.basename(os.fspath(path))} is not a NiMARE dataset (a JSON object of studies)")
+        raise ValueError(f"{name} is not a NiMARE dataset (a JSON object of studies)")
     foci = []
     for study_id, study in data.items():
-        for contrast_id, contrast in ((study or {}).get("contrasts") or {}).items():
-            coords = (contrast or {}).get("coords") or {}
+        contrasts = (study or {}).get("contrasts") or {} if isinstance(study or {}, dict) else None
+        if not isinstance(contrasts, dict):
+            raise ValueError(f"{name} is not a NiMARE dataset (study {study_id!r} has no table of contrasts)")
+        for contrast_id, contrast in contrasts.items():
+            coords = (contrast or {}).get("coords") or {} if isinstance(contrast or {}, dict) else None
+            if not isinstance(coords, dict):
+                raise ValueError(f"{name} is not a NiMARE dataset (contrast {study_id}-{contrast_id} has no coords)")
+            if not all(isinstance(coords.get(axis) or [], list) for axis in ("x", "y", "z")):
+                raise ValueError(f"{name} is not a NiMARE dataset (x, y and z of {study_id}-{contrast_id} must be lists of numbers)")
             xs, ys, zs = (list(coords.get(axis) or []) for axis in ("x", "y", "z"))
             if not (len(xs) == len(ys) == len(zs)):
                 raise ValueError(f"{study_id}-{contrast_id}: x, y and z have different lengths")
             if not xs:
                 continue
             space = normalize_space(coords.get("space"))
-            sizes = ((contrast.get("metadata") or {}).get("sample_sizes") or [None]) if isinstance(contrast, dict) else [None]
-            n = sizes[0] if sizes and isinstance(sizes[0], (int, float)) else None
-            for x, y, z in zip(xs, ys, zs, strict=True):
-                foci.append(Focus(float(x), float(y), float(z), f"{study_id}-{contrast_id}", space, None, None if n is None else int(n)))
+            metadata = contrast.get("metadata") if isinstance(contrast, dict) else None
+            if metadata is not None and not isinstance(metadata, dict):
+                raise ValueError(f"{name} is not a NiMARE dataset (metadata of {study_id}-{contrast_id} must be an object)")
+            sizes = (metadata or {}).get("sample_sizes")
+            if isinstance(sizes, (int, float)) and not isinstance(sizes, bool):
+                sizes = [sizes]
+            elif sizes is not None and not isinstance(sizes, list):
+                raise ValueError(f"{name} is not a NiMARE dataset (sample_sizes of {study_id}-{contrast_id} must be a number or a list)")
+            n = sizes[0] if sizes and isinstance(sizes[0], (int, float)) and not isinstance(sizes[0], bool) else None
+            if n is not None and not math.isfinite(n):
+                n = None
+            try:
+                points = [(float(x), float(y), float(z)) for x, y, z in zip(xs, ys, zs, strict=True)]
+                if not all(math.isfinite(v) for point in points for v in point):
+                    raise ValueError("not finite")
+            except (TypeError, ValueError):
+                raise ValueError(f"{name} is not a NiMARE dataset (x, y and z of {study_id}-{contrast_id} must be lists of numbers)") from None
+            for x, y, z in points:
+                foci.append(Focus(x, y, z, f"{study_id}-{contrast_id}", space, None, None if n is None else int(n)))
     if not foci:
-        raise ValueError(f"{os.path.basename(os.fspath(path))} holds no coordinates")
+        raise ValueError(f"{name} holds no coordinates")
     return foci
 
 
@@ -382,8 +481,7 @@ def read_foci(path, default_space="MNI"):
     path = os.fspath(path)
     if path.lower().endswith(".json"):
         return read_nimare_json(path)
-    with open(path, encoding="utf-8-sig") as f:
-        head = f.read(4096)
+    head = read_text(path)[:4096]
     if any(line.strip().startswith("//") for line in head.splitlines()):
         return read_sleuth(path)
     return read_csv(path, default_space)
@@ -486,6 +584,8 @@ def sphere_occupancy(center_xyz, radius_mm, grid, supersample=DEFAULT_SUPERSAMPL
         out = np.zeros(grid.shape, dtype=np.float32)
     linear, offset = grid.affine[:3, :3], grid.affine[:3, 3]
     center = np.asarray(center_xyz, dtype=np.float64)
+    if not np.all(np.isfinite(center)):
+        return out  # no voxel (prepare_coordinates refuses such a focus by name)
     voxel = np.linalg.solve(linear, center - offset)
     reach = np.ceil(radius / np.maximum(grid.spacing, 1e-9)).astype(int) + 1
     lo = np.maximum(np.floor(voxel).astype(int) - reach, 0)
@@ -524,7 +624,7 @@ def spheres(foci, grid, radius_mm=None, diameter_mm=None, supersample=DEFAULT_SU
         if getattr(focus, "space", "MNI") == "TAL":
             raise ValueError("Talairach foci must be converted to MNI first (coords.to_mni)")
         r = radius
-        if use_focus_radius and getattr(focus, "radius_mm", None):
+        if use_focus_radius and getattr(focus, "radius_mm", None) is not None:
             r = sphere_radius(focus.radius_mm)[0]
             own.add(r)
         xyz = focus.xyz if hasattr(focus, "xyz") else tuple(float(v) for v in focus[:3])
@@ -563,7 +663,7 @@ def study_union_seeds(foci_by_study, grid, radius_mm=None, diameter_mm=None, mas
 def focus_radii(foci, radius_mm=None, diameter_mm=None):
     """(F,) sphere radius of each focus, as :func:`spheres` uses it: its own radius when it has one, else the given one."""
     radius = sphere_radius(radius_mm, diameter_mm)[0]
-    return np.array([sphere_radius(focus.radius_mm)[0] if getattr(focus, "radius_mm", None) else radius for focus in foci], dtype=np.float64)
+    return np.array([sphere_radius(focus.radius_mm)[0] if getattr(focus, "radius_mm", None) is not None else radius for focus in foci], dtype=np.float64)
 
 
 #
@@ -777,6 +877,64 @@ def atrophy_seed(wmap, rule=DEFAULT_ATROPHY_RULE, weighted=False, mask=None):
 #
 
 
+#: NIfTI xform code of MNI-152 coordinates (NIFTI_XFORM_MNI_152)
+_XFORM_MNI_152 = 4
+
+
+def stimulation_image_space(image, header=None):
+    """Where a stimulation image (E-field or VTA) is, as far as its file can tell: a dict with ``mni`` (True when the
+    image is on a known template grid (geometry.detect_space) or its NIfTI header marks it MNI-152 (sform or qform code
+    4), else False: subject/scanner space cannot be ruled out), ``space`` (the template label, "MNI152 (NIfTI header)"
+    or None), ``basis`` ("grid", "header" or None) and ``oblique`` (a rotated voxel grid: the usual sign of a
+    scanner-space image; template images are axis-aligned).
+
+    ``image``: a NIfTI path (only its header is read, unless ``header`` is given) or (array, affine). Nothing is
+    refused: an MNI image on its own small grid (a Lead-DBS VTA) also has no known grid, so the caller tells the user
+    (:func:`stimulation_space_notice`) and the seed record keeps the result.
+    """
+    from .geometry import detect_space
+
+    if isinstance(image, (str, os.PathLike)):
+        if header is None:
+            from .nifti import read_nifti_header
+
+            header = read_nifti_header(image)
+        shape, affine = tuple(header["shape"][:3]), np.asarray(header["affine"], dtype=np.float64)
+    else:
+        data, affine = image
+        shape, affine = tuple(np.shape(data)[:3]), np.asarray(affine, dtype=np.float64)
+    columns = affine[:3, :3] / np.maximum(np.linalg.norm(affine[:3, :3], axis=0), 1e-12)
+    oblique = bool(np.any(np.abs(columns).max(axis=0) < 1.0 - 1e-4))  # an axis not along x, y or z (more than ~0.8 degrees)
+    template = detect_space((shape, affine))
+    if template is not None:
+        return {"mni": True, "space": str(template[0]), "basis": "grid", "oblique": oblique}
+    if header is not None:
+        source = header.get("affine_source")
+        code = header.get("sform_code") if source == "sform" else header.get("qform_code") if source == "qform" else 0
+        if code == _XFORM_MNI_152:
+            return {"mni": True, "space": "MNI152 (NIfTI header)", "basis": "header", "oblique": oblique}
+    return {"mni": False, "space": None, "basis": None, "oblique": oblique}
+
+
+def stimulation_space_notice(names_and_spaces):
+    """Amber notice for stimulation images not known to be in MNI space, or "" when all are: ``names_and_spaces`` is
+    [(name, :func:`stimulation_image_space` dict)].
+    """
+    unknown = [name for name, space in names_and_spaces if space is not None and not space.get("mni")]
+    if not unknown:
+        return ""
+    oblique = [name for name, space in names_and_spaces if space is not None and not space.get("mni") and space.get("oblique")]
+    shown = ", ".join(unknown[:4]) + (f" and {len(unknown) - 4} more" if len(unknown) > 4 else "")
+    one = len(unknown) == 1
+    text = (f"Not confirmed as MNI space: {shown} (not on a known MNI grid and not marked MNI in the NIfTI header). "
+            + ("It is mapped as if its world mm were MNI mm" if one else "They are mapped as if their world mm were MNI mm")
+            + "; an image in subject (scanner) space gives a misplaced seed. Use MNI-space files (SimNIBS: the *_MNI field; Lead-DBS: the MNI VTA).")
+    if oblique:
+        text += (" It is on an oblique grid, typical of scanner space." if one
+                 else f" {len(oblique)} of {len(unknown)} are on an oblique grid, typical of scanner space.")
+    return text
+
+
 def stimulation_seed(kind, grid, points=None, image=None, radius_mm=None, diameter_mm=None, weighting=None, threshold=None, supersample=DEFAULT_SUPERSAMPLE):
     """Seed of one stimulation site on ``grid`` (float32 weights in [0, 1]) and its record.
 
@@ -787,7 +945,8 @@ def stimulation_seed(kind, grid, points=None, image=None, radius_mm=None, diamet
     - ``vta``: a VTA NIfTI (Lead-DBS); "binary" (occupancy >= 0.5 after resampling) or "probabilistic" (values in
       [0, 1]).
 
-    Images are resampled onto the grid by the volume-weighted mean (geometry.resample_to_grid "fraction").
+    Images are resampled onto the grid by the volume-weighted mean (geometry.resample_to_grid "fraction"). Their world
+    mm are used as MNI mm; the record's ``space`` (:func:`stimulation_image_space`) says whether that is confirmed.
     """
     from .geometry import resample_to_grid
 
@@ -810,10 +969,12 @@ def stimulation_seed(kind, grid, points=None, image=None, radius_mm=None, diamet
     if isinstance(image, (str, os.PathLike)):
         from .nifti import read_nifti
 
-        data, affine, _header = read_nifti(image)
+        data, affine, header = read_nifti(image)
         record["source"] = {"file": os.path.basename(os.fspath(image)), "sha256": _sha256(image)}
+        record["space"] = stimulation_image_space(image, header)
     else:
         data, affine = image
+        record["space"] = stimulation_image_space((data, affine))
     data = np.nan_to_num(np.asarray(data, dtype=np.float64))
     if data.ndim > 3 and data.shape[-1] == 3 and int(np.prod(data.shape[3:])) == 3:
         if kind != "efield":
@@ -912,17 +1073,25 @@ def seed_id(label, used=None):
     return name
 
 
-def write_seed_set(out_dir, seeds, grid, kind, record=None):
+def write_seed_set(out_dir, seeds, grid, kind, record=None, mask_indices=None):
     """Write seed NIfTIs, ``lesions.tsv`` and ``seeds.json`` in ``out_dir``; return the path of lesions.tsv.
 
     ``seeds``: [(participant_id, label, volume float [i, j, k], extra dict)] on ``grid``. Paths in the files are
-    relative to ``out_dir``; sources are named by file name and sha256 only.
+    relative to ``out_dir``; sources are named by file name and sha256 only. ``mask_indices`` (the connectome's
+    in-mask voxels, flat C-order, e.g. ``bundle.mask_indices``): when given, seeds with no weight in the mask are
+    refused before anything is written (:class:`OutsideMaskError`, naming every such seed by its label).
     """
     from .nifti import write_nifti
 
     if kind not in KINDS:
         raise ValueError(f"Unknown seed kind {kind!r}")
     grid = _as_grid(grid)
+    if mask_indices is not None:
+        indices = np.asarray(mask_indices)
+        outside = [str(label) for _sid, label, volume, _extra in seeds
+                   if np.any(np.asarray(volume) > 0) and not np.any(np.asarray(volume, dtype=np.float32).reshape(-1)[indices] > 0)]
+        if outside:
+            raise OutsideMaskError(outside)
     out_dir = os.path.abspath(os.fspath(out_dir))
     folder = os.path.join(out_dir, SEED_FOLDER)
     os.makedirs(folder, exist_ok=True)
@@ -967,12 +1136,49 @@ def _source(path):
     return {"file": os.path.basename(os.fspath(path)), "sha256": _sha256(path)} if path and os.path.isfile(path) else None
 
 
-def prepare_coordinates(out_dir, foci, grid, radius_mm=None, diameter_mm=None, tal_matrix=DEFAULT_TAL_MATRIX, source=None, grid_space=None, supersample=DEFAULT_SUPERSAMPLE):
-    """Study-level union seeds of ``foci`` in ``out_dir`` (Talairach foci converted, recorded); return lesions.tsv."""
+def focus_text(focus):
+    """A focus named by its study and position, for example "Smith 2010 focus (-33, -57, 110)"."""
+    return f"{focus.study} focus ({', '.join(f'{v:g}' for v in focus.xyz)})"
+
+
+def unplaced_foci(foci_by_study, grid, radius_mm=None, diameter_mm=None, mask_indices=None, supersample=DEFAULT_SUPERSAMPLE):
+    """Labels of the foci whose sphere has no weight on ``grid`` (or in ``mask_indices``), in study order.
+
+    A non-finite focus, or one off the connectome grid or outside its brain mask, adds nothing to its study's seed.
+    A study none of whose foci can be placed is named by its study label; otherwise each such focus is named
+    (:func:`focus_text`).
+    """
+    grid = _as_grid(grid)
+    indices = None if mask_indices is None else np.asarray(mask_indices)
+    labels = []
+    for name, members in foci_by_study.items():
+        radii = focus_radii(members, radius_mm, diameter_mm)
+        bad = []
+        for focus, radius in zip(members, radii, strict=True):
+            volume = sphere_occupancy(focus.xyz, radius, grid, supersample).reshape(-1)
+            if not np.any((volume if indices is None else volume[indices]) > 0):
+                bad.append(focus)
+        if bad:
+            labels.extend([str(name)] if len(bad) == len(members) else [focus_text(focus) for focus in bad])
+    return labels
+
+
+def prepare_coordinates(out_dir, foci, grid, radius_mm=None, diameter_mm=None, tal_matrix=DEFAULT_TAL_MATRIX, source=None, grid_space=None, supersample=DEFAULT_SUPERSAMPLE,
+                        mask_indices=None):
+    """Study-level union seeds of ``foci`` in ``out_dir`` (Talairach foci converted, recorded); return lesions.tsv.
+
+    ``mask_indices``: refuse studies whose seed has no weight in the connectome's brain mask (:func:`write_seed_set`).
+    A focus that adds nothing to a study's seed (off the grid, or outside ``mask_indices``) is refused by name too
+    (:class:`OutsideMaskError`, :func:`unplaced_foci`), so that the recorded foci counts describe the seeds.
+    """
     if not foci:
         raise ValueError("No coordinates")
     mni, conversion = to_mni(foci, tal_matrix)
     groups = group_by_study(mni)
+    unplaced = unplaced_foci(groups, grid, radius_mm, diameter_mm, mask_indices, supersample)
+    if any(label not in groups for label in unplaced):
+        # A focus that adds no voxel to its study's seed would be counted (n_foci, foci) but silently dropped
+        raise OutsideMaskError(unplaced)
     seeds, used = [], set()
     sphere = sphere_radius(radius_mm, diameter_mm)[1]
     for name, members in groups.items():
@@ -982,11 +1188,11 @@ def prepare_coordinates(out_dir, foci, grid, radius_mm=None, diameter_mm=None, t
               "studies": len(groups), "foci": len(foci), "seed_rule": "study-level union of spheres (Darby et al. 2019)",
               "placement": f"MNI coordinates are used as the world mm of the connectome grid ({grid_space or 'space not stated'}); no template-family warp",
               "source": _source(source)}
-    return write_seed_set(out_dir, seeds, grid, "coordinates", record)
+    return write_seed_set(out_dir, seeds, grid, "coordinates", record, mask_indices)
 
 
-def prepare_atrophy(out_dir, wmaps, grid, rule=DEFAULT_ATROPHY_RULE, weighted=False):
-    """Atrophy seeds of per-patient w-maps {participant_id: path} on ``grid``; return lesions.tsv."""
+def prepare_atrophy(out_dir, wmaps, grid, rule=DEFAULT_ATROPHY_RULE, weighted=False, mask_indices=None):
+    """Atrophy seeds of per-patient w-maps {participant_id: path} on ``grid``; return lesions.tsv (``mask_indices``: see :func:`write_seed_set`)."""
     from .geometry import resample_to_grid
     from .nifti import read_nifti
 
@@ -1004,17 +1210,64 @@ def prepare_atrophy(out_dir, wmaps, grid, rule=DEFAULT_ATROPHY_RULE, weighted=Fa
         seeds.append((seed_id(sid, used), sid, seed, {"atrophy": record}))
         sources[sid] = _source(path)
     return write_seed_set(out_dir, seeds, grid, "atrophy", {"rule": rule, "weighted": bool(weighted), "sources": sources,
-                                                            "seed_rule": "per-patient w-map thresholded (Tetreault et al. 2020)"})
+                                                            "seed_rule": "per-patient w-map thresholded (Tetreault et al. 2020)"}, mask_indices)
 
 
-def prepare_stimulation(out_dir, items, grid, kind, radius_mm=None, diameter_mm=None, weighting=None, threshold=None, outcome_column="outcome"):
+def _outcome_value(text):
+    """The outcome of a stimulation row for comparing rows of one participant: a float, the stripped text when it is not
+    a number, or None when it is missing ("", n/a).
+    """
+    try:
+        return _number(text)
+    except ValueError:
+        return str(text).strip()
+
+
+def outcome_conflicts(items):
+    """{participant_id: [outcome texts]} of participants whose rows in ``items`` have different outcomes (missing values
+    are ignored; "40" and "40.0" agree). :func:`prepare_stimulation` refuses them, as the rows make one seed.
+    """
+    values, texts = {}, {}
+    for item in items:
+        sid = str(item.get("participant_id") or "").strip()
+        value = _outcome_value(item.get("outcome"))
+        if not sid or value is None:
+            continue
+        if value not in values.setdefault(sid, []):
+            values[sid].append(value)
+            texts.setdefault(sid, []).append(str(item["outcome"]).strip())
+    return {sid: texts[sid] for sid, found in values.items() if len(found) > 1}
+
+
+def outcome_conflict_text(sid, texts):
+    """"sub-01 has two different outcomes: 40 and 80 ..." for a participant whose rows disagree."""
+    texts = [str(text).strip() for text in texts]
+    listed = ", ".join(texts[:-1]) + " and " + texts[-1]
+    count = "two" if len(texts) == 2 else str(len(texts))
+    return (f"{sid} has {count} different outcomes: {listed}. Its rows make one seed (a union of its sites), "
+            "so they need one outcome: correct the table or give each seed its own participant_id")
+
+
+def prepare_stimulation(out_dir, items, grid, kind, radius_mm=None, diameter_mm=None, weighting=None, threshold=None, outcome_column="outcome", mask_indices=None):
     """Stimulation seeds of ``items`` [{participant_id, points | image, outcome}] in ``out_dir``; return lesions.tsv.
 
-    Points of rows with the same participant_id form one seed (a union). The outcomes, when given, are written to
-    ``outcomes.tsv`` (for :func:`slnm_arguments`).
+    Points of rows with the same participant_id form one seed (a union); their outcomes must agree (different values
+    are refused with a ValueError, :func:`outcome_conflicts`). The outcomes, when given, are written to
+    ``outcomes.tsv`` (for :func:`slnm_arguments`). ``mask_indices``: refuse participants whose seed has no weight
+    in the connectome's brain mask (:func:`write_seed_set`).
     """
     grid = _as_grid(grid)
-    merged = {}
+    merged, conversion = {}, None
+    if kind == "points":
+        # Talairach sites (a "space" column) are converted to MNI as the Coordinates mode does, and recorded
+        points = [p if isinstance(p, Focus) else Focus(float(p[0]), float(p[1]), float(p[2])) for item in items for p in item.get("points") or ()]
+        mni, conversion = to_mni(points)
+        mni, converted = iter(mni), []
+        for item in items:
+            if item.get("points"):
+                item = dict(item, points=[next(mni) for _point in item["points"]])
+            converted.append(item)
+        items = converted
     for item in items:
         sid = str(item.get("participant_id") or "").strip()
         if not sid:
@@ -1026,8 +1279,14 @@ def prepare_stimulation(out_dir, items, grid, kind, radius_mm=None, diameter_mm=
             if entry["image"] is not None:
                 raise ValueError(f"{sid} has two stimulation images")
             entry["image"] = item["image"]
-        if item.get("outcome") not in (None, ""):
-            entry["outcome"] = item["outcome"]
+        if _outcome_value(item.get("outcome")) is not None:
+            if _outcome_value(entry["outcome"]) is None:
+                entry["outcome"] = item["outcome"]
+            elif _outcome_value(item["outcome"]) != _outcome_value(entry["outcome"]):
+                # Rows of one participant make one seed: one outcome. Never keep one of two values silently.
+                raise ValueError(outcome_conflict_text(sid, [entry["outcome"], item["outcome"]]))
+        elif entry["outcome"] is None and item.get("outcome") not in (None, ""):
+            entry["outcome"] = item["outcome"]  # a missing value ("n/a") is kept only when no row has a value
     seeds, used, outcomes, records = [], set(), {}, {}
     for sid, entry in merged.items():
         seed, record = stimulation_seed(kind, grid, points=entry["points"] or None, image=entry["image"], radius_mm=radius_mm, diameter_mm=diameter_mm,
@@ -1037,10 +1296,18 @@ def prepare_stimulation(out_dir, items, grid, kind, radius_mm=None, diameter_mm=
         records[pid] = record
         if entry["outcome"] is not None:
             outcomes[pid] = entry["outcome"]
+    unconfirmed = [pid for pid, record in records.items() if record.get("space") is not None and not record["space"].get("mni")]
+    if kind == "points":
+        placement = "MNI coordinates are used as the world mm of the connectome grid; no template-family warp"
+    else:
+        placement = ("Image world mm are used as the world mm of the connectome grid (MNI); no warp. "
+                     + (f"Not confirmed as MNI space: {', '.join(unconfirmed)}" if unconfirmed else "Every image is on a known MNI grid or marked MNI"))
     tsv = write_seed_set(out_dir, seeds, grid, "stimulation", {
         "stimulation": {"kind": kind, "weighting": weighting or STIMULATION_WEIGHTINGS[kind][0],
-                        "sphere": sphere_radius(radius_mm, diameter_mm)[1] if kind == "points" else None},
-        "outcome_column": outcome_column if outcomes else None, "research_use": RESEARCH_ONLY})
+                        "sphere": sphere_radius(radius_mm, diameter_mm)[1] if kind == "points" else None,
+                        "placement": placement, "space_unconfirmed": unconfirmed,
+                        "conversion": conversion, "conversion_text": conversion_text(conversion) if conversion else None},
+        "outcome_column": outcome_column if outcomes else None, "research_use": RESEARCH_ONLY}, mask_indices)
     if outcomes:
         write_outcome_table(os.path.join(os.path.dirname(tsv), OUTCOMES_TSV), outcomes, outcome_column)
     return tsv
@@ -1060,7 +1327,7 @@ def read_stimulation_table(path, kind="points", outcome_column=None):
     if kind == "points":
         foci = foci_from_rows(columns, rows, where=os.path.basename(os.fspath(path)))
         for row, focus in zip(rows, foci, strict=True):
-            out.append({"participant_id": row["participant_id"], "points": [Focus(*focus.xyz, radius_mm=focus.radius_mm)],
+            out.append({"participant_id": row["participant_id"], "points": [Focus(*focus.xyz, study=row["participant_id"], space=focus.space, radius_mm=focus.radius_mm)],
                         "outcome": row.get(outcome_column) if outcome_column else None})
         return out
     file_column = next((name for name in ("file", "path", "image", "efield", "vta") if name in columns), None)
@@ -1081,20 +1348,26 @@ def numeric_columns(path):
     for column in columns:
         if column in skip:
             continue
-        values = [row.get(column) for row in rows if (row.get(column) or "").strip() not in ("", NA)]
         try:
-            if values and all(math.isfinite(float(value)) for value in values):
-                out.append(column)
+            # Missing values are read as _number reads them: blank, n/a, NA (R), nan, NaN.
+            values = [v for v in (_number(row.get(column)) for row in rows) if v is not None]
         except ValueError:
             continue
+        if values:
+            out.append(column)
     return out
 
 
-def cohortmaps_arguments(lesions_tsv, bundle_path, out_dir, preview_n=None, preview_seed=0):
+def cohortmaps_arguments(lesions_tsv, bundle_path, out_dir, preview_n=None, preview_seed=0, run_root=None):
     """Arguments of ``python -m LesionNetworkMappingLib.cohortmaps`` that map the seeds of ``lesions_tsv`` (weights
     used as they are: ``--probabilistic``; the job runner adds --threads and --cancel-file).
+
+    ``run_root``: the folder whose ``derivatives/lnm/runs.jsonl`` records the run (the open study, so that its Report
+    card sees the run); without it the run folder records itself.
     """
     args = ["--lesions-tsv", os.fspath(lesions_tsv), "--bundle", os.fspath(bundle_path), "--out", os.fspath(out_dir), "--probabilistic", "--resume"]
+    if run_root:
+        args += ["--run-root", os.fspath(run_root)]
     if preview_n:
         args += ["--subjects", str(int(preview_n)), "--random", "--seed", str(int(preview_seed))]
     return args
@@ -1189,7 +1462,8 @@ def main(argv=None):
     try:
         if args.command == "seeds":
             foci = read_foci(args.foci, normalize_space(args.space))
-            tsv = prepare_coordinates(out_dir, foci, bundle.grid, args.radius, args.diameter, args.tal_matrix, args.foci, grid_space(bundle))
+            tsv = prepare_coordinates(out_dir, foci, bundle.grid, args.radius, args.diameter, args.tal_matrix, args.foci, grid_space(bundle),
+                                      mask_indices=bundle.mask_indices)
             jobs.emit("done", outputs=[tsv, os.path.join(out_dir, SEEDS_JSON)], elapsed=round(jobs.elapsed(), 3), n=len(group_by_study(foci)))
             return jobs.EXIT_OK
         if args.command == "atrophy":
@@ -1199,7 +1473,7 @@ def main(argv=None):
                 if not sid or not path:
                     raise jobs.JobError(f"--wmap needs ID=FILE, got {item!r}", code="usage", exit_code=jobs.EXIT_USAGE)
                 wmaps[sid] = path
-            tsv = prepare_atrophy(out_dir, wmaps, bundle.grid, args.rule, args.weighted)
+            tsv = prepare_atrophy(out_dir, wmaps, bundle.grid, args.rule, args.weighted, mask_indices=bundle.mask_indices)
             jobs.emit("done", outputs=[tsv, os.path.join(out_dir, SEEDS_JSON)], elapsed=round(jobs.elapsed(), 3), n=len(wmaps))
             return jobs.EXIT_OK
         return _run_null(args, argv, bundle, out_dir)

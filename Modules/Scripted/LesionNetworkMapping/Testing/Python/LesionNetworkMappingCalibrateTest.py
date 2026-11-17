@@ -216,6 +216,113 @@ class PlantedNetworkTest(_CalibrateTestCase):
             calibrate.planted_network(study, Y, study.subject_ids, np.ones(N_VOXELS, dtype=bool), effects=(1.5,), n_sims=1, inner_perm=100)
 
 
+class DesignMatchTest(_CalibrateTestCase):
+    """A calibration counts only for the design it was run for (BB-1 calibration-result-not-out-of-date-after-design-change).
+
+    The folder is named by the contrast label only, so a covariate change reuses it; the checklist evidence of the
+    changed design must not be the old design's calibration.
+    """
+
+    def register(self, study, design, name):
+        out = self.path("study", "derivatives", "lnm", "calibration", name)
+        os.makedirs(out, exist_ok=True)
+        run_id = runs.register(study.path, "calibration", out, params={"name": name})
+        record = {"format": calibrate.FORMAT_NAME, "version": calibrate.FORMAT_VERSION, "run_id": run_id, "status": "done", "design": calibrate._design_info(design),
+                  "fwer": {"level": "consistent", "fwe": calibrate.rate_summary(1, 20)}}
+        calibrate.write_record(os.path.join(out, calibrate.CALIBRATION_JSON), record)
+        runs.update(study.path, run_id, status="done")
+        return run_id
+
+    def test_evidence_follows_the_design(self):
+        study = self.make_study(8, 8)
+        with_volume = designlib.build_design(study, designlib.DesignSpec(test="two_group", levels=["case", "control"], covariates=["volume_ml"], inference={"n_perm": 1000}))
+        without = designlib.build_design(study, designlib.DesignSpec(test="two_group", levels=["case", "control"], covariates=[], volume_off_reason="tested without volume",
+                                                                      inference={"n_perm": 1000}))
+        run_id = self.register(study, with_volume, "caseVsControl")
+        record = calibrate.read_record(self.path("study", "derivatives", "lnm", "calibration", "caseVsControl", calibrate.CALIBRATION_JSON))
+        self.assertTrue(calibrate.matches_design(record, with_volume))
+        self.assertTrue(calibrate.matches_design(record, calibrate.design_identity(with_volume)))
+        self.assertFalse(calibrate.matches_design(record, without))
+        self.assertEqual(calibrate.checklist_evidence(study.path, design=with_volume)[2], [run_id])
+        self.assertEqual(calibrate.checklist_evidence(study.path, design=without)[0], "not_run")
+        self.assertEqual(calibrate.checklist_evidence(study.path)[2], [run_id])  # without a design: the newest, as before
+        # The same folder calibrated again for the other design: the older run no longer holds its own record
+        newer = self.register(study, without, "caseVsControl")
+        self.assertEqual(calibrate.checklist_evidence(study.path, design=without)[2], [newer])
+        self.assertEqual(calibrate.checklist_evidence(study.path, design=with_volume)[0], "not_run")
+
+    def test_evidence_follows_transforms_and_statistic(self):
+        """A t calibration of untransformed covariates is out of date for log(volume) or the Aspin-Welch v statistic
+        (BB-1 calibration-stays-current-after-log-volume-or-welch-change), in the card's identity and in glm.json.
+        """
+        study = self.make_study(8, 8)
+
+        def build(**kwargs):
+            return designlib.build_design(study, designlib.DesignSpec(test="two_group", levels=["case", "control"], covariates=["volume_ml"], inference={"n_perm": 1000}, **kwargs))
+
+        plain, logged, welch = build(), build(transforms={"volume_ml": "log"}), build(variance_groups=True)
+        self.assertEqual((plain.stat, welch.stat), ("t", "v"))
+        run_id = self.register(study, plain, "caseVsControl")
+        record = calibrate.read_record(self.path("study", "derivatives", "lnm", "calibration", "caseVsControl", calibrate.CALIBRATION_JSON))
+        self.assertTrue(calibrate.matches_design(record, plain))
+        self.assertFalse(calibrate.matches_design(record, logged))
+        self.assertFalse(calibrate.matches_design(record, welch))
+        self.assertNotEqual(calibrate.design_identity(record["design"]), calibrate.design_identity(calibrate._design_info(logged, logged.spec)))
+        self.assertEqual(calibrate.checklist_evidence(study.path, design=plain)[2], [run_id])
+        self.assertEqual(calibrate.checklist_evidence(study.path, design=logged)[0], "not_run")
+        self.assertEqual(calibrate.checklist_evidence(study.path, design=welch)[0], "not_run")
+        # glm.json of the group analysis (checklist F8): the transforms and the statistic are compared too
+        glm_record = {"test": "two_group", "design_type": plain.design_type, "n": plain.n, "covariates": ["volume_ml"], "transforms": {}, "stat": "t",
+                      "contrast": {"spec": plain.spec.contrast}, "permutation": {"scheme": plain.permute, "exchange": plain.exchange, "block_column": plain.block_column}}
+        self.assertTrue(calibrate.matches_group(record, glm_record, "glm"))
+        self.assertFalse(calibrate.matches_group(record, dict(glm_record, transforms={"volume_ml": "log"}), "glm"))
+        self.assertFalse(calibrate.matches_group(record, dict(glm_record, stat="v"), "glm"))
+        # A record written before the transforms were stored is out of date rather than assumed untransformed
+        old = dict(record, design={key: value for key, value in record["design"].items() if key != "transforms"})
+        self.assertFalse(calibrate.matches_design(old, plain))
+
+    def test_evidence_follows_the_tested_factor(self):
+        """A calibration of group case vs control is out of date for another group column with the same n and
+        covariates (side L vs R), in the card's identity, latest_record, glm.json (checklist F8) and the methods
+        (BB-1 calibration-of-other-group-column-counts-as-current).
+        """
+        study = Study.create(self.path("study"), name="study")
+        for index in range(12):
+            group = "case" if index < 8 else "control"
+            study.add_subject(f"sub-{index:03d}", {"group": group, "side": "L" if index % 2 else "R", "volume_ml": f"{float(self.rng.uniform(2, 60)):.3f}"})
+        study.save()
+        case = designlib.build_design(study, designlib.DesignSpec(test="two_group", levels=["case", "control"], covariates=["volume_ml"], inference={"n_perm": 1000}))
+        side = designlib.build_design(study, designlib.DesignSpec(test="two_group", group_column="side", levels=["L", "R"], covariates=["volume_ml"], inference={"n_perm": 1000}))
+        swapped = designlib.build_design(study, designlib.DesignSpec(test="two_group", group_column="side", levels=["R", "L"], covariates=["volume_ml"], inference={"n_perm": 1000}))
+        self.assertEqual((case.n, side.n, case.design_type), (12, 12, side.design_type))
+        run_id = self.register(study, case, "caseVsControl")
+        record = calibrate.read_record(self.path("study", "derivatives", "lnm", "calibration", "caseVsControl", calibrate.CALIBRATION_JSON))
+        self.assertTrue(calibrate.matches_design(record, case))
+        self.assertFalse(calibrate.matches_design(record, side))
+        self.assertFalse(calibrate.matches_design(record, swapped))
+        self.assertNotEqual(calibrate.design_identity(record["design"]), calibrate.design_identity(calibrate._design_info(side, side.spec)))
+        self.assertEqual(calibrate.latest_record(study.path, design=side), (None, None))
+        self.assertEqual(calibrate.checklist_evidence(study.path, design=side)[0], "not_run")
+        self.assertEqual(calibrate.checklist_evidence(study.path, design=case)[2], [run_id])
+
+        def glm_record(design):
+            info = calibrate.tested_columns(design)
+            return {"test": "two_group", "design_type": design.design_type, "n": design.n, "covariates": ["volume_ml"], "transforms": {}, "stat": design.stat,
+                    "contrast": {"spec": design.spec.contrast}, "permutation": {"scheme": design.permute, "exchange": design.exchange, "block_column": design.block_column}, **info}
+
+        self.assertTrue(calibrate.matches_group(record, glm_record(case), "glm"))
+        self.assertFalse(calibrate.matches_group(record, glm_record(side), "glm"))
+        status, value, _evidence = calibrate.group_checklist_evidence(study.path, [("glm", glm_record(side))])
+        self.assertEqual(status, "flagged")
+        self.assertIn("out of date", value)
+        # A record written before the tested factor was stored is out of date rather than assumed to match
+        old = dict(record, design={key: value for key, value in record["design"].items() if key not in ("group_column", "levels", "score_column")})
+        self.assertFalse(calibrate.matches_design(old, case))
+        self.assertFalse(calibrate.matches_group(old, glm_record(case), "glm"))
+        # An sLNM record (slnm.json) stores the tested score as "score"
+        self.assertEqual(calibrate.group_design({"score": "nihss"}, "slnm")["score_column"], "nihss")
+
+
 class SensitivityTest(unittest.TestCase):
     def test_routes(self):
         rng = np.random.default_rng(7)
@@ -290,6 +397,105 @@ class CommandLineTest(_CalibrateTestCase):
         self.assertIn("empirical FWER", value)
         self.assertEqual(evidence, [registered["id"]])
 
+    def test_stopped_recalibration_keeps_the_finished_result(self):
+        """A new calibration of the same folder that is stopped keeps the previous finished record (bug bash BB-1)."""
+        study = self.make_study(16, 16)
+        Y = _maps(self.rng, len(study.subject_ids), self.degree, self.networks)
+        maps_tsv = self.write_maps(study, Y)
+        design_path = designlib.DesignSpec(test="two_group", levels=["case", "control"], inference={"n_perm": 1000}).save(self.path("design.json"))
+        out = self.path("study", "derivatives", "lnm", "calibration", "caseVsControl")
+        common = ["--maps", maps_tsv, "--participants", os.path.join(study.path, "participants.tsv"), "--design", design_path, "--mask", self.path("mask.nii.gz"), "--out", out,
+                  "--inner-perm", "100", "--no-planted"]
+        code, events, stderr = self.run_cli(*common, "--k", "10")
+        self.assertEqual(code, 0, (stderr, events[-3:]))
+        first = runs.latest(study.path, "calibration", status="done")["id"]
+        before = calibrate.checklist_evidence(study.path)
+        self.assertIn("empirical FWER", before[1])
+        self.assertNotIn("not computed", before[1])
+        # Other settings, stopped at once
+        cancel = self.path("cancel.flag")
+        open(cancel, "w").close()
+        code, events, _ = self.run_cli(*common, "--k", "15", "--cancel-file", cancel)
+        self.assertEqual(code, 3)
+        self.assertEqual(runs.list_runs(study.path, kind="calibration")[-1]["status"], "cancelled")
+        record = calibrate.read_record(os.path.join(out, calibrate.CALIBRATION_JSON))
+        self.assertEqual((record["status"], record["run_id"], record["fwer"]["k"]), ("done", first, 10))
+        self.assertEqual(calibrate.checklist_evidence(study.path), before)
+        self.assertEqual(calibrate.latest_record(study.path)[0], first)
+        # A record that is not the run's own (an older version's stopped stub over the folder) is not cited
+        stub = dict(record, status="cancelled", run_id="calibration-other", fwer=None)
+        calibrate.write_record(os.path.join(out, calibrate.CALIBRATION_JSON), stub)
+        self.assertEqual(calibrate.checklist_evidence(study.path)[0], "not_run")
+
+    def test_checklist_battery_and_methods_carry_the_calibration(self):
+        """Checklist item F8, the Specificity battery dot, checklist.md and the methods include the calibration of the
+        group analysis (bug bash BB-1 calibration-evidence-missing-from-checklist-battery-report-methods, L-48).
+        """
+        from LesionNetworkMappingLib import checklist, methods
+
+        study = self.make_study(16, 16)
+        Y = _maps(self.rng, len(study.subject_ids), self.degree, self.networks)
+        maps_tsv = self.write_maps(study, Y)
+        design_path = designlib.DesignSpec(test="two_group", levels=["case", "control"], inference={"n_perm": 1000}).save(self.path("design.json"))
+        common = ["--maps", maps_tsv, "--participants", os.path.join(study.path, "participants.tsv"), "--design", design_path, "--mask", self.path("mask.nii.gz")]
+        glm_out = self.path("study", "derivatives", "lnm", "glm", "caseVsControl")
+        process = subprocess.run([sys.executable, "-m", "LesionNetworkMappingLib.glm", *common, "--out", glm_out], cwd=MODULE_DIR, env=_env(), capture_output=True, text=True, timeout=600, check=False)
+        self.assertEqual(process.returncode, 0, process.stderr[-2000:])
+        out = self.path("study", "derivatives", "lnm", "calibration", "caseVsControl")
+        code, events, stderr = self.run_cli(*common, "--out", out, "--k", "10", "--inner-perm", "100", "--no-planted")
+        self.assertEqual(code, 0, (stderr, events[-3:]))
+        calibration_id = runs.latest(study.path, "calibration", status="done")["id"]
+        glm_id = runs.latest(study.path, "glm", status="done")["id"]
+        record_path = os.path.join(out, calibrate.CALIBRATION_JSON)
+        record = calibrate.read_record(record_path)
+        with open(os.path.join(glm_out, "glm.json"), encoding="utf-8") as f:
+            glm_record = json.load(f)
+        self.assertTrue(calibrate.matches_group(record, glm_record, "glm"))  # the same design, read from both records
+        self.assertEqual((glm_record["group_column"], glm_record["levels"], glm_record["score_column"]), ("group", ["case", "control"], None))
+        self.assertFalse(calibrate.matches_group(record, dict(glm_record, group_column="side", levels=["L", "R"]), "glm"))  # another factor, same n
+
+        def f8():
+            items = checklist.evaluate(study.path)
+            dot = next(dot for dot in checklist.battery(study.path, items=items) if dot["id"] == "specificity")
+            return next(item for item in items if item["id"] == "F8"), dot, checklist.checklist_markdown(items, checklist.battery(study.path, items=items))
+
+        item, dot, markdown = f8()
+        self.assertIn("calibration: empirical FWER", item["value"])
+        self.assertEqual(item["evidence"], [glm_id, calibration_id])
+        self.assertIn("empirical FWER", dot["text"])
+        self.assertIn("calibration: empirical FWER", markdown)
+        text = methods.render(methods.methods_sections(study.path), fmt="txt")
+        self.assertIn(f"Pipeline calibration (run {calibration_id})", text)
+        self.assertIn("Empirical family-wise error rate: 10 null datasets", text)
+        # An inflated FWER (the one-sample error class) flags the item and turns the battery dot amber
+        raw = calibrate.read_record(record_path)
+        raw["fwer"]["level"] = "inflated"
+        calibrate.write_record(record_path, raw)
+        item, dot, markdown = f8()
+        self.assertEqual(item["status"], checklist.FLAGGED)
+        self.assertIn("(inflated)", item["value"])
+        self.assertEqual(dot["colour"], checklist.AMBER)
+        # A calibration of another design (another covariate set) is out of date for the group analysis
+        raw["fwer"]["level"] = "consistent"
+        raw["design"]["covariates"] = []
+        calibrate.write_record(record_path, raw)
+        self.assertFalse(calibrate.matches_group(calibrate.read_record(record_path), glm_record, "glm"))
+        item, dot, _ = f8()
+        self.assertEqual(item["status"], checklist.FLAGGED)
+        self.assertIn("calibration: out of date", item["value"])
+        self.assertIn(calibration_id, item["evidence"])
+        self.assertEqual(dot["colour"], checklist.AMBER)
+        # The methods do not cite it as a calibration of the configured analysis (BB-1
+        # methods-cite-out-of-date-calibration-as-configured-analysis): they say it was run for another design
+        text = methods.render(methods.methods_sections(study.path), fmt="txt")
+        self.assertIn(f"Pipeline calibration (run {calibration_id}): out of date", text)
+        self.assertIn("covariates: none", text)
+        self.assertNotIn("the configured analysis", text)
+        self.assertNotIn("Empirical family-wise error rate", text)
+        raw["design"]["covariates"], raw["design"]["transforms"] = ["volume_ml"], {"volume_ml": "log"}
+        calibrate.write_record(record_path, raw)
+        self.assertIn("covariates: log(volume_ml)", methods.render(methods.methods_sections(study.path), fmt="txt"))
+
     def test_blocked_and_usage(self):
         study = self.make_study(4, 0)
         Y = _maps(self.rng, 4, self.degree, self.networks)
@@ -301,6 +507,75 @@ class CommandLineTest(_CalibrateTestCase):
         code, events, _ = self.run_cli(*common)  # the default design needs two groups
         self.assertEqual(code, 2)
         self.assertEqual(events[-1]["code"], "design_blocked")
+
+    def test_missing_input_file_is_a_usage_error_naming_the_option(self):
+        # A missing --maps/--participants/--mask/--target (calibrate, glm, slnm) or a --out without pipeline.json (pipeline
+        # report) is a usage error (exit 2) that names the option, not an "exception" event with a traceback (exit 1).
+        missing = self.path("nonexistent", "x.tsv")
+        here = {"maps": self.path("maps.tsv"), "participants": self.path("participants.tsv"), "mask": self.path("mask.nii.gz")}
+        for path in here.values():
+            open(path, "w", encoding="utf-8").close()
+        extra = {"glm": [], "slnm": ["--score", "s"], "calibrate": []}
+
+        def run(module, args):
+            process = subprocess.run([sys.executable, "-m", f"LesionNetworkMappingLib.{module}", *args], cwd=MODULE_DIR, env=_env(), capture_output=True, text=True, timeout=600, check=False)
+            events = [json.loads(line) for line in process.stdout.splitlines() if line.startswith("{")]
+            return process.returncode, events[-1]
+
+        cases = []
+        for module, tail in extra.items():
+            for option in here:
+                given = {**here, option: missing}
+                cases.append((module, option, [arg for key, value in given.items() for arg in (f"--{key}", value)] + tail))
+        cases.append(("calibrate", "target", [arg for key, value in here.items() for arg in (f"--{key}", value)] + ["--target", missing]))
+        for module, option, args in cases:
+            label = f"{module} --{option}"
+            code, event = run(module, [*args, "--out", self.path("out")])
+            self.assertEqual(code, 2, label)
+            self.assertEqual(event["code"], "usage", label)
+            self.assertNotIn("traceback", event, label)
+            self.assertIn(f"--{option} does not exist", event["message"], label)
+        code, event = run("pipeline", ["report", "--out", self.path("nowhere")])
+        self.assertEqual(code, 2)
+        self.assertEqual(event["code"], "usage")
+        self.assertNotIn("traceback", event)
+        self.assertIn("--out", event["message"])
+
+    def test_sensitivity_overlap_out_of_range_is_refused(self):
+        # An overlap outside 50-100 % (or nan) is a usage error: a rule of at least -1 % passes every voxel and would be
+        # written as a calibrated 0 % false-positive rate.
+        common = ["--maps", self.path("maps.tsv"), "--participants", self.path("participants.tsv"), "--mask", self.path("mask.nii.gz"), "--out", self.path("out"), "--no-fwer", "--no-planted", "--sensitivity"]
+        for value in ("-1", "0", "49", "150", "nan"):
+            code, events, _ = self.run_cli(*common, "--overlap", value)
+            self.assertEqual(code, 2, value)
+            self.assertEqual(events[-1]["event"], "error", value)
+            self.assertEqual(events[-1]["code"], "usage", value)
+            self.assertIn("--overlap", events[-1]["message"], value)
+
+    def test_sensitivity_rule_is_validated_before_any_work(self):
+        # A mistyped --rule is a usage error at the start, not after the empirical FWER stage has run.
+        common = ["--maps", self.path("maps.tsv"), "--participants", self.path("participants.tsv"), "--mask", self.path("mask.nii.gz"), "--out", self.path("out"), "--sensitivity"]
+        code, events, _ = self.run_cli(*common, "--rule", '{"kind": "fwe_bonferroni", "alpha": 0.05')
+        self.assertEqual(code, 2)
+        self.assertEqual(events[-1]["event"], "error")
+        self.assertEqual(events[-1]["code"], "usage")
+        self.assertIn("--rule", events[-1]["message"])
+        self.assertEqual([e for e in events if e.get("event") in ("stage", "progress", "result")], [])
+
+    def test_target_is_validated_before_any_work(self):
+        # A --target on another grid, or not a NIfTI, is a usage error at the start, not after the empirical FWER stage.
+        study = self.make_study(4, 4)
+        Y = _maps(self.rng, 8, self.degree, self.networks)
+        maps_tsv = self.write_maps(study, Y)
+        common = ["--maps", maps_tsv, "--participants", os.path.join(study.path, "participants.tsv"), "--mask", self.path("mask.nii.gz"), "--out", self.path("out")]
+        nifti.write_nifti(self.path("wrong.nii.gz"), np.ones((SHAPE[0] + 1, SHAPE[1], SHAPE[2]), np.uint8), AFFINE)
+        for target in (self.path("wrong.nii.gz"), maps_tsv):
+            code, events, _ = self.run_cli(*common, "--target", target)
+            self.assertEqual(code, 2, target)
+            self.assertEqual(events[-1]["event"], "error", target)
+            self.assertEqual(events[-1]["code"], "usage", target)
+            self.assertIn("target", events[-1]["message"], target)
+            self.assertEqual([e for e in events if e.get("event") in ("stage", "progress", "result")], [], target)
 
 
 if __name__ == "__main__":

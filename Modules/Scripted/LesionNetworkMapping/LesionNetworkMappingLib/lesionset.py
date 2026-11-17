@@ -30,7 +30,7 @@ participants.tsv)::
 
     <study>/derivatives/lesions/group_space-<sp>_desc-overlapCount_map.nii.gz   int16 counts (+ .json)
     <study>/derivatives/lesions/group_space-<sp>_desc-overlapPct_map.nii.gz     float32 percent (+ .json)
-    <study>/derivatives/lnm/lesionset.json     {"format": "slicer-lnm-lesionset", "version": 1, ...}
+    <study>/derivatives/lnm/lesionset.json     {"format": "slicer-lnm-lesionset", "version": 1, "inputs", ...}
     inbox (source "lesionset"): gm_frac, wm_frac, csf_frac, hemisphere, and dimensionality for rows
                                 that have none
 
@@ -56,6 +56,8 @@ if __name__ == "__main__":
     set_blas_threads(sys.argv[1:])  # before numpy is imported: BLAS reads these variables once
 
 import datetime
+import hashlib
+import json
 import math
 import re
 import time
@@ -66,7 +68,7 @@ import numpy as np
 from . import jobs, lesionops
 from .geometry import GRID_BY_ID, Grid, GridSpec, detect_grid_candidates, resample_to_grid, space_family
 from .nifti import read_nifti, read_nifti_header, write_like, write_nifti
-from .study import Study, is_missing
+from .study import Study, is_included, is_missing
 
 FORMAT = "slicer-lnm-lesionset"
 VERSION = 1
@@ -91,10 +93,32 @@ OVERLAP_NAME = "group_space-{space}_desc-overlap{kind}_map.nii.gz"
 EXCLUDED_MISSING_FILE = "lesion file not found"
 EXCLUDED_UNREADABLE = "lesion file unreadable"
 EXCLUDED_EMPTY = "empty lesion"
+_EXCLUDED_SPACE = "space {space} is not in the {family} family of {target}"
+
+
+def space_exclusion(lesion_space, family, target):
+    """The exclusion reason of a lesion in another space family than the grid's (see :func:`excluded_for_space`)."""
+    return _EXCLUDED_SPACE.format(space=lesion_space or "unknown", family=family, target=target)
+
+
+def excluded_for_space(reason):
+    """True for an exclusion reason :func:`space_exclusion` made (a lesion of another space family than the grid's)."""
+    return isinstance(reason, str) and reason.startswith("space ") and " is not in the " in reason and " family of " in reason
+
 
 CITATION_VDH = "van den Heuvel 2026"
 CITATION_COTOVIO = "Cotovio 2022"
 CITATION_CUI = "Cui 2026"
+
+
+class GridSpaceError(ValueError):
+    """A grid that is not a standard template grid was given without its space (``grid`` is the grid)."""
+
+    def __init__(self, grid):
+        spacing = "x".join(f"{float(v):g}" for v in grid.spacing)
+        shape = " x ".join(str(int(n)) for n in grid.shape)
+        super().__init__(f"The grid ({shape} voxels, {spacing} mm) is not a standard template grid; give its space")
+        self.grid = grid
 
 
 class PriorFamilyError(ValueError):
@@ -182,7 +206,7 @@ def _grid_space(grid, space):
         return str(space)
     match = detect_grid_candidates(grid.shape, grid.affine)
     if match is None:
-        raise ValueError(f"{grid} is not a standard template grid; give its space")
+        raise GridSpaceError(grid)
     return match.space
 
 
@@ -400,7 +424,7 @@ def load_occupancies(study, grid=None, include_only=True, groups=None, probabili
             header = read_nifti_header(path)
             lesion_family, lesion_space = _lesion_family(row, header)
             if lesion_family != family:
-                excluded.setdefault(f"space {lesion_space or 'unknown'} is not in the {family} family of {choice.space}", []).append(sid)
+                excluded.setdefault(space_exclusion(lesion_space, family, choice.space), []).append(sid)
                 continue
             data, affine, _ = read_nifti(path)
         except (OSError, ValueError, EOFError) as exc:
@@ -647,10 +671,17 @@ def volume_summary(volumes):
         return {"n": 0, "median": None, "q1": None, "q3": None, "iqr": None, "mean": None, "min": None, "max": None, "skew": None, "suggest_log": False}
     q1, median, q3 = (float(q) for q in np.percentile(values, (25, 50, 75)))
     skew = None
-    if n >= 3 and float(values.std()) > 0:
+    # Volumes that differ only by floating-point noise have no skew: scipy would warn about catastrophic cancellation
+    # (logged as Critical) and return nan.
+    if n >= 3 and float(values.std()) > 1e-9 * max(abs(float(values.mean())), 1e-12):
+        import warnings
+
         from scipy import stats
 
-        skew = float(stats.skew(values, bias=False))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            value = float(stats.skew(values, bias=False))
+        skew = value if math.isfinite(value) else None
     return {
         "n": n,
         "median": median,
@@ -949,6 +980,13 @@ def matched_subsample(cases, controls, covariates, seed=0, ratio=1, caliper=None
     available control (Euclidean distance; ties go to the earlier control of a seeded random
     order), ``ratio`` rounds. Rows with a missing covariate are left out and listed.
 
+    When there are fewer controls than ``ratio`` x cases, every control is used anyway, and
+    matching from the cases' side would only drop the cases that come last in the random order
+    (which can make the balance worse). The cases are then chosen from the controls' side first:
+    controls are taken in a seeded random order and each picks the nearest available case, until
+    ``len(controls) // ratio`` cases are chosen; those cases are then matched as above
+    (``"matched_from": "controls"``; otherwise ``"cases"``).
+
     :param cases, controls: {sid: {covariate: value}} or [(sid, {covariate: value})].
     :param covariates: covariate names.
     :param caliper: optional largest distance (in SD units) of a match.
@@ -981,9 +1019,32 @@ def matched_subsample(cases, controls, covariates, seed=0, ratio=1, caliper=None
     case_order = rng.permutation(len(case_rows))
     control_rank = np.empty(len(control_rows), dtype=np.int64)
     control_rank[rng.permutation(len(control_rows))] = np.arange(len(control_rows))
+    ratio = max(1, int(ratio))
+    matched_from = "cases"
+    if 0 < len(control_rows) < ratio * len(case_rows):
+        # Too few controls: choose the cases nearest to the controls (seeded control order), not a random share
+        matched_from = "controls"
+        n_keep = len(control_rows) // ratio
+        case_free = np.ones(len(case_rows), dtype=bool)
+        case_rank = np.empty(len(case_rows), dtype=np.int64)
+        case_rank[case_order] = np.arange(len(case_rows))
+        chosen = []
+        for j in rng.permutation(len(control_rows)):
+            if len(chosen) >= n_keep or not case_free.any():
+                break
+            distance = np.sqrt(((case_z - control_z[j]) ** 2).sum(axis=1))
+            distance[~case_free] = np.inf
+            best = np.flatnonzero(distance == distance.min())
+            c = int(best[np.argmin(case_rank[best])])
+            if caliper is not None and distance[c] > caliper:
+                continue
+            case_free[c] = False
+            chosen.append(c)
+        chosen = set(chosen)
+        case_order = np.array([c for c in case_order if c in chosen], dtype=np.int64)
     available = np.ones(len(control_rows), dtype=bool)
     pairs, matched_cases = [], set()
-    for _ in range(int(ratio)):
+    for _ in range(ratio):
         for c in case_order:
             if not available.any():
                 break
@@ -1011,6 +1072,7 @@ def matched_subsample(cases, controls, covariates, seed=0, ratio=1, caliper=None
         "seed": int(seed),
         "ratio": int(ratio),
         "caliper": caliper,
+        "matched_from": matched_from,
         "covariates": covariates,
         "smd_before": smds([sid for sid, _ in case_rows], [sid for sid, _ in control_rows]),
         "smd_after": smds(sorted(matched_cases), matched_controls),
@@ -1033,14 +1095,18 @@ def add_subset(study, name, sids):
 # Literature context
 
 
-def literature_context(summary):
-    """Neutral, cited context strings for a summary: [{"key", "text", "citation"}]."""
+def literature_context(summary, blind=False):
+    """Neutral, cited context strings for a summary: [{"key", "text", "citation"}].
+
+    With ``blind`` (blind tracing, L-43) the set size is the total number of lesions, not the number of cases, so the
+    line does not give away the case/control split.
+    """
     out = []
-    n = summary.get("n_cases") or summary.get("n") or 0
+    n = (summary.get("n") or 0) if blind else (summary.get("n_cases") or summary.get("n") or 0)
     out.append(
         {
             "key": "set_size",
-            "text": f"This set: {n} lesions. Sets of \u2265 10 heterogeneous lesions approach the degree map (r > 0.44; 20\u201325 lesions r > 0.62; {CITATION_VDH})",
+            "text": f"This set: {n} {'lesion' if n == 1 else 'lesions'}. Sets of \u2265 10 heterogeneous lesions approach the degree map (r > 0.44; 20\u201325 lesions r > 0.62; {CITATION_VDH})",
             "citation": CITATION_VDH,
         },
     )
@@ -1078,6 +1144,19 @@ def literature_context(summary):
 
 def _now():
     return datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
+
+
+def _balance_row(row):
+    """A :func:`balance` row for the strict-JSON summary: rounded values; "smd_inf" (+1/-1) marks an infinite SMD.
+
+    JSON has no Infinity, so a complete separation (the groups differ and neither varies) is stored as
+    ``"smd": null`` plus ``"smd_inf": 1`` or ``-1`` (the sign of cases - controls); a null SMD without
+    "smd_inf" means that it is not computable (no data).
+    """
+    out = {**row, "smd": _round(row["smd"]), "case_mean": _round(row["case_mean"]), "control_mean": _round(row["control_mean"])}
+    if row["smd"] is not None and math.isinf(row["smd"]):
+        out["smd_inf"] = 1 if row["smd"] > 0 else -1
+    return out
 
 
 def _round(value, digits=4):
@@ -1168,7 +1247,7 @@ def summarize(occ, priors=None, binarize_at=BINARIZE_AT, case="case", control="c
         }
     if cases and controls:
         table = balance(covariates, cases, controls)
-        summary["balance"] = {name: {**row, "smd": _round(row["smd"]), "case_mean": _round(row["case_mean"]), "control_mean": _round(row["control_mean"])} for name, row in table.items()}
+        summary["balance"] = {name: _balance_row(row) for name, row in table.items()}
         dims = {group: [occ.dimensionality[k][0] for k, g in enumerate(occ.groups) if g == group] for group in (case, control)}
         shares = {group: 100.0 * sum(d in ("2D", "multi2D") for d in values) / len(values) for group, values in dims.items()}
         summary["suggest_dimensionality_covariate"] = bool(abs(shares[case] - shares[control]) > DIMENSIONALITY_SHARE_POINTS)
@@ -1198,6 +1277,36 @@ def posted_values(occ, summary):
         if values:
             rows[lesion["participant_id"]] = values
     return rows
+
+
+#: Row cells that decide which lesions a check uses and how it groups them (the fingerprint of :func:`input_fingerprint`)
+INPUT_COLUMNS = ("include", "qc", "review_status", "trace_method", "norm_method", "norm_qc", "group", "source_type", "lesion")
+
+
+def input_fingerprint(study):
+    """A digest of what a lesion-set check reads: the rows' :data:`INPUT_COLUMNS` and the size and time of each included lesion file.
+
+    Stored in lesionset.json (``inputs``): a recorded summary whose fingerprint differs from the study's current one is out of
+    date (a lesion was edited, replaced, included or excluded, or a group changed). Only a digest is stored, never a path.
+    The columns that the check itself posts (:data:`POSTED_COLUMNS`) are not part of it.
+    """
+    if not isinstance(study, Study):
+        study = Study.open(study)
+    items = []
+    for row in study.subjects:
+        cells = [str(row.get("participant_id") or "")]
+        cells += ["" if is_missing(row.get(column)) else str(row.get(column)).strip() for column in INPUT_COLUMNS]
+        cells[1] = "1" if is_included(row) else "0"
+        stamp = None
+        if cells[1] == "1" and not is_missing(row.get("lesion")):
+            try:
+                stat = os.stat(study.abspath(row["lesion"]))
+                stamp = [int(stat.st_size), int(stat.st_mtime_ns // 1_000_000)]
+            except (OSError, TypeError, ValueError):
+                stamp = None
+        items.append([cells, stamp])
+    payload = json.dumps({"review_required": bool(study.review_required), "rows": items}, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
 
 def lesionset_path(study, out_dir=None):
@@ -1239,6 +1348,7 @@ def run(study, grid=None, priors=None, out_dir=None, groups=None, binarize_at=BI
     """
     if not isinstance(study, Study):
         study = Study.open(study)
+    inputs = input_fingerprint(study)  # before loading: an edit made while the check runs makes the result out of date
     occ = load_occupancies(study, grid, groups=groups, probabilistic=probabilistic, space=space, template_dirs=template_dirs, cancel=cancel, progress=progress)
     if isinstance(priors, (str, os.PathLike)):
         folder = priors
@@ -1255,7 +1365,7 @@ def run(study, grid=None, priors=None, out_dir=None, groups=None, binarize_at=BI
         controls = {sid: covariates[sid] for sid, group in zip(occ.sids, occ.groups, strict=True) if group == "control"}
         matched = {"name": match["name"], **matched_subsample(cases, controls, match["covariates"], seed=match.get("seed", 0), ratio=match.get("ratio", 1))}
     outputs = {"overlap_count": _out_rel(study.path, count_path), "overlap_pct": _out_rel(study.path, percent_path)}
-    path, inbox = write_lesionset_json(study, summary, occ, out_dir=out_dir, post=post, outputs=outputs, extra={"matched": matched} if matched else None)
+    path, inbox = write_lesionset_json(study, summary, occ, out_dir=out_dir, post=post, outputs=outputs, extra={"inputs": inputs, **({"matched": matched} if matched else {})})
     return {"summary": summary, "lesionset": path, "inbox": inbox, "overlap": [count_path, percent_path], "matched": matched, "lesions": occ}
 
 

@@ -12,11 +12,167 @@ from slicer.ScriptedLoadableModule import *
 #
 
 
+#: Files, folders and URLs given on the command line that the Studio module took over from the core loader
+#: (``takeOverCommandLineArguments()``), opened once Studio has been applied; None when there are none
+_commandLineArguments = None
+
+
+def takeOverCommandLineArguments(willApply=None, options=None):
+    """Take the files given on the command line from 3D Slicer's core loader when Studio applies at startup.
+
+    The core loader (``qSlicerCoreApplication::handleURIArguments()``, run when the event loop starts) reads every image as a
+    plain volume. When Studio will be applied, its handling is turned off here, before the event loop starts, and the
+    arguments are opened by ``StudioLib.importer.openCommandLineArguments()`` once Studio is applied, as a drop would be.
+    The same arguments as the core loader are taken: none when a Python script was given (they are its arguments).
+    ``willApply`` (default ``_studioWillApplyAtStartup()``) and ``options`` (default ``slicer.app.commandOptions()``) are for
+    tests. Return the arguments taken over (a list).
+    """
+    global _commandLineArguments
+    app = slicer.app
+    if not hasattr(app, "setURIArgumentHandlingEnabled") or not app.isURIArgumentHandlingEnabled():
+        # A build without the setter, or the application does not open them: the core keeps its own handling
+        return []
+    options = app.commandOptions() if options is None else options
+    arguments = [str(argument) for argument in (options.unparsedArguments or [])]
+    if not arguments or options.pythonScript or options.extraPythonScript:
+        return []
+    if not (_studioWillApplyAtStartup() if willApply is None else willApply):
+        return []
+    app.setURIArgumentHandlingEnabled(False)
+    _commandLineArguments = arguments
+    return list(arguments)
+
+
+def _openCommandLineArguments():
+    """Open the arguments taken over by ``takeOverCommandLineArguments()`` (with the core loader in Classic)."""
+    global _commandLineArguments
+    arguments, _commandLineArguments = _commandLineArguments, None
+    if not arguments:
+        return
+    try:
+        from StudioLib import importer
+
+        importer.openCommandLineArguments(arguments)
+    except Exception:
+        import logging
+        import traceback
+
+        logging.error("The files given on the command line could not be opened:\n" + traceback.format_exc())
+
+
+#: Files that macOS hands to the running application as QFileOpenEvent (Finder "Open With", a double click, a drop on the
+#: Dock icon; at a cold start they come as an event instead of command line arguments). They are kept until startup is
+#: completed (Studio is applied by then) and then opened with the routes of the command line files.
+_pendingFileOpens = []
+_startupCompleted = False
+_fileOpenFilter = None
+
+
+class _FileOpenFilter(qt.QObject):
+    """Event filter of the application: QEvent::FileOpen opens the file like Open... does (nothing else handles it)."""
+
+    def eventFilter(self, obj, event):
+        if event.type() != qt.QEvent.FileOpen:
+            return False
+        try:
+            path = str(event.file())
+            if not path:
+                url = event.url()
+                path = str(url.toString()) if url is not None else ""
+        except Exception:
+            return False
+        if path:
+            openFileFromSystem(path)
+        return True
+
+
+def installFileOpenFilter():
+    """Install the QFileOpenEvent handling on the application (once). Return the filter.
+
+    The filter is removed when the application quits: a Python event filter must not stay on the application while the
+    Python interpreter is finalized (the widgets owned by Python objects are deleted then, their destruction sends
+    events through the application event filters, and the half-finalized filter crashes the process on every quit).
+    """
+    global _fileOpenFilter
+    if _fileOpenFilter is None:
+        _fileOpenFilter = _FileOpenFilter(slicer.app)
+        slicer.app.installEventFilter(_fileOpenFilter)
+        slicer.app.connect("aboutToQuit()", removeFileOpenFilter)
+    return _fileOpenFilter
+
+
+def removeFileOpenFilter():
+    """Remove the QFileOpenEvent handling from the application (done when the application quits)."""
+    global _fileOpenFilter
+    fileOpenFilter = _fileOpenFilter
+    if fileOpenFilter is None:
+        return
+    _fileOpenFilter = None
+    try:
+        slicer.app.disconnect("aboutToQuit()", removeFileOpenFilter)
+    except Exception:
+        pass
+    try:
+        slicer.app.removeEventFilter(fileOpenFilter)
+    except Exception:
+        pass
+
+
+#: Events of one selection (Finder gives one QFileOpenEvent per selected file) arrive within a few milliseconds: they are
+#: collected for this long and opened as one batch, like the files of Ctrl+O (a scan opened alone would get an empty
+#: lesion segmentation before its lesion file is opened).
+_FILE_OPEN_BATCH_MS = 250
+_fileOpenTimerScheduled = False
+
+
+def openFileFromSystem(path):
+    """Open a file that the system gave to the running application (QFileOpenEvent): after startup, with the files
+    that arrive together with it.
+    """
+    global _fileOpenTimerScheduled
+    _pendingFileOpens.append(path)
+    if not _startupCompleted:
+        return
+    if not _fileOpenTimerScheduled:
+        _fileOpenTimerScheduled = True
+        qt.QTimer.singleShot(_FILE_OPEN_BATCH_MS, _openPendingFileOpens)
+
+
+def _openFiles(paths):
+    try:
+        from StudioLib import importer
+
+        importer.openCommandLineArguments(paths)
+    except Exception:
+        import logging
+        import traceback
+
+        logging.error("The file given by the system could not be opened:\n" + traceback.format_exc())
+
+
+def _openPendingFileOpens():
+    global _fileOpenTimerScheduled
+    _fileOpenTimerScheduled = False
+    if not _startupCompleted:
+        return
+    paths = list(_pendingFileOpens)
+    del _pendingFileOpens[:]
+    if paths:
+        _openFiles(paths)
+
+
 def _onStartupCompleted():
+    global _startupCompleted
+    _startupCompleted = True
+    if _pendingFileOpens:
+        qt.QTimer.singleShot(0, _openPendingFileOpens)
     import time
 
     # The apply time of Studio includes importing the shell
     startTime = time.perf_counter()
+    if _commandLineArguments:
+        # After this slot (Studio is applied by then), when the core loader would have read them
+        qt.QTimer.singleShot(0, _openCommandLineArguments)
     # Imported lazily, so that the module costs nothing at startup when Studio is not used
     from StudioLib import shell
 
@@ -54,6 +210,17 @@ def _onStartupCompleted():
 
         logging.error("Updates could not be started:\n" + traceback.format_exc())
         startAutosave()
+    # Settings > Templates is also there in Classic: the Normalize and Map messages of the Lesion Network Mapping module
+    # (which works in Classic) point to it. In Studio the templates plug-in installs it.
+    try:
+        from StudioLib import templates_ui
+
+        templates_ui.installSettingsPanelDeferred()
+    except Exception:
+        import logging
+        import traceback
+
+        logging.error("Settings > Templates could not be scheduled:\n" + traceback.format_exc())
 
 
 def _startAutosave():
@@ -107,6 +274,19 @@ class Studio(ScriptedLoadableModule):
     when the application has started (see StudioLib/shell.py).
     """
 
+    @staticmethod
+    def _formatHelpKeys(text):
+        """``text`` with its ``{key:Ctrl+K}`` markers as this platform shows the keys (⌘K on macOS), as
+        ``StudioLib.migration.formatKeys`` does (not imported: the module is created at start-up).
+        """
+        import re
+
+        def native(match):
+            sequence = qt.QKeySequence(match.group(1))
+            return (sequence.toString(qt.QKeySequence.NativeText) if sequence.count() == 1 else "") or match.group(1)
+
+        return re.sub(r"\{key:([^}]+)\}", native, text)
+
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
         self.parent.title = _("Library")
@@ -114,15 +294,16 @@ class Studio(ScriptedLoadableModule):
         self.parent.dependencies = []
         self.parent.hidden = False
         self.parent.contributors = ["Slicer Studio contributors"]
-        self.parent.helpText = _("""
+        self.parent.helpText = self._formatHelpKeys(_("""
 <p>Slicer Studio is the streamlined default interface of this application.
 Its three workspaces follow the path of a lesion network mapping study:
 <b>Library</b> (open data and choose a subject), <b>Draw</b> (trace the lesion) and <b>Map</b>
 (compute and read a network map).</p>
-<p>Keyboard: Ctrl+Alt+1/2/3 switch workspaces, Ctrl+K searches tools and actions,
-Alt+1..4 change the view layout, Ctrl+\\ (or F6) shows or hides the inspector,
-F11 toggles the focus mode, Esc backs out of the place and window/level modes, a maximized view
-and the focus mode, and Ctrl+Alt+0 switches to the Classic interface and back
+<p>Keyboard: {key:Ctrl+Alt+1}/2/3 switch workspaces, {key:Ctrl+K} searches tools and actions,
+{key:Alt+1}..5 change the view layout, {key:Ctrl+\\} (or {key:Ctrl+5}) shows or hides the inspector,
+F6 and Shift+F6 move the keyboard focus between the top bar, the inspector and the views,
+F11 (or {key:Ctrl+6}) hides or shows the panels, Esc backs out of the place and window/level modes, a maximized view
+and hidden panels, and {key:Ctrl+Alt+0} switches to the Classic interface and back
 (also View &gt; Studio interface). On Windows, where AltGr and Ctrl+Alt cannot be told apart, text fields
 keep the characters typed with AltGr (for example @) and in a view AltGr+digit acts as Ctrl+Alt+digit.</p>
 <p>The Classic interface is never removed. Studio is not used when testing,
@@ -131,7 +312,7 @@ or when the Studio/Enabled setting is false.</p>
 <p>Projects (Studio): at the first start you choose the Slicer Studio folder (Documents/Slicer Studio by
 default). From then on your work is saved there automatically as you work, one folder per project
 (Projects/&lt;name&gt;, a 3D Slicer scene with Images, Segmentations, Lesions, Maps and other folders), and
-studies go to Studies. Ctrl+S saves at once, Ctrl+N starts a new project, and File &gt; Save a copy as… writes
+studies go to Studies. {key:Ctrl+S} saves at once, {key:Ctrl+N} starts a new project, and File &gt; Save a copy as… writes
 a .mrb file anywhere. The folder can be changed in the Saving panel of the application settings.</p>
 <p>Recovery (Classic, and scenes that are not a project): while you work, the scene is autosaved every few
 minutes to a private folder of your user account (the StudioAutosave folder in the application data folder),
@@ -144,7 +325,7 @@ Slicer Studio restarts. Automatic checks can be turned off in the Updates panel.
 <p>Your own MNI templates: Library &gt; Start on template ▾ &gt; Add your own template… (or Search: Add MNI template)
 adds an MNI-space brain image, with an optional brain mask and 3D surfaces. It is copied into the Templates folder of
 the Slicer Studio folder and can be drawn on, mapped from and normalized to; Settings &gt; Templates sets the default.</p>
-""")
+"""))
         self.parent.acknowledgementText = _("""
 <p>Icons: <a href="https://lucide.dev">Lucide</a> 0.468.0, ISC License,
 copyright (c) Lucide Contributors 2022 and Cole Bemis 2013-2022 (Feather, MIT).
@@ -154,10 +335,13 @@ copyright (c) The Inter Project Authors.</p>
 """)
         if not slicer.app.testingEnabled():
             slicer.app.connect("startupCompleted()", _onStartupCompleted)
+            installFileOpenFilter()
             if _studioWillApplyAtStartup():
                 # Set before the main window is first shown: it emits disclaimerRequested() instead of opening its
                 # disclaimer dialog, and Studio shows a non-modal research-use line (StudioLib/firstrun.py)
                 slicer.app.setProperty("SlicerDisclaimerHandledByApplication", True)
+                # Files given on the command line take Studio's import routes, not the core loader (U-07)
+                takeOverCommandLineArguments(willApply=True)
 
 
 #

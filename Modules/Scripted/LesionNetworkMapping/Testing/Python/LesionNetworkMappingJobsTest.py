@@ -31,6 +31,7 @@ def _env(**extra):
     env["PYTHONPATH"] = MODULE_DIR + os.pathsep + env.get("PYTHONPATH", "")
     for name in jobs.THREAD_ENV_VARS:
         env.pop(name, None)
+    env.pop(jobs.PARENT_PID_ENV, None)
     env.update(extra)
     return env
 
@@ -170,6 +171,49 @@ class SelfTestJobTest(_TempDirTestCase):
         self.assertEqual(result.stdout, "")
         self.assertIn("--threads", result.stderr)
 
+    def test_help_of_commands_with_percent_in_help(self):
+        # argparse expands every option's help with "help % params": a bare "%" (as in "top % of") broke the whole --help
+        for args in (["LesionNetworkMappingLib.calibrate", "--help"], ["LesionNetworkMappingLib.circuits", "damage", "--help"]):
+            result = subprocess.run([sys.executable, "-m", *args], check=False, capture_output=True, text=True, env=_env(), cwd=self.tmp, timeout=120)
+            self.assertEqual(result.returncode, 0, (args, result.stdout, result.stderr))
+            self.assertEqual(result.stdout, "", args)
+            self.assertIn("% of the", result.stderr, args)
+
+    def test_all_cli_help_strings_format(self):
+        # Every literal help= of the LNM command lines must survive argparse's "help % params" (a literal percent is "%%")
+        import ast
+
+        class _Params(dict):
+            def __missing__(self, key):
+                return ""
+
+        failures = []
+        for package in ("LesionNetworkMappingLib", "LesionNetworkMappingUI"):
+            folder = os.path.join(MODULE_DIR, package)
+            for name in sorted(os.listdir(folder)):
+                if not name.endswith(".py"):
+                    continue
+                with open(os.path.join(folder, name), encoding="utf-8") as stream:
+                    tree = ast.parse(stream.read(), filename=name)
+                for node in ast.walk(tree):
+                    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ("add_argument", "add_parser")):
+                        continue
+                    for keyword in node.keywords:
+                        if keyword.arg != "help":
+                            continue
+                        value = keyword.value
+                        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                            text = value.value
+                        elif isinstance(value, ast.JoinedStr):
+                            text = "".join(part.value if isinstance(part, ast.Constant) else "x" for part in value.values)
+                        else:
+                            continue
+                        try:
+                            text % _Params()
+                        except (TypeError, ValueError, KeyError) as error:
+                            failures.append(f"{package}/{name}:{node.lineno}: {error}")
+        self.assertEqual(failures, [])
+
     def test_blas_threads_set_before_numpy(self):
         code, events, stderr = self._run("--seconds", "0", "--units", "1", "--threads", "3", "--numpy")
         self.assertEqual(code, 0, stderr)
@@ -214,6 +258,49 @@ class SelfTestJobTest(_TempDirTestCase):
         cancelled = _events(first + stdout)[-1]
         self.assertEqual(cancelled["event"], "cancelled")
         self.assertIn("is gone", cancelled["reason"])
+
+    def test_app_parent_pid_from_environment(self):
+        """A job of the app's job runner (SLICER_LNM_PARENT_PID, no --parent-pid) stops when the application is gone.
+
+        Regression: after a crash (kill -9) of the application the PythonSlicer launcher lives on, so the job's orphan
+        watchdog never fired; nulls, validate and calibrate kept computing unseen and holding their output lock.
+        """
+        if sys.platform == "win32":
+            self.skipTest("uses a POSIX sleep process")
+        application = subprocess.Popen(["sleep", "60"])
+        # An intermediate shell plays the PythonSlicer launcher, which outlives the application
+        launcher = subprocess.Popen(["sh", "-c", f'"{sys.executable}" -m LesionNetworkMappingLib.jobs selftest --seconds 60 --units 600; true'],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=_env(**{jobs.PARENT_PID_ENV: str(application.pid)}), cwd=self.tmp)
+        try:
+            first = launcher.stdout.readline()
+            self.assertEqual(json.loads(first)["event"], "start")
+            application.kill()
+            application.wait()
+            stdout, stderr = launcher.communicate(timeout=30)
+        finally:
+            for proc in (application, launcher):
+                if proc.poll() is None:
+                    proc.kill()
+        cancelled = _events(first + stdout)[-1]
+        self.assertEqual(cancelled["event"], "cancelled", stderr)
+        self.assertIn(f"process {application.pid} is gone", cancelled["reason"])
+
+    def test_env_parent_pid(self):
+        previous = os.environ.get(jobs.PARENT_PID_ENV)
+        try:
+            os.environ.pop(jobs.PARENT_PID_ENV, None)
+            self.assertIsNone(jobs.env_parent_pid([]))
+            os.environ[jobs.PARENT_PID_ENV] = "12345"
+            self.assertEqual(jobs.env_parent_pid(["--out", "x"]), 12345)
+            self.assertIsNone(jobs.env_parent_pid(["--parent-pid", "7"]))  # the command watches its own --parent-pid
+            self.assertIsNone(jobs.env_parent_pid(["--parent-pid=7"]))
+            for value in ("", "1", "abc", str(os.getpid())):
+                os.environ[jobs.PARENT_PID_ENV] = value
+                self.assertIsNone(jobs.env_parent_pid([]), value)
+        finally:
+            os.environ.pop(jobs.PARENT_PID_ENV, None)
+            if previous is not None:
+                os.environ[jobs.PARENT_PID_ENV] = previous
 
     def test_orphan_watchdog(self):
         if sys.platform == "win32":
@@ -264,6 +351,31 @@ class JobPrimitivesTest(_TempDirTestCase):
             os.environ.pop(jobs.MAX_THREADS_ENV, None)
             if old is not None:
                 os.environ[jobs.MAX_THREADS_ENV] = old
+
+    def test_utf8_locale_env(self):
+        # Under C/POSIX the PythonSlicer launcher drops non-ASCII argument letters: children get a UTF-8 LC_CTYPE
+        linux = lambda env: jobs.utf8_locale_env(env, platform="linux")  # noqa: E731
+        self.assertEqual(linux({}), {"LC_CTYPE": "C.UTF-8"})
+        self.assertEqual(linux({"LANG": "C"}), {"LC_CTYPE": "C.UTF-8"})
+        self.assertEqual(linux({"LANG": "POSIX", "LC_ALL": ""}), {"LC_CTYPE": "C.UTF-8"})
+        self.assertEqual(linux({"LANG": "C", "LC_ALL": "C"}), {"LC_ALL": "C.UTF-8"})  # LC_ALL overrides LC_CTYPE
+        self.assertEqual(linux({"LANG": "en_US.UTF-8", "LC_ALL": "C"}), {"LC_ALL": "C.UTF-8"})
+        self.assertEqual(linux({"LANG": "de_DE.ISO-8859-1"}), {"LC_CTYPE": "C.UTF-8"})
+        self.assertEqual(linux({"LANG": "C", "LC_CTYPE": "en_US.utf8"}), {})
+        self.assertEqual(linux({"LANG": "C.UTF-8"}), {})
+        self.assertEqual(linux({"LANG": "C", "LC_ALL": "C.UTF-8"}), {})
+        self.assertEqual(jobs.utf8_locale_env({"LANG": "C"}, platform="darwin"), {})
+        self.assertEqual(jobs.utf8_locale_env({"LANG": "C"}, platform="win32"), {})
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("PythonSlicer"), "Linux with the PythonSlicer launcher")
+    def test_utf8_locale_env_keeps_non_ascii_arguments(self):
+        argument = os.path.join(self.tmp, "Läsionsstudie 患者", "sub-01.nii.gz")
+        base = {key: value for key, value in os.environ.items() if key not in ("LC_ALL", "LC_CTYPE", "LANG")}
+        for locale_env in ({"LANG": "C", "LC_ALL": "C"}, {"LANG": "POSIX"}, {}):
+            env = {**base, **locale_env}
+            env.update(jobs.utf8_locale_env(env))
+            out = subprocess.run([shutil.which("PythonSlicer"), "-c", "import sys; sys.stdout.buffer.write(sys.argv[1].encode('utf-8'))", argument], env=env, capture_output=True, check=True, timeout=60)
+            self.assertEqual(out.stdout.decode("utf-8"), argument, locale_env)
 
     def test_resume_state(self):
         path = self.path("sub", "state.json")

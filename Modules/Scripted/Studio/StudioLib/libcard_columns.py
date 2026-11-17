@@ -49,6 +49,32 @@ CASE_GROUPS = (
 )
 #: Shown read-only under the groups (derived or recorded by the application): (column, label)
 CASE_FACTS = (("hemisphere", "Hemisphere"), ("review_status", "Review"), ("trace_method", "Traced by"), ("qc_flags", "Flags"), ("duplicate_of", "Duplicate of"))
+
+
+def caseFactWords(column, row, value):
+    """``(text, tooltip)`` of one fact of the Case facts line, in the words used elsewhere in the Library: the review state as in the
+    Review section ("Changes requested"), the QC flags as in the Flags column ("Side, CSF, Parts", the sentences of the flags in the
+    tooltip). Other values are shown as they are stored.
+    """
+    if column == "review_status":
+        labels = _lnm("review").STATE_LABELS
+        return _(labels.get(str(value).strip(), str(value))), ""
+    if column == "qc_flags":
+        from . import libcard_flags
+
+        codes = libcard_flags._flags(row)
+        if not codes:
+            return str(value), ""
+        try:
+            explanations = _lnm("lesionops").QC_FLAGS
+        except ImportError:
+            explanations = {}
+        names = [_(libcard_flags.FLAG_SHORT.get(code, code)) for code in codes]
+        tip = "\n".join(f"{name}: {explanations.get(code, code)}" for name, code in zip(names, codes, strict=True))
+        return ", ".join(names), tip
+    return str(value), ""
+
+
 #: Short labels of the Case fields (the registry's descriptions are the tooltips)
 FIELD_LABELS = {
     "source_type": "Source type", "source_dataset": "Source dataset", "source_id": "Source ID", "doi": "DOI", "pmid": "PMID", "citation": "Citation",
@@ -244,7 +270,7 @@ def applyChanges(session, changes, confirm=None):
     """Confirm the roles (and types, units, levels, descriptions) of columns of the open study.
 
     :param changes: ``{column: {"role", and optionally "type", "units", "levels" (dict), "description"}}``; an empty text of
-      units or description removes it.
+      units or description removes it (the description of a registered column goes back to the registry's, which the dialog shows).
     :param confirm: ``confirm(names, reasons) -> accepted names`` for the columns that would become scores from bookkeeping
       or metadata (default :func:`confirmScore`); a column that is not accepted keeps its role and is listed in ``declined``.
     :return: ``{"applied": [names], "declined": [names], "errors": {name: message}}``. The study is saved when something was applied.
@@ -261,9 +287,16 @@ def applyChanges(session, changes, confirm=None):
             result["declined"].append(name)
             continue
         clear = [key for key in ("units", "description") if key in change and change[key] == ""]
+        registered = schema.registered(name)
+        description = change.get("description") or None
+        if "description" in clear and registered is not None and registered.description:
+            # Study.column_spec() falls back to the registry's description, so a cleared one would come back in the dialog
+            # without being in participants.json: write the registry's, so that the file holds what the dialog shows.
+            description = registered.description
+            clear.remove("description")
         try:
             study.set_column_role(name, change["role"], type=change.get("type"), levels=change.get("levels"),
-                                  units=change.get("units") or None, description=change.get("description") or None)
+                                  units=change.get("units") or None, description=description)
         except (KeyError, ValueError) as e:
             result["errors"][name] = str(e)
             continue
@@ -319,6 +352,7 @@ class ColumnsDialog:
         self.table.setHorizontalHeaderLabels([_("Column"), _("Type"), _("Role"), _("Units"), _("Levels"), _("Description")])
         self.table.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(qt.QAbstractItemView.SingleSelection)
+        self.table.setTabKeyNavigation(False)  # Tab leaves the table, arrows move (SPEC 2.9)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.setWordWrap(False)
@@ -337,6 +371,9 @@ class ColumnsDialog:
         self.cancelButton = qt.QPushButton(_("Cancel"))
         self.cancelButton.setObjectName("StudioColumnsCancelButton")
         ui.setRole(self.cancelButton, "secondary")
+        # No default button: Return that a cell, a combo or the check box leaves unhandled must not close the dialog
+        # (with Cancel as QDialog's automatic default it dropped every edit; Confirm is clicked, never pressed by Return)
+        self.cancelButton.setAutoDefault(False)
         self.cancelButton.connect("clicked()", dialog.reject)
         buttons.addWidget(self.cancelButton)
         self.confirmButton = qt.QPushButton(_("Confirm"))
@@ -401,10 +438,21 @@ class ColumnsDialog:
                 elif column == COL_UNITS and info["registered"] and schema.registered(name).units:
                     _readOnly(item)  # the registry's units show through: they cannot be removed
                     item.setToolTip(_("The units of a registered column are the registry's"))
+                elif column == COL_LEVELS and info["registered"] and schema.registered(name).strict and schema.registered(name).levels:
+                    _readOnly(item)  # the application checks the values of a strict column against the registry's levels
+                    item.setToolTip(_("The levels of this registered column are fixed: the application only accepts these values"))
+                elif column == COL_DESCRIPTION and info["registered"] and schema.registered(name).description:
+                    item.setToolTip(_("Clearing the description of a registered column restores the registry's"))
                 self.table.setItem(row, column, item)
             self.original[name] = {"role": spec.role, "type": spec.type, "units": units, "levels": levels, "description": description, "standard": info["standard"]}
         self.table.resizeColumnToContents(COL_NAME)
-        for column, width in ((COL_TYPE, 110), (COL_ROLE, 150), (COL_UNITS, 70), (COL_LEVELS, 200)):
+        # the Type column follows the font: the widest type combo needs its full sizeHint (110 px is the 100% minimum)
+        typeWidth = 110
+        for row in range(self.table.rowCount):
+            combo = self.table.cellWidget(row, COL_TYPE)
+            if combo is not None:
+                typeWidth = max(typeWidth, combo.sizeHint.width() + 8)
+        for column, width in ((COL_TYPE, typeWidth), (COL_ROLE, 150), (COL_UNITS, 70), (COL_LEVELS, 200)):
             self.table.setColumnWidth(column, width)
         self.table.setColumnWidth(COL_NAME, max(140, self.table.columnWidth(COL_NAME) + 12))
         self._applyFilter()
@@ -457,6 +505,28 @@ class ColumnsDialog:
         self.helpLabel.setText(text)
         self.helpLabel.setVisible(bool(text))
 
+    def _rowState(self, name):
+        """What the row of ``name`` shows: ``(role, type, units, levels, description)``."""
+        row = self.rowOf(name)
+        roleCombo = self.table.cellWidget(row, COL_ROLE)
+        typeCombo = self.table.cellWidget(row, COL_TYPE)
+        texts = tuple(self.table.item(row, column).text() for column in (COL_UNITS, COL_LEVELS, COL_DESCRIPTION))
+        return (roleCombo.itemData(roleCombo.currentIndex), typeCombo.itemData(typeCombo.currentIndex), *texts)
+
+    def _restoreRow(self, name, state):
+        """Show ``state`` (from :meth:`_rowState`) again in the row of ``name``, when the row is still there."""
+        row = self.rowOf(name)
+        if row < 0:
+            return
+        role, typeName, *texts = state
+        for column, data in ((COL_ROLE, role), (COL_TYPE, typeName)):
+            combo = self.table.cellWidget(row, column)
+            index = combo.findData(data)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+        for column, text in zip((COL_UNITS, COL_LEVELS, COL_DESCRIPTION), texts, strict=True):
+            self.table.item(row, column).setText(text)
+
     # Changes
 
     def changes(self):
@@ -501,9 +571,15 @@ class ColumnsDialog:
         notes = list(problems.values()) + [f"{name}: {message}" for name, message in result["errors"].items()]
         for name in result["declined"]:
             self.setRole(name, self.original[name]["role"])  # the answer was "Keep as is"
+            if name in self.changes()[0]:  # its other edits stay in the table for the next Confirm
+                notes.append(_("{name} keeps its role: Confirm again to save its other changes.").format(name=name))
         if result["applied"]:
             _toast(_("Roles saved for {n} columns").format(n=len(result["applied"])) if len(result["applied"]) != 1 else _("Role saved for {name}").format(name=result["applied"][0]))
+            # fill() rebuilds every row from the study: the rows that were not saved (no role yet, declined, refused) keep what was typed
+            pending = {name: self._rowState(name) for name in [*problems, *result["declined"], *result["errors"]]}
             self.fill()
+            for name, state in pending.items():
+                self._restoreRow(name, state)
         self._setNote(" ".join(notes))
         result["errors"].update(problems)
         if result["applied"] and not notes and not result["declined"]:
@@ -623,8 +699,10 @@ def doiUrl(text):
 
 
 def openExternalUrl(url):
-    """Open a web address in the browser (tests replace this function)."""
-    return qt.QDesktopServices.openUrl(qt.QUrl(url))
+    """Open a web address in the browser, or show the link to copy in the web build (tests replace this function)."""
+    from . import projects
+
+    return projects.openLink(url)
 
 
 def parseSourceReference(text):
@@ -662,6 +740,36 @@ def levelLabel(level, description):
     return f"{level} · {description}" if str(level).isdigit() else str(description)
 
 
+class _CaseEscFilter(qt.QObject):
+    """Event filter of a Case field: Esc with unsent edits puts the stored value back (the shell leaves Esc to a
+    modified line edit); without unsent edits the key goes on to the Esc ladder of the shell.
+
+    ``field`` is the widget that takes the focus: the line edit, or the editable combo box. A combo box keeps the focus
+    itself (its line edit has it as focus proxy) and passes key events to the line edit by calling its event() directly,
+    so a filter on the line edit alone never sees Esc there and the shell took the field for a closed combo box: it
+    moved the focus out, and that focus-out wrote the typed value (BB-1).
+    """
+
+    def __init__(self, field, lineEdit, stored, restore):
+        qt.QObject.__init__(self, field)
+        self._field = field
+        self._edit = lineEdit
+        self._stored = stored  # the text the field shows for the stored value
+        self._restore = restore  # shows the stored value again
+
+    def eventFilter(self, obj, event):
+        eventType = event.type()
+        if eventType in (qt.QEvent.ShortcutOverride, qt.QEvent.KeyPress) and event.key() == qt.Qt.Key_Escape:
+            if (self._field.hasFocus() or self._edit.hasFocus()) and str(self._edit.text) != self._stored():
+                if eventType == qt.QEvent.KeyPress:
+                    self._restore()
+                    self._edit.setModified(False)
+                    self._edit.selectAll()
+                event.accept()
+                return True
+        return False
+
+
 class CaseSection:
     """The 'Case' section of the SUBJECT card (SUBJECT_SECTION): the registry fields of the open subject, edited in place."""
 
@@ -670,6 +778,7 @@ class CaseSection:
         self.sid = None
         self._loading = False
         self.editors = {}  # column: widget
+        self.rows = {}  # column: (label, field widget) of the form, hidden for a blinded column
         self.groups = {}  # key: (button, container, columns)
         self.widget = qt.QWidget()
         self.widget.setObjectName("StudioCaseSection")
@@ -742,16 +851,21 @@ class CaseSection:
             self.editors[column] = editor
             if column == "doi":
                 row = qt.QWidget()
-                rowLayout = qt.QHBoxLayout(row)
+                # The edit keeps the width of the other fields (a DOI is long); the "Open" link goes below it, because
+                # next to it the link's minimum width (about 80 px) left the edit 53 px of a 137 px field (BB-1)
+                rowLayout = qt.QVBoxLayout(row)
                 rowLayout.setContentsMargins(0, 0, 0, 0)
-                rowLayout.setSpacing(4)
-                rowLayout.addWidget(editor, 1)
+                rowLayout.setSpacing(0)
+                rowLayout.addWidget(editor)
                 self.doiButton = library._linkButton(_("Open"), "StudioCaseDoiOpen", self.openDoi)
                 self.doiButton.setToolTip(_("Open https://doi.org/<doi> in the browser"))
-                rowLayout.addWidget(self.doiButton)
+                self.doiButton.setSizePolicy(qt.QSizePolicy.Fixed, qt.QSizePolicy.Fixed)
+                rowLayout.addWidget(self.doiButton, 0, qt.Qt.AlignLeft)
                 form.addRow(label, row)
+                self.rows[column] = (label, row)
             else:
                 form.addRow(label, editor)
+                self.rows[column] = (label, editor)
         container.setVisible(button.isChecked())
         layout.addWidget(container)
         self.groups[key] = (button, container, columns)
@@ -762,14 +876,16 @@ class CaseSection:
             combo = qt.QComboBox()
             combo.setObjectName(f"StudioCaseEdit_{column}")
             combo.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
-            combo.addItem("—", None)
-            for level, description in spec.levels.items():
-                combo.addItem(levelLabel(level, description), level)
-            combo.setProperty("baseCount", combo.count)
+            self._fillLevels(combo, spec)
             if not spec.strict:
                 combo.setEditable(True)
+                # Return must not add the typed text as a new item without data (QComboBox's default InsertAtBottom):
+                # activated() would then write that item's missing data as an empty value. The typed text is written by
+                # editingFinished(), which Return also emits.
+                combo.setInsertPolicy(qt.QComboBox.NoInsert)
                 combo.lineEdit().setPlaceholderText("—")
                 combo.lineEdit().connect("editingFinished()", lambda column=column, combo=combo: self._commitCombo(column, combo, typed=True))
+                self._escFilter(column, combo)
             combo.connect("activated(int)", lambda index, column=column, combo=combo: self._commitCombo(column, combo))
             return combo
         edit = qt.QLineEdit()
@@ -777,9 +893,87 @@ class CaseSection:
         edit.setSizePolicy(qt.QSizePolicy.Ignored, qt.QSizePolicy.Fixed)
         edit.setPlaceholderText(f"— ({spec.units})" if spec.units else "—")
         edit.connect("editingFinished()", lambda column=column, edit=edit: self._commitLine(column, edit))
+        self._escFilter(column, edit)
         if column == "doi":
             edit.connect("textChanged(QString)", lambda text: self._updateDoiButton())
         return edit
+
+    def _escFilter(self, column, field):
+        """Esc in a field with unsent edits gives them up (USABILITY 3 rung 0), so the next focus-out writes nothing.
+
+        ``field`` is a line edit or an editable combo box; for a combo box the filter watches the combo box (which has
+        the focus and gets the keys) and its line edit.
+        """
+        if hasattr(field, "itemData"):
+            lineEdit = field.lineEdit()
+            escFilter = _CaseEscFilter(field, lineEdit, lambda: self._comboText(column, field), lambda: self._restoreCombo(column, field))
+            field.installEventFilter(escFilter)
+            lineEdit.installEventFilter(escFilter)
+            return
+        escFilter = _CaseEscFilter(field, field, lambda: self._storedText(column), lambda: field.setText(self._storedText(column)))
+        field.installEventFilter(escFilter)
+
+    def _comboText(self, column, combo):
+        """The text an editable combo box shows for the stored value: the label of its level ("Male" for "M")."""
+        text = self._storedText(column)
+        index = combo.findData(text) if text else 0
+        return str(combo.itemText(index)) if index >= 0 else text
+
+    def _restoreCombo(self, column, combo):
+        text = self._storedText(column)
+        index = combo.findData(text) if text else 0
+        wasLoading = self._loading
+        self._loading = True
+        try:
+            if index >= 0:
+                combo.setCurrentIndex(index)
+                combo.setEditText(combo.itemText(index))
+            else:
+                combo.setCurrentIndex(0)
+                combo.setEditText(text)
+        finally:
+            self._loading = wasLoading
+
+    def _storedText(self, column):
+        session = _session()
+        if session is None or self.sid is None or self.sid not in session.study:
+            return ""
+        value = session.study.subject(self.sid).get(column)
+        return "" if _missing(value) else str(value)
+
+    @staticmethod
+    def _fillLevels(combo, spec):
+        """Fill a combo with the empty choice and the levels of ``spec`` (and remember which levels these are)."""
+        combo.clear()
+        combo.addItem("—", None)
+        for level, description in spec.levels.items():
+            combo.addItem(levelLabel(level, description), level)
+        combo.setProperty("baseCount", combo.count)
+        combo.setProperty("levelsKey", json.dumps(list(spec.levels.items())))
+
+    @staticmethod
+    def _specOf(study, column):
+        """The spec the Case section works with for a column: the registry's; for a lenient column with levels, the levels
+        the study declares in participants.json (Columns…, or a BIDS dataset's own), which are the ones that column accepts
+        without a warning. A strict column keeps the registry's levels: the application refuses any other value.
+        """
+        spec = _lnm("schema").registered(column)
+        if spec is None or spec.strict or not spec.levels or spec.separator is not None:
+            return spec
+        declared = study.column_spec(column).levels
+        if not declared:
+            return spec
+        quotes = _lnm("study").typographic_quotes  # the cells hold levels as Study.set stores them, so the choices do too
+        return spec.replace(levels={quotes(level): description for level, description in declared.items()})
+
+    def _syncLevels(self, study, column, editor):
+        """Offer the levels the open study declares for a lenient column (the editors are made once, for every study)."""
+        if not hasattr(editor, "itemData") or editor.hasFocus() or (editor.isEditable() and editor.lineEdit().hasFocus()):
+            return
+        spec = self._specOf(study, column)
+        if spec is None or not spec.levels or editor.property("levelsKey") == json.dumps(list(spec.levels.items())):
+            return
+        self._fillLevels(editor, spec)
 
     def _toggle(self, key, checked):
         button, container, _columns = self.groups[key]
@@ -799,29 +993,44 @@ class CaseSection:
         self.widget.show()
         study = session.study
         row = study.subject(sid)
+        # Blind tracing (L-43): the fields of blinded columns (symptom, domain) are not shown
+        hidden = library._hiddenColumns(study)
         self._loading = True
         try:
             warnings = []
             for column, editor in self.editors.items():
+                label, field = self.rows.get(column, (None, editor))
+                for widget in (label, field):
+                    if widget is not None and widget.isHidden() != (column in hidden):
+                        widget.setHidden(column in hidden)
+                if column in hidden:
+                    self._show(column, editor, None)  # no value of the subject stays in a hidden editor
+                    continue
                 value = row.get(column)
+                self._syncLevels(study, column, editor)
                 self._show(column, editor, value)
-                warning = self._warningOf(column, value)
+                warning = self._warningOf(study, column, value)
                 if warning:
                     warnings.append(warning)
             for key, (button, _container, columns) in self.groups.items():
                 title = next(title for groupKey, title, _columns in CASE_GROUPS if groupKey == key)
-                filled = sum(1 for column in columns if column in self.editors and not _missing(row.get(column)))
-                button.setText(f"{_(title)}  ·  {filled}/{len([c for c in columns if c in self.editors])}")
+                shown = [column for column in columns if column in self.editors and column not in hidden]
+                filled = sum(1 for column in shown if not _missing(row.get(column)))
+                button.setText(f"{_(title)}  ·  {filled}/{len(shown)}")
         finally:
             self._loading = False
         self.warningLabel.setText("  ".join(warnings))
         self.warningLabel.setVisible(bool(warnings))
-        facts = []
+        facts, tips = [], []
         for column, label in CASE_FACTS:
             value = row.get(column)
             if not _missing(value) and value != "none":
-                facts.append(f"{_(label)}: {value}")
+                text, tip = caseFactWords(column, row, value)
+                facts.append(f"{_(label)}: {text}")
+                if tip:
+                    tips.append(tip)
         self.factsLabel.setText(" · ".join(facts))
+        self.factsLabel.setToolTip("\n".join(tips))
         self.factsLabel.setVisible(bool(facts))
         number = self._caseNumber(study, sid)
         self.numberLabel.setText(_("Case {n} in the figures").format(n=number) if number else "")
@@ -851,19 +1060,38 @@ class CaseSection:
             return
         if str(editor.text) != text:
             editor.setText(text)
+        # Typing or setText leaves the cursor at the end, so a value wider than the field showed its tail once
+        # the field was left: always show the start of a field that is not being edited
+        editor.setCursorPosition(0)
 
-    def _warningOf(self, column, value):
+    def _warningOf(self, study, column, value):
         if _missing(value):
             return ""
+        if column == "doi":
+            # The same check as the case strip of Draw (the schema has none): a text that is no DOI is kept, but flagged
+            studyUi = library._studyUi()
+            if studyUi is not None and not studyUi.isDoi(value):
+                return _("{text} does not look like a DOI (10.xxxx/…)").format(text=studyUi.normalizeDoi(value))
         schema = _lnm("schema")
-        spec = schema.registered(column)
+        spec = self._specOf(study, column)
         if spec is None or spec.strict:
             return ""
         try:
             _text, warning = schema.normalize_with_spec(spec, str(value))
         except ValueError as e:
-            return str(e)
-        return warning or ""
+            return self._inWords(column, spec, str(e))
+        return self._inWords(column, spec, warning or "")
+
+    @staticmethod
+    def _inWords(column, spec, message):
+        """The schema's warning with the field's label, as shown next to the editor, instead of the column code."""
+        label = _(FIELD_LABELS.get(column, column))
+        code = spec.name
+        if not message or label == code:
+            return message
+        if message.startswith(f"{code} value "):
+            return f"{label}: " + message[len(f"{code} value "):]
+        return message.replace(f" {code} ", f" {label} ", 1)
 
     def _caseNumber(self, study, sid):
         order = recordedGallery(study)
@@ -950,8 +1178,10 @@ class CaseSection:
         session = _session()
         if session is None or self.sid is None or self.sid not in session.study or self._loading:
             return False
+        if column in library._hiddenColumns(session.study):
+            return False  # a blinded field is not shown, so it is not written either
         current = session.study.subject(self.sid).get(column)
-        text = str(text).strip()
+        text = _lnm("study").typographic_quotes(str(text).strip())  # as Study.set stores it, so an unchanged field is not rewritten
         if column == "doi" and doiOf(text):
             text = doiOf(text)  # "doi:10.1000/x" and the doi.org address are stored as the bare DOI
         if text == ("" if _missing(current) else str(current)):

@@ -147,7 +147,7 @@ ROWS = (
         keywords="template templates own mni brain model add template icbm fsl mni152 2009b colin custom atlas space default template",
         note=_("Official 3D Slicer has no template list: you load a template with File > Add Data. In Studio a template you add is "
                "copied into the Slicer Studio folder (Templates) and used by Start on template, Map and Normalize to MNI.")),
-    Row("recent", _("File > Recent"), _("Library > Recent"), target="StudioRecentList", workspace="library", keywords="recent files history reopen"),
+    Row("recent", _("File > Recent"), _("Library > Opened from elsewhere"), target="StudioRecentList", workspace="library", keywords="recent files history reopen"),
     Row("save-data", _("File > Save Data"), _("Saved automatically to Projects/<name> in the Slicer Studio folder ({key:Ctrl+S} saves now)"),
         officialKey="Ctrl+S", key="Ctrl+S", target=("StudioSaveStatus", "StudioAppMenuButton"), keywords="save scene mrb mrml save data write save project autosave",
         note=_("Each project is a 3D Slicer scene (.mrml) with its data in folders. To save only the lesion as a NIfTI mask, use Save "
@@ -208,7 +208,7 @@ ROWS = (
         category="editor"),
     Row("segment-editor-masking", _("Segment Editor > Masking (Editable area, Editable intensity range, Modify other segments)"),
         _("Draw > More tools ▾: the overwrite options appear under the tool options; they also stay shown while they limit where you paint"),
-        target=("MaskingGroupBox", "SegmentEditorMoreToolsButton", "EffectsGroupBox"), workspace="draw",
+        target=("MaskingGroupBox", "SegmentEditorMoreToolsButton", "EffectsGroupBox", "StudioDrawEmptyState"), workspace="draw",
         keywords="masking mask editable area intensity range overwrite modify other segments paint everywhere overlap",
         category="editor"),
     Row("segment-editor-display", _("Segmentations > Display (opacity, outline, Show 3D) and Volumes > window/level"),
@@ -235,7 +235,7 @@ ROWS = (
         category="editor"),
     Row("segment-editor-undo", _("Segment Editor Undo / Redo"), _("Undo and Redo in the top bar while you draw ({key:Ctrl+Z}, {key:Ctrl+Y})"),
         officialKey="Ctrl+Z / Ctrl+Shift+Z", key="Ctrl+Z", target="StudioUndoButton", workspace="draw", keywords="undo redo history", category="editor",
-        note=_("Ctrl+Shift+Z, and Z and Y without Ctrl, still work as in 3D Slicer.")),
+        note=_("{key:Ctrl+Shift+Z}, and Z and Y alone, still work as in 3D Slicer.")),
     Row("segmentations-module", _("Segmentations module"),
         _("Search > Segmentations ({key:Ctrl+K}); in Draw, ⋯ of the panel > Show all controls also shows its button"),
         key="Ctrl+K", target="StudioSearchPill", keywords="segmentations module representations closed surface import export",

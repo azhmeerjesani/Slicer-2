@@ -134,7 +134,10 @@ def _pText(value, floor=None):
 
 
 def _safeName(text):
-    return re.sub(r"[^A-Za-z0-9]+", "", str(text)) or "x"
+    """The ASCII letters and digits of a name, plus a tag of it when it has other letters (glm._unicode_tag), so that "失語" and "運動" get different folders."""
+    from LesionNetworkMappingLib import glm
+
+    return (re.sub(r"[^A-Za-z0-9]+", "", str(text)) + glm._unicode_tag(text)) or "x"
 
 
 def _setAlignment(item, alignment):
@@ -420,6 +423,7 @@ class ValidateCard:
 
     def _buildControls(self, layout):
         form = qt.QFormLayout()
+        form.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
         self.outcomeCombo = self._combo("LNMValidateOutcome", _("The outcome the circuit is validated against: a group column with two levels (binary: AUC, odds ratio) or a score (continuous: r, out-of-sample R²)"),
                                         self.onOutcomeChanged)
@@ -478,6 +482,9 @@ class ValidateCard:
         self.refmapLabel = label("", "LNMValidateRefmaps", "secondaryText")
         refRow.addWidget(self.refmapLabel, 1)
         layout.addLayout(refRow)
+        # The μC and PC1 baselines need the connectome's reference maps (not the extra maps above): said before the run, not after
+        self.connectomeRefNote = label("", "LNMValidateConnectomeRefs", "secondaryText")
+        layout.addWidget(self.connectomeRefNote)
         # Options
         self.optionsButton = qt.QToolButton()
         self.optionsButton.setObjectName("LNMValidateOptionsButton")
@@ -492,6 +499,7 @@ class ValidateCard:
         self.options = qt.QWidget()
         self.options.setObjectName("LNMValidateOptions")
         options = qt.QFormLayout(self.options)
+        options.setRowWrapPolicy(qt.QFormLayout.WrapLongRows)
         options.setContentsMargins(0, 0, 0, 0)
         self.scoreCombo = self._combo("LNMValidateScore", _("The lesion score the models use: the Fisher-z spatial r of the lesion's network map with the circuit (default), the damage score (needs the lesion "
                                                             "occupancy of the cohort maps) or the ROI connectivity (top-x% circuits only)"))
@@ -556,6 +564,9 @@ class ValidateCard:
         self.tableWidget.setAlternatingRowColors(False)
         self.tableWidget.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
         self.tableWidget.setVerticalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        # Every reference-map row starts with "Reference: ": on the narrow inspector the default right-side elision keeps
+        # only that prefix and two maps read the same. Eliding in the middle keeps the end of the name (the part that differs)
+        self.tableWidget.setTextElideMode(qt.Qt.ElideMiddle)
         box.addWidget(self.tableWidget)
         self.tableCaption = label("", "LNMValidateTableCaption", "caption")
         box.addWidget(self.tableCaption)
@@ -651,7 +662,7 @@ class ValidateCard:
         if path:
             return os.path.dirname(os.path.dirname(path))
         widget = _mapWidget()
-        cohortDir = widget.cohortOutputDir() if widget is not None and hasattr(widget, "cohortOutputDir") else None
+        cohortDir = widget.cohortOutputDir(ownOnly=True) if widget is not None and hasattr(widget, "cohortOutputDir") else None
         return os.path.dirname(cohortDir) if cohortDir else None
 
     def participantsPath(self):
@@ -1149,7 +1160,7 @@ class ValidateCard:
         self.setRefmaps(chosen)
 
     def addRefmapFile(self):
-        path = qt.QFileDialog.getOpenFileName(self.widget, _("Reference map"), "", "NIfTI (*.nii *.nii.gz)")
+        path = qt.QFileDialog.getOpenFileName(self.widget, _("Reference map"), widgets.dialogStartFolder(), "NIfTI (*.nii *.nii.gz)")
         if path:
             self.setRefmaps(self.refmaps() + [path] if path not in self._refmaps else self.refmaps())
             if self.refmapPopover is not None:
@@ -1162,9 +1173,53 @@ class ValidateCard:
         self.showRefmapState()
         self.showState()
 
+    def connectomeHasReference(self):
+        """Whether the connectome has valid reference maps (μC_r, PC1 behind two baselines); True when there is no connectome yet.
+
+        A listing of reference.json files (no data read), asked again at every refresh so that a build that finishes shows.
+        """
+        bundle = self.ctx.bundle
+        if bundle is None:
+            return True
+        try:
+            from LesionNetworkMappingLib import reference
+
+            return any(entry["status"] == "ok" for entry in reference.reference_status(bundle, verify=False, check_data=False))
+        except Exception:
+            logging.debug("Lesion network mapping: the reference maps of the connectome could not be listed", exc_info=True)
+            return True
+
+    def offGridRefmaps(self):
+        """Basenames of the chosen reference map files that are not on the connectome grid (they would be left out of the run)."""
+        mask = self.maskPath()
+        if not mask or not os.path.isfile(mask):
+            return []
+        from LesionNetworkMappingLib import nifti
+        import numpy as np
+
+        out = []
+        try:
+            grid = nifti.read_nifti_header(mask)
+        except Exception:
+            return out
+        for path in self._refmaps:
+            try:
+                header = nifti.read_nifti_header(path)
+                if tuple(header["shape"][:3]) != tuple(grid["shape"][:3]) or not np.allclose(header["affine"], grid["affine"], atol=1e-4, rtol=0):
+                    out.append(os.path.basename(path))
+            except Exception:
+                continue
+        return out
+
     def showRefmapState(self):
         names = [os.path.basename(path) for path in self._refmaps]
-        self.refmapLabel.setText(_("{n} reference map(s): {names}").format(n=len(names), names=", ".join(names[:3]) + (" …" if len(names) > 3 else "")) if names else _("No reference maps (volume, μC, PC1 and lesion location are always included)."))
+        self.refmapLabel.setText(_("{n} reference map(s): {names}").format(n=len(names), names=", ".join(names[:3]) + (" …" if len(names) > 3 else "")) if names else _("No extra reference maps (volume and lesion location are always included)."))
+        off = self.offGridRefmaps()
+        if off:
+            self.refmapLabel.setText(self.refmapLabel.text + " " + _("Not on the connectome grid, left out of the run: {names} (resample to the connectome grid first).").format(names=", ".join(off)))
+        missing = not self.connectomeHasReference()
+        self.connectomeRefNote.setText(_("The μC (degree) and PC1 baselines need the connectome's reference maps, which this connectome does not have yet: they will show as not computed. Build them in the Connectome card (Manage… > Build reference maps).") if missing else "")
+        self.connectomeRefNote.setVisible(missing)
 
     #
     # Run
@@ -1421,7 +1476,7 @@ class ValidateCard:
         symbol = "ΔAUC" if primary == "auc" else "ΔR²"
         text = incremental.get("text") or ""
         delta = f"Δ {_num(incremental.get('delta'))}"
-        table.setItem(last, 0, _tableItem(_("Δ vs volume alone"), f"{symbol}: " + _("volume + circuit minus volume alone") + (f"\n{text}" if text else ""), right=False, bold=True))
+        table.setItem(last, 0, _tableItem(_("Δ vs volume"), f"{symbol}: " + _("volume + circuit minus volume alone") + (f"\n{text}" if text else ""), right=False, bold=True))
         table.setItem(last, 1, _tableItem(delta if primary == "auc" else "—", text, bold=True))
         table.setItem(last, 2, _tableItem(delta if primary != "auc" else "—", text, bold=True))
         table.setItem(last, 3, _tableItem("—", text))
@@ -1550,7 +1605,7 @@ class ValidateCard:
     def showFolder(self):
         folder = self.result[0] if self.result else (self.frozenResult[0] if self.frozenResult else None)
         if folder and os.path.isdir(folder) and not slicer.app.testingEnabled():
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(folder))
+            widgets.showInFileManager(folder)
 
     #
     # Frozen circuit
@@ -1565,7 +1620,7 @@ class ValidateCard:
         current = getattr(self.ctx, "currentCircuit", None)
         if current and current.get("path") and os.path.isfile(current["path"]):
             return dict(current)
-        path = qt.QFileDialog.getOpenFileName(self.widget, _("Circuit map to freeze"), "", "NIfTI (*.nii *.nii.gz)")
+        path = qt.QFileDialog.getOpenFileName(self.widget, _("Circuit map to freeze"), widgets.dialogStartFolder(), "NIfTI (*.nii *.nii.gz)")
         if not path:
             return None
         return {"path": os.path.abspath(path), "sha256": export.file_sha256(path), "kind": "file"}
@@ -1691,9 +1746,17 @@ class ValidateCard:
         metric = "AUC" if binary else "r"
         circuit, volume = metrics.get(first) or {}, (record.get("volume_metrics") or {}).get(first) or {}
         bootstrap = record.get("bootstrap") or {}
+        independence = frozen.get("independence") or {}
+        sameCohort = independence.get("provenance") == "same_cohort"
+        sha = str(frozen.get("sha256") or "")[:16] + "…"
+        if sameCohort:
+            fitted = _("Not an independent replication: {basis}. The result is circular (same cohort).").format(basis=independence.get("basis") or _("the circuit was made from the scored lesions"))
+            fitted = '<span style="color:{}"><b>{}</b></span>'.format(levelColor("warn"), html.escape(fitted))
+        else:
+            fitted = html.escape(_("Nothing was fitted on this cohort."))
         lines = [
             "<b>" + html.escape(_("Frozen circuit applied to {n} subjects · {outcome}").format(n=outcome.get("n", "?"), outcome=outcome.get("column", ""))) + "</b>",
-            html.escape(_("The circuit file has sha256 {sha}, recorded in validation.json. Nothing was fitted on this cohort.").format(sha=str(frozen.get("sha256") or "")[:16] + "…")),
+            html.escape(_("The circuit file has sha256 {sha}, recorded in validation.json.").format(sha=sha)) + " " + fitted,
             html.escape(_("95% CI: simple bootstrap of the subjects within strata ({boot} resamples). There is no permutation p: no model was fitted here.").format(boot=bootstrap.get("B", "?"))),
         ]
         self.frozenSummary.setText("".join(f"<div>{line}</div>" for line in lines))
@@ -1702,7 +1765,7 @@ class ValidateCard:
             overlap = not (float(circuit["ci"][1]) < float(volume["ci"][0]) or float(volume["ci"][1]) < float(circuit["ci"][0]))
         except (KeyError, TypeError, ValueError, IndexError):
             overlap = None
-        text = _("The frozen circuit gives {metric} {value} (95% CI {low} to {high}) in this cohort; lesion volume alone gives {volumeValue} (95% CI {volumeLow} to {volumeHigh}).").format(
+        text = (_("Same-cohort (circular) result: ") if sameCohort else "") + _("The frozen circuit gives {metric} {value} (95% CI {low} to {high}) in this cohort; lesion volume alone gives {volumeValue} (95% CI {volumeLow} to {volumeHigh}).").format(
             metric=metric, value=_num(circuit.get("value")), low=_num((circuit.get("ci") or [None, None])[0]), high=_num((circuit.get("ci") or [None, None])[1]),
             volumeValue=_num(volume.get("value")), volumeLow=_num((volume.get("ci") or [None, None])[0]), volumeHigh=_num((volume.get("ci") or [None, None])[1]))
         if overlap is not None:

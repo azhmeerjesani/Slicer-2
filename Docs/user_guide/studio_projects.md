@@ -6,7 +6,7 @@ remember. The first time Slicer Studio starts, it asks one question:
 > **Where should Slicer Studio keep your work?**
 
 It proposes a folder called **Slicer Studio** in your Documents folder. Press
-**Continue** to accept it, or **Choose folder…** to pick another one. If you
+**Continue** to accept it, or **Choose…** to pick another one. If you
 close the window, the proposed folder is used. You can change the folder later
 in **Settings › Saving**.
 
@@ -32,7 +32,7 @@ Slicer Studio/
 │       ├── Markups/             point lists and other markups
 │       ├── Models/  Tables/  Transforms/  Other/
 │       ├── Exports/             screenshots, figures, reports, exported tables and nifti/ (NIfTI exports)
-│       └── .studio/             Slicer Studio's own notes (thumbnail, lock): safe to ignore
+│       └── .studio/             Slicer Studio's own notes (thumbnail, lock, where copies came from): safe to ignore
 ├── Studies/
 │   └── Stroke cohort/           lesion network mapping studies
 ├── Templates/
@@ -44,7 +44,9 @@ Templates/ appears when you add your own MNI template. How to add one and use it
 explained in [Your own MNI templates](studio_templates.md).
 
 A folder appears only when something is saved into it, so a new project with
-one scan has just `Images/` and its `.mrml` file.
+one scan has `Images/` (the copy of the scan), `Segmentations/` (the empty
+lesion drawing that opening a scan creates, `Lesions (<scan name>)`) and its
+`.mrml` file.
 
 ## Projects
 
@@ -56,11 +58,22 @@ you compute. In Slicer Studio:
   example `sub-012 T1w`, or `Untitled project`. A message says
   "Saving to Projects/sub-012 T1w"; its **Rename** button renames it.
 - The files you open are **copied** into the project. Your original files are
-  never changed or moved.
+  never changed or moved. Opening one of them again (Open…, a drop, Recent, or a
+  folder's **Load all**) does not load a second copy: its scan or lesion becomes
+  current again ("<name> is already open"), also after a restart. The same goes
+  for a DICOM folder of one series dropped again or reopened from Recent: the
+  series is not loaded a second time. Slicer Studio
+  remembers where each copy came from in the project's `.studio/` folder, never
+  in the scene file.
 - Opening a Slicer scene (`.mrml` or `.mrb`) from somewhere else makes a new
   project that starts as a copy: "Opened a copy in Projects/<name>. The original
-  is not changed."
+  is not changed." If some of its files cannot be read (missing or damaged), the
+  copy holds what loaded and a warning names what is missing; if nothing loads
+  (for example a damaged scene file), no project is made.
 - Opening a project from **Library › Projects** continues it where you left it.
+  A project folder that cannot be written (a read-only share or medium) is left
+  as it is and continues as a copy: "<name> is read-only: opened a copy in
+  Projects/<name> 2. The original is not changed."
 - While a lesion network mapping **study** is open, the study saves its own
   files (in `Studies/`): no project is made for it.
 
@@ -87,14 +100,26 @@ Finder/Files** or **Move to Trash**.
 
 If another program changes a file of a project while Slicer Studio has it open,
 that file is never overwritten: Slicer Studio saves its own version next to it,
-as `<name> (Slicer Studio).<ext>`, and tells you.
+as `<name> (Slicer Studio).<ext>`, and tells you. This includes the scene file:
+if official 3D Slicer saves `<name>.mrml` while the project is open, Slicer
+Studio keeps it and saves its own scene as `<name> (Slicer Studio).mrml` from
+then on. The next time, the project opens `<name>.mrml`; open the
+`(Slicer Studio)` file to continue with Slicer Studio's version. Files that
+Slicer Studio saves itself, for example with **File › Save Data** in Classic,
+are not another program's change: the project keeps saving them in place.
 
 When you close something in a project (a scan, a point list), its file goes to
 `.studio/removed/` in the project, where it stays for 14 days.
 
 The pause and the interval are set in **Settings › Saving**. The same panel
-shows the Slicer Studio folder, with **Change…** and **Show**. When you change
-the folder, Slicer Studio offers to move your projects and studies there.
+shows the Slicer Studio folder, with **Change…** and **Show in Files** (**Show in Finder**
+on macOS, **Show in Explorer** on Windows). When you change the folder, Slicer Studio
+offers to move your projects, studies and templates there.
+Anything whose name the new folder already uses moves in under another name: a
+template "My template" becomes "My template 2" and stays your default if it was.
+If Slicer Studio closes during the move (a crash, a power cut), it finishes the
+move the next time it starts and tells you; when the new folder is on a drive
+that is not connected then, connect it and start Slicer Studio again.
 
 ## Open a project in official 3D Slicer
 
@@ -117,6 +142,10 @@ next to the `.mrml` file into their folders.
   file anywhere. The project itself stays where it is and keeps saving there.
 - Scene files hold no absolute paths of your computer, so a copied project opens
   on another computer.
+- A project that was still open on another computer when it was copied (or when
+  that computer crashed) says so when you open it: if it is not open there any
+  more, choose **Open here**. After two hours without a sign of the other
+  computer it opens without asking.
 - **Use the images in FSL, SPM, AFNI or Python**: **Export project as NIfTI…**
   (the save status menu of the top bar, the project's card in Library, or
   Search) writes every image, lesion and map of the project as NIfTI files into

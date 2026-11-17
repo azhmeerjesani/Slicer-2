@@ -8,6 +8,7 @@ native subject of ``lnm_normalize_fixture.py`` (no network)::
 Under a plain PythonSlicer (the library test glob) the module is skipped.
 """
 
+import json
 import os
 import shutil
 import sys
@@ -176,6 +177,13 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
     # Entry points
     #
 
+    def test_describe_unwritable_output_folder(self):
+        text, offer = self.nc.describeFailure({"code": "output_unwritable", "message": "The output folder /x/y cannot be written: Permission denied", "event": {"path": "/x/y"}})
+        self.assertIsNone(offer)
+        self.assertIn("/x/y", text)
+        self.assertIn("Settings", text)
+        self.assertNotIn("unexpected", text)
+
     def test_01_entry_points(self):
         """canNormalize() answers without starting anything; offerNormalize() never starts a job; no download under testing."""
         nc = self.nc
@@ -261,7 +269,9 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
         self.assertTrue(space.isMni(segmentation))
         for node in (segmentation, result.volumeNode):
             self.assertEqual(node.GetAttribute(nc.SPACE_ATTRIBUTE), TEMPLATE)
-            self.assertEqual(node.GetAttribute(nc.NORMALIZATION_ATTRIBUTE), os.path.join(result.outDir, "normalization.json"))
+            # A portable reference, never the absolute path (SPEC 9.7 rules 2 and 10)
+            self.assertEqual(node.GetAttribute(nc.NORMALIZATION_ATTRIBUTE), f"normalization/{os.path.basename(result.outDir)}/normalization.json")
+            self.assertEqual(os.path.normpath(nc.resolveReference(node.GetAttribute(nc.NORMALIZATION_ATTRIBUTE))), os.path.normpath(result.provenancePath))
             self.assertIn(node.GetAttribute(nc.SUGGESTION_ATTRIBUTE), ("looks-ok", "review"))
         self.assertEqual(segmentation.GetAttribute(nc.NORMALIZED_FROM_ATTRIBUTE), f"{self.native.GetID()}|{self.nativeSegmentId}")
         self.assertFalse(result.volumeNode.GetDisplayNode().GetAutoWindowLevel())
@@ -285,6 +295,51 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
             lines = []
             self.assertEqual(module.scan([result.outDir], False, lines.append), 0, "\n".join(lines))
 
+    def test_03b_scene_holds_no_absolute_path(self):
+        """A saved scene (project, .mrb) holds no absolute local path in the normalization attributes; earlier absolute values are replaced."""
+        import re
+
+        nc = self.nc
+        self.assertIsNotNone(self.result)
+
+        def sceneXml():
+            scene = slicer.mrmlScene
+            scene.InvokeEvent(slicer.vtkMRMLScene.StartSaveEvent)  # as File > Save and .mrb writing do: the scene migration runs
+            scene.SetSaveToXMLString(1)
+            try:
+                scene.Commit()
+                return scene.GetSceneXMLString()
+            finally:
+                scene.SetSaveToXMLString(0)
+
+        def lnmValues(xml):
+            return re.findall(r"LNM\.(?:Normalization|NormLesionWarp):([^;\"]*)", xml)
+
+        xml = sceneXml()
+        values = lnmValues(xml)
+        self.assertTrue(values, "no LNM.Normalization attribute in the scene")
+        for value in values:
+            self.assertFalse(value.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", value), f"absolute path in a scene attribute: {value}")
+        self.assertNotIn(self.tmp, "".join(values))
+        # A scene of an earlier version (absolute values) is migrated before it is saved again
+        volume = self.result.volumeNode
+        reference = volume.GetAttribute(nc.NORMALIZATION_ATTRIBUTE)
+        volume.SetAttribute(nc.NORMALIZATION_ATTRIBUTE, self.result.provenancePath)
+        volume.SetAttribute(nc.LESION_WARP_ATTRIBUTE, os.path.join(self.result.outDir, "warps", "sub-01_edit-1234_desc-lesion_mask.nii.gz"))
+        try:
+            for value in lnmValues(sceneXml()):
+                self.assertNotIn(self.tmp, value)
+            self.assertEqual(volume.GetAttribute(nc.NORMALIZATION_ATTRIBUTE), reference)
+            self.assertEqual(volume.GetAttribute(nc.LESION_WARP_ATTRIBUTE), f"normalization/{os.path.basename(self.result.outDir)}/warps/sub-01_edit-1234_desc-lesion_mask.nii.gz")
+        finally:
+            volume.RemoveAttribute(nc.LESION_WARP_ATTRIBUTE)
+            volume.SetAttribute(nc.NORMALIZATION_ATTRIBUTE, reference)
+        # References of other computers and of studies
+        self.assertEqual(nc.portableReference("/Users/a/Studies/s1/derivatives/normalization/sub-02/normalization.json"), "derivatives/normalization/sub-02/normalization.json")
+        self.assertEqual(nc.portableReference("C:\\Users\\a\\Documents\\Slicer Studio\\LNM\\normalization\\sub-02-0a1b2c3d\\normalization.json"), "normalization/sub-02-0a1b2c3d/normalization.json")
+        self.assertEqual(nc.portableReference("/data/out/normalization.json"), "out/normalization.json")
+        self.assertEqual(nc.resolveReference("derivatives/normalization/sub-02/normalization.json", "/study"), os.path.join("/study", "derivatives", "normalization", "sub-02", "normalization.json"))
+
     def test_04_rerun_reused(self):
         """Normalizing the same lesion again reuses the result (no new nodes) within 2 s."""
         self.assertIsNotNone(self.result)
@@ -306,6 +361,8 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
         self._setOptions(quality="standard")
         controller = self.card.controller
         nodesBefore = (self._segmentationNodes(), self._volumeNodes())
+        previous = controller.result
+        self.assertIsNotNone(previous)
         stages = []
 
         def onProgress(fraction, text, eta):
@@ -325,6 +382,12 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
         print(f"stop: cancelled after {seconds:.2f} s")
         self.assertLessEqual(seconds, 3.0)
         self.assertEqual((self._segmentationNodes(), self._volumeNodes()), nodesBefore)
+        # "Nothing was changed": the previous result is still the card's result, with its QC and its folder (and no edit)
+        _pump(self.nc.EDIT_DEBOUNCE_MS + 700)
+        self.assertIs(controller.result, previous)
+        self.assertEqual(controller.outDir, previous.outDir)
+        self.assertFalse(controller.edited)
+        self.assertIsNotNone(self.card._qcPanel)
         self._setOptions(quality="affine")
 
     def test_06_review_restore(self):
@@ -347,6 +410,98 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
         self.assertEqual(controller.compositeState(), before)
         self.assertEqual(self._volumeNodes(), volumesBefore)
         self.assertTrue(display.GetVisibility2DFill())
+
+    def test_06b_review_uses_open_user_template(self):
+        """The review shows the open volume of the user's template (no second copy), and names a copy it must read by the template name."""
+        from StudioLib import importer, projects, templates
+
+        controller = self.card.controller
+        root = os.path.join(self.tmp, "studio-root")
+        environment = os.environ.get(projects.ROOT_ENVIRONMENT)
+        os.environ[projects.ROOT_ENVIRONMENT] = root
+        opened = []
+        volumesBefore = self._volumeNodes()
+        try:
+            template = templates.addTemplate(self.nc.templateFile(TEMPLATE, "fixed"), mask=self.nc.templateFile(TEMPLATE, "mask"),
+                                             name="Lab review brain", space=TEMPLATE)
+            self.assertTrue(template.id.startswith("user:"), template.id)
+            node = importer.loadTemplateVolume(template)
+            opened.append(node)
+            self.assertEqual(node.GetAttribute("Studio.TemplateId"), template.id)
+            volumesOpen = self._volumeNodes()
+            found, created = controller._reviewTemplate(template.id)
+            self.assertIs(found, node)
+            self.assertFalse(created)
+            self.assertEqual(self._volumeNodes(), volumesOpen)
+            # Without the open volume the template file is read, named by the template name and never by its raw id
+            slicer.mrmlScene.RemoveNode(node)
+            opened.clear()
+            found, created = controller._reviewTemplate(template.id)
+            self.assertTrue(created)
+            opened.append(found)
+            self.assertEqual(found.GetName(), "Lab review brain template")
+            self.assertNotIn("user:", found.GetName())
+        finally:
+            for node in opened:
+                if slicer.mrmlScene.IsNodePresent(node):
+                    controller._removeWithHelpers(node)
+            for node in list(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")):
+                if node.GetID() not in volumesBefore:
+                    controller._removeWithHelpers(node)
+            if environment is None:
+                os.environ.pop(projects.ROOT_ENVIRONMENT, None)
+            else:
+                os.environ[projects.ROOT_ENVIRONMENT] = environment
+            templates.registerGrids(force=True)
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_06c_done_toast_names_user_template(self):
+        """The 'Lesion normalized' toast names the user's template by its name, never by its raw id (as the Draw card does)."""
+        from StudioLib import projects, templates
+
+        root = os.path.join(self.tmp, "studio-root-toast")
+        environment = os.environ.get(projects.ROOT_ENVIRONMENT)
+        os.environ[projects.ROOT_ENVIRONMENT] = root
+        controller = self.card.controller
+        resultBefore = controller.result
+
+        class _Shell:
+            toasts = []
+
+            def toast(self, text, _ms=0):
+                self.toasts.append(text)
+
+        class _Result:
+            segmentationNode = None
+            nativeSegmentationNode = None
+            segmentId = None
+
+            def __init__(self, templateId):
+                self.templateId = templateId
+
+        fake = _Shell()
+        try:
+            template = templates.addTemplate(self.nc.templateFile(TEMPLATE, "fixed"), mask=self.nc.templateFile(TEMPLATE, "mask"),
+                                             name="Lab toast brain", space=TEMPLATE)
+            self.assertTrue(template.id.startswith("user:"), template.id)
+            self.ctx.shell = lambda: fake
+            for templateId, expected in ((template.id, "Lab toast brain"), (TEMPLATE, TEMPLATE)):
+                result = _Result(templateId)
+                controller.result = result
+                self.card._useResult(result)
+                controller.result = None  # the deferred showInViews must not run on the stand-in
+                self.assertIn(expected, fake.toasts[-1])
+                self.assertNotIn("user:", fake.toasts[-1])
+            _pump(50)
+        finally:
+            self.ctx.__dict__.pop("shell", None)  # back to the class method
+            controller.result = resultBefore
+            if environment is None:
+                os.environ.pop(projects.ROOT_ENVIRONMENT, None)
+            else:
+                os.environ[projects.ROOT_ENVIRONMENT] = environment
+            templates.registerGrids(force=True)
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_07_edit_then_update(self):
         """An edit of the native lesion offers Update MNI lesion, which re-warps it within 5 s."""
@@ -378,7 +533,9 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
         self.assertFalse(controller.edited)
         # The updated segmentation no longer holds the run's lesion: a reuse of the run must not return it
         self.assertNotEqual(segmentation.GetAttribute(self.nc.FINGERPRINT_ATTRIBUTE), controller.result.fingerprint or "")
-        self.assertTrue(os.path.isfile(segmentation.GetAttribute(self.nc.LESION_WARP_ATTRIBUTE) or ""))
+        warp = segmentation.GetAttribute(self.nc.LESION_WARP_ATTRIBUTE) or ""
+        self.assertFalse(os.path.isabs(warp), warp)
+        self.assertTrue(os.path.isfile(self.nc.resolveReference(warp) or ""), warp)
         # An edit far outside the original lesion needs a new registration
         array = slicer.util.arrayFromSegmentBinaryLabelmap(self.native, self.nativeSegmentId, self.scan)
         array[5:9, 5:9, 5:9] = 1
@@ -398,11 +555,69 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
         self.assertTrue(self._cardVisible())
         result = self._runAndWait(timeoutS=30.0)
         self.assertEqual(result.status, "reused")
-        self.assertIsNot(result.segmentationNode, edited)
+        # The same MNI lesion node (the Map seed keeps following it) holds the run's lesion again, tagged with the run
+        self.assertIs(result.segmentationNode, edited)
+        self.assertEqual(edited.GetAttribute(self.nc.FINGERPRINT_ATTRIBUTE), result.fingerprint or "")
+        self.assertFalse(edited.GetAttribute(self.nc.LESION_WARP_ATTRIBUTE))
         self.assertIs(result.volumeNode, self.result.volumeNode)  # the warped scan is unchanged and reused
         voxels = int(np.count_nonzero(slicer.util.arrayFromSegmentBinaryLabelmap(result.segmentationNode, "Lesion", result.volumeNode)))
         self.assertLessEqual(abs(voxels - self.mniVoxels), 0.02 * self.mniVoxels)
         self.assertFalse(controller.edited)
+
+    def test_07c_reregister_replaces_previous_result(self):
+        """A new registration of the edited lesion (Normalize again / Re-register) replaces the earlier MNI lesion and scan in place.
+
+        Regression (bug bash BB-1): it added "Lesion (…)_1" and a second warped scan, and the Map seed chosen with
+        Use for Map stayed on the outdated MNI lesion.
+        """
+        import numpy as np
+
+        nc = self.nc
+        controller = self.card.controller
+        previous = controller.result
+        self.assertIsNotNone(previous)
+        segmentation, volume = previous.segmentationNode, previous.volumeNode
+        self.ctx.setSeed(segmentation, "Lesion")  # what Use for Map does
+        before = int(np.count_nonzero(slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, "Lesion", volume)))
+        nodesBefore = (self._segmentationNodes(), self._volumeNodes())
+        # An edit far outside the normalized lesion: a new registration (new fingerprint), not an update
+        array = slicer.util.arrayFromSegmentBinaryLabelmap(self.native, self.nativeSegmentId, self.scan)
+        nz = np.argwhere(array > 0)
+        low = nz.min(axis=0)
+        k, j, _i = (int(value) for value in nz.mean(axis=0))
+        i0 = max(2, int(low[2]) - 14)
+        array[k - 3:k + 3, j - 3:j + 3, i0:i0 + 6] = 1
+        slicer.util.updateSegmentBinaryLabelmapFromArray(array, self.native, self.nativeSegmentId, self.scan)
+        self.assertTrue(_wait(lambda: controller.needsReregister, 5.0))
+        done, failed = [], []
+        controller.resultReady.append(done.append)
+        controller.failed.append(failed.append)
+        try:
+            self.assertTrue(controller.start(previous.request.copy(quality="affine")))
+            self.assertTrue(_wait(lambda: done or failed or controller.state in ("cancelled", "failed"), 90.0), controller.state)
+        finally:
+            controller.resultReady.remove(done.append)
+            controller.failed.remove(failed.append)
+        _pump(300)
+        try:
+            self.assertFalse(failed, failed[0]["message"] if failed else "")
+            result = done[0]
+            self.assertNotEqual(result.fingerprint, previous.fingerprint)
+            # One MNI lesion and one warped scan per native lesion and template: the same nodes, no new ones
+            self.assertIs(result.segmentationNode, segmentation)
+            self.assertIs(result.volumeNode, volume)
+            self.assertEqual((self._segmentationNodes(), self._volumeNodes()), nodesBefore)
+            for node in (segmentation, volume):
+                self.assertEqual(node.GetAttribute(nc.FINGERPRINT_ATTRIBUTE), result.fingerprint or "")
+                self.assertEqual(node.GetAttribute(nc.NORMALIZATION_ATTRIBUTE), result.reference)
+            self.assertEqual(segmentation.GetAttribute(nc.NORMALIZED_FROM_ATTRIBUTE), f"{self.native.GetID()}|{self.nativeSegmentId}")
+            after = int(np.count_nonzero(slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, "Lesion", volume)))
+            self.assertGreater(after, before)  # the seed holds the new registration's lesion (with the added voxels)
+            self.assertEqual(self.ctx.seed(), (segmentation, "Lesion"))
+        finally:
+            # Later tests use the original native lesion
+            slicer.util.updateSegmentBinaryLabelmapFromArray(self.nativeOriginal, self.native, self.nativeSegmentId, self.scan)
+            _pump(800)
 
     #
     # Draw card (Studio)
@@ -431,6 +646,16 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
             self.assertLessEqual(card.widget.height, 56)  # compact idle state (laid out in the Draw inspector)
             self.assertTrue(self.nc.offerNormalize(self.native, self.nativeSegmentId, studioShell))
             self.assertEqual(card.controller.state, "idle")
+            self.assertEqual(studioShell.currentWorkspace(), "draw")  # Draw's call to action stays in Draw
+            # "Options in Map…" (the ⋯ menu and the failure banner) shows the Map card, not this Draw card again
+            self.assertTrue(card.openInMap())
+            _pump(300)
+            self.assertEqual(studioShell.currentWorkspace(), "map")
+            self.assertTrue(self._cardVisible())
+            self.assertIs(self.card.scanSelector.currentNode(), self.scan)
+            self.assertEqual(card.controller.state, "idle")  # no job is started
+            studioShell.switchTo("draw")
+            _pump(300)
             # A template source hides the card
             editor.setSegmentationNode(self.mniSegmentation)
             editor.setSourceVolumeNode(self.template)
@@ -516,6 +741,253 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
             _pump(200)
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
 
+    def test_08a_draw_stopped_again_keeps_result(self):
+        """Stopping a "Normalize again" run gives the Draw card its previous result back (QC, Use for Map, Trace on the MNI scan)."""
+        from StudioLib import draw, drawcard_normalize, shell
+
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        _pump(200)
+        try:
+            studioShell.switchTo("draw")
+            _pump(300)
+            editor = slicer.modules.SegmentEditorWidget.editor
+            editor.setSegmentationNode(self.native)
+            editor.setSourceVolumeNode(self.scan)
+            editor.setCurrentSegmentID(self.nativeSegmentId)
+            draw.extension().refreshCards()
+            _pump(500)
+            card = drawcard_normalize.active()
+            self.assertIsNotNone(card)
+            controller = card.controller
+            request = self.nc.NormalizeRequest(scanNode=self.scan, segmentationNode=self.native, segmentId=self.nativeSegmentId)
+            self.assertTrue(controller.loadResult(self.result.outDir, request))
+            self.assertTrue(_wait(lambda: controller.state == "done", 30.0), controller.state)
+            _pump(400)
+            previous = controller.result
+            self.assertFalse(card.doneRow.isHidden())
+            self.assertIsNotNone(card._qcPanel)
+            useForMapBefore = card.useForMapButton.enabled
+            # Normalize again as a real run (not reused), then Stop during the registration
+            controllerStart = controller.start
+            controller.start = lambda request: controllerStart(request.copy(quality="standard", reuse=False, outDir=os.path.join(self.tmp, "draw-stop-run")))
+            try:
+                self.assertTrue(card.start())
+                self.assertTrue(_wait(lambda: controller.stage == "affine", 60.0), f"no affine stage (state {controller.state})")
+            finally:
+                del controller.start
+            self.assertIsNone(controller.result)  # while it runs
+            card.progress.stopButton.click()
+            self.assertTrue(_wait(lambda: controller.state == "cancelled", 10.0), controller.state)
+            # The restored result compares the native lesion again (debounced): the untouched lesion of a loaded result is no edit
+            _pump(self.nc.EDIT_DEBOUNCE_MS + 700)
+            self.assertIs(controller.result, previous)
+            self.assertEqual(controller.outDir, previous.outDir)
+            self.assertFalse(controller.edited)
+            self.assertFalse(card.doneRow.isHidden())
+            self.assertEqual(card.useForMapButton.enabled, useForMapBefore)
+            self.assertIsNotNone(card._qcPanel)
+            self.assertFalse(card._qcPanel.isHidden())
+            self.assertEqual(card.button.text, "Normalize again")
+            self.assertIn("Normalized", card.label.text)
+            self.assertIsNotNone(card.message)
+            self.assertIn("Nothing was changed", card.message.findChild("QLabel", "LNMBannerText").text)
+            self.assertTrue(card.traceOnMni())
+            self.assertIs(editor.sourceVolumeNode(), previous.volumeNode)
+        finally:
+            studioShell.dispose()
+            _pump(200)
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+
+    def test_08b_draw_uses_remembered_options(self):
+        """Draw's Normalize to MNI builds its request from the remembered Map options (the user's own template included)."""
+        from StudioLib import draw, drawcard_normalize, shell
+
+        nc = self.nc
+        settings = qt.QSettings()
+        originalAvailable = nc.templateAvailable
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        _pump(200)
+        try:
+            studioShell.switchTo("draw")
+            _pump(300)
+            editor = slicer.modules.SegmentEditorWidget.editor
+            editor.setSegmentationNode(self.native)
+            editor.setSourceVolumeNode(self.scan)
+            editor.setCurrentSegmentID(self.nativeSegmentId)
+            draw.extension().refreshCards()
+            _pump(500)
+            card = drawcard_normalize.active()
+            self.assertIsNotNone(card)
+            started = []
+            card.controller.start = lambda request: started.append(request) or True
+            try:
+                # Nothing remembered: the defaults
+                settings.remove(nc.LAST_OPTIONS_SETTING)
+                self.assertTrue(card.start())
+                self.assertEqual(started[-1].templateId, nc.DEFAULT_TEMPLATE)
+                self.assertEqual(started[-1].quality, "standard")
+                # Remembered user template (image and mask present), quality and margin
+                settings.setValue(nc.LAST_OPTIONS_SETTING, json.dumps({"templateId": "user:lab-mni-1-5-mm", "quality": "affine", "modality": "t1", "dilateMm": 5}))
+                nc.templateAvailable = lambda templateId: True
+                self.assertTrue(card.start())
+                self.assertEqual(started[-1].templateId, "user:lab-mni-1-5-mm")
+                self.assertEqual(started[-1].quality, "affine")
+                self.assertEqual(started[-1].modality, "t1")
+                self.assertEqual(started[-1].dilateMm, 5.0)
+                self.assertTrue(card.start(scanOnly=True))
+                self.assertEqual(started[-1].templateId, "user:lab-mni-1-5-mm")
+                # The remembered template is gone (or has no mask): the default template, the other options stay
+                nc.templateAvailable = lambda templateId: not nc.isUserTemplate(templateId)
+                self.assertTrue(card.start())
+                self.assertEqual(started[-1].templateId, nc.DEFAULT_TEMPLATE)
+                self.assertEqual(started[-1].quality, "affine")
+                # "Automatic" (no template stored) is the default template here
+                settings.setValue(nc.LAST_OPTIONS_SETTING, json.dumps({"templateId": None, "quality": "fine"}))
+                self.assertTrue(card.start())
+                self.assertEqual(started[-1].templateId, nc.DEFAULT_TEMPLATE)
+                self.assertEqual(started[-1].quality, "fine")
+            finally:
+                nc.templateAvailable = originalAvailable
+                settings.remove(nc.LAST_OPTIONS_SETTING)
+                del card.controller.start
+        finally:
+            studioShell.dispose()
+            _pump(200)
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+
+    def test_08c_draw_result_belongs_to_its_segment(self):
+        """With two lesions in one segmentation, the result of one is not shown (nor used for Map) for the other.
+
+        Regression (bug bash BB-1): after "Lesion 2" was normalized, selecting "Lesion" still showed "Normalized" and
+        Use for Map, which made the warped "Lesion 2" the Map seed; its MNI segment was named "Lesion" as well.
+        """
+        from StudioLib import draw, drawcard_normalize, shell
+
+        nc = self.nc
+        segmentation = self.native.GetSegmentation()
+        secondId = segmentation.AddEmptySegment("", "Lesion 2")
+        slicer.util.updateSegmentBinaryLabelmapFromArray(self.nativeOriginal, self.native, secondId, self.scan)
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        _pump(200)
+        made = []
+        try:
+            studioShell.switchTo("draw")
+            _pump(300)
+            editor = slicer.modules.SegmentEditorWidget.editor
+            editor.setSegmentationNode(self.native)
+            editor.setSourceVolumeNode(self.scan)
+            editor.setCurrentSegmentID(self.nativeSegmentId)
+            draw.extension().refreshCards()
+            _pump(500)
+            card = drawcard_normalize.active()
+            self.assertIsNotNone(card)
+            controller = card.controller
+            request = nc.NormalizeRequest(scanNode=self.scan, segmentationNode=self.native, segmentId=self.nativeSegmentId)
+            self.assertTrue(controller.loadResult(self.result.outDir, request))
+            self.assertTrue(_wait(lambda: controller.state == "done", 30.0), controller.state)
+            _pump(400)
+            self.assertIn("Normalized", card.label.text)
+            self.assertFalse(card.doneRow.isHidden())
+            # The other segment is current (the card follows the editor by itself): it has no MNI copy
+            editor.setCurrentSegmentID(secondId)
+            _pump(drawcard_normalize.REFRESH_DELAY_MS + 300)
+            self.assertEqual(card.label.text, "Native space · Map needs MNI")
+            self.assertEqual(card.button.text, "Normalize to MNI")
+            self.assertTrue(card.doneRow.isHidden())
+            self.ctx.setSeed(self.native, secondId)
+            self.assertFalse(card.useForMap())
+            self.assertEqual(self.ctx.seed(), (self.native, secondId))
+            self.assertEqual(studioShell.currentWorkspace(), "draw")
+            # Back on the normalized segment: its result again
+            editor.setCurrentSegmentID(self.nativeSegmentId)
+            _pump(drawcard_normalize.REFRESH_DELAY_MS + 300)
+            self.assertIn("Normalized", card.label.text)
+            self.assertFalse(card.doneRow.isHidden())
+            # The MNI lesion of "Lesion 2" is named after it (the segment ID stays "Lesion")
+            loaded = {"outDir": os.path.join(self.tmp, "second-lesion"), "record": {"template": {"id": TEMPLATE}, "fingerprint": "second-lesion"}, "outputs": {}}
+            before = self._segmentationNodes()
+            second = controller.createNodes(loaded, "done", nc.NormalizeRequest(scanNode=self.scan, segmentationNode=self.native, segmentId=secondId))
+            made = [slicer.mrmlScene.GetNodeByID(nodeId) for nodeId in self._segmentationNodes() - before]
+            self.assertEqual(second.segmentId, nc.LESION_SEGMENT)
+            self.assertEqual(second.segmentationNode.GetSegmentation().GetSegment(second.segmentId).GetName(), "Lesion 2")
+            self.assertTrue(second.segmentationNode.GetName().startswith("Lesion 2 ("), second.segmentationNode.GetName())
+            self.assertEqual(second.segmentationNode.GetAttribute(nc.NORMALIZED_FROM_ATTRIBUTE), f"{self.native.GetID()}|{secondId}")
+        finally:
+            for node in made:
+                slicer.mrmlScene.RemoveNode(node)
+            segmentation.RemoveSegment(secondId)
+            studioShell.dispose()
+            _pump(200)
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+
+    def test_08d_draw_normalize_again_on_mni_scan(self):
+        """After "Trace on the MNI scan", Normalize again redoes the native scan and lesion of the result (not the warped scan).
+
+        Regression (bug bash BB-1): the request used the editor's MNI scan and MNI lesion, the engine refused it
+        (already on the template grid) and the failed run dropped the card's result (QC, Use for Map, Trace on the MNI scan).
+        """
+        from StudioLib import draw, drawcard_normalize, shell
+
+        studioShell = shell.Shell(force=True)
+        studioShell.apply()
+        _pump(200)
+        try:
+            studioShell.switchTo("draw")
+            _pump(300)
+            editor = slicer.modules.SegmentEditorWidget.editor
+            editor.setSegmentationNode(self.native)
+            editor.setSourceVolumeNode(self.scan)
+            editor.setCurrentSegmentID(self.nativeSegmentId)
+            draw.extension().refreshCards()
+            _pump(500)
+            card = drawcard_normalize.active()
+            self.assertIsNotNone(card)
+            controller = card.controller
+            request = self.nc.NormalizeRequest(scanNode=self.scan, segmentationNode=self.native, segmentId=self.nativeSegmentId)
+            self.assertTrue(controller.loadResult(self.result.outDir, request))
+            self.assertTrue(_wait(lambda: controller.state == "done", 30.0), controller.state)
+            _pump(400)
+            previous = controller.result
+            self.assertTrue(card.traceOnMni())
+            self.assertIs(editor.sourceVolumeNode(), previous.volumeNode)
+            self.assertIs(editor.segmentationNode(), previous.segmentationNode)
+            self.assertEqual(card.button.text, "Normalize again")
+            started = []
+            controller.start = lambda request: started.append(request) or True
+            try:
+                self.assertTrue(card.start())
+            finally:
+                del controller.start
+            self.assertEqual(len(started), 1)
+            self.assertIs(started[0].scanNode, self.scan)
+            self.assertIs(started[0].segmentationNode, self.native)
+            self.assertEqual(started[0].segmentId, self.nativeSegmentId)
+            # Nothing was started for real: the result and its card stay
+            self.assertIs(controller.result, previous)
+            self.assertFalse(card.doneRow.isHidden())
+            # The native scan of the result is gone: no request, a readable message, the result stays
+            originalRequest = previous.request
+            gone = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "closed native scan")
+            previous.request = originalRequest.copy(scanNode=gone)
+            slicer.mrmlScene.RemoveNode(gone)
+            started.clear()
+            controller.start = lambda request: started.append(request) or True
+            try:
+                self.assertFalse(card.start())
+            finally:
+                del controller.start
+                previous.request = originalRequest
+            self.assertEqual(started, [])
+            self.assertIn("no longer open", card.message.findChild("QLabel", "LNMBannerText").text)
+            self.assertIs(controller.result, previous)
+        finally:
+            studioShell.dispose()
+            _pump(200)
+            slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+
     #
     # Settings
     #
@@ -538,6 +1010,100 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
         popover.close()
         self.assertFalse([key for key in _settingsKeys() - self.keysBefore if key.startswith("Studio/LNM")])
 
+    def test_09b_template_list_follows_user_templates(self):
+        """Options > Template is rebuilt each time the popover opens: an added user template is offered, a removed one is not."""
+        nc = self.nc
+        original = nc.userTemplates
+        shown = []
+
+        def offered():
+            popover = self.card.showOptions()
+            _pump(50)
+            texts = [self.card.templateCombo.itemText(i) for i in range(self.card.templateCombo.count)]
+            shown.append(self.card.templateCombo.currentData)
+            popover.close()
+            return texts
+
+        try:
+            nc.userTemplates = lambda: [("user:first", "First (with mask)")]
+            self.card.options["templateId"] = None
+            self.assertTrue(any("First (with mask) (yours)" in text for text in offered()))
+            nc.userTemplates = lambda: [("user:second", "Second (added later)")]
+            texts = offered()
+            self.assertTrue(any("Second (added later) (yours)" in text for text in texts), texts)
+            self.assertFalse(any("First (with mask)" in text for text in texts), texts)
+            self.assertEqual(sum("(yours)" in text for text in texts), 1, texts)
+            # The chosen template stays selected across reopenings
+            self.card.options["templateId"] = "user:second"
+            offered()
+            self.assertEqual(shown[-1], "user:second")
+            nc.userTemplates = lambda: []
+            texts = offered()
+            self.assertFalse(any("(yours)" in text for text in texts), texts)
+            self.assertEqual(shown[-1], "")  # a removed template falls back to Automatic
+        finally:
+            nc.userTemplates = original
+            self.card.options["templateId"] = None
+
+    def test_09c_chosen_template_follows_a_moved_template_id(self):
+        """BB-1: Change folder > Move gave the chosen user template another id (the new folder had a template with its id): the
+        Map card's chosen template and the remembered options follow the new id, so Normalize keeps registering to the image
+        the user chose instead of the other folder's template that kept the old id.
+        """
+        from StudioLib import templates
+
+        settings = qt.QSettings()
+        try:
+            self.card.options["templateId"] = "user:lab-template"
+            settings.setValue(self.nc.LAST_OPTIONS_SETTING, json.dumps({"templateId": "user:lab-template", "quality": "fine"}))
+            templates.followRenamedIds({"user:lab-template": "user:lab-template-2"})
+            self.assertEqual(self.card.options["templateId"], "user:lab-template-2")
+            self.assertEqual(self.nc.rememberedOptions()["templateId"], "user:lab-template-2")
+            self.assertEqual(self.nc.rememberedOptions()["quality"], "fine")
+            # Another chosen template is left alone
+            self.card.options["templateId"] = self.nc.DEFAULT_TEMPLATE
+            templates.followRenamedIds({"user:lab-template-2": "user:lab-template-3"})
+            self.assertEqual(self.card.options["templateId"], self.nc.DEFAULT_TEMPLATE)
+            self.assertEqual(self.nc.rememberedOptions()["templateId"], "user:lab-template-3")
+        finally:
+            self.card.options["templateId"] = None
+            settings.remove(self.nc.LAST_OPTIONS_SETTING)
+            self.card.refreshState()
+
+    def test_09d_edit_during_run_flags_result(self):
+        """BB-1: an edit of the native lesion while the job runs flags the result (made from the lesion as it was at the
+        start) as edited, as an edit after the result does, so Use for Map does not silently use the old lesion.
+        """
+        import numpy as np
+
+        self.ctx.setSeed(self.native, self.nativeSegmentId)
+        self._setOptions(quality="affine")
+        self.assertTrue(self._cardVisible())
+        controller = self.card.controller
+        original = slicer.util.arrayFromSegmentBinaryLabelmap(self.native, self.nativeSegmentId, self.scan).copy()
+        self.assertTrue(original.any())
+        done = []
+        controller.resultReady.append(done.append)
+        try:
+            self.assertTrue(controller.start(self.card.request(outDir=os.path.join(self.tmp, "edit-during-run"), reuse=False)))
+            self.assertTrue(controller.isBusy(), controller.state)
+            # The lesion has been exported: erase its upper half while the job runs (inside the original: an update)
+            array = original.copy()
+            slices = np.nonzero(array.any(axis=(1, 2)))[0]
+            array[slices[len(slices) // 2]:] = 0
+            slicer.util.updateSegmentBinaryLabelmapFromArray(array, self.native, self.nativeSegmentId, self.scan)
+            self.assertTrue(_wait(lambda: done or controller.state in ("cancelled", "failed"), 120.0), controller.state)
+        finally:
+            controller.resultReady.remove(done.append)
+        try:
+            self.assertTrue(done, controller.state)
+            self.assertTrue(_wait(lambda: controller.edited, 5.0), "an edit made during the run does not flag the result")
+            self.assertFalse(controller.needsReregister)
+        finally:
+            slicer.util.updateSegmentBinaryLabelmapFromArray(original, self.native, self.nativeSegmentId, self.scan)
+        # The lesion as it was normalized again: no longer edited
+        self.assertTrue(_wait(lambda: not controller.edited, 5.0))
+
     #
     # Scene close (last: it clears the scene)
     #
@@ -553,7 +1119,11 @@ class LesionNetworkMappingNormalizeUITest(unittest.TestCase):
         slicer.mrmlScene.Clear(0)
         self.assertTrue(_wait(lambda: not controller.isBusy(), 30.0), controller.state)
         _pump(500)
-        self.assertEqual(controller.state, "cancelled")
+        # The run that the close stopped ends idle, not cancelled: the user did not stop it, so no "Normalization stopped"
+        # message waits under the button for the next scene's scan
+        self.assertEqual(controller.state, "idle")
+        self.assertIsNone(self.card.message, self.card.message and self.card.message.findChild("QLabel", "LNMBannerText").text)
+        self.assertIsNone(controller.request)
         self.assertIsNone(controller.result)
         self.assertEqual(slicer.util.getNodesByClass("vtkMRMLSegmentationNode"), [])
         self.assertEqual(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"), [])

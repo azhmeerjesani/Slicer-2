@@ -20,9 +20,10 @@ Examples::
     python3 slicer_studio_web.py update       # download, verify and install the latest release
 
 Updates: ``run`` checks the public latest release of Slicer Studio on GitHub (one anonymous request; no API, no
-account). A required update stops it with instructions, an optional one prints a notice. ``update`` (or ``--update``)
-downloads the launcher bundle and the Linux package of the latest release, checks their size and SHA-256 against
-the release manifest, unpacks the launcher next to this one and builds the image from the verified package.
+account). A required update stops it with instructions (only a warning while the release has no Linux package),
+an optional one prints a notice. ``update`` (or ``--update``) downloads the launcher bundle and the Linux package of
+the latest release, checks their size and SHA-256 against the release manifest, unpacks the launcher next to this one
+and builds the image from the verified package.
 
 The script only uses the Python standard library (Python 3.8 or later). See
 README.md next to this script for details.
@@ -32,6 +33,8 @@ from __future__ import annotations
 
 import argparse
 import collections
+import contextlib
+import errno
 import getpass
 import hashlib
 import http.client
@@ -89,6 +92,9 @@ PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https
 LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
 # Process names of the Slicer launcher and application.
 SLICER_PROCESS_NAMES = ("Slicer", "SlicerApp-real")
+
+# Makes Slicer Studio quit as File > Exit does on SIGTERM in local mode (StudioLib/autosave.py)
+STOP_ON_SIGTERM_VARIABLE = "SLICER_STUDIO_STOP_ON_SIGTERM"
 
 # In-app updates (decision D-U1): the manifest of the latest public release (no GitHub API, no token). The
 # environment variable SLICER_STUDIO_UPDATE_FEED replaces the address (tests); "off" turns update checks off.
@@ -521,8 +527,22 @@ def check_port_free(listen, port):
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             probe.bind((listen, port))
-        except OSError:
-            in_use = True
+        except OSError as error:
+            # Name the real cause: only EADDRINUSE (and the Windows equivalent) means "in use".
+            code = error.errno
+            if code in (errno.EACCES, getattr(errno, "WSAEACCES", None)) and port < 1024 and os.name != "nt":
+                raise LauncherError(
+                    f"Port {port} needs administrator rights on this computer. Choose a port of 1024 or higher, for example: --port 8080",
+                ) from None
+            if code in (errno.EADDRNOTAVAIL, getattr(errno, "WSAEADDRNOTAVAIL", None)):
+                raise LauncherError(
+                    f"--listen {listen} is not an address of this computer. Use 127.0.0.1 (this computer only) or 0.0.0.0 (all addresses).",
+                ) from None
+            if code in (errno.EADDRINUSE, getattr(errno, "WSAEADDRINUSE", None), errno.EACCES, getattr(errno, "WSAEACCES", None)):
+                # EACCES on Windows also reports a port held exclusively by another program.
+                in_use = True
+            else:
+                raise LauncherError(f"Cannot use port {port} on {listen}: {error.strerror or error}") from None
     if not in_use:
         # On macOS the bind above also succeeds when another program listens on all
         # addresses of the port: check that nothing answers there either.
@@ -532,7 +552,8 @@ def check_port_free(listen, port):
         except OSError:
             pass
     if in_use:
-        raise LauncherError(f"Port {port} is already in use. Close the program that uses it, or choose another port, for example: --port {port + 1}")
+        suggestion = f", for example: --port {port + 1}" if port < 65535 else ""
+        raise LauncherError(f"Port {port} is already in use. Close the program that uses it, or choose another port{suggestion}")
 
 
 def free_local_port():
@@ -671,6 +692,22 @@ class _UpdateRedirectHandler(urllib.request.HTTPRedirectHandler):
         return urllib.request.HTTPRedirectHandler.redirect_request(self, req, fp, code, msg, headers, newurl)
 
 
+def _network_failure(error):
+    """A failed connection in plain words (like the app's), never the error number or the library's text."""
+    import ssl
+
+    reason = getattr(error, "reason", None)  # URLError wraps the OSError
+    if isinstance(reason, BaseException):
+        error = reason
+    if isinstance(error, (socket.timeout, TimeoutError)):
+        return "no answer in time"
+    if isinstance(error, ssl.SSLError):
+        return "the secure connection failed"
+    if isinstance(error, ValueError):
+        return "the address is not valid"
+    return "no connection"
+
+
 def _update_open(url, feed, timeout):
     if not _update_url_allowed(url, feed):
         raise LauncherError(f"Refused to download {url}: updates come only from GitHub over HTTPS.")
@@ -680,8 +717,19 @@ def _update_open(url, feed, timeout):
         return opener.open(request, timeout=timeout)
     except urllib.error.HTTPError as error:
         raise LauncherError(f"{url}: the server answered {error.code} {error.reason}")
-    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as error:
-        raise LauncherError(f"Cannot reach the update server: {getattr(error, 'reason', error)}")
+    except http.client.HTTPException:
+        # not an OSError: a reply that is not HTTP (BadStatusLine echoes the server's own line), cut off or malformed
+        raise LauncherError("Cannot reach the update server (it did not send a valid answer). Try again later.")
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        raise LauncherError(f"Cannot reach the update server ({_network_failure(error)}). Check your internet connection and try again.")
+
+
+def _update_read(response, size, what):
+    """response.read(size); a connection that drops or stalls becomes a LauncherError, not a traceback."""
+    try:
+        return response.read(size)
+    except (http.client.HTTPException, OSError):
+        raise LauncherError(f"{what}: the connection was interrupted. Check your internet connection and try again.")
 
 
 def fetch_update_manifest(feed=None, timeout=UPDATE_CHECK_TIMEOUT):
@@ -690,7 +738,7 @@ def fetch_update_manifest(feed=None, timeout=UPDATE_CHECK_TIMEOUT):
     if not feed:
         raise LauncherError(f"Update checks are turned off ({UPDATE_FEED_VARIABLE}=off).")
     with _update_open(feed, feed, timeout) as response:
-        content = response.read(UPDATE_MANIFEST_MAX_BYTES + 1)
+        content = _update_read(response, UPDATE_MANIFEST_MAX_BYTES + 1, "The update manifest")
     if len(content) > UPDATE_MANIFEST_MAX_BYTES:
         raise LauncherError("The update manifest is too large.")
     try:
@@ -701,15 +749,23 @@ def fetch_update_manifest(feed=None, timeout=UPDATE_CHECK_TIMEOUT):
         if not isinstance(manifest.get("required", False), bool):
             raise ValueError("required")
         assets = manifest.get("assets") or {}
+        if not isinstance(assets, dict):
+            raise ValueError("assets")
         for key in ("web", "linux-x86_64"):
             asset = assets.get(key)
             if asset is None:
                 continue
+            if not isinstance(asset, dict):
+                raise ValueError(f"assets.{key}")
             if (not _ASSET_NAME_PATTERN.match(str(asset.get("name"))) or ".." in asset["name"] or not isinstance(asset.get("size"), int)
                     or asset["size"] <= 0 or not re.match(r"^[0-9a-f]{64}$", str(asset.get("sha256", "")).lower())):
                 raise ValueError(f"assets.{key}")
-    except (ValueError, KeyError, TypeError, UnicodeDecodeError) as error:
-        raise LauncherError(f"The update manifest is not valid ({error}).")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        # not JSON at all: a proxy block page, a login page or an empty answer; the parser's text would only confuse
+        raise LauncherError("The update server did not send an update manifest (a proxy or login page may be in the way). "
+                            "Check your internet connection, try another network, and try again.")
+    except (ValueError, KeyError, TypeError):
+        raise LauncherError("The update manifest is not valid.")
     return manifest
 
 
@@ -727,6 +783,11 @@ def update_status(manifest, current):
     return "required" if manifest.get("required") or below else "optional"
 
 
+def release_has_linux_package(manifest):
+    """True when the release has the Linux package that ``update`` installs (the web version needs it)."""
+    return bool((manifest.get("assets") or {}).get("linux-x86_64"))
+
+
 def check_for_updates(current, quiet_failure=True):
     """At launcher start: stop on a required update, print a notice for an optional one."""
     if update_feed() is None:
@@ -739,14 +800,36 @@ def check_for_updates(current, quiet_failure=True):
         info(f"(Could not check for updates: {error})")
         return "unknown"
     status = update_status(manifest, current)
+    have = current or "an unknown version"
+    if not release_has_linux_package(manifest):
+        # 'update' needs the Linux package: until the publisher adds it, a required update only warns (like the app
+        # on a computer whose file the release does not have), and an optional one names no command that would fail.
+        if status == "required":
+            warn(f"Slicer Studio {manifest['version']} is required (you have {have}), but its release has no Linux package yet; "
+                 f"starting this version. Update with {script_command('update')} once the package is published.")
+        elif status == "optional":
+            info(f"Slicer Studio {manifest['version']} is available (you have {have}); its Linux package is not published yet.")
+        return status
     if status == "required":
         raise LauncherError(
-            f"Slicer Studio {manifest['version']} is a required update (you have {current or 'an unknown version'}).\n"
+            f"Slicer Studio {manifest['version']} is a required update (you have {have}).\n"
             f"  Update with: {script_command('update')}\n"
-            f"  then start it again. Release notes: https://github.com/{UPDATE_REPOSITORY}/releases/tag/v{manifest['version']}")
+            f"  then start it again. Release notes: https://github.com/{UPDATE_REPOSITORY}/releases/tag/v{manifest['version']}\n"
+            "  To start this version anyway, add --no-update-check.")
     if status == "optional":
-        info(f"Slicer Studio {manifest['version']} is available (you have {current or 'an unknown version'}). Update with: {script_command('update')}")
+        info(f"Slicer Studio {manifest['version']} is available (you have {have}). Update with: {script_command('update')}")
     return status
+
+
+def _update_folder_error(directory, error):
+    """One plain sentence for a download folder that cannot be written (full disk, not a folder, no permission)."""
+    reason = (error.strerror or str(error)).rstrip(".")
+    reason = reason[:1].lower() + reason[1:]
+    try:
+        shown = "~/" + directory.relative_to(Path.home()).as_posix()
+    except ValueError:
+        shown = str(directory)
+    return f"Cannot download the update into {shown}: {reason}."
 
 
 def download_update_asset(manifest, key, directory, feed=None):
@@ -760,7 +843,10 @@ def download_update_asset(manifest, key, directory, feed=None):
         url = urllib.parse.urljoin(feed, urllib.parse.quote(name))
     else:
         url = UPDATE_DOWNLOAD_URL.format(repository=UPDATE_REPOSITORY, tag=f"v{manifest['version']}", name=urllib.parse.quote(name))
-    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise LauncherError(_update_folder_error(directory, error)) from None
     path = directory / name
     if path.is_file() and path.stat().st_size == asset["size"] and file_sha256(path) == asset["sha256"].lower():
         info(f"Using {name} downloaded before (checked).")
@@ -772,7 +858,7 @@ def download_update_asset(manifest, key, directory, feed=None):
     info(f"Downloading {name} ({asset['size'] / 1e6:.0f} MB)")
     try:
         with _update_open(url, feed, 60) as response, open(partial, "wb") as stream:
-            for block in iter(lambda: response.read(1024 * 1024), b""):
+            for block in iter(lambda: _update_read(response, 1024 * 1024, name), b""):
                 received += len(block)
                 if received > asset["size"]:
                     raise LauncherError(f"{name} is larger than the release file: refused.")
@@ -786,10 +872,16 @@ def download_update_asset(manifest, key, directory, feed=None):
             raise LauncherError(f"{name} has the wrong size ({received} bytes instead of {asset['size']}): refused.")
         if digest.hexdigest() != asset["sha256"].lower():
             raise LauncherError(f"{name} does not have the SHA-256 checksum of the release: refused.")
-    except BaseException:
-        partial.unlink(missing_ok=True)
+    except BaseException as error:
+        with contextlib.suppress(OSError):
+            partial.unlink(missing_ok=True)
+        if isinstance(error, OSError):  # every network failure is a LauncherError by now: this is the local folder or disk
+            raise LauncherError(_update_folder_error(directory, error)) from None
         raise
-    partial.replace(path)
+    try:
+        partial.replace(path)
+    except OSError as error:
+        raise LauncherError(_update_folder_error(directory, error)) from None
     return path
 
 
@@ -803,17 +895,34 @@ def unpack_web_bundle(bundle, destination):
         target = destination / tops.pop()
         if target.resolve() == SCRIPT_DIR:
             raise LauncherError(f"{target} is the folder of this launcher; choose another --dest.")
-        if target.exists():
-            shutil.rmtree(target)
-        destination.mkdir(parents=True, exist_ok=True)
-        archive.extractall(destination)
-        for info_entry in archive.infolist():
-            mode = (info_entry.external_attr >> 16) & 0o777
-            if mode:
-                os.chmod(destination / info_entry.filename, mode)
+        try:
+            if target.exists():
+                shutil.rmtree(target)
+            destination.mkdir(parents=True, exist_ok=True)
+            archive.extractall(destination)
+            for info_entry in archive.infolist():
+                mode = (info_entry.external_attr >> 16) & 0o777
+                if mode:
+                    os.chmod(destination / info_entry.filename, mode)
+        except OSError as error:
+            raise LauncherError(f"Cannot unpack the launcher into {destination}: {error.strerror or error}.") from None
     if not (target / "slicer_studio_web.py").is_file():
         raise LauncherError(f"{bundle.name} does not contain slicer_studio_web.py.")
     return target
+
+
+def remove_update_downloads(keep=None):
+    """Delete the downloaded update packages in the cache (a Slicer package is several hundred MB), except the folder
+    of the version 'keep'. Failures are ignored: the files are only a cache.
+    """
+    root = cache_dir() / "updates"
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if entry.name != keep and entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry, ignore_errors=True)
 
 
 def command_update(args):
@@ -835,8 +944,12 @@ def command_update(args):
     if status == "none" and not args.force:
         info(f"Slicer Studio is up to date ({current}; the latest release is {version}).")
         return 0
+    if not release_has_linux_package(manifest):
+        raise LauncherError(f"The release {version} has no Linux package yet, so the web version cannot be updated to it. "
+                            f"Try again once the package is published; until then {script_command('run')} keeps starting this version.")
     info(f"Updating to Slicer Studio {version} (you have {current or 'an unknown version'}).")
     directory = cache_dir() / "updates" / version
+    remove_update_downloads(keep=version)  # the packages of earlier updates are no longer needed
     package = download_update_asset(manifest, "linux-x86_64", directory, feed)
     launcher_dir = SCRIPT_DIR
     if (manifest.get("assets") or {}).get("web"):
@@ -854,12 +967,14 @@ def command_update(args):
     new_script = launcher_dir / "slicer_studio_web.py"
     if args.no_build:
         info(f"Verified package: {package}")
+        info(f"It stays in {directory} until the next update removes it; delete that folder when you no longer need it.")
         info(f"Build the image with: python3 {new_script} build --package {package}")
         return 0
     command = [sys.executable, str(new_script), "build", "--package", str(package), "--image", args.image]
     info("Building the image with the new launcher.")
     if subprocess.call(command) != 0:
         raise LauncherError("Building the image of the update failed (see above); the previous image is kept.")
+    shutil.rmtree(directory, ignore_errors=True)  # the image holds the package now
     info("")
     info(f"Slicer Studio {version} is installed. Start it with: python3 {new_script} run --recreate")
     return 0
@@ -902,7 +1017,9 @@ def command_run(args):
             f"  {script_command('build')} --package Slicer-X.Y.Z-linux-amd64.tar.gz\n"
             f"or give the package to this command (--package, --package-url or --slicer-build). See README.md.")
     if state is not None:
-        docker("rm", "--force", "--volumes", args.name)
+        if state == "running":
+            info("Stopping the running Slicer Studio first (it saves the open project).")
+        remove_container(args.name, state)
     if remote:
         remote_access_warning(args.listen, args.port)
     check_port_free(args.listen, args.port)
@@ -967,14 +1084,24 @@ def command_run(args):
     open_browser(url, not args.no_browser)
 
 
+def remove_container(name, state):
+    """Remove the container. One that may still run is stopped first: 'docker stop' sends SIGTERM, so Slicer saves
+    the open project, while 'docker rm --force' alone would kill it with SIGKILL and lose the edits since the last
+    autosave.
+    """
+    if state not in ("created", "exited", "dead"):
+        docker("stop", "--time", "20", name, check=False)
+    docker("rm", "--force", "--volumes", name)
+
+
 def command_stop(args):
     ensure_docker_running()
-    if container_state(args.name) is None:
+    state = container_state(args.name)
+    if state is None:
         info("Slicer Studio is not running.")
         return
     info("Stopping Slicer Studio.")
-    docker("stop", "--time", "20", args.name, check=False)
-    docker("rm", "--force", "--volumes", args.name)
+    remove_container(args.name, state)
     info("Stopped. Files saved in the data folder stay there.")
 
 
@@ -1254,7 +1381,10 @@ class LocalSession:
 
     def start_slicer(self):
         info(f"Starting {self.slicer}")
-        self.slicer_process = self.start_process([str(self.slicer), *self.args.slicer_args], env=self.display_env())
+        env = self.display_env()
+        # stop() sends SIGTERM: Slicer then quits as File > Exit does and saves the open project (as in the container)
+        env[STOP_ON_SIGTERM_VARIABLE] = "1"
+        self.slicer_process = self.start_process([str(self.slicer), *self.args.slicer_args], env=env)
 
     def services_alive(self):
         return all(process.poll() is None for _, process in self.services)
@@ -1309,11 +1439,20 @@ class LocalSession:
         except ProcessLookupError:
             pass
 
-    def stop(self):
-        self.terminate(self.slicer_process)
+    def stop(self, timeout=15):
+        # Slicer saves the open project when it gets SIGTERM: wait for it to exit before the display goes away
+        self.terminate(self.slicer_process, timeout)
         for pid in self.slicer_instances():
             try:
                 os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        deadline = time.monotonic() + timeout
+        while self.slicer_instances() and time.monotonic() < deadline:
+            time.sleep(0.2)
+        for pid in self.slicer_instances():
+            try:
+                os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
         for _, process in reversed(self.services):
@@ -1352,6 +1491,10 @@ def command_local(args):
     except KeyboardInterrupt:
         info("Stopping.")
     finally:
+        # A second Ctrl+C (or SIGTERM) while Slicer saves and quits must not interrupt the clean-up:
+        # the services run in their own sessions and would stay behind with the port and runtime folder.
+        for stop_signal in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(stop_signal, signal.SIG_IGN)
         session.stop()
     return 0
 
@@ -1381,14 +1524,26 @@ def geometry_value(text):
     return f"{int(match.group(1))}x{int(match.group(2))}"
 
 
+def port_value(text):
+    """Return a TCP port number from 1 to 65535 (argparse type)."""
+    try:
+        port = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid port '{text}': --port must be between 1 and 65535") from None
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("--port must be between 1 and 65535")
+    return port
+
+
 def add_server_options(parser):
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"browser port on this computer (default {DEFAULT_PORT})")
+    parser.add_argument("--port", type=port_value, default=DEFAULT_PORT, help=f"browser port on this computer (default {DEFAULT_PORT})")
     parser.add_argument("--listen", default=DEFAULT_LISTEN, metavar="ADDRESS",
                         help=f"network address to listen on (default {DEFAULT_LISTEN}: this computer only; 0.0.0.0 allows other computers and needs a password)")
     parser.add_argument("--geometry", metavar="WxH", type=geometry_value, help=f"initial screen size (default {DEFAULT_GEOMETRY}; the browser window size is used once connected)")
     parser.add_argument("--ask-password", action="store_true", help="ask for a password to require in the browser (or set VNC_PASSWORD)")
     parser.add_argument("--no-browser", action="store_true", help="do not open the web browser")
-    parser.add_argument("slicer_args", nargs="*", metavar="-- SLICER_ARGS", help="arguments passed to Slicer, after '--'")
+    # Slicer arguments are only taken from after "--" (see main()); a stray word is an error, not a Slicer argument
+    parser.set_defaults(slicer_args=[])
 
 
 def build_parser():
@@ -1448,6 +1603,10 @@ def main(argv=None):
     commands = ("build", "run", "stop", "logs", "status", "local", "update")
     if "--update" in argv and (not argv or argv[0] not in commands):
         argv = ["update"] + [arg for arg in argv if arg != "--update"]
+    if argv and not argv[0].startswith("-") and argv[0] not in commands:
+        # A mistyped command (for example "stauts") must not start Slicer Studio and reach Slicer as a file name
+        build_parser().error(f"unknown command '{argv[0]}' (commands: {', '.join(commands)}); "
+                             "arguments for Slicer go after '--'")
     if not argv or (argv[0] not in commands and argv[0] not in ("-h", "--help")):
         argv.insert(0, "run")
     # Everything after "--" goes to Slicer.

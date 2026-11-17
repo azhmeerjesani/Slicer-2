@@ -37,14 +37,17 @@ Threads: ``identify``, ``copyFiles`` and ``thumbnailArray`` use only files and n
 runs on the main thread.
 """
 
+import contextlib
 import datetime
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
 import sys
+import threading
 
 import qt
 import slicer
@@ -58,6 +61,9 @@ SURFACES_DIR = "surfaces"
 THUMBNAIL_FILE = ".thumbnail.png"
 #: Fork-only setting: the id of the default template ("Start on template")
 DEFAULT_KEY = "Studio/Templates/Default"
+#: Fork-only settings that hold a template id in a field of their JSON value, which follow a moved template's new id
+#: (``followRenamedIds``): "Remember these options" of Normalize to MNI (``normalize_controller.LAST_OPTIONS_SETTING``)
+REMEMBERED_TEMPLATE_SETTINGS = (("Studio/LNM/Normalize/LastOptions", "templateId"),)
 USER_PREFIX = "user:"
 BUILTIN_PREFIX = "builtin:"
 #: The space id of "MNI (other)" (an unknown MNI family: Map shows the family notice)
@@ -90,6 +96,17 @@ ANISOTROPY_WARNING = 1.5
 GRID_TOLERANCE_MM = 0.01
 COPY_CHUNK = 1 << 20
 REFUSAL = "This image is not in MNI space. Open it as a scan instead, or normalize it to MNI first."
+#: A NIfTI file whose sform and qform disagree by more than this (mm) is refused: the check reads the sform, while
+#: Slicer (ITK) loads such a file at the qform, so drawn lesions would not be where the template says
+XFORM_REFUSAL_MM = 0.1
+XFORM_REFUSAL = ("The sform and qform of this image disagree by up to {distance:.3g} mm, so programs place it differently "
+                 "(Slicer uses the qform, FSL the sform). Make them agree (for example with fslorient -copysform2qform) "
+                 "and add it again.")
+#: A NIfTI file with an sform and no qform whose voxel sizes (pixdim) do not match the sform is refused as well: Slicer
+#: (ITK) loads it with the sform's directions and origin but the pixdim voxel sizes, away from the grid that was checked
+PIXDIM_REFUSAL = ("The voxel size in the header of this image (pixdim) does not match its sform, so programs place it differently, "
+                  "up to {distance:.3g} mm apart (Slicer uses the voxel size, FSL the sform). Set the voxel size to the sform's "
+                  "({spacing} mm) and add it again.")
 #: Node attribute: the template id of a template volume ("user:<slug>" or "builtin:<name>"); a portable id, never a path
 TEMPLATE_ID_ATTRIBUTE = "Studio.TemplateId"
 #: ``Studio.Role`` of the 3D brain surfaces of a template
@@ -106,8 +123,10 @@ _BUILTINS = (
 BUILTIN_DEFAULT = _BUILTINS[0][0]
 
 _listeners = []
-_registered = {"root": None, "ids": set(), "others": []}
+_renameListeners = []
+_registered = {"root": None, "stamp": None, "ids": set(), "others": []}
 _thumbnails = {}
+_unwritableCopies = set()  # copied template folders whose template.json could not be given their own id
 
 
 #
@@ -188,12 +207,20 @@ def fileSha256(path):
 #
 
 
+# The signs that turn the coordinates of a NRRD "space" into RAS, as 3D Slicer reads a scalar volume (ITK's NrrdImageIO):
+# only RAS and LAS coordinates are converted; any other space, a missing one included ("3D-right-handed", "scanner-xyz",
+# no "space" field), is taken unchanged as LPS (see _nrrdSpaceSigns).
 _NRRD_SPACES = {
     "right-anterior-superior": (1, 1, 1), "ras": (1, 1, 1),
     "left-posterior-superior": (-1, -1, 1), "lps": (-1, -1, 1),
     "left-anterior-superior": (-1, 1, 1), "las": (-1, 1, 1),
-    "scanner-xyz": (-1, -1, 1), "3d-right-handed": (1, 1, 1),
 }
+_NRRD_OTHER_SPACE = (-1, -1, 1)
+
+
+def _nrrdSpaceSigns(fields):
+    """The RAS signs of the coordinates of a NRRD file: what 3D Slicer does, so the grid checked is the grid loaded."""
+    return _NRRD_SPACES.get(fields.get("space", "").strip().lower(), _NRRD_OTHER_SPACE)
 
 
 def _nrrdVector(text):
@@ -203,23 +230,31 @@ def _nrrdVector(text):
     return [float(value) for value in text.strip("()").split(",")]
 
 
-def readNrrdHeader(path):
-    """``{"shape", "affine" (RAS), "codes": None}`` of a NRRD file (header only); raises ValueError."""
-    np = _np()
+def _readNrrdFields(f):
+    """The ``{lowercase key: value}`` header fields of an open NRRD file, left positioned at the first data byte; raises
+    ValueError.
+    """
     fields = {}
-    with open(path, "rb") as f:
-        magic = f.readline()
-        if not magic.startswith(b"NRRD"):
-            raise ValueError(_("Not a NRRD file"))
-        for _line in range(200):
-            line = f.readline()
-            if not line or not line.strip():
-                break
-            text = line.decode("latin-1").rstrip("\r\n")
-            if text.startswith("#") or ":" not in text:
-                continue
-            key, _separator, value = text.partition(":")
-            fields[key.strip().lower()] = value.lstrip("=").strip()
+    magic = f.readline()
+    if not magic.startswith(b"NRRD"):
+        raise ValueError(_("Not a NRRD file"))
+    for _line in range(200):
+        line = f.readline()
+        if not line or not line.strip():
+            break
+        text = line.decode("latin-1").rstrip("\r\n")
+        if text.startswith("#") or ":" not in text:
+            continue
+        key, _separator, value = text.partition(":")
+        fields[key.strip().lower()] = value.lstrip("=").strip()
+    return fields
+
+
+def _nrrdGeometry(fields):
+    """``(sizes, vectors, spatial, affine)`` from NRRD header fields: the axis sizes, the space direction of every axis (None
+    for a non-spatial one), the indices of the three spatial axes and the RAS affine of their voxel grid; raises ValueError.
+    """
+    np = _np()
     sizes = [int(value) for value in fields.get("sizes", "").split()]
     directions = re.findall(r"\([^)]*\)|none", fields.get("space directions", ""))
     if not sizes or not directions:
@@ -228,12 +263,20 @@ def readNrrdHeader(path):
     spatial = [index for index, vector in enumerate(vectors) if vector is not None]
     if len(spatial) != 3:
         raise ValueError(_("Not a 3D image"))
-    signs = np.array(_NRRD_SPACES.get(fields.get("space", "right-anterior-superior").lower(), (1, 1, 1)), dtype=float)
+    signs = np.array(_nrrdSpaceSigns(fields), dtype=float)
     affine = np.eye(4)
     for column, index in enumerate(spatial):
         affine[:3, column] = np.array(vectors[index]) * signs
     origin = _nrrdVector(fields.get("space origin", "(0,0,0)")) or [0.0, 0.0, 0.0]
     affine[:3, 3] = np.array(origin) * signs
+    return sizes, vectors, spatial, affine
+
+
+def readNrrdHeader(path):
+    """``{"shape", "affine" (RAS), "codes": None}`` of a NRRD file (header only); raises ValueError."""
+    with open(path, "rb") as f:
+        fields = _readNrrdFields(f)
+    sizes, vectors, spatial, affine = _nrrdGeometry(fields)
     shape = tuple(sizes[index] for index in spatial)
     frames = 1
     for index, vector in enumerate(vectors):
@@ -245,26 +288,100 @@ def readNrrdHeader(path):
     return {"shape": shape, "frames": frames, "affine": affine, "codes": None, "format": "NRRD"}
 
 
+_NRRD_TYPES = {
+    "int8": "i1", "signed char": "i1", "uint8": "u1", "uchar": "u1", "unsigned char": "u1",
+    "int16": "i2", "short": "i2", "short int": "i2", "signed short": "i2", "signed short int": "i2",
+    "uint16": "u2", "ushort": "u2", "unsigned short": "u2", "unsigned short int": "u2",
+    "int32": "i4", "int": "i4", "signed int": "i4", "uint32": "u4", "uint": "u4", "unsigned int": "u4",
+    "int64": "i8", "longlong": "i8", "long long": "i8", "signed long long": "i8",
+    "uint64": "u8", "ulonglong": "u8", "unsigned long long": "u8",
+    "float": "f4", "float32": "f4", "double": "f8", "float64": "f8",
+}
+
+
+def readNrrdData(path):
+    """``(data, affine)`` of a NRRD file: the voxels of its first frame as an array indexed by the three spatial axes in header
+    order (the columns of the RAS ``affine``). Attached raw, gzip and ascii data only; raises ValueError. Worker-safe.
+    """
+    np = _np()
+    with open(path, "rb") as f:
+        fields = _readNrrdFields(f)
+        body = f.read()
+    sizes, vectors, spatial, affine = _nrrdGeometry(fields)
+    if len(sizes) != len(vectors) or "data file" in fields or "datafile" in fields:
+        raise ValueError(_("Unsupported NRRD layout"))
+    typeName = fields.get("type", "").lower()
+    if typeName not in _NRRD_TYPES:
+        raise ValueError(_("Unsupported NRRD voxel type"))
+    dtype = np.dtype(_NRRD_TYPES[typeName])
+    encoding = fields.get("encoding", "raw").lower()
+    count = int(np.prod(sizes))
+    if encoding in ("gzip", "gz"):
+        import zlib
+
+        body = zlib.decompress(body, 16 + zlib.MAX_WBITS)
+    elif encoding in ("ascii", "text", "txt"):
+        values = np.array(body.split(), dtype=np.float64)
+        if values.size != count:
+            raise ValueError(_("The NRRD data is incomplete"))
+        data = values.reshape(sizes[::-1])
+        encoding = None
+    elif encoding != "raw":
+        raise ValueError(_("Unsupported NRRD encoding"))
+    if encoding is not None:
+        if fields.get("endian", "little").lower() == "big":
+            dtype = dtype.newbyteorder(">")
+        if len(body) < count * dtype.itemsize:
+            raise ValueError(_("The NRRD data is incomplete"))
+        # raw data may carry trailing bytes; the voxels are the last ones when "byte skip: -1"
+        start = len(body) - count * dtype.itemsize if fields.get("byte skip", "0").strip() == "-1" else int(fields.get("byte skip", "0"))
+        data = np.frombuffer(body, dtype=dtype, count=count, offset=start).reshape(sizes[::-1])
+    data = data.transpose(range(data.ndim)[::-1])  # axes in header order (the first one varies fastest in the file)
+    index = tuple(slice(None) if axis in spatial else 0 for axis in range(data.ndim))
+    return data[index], affine
+
+
 def readHeader(path):
-    """``{"shape" (3 voxel counts), "frames", "affine" (RAS 4x4), "codes" ((sform, qform) or None), "format"}``.
+    """``{"shape" (3 voxel counts), "frames", "affine" (RAS 4x4), "codes" ((sform, qform) or None), "format", "xformMm",
+    "pixdimMm"}``.
 
     NIfTI-1 through ``LesionNetworkMappingLib.nifti`` (header only), NRRD with a small reader. Raises ValueError for
-    other files.
+    other files. ``xformMm`` is how far (mm) the sform and qform of a NIfTI file disagree, ``pixdimMm`` how far Slicer
+    places a NIfTI file with an sform and no qform from its sform because the voxel sizes (pixdim) differ (both 0.0 for
+    NRRD). See :func:`xformRefusal`.
     """
     extension = _lowerExtension(path)
     if extension in (".nii", ".nii.gz"):
         from LesionNetworkMappingLib import nifti
 
-        header = nifti.read_nifti_header(path)
+        try:
+            header = nifti.read_nifti_header(path)
+        except ValueError as error:
+            if "NIfTI-2" in str(error):  # the reader's text ends in the file's full path
+                raise ValueError(_("NIfTI-2 files are not supported: save the image as NIfTI-1")) from None
+            raise
         shape = tuple(int(value) for value in header["shape"])
         frames = 1
         for value in shape[3:]:
             frames *= int(value)
         return {"shape": shape[:3], "frames": frames, "affine": header["affine"], "codes": (header["sform_code"], header["qform_code"]),
-                "format": "NIfTI"}
+                "format": "NIfTI", "xformMm": float(nifti.xform_disagreement(header)), "pixdimMm": float(nifti.pixdim_disagreement(header))}
     if extension == ".nrrd":
-        return readNrrdHeader(path)
+        return dict(readNrrdHeader(path), xformMm=0.0, pixdimMm=0.0)
     raise ValueError(_("Use a NIfTI (.nii, .nii.gz) or NRRD (.nrrd) file"))
+
+
+def xformRefusal(header):
+    """The plain reason a file with the :func:`readHeader` ``header`` is refused, "" when Slicer loads it at its checked
+    matrix (the sform of a NIfTI file): refused when the sform and qform disagree (Slicer loads the qform) or when the
+    voxel sizes of a file without a qform do not match its sform (Slicer uses the voxel sizes).
+    """
+    if header.get("xformMm", 0.0) > XFORM_REFUSAL_MM:
+        return _(XFORM_REFUSAL).format(distance=header["xformMm"])
+    if header.get("pixdimMm", 0.0) > XFORM_REFUSAL_MM:
+        spacing = voxelSpacing(header["affine"])
+        return _(PIXDIM_REFUSAL).format(distance=header["pixdimMm"], spacing=" × ".join(f"{value:.4g}" for value in spacing))  # noqa: RUF001
+    return ""
 
 
 def worldBox(shape, affine, tolerance=1e-3):
@@ -402,6 +519,20 @@ def identify(path):
         detection.status = "error"
         detection.message = _("This file cannot be read as an image: {error}").format(error=error)
         return detection
+    try:
+        from . import importer
+
+        shortfall = importer._niftiDataShortfall(path) or importer._nrrdMhaDataShortfall(path)
+    except Exception:
+        shortfall = None
+    if shortfall:
+        # The readers zero-fill the missing voxels: a template cut short would open half black without a word
+        detection.status = "refused"
+        detection.message = _(
+            "{name} is damaged: its image data stops after {have:,} of the {need:,} bytes that its header announces "
+            "(the file was probably cut short by a failed copy or download). Copy it again from its source.").format(
+            name=os.path.basename(str(path)), have=shortfall[0], need=shortfall[1])
+        return detection
     shape, affine = tuple(header["shape"]), np.asarray(header["affine"], dtype=float)
     detection.shape, detection.frames, detection.affine, detection.codes, detection.format = shape, header["frames"], affine, header["codes"], header["format"]
     detection.spacing = voxelSpacing(affine)
@@ -416,11 +547,18 @@ def identify(path):
         detection.warnings.append(_("The voxels are not cubic ({spacing} mm): drawing and maps work best on near-isotropic templates.").format(
             spacing=" × ".join(f"{value:g}" for value in spacing)))  # noqa: RUF001
     if detection.frames > 1:
-        detection.warnings.append(_("The file holds {count} volumes: only the first is used.").format(count=detection.frames))
         if header["format"] != "NIfTI":
+            # Refused: no "only the first is used" warning beside it (the dialog shows the warnings of refused files too)
             detection.status, detection.message = "refused", _("A NRRD file with several volumes cannot be used: save its first volume as NIfTI.")
             detection.facts = " · ".join(facts)
             return detection
+        detection.warnings.append(_("The file holds {count} volumes: only the first is used.").format(count=detection.frames))
+    refusal = xformRefusal(header)
+    if refusal:
+        # The checked matrix (the sform) would not be the one the scene uses (Slicer loads the qform, or the pixdim voxel sizes)
+        detection.status, detection.message = "refused", refusal
+        detection.facts = " · ".join(facts)
+        return detection
     match = None
     try:
         from LesionNetworkMappingLib import geometry
@@ -450,8 +588,32 @@ def identify(path):
     else:
         detection.status = "refused"
         detection.message = _(REFUSAL)
+    if detection.ok:
+        # Drawing and maps use any MNI grid; Normalize registers to the image's own grid, which needs more
+        problem = normalizeTargetProblem(path, shape, affine)
+        if problem:
+            detection.warnings.append(problem)
     detection.facts = " · ".join(facts)
     return detection
+
+
+def normalizeTargetProblem(imagePath, shape, affine):
+    """Why a template image cannot be a normalization target (a plain sentence), or None when it can: Normalize needs a
+    NIfTI image whose voxels are cubic and aligned with the axes (it registers scans to that grid). Worker-safe.
+    """
+    if _lowerExtension(imagePath) not in (".nii", ".nii.gz"):
+        return _("Normalize cannot use it as a target: save the image as NIfTI (.nii.gz) to normalize scans to this template.")
+    try:
+        from LesionNetworkMappingLib import geometry
+    except ImportError:
+        return None
+    try:
+        spec = geometry.grid_spec_from_affine("check", tuple(int(n) for n in shape)[:3], _np().asarray(affine, dtype=float), OTHER_SPACE)
+    except Exception:
+        spec = None
+    if spec is None:
+        return _("Normalize cannot use it as a target: that needs cubic voxels aligned with the axes. Drawing and maps work.")
+    return None
 
 
 def checkCompanion(detection, path):
@@ -462,6 +624,13 @@ def checkCompanion(detection, path):
         return False, _("This file cannot be read as an image: {error}").format(error=error)
     if detection is None or detection.shape is None:
         return False, _("Choose the template image first.")
+    if header["frames"] > 1:
+        # Only the template image keeps its first volume (copyFiles); a mask or head is copied as it is, and a 4D mask has no usable voxels
+        return False, _("{name} holds several volumes: a brain mask or head image must be one volume (save its first volume as a separate file).").format(
+            name=os.path.basename(path))
+    refusal = xformRefusal(header)
+    if refusal:
+        return False, os.path.basename(path) + ": " + refusal
     if not sameGrid(header["shape"], header["affine"], detection.shape, detection.affine):
         return False, _("{name} is not on the grid of the template image ({size}).").format(
             name=os.path.basename(path), size=" × ".join(str(n) for n in detection.shape))  # noqa: RUF001
@@ -473,6 +642,11 @@ def checkCompanion(detection, path):
 #
 
 
+# Template surfaces are meshes in MNI coordinates, which are RAS: files that state no coordinate system are read as RAS.
+# A SPACE=RAS/LPS header (every file Slicer writes has one) still decides.
+SURFACE_COORDINATE_SYSTEM = slicer.vtkMRMLStorageNode.CoordinateSystemRAS
+
+
 def surfaceReaderAvailable(path):
     """True if Slicer can read this surface file (GIfTI only with a reader, e.g. an extension)."""
     storage = slicer.vtkMRMLModelStorageNode()
@@ -481,6 +655,8 @@ def surfaceReaderAvailable(path):
 
 def _readSurfaceBounds(path):
     storage = slicer.vtkMRMLModelStorageNode()
+    # MNI coordinates are RAS: a file without a SPACE= header (FreeSurfer, BrainNet, nibabel exports) is RAS, not Slicer's LPS default.
+    storage.SetCoordinateSystem(SURFACE_COORDINATE_SYSTEM)
     storage.SetFileName(path)
     model = slicer.vtkMRMLModelNode()
     if not storage.ReadData(model):
@@ -504,8 +680,7 @@ def checkSurface(path):
         return False, str(error)
     allowed = [(low - SURFACE_TOLERANCE_MM, high + SURFACE_TOLERANCE_MM) for low, high in MNI_BRAIN_BOX]
     inside = all(allowed[axis][0] <= bounds[2 * axis] and bounds[2 * axis + 1] <= allowed[axis][1] for axis in range(3))
-    large = all(bounds[2 * axis + 1] - bounds[2 * axis] >= 20.0 for axis in range(3))
-    if not inside or not large:
+    if not inside:
         return False, _("{name} does not lie in MNI space (bounds {bounds} mm).").format(
             name=os.path.basename(path), bounds=", ".join(f"{value:.0f}" for value in bounds))
     return True, ""
@@ -594,9 +769,16 @@ class Template:
         return bool(image) and os.path.isfile(image)
 
     def canNormalize(self):
-        """True when it can be a normalization target (an image and a brain mask, NIfTI)."""
+        """True when it can be a normalization target: a brain mask, and a NIfTI image whose recorded grid has cubic voxels
+        aligned with the axes (``normalizeTargetProblem``; Normalize refuses other grids).
+        """
         image, mask = self.imagePath, self.maskPath
-        return bool(image and mask and os.path.isfile(image) and os.path.isfile(mask) and _lowerExtension(image) in (".nii", ".nii.gz"))
+        if not (image and mask and os.path.isfile(image) and os.path.isfile(mask)):
+            return False
+        grid = self.grid
+        if grid.get("shape") and grid.get("affine"):
+            return normalizeTargetProblem(image, grid["shape"], grid["affine"]) is None
+        return _lowerExtension(image) in (".nii", ".nii.gz")
 
 
 def _sampleFile(sampleName):
@@ -663,8 +845,52 @@ def templatesFolder(rootPath=None):
     return os.path.join(rootPath, TEMPLATES_DIR)
 
 
+def _isNumber(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _isNumberList(value, allowNested=False):
+    if not isinstance(value, (list, tuple)):
+        return False
+    return all(_isNumberList(item) if allowNested else _isNumber(item) for item in value)
+
+
+def _recordIsUsable(record):
+    """True when the fields ``Template`` and its users read have the types they expect. A template.json edited by hand (or
+    written by another tool) with, say, ``"resolution_mm": "2 mm"`` is then skipped like an unreadable one, instead of
+    making every listing of the templates fail.
+    """
+    resolution = record.get("resolution_mm")
+    if resolution is not None and not _isNumber(resolution):
+        return False
+    shape = record.get("shape")
+    if shape is not None and not (isinstance(shape, (list, tuple)) and all(isinstance(item, int) and not isinstance(item, bool) for item in shape)):
+        return False
+    sha256 = record.get("sha256")
+    if sha256 is not None and not isinstance(sha256, dict):
+        return False
+    grid = record.get("grid")
+    if grid is not None:
+        if not isinstance(grid, dict):
+            return False
+        if grid.get("shape") is not None and not _isNumberList(grid["shape"]):
+            return False
+        if grid.get("affine") is not None and not _isNumberList(grid["affine"], allowNested=True):
+            return False
+    files = record.get("files")
+    if files is not None:
+        if not isinstance(files, dict):
+            return False
+        if any(files.get(role) is not None and not isinstance(files[role], str) for role in ("image", "mask", "head")):
+            return False
+        surfaces = files.get("surfaces")
+        if surfaces is not None and not (isinstance(surfaces, (list, tuple)) and all(isinstance(item, str) for item in surfaces)):
+            return False
+    return True
+
+
 def readRecord(folder):
-    """The template.json of a template folder, or None."""
+    """The template.json of a template folder, or None (unreadable, not a template, or with a field of the wrong type)."""
     try:
         with open(os.path.join(folder, TEMPLATE_JSON), encoding="utf-8") as f:
             record = json.load(f)
@@ -672,26 +898,172 @@ def readRecord(folder):
         return None
     if not isinstance(record, dict) or record.get("schema") != SCHEMA or not record.get("id"):
         return None
+    if not _recordIsUsable(record):
+        return None
     return record
 
 
-def userTemplates(rootPath=None):
-    """Your templates (folders of Templates/ with a template.json), sorted by name."""
-    folder = templatesFolder(rootPath)
-    found = []
+_STAGING_PREFIX = ".adding-"
+#: Staging folders of the adds running in this process (a lock guards it: adds run in worker threads)
+_activeStaging = set()
+_activeStagingLock = threading.Lock()
+
+
+def _processAlive(pid):
+    if sys.platform == "win32":
+        return True  # os.kill(pid, 0) would end the process there: keep what might belong to a live add
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # exists, but belongs to another user
+    return True
+
+
+def removeStaleStaging(folder):
+    """Remove the hidden ".adding-<id>-<pid>" folders of adds that never finished (the app was killed, crashed or lost
+    power while copying), so that they do not stay as invisible garbage. A folder of a live process, and one of an add
+    running in this process, is kept. Returns the number of folders removed.
+    """
     try:
         names = os.listdir(folder)
     except OSError:
-        return found
+        return 0
+    removed = 0
+    for name in names:
+        if not name.startswith(_STAGING_PREFIX):
+            continue
+        path = os.path.join(folder, name)
+        if not os.path.isdir(path):
+            continue
+        match = re.search(r"-(\d+)$", name)
+        if match is None:
+            continue
+        pid = int(match.group(1))
+        with _activeStagingLock:
+            if os.path.normpath(path) in _activeStaging:
+                continue
+        # The pid of this process without an active add is a leftover of an earlier run that had the same pid
+        if pid != os.getpid() and _processAlive(pid):
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        removed += 1
+    return removed
+
+
+def userTemplates(rootPath=None):
+    """Your templates (folders of Templates/ with a template.json), sorted by name. Each has its own id: a folder copied
+    in by hand with the id of another one gets its own first (``_makeCopiedIdsUnique``).
+    """
+    folder = templatesFolder(rootPath)
+    entries = []
+    removeStaleStaging(folder)
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
     for name in names:
         path = os.path.join(folder, name)
         if name.startswith(".") or not os.path.isdir(path):
             continue
         record = readRecord(path)
         if record is not None:
+            entries.append((name, path, record))
+    _makeCopiedIdsUnique(entries)
+    found = []
+    for name, path, record in entries:
+        try:
             found.append(Template(record, folder=path))
+        except (TypeError, ValueError, AttributeError):
+            logging.warning(f"Slicer Studio: the template folder {name} could not be read and is skipped")
     found.sort(key=lambda template: template.name.lower())
     return found
+
+
+def _arrivalRank(name, path, record):
+    """Sort key of the template folders that share an id: the one that was there first keeps it. That is the folder an add
+    named after the template ("Lab ICBM", or "Lab ICBM 2" when that name was taken), then the oldest template.json (a
+    copy is a new file: its creation, or inode change, time is that of the copy), then the folder name.
+    """
+    from . import projects
+
+    base = projects.sanitizeName(str(record.get("name") or record.get("id")), fallback="Template").lower()
+    lower = name.lower()
+    named = lower == base or (lower.startswith(base + " ") and lower[len(base) + 1:].isdigit())
+    try:
+        info = os.stat(os.path.join(path, TEMPLATE_JSON))
+        arrived = getattr(info, "st_birthtime", None) or info.st_ctime
+    except OSError:
+        arrived = float("inf")
+    return (0 if named else 1, arrived, name)
+
+
+def _makeCopiedIdsUnique(entries):
+    """Give each template folder of ``entries`` (``(folder name, path, record)`` of one Templates/ folder) whose id another
+    one there already has its own id and name, written into its template.json: a folder copied into Templates/ by hand
+    (a colleague's template, a duplicate made in the file manager) keeps everything but its id. The folder that was there
+    first keeps the id (``_arrivalRank``), so what refers to it (the default, scans, studies) stays its; the copy gets
+    "My template 2" ("my-template-2") as an add would name it (the rule of ``makeMovedIdsUnique`` after a move). The
+    records of ``entries`` are replaced. Worker-safe (files only).
+    """
+    groups = {}
+    for index, (name, path, record) in enumerate(entries):
+        groups.setdefault(str(record.get("id")), []).append(index)
+    duplicates = [indexes for indexes in groups.values() if len(indexes) > 1]
+    if not duplicates:
+        return {}
+
+    def nameOf(record):
+        return str(record.get("name") or record.get("id")).strip().lower()
+
+    takenSlugs = set(groups)
+    changed = {}
+    for indexes in duplicates:
+        indexes = sorted(indexes, key=lambda index: _arrivalRank(*entries[index]))
+        for index in indexes[1:]:
+            name, path, record = entries[index]
+            slug = str(record.get("id"))
+            baseName = str(record.get("name") or slug)
+            # A name another template has (without case) becomes "<name> 2"; a name it alone has stays
+            takenNames = {nameOf(other[2]) for position, other in enumerate(entries) if position != index}
+            newName, counter = baseName, 2
+            while newName.strip().lower() in takenNames:
+                newName = f"{baseName} {counter}"
+                counter += 1
+            base = slugOf(newName)
+            newSlug, counter = base, 2
+            while newSlug in takenSlugs:
+                newSlug = f"{base}-{counter}"
+                counter += 1
+            updated = dict(record, id=newSlug, name=newName)
+            if not _writeRecord(path, updated):
+                # A folder that cannot be written (read-only) still gets its own id while it is listed
+                if path not in _unwritableCopies:
+                    _unwritableCopies.add(path)
+                    logging.warning(f"Slicer Studio: the copied template {baseName} could not be given its own id in its template.json")
+            entries[index] = (name, path, updated)
+            takenSlugs.add(newSlug)
+            changed[USER_PREFIX + slug] = USER_PREFIX + newSlug
+            # The cached picture of the shared id may be the copy's
+            forgetThumbnails(USER_PREFIX + slug)
+    return changed
+
+
+def _writeRecord(folder, record):
+    """Replace the template.json of ``folder`` with ``record`` (atomically); return True when it was written."""
+    target = os.path.join(folder, TEMPLATE_JSON)
+    staging = f"{target}.renaming-{os.getpid()}-{threading.get_ident()}"
+    try:
+        with open(staging, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(record, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        os.replace(staging, target)
+        return True
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.remove(staging)
+        return False
 
 
 def listTemplates(rootPath=None):
@@ -727,11 +1099,57 @@ def templateForGrid(shape, affine, rootPath=None):
 
 
 def templateOfNode(node):
-    """The template of a volume tagged ``Studio.TemplateId`` (yours or built-in), or None."""
+    """The template of a volume tagged ``Studio.TemplateId`` (yours or built-in), or None (also when the volume is not on
+    the grid of your template with that id: the volume of a template you removed, then added again under the same name).
+    """
     if node is None or not hasattr(node, "GetAttribute"):
         return None
     templateId = node.GetAttribute(TEMPLATE_ID_ATTRIBUTE)
-    return templateById(templateId) if templateId else None
+    template = templateById(templateId) if templateId else None
+    return template if template is not None and isNodeOnTemplateGrid(node, template) else None
+
+
+def isNodeOnTemplateGrid(node, template):
+    """True when the volume ``node`` holds the grid recorded for your template ``template`` (always True for a built-in
+    template, a template without a recorded grid, and a node that is not a volume with an image).
+
+    The id of your template is the slug of its name, so a template removed and added again under the same name has the
+    same id: the grid tells its volume apart from the volume of the removed one. The tolerance allows the sform and qform
+    disagreement that an added template may have (Slicer places the image at the qform, the recorded grid is the sform).
+    """
+    if template is None or template.builtin or node is None or not hasattr(node, "IsA") or not node.IsA("vtkMRMLVolumeNode"):
+        return True
+    grid = template.grid
+    imageData = node.GetImageData()
+    if not grid.get("shape") or not grid.get("affine") or imageData is None:
+        return True
+    import vtk
+
+    matrix = vtk.vtkMatrix4x4()
+    node.GetIJKToRASMatrix(matrix)
+    affine = [[matrix.GetElement(row, column) for column in range(4)] for row in range(4)]
+    try:
+        return sameGrid(grid["shape"], grid["affine"], imageData.GetDimensions(), affine, tolerance=XFORM_REFUSAL_MM + GRID_TOLERANCE_MM)
+    except Exception:
+        logging.debug("Slicer Studio: template grid comparison failed", exc_info=True)
+        return True
+
+
+def forgetTemplateNodes(templateId, nodes=None):
+    """Remove the ``Studio.TemplateId`` = ``templateId`` tag of scene volumes and template surfaces (or of ``nodes``): they no
+    longer show that template (it was removed, or a template added again under the same name has another image). Their
+    ``Studio.Role`` and ``Studio.Space`` stay, so lesions drawn on them keep their space. Return the nodes untagged.
+    """
+    if not templateId:
+        return []
+    if nodes is None:
+        nodes = list(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")) + list(slicer.util.getNodesByClass("vtkMRMLModelNode"))
+    forgotten = []
+    for node in nodes:
+        if node is not None and node.GetAttribute(TEMPLATE_ID_ATTRIBUTE) == templateId:
+            node.RemoveAttribute(TEMPLATE_ID_ATTRIBUTE)
+            forgotten.append(node)
+    return forgotten
 
 
 def userTemplateOfNode(node):
@@ -764,6 +1182,9 @@ def setDefault(templateId):
     template = templateById(templateId)
     if template is None:
         raise ValueError(_("No template {id}").format(id=templateId))
+    if not template.isAvailable():
+        # defaultTemplateId() would ignore it for now and take it up silently if its image came back
+        raise ValueError(_("The image of the template {name} is missing, so it cannot be the default.").format(name=template.name))
     qt.QSettings().setValue(DEFAULT_KEY, template.id)
     _notify()
     return template
@@ -783,7 +1204,9 @@ def registerGrids(rootPath=None, force=False):
     except ImportError:
         return False
     root = templatesFolder(rootPath)
-    if not force and _registered["root"] == root:
+    # A template folder added or removed outside the app changes the folder's time stamp
+    stamp = _folderStamp(root)
+    if not force and _registered["root"] == root and _registered["stamp"] == stamp:
         return True
     for gridId in list(_registered["ids"]):
         geometry.unregister_grid(gridId)
@@ -804,7 +1227,16 @@ def registerGrids(rootPath=None, force=False):
         except Exception:
             logging.warning(f"Slicer Studio: the grid of template {template.name} could not be registered")
     _registered["root"] = root
+    _registered["stamp"] = stamp
     return True
+
+
+def _folderStamp(folder):
+    """The modification time of a folder (None when it does not exist)."""
+    try:
+        return os.stat(folder).st_mtime_ns
+    except OSError:
+        return None
 
 
 def gridSpace(shape, affine):
@@ -865,6 +1297,114 @@ def _uniqueSlug(name, rootPath=None):
         slug = f"{base}-{counter}"
         counter += 1
     return slug
+
+
+def makeMovedIdsUnique(folder, movedNames, recordId=None):
+    """Give each template of ``folder`` (a Templates/ folder) whose folder name is in ``movedNames`` (the templates that a
+    move of the Slicer Studio folder merged in) its own id and name when another template there already uses its id or
+    its name (without case): "My template" -> "My template 2" ("my-template-2"), as an add would name it. The templates
+    that were there keep theirs, so what refers to them (scans, studies, the default) stays theirs. Return
+    ``{old id: new id}`` ("user:<slug>") of the templates that changed. ``recordId(old id, new id)`` is called before a
+    template gets its new id (the journal of the move, ``projects.MoveJournal``). Worker-safe (files only).
+    """
+    entries = []
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return {}
+    for name in names:
+        path = os.path.join(folder, name)
+        if name.startswith(".") or not os.path.isdir(path):
+            continue
+        record = readRecord(path)
+        if record is not None:
+            entries.append((name, path, record))
+    moved = set(movedNames)
+    kept = [record for name, path, record in entries if name not in moved]
+    takenSlugs = {str(record.get("id")) for record in kept}
+    takenNames = {str(record.get("name") or record.get("id")).strip().lower() for record in kept}
+    # A new id or name never takes one that another moved template keeps
+    reservedSlugs = {str(record.get("id")) for name, path, record in entries if name in moved}
+    reservedNames = {str(record.get("name") or record.get("id")).strip().lower() for name, path, record in entries if name in moved}
+    changed = {}
+    for name, path, record in entries:
+        if name not in moved:
+            continue
+        slug = str(record.get("id"))
+        baseName = str(record.get("name") or slug)
+        newName, counter = baseName, 2
+        if newName.strip().lower() in takenNames:
+            while newName.strip().lower() in takenNames or newName.strip().lower() in reservedNames:
+                newName = f"{baseName} {counter}"
+                counter += 1
+        newSlug = slug
+        if newSlug in takenSlugs:
+            base = slugOf(newName)
+            newSlug, counter = base, 2
+            while newSlug in takenSlugs or newSlug in reservedSlugs:
+                newSlug = f"{base}-{counter}"
+                counter += 1
+        if newSlug != slug or newName != baseName:
+            updated = dict(record, id=newSlug, name=newName)
+            if recordId is not None and newSlug != slug:
+                recordId(USER_PREFIX + slug, USER_PREFIX + newSlug)
+            if not _writeRecord(path, updated):
+                logging.warning(f"Slicer Studio: the moved template {baseName} could not be renamed")
+                newSlug, newName = slug, baseName
+            if newSlug != slug:
+                changed[USER_PREFIX + slug] = USER_PREFIX + newSlug
+        takenSlugs.add(newSlug)
+        takenNames.add(newName.strip().lower())
+    return changed
+
+
+def followRenamedIds(renamedIds):
+    """Main thread, after a move gave moved templates new ids (``makeMovedIdsUnique``): the default, the remembered
+    Normalize options (``REMEMBERED_TEMPLATE_SETTINGS``), the ids held by rename listeners (the Map card's chosen
+    template) and the scene's volumes and surfaces of those templates follow them (they came from the moved folder), and
+    the lists refresh.
+    """
+    if not renamedIds:
+        return
+    settings = qt.QSettings()
+    value = str(settings.value(DEFAULT_KEY) or "")
+    if value in renamedIds:
+        settings.setValue(DEFAULT_KEY, renamedIds[value])
+    for key, field in REMEMBERED_TEMPLATE_SETTINGS:
+        _followRenamedIdInSetting(settings, key, field, renamedIds)
+    nodes = list(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")) + list(slicer.util.getNodesByClass("vtkMRMLModelNode"))
+    tagged = [(node, node.GetAttribute(TEMPLATE_ID_ATTRIBUTE)) for node in nodes if node is not None]
+    for node, templateId in tagged:
+        if templateId in renamedIds:
+            node.SetAttribute(TEMPLATE_ID_ATTRIBUTE, renamedIds[templateId])
+    for oldId, newId in renamedIds.items():
+        forgetThumbnails(oldId)
+        forgetThumbnails(newId)
+    for callback in list(_renameListeners):
+        try:
+            callback(dict(renamedIds))
+        except Exception:
+            logging.error("Slicer Studio: a listener of renamed template ids failed", exc_info=True)
+    _notify()
+
+
+def _followRenamedIdInSetting(settings, key, field, renamedIds):
+    """The template id in ``field`` of the JSON setting ``key`` follows ``renamedIds`` (an unreadable value is left alone).
+
+    Without this, the remembered id would name the template of the target folder that kept it: another image and space.
+    """
+    if not settings.contains(key):
+        return
+    try:
+        stored = json.loads(str(settings.value(key) or ""))
+    except ValueError:
+        return
+    if not isinstance(stored, dict):
+        return
+    templateId = stored.get(field)
+    if isinstance(templateId, str) and templateId in renamedIds:
+        stored[field] = renamedIds[templateId]
+        settings.setValue(key, json.dumps(stored, sort_keys=True))
 
 
 def nameTaken(name, rootPath=None):
@@ -953,8 +1493,7 @@ def _copyHashed(source, target, plan):
     digest = hashlib.sha256()
     with open(source, "rb") as reader, open(target, "wb") as writer:
         for chunk in iter(lambda: reader.read(COPY_CHUNK), b""):
-            if plan.cancelled:
-                raise TemplateError(_("Cancelled"))
+            _checkCancelled(plan)
             digest.update(chunk)
             writer.write(chunk)
             plan.progress += len(chunk)
@@ -962,16 +1501,35 @@ def _copyHashed(source, target, plan):
     return digest.hexdigest()
 
 
+def _checkCancelled(plan):
+    if plan.cancelled:
+        raise TemplateError(_("Cancelled"))
+
+
 def _writeFirstVolume(source, target, plan):
-    """The first volume of a 4D NIfTI file as a 3D NIfTI file (same header geometry and codes)."""
+    """The first volume of a 4D NIfTI file as a 3D NIfTI file (same header geometry and codes).
+
+    Cancel (``plan.cancelled``) is checked while the file is read and before and after the volume is written; the progress
+    moves while the file is read (most of the time) and reaches the size of the file when the volume is written.
+    """
     from LesionNetworkMappingLib import nifti
 
-    data, affine, header = nifti.read_nifti(source, apply_scaling=False)
+    start = plan.progress
+    size = os.path.getsize(source)
+    readShare = 0.9 * size
+
+    def onBlock(done, total):
+        _checkCancelled(plan)
+        plan.progress = start + int(readShare * done / max(1, total))
+
+    data, affine, header = nifti.read_nifti(source, apply_scaling=False, on_block=onBlock)
+    _checkCancelled(plan)
     first = data.reshape(data.shape[:3] + (-1,))[..., 0]
     nifti.write_nifti(target, first, affine, sform_code=max(1, header["sform_code"]), qform_code=max(1, header["qform_code"]),
                       dtype=first.dtype, scl_slope=header["scl_slope"] or None, scl_inter=header["scl_inter"] if header["scl_slope"] else None,
                       descrip=header.get("descrip", ""))
-    plan.progress += os.path.getsize(source)
+    _checkCancelled(plan)
+    plan.progress = start + size
     return fileSha256(target)
 
 
@@ -980,12 +1538,18 @@ def copyFiles(plan):
 
     The files are written into a hidden ".adding-..." folder that is renamed when everything is copied, so a failed or
     cancelled add leaves nothing behind. The user's files are only read.
+
+    :raises TemplateError: "Cancelled" when ``plan.cancelled`` is set before the folder is renamed (a cancel after that
+      is handled by the caller, which removes ``plan.folder``: see ``templates_ui.AddTemplateDialog``).
     """
     parent = os.path.dirname(plan.folder)
     os.makedirs(parent, exist_ok=True)
-    staging = os.path.join(parent, f".adding-{plan.record['id']}-{os.getpid()}")
+    removeStaleStaging(parent)
+    staging = os.path.join(parent, f"{_STAGING_PREFIX}{plan.record['id']}-{os.getpid()}")
     shutil.rmtree(staging, ignore_errors=True)
     os.makedirs(staging)
+    with _activeStagingLock:
+        _activeStaging.add(os.path.normpath(staging))
     try:
         record = dict(plan.record)
         record["sha256"] = {}
@@ -1002,6 +1566,8 @@ def copyFiles(plan):
         with open(os.path.join(staging, TEMPLATE_JSON), "w", encoding="utf-8", newline="\n") as f:
             json.dump(record, f, indent=2, ensure_ascii=False)
             f.write("\n")
+        # A cancel that came while the last file was written: nothing is added
+        _checkCancelled(plan)
         folder = plan.folder
         if os.path.exists(folder):
             base, counter = folder, 2
@@ -1014,6 +1580,9 @@ def copyFiles(plan):
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
+    finally:
+        with _activeStagingLock:
+            _activeStaging.discard(os.path.normpath(staging))
 
 
 def finishAdd(plan, record):
@@ -1032,7 +1601,7 @@ def addTemplate(imagePath, mask=None, head=None, surfaces=(), name=None, space=N
 
     ``copy`` must be True: the files are always copied into the Slicer Studio folder (the originals are never changed, and
     a template never refers to a file outside its folder). A folder you put into Templates/ yourself with a template.json
-    is listed as it is.
+    is listed as it is (with its own id when another template there has its id: ``userTemplates``).
 
     :raises TemplateError: see ``prepareAdd``.
     """
@@ -1041,6 +1610,29 @@ def addTemplate(imagePath, mask=None, head=None, surfaces=(), name=None, space=N
     plan = prepareAdd(imagePath, mask, head, surfaces, name, space, contrast, notes, spaceLabel, makeDefault, rootPath, requiredSha256)
     record = copyFiles(plan)
     return finishAdd(plan, record)
+
+
+def _removalRefusal(template, folder, wholeTree):
+    """Why the folder of ``template`` cannot be removed (moved to the trash, or deleted when ``wholeTree``), in plain
+    words; None if it can. Moving or deleting a folder needs write access to the folder that holds it and to the folder
+    itself (and, to delete it, to every folder inside it).
+    """
+    access = os.W_OK | os.X_OK
+    parent = os.path.dirname(os.path.normpath(folder))
+    readOnly = None
+    if not os.access(parent, access):
+        readOnly = parent
+    elif not os.access(folder, access):
+        readOnly = folder
+    elif wholeTree:
+        for directory, _folders, _files in os.walk(folder):
+            if not os.access(directory, access):
+                readOnly = directory
+                break
+    if readOnly is None:
+        return None
+    return _("The template {name} cannot be removed: the folder {folder} is read-only. Nothing was deleted.").format(
+        name=template.name, folder=readOnly)
 
 
 def removeTemplate(templateId, confirmDelete=None):
@@ -1056,14 +1648,29 @@ def removeTemplate(templateId, confirmDelete=None):
     if template.builtin:
         raise TemplateError(_("Built-in templates cannot be removed."))
     folder = template.folder
+    # A folder in a read-only place (a share where Templates/ is locked) can be neither moved to the trash nor deleted:
+    # say so and change nothing, rather than offer to delete it for good as if there were no trash and then stop half way
+    refusal = _removalRefusal(template, folder, wholeTree=False)
+    if refusal:
+        raise TemplateError(refusal)
     if not projects.moveToTrash(folder):
+        refusal = _removalRefusal(template, folder, wholeTree=True)
+        if refusal:
+            raise TemplateError(refusal)
         if confirmDelete is not None and not confirmDelete():
             return False
-        shutil.rmtree(folder)
+        try:
+            shutil.rmtree(folder)
+        except OSError as error:
+            raise TemplateError(_("The template {name} could not be deleted completely ({reason}).").format(
+                name=template.name, reason=error.strerror or str(error))) from error
     if str(qt.QSettings().value(DEFAULT_KEY) or "") == template.id:
         qt.QSettings().remove(DEFAULT_KEY)
     registerGrids(force=True)
-    _thumbnails.pop(template.id, None)
+    forgetThumbnails(template.id)
+    # Its volume and surfaces stay in the scene (lesions drawn on it keep working) but no longer carry its id: a template
+    # added later under the same name (the same id) is loaded from its own image, not taken from them
+    forgetTemplateNodes(template.id)
     _notify()
     return not os.path.exists(folder)
 
@@ -1118,12 +1725,16 @@ def thumbnailArray(path, size=96):
     radiological axial views), windowed at the 1st-99th percentiles. Worker-safe; None when it cannot be read.
     """
     np = _np()
-    if _lowerExtension(path) not in (".nii", ".nii.gz"):
-        return None
-    from LesionNetworkMappingLib import nifti
+    extension = _lowerExtension(path)
+    if extension == ".nrrd":
+        data, affine = readNrrdData(path)
+    elif extension in (".nii", ".nii.gz"):
+        from LesionNetworkMappingLib import nifti
 
-    data, affine, _header = nifti.read_nifti(path, apply_scaling=True)
-    data = data.reshape(data.shape[:3] + (-1,))[..., 0] if data.ndim > 3 else data
+        data, affine, _header = nifti.read_nifti(path, apply_scaling=True)
+        data = data.reshape(data.shape[:3] + (-1,))[..., 0] if data.ndim > 3 else data
+    else:
+        return None
     linear = np.asarray(affine, dtype=float)[:3, :3]
     axes = np.argmax(np.abs(linear), axis=1)  # voxel axis of world x, y, z
     if len(set(axes.tolist())) != 3:
@@ -1143,6 +1754,14 @@ def thumbnailArray(path, size=96):
     scaled = np.clip((image - low) / max(high - low, 1e-6), 0, 1)
     step = max(1, int(max(scaled.shape) / size))
     return (scaled[::step, ::step] * 255).astype(np.uint8)
+
+
+def forgetThumbnails(templateId):
+    """Drop the in-memory thumbnails of a template at every size (the cache keys are ``(id, size)``): a template added later
+    under the same name has the same id and must not show the removed one's picture.
+    """
+    for key in [key for key in list(_thumbnails) if key[0] == templateId]:
+        _thumbnails.pop(key, None)
 
 
 def rememberThumbnail(template, size, pixmap):
@@ -1222,6 +1841,19 @@ def addListener(callback):
 def removeListener(callback):
     while callback in _listeners:
         _listeners.remove(callback)
+
+
+def addRenameListener(callback):
+    """``callback({old id: new id})`` after a move gave moved templates other ids (``followRenamedIds``): an id held in
+    memory (a card's chosen template) follows it.
+    """
+    if callback not in _renameListeners:
+        _renameListeners.append(callback)
+
+
+def removeRenameListener(callback):
+    while callback in _renameListeners:
+        _renameListeners.remove(callback)
 
 
 def _notify():

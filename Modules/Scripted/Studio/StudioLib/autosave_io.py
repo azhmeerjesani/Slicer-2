@@ -22,6 +22,9 @@ single ``BackgroundWriter`` thread (``backgroundWriter()``), which other feature
 """
 
 import collections
+import contextlib
+import errno
+import hashlib
 import json
 import logging
 import os
@@ -99,6 +102,7 @@ FINGERPRINT_EXCLUDED_CLASSES = (
     "vtkMRMLCrosshairNode",
     "vtkMRMLSliceCompositeNode",
     "vtkMRMLLayoutNode",
+    "vtkMRMLSegmentEditorNode",  # the Segment Editor's selection and parameters, changed by entering and leaving Draw
 )
 
 #: numpy dtype name -> NRRD type (other types are written by the C++ storage node)
@@ -193,7 +197,7 @@ unsaved work can be recovered after a crash or after closing without saving.
 - Recover them with File > Recover Autosaved Work... in Slicer Studio.
 - Each session folder contains scene-<n> folders. Each one is a standard Slicer scene
   (Scene.mrml and its data files) that any Slicer version can open with File > Load Scene.
-- Sessions are deleted automatically after some days (Edit > Application Settings > Autosave).
+- Sessions are deleted automatically after some days (Edit > Application Settings > Saving).
 - The files may contain patient data: this folder is private to your user account.
 
 Deleting this folder is safe when Slicer is not running.
@@ -241,6 +245,36 @@ def _isExcludedClass(node):
     return excluded
 
 
+def _isHierarchyClass(node):
+    return node.IsA("vtkMRMLSubjectHierarchyNode")
+
+
+_classIsMarkups = {}
+
+
+def _isMarkupsClass(node):
+    className = node.GetClassName()
+    markups = _classIsMarkups.get(className)
+    if markups is None:
+        markups = _classIsMarkups[className] = bool(node.IsA("vtkMRMLMarkupsNode"))
+    return markups
+
+
+def _markupsDetails(node):
+    """The label, description and lock of each control point of a markups node.
+
+    They are saved in the node's file but changing them does not modify the node (``GetMTime()`` stays the same): the
+    control point only invokes a custom modified event. So the change detection has to read them.
+    """
+    try:
+        return tuple(
+            (node.GetNthControlPointLabel(index), node.GetNthControlPointDescription(index), node.GetNthControlPointLocked(index))
+            for index in range(node.GetNumberOfControlPoints())
+        )
+    except Exception:
+        return (("modified", node.GetMTime()),)
+
+
 def contentMTime(node):
     """Modification time of the content of a storable node: it changes on data edits, not on display edits."""
     mtime = node.GetMTime()
@@ -276,29 +310,160 @@ def contentMTime(node):
     return mtime
 
 
+def _hierarchyItems(node):
+    """What the user sees of a subject hierarchy: the data node or the name of each item, its parent and its attributes
+    (the DICOM tag editor and extensions set them with ``SetItemAttribute``, which does not modify the node).
+
+    The numbers of the items are not part of it: entering and leaving Draw (segments shown in the hierarchy) removes
+    and makes the items again with new numbers for the same data, which is not a change of the project. The order of the
+    items is: moving an item before or after its sibling (drag and drop in the Data module) is an edit of the project.
+
+    It is read again on every call (about 1 ms for 500 items), not cached by the node's MTime: renaming a folder, patient
+    or study item (``SetItemName`` of an item without a data node) does not modify the node, only invokes
+    ``SubjectHierarchyItemModifiedEvent``, and is an edit of the project.
+    """
+    try:
+        import vtk
+
+        def key(itemId):
+            dataNode = node.GetItemDataNode(itemId)
+            return dataNode.GetID() if dataNode is not None else node.GetItemName(itemId)
+
+        sceneItem = node.GetSceneItemID()
+        ids = vtk.vtkIdList()
+        node.GetItemChildren(sceneItem, ids, True)
+        entries = []
+        for index in range(ids.GetNumberOfIds()):
+            itemId = ids.GetId(index)
+            parent = node.GetItemParent(itemId)
+            names = node.GetItemAttributeNames(itemId)
+            attributes = tuple(
+                (name, node.GetItemAttribute(itemId, name)) for name in sorted(names)
+            ) if names else ()
+            entries.append((key(itemId), "" if parent == sceneItem else key(parent), attributes))
+    except Exception:
+        entries = [("modified", node.GetMTime())]  # an unreadable hierarchy counts as changed whenever it is modified
+    return entries
+
+
+_settledNodes = {}
+
+
+def settleNode(node, mtimeBefore):
+    """Tell the autosave that ``node`` is as it was at ``mtimeBefore``: its last modifications put back what a view
+    change (for example a lesion shown as an outline while Map is open) had changed, so they are not an edit.
+
+    Only the modifications made until now are taken back: a later change of the node counts as an edit again.
+    """
+    if node is None or not node.GetID():
+        return
+    if len(_settledNodes) > 64:
+        _settledNodes.clear()
+    _settledNodes[node.GetID()] = (node.GetMTime(), mtimeBefore)
+
+
+def settledMTime(node):
+    """The modification time of ``node`` as the change detection sees it (see :func:`settleNode`)."""
+    mtime = node.GetMTime()
+    settled = _settledNodes.get(node.GetID()) if node.GetID() else None
+    if settled is not None and settled[0] == mtime:
+        return settled[1]
+    return mtime
+
+
+def _lesionDisplay():
+    """``LesionNetworkMappingLib.display`` if it was imported (never imported for this: no outline is shown without it)."""
+    return sys.modules.get("LesionNetworkMappingLib.display")
+
+
+def ownLookXml(xml):
+    """Scene file text with the nodes' own look: view states that change how a node looks (the lesion shown as a white
+    outline while Map is open) never reach the project or its autosave. The live scene is not changed.
+    """
+    hook = getattr(_lesionDisplay(), "ownLookXml", None)
+    return hook(xml) if hook is not None and xml else xml
+
+
+def ownLookFile(path):
+    """:func:`ownLookXml` applied to the scene file ``path`` (just written by ``vtkMRMLScene::Commit``)."""
+    if getattr(_lesionDisplay(), "ownLookXml", None) is None:
+        return
+    with open(path, "rb") as stream:
+        data = stream.read()
+    text = data.decode("utf-8", "surrogateescape")
+    changed = ownLookXml(text)
+    if changed != text:
+        with open(path, "wb") as stream:
+            stream.write(changed.encode("utf-8", "surrogateescape"))
+
+
+@contextlib.contextmanager
+def nodesOwnLook():
+    """``with nodesOwnLook(): scene.WriteToMRB(...)``: view states that change how a node looks (the lesion shown as a
+    white outline while Map is open) are taken back for the length of a bundle write, so that a copy keeps the nodes' own
+    look (they are put back afterwards). Scene files written with ``vtkMRMLScene::Commit`` use :func:`ownLookXml`.
+    """
+    hook = getattr(_lesionDisplay(), "ownLookWhileWriting", None)
+    if hook is None:
+        yield
+        return
+    with hook():
+        yield
+
+
 def sceneFingerprint(scene, ignoreIds=()):
     """A cheap value that changes when the scene content changes (MTimes only: it computes nothing).
 
-    ``(number of nodes, max content MTime of the storable nodes saved with the scene, max MTime of the
-    other nodes, excluding views, cameras and interaction state)``.
+    ``(number of nodes saved with the scene, max content MTime of the storable nodes, max MTime of the other nodes,
+    structure of the subject hierarchy, hash of the labels, descriptions and locks of the control points)``. Left out: the nodes that the scene does not save (the slice models and their
+    display and transform nodes appear and change once the views show), views, cameras, interaction state and the Segment
+    Editor's state, and the subject hierarchy nodes themselves (the one made by the application and the one loaded with
+    the scene are merged after the load; the items' numbers change without an edit): the hierarchy counts by its structure.
     """
-    count = scene.GetNumberOfNodes()
+    count = 0
     storableMTime = 0
     otherMTime = 0
-    ignored = 0
-    for index in range(count):
+    items = []
+    points = []
+    for index in range(scene.GetNumberOfNodes()):
         node = scene.GetNthNode(index)
-        if node is None:
+        if node is None or not node.GetSaveWithScene():
             continue
         if ignoreIds and node.GetID() in ignoreIds:
-            ignored += 1
             continue
+        if _isHierarchyClass(node):
+            items.extend(_hierarchyItems(node))
+            continue
+        count += 1
+        if _isExcludedClass(node):
+            continue  # a camera is a storable node too, and the 3D view moves it after a project opens (not an edit)
         if _isStorableClass(node):
-            if node.GetSaveWithScene():
-                storableMTime = max(storableMTime, contentMTime(node))
-        elif not _isExcludedClass(node):
-            otherMTime = max(otherMTime, node.GetMTime())
-    return (count - ignored, storableMTime, otherMTime)
+            storableMTime = max(storableMTime, contentMTime(node))
+            if _isMarkupsClass(node):
+                points.append((node.GetID(), _markupsDetails(node)))
+        else:
+            otherMTime = max(otherMTime, settledMTime(node))
+    return (count, storableMTime, otherMTime, hash(tuple(items)), hash(tuple(points)))
+
+
+def viewState(scene):
+    """What the views show, as a comparable value: for each slice composite node its background, foreground and label
+    volumes and their opacities, and the layout number. ``sceneFingerprint`` leaves these nodes out (they change while a
+    project opens), but Save now and leaving write them to the scene as official 3D Slicer does, so a change made on
+    purpose to what a view shows is an edit for those two (``AutosaveService.projectNeedsSave(includeScene=True)``).
+    """
+    composites = []
+    layout = None
+    for index in range(scene.GetNumberOfNodes()):
+        node = scene.GetNthNode(index)
+        if node is None or not node.GetSaveWithScene():
+            continue
+        if node.IsA("vtkMRMLSliceCompositeNode"):
+            composites.append((node.GetID(), node.GetBackgroundVolumeID(), node.GetForegroundVolumeID(),
+                               node.GetLabelVolumeID(), round(node.GetForegroundOpacity(), 4), round(node.GetLabelOpacity(), 4)))
+        elif node.IsA("vtkMRMLLayoutNode"):
+            layout = node.GetViewArrangement()
+    return (tuple(sorted(composites)), layout)
 
 
 def estimateBytes(node):
@@ -327,6 +492,16 @@ def estimateBytes(node):
     except Exception:
         pass
     return 64 * 1024
+
+
+# Files that a storage node writes next to its own file, by the extension of that file
+_COMPANION_SUFFIXES = {
+    ".tsv": (".schema.tsv",),
+    ".csv": (".schema.csv",),
+    ".nhdr": (".raw", ".raw.gz", ".zraw", ".img", ".img.gz"),
+    ".mhd": (".raw", ".zraw", ".img"),
+    ".seg.vtm": (".seg",),  # the folder of the closed-surface segments
+}
 
 
 def _canonical(path):
@@ -384,6 +559,32 @@ def defaultStorageNodeClassName(node):
         return node.GetDefaultStorageNodeClassName() or ""
     except TypeError:
         return node.GetDefaultStorageNodeClassName("") or ""
+
+
+def storageWriteOptions(storageNode):
+    """Write options of a user's storage node that the private autosave copy sets differently (``_WriteJob``:
+    cropped, uncompressed segmentations, uncompressed volumes): ``{"useCompression", "compressionParameter"[,
+    "cropToMinimumExtent"]}``, or None without a storage node. Recorded in the manifest so that Recover puts them
+    back on the node of the user's file (``applyStorageWriteOptions()``), and a later Save writes that file as before.
+    """
+    if storageNode is None:
+        return None
+    options = {"useCompression": int(storageNode.GetUseCompression()), "compressionParameter": storageNode.GetCompressionParameter() or ""}
+    if storageNode.IsA("vtkMRMLSegmentationStorageNode"):
+        options["cropToMinimumExtent"] = bool(storageNode.GetCropToMinimumExtent())
+    return options
+
+
+def applyStorageWriteOptions(storageNode, options):
+    """Set the write options of ``storageWriteOptions()`` on ``storageNode`` (options it does not have are ignored)."""
+    if storageNode is None or not options:
+        return
+    if "useCompression" in options:
+        storageNode.SetUseCompression(int(options["useCompression"]))
+    if options.get("compressionParameter"):
+        storageNode.SetCompressionParameter(options["compressionParameter"])
+    if "cropToMinimumExtent" in options and storageNode.IsA("vtkMRMLSegmentationStorageNode"):
+        storageNode.SetCropToMinimumExtent(bool(options["cropToMinimumExtent"]))
 
 
 def classify(node, oldEntry, rootDirectory, roots, maxNodeBytes, systemTemporary=True):
@@ -500,7 +701,7 @@ def sceneXml(scene):
         scene.Commit()
     finally:
         scene.SetSaveToXMLString(0)
-    xml = scene.GetSceneXMLString()
+    xml = ownLookXml(scene.GetSceneXMLString())
     if modifiedNames is not None and not scene.GetModifiedSinceRead():
         _Sentinel.touch(scene, modifiedNames)
     return xml, rootDirectory
@@ -609,6 +810,34 @@ def fsyncFile(path):
             os.fsync(f.fileno())
     except OSError:
         pass
+
+
+#: Some C++ writers report success when the disk filled up during the write (teem's ``nrrdSave``, used by the NRRD
+#: and segmentation storage nodes, ignores the error of the final flush; so did ``vtkMRMLScene::Commit`` before
+#: 2026-10): their file is then truncated or empty. While less than this is free on the disk after such a write, the
+#: file is not trusted, and it never replaces a file of a project.
+DISK_FULL_MARGIN_BYTES = 1024 * 1024
+
+
+def checkDiskNotFull(folder):
+    """Raise OSError(ENOSPC) if the disk of ``folder`` is (nearly) full after a write by a C++ writer. Worker-safe."""
+    try:
+        free = shutil.disk_usage(folder).free
+    except OSError:
+        return
+    if free < DISK_FULL_MARGIN_BYTES:
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+
+def sceneFileComplete(path):
+    """True if the scene file at ``path`` ends with the closing MRML tag (a truncated scene file does not)."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 64))
+            return f.read().rstrip().endswith(b"</MRML>")
+    except OSError:
+        return False
 
 
 def treeSize(path):
@@ -743,6 +972,10 @@ class BackgroundWriter:
         while self._results:
             callback, value, failure = self._results.popleft()
             if failure is not None and callback is None:
+                if isinstance(value, OSError):
+                    # A folder that cannot be written is reported by the service as a pause, not as a bug
+                    logging.warning(f"Autosave background job failed: {value}")
+                    continue
                 logging.error(f"Autosave background job failed:\n{failure}")
                 continue
             if callback is None:
@@ -821,6 +1054,33 @@ def _parseXml(text):
     except ET.ParseError:
         # MRML writes some attribute values (file names, parameters) without escaping "&"
         return ET.fromstring(_BARE_AMPERSAND.sub("&amp;", text))
+
+
+def repairBareAmpersands(path):
+    """Escape the bare "&" of a scene file that is not well-formed XML because of them. Return True if it was rewritten.
+
+    Scenes written before vtkMRMLStorageNode XML-escaped file names (and by official 3D Slicer) keep the "&" of
+    a file name such as "Smith & Jones T1.nii.gz" raw, and then no Slicer can load them.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except (OSError, UnicodeDecodeError):
+        return False
+    if "&" not in text:
+        return False
+    try:
+        ET.fromstring(text)
+        return False
+    except ET.ParseError:
+        pass
+    repaired = _BARE_AMPERSAND.sub("&amp;", text)
+    try:
+        ET.fromstring(repaired)
+    except ET.ParseError:
+        return False
+    atomicWriteText(path, repaired)
+    return True
 
 
 def _isUrl(path):
@@ -1004,6 +1264,7 @@ class SlotWriter:
             roots = volatileRoots(self.options["autosaveRoot"])
         maxNodeBytes = self.options["maxNodeBytes"]
         storableNodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        storableNodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         snapshotJobs = []
         for index in range(storableNodes.GetNumberOfItems()):
             node = storableNodes.GetItemAsObject(index)
@@ -1025,6 +1286,7 @@ class SlotWriter:
                 "original": storageNode.GetFileName() if storageNode is not None and storageNode.GetFileName() else None,
                 "storageId": storageNode.GetID() if storageNode is not None else None,
                 "originalStorageClass": storageNode.GetClassName() if storageNode is not None and storageNode.GetFileName() else None,
+                "originalStorageOptions": storageWriteOptions(storageNode) if storageNode is not None and storageNode.GetFileName() else None,
                 "contentMTime": contentMTime(node),
             }
             sameFiles = bool(old) and old.get("files") == files
@@ -1051,7 +1313,8 @@ class SlotWriter:
             # write
             if old and old.get("kind") == "write" and old.get("contentMTime") == entry["contentMTime"] and old.get("class") == entry["class"] and self._dirExists(old):
                 kept = dict(old)
-                kept.update(name=entry["name"], original=entry["original"], storageId=entry["storageId"], originalStorageClass=entry["originalStorageClass"])
+                kept.update(name=entry["name"], original=entry["original"], storageId=entry["storageId"], originalStorageClass=entry["originalStorageClass"],
+                            originalStorageOptions=entry["originalStorageOptions"])
                 kept.pop("stale", None)
                 plan.entries[nodeId] = kept
                 continue
@@ -1060,7 +1323,8 @@ class SlotWriter:
                 if now - float(old.get("writtenAt") or 0) < HEAVY_INTERVAL_S or idle < HEAVY_IDLE_S:
                     plan.incomplete = True
                     if self._dirExists(old) and old.get("kind") == "write":
-                        plan.entries[nodeId] = dict(old, stale=True, name=entry["name"], original=entry["original"], storageId=entry["storageId"])
+                        plan.entries[nodeId] = dict(old, stale=True, name=entry["name"], original=entry["original"], storageId=entry["storageId"],
+                                                    originalStorageClass=entry["originalStorageClass"], originalStorageOptions=entry["originalStorageOptions"])
                     else:
                         plan.entries[nodeId] = dict(entry, kind="deferred", reason="heavy")
                     continue
@@ -1403,6 +1667,9 @@ class _WriteJob:
         storageNode.SetFileName(path)
         start = time.perf_counter()
         ok = storageNode.WriteData(node)
+        if ok:
+            # A full disk: the file may be truncated although it is reported as written (the generation is aborted)
+            checkDiskNotFull(absolute)
         elapsed = (time.perf_counter() - start) * 1000.0
         entry["lastWriteMs"] = round(elapsed, 2)
         entry["writtenAt"] = time.time()
@@ -1675,13 +1942,71 @@ def summarizeScene(scene, entries=None):
 PROJECT_TEMPORARY_PREFIX = ".studio-tmp-"
 #: Suffix of the name of the file Studio writes when another program changed the file of a node since Studio wrote it
 CONFLICT_SUFFIX = " (Slicer Studio)"
-#: Files that refer to data files next to them (NRRD and MetaImage detached headers, Analyze headers, multi-block
-#: surfaces): a node read from one of these outside the project is written into the project, never copied file by file
-DETACHED_EXTENSIONS = (".nhdr", ".seg.nhdr", ".seq.nhdr", ".mhd", ".hdr", ".vtm", ".seg.vtm")
+#: Files that are one half of a pair or refer to data files next to them (NRRD and MetaImage detached headers, the
+#: header and the image file of a NIfTI or Analyze pair, multi-block surfaces): a node read from one of these outside the
+#: project is written into the project, never copied file by file (the other half would be missing)
+DETACHED_EXTENSIONS = (".nhdr", ".seg.nhdr", ".seq.nhdr", ".mhd", ".hdr", ".hdr.gz", ".img", ".img.gz", ".vtm", ".seg.vtm")
 #: Files that official Slicer saved next to the scene file and that a generation moves into their kind folder (single
 #: files only: a .nhdr, a table and its schema or a DICOM series stay where they are)
 MOVABLE_EXTENSIONS = (".nrrd", ".nii", ".nii.gz", ".mha", ".seg.nrrd", ".mrk.json", ".vtk", ".vtp", ".stl", ".obj", ".ply", ".h5", ".tfm",
                       ".ctbl", ".txt")
+#: Files of a 4D image (a volume sequence) that official 3D Slicer 5.12 reads: its vtkMRMLVolumeSequenceStorageNode reads
+#: NRRD only (a 4D NIfTI is read since 5.13). A sequence read from another file is written into the project as .seq.nrrd
+PORTABLE_SEQUENCE_EXTENSIONS = (".seq.nrrd", ".seq.nhdr", ".nrrd", ".nhdr")
+#: File of the project's .studio folder (app state, never shared, never read by official Slicer) that remembers, for the files
+#: of the project that Studio took over from files outside it, the outside file each one came from: a file the user opens
+#: again is then "already open", also after the project saved it (and after a restart)
+SOURCES_FILE = "sources.json"
+#: .studio/pending-files.json: the new files of the generation being written (see ``ProjectWriter._journalNew``)
+PENDING_FILES = "pending-files.json"
+PENDING_FORMAT = "slicer-studio-pending-files"
+SOURCES_FORMAT = "slicer-studio-sources"
+#: prefix of the values of .studio/sources.json: a hash of the outside file's path, never the path itself (the project
+#: folder is shared whole, and the folder of a scan is often named after the patient)
+SOURCE_ID_PREFIX = "sha256:"
+#: First line of a colour table that vtkMRMLColorTableStorageNode wrote as .ctbl or .txt: "# Color table file <full path of
+#: the file>". A comment (every reader skips lines that start with "#"), but the path is an absolute local one
+COLOR_TABLE_HEADER = b"# Color table file "
+
+
+def portableColorTableHeader(data, name):
+    """``data`` (the bytes of a .ctbl/.txt colour table) with the path on its "# Color table file" line replaced by the file
+    name ``name``: the project folder is shared whole, and the header names the absolute path of the file that official
+    3D Slicer wrote. Anything else (other files, other lines) is returned unchanged.
+    """
+    if not data.startswith(COLOR_TABLE_HEADER):
+        return data
+    end = data.find(b"\n")
+    if end < 0:
+        end = len(data)
+    lineEnd = b"\r" if end > 0 and data[end - 1 : end] == b"\r" else b""
+    header = COLOR_TABLE_HEADER + os.path.basename(name).encode("utf-8", "surrogateescape") + lineEnd
+    return header + data[end:]
+
+
+def makeColorTableHeaderPortable(path):
+    """Rewrite the header line of the colour table file ``path`` if it names a path (``portableColorTableHeader()``).
+    True if the file was changed. Worker-safe.
+    """
+    with open(path, "rb") as f:
+        data = f.read()
+    portable = portableColorTableHeader(data, os.path.basename(path))
+    if portable == data:
+        return False
+    atomicWriteBytes(path, portable)
+    return True
+
+
+def _isColorTableFile(storageNode, path):
+    """True for a .ctbl/.txt file of a colour table node (its header line may hold the absolute path of the file)."""
+    if storageNode is None or not storageNode.IsA("vtkMRMLColorTableStorageNode"):
+        return False
+    return path.lower().endswith((".ctbl", ".txt"))
+
+
+def sourceId(path):
+    """A portable identifier of the outside file ``path`` (``SOURCE_ID_PREFIX`` + sha256 of its canonical path)."""
+    return SOURCE_ID_PREFIX + hashlib.sha256(_canonical(path).encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def _projects():
@@ -1695,6 +2020,57 @@ def _statOrNone(path):
         return _fileStat(path)
     except OSError:
         return None
+
+
+def _isPrivateProjectFile(projectPath, path):
+    """Files of the hidden nodes (vtkMRMLScene keeps them in "<scene>_Private") and of .studio are not tracked."""
+    relative = os.path.relpath(_canonical(path), _canonical(projectPath))
+    first = relative.split(os.sep)[0]
+    return first == ".studio" or first.endswith("_Private")
+
+
+def projectFileStats(project, scene):
+    """{canonical path: stat} of the project's scene file and of the files of the project that the scene references, as
+    they are now: taken when a scene of ``project`` was read but could not continue it (another Slicer Studio has it
+    open), and given to ``ProjectWriter.recordSceneFiles()`` when it continues it later.
+    """
+    projects = _projects()
+    stats = {}
+    stat = _statOrNone(project.scenePath)
+    if stat is not None:
+        stats[_canonical(project.scenePath)] = stat
+    rootDirectory = scene.GetRootDirectory()
+    nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+    nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
+    for index in range(nodes.GetNumberOfItems()):
+        node = nodes.GetItemAsObject(index)
+        if node.GetHideFromEditors():
+            continue
+        for path in _storagePaths(node.GetStorageNode(), rootDirectory):
+            if projects.isInside(path, project.path) and not _isPrivateProjectFile(project.path, path):
+                stat = _statOrNone(path)
+                if stat is not None:
+                    stats[_canonical(path)] = stat
+    return stats
+
+
+def _vtkTimeNow():
+    """The current value of VTK's modification time counter (``vtkTimeStamp::Modified()``): a time stamp taken later in
+    this process, such as a storage node's ``GetStoredTime()`` after it wrote its file, is larger.
+    """
+    import vtk
+
+    stamp = vtk.vtkTimeStamp()
+    stamp.Modified()
+    return stamp.GetMTime()
+
+
+def _storedTime(storageNode):
+    """``storageNode.GetStoredTime()`` as a number (0 when there is none)."""
+    try:
+        return int(storageNode.GetStoredTime().GetMTime()) if storageNode is not None else 0
+    except (AttributeError, TypeError):
+        return 0
 
 
 def _storagePaths(storageNode, rootDirectory):
@@ -1781,7 +2157,11 @@ class ProjectPlan(GenerationPlan):
         self.orphans = []
         #: [(name of the file another program changed, name of the file Studio wrote)]
         self.conflicts = []
+        #: conflict -> ID of the node whose file it is (a conflict of a node that could not be written is not reported)
+        self.conflictOwners = {}
         self.projectJson = None
+        #: the new content of .studio/sources.json, None when it did not change
+        self.sourcesJson = None
         self.thumbnailPath = os.path.join(projectDir, ".studio", "thumbnail.png")
 
 
@@ -1797,7 +2177,8 @@ class ProjectWriter(SlotWriter):
     - The scene file is written last (``vtkMRMLScene::Commit`` to a temporary file, then replaced), with paths relative
       to the project folder; files of nodes that left the scene are moved to ``.studio/removed``.
     - A file another program changed since Studio wrote it (size or time differ) is never overwritten: Studio writes
-      "<name> (Slicer Studio).<ext>" and reports it in ``conflicts``.
+      "<name> (Slicer Studio).<ext>" and reports it in ``conflicts``. The scene file too: Studio then writes its scene to
+      "<project> (Slicer Studio).mrml" for the rest of the session (``sceneConflictPath``).
 
     The scheduling is the autosave service's (``autosave.AutosaveService``): ``plan()``, ``runMainThreadStep()`` from a
     timer, then ``submitFinalize()``.
@@ -1811,7 +2192,8 @@ class ProjectWriter(SlotWriter):
         self.options = {"snapshotBudgetBytes": snapshotBudgetBytes(), "idleSeconds": None, "maxNodeBytes": 1 << 62}
         self.options.update(options or {})
         self.entries = {}
-        #: canonical path -> {"stat": [size, mtime_ns], "ours": bool}: the files of the project that Studio knows
+        #: canonical path -> {"stat": [size, mtime_ns], "ours": bool, "mark": VTK time counter when it was recorded}: the
+        #: files of the project that Studio knows (``_writtenHereSince()`` compares a storage node's stored time with "mark")
         self.records = {}
         #: node ID -> (canonical source, source stat, destination): copies that finished (reused by a later generation)
         self.importsDone = {}
@@ -1823,9 +2205,84 @@ class ProjectWriter(SlotWriter):
         self.lastResult = None
         #: [(other program's file name, Studio's file name)] not reported yet (``takeConflicts()``)
         self.conflicts = []
+        #: node ID -> ``sourceId()`` of the file outside the project that the node was read from (the project took it
+        #: over: its storage node now names a file of the project). Kept in .studio/sources.json (``SOURCES_FILE``),
+        #: as identifiers and not paths: no local path is written into the project folder
+        self.sources = {}
+        #: the content of .studio/sources.json as last read or written (it is written again only when it changes)
+        self._sourcesWritten = None
+        #: "<project> (Slicer Studio).mrml" once another program changed the scene file: Studio's scene is written there
+        self.sceneConflictPath = None
+        #: ``vtkMRMLScene::GetStoredTime()`` after the scene file was last read or written by this writer: a later value
+        #: means that this Slicer wrote the scene to a file since (the official Save dialog), not another program
+        self._sceneStoredTime = None
+        #: project-relative names ("/") of the new files that a generation wrote before its scene file (journal in
+        #: .studio/pending-files.json): a crash in between leaves them, complete but unreferenced, in the project
+        self._pendingNew = []
+        self._pendingLock = threading.Lock()
 
     def manifestPath(self):
         return None
+
+    def _pendingPath(self):
+        return os.path.join(self.project.path, ".studio", PENDING_FILES)
+
+    def _journalNew(self, path):
+        """Write down ``path``, a new file of the project, before it is created (main thread or background writer).
+        ``finalize()`` clears the journal once the scene file names the files; ``recoverPending()`` reads what a crash left.
+        """
+        relative = self._projectRelative(path)
+        if relative is None or os.path.lexists(path):
+            return
+        with self._pendingLock:
+            if relative in self._pendingNew:
+                return
+            self._pendingNew.append(relative)
+            try:
+                os.makedirs(os.path.dirname(self._pendingPath()), exist_ok=True)
+                atomicWriteJson(self._pendingPath(), {"format": PENDING_FORMAT, "version": 1, "files": list(self._pendingNew)})
+            except OSError as error:
+                logging.warning(f"Slicer Studio: the list of new project files could not be written: {error}")
+
+    def _clearPending(self):
+        with self._pendingLock:
+            self._pendingNew = []
+            _removeQuietly(self._pendingPath())
+
+    def recoverPending(self, referenced):
+        """Move the new files that an interrupted generation wrote and that the scene file does not name (``referenced``:
+        canonical paths) to .studio/removed, so that they do not stay in the project for good and a later file does not
+        have to be called "name 2". Files that the scene names, and files that were there before, are never touched.
+        """
+        data = readJson(self._pendingPath())
+        names = data.get("files") if isinstance(data, dict) and data.get("format") == PENDING_FORMAT else None
+        removedDir = None
+        projectCanonical = _canonical(self.project.path)
+        for name in names if isinstance(names, list) else ():
+            if not isinstance(name, str) or not name or os.path.isabs(name) or ".." in name.replace("\\", "/").split("/"):
+                continue
+            path = os.path.join(self.project.path, *name.split("/"))
+            if _canonical(path) in referenced or not _isUnder(_canonical(path), projectCanonical) or self._isPrivateFile(path) \
+                    or os.path.dirname(_canonical(path)) == projectCanonical:
+                continue
+            base, extension = _projects().splitExtension(os.path.basename(path))
+            candidates = [path] + [os.path.join(os.path.dirname(path), base + suffix) for suffix in _COMPANION_SUFFIXES.get(extension.lower(), ())]
+            for candidate in candidates:
+                if not os.path.lexists(candidate) or _canonical(candidate) in referenced:
+                    continue
+                if removedDir is None:
+                    removedDir = os.path.join(self.project.path, ".studio", "removed", time.strftime("%Y%m%d-%H%M%S"))
+                    os.makedirs(removedDir, exist_ok=True)
+                try:
+                    shutil.move(candidate, os.path.join(removedDir, _projects().uniqueName(removedDir, os.path.basename(candidate))))
+                except OSError:
+                    continue
+            folder = os.path.dirname(path)
+            try:
+                os.rmdir(folder)  # never leave an empty kind folder
+            except OSError:
+                pass
+        _removeQuietly(self._pendingPath())
 
     def hasContent(self):
         return os.path.isfile(self.project.scenePath)
@@ -1836,11 +2293,21 @@ class ProjectWriter(SlotWriter):
     def _canonical(self, path):
         return _canonical(path)
 
-    def _record(self, path, ours):
-        stat = _statOrNone(path)
+    def _record(self, path, ours, stat=None):
+        stat = _statOrNone(path) if stat is None else stat
         if stat is not None:
             previous = self.records.get(_canonical(path)) or {}
-            self.records[_canonical(path)] = {"stat": stat, "ours": bool(ours or previous.get("ours"))}
+            self.records[_canonical(path)] = {"stat": stat, "ours": bool(ours or previous.get("ours")), "mark": _vtkTimeNow()}
+
+    def _writtenHereSince(self, storageNode, path):
+        """True when ``storageNode`` wrote (or read) its file ``path`` in this Slicer after Studio recorded that file: the
+        official Save Data dialog (Ctrl+S in Classic), ``slicer.util.saveNode()``... A file changed that way is not
+        another program's change (the same rule as ``_sceneStoredTime`` for the scene file).
+        """
+        record = self.records.get(_canonical(path)) if path else None
+        if storageNode is None or record is None:
+            return False
+        return _storedTime(storageNode) > int(record.get("mark") or 0)
 
     def takeConflicts(self):
         conflicts, self.conflicts = self.conflicts, []
@@ -1848,28 +2315,93 @@ class ProjectWriter(SlotWriter):
 
     def _isPrivateFile(self, path):
         """Files of the hidden nodes (vtkMRMLScene keeps them in "<scene>_Private") and of .studio are not tracked."""
-        relative = os.path.relpath(_canonical(path), _canonical(self.project.path))
-        first = relative.split(os.sep)[0]
-        return first == ".studio" or first.endswith("_Private")
+        return _isPrivateProjectFile(self.project.path, path)
 
     def _isTemporaryFile(self, path):
         """A file in a temporary folder of a generation (never a node's own file: written again in its kind folder)."""
         relative = os.path.relpath(_canonical(path), _canonical(self.project.path))
         return any(part.startswith(PROJECT_TEMPORARY_PREFIX) for part in relative.split(os.sep))
 
-    def recordSceneFiles(self, scene):
+    def recordSceneFiles(self, scene, readStats=None):
         """Remember the files of the project that the scene references (a project opened in place): another program that
         changes one of them later is detected, and a file that leaves the scene is moved to .studio/removed.
+
+        ``readStats`` (``projectFileStats()`` taken when the scene was read, if that was earlier): the files are recorded
+        as they were then, so a file that changed since (another Slicer Studio saved the project while it had it open)
+        is another program's change and is not overwritten.
         """
+        readStats = readStats or {}
+
+        def record(path):
+            self._record(path, ours=False, stat=readStats.get(_canonical(path)))
+
+        record(self.project.scenePath)
+        self._sceneStoredTime = scene.GetStoredTime()
         rootDirectory = scene.GetRootDirectory()
+        stored = self._readSources()
+        referenced = set()
         nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         for index in range(nodes.GetNumberOfItems()):
             node = nodes.GetItemAsObject(index)
-            if node.GetHideFromEditors():
+            referenced.update(_canonical(path) for path in _storagePaths(node.GetStorageNode(), rootDirectory))
+            hidden = node.GetHideFromEditors()
+            if hidden and not node.IsA("vtkMRMLSequenceNode"):
                 continue
-            for path in _storagePaths(node.GetStorageNode(), rootDirectory):
+            files = _storagePaths(node.GetStorageNode(), rootDirectory)
+            for path in files if not hidden else ():
                 if _projects().isInside(path, self.project.path) and not self._isPrivateFile(path):
-                    self._record(path, ours=False)
+                    record(path)
+            source = stored.get(self._projectRelative(files[0])) if files else None
+            if source:
+                self.sources[node.GetID()] = source if source.startswith(SOURCE_ID_PREFIX) else sourceId(source)
+        self._sourcesWritten = stored
+        self.recoverPending(referenced)
+
+    def _sourcesPath(self):
+        return os.path.join(self.project.path, ".studio", SOURCES_FILE)
+
+    def _rememberSource(self, nodeId, files, projectCanonical):
+        """A node read from a file outside the project, which the project takes over now: remember that file."""
+        if files and not _isUnder(_canonical(files[0]), projectCanonical):
+            self.sources[nodeId] = sourceId(files[0])
+
+    def transferSource(self, oldNodeId, newNodeId, path=None):
+        """The node ``newNodeId`` replaces ``oldNodeId`` (a mask opened in Classic that became a lesion: no storage node
+        reads the file any more): it is found by the file that ``oldNodeId`` was read from. ``path``: that file when the
+        old node still read it from outside the project (the project did not take it over yet).
+        """
+        source = self.sources.pop(oldNodeId, None)
+        if source is None and path and not _isUnder(_canonical(path), _canonical(self.project.path)):
+            source = sourceId(path)
+        if source:
+            self.sources[newNodeId] = source
+
+    def _projectRelative(self, path):
+        """``path`` relative to the project folder with "/" (a key of .studio/sources.json), None if it is outside."""
+        canonical, projectCanonical = _canonical(path), _canonical(self.project.path)
+        if canonical == projectCanonical or not _isUnder(canonical, projectCanonical):
+            return None
+        return os.path.relpath(canonical, projectCanonical).replace(os.sep, "/")
+
+    def _readSources(self):
+        """The content of .studio/sources.json: {file of the project (relative, "/"): ``sourceId()`` of the outside file}.
+
+        A file that an earlier version wrote holds the path itself: it is converted when its project is opened, and
+        written again as identifiers (it differs from the new content, so the next save rewrites it).
+        """
+        data = readJson(self._sourcesPath())
+        sources = data.get("sources") if isinstance(data, dict) and data.get("format") == SOURCES_FORMAT else None
+        if not isinstance(sources, dict):
+            return {}
+        return {key: value for key, value in sources.items() if isinstance(key, str) and isinstance(value, str) and value}
+
+    def nodeIdsForSource(self, path):
+        """IDs of the nodes that were read from ``path``, a file outside the project that the project took over."""
+        if not path:
+            return []
+        target = sourceId(path)
+        return [nodeId for nodeId, source in self.sources.items() if source == target]
 
     def relocate(self, oldPath, newPath):
         """The project folder moved (renamed, or the Slicer Studio folder moved): follow it."""
@@ -1887,7 +2419,34 @@ class ProjectWriter(SlotWriter):
         for entry in self.entries.values():
             if entry.get("files"):
                 entry["files"] = [moved(os.path.normpath(path), oldPath, newPath) for path in entry["files"]]
+        if self.sceneConflictPath:
+            self.sceneConflictPath = moved(os.path.normpath(self.sceneConflictPath), oldPath, newPath)
         self.slotDir = newPath
+
+    def unchangedSceneFiles(self):
+        """The scene files of the project (its scene, and the "(Slicer Studio)" scene of a conflict) as Studio last read or
+        wrote them: their names relative to the project folder. Taken before a change that Studio itself makes to them
+        (the scenes follow the moved templates' new ids when the Slicer Studio folder moves), so that ``followSceneFiles``
+        can record that change as Studio's own, never as another program's.
+        """
+        names = []
+        for path in (self.project.scenePath, self.sceneConflictPath):
+            if not path:
+                continue
+            record = self.records.get(_canonical(path))
+            if record is not None and record["stat"] == _statOrNone(path):
+                names.append(os.path.relpath(os.path.normpath(path), os.path.normpath(self.project.path)))
+        return names
+
+    def followSceneFiles(self, names):
+        """Studio itself changed the scene files ``names`` (``unchangedSceneFiles``, relative to the project folder): record
+        them as they are now, so that the next save writes over them instead of taking them for another program's change.
+        """
+        for name in names or ():
+            path = os.path.join(self.project.path, name)
+            stat = _statOrNone(path)
+            if stat is not None and _canonical(path) in self.records:
+                self._record(path, ours=False, stat=stat)  # keeps whether Studio wrote it
 
     #
     # Plan (main thread)
@@ -1912,9 +2471,14 @@ class ProjectWriter(SlotWriter):
         plan.unsaved = bool(scene.GetStorableNodesModifiedSinceRead())
         projectCanonical = _canonical(projectDir)
         storableNodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        storableNodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         snapshotJobs = []
+        plan.freed = self._freedNames(plan, storableNodes, projectCanonical)
         for index in range(storableNodes.GetNumberOfItems()):
             node = storableNodes.GetItemAsObject(index)
+            if node.GetHideFromEditors() and node.IsA("vtkMRMLSequenceNode") and node.GetSaveWithScene():
+                # The sequence of a 4D image (its proxy volume is what the user sees)
+                self._rememberSource(node.GetID(), _storagePaths(node.GetStorageNode(), plan.rootDirectory), projectCanonical)
             if not node.GetSaveWithScene() or node.GetHideFromEditors():
                 # Hidden nodes are written by vtkMRMLScene::Commit itself, into "<scene>_Private"
                 continue
@@ -1930,11 +2494,17 @@ class ProjectWriter(SlotWriter):
                      "heavy": bool(old.get("heavy")), "lastWriteMs": old.get("lastWriteMs"), "writtenAt": old.get("writtenAt")}
             plan.entries[nodeId] = entry
             files = _storagePaths(storageNode, plan.rootDirectory)
+            if files and self._writtenHereSince(storageNode, files[0]):
+                # Saved by this Slicer since (the Save Data dialog): its files hold what the node held then
+                for path in files:
+                    if _isUnder(_canonical(path), projectCanonical) and not self._isPrivateFile(path):
+                        self._record(path, ours=False)
             modified = bool(node.GetModifiedSinceRead())
             exists = bool(files) and os.path.isfile(files[0]) and (len(files) == 1 or all(os.path.exists(path) for path in files[1:2]))
             inside = bool(files) and all(_isUnder(_canonical(path), projectCanonical) for path in files)
-            if inside and any(self._isTemporaryFile(path) for path in files):
-                modified = True  # left in a temporary folder by an interrupted generation: written into its kind folder
+            self._rememberSource(nodeId, files, projectCanonical)
+            if self._writtenAgain(storageNode, files, inside):
+                modified = True
             if not modified and exists and inside:
                 entry.update(kind="stored", files=files)
                 if _canonical(files[0]) not in self.records:
@@ -1969,8 +2539,72 @@ class ProjectWriter(SlotWriter):
         """True for a file that refers to other files (a detached header, a multi-block surface file): copying it alone
         would break it, so its node is written into the project by its storage node instead.
         """
+        name = os.path.basename(path).lower()
+        return any(name.endswith(extension) and len(name) > len(extension) for extension in DETACHED_EXTENSIONS)
+
+    def _writtenAgain(self, storageNode, files, inside):
+        """True if a generation writes the node of these files although it is not modified: a 4D NIfTI (written as
+        .seq.nrrd, never copied: official 3D Slicer 5.12 reads NRRD only), or a file left in a temporary folder by an
+        interrupted generation (written into its kind folder). ``inside``: every file is in the project folder.
+        """
+        if files and self._needsPortableFile(storageNode, files[0]):
+            return True
+        return inside and any(self._isTemporaryFile(path) for path in files)
+
+    def _freedNames(self, plan, storableNodes, projectCanonical):
+        """{(folder, lower-case name)} of files in the kind folders that no node references any more (the node was saved
+        elsewhere, e.g. by the Classic Save Data dialog) and that nobody changed since this writer recorded them: this
+        generation leaves them (they are orphans at its commit), so a new file may take their name instead of "name 2".
+        """
+        referenced = set()
+        for index in range(storableNodes.GetNumberOfItems()):
+            for path in _storagePaths(storableNodes.GetItemAsObject(index).GetStorageNode(), plan.rootDirectory):
+                referenced.add(_canonical(path))
+        freed = set()
+        for path, record in self.records.items():
+            if path in referenced or not _isUnder(path, projectCanonical) or self._isPrivateFile(path):
+                continue
+            folder = os.path.dirname(path)
+            if folder == projectCanonical or record["stat"] is None or _statOrNone(path) != record["stat"]:
+                continue  # the project folder holds the scene files; a changed file is kept
+            _base, extension = _projects().splitExtension(os.path.basename(path))
+            if extension.lower() in _COMPANION_SUFFIXES:
+                continue
+            freed.add((folder, os.path.basename(path).lower()))
+        return freed
+
+    def needsMigration(self, scene):
+        """True if files of the project are in a form that the next save replaces although nothing was edited: a file
+        that a generation writes again (``_writtenAgain()``: a project saved by an earlier version), or .studio/sources.json
+        of an earlier version (it holds the outside files' paths, not their identifiers). Save now, leaving and quitting
+        save such a project (``AutosaveService.projectNeedsSave(includeScene=True)``); looking at it is not an edit.
+        """
+        if any(not value.startswith(SOURCE_ID_PREFIX) for value in (self._sourcesWritten or {}).values()):
+            return True
+        projectCanonical = _canonical(self.project.path)
+        rootDirectory = scene.GetRootDirectory()
+        nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
+        for index in range(nodes.GetNumberOfItems()):
+            node = nodes.GetItemAsObject(index)
+            storageNode = node.GetStorageNode()
+            if not node.GetSaveWithScene() or node.GetHideFromEditors() or storageNode is None or not storageNode.GetSaveWithScene():
+                continue  # as plan(): not written by a generation
+            files = _storagePaths(storageNode, rootDirectory)
+            inside = bool(files) and all(_isUnder(_canonical(path), projectCanonical) for path in files)
+            if self._writtenAgain(storageNode, files, inside):
+                return True
+        return False
+
+    @staticmethod
+    def _needsPortableFile(storageNode, path):
+        """True for the file of a 4D image that official 3D Slicer 5.12 cannot read as a sequence (a 4D NIfTI): the project
+        writes the sequence through its storage node (.seq.nrrd) instead of keeping or copying that file.
+        """
+        if storageNode is None or not storageNode.IsA("vtkMRMLVolumeSequenceStorageNode"):
+            return False
         _base, extension = _projects().splitExtension(os.path.basename(path))
-        return extension.lower() in DETACHED_EXTENSIONS
+        return extension.lower() not in PORTABLE_SEQUENCE_EXTENSIONS
 
     @staticmethod
     def _movable(path, node):
@@ -1984,7 +2618,9 @@ class ProjectWriter(SlotWriter):
 
     def _newPath(self, plan, folder, fileName):
         """A file name in ``folder`` that replaces nothing (on disk or planned in this generation)."""
-        name = _projects().uniqueName(folder, fileName, plan.reserved.get(_canonical(folder), ()))
+        folderKey = _canonical(folder)
+        free = {name for key, name in getattr(plan, "freed", ()) if key == folderKey}
+        name = _projects().uniqueName(folder, fileName, plan.reserved.get(folderKey, ()), free=free)
         self._reserve(plan, folder, name)
         return os.path.join(folder, name)
 
@@ -2010,12 +2646,14 @@ class ProjectWriter(SlotWriter):
                     # was changed after: it is the node's own file
                     self._record(current, ours=False)
                     record = self.records.get(_canonical(current))
-                if stat is None or (record is not None and record["stat"] == stat):
+                if stat is None or (record is not None and record["stat"] == stat) or self._writtenHereSince(storageNode, current):
                     self._reserve(plan, os.path.dirname(current), os.path.basename(current))
                     return current
                 # Changed by another program since it was read or written: keep it
                 destination = self._newPath(plan, os.path.dirname(current), f"{base}{CONFLICT_SUFFIX}{extension}")
-                plan.conflicts.append((os.path.basename(current), os.path.basename(destination)))
+                conflict = (os.path.basename(current), os.path.basename(destination))
+                plan.conflicts.append(conflict)
+                plan.conflictOwners[conflict] = node.GetID()
                 return destination
         folder = os.path.join(projectDir, projects.kindFolder(node))
         base = projects.sanitizeName(node.GetName() or projects.kindFolder(node), fallback="data")
@@ -2031,25 +2669,36 @@ class ProjectWriter(SlotWriter):
             self._reserve(plan, os.path.dirname(done[2]), os.path.basename(done[2]))
             return
         folder = os.path.join(self.project.path, projects.kindFolder(node))
-        destination = self._newPath(plan, folder, projects.sanitizeName(os.path.basename(source), fallback="data"))
+        # The name is capped before its extension, which must stay whole (a copied "x.nii.gz" must still open)
+        base, extension = projects.splitExtension(os.path.basename(source))
+        destination = self._newPath(plan, folder, projects.sanitizeName(base, fallback="data") + extension)
         plan.imports.append((nodeId, source, stat, destination))
-        plan.copyJobs.append((nodeId, source, stat, destination))
+        # A colour table's .ctbl/.txt names the absolute path of the file on its first line: the copy names its own file
+        plan.copyJobs.append((nodeId, source, stat, destination, _isColorTableFile(node.GetStorageNode(), source)))
         entry["bytes"] = stat[0] if stat else 0
 
     def submitCopies(self, plan):
         """Queue the copies of unchanged files (background writer). Main thread."""
         jobs, plan.copyJobs = plan.copyJobs, []
-        for nodeId, source, stat, destination in jobs:
+        for nodeId, source, stat, destination, colorTable in jobs:
             plan.workerPending += 1
 
-            def copy(source=source, destination=destination):
+            def copy(source=source, destination=destination, colorTable=colorTable):
                 if plan.cancelled:
                     return None
                 os.makedirs(os.path.dirname(destination), exist_ok=True)
+                self._journalNew(destination)
                 temporary = destination + ".studio-part"
                 start = time.perf_counter()
                 try:
                     shutil.copy2(source, temporary)
+                    if colorTable:
+                        with open(temporary, "rb") as f:
+                            data = f.read()
+                        portable = portableColorTableHeader(data, os.path.basename(destination))
+                        if portable != data:
+                            with open(temporary, "wb") as f:
+                                f.write(portable)
                     fsyncFile(temporary)
                     replaceWithRetry(temporary, destination)
                 except BaseException:
@@ -2093,6 +2742,24 @@ class ProjectWriter(SlotWriter):
     # Commit (main thread, last job)
     #
 
+    def _sceneTarget(self, scene):
+        """The scene file to write and the conflict to report: (path, None), or (path, (their name, our name)).
+
+        The scene file of the project, unless another program changed it since Studio read or wrote it: then it is kept
+        and Studio writes "<project> (Slicer Studio).mrml" next to it (and keeps writing there in this session).
+        """
+        projects = _projects()
+        current = self.sceneConflictPath or self.project.scenePath
+        record = self.records.get(_canonical(current))
+        stat = _statOrNone(current)
+        if stat is None or record is None or record["stat"] == stat:
+            return current, None
+        if self._sceneStoredTime is not None and scene.GetStoredTime() != self._sceneStoredTime:
+            return current, None  # written by this Slicer since (the official Save dialog): not another program
+        stem = os.path.basename(self.project.scenePath)[: -len(projects.SCENE_EXTENSION)]
+        name = projects.uniqueName(self.project.path, f"{stem}{CONFLICT_SUFFIX}{projects.SCENE_EXTENSION}")
+        return os.path.join(self.project.path, name), (os.path.basename(current), name)
+
     def commit(self, plan, scene):
         """Point the copied and snapshot nodes at their files, then replace the scene file (relative paths)."""
         projects = _projects()
@@ -2116,14 +2783,16 @@ class ProjectWriter(SlotWriter):
             node = scene.GetNodeByID(nodeId)
             if node is None:
                 continue
-            self._record(destination, ours=True)
             imageData, imageMTime, scalarsMTime, rows = check
             current = node.GetImageData()
             unchanged = current is imageData and current is not None and current.GetMTime() == imageMTime
             if unchanged:
                 scalars = current.GetPointData().GetScalars() if current.GetPointData() is not None else None
                 unchanged = scalars is not None and scalars.GetMTime() == scalarsMTime and _ijkToRasRows(node) == rows
-            if unchanged and markStoredWithFile(scene, node, destination):
+            stored = unchanged and markStoredWithFile(scene, node, destination)
+            # Recorded after markStoredWithFile, whose new storage node is marked as written (not a write of this file)
+            self._record(destination, ours=True)
+            if stored:
                 plan.entries[nodeId].update(kind="stored", files=[destination])
                 continue
             # Changed while it was written: the file holds the snapshot, the node stays modified
@@ -2138,48 +2807,81 @@ class ProjectWriter(SlotWriter):
             scene.SetURL(scenePath)
         if os.path.normpath(scene.GetRootDirectory() or "") != os.path.normpath(projectDir):
             scene.SetRootDirectory(projectDir)
+        # A scene file that another program changed is kept: Studio writes its own next to it
+        target, sceneConflict = self._sceneTarget(scene)
         # vtkMRMLScene names the folder of hidden nodes after the scene file up to its first dot: the temporary scene
         # file keeps that part of the name
-        stem = os.path.basename(scenePath)[: -len(projects.SCENE_EXTENSION)]
+        stem = os.path.basename(target)[: -len(projects.SCENE_EXTENSION)]
         temporary = os.path.join(projectDir, f"{stem}.{PROJECT_TEMPORARY_PREFIX.strip('.')}{uuid.uuid4().hex[:8]}{projects.SCENE_EXTENSION}")
         start = time.perf_counter()
         try:
             written = scene.Commit(temporary)
-            if not written or not os.path.isfile(temporary):
+            # A disk that filled up during the write leaves a truncated file (and the hidden nodes' files): the scene
+            # file of the project is kept
+            checkDiskNotFull(projectDir)
+            if not written or not sceneFileComplete(temporary):
                 raise OSError(_tr("The scene file could not be written."))
+            ownLookFile(temporary)  # Map's lesion outline is a view state, not the lesion's look
             fsyncFile(temporary)
-            replaceWithRetry(temporary, scenePath)
+            replaceWithRetry(temporary, target)
         finally:
             _removeQuietly(temporary)
+        if sceneConflict is not None:
+            self.sceneConflictPath = target
+            plan.conflicts.append(sceneConflict)
+        self._sceneStoredTime = scene.GetStoredTime()
         plan.committed = True
         plan.metrics["sceneMs"] = round((time.perf_counter() - start) * 1000.0, 2)
         # After the commit: writing the scene may modify a node once (the subject hierarchy)
         plan.fingerprint = sceneFingerprint(scene, sentinelIds())
-        self._record(scenePath, ours=True)
+        self._record(target, ours=True)
         for nodeId in plan.nodeIds:
             node = scene.GetNodeByID(nodeId)
             entry = plan.entries.get(nodeId) or {}
             if node is not None and node.GetModifiedSinceRead() and entry.get("kind") not in ("skip",):
                 plan.incomplete = True
         # Files of nodes that left the scene
-        referenced = {_canonical(scenePath)}
+        referenced = {_canonical(scenePath), _canonical(target)}
         rootDirectory = scene.GetRootDirectory()
         nodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+        nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
         for index in range(nodes.GetNumberOfItems()):
             for path in _storagePaths(nodes.GetItemAsObject(index).GetStorageNode(), rootDirectory):
                 referenced.add(_canonical(path))
-        # Files that a storage node writes next to its file are referenced too (a table's "<name>.schema.tsv", the data
-        # file of a .nhdr): a file whose name starts with "<base name of a referenced file>." in the same folder
-        companions = {(os.path.dirname(path), _projects().splitExtension(os.path.basename(path))[0] + ".") for path in referenced}
+        # Files that a storage node writes next to its file are referenced too: a table's "<name>.schema.tsv" and the
+        # data file of a .nhdr/.mhd ("<name>.raw", ".raw.gz", ".zraw", ".img"), the "<name>.seg" folder of a .seg.vtm. Only these suffixes count: a file that
+        # merely shares the base name ("T1.mgz" next to the new "T1.nrrd") is a superseded copy and leaves the project
+        companions = set()
+        for path in referenced:
+            base, extension = _projects().splitExtension(os.path.basename(path))
+            for suffix in _COMPANION_SUFFIXES.get(extension.lower(), ()):
+                companions.add((os.path.dirname(path), (base + suffix).lower()))
         for path, record in list(self.records.items()):
             if path in referenced or not _isUnder(path, _canonical(projectDir)) or self._isPrivateFile(path):
                 continue
-            folder, name = os.path.dirname(path), os.path.basename(path)
-            if any(folder == companionFolder and name.startswith(prefix) for companionFolder, prefix in companions):
+            if (os.path.dirname(path), os.path.basename(path).lower()) in companions:
                 continue
             plan.orphans.append((path, record["stat"]))
             del self.records[path]
+        # Studio's version of a file that another program changed is only reported when it was written: a node that could
+        # not be written (a full disk) left no "(Slicer Studio)" file, and the notice would name a file that does not exist
+        plan.conflicts = [conflict for conflict in plan.conflicts
+                          if (plan.entries.get(plan.conflictOwners.get(conflict)) or {}).get("kind") != "error"]
         self.conflicts.extend(plan.conflicts)
+        # The outside files of the nodes that are still in the scene, by the file of the project that holds each node now
+        sources = {}
+        for nodeId, source in list(self.sources.items()):
+            node = scene.GetNodeByID(nodeId)
+            if node is None:
+                del self.sources[nodeId]
+                continue
+            files = _storagePaths(node.GetStorageNode(), rootDirectory)
+            key = self._projectRelative(files[0]) if files else None
+            if key is not None:
+                sources[key] = source
+        if sources != self._sourcesWritten:
+            plan.sourcesJson = sources
+            self._sourcesWritten = sources
         plan.projectJson = self.project.jsonData("open", scene, savedAt=time.time())
         plan.summary = projects.counts(scene)
 
@@ -2214,9 +2916,13 @@ class ProjectWriter(SlotWriter):
                     pass
         for path in plan.temporary:
             removeTree(path)
+        self._clearPending()  # the scene file names every file of this generation
         if plan.projectJson is not None:
             os.makedirs(os.path.join(projectDir, ".studio"), exist_ok=True)
             atomicWriteJson(os.path.join(projectDir, ".studio", "project.json"), plan.projectJson)
+        if plan.sourcesJson is not None:
+            os.makedirs(os.path.join(projectDir, ".studio"), exist_ok=True)
+            atomicWriteJson(os.path.join(projectDir, ".studio", SOURCES_FILE), {"format": SOURCES_FORMAT, "version": 1, "sources": plan.sourcesJson})
         return {"bytes": 0, "workerMs": (time.perf_counter() - start) * 1000.0, "generation": plan.generation}
 
     def abort(self, plan, reason):
@@ -2299,6 +3005,7 @@ class _ProjectWriteJob:
         destination = writer.target(plan, node, extension)
         folder = os.path.dirname(destination)
         os.makedirs(folder, exist_ok=True)
+        writer._journalNew(destination)
         temporary = os.path.join(folder, f"{PROJECT_TEMPORARY_PREFIX}{uuid.uuid4().hex[:8]}")
         os.makedirs(temporary)
         plan.temporary.append(temporary)
@@ -2311,13 +3018,20 @@ class _ProjectWriteJob:
             written = False
         elapsed = (time.perf_counter() - start) * 1000.0
         produced = os.listdir(temporary) if os.path.isdir(temporary) else []
-        error = None
-        if written and os.path.basename(destination) in produced:
+        error = diskFull = None
+        if written:
+            # A disk that filled up during the write leaves a truncated (or empty) file that the writer reports as
+            # written: it never replaces the node's file, and the whole save fails
+            try:
+                checkDiskNotFull(folder)
+            except OSError as fullError:
+                error = diskFull = fullError
+        if error is None and written and os.path.basename(destination) in produced:
             try:
                 size = self._moveIntoPlace(temporary, folder, produced, os.path.basename(destination))
             except OSError as moveError:
                 error = moveError
-        else:
+        elif error is None:
             error = "write failed"
         if error is not None:
             # The node keeps its previous file and stays modified (WriteData marked it stored): the next generation
@@ -2328,12 +3042,21 @@ class _ProjectWriteJob:
                 if name:
                     storageNode.AddFileName(name)
             node.StorableModified()
+            # WriteData marked the storage node as written, but not to its own file: that file stays as Studio knew it
+            original = originalNames[0]
+            if original and not os.path.isabs(original):
+                original = os.path.join(scene.GetRootDirectory() or writer.project.path, original)
+            record = writer.records.get(_canonical(original)) if original else None
+            if record is not None:
+                record["mark"] = _vtkTimeNow()
             removeTree(temporary)
             plan.incomplete = True
             entry.update(kind="error", reason="write failed")
             if self.nodeId not in writer._reportedFailures:
                 writer._reportedFailures.add(self.nodeId)
                 logging.warning(f"Slicer Studio: {entry.get('name') or self.nodeId} could not be saved in the project: {error}")
+            if diskFull is not None:
+                raise diskFull
             return True
         removeTree(temporary)
         _setSingleFile(storageNode, destination)
@@ -2397,6 +3120,12 @@ class _ProjectMoveJob:
             if record is not None:
                 self.writer.records[_canonical(self.path)] = record
             return True
+        if _isColorTableFile(node.GetStorageNode(), destination):
+            # Official 3D Slicer wrote the absolute path of the file on its first line: the project names the file only
+            try:
+                makeColorTableHeaderPortable(destination)
+            except OSError as error:
+                logging.warning(f"Slicer Studio: the header of {os.path.basename(destination)} could not be rewritten: {error}")
         _setSingleFile(node.GetStorageNode(), destination)
         self.writer._record(destination, ours=bool(record and record.get("ours")))
         self.entry["files"] = [destination]
@@ -2425,6 +3154,7 @@ class _ProjectSnapshotJob(_SnapshotJob):
             if plan.cancelled:
                 return None
             os.makedirs(os.path.dirname(destination), exist_ok=True)
+            writer._journalNew(destination)
             start = time.perf_counter()
             written = writeScalarNrrd(destination, snapshot, rows, level=1)
             if plan.cancelled and isNewFile:

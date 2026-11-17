@@ -242,7 +242,7 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         topBar._updateErrorBadge()
         self._pump()
         tab = int(qt.Qt.TabFocus)
-        controls = [topBar.menuButton, *topBar.workspaceButtons.values(), topBar.undoButton, topBar.redoButton, topBar.layoutButton, topBar.searchPill, topBar.errorBadge]
+        controls = [topBar.menuButton, topBar.workspaceButtons["draw"], topBar.undoButton, topBar.redoButton, topBar.layoutButton, topBar.searchPill, topBar.errorBadge]
         for control in controls:
             self.assertTrue(int(control.focusPolicy) & tab, f"{control.objectName} takes no Tab focus")
         # The error badge is no focus stop while it is hidden
@@ -263,8 +263,9 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self._pump(1)
         for control in (topBar.menuButton, topBar.layoutButton, topBar.searchPill):
             self.assertIn(str(control.objectName), visited)
-        # Qt keeps one Tab stop in the group of tabs that has had the focus: at least one is reached, the arrows reach the others
-        self.assertTrue(visited & {str(button.objectName) for button in topBar.workspaceButtons.values()})
+        # The tabs have one Tab stop, the current tab (Draw here); the arrows reach the others
+        self.assertIn(str(topBar.workspaceButtons["draw"].objectName), visited)
+        self.assertFalse(visited & {str(topBar.workspaceButtons[key].objectName) for key in ("library", "map")})
         # Space and Enter press a focused button in Draw (the Segment Editor's Space shortcut must not take them)
         libraryButton = topBar.workspaceButtons["library"]
         for key, text in ((qt.Qt.Key_Space, " "), (qt.Qt.Key_Return, "\r"), (qt.Qt.Key_Enter, "\r")):
@@ -286,6 +287,42 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(slicer.app.focusWidget(), libraryButton)
         self._sendKey(libraryButton, qt.Qt.Key_Left)
         self.assertEqual(slicer.app.focusWidget(), libraryButton)
+
+    def test_switcher_tab_stop_is_current_tab(self):
+        """Tab enters the workspace switcher on the current tab, as in a tab bar (not always on Library)."""
+        studioShell = self._applyStudio()
+        topBar = studioShell.topBar
+        tab = int(qt.Qt.TabFocus)
+
+        def stops():
+            return [key for key, button in topBar.workspaceButtons.items() if int(button.focusPolicy) & tab]
+
+        for key in ("draw", "library", "draw", "map"):
+            if key not in topBar.workspaceButtons:
+                continue
+            studioShell.switchTo(key)
+            self._pump()
+            if studioShell.currentWorkspace() != key:
+                continue  # Map is not available in this build
+            self.assertEqual(stops(), [key], f"the Tab stop of the switcher while {key} is current")
+        studioShell.switchTo("draw")
+        self._pump()
+        if not self._focus(topBar.menuButton):
+            self.skipTest("the main window cannot take the keyboard focus here")
+        entered = None
+        for _step in range(80):
+            self._sendKey(slicer.app.focusWidget(), qt.Qt.Key_Tab)
+            self._pump(1)
+            widget = slicer.app.focusWidget()
+            if widget is not None and widget.parentWidget() == topBar.switcherFrame:
+                entered = widget
+                break
+        self.assertEqual(entered, topBar.workspaceButtons["draw"], "Tab enters the switcher on the current tab")
+        # Shift+Tab enters it on the current tab too
+        self.assertTrue(self._focus(topBar.layoutButton))
+        self._sendKey(topBar.layoutButton, qt.Qt.Key_Backtab)
+        self._pump(1)
+        self.assertEqual(slicer.app.focusWidget(), topBar.workspaceButtons["draw"])
 
     #
     # Geometry
@@ -325,6 +362,41 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self.assertEqual(topBar.grid.columnStretch(2), 1)
         self.assertEqual(topBar.grid.columnMinimumWidth(0), topBar.grid.columnMinimumWidth(2))
 
+    def test_long_status_chip_keeps_window_narrow(self):
+        """A long status chip (a failed run's reason) is elided: the window still shrinks to 1000 px, the full text stays readable."""
+        studioShell = self._applyStudio()
+        topBar = studioShell.topBar
+        self.mainWindow.resize(1366, 760)
+        self._pump(6)
+        before = topBar.toolBar.minimumSizeHint.width()
+        longText = ("Run failed: The VLSM is blocked: No voxel is lesioned in at least 20 of the 24 lesions, "
+                    "lower the minimum overlap or add lesions")
+        studioShell.setStatusChip(longText, "warn")
+        self._pump(6)
+        self.assertTrue(topBar.statusChip.isVisibleTo(topBar.toolBar))
+        # Both side columns take the chip's minimum width (72 px and the spacing), never its whole text
+        self.assertLessEqual(topBar.toolBar.minimumSizeHint.width() - before, 200,
+                             f"the chip widened the top bar from {before} to {topBar.toolBar.minimumSizeHint.width()} px")
+        self.assertLessEqual(topBar.statusChip.width, 320)
+        self.assertIn("…", str(topBar.statusChip.text))
+        self.assertIn(longText, str(topBar.statusChip.toolTip))
+        self.assertEqual(topBar.statusChipText(), longText)
+        self.assertLessEqual(self.mainWindow.width, 1366)
+        for width in (1000, 1366, 1920):
+            self.mainWindow.resize(width, 760)
+            self._pump(6)
+            self.assertLessEqual(self.mainWindow.minimumSizeHint.width(), 1000, f"at {width} px")
+            self.assertEqual(self.mainWindow.width, width)
+            self._assertCentred(topBar, f"long chip at {width} px")
+            self.assertTrue(str(topBar.statusChip.text).startswith("Run failed"), str(topBar.statusChip.text))
+        # A short text is shown whole, without a tooltip
+        studioShell.setStatusChip("Mapping 34%", "busy")
+        self._pump(4)
+        self.assertEqual(str(topBar.statusChip.text), "Mapping 34%")
+        self.assertEqual(topBar.statusChipText(), "Mapping 34%")
+        studioShell.setStatusChip(None)
+        self.assertIsNone(topBar.statusChipText())
+
     def test_compact_mode(self):
         """setCompact(True): the search pill is a 30 px icon button, the switcher shows icons, the breadcrumb is at most 160 px."""
         studioShell = self._applyStudio()
@@ -351,6 +423,28 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         for button in topBar.workspaceButtons.values():
             self.assertEqual(int(button.toolButtonStyle), int(qt.Qt.ToolButtonTextBesideIcon))
         self._assertCentred(topBar, "after compact")
+
+    def test_search_pill_minimum_scales_with_font(self):
+        """At a 125% font the pill keeps room for the icon, "Search" and the key chip (no text under the chip)."""
+        studioShell = self._applyStudio()
+        topBar = studioShell.topBar
+        original = qt.QApplication.font()
+        big = qt.QFont(original)
+        big.setPixelSize(18)
+        try:
+            qt.QApplication.setFont(big)
+            self._pump(4)
+            topBar.updateColumnMinimums()
+            font = qt.QFont(topBar.searchPlaceholder.font)
+            font.setPixelSize(18)
+            text = qt.QFontMetrics(font).horizontalAdvance("Search")
+            needed = 10 + 8 + 16 + 2 * topBar.pillLayout.spacing + text + topBar.searchKey.sizeHint.width()
+            self.assertGreaterEqual(topBar.searchPill.minimumWidth, needed)
+            self.assertGreater(topBar.searchPill.minimumWidth, 132)
+        finally:
+            qt.QApplication.setFont(original)
+            self._pump(4)
+            topBar.updateColumnMinimums()
 
     def test_narrow_window_is_compact(self):
         """U-03 narrow mode: the top bar is compact below 1100 px of window width, and normal again above.
@@ -629,6 +723,23 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         topBar.breadcrumbButton.click()
         self._pump()
         self.assertEqual(studioShell.currentWorkspace(), "library")
+
+    def test_breadcrumb_open_study_never_names_a_scan(self):
+        """While a study is open (no subject, no project) the title does not fall back to a scan left in the scene."""
+        studioShell = self._applyStudio()
+        topBar = studioShell.topBar
+        self._addVolume("P0_scan")
+        studioShell.switchTo("library")
+        self.assertTrue(self._wait(lambda: topBar.breadcrumbText() == "P0_scan"), topBar.breadcrumbText())
+        studioShell.studySession = object()
+        try:
+            topBar._updateDefaultBreadcrumb()
+            self.assertEqual(topBar.breadcrumbText(), "")
+            self.assertEqual(str(topBar.breadcrumbButton.text), "")
+        finally:
+            studioShell.studySession = None
+        topBar._updateDefaultBreadcrumb()
+        self.assertEqual(topBar.breadcrumbText(), "P0_scan")
 
     def test_breadcrumb_ampersand(self):
         """A '&' in a name is shown as typed: not a mnemonic, so no underline and no shortcut on the breadcrumb."""
@@ -921,6 +1032,45 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         topBar._updateLayoutPicker()
         self.assertTrue(compare.isHidden())
 
+    def test_figure_view_chip_reset_and_rotate_leave_the_figure(self):
+        """The orientation chip entries "Reset orientation" and "Rotate to volume plane" leave a figure view as it is: the default
+        orientation of the view would show the 2D picture edge-on (a line), and its volume plane would flip it. Other views still follow them.
+        """
+        figure = self._addVolume("figure", shape=(1, 30, 20), role="figure")
+        scan = self._addVolume("scan", shape=(16, 24, 24))
+        yellowWidget = self.layoutManager.sliceWidget("Yellow")
+        redWidget = self.layoutManager.sliceWidget("Red")
+        yellowWidget.mrmlSliceCompositeNode().SetBackgroundVolumeID(figure.GetID())
+        redWidget.mrmlSliceCompositeNode().SetBackgroundVolumeID(scan.GetID())
+        yellowNode = yellowWidget.mrmlSliceNode()
+        yellowNode.SetOrientationToAxial()
+        yellowWidget.fitSliceToBackground()
+        self._pump()
+        controller = yellowWidget.sliceController()
+
+        def matrixOf(node):
+            matrix = node.GetSliceToRAS()
+            return [matrix.GetElement(row, column) for row in range(4) for column in range(4)]
+
+        before = matrixOf(yellowNode)
+        fieldOfView = list(yellowNode.GetFieldOfView())
+        for name in ("ResetOrientationAction", "actionRotate_to_volume_plane"):
+            action = controller.findChild("QAction", name)
+            self.assertIsNotNone(action, name)
+            action.trigger()
+            self._pump()
+            self.assertEqual(yellowNode.GetOrientationString(), "Axial", name)
+            self.assertEqual(matrixOf(yellowNode), before, name)
+            self.assertEqual(list(yellowNode.GetFieldOfView()), fieldOfView, name)
+        # The same entries still work on a scan view: Reset goes back to the default orientation
+        redNode = redWidget.mrmlSliceNode()
+        redNode.SetOrientationToCoronal()
+        self._pump()
+        self.assertEqual(redNode.GetOrientationString(), "Coronal")
+        redWidget.sliceController().findChild("QAction", "ResetOrientationAction").trigger()
+        self._pump()
+        self.assertEqual(redNode.GetOrientationString(), "Axial")
+
     def test_more_layouts_does_not_modify_layoutmenu(self):
         """More layouts… shows the Studio layouts and the classic actions by reference; the Layout menu is not changed."""
         before = self._studioLayoutActions()
@@ -1019,6 +1169,59 @@ class StudioTopBarTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
         self._pump(10)
         topBar._scanErrors()
         self.assertEqual(topBar.errorCount(), before + 7 + 10 - topbar._DICOM_FIRST_RUN_MAX_SQL_ERRORS)
+        topBar._onErrorLogViewed()
+
+    def test_error_badge_ignores_dcmtk_non_dicom_file(self):
+        """DCMTK's read messages for a non-DICOM file next to a series are not counted; other errors still are."""
+        studioShell = self._applyStudio()
+        topBar = studioShell.topBar
+        self._pump()
+        topBar._scanErrors()
+        before = topBar.errorCount()
+        logging.warning("unrelated message")
+        logging.error(
+            "W: DcmFileFormat: Could not determine Transfer Syntax from File Meta Information Header\n"
+            "W: DcmItem: Length of element (ff04,bccc) is odd\n"
+            "E: DcmElement: Unknown Tag & Data (ff04,bccc) larger (2136291449) than remaining bytes in file\n"
+            'Could not load  "/tmp/x/other_scan.nii.gz" \n'
+            "DCMTK says:  I/O suspension or premature end of stream\n"
+            "Could not read DICOM file:/tmp/x/other_scan.nii.gz",
+        )
+        self._pump(10)
+        topBar._scanErrors()
+        self.assertEqual(topBar.errorCount(), before)
+        logging.warning("unrelated message")
+        logging.error('Could not load "/tmp/x/real.nrrd"')
+        self._pump(10)
+        topBar._scanErrors()
+        self.assertEqual(topBar.errorCount(), before + 1)
+        topBar._onErrorLogViewed()
+
+    def test_error_badge_ignores_blank_stderr_line(self):
+        """A stray newline on stderr (CTK's FD reader logs it as an empty Critical entry at some starts) is not an error to count."""
+        from StudioLib import topbar
+
+        studioShell = self._applyStudio()
+        topBar = studioShell.topBar
+        model = topBar.errorLogModel
+        self._pump()
+        topBar._scanErrors()
+        before = topBar.errorCount()
+        rows = model.rowCount()
+        if "FD" not in model.msgHandlerNames:
+            self.skipTest("the stderr (FD) log handler is not registered here")
+        # The very entry of the startup race: Critical, origin FD, no text
+        os.write(2, b"\n")
+        self._pump(10)
+        topBar._scanErrors()
+        blank = [row for row in range(rows, model.rowCount()) if model.index(row, topbar._LEVEL_COLUMN).data() == "Critical" and not (model.index(row, topbar._DESCRIPTION_COLUMN).data() or "").strip()]
+        self.assertTrue(blank, "no empty Critical entry was logged for a newline on stderr")
+        self.assertEqual(topBar.errorCount(), before)
+        # A real stderr line is still counted
+        os.write(2, b"a real failure on stderr\n")
+        self._pump(10)
+        topBar._scanErrors()
+        self.assertEqual(topBar.errorCount(), before + 1)
         topBar._onErrorLogViewed()
 
 

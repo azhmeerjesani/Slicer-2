@@ -116,6 +116,9 @@ FZ_WARN = 10.0
 LOO_WARNING = "pooled LOO predictions are negatively biased for r/AUC and have high variance"
 #: Reference maps partialled out of the circuit similarity and used as the degree and PC1 baselines
 REFERENCE_KEYS = ("mu_r", "pc1")
+#: Where to build the missing reference maps; the reason is shown in the app and kept in validation.json, so it names the
+#: Connectome card's Manage… menu and no terminal command (the command line is in the reference module's help)
+REFERENCE_BUILD_HINT = "build them in the Connectome card: Manage… > Build reference maps"
 #: Inner blocks of the cross-fitting: a training subject's score comes from the in-fold circuit (and location map)
 #: built without its block, so that the models are fitted on out-of-sample training scores
 INNER_FOLDS = 5
@@ -629,6 +632,20 @@ def _map_score(prep_maps, data, vector, score, circuit, top_pct, bases_terms):
     return scores.fisher_z(scores.similarity_from_terms(cross, lesion, scores.map_terms(vector[None, :], bases), 0)[:, 0])
 
 
+def _fixed_reason(fixed):
+    """Why a fixed map gives no usable lesion score, or None. A constant (or all-zero) map has no spatial r with any
+    lesion map, and a score that is the same for every lesion carries no information: the model would silently fall
+    back to the volume-only model while the table and the verdicts name the map.
+    """
+    fixed = np.asarray(fixed, dtype=np.float64)
+    finite = fixed[np.isfinite(fixed)]
+    if finite.size < 3:
+        return "the map gives no defined score for the lesions (a constant or empty map has no spatial r)"
+    if np.ptp(finite) <= 1e-12 * max(float(np.abs(finite).max()), 1.0):
+        return "the map gives the same score to every lesion (a constant map has no spatial r)"
+    return None
+
+
 def _prepare(data, circuit, score, top_pct):
     data.check()
     if circuit not in CIRCUITS:
@@ -673,13 +690,20 @@ def _prepare(data, circuit, score, top_pct):
             item.status, item.reason = "not computed", data.reference_reason or "no reference maps (μC_r, PC1) for this connectome"
         else:
             item.fixed = _map_score(Y, data, reference[key], score, circuit, top_pct, terms)
+            item.reason = _fixed_reason(item.fixed)
+            if item.reason:
+                item.status = "not computed"
         predictors.append(item)
     location = _Predictor("location", "Lesion location (in-fold proportional subtraction)" if data.outcome_type == "binary" else "Lesion location (in-fold outcome-weighted occupancy)", "baseline", "location")
     if gram is None:
         location.status, location.reason = "not computed", data.occupancy_reason or "no lesion occupancy (weights.npz) for these maps"
     predictors.append(location)
     for name, vector in data.refmaps.items():
-        predictors.append(_Predictor(f"ref:{name}", f"Reference map {name}", "baseline", "fixed", fixed=_map_score(Y, data, vector, score, circuit, top_pct, terms)))
+        item = _Predictor(f"ref:{name}", f"Reference map {name}", "baseline", "fixed", fixed=_map_score(Y, data, vector, score, circuit, top_pct, terms))
+        item.reason = _fixed_reason(item.fixed)
+        if item.reason:
+            item.status = "not computed"
+        predictors.append(item)
     occupancy_csc = data.occupancy.tocsc() if data.occupancy is not None and score == "damage" else None
     return _Prepared(data, circuit, score, float(top_pct), predictors, nuisance, voxel_mean, bases, lesion, gram, occupancy_csc, [b.astype(PASS_DTYPE) for b in bases])
 
@@ -1333,10 +1357,13 @@ def permutation_p(null, observed):
 
 
 def _format_number(value):
-    return f"{value:.2f}".replace("-", "\u2212")  # the minus sign of the addendum's verdicts
+    text = f"{value:.2f}"
+    if text == "-0.00":  # a value that rounds to zero is printed without a sign
+        text = "0.00"
+    return text.replace("-", "\u2212")  # the minus sign of the addendum's verdicts
 
 
-def verdict_text(delta, ci, baseline_label, metric="auc", p_perm=None, subject="the circuit"):
+def verdict_text(delta, ci, baseline_label, metric="auc", p_perm=None, subject="the circuit", p_floor=None):
     """Neutral verdict of a comparison with a baseline, e.g. "the circuit does not exceed the degree baseline
     (ΔAUC 0.01, 95% CI -0.04 to 0.06)", printed with minus signs. "exceeds" only when the difference and the whole CI
     are above 0, "falls below" only when both are below 0.
@@ -1351,7 +1378,12 @@ def verdict_text(delta, ci, baseline_label, metric="auc", p_perm=None, subject="
         verb = "falls below"
     else:
         verb = "does not exceed"
-    p_text = "" if p_perm is None or not np.isfinite(p_perm) else f"; p_perm = {p_perm:.3g}"
+    if p_perm is None or not np.isfinite(p_perm):
+        p_text = ""
+    elif p_floor and p_perm <= p_floor * (1 + 1e-9):  # at the smallest attainable p: "<=", as the card prints it
+        p_text = f"; p_perm \u2264 {p_perm:.3g}"
+    else:
+        p_text = f"; p_perm = {p_perm:.3g}"
     return f"{subject} {verb} the {baseline_label} ({name} {_format_number(delta)}, {round(CI_LEVEL * 100)}% CI {_format_number(ci[0])} to {_format_number(ci[1])}{p_text})"
 
 
@@ -1499,7 +1531,8 @@ def _assemble(prep, folds, observed, boot, null, n_boot, n_perm, timings):
         details = interval_details([delta(run, "circuit", "volume") for run in boot], value)
         ci = details["ci"]
         p = permutation_p([delta(run, "circuit", "volume") for run in null], value) if n_perm else None
-        incremental.update({"delta": value, "ci": ci, "p_perm": p, "ci_percentile": details["ci_percentile"], "boot_median": details["boot_median"], "z0": details["z0"], "ci_method": details["method"], "text": verdict_text(value, ci, BASELINE_LABELS["volume"], primary, p, "volume + circuit")})
+        floor = 1.0 / (n_perm + 1) if n_perm else None
+        incremental.update({"delta": value, "ci": ci, "p_perm": p, "ci_percentile": details["ci_percentile"], "boot_median": details["boot_median"], "z0": details["z0"], "ci_method": details["method"], "text": verdict_text(value, ci, BASELINE_LABELS["volume"], primary, p, "volume + circuit", p_floor=floor)})
     comparisons = []
     for item in prep.predictors:
         if item.role != "baseline":
@@ -1575,16 +1608,19 @@ def apply_frozen(circuit_path, sha256, maps_tsv, participants, outcome, outcome_
 
     The circuit file must have the given sha256 (it is the record of what was frozen). Returns a dict with the
     circuit sha256, the per-subject scores, the metrics of the score (and of lesion volume, for context) with
-    bootstrap CIs, and the excluded subjects.
+    bootstrap CIs, the excluded subjects, and the circuit's independence of the scored lesions
+    (``provenance``: :func:`circuits.provenance_of`; "same_cohort" when the circuit was made from some of them).
 
     :raises ValueError: the sha256 does not match, or the circuit is not on the grid of the maps.
     """
-    from . import nifti
+    from . import circuits, nifti
     from .export import file_sha256
 
     actual = file_sha256(circuit_path)
     if str(sha256).lower() != actual:
         raise ValueError(f"The circuit {os.path.basename(os.fspath(circuit_path))} has sha256 {actual}, not the frozen {sha256}: it is not the frozen circuit")
+    # A circuit made from (some of) the scored lesions is not an independent replication (double dipping)
+    provenance = circuits.provenance_of(circuit_path, actual, circuits.lesions_of_maps(maps_tsv), circuits.find_study_root(maps_tsv), actual)
     loaded = load_data(maps_tsv, participants, outcome, outcome_type, mask=mask, positive=positive, dataset_column=dataset_column, input=input, bundle=bundle, need_occupancy=score == "damage", memmap_path=memmap_path, emit=emit)
     data, info = loaded["data"], loaded["info"]
     circuit_data, circuit_affine, _ = nifti.read_nifti(circuit_path)
@@ -1610,6 +1646,7 @@ def apply_frozen(circuit_path, sha256, maps_tsv, participants, outcome, outcome_
         "metrics": metrics,
         "partial_metrics": frozen_metrics(partial, data.outcome, data.outcome_type, data.datasets, n_boot, seed) if partial is not None else None,
         "volume_metrics": frozen_metrics(data.volume, data.outcome, data.outcome_type, data.datasets, n_boot, seed),
+        "provenance": provenance,
         "data": data,
         "info": info,
     }
@@ -1789,7 +1826,7 @@ def load_data(maps_tsv, participants, outcome, outcome_type, covariates=(), mask
         raise ValueError(f"Damage scores need the lesion occupancy: {occupancy_reason}")
     subjects_sha = mapped[sids[0]][2][1]
 
-    ref, ref_reason, ref_info = slnm._reference_for(types.SimpleNamespace(bundle=bundle_path), cohort, subjects_sha if isinstance(subjects_sha, str) and len(subjects_sha) == 64 else None, indices, mask_shape)
+    ref, ref_reason, ref_info = slnm._reference_for(types.SimpleNamespace(bundle=bundle_path), cohort, subjects_sha if isinstance(subjects_sha, str) and len(subjects_sha) == 64 else None, indices, mask_shape, build_hint=REFERENCE_BUILD_HINT)
     reference = {key: np.asarray(ref.maps[key], dtype=np.float64) for key in REFERENCE_KEYS} if ref is not None else None
     loaded_refmaps = {}
     for path in refmaps:
@@ -1798,7 +1835,8 @@ def load_data(maps_tsv, participants, outcome, outcome_type, covariates=(), mask
         if data.ndim > 3:
             data = data.reshape(data.shape[:3])
         if tuple(data.shape) != mask_shape or not np.allclose(affine, mask_affine, atol=1e-4, rtol=0):
-            raise ValueError(f"The reference map {os.path.basename(path)} is not on the connectome grid (resample it first)")
+            emit("warning", code="refmap_grid", message=f"The reference map {os.path.basename(path)} is not on the connectome grid (resample it first): it is left out")
+            continue
         vector = data.reshape(-1)[indices]
         if not np.all(np.isfinite(vector)):
             raise ValueError(f"The reference map {os.path.basename(path)} has non-finite values inside the mask")
@@ -2117,15 +2155,22 @@ def _run_cli(args, argv):
             )
             outputs.append(scores_path)
             record.update(common)
+            independence = applied["provenance"]
+            if independence["provenance"] == "frozen":
+                provenance = "frozen (independent circuit, sha256 verified)"
+            else:
+                provenance = f"same_cohort ({independence['basis']}: not an independent replication)"
+                emit("warning", code="same_cohort", message=f"The frozen circuit is not independent of this cohort: {independence['basis']}. The result is recorded as same-cohort (circular), not as a replication.")
             record.update({
                 "mode": "frozen",
-                "frozen": {"circuit": applied["circuit"], "sha256": applied["sha256"], "score": applied["score"], "top_pct": applied["top_pct"], "provenance": "frozen (independent circuit, sha256 verified)"},
+                "frozen": {"circuit": applied["circuit"], "sha256": applied["sha256"], "score": applied["score"], "top_pct": applied["top_pct"], "provenance": provenance,
+                           "independence": {key: independence[key] for key in ("provenance", "basis", "overlap")}},
                 "metrics": applied["metrics"],
                 "partial_metrics": applied["partial_metrics"],
                 "volume_metrics": applied["volume_metrics"],
                 "bootstrap": {"B": n_boot, "resampling": "subjects within strata (simple bootstrap; the circuit is fixed)", "ci_level": CI_LEVEL},
             })
-            summary = {"mode": "frozen", "n": data.n, "metrics": {name: item["value"] for name, item in applied["metrics"].items()}}
+            summary = {"mode": "frozen", "provenance": independence["provenance"], "n": data.n, "metrics": {name: item["value"] for name, item in applied["metrics"].items()}}
         else:
             stage = {"index": 1}
 
@@ -2179,7 +2224,10 @@ def _run_cli(args, argv):
     except jobs.Cancelled as exc:
         if record is not None:
             record.update({"status": "cancelled", "end": now_iso(), "stop_reason": exc.reason, "reruns_done": exc.done})
-            write_record(os.path.join(out_dir, VALIDATION_JSON), record)
+            json_path = os.path.join(out_dir, VALIDATION_JSON)
+            previous = read_record(json_path)
+            if not previous or previous.get("status") != "done":  # never replace a finished result's record with a stub
+                write_record(json_path, record)
         if run_id:
             runs.update(run_root, run_id, status="cancelled", ended=now_iso())
         raise

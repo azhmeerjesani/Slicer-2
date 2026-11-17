@@ -45,11 +45,14 @@ Command line (one JSON event per line, see ``jobs``; the GUI runs it as a light 
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
+import sys
 import threading
 import time
+import urllib.parse
 import zipfile
 
 CATALOG_FORMAT = "slicer-lnm-catalog"
@@ -121,6 +124,12 @@ class ChecksumError(FetchError):
         self.url = url
 
 
+class DiskFullError(FetchError):
+    """A file could not be written because the disk (or the quota) is full; the partial file was removed."""
+
+    code = "disk_full"
+
+
 class NotDownloadableError(FetchError):
     """The entry is a link-out or derived: there is nothing to download (``code`` "link_out" or "derive")."""
 
@@ -164,10 +173,29 @@ def badge_for(licence):
 def cache_dir(explicit=None):
     """Cache folder: ``explicit``, else ``$SLICER_LNM_CACHE``, else ``~/.cache/SlicerStudio/LNM``.
 
-    The application passes ``slicer.app.cachePath/LNM``. The folder is created when a file is written.
+    The application passes :func:`app_cache_dir` (``slicer.app.cachePath/LNM``). The folder is created when a file is written.
     """
     path = explicit or os.environ.get(CACHE_ENV) or os.path.join(os.path.expanduser("~"), ".cache", "SlicerStudio", "LNM")
     return os.path.abspath(os.path.expanduser(os.fspath(path)))
+
+
+def app_cache_dir():
+    """The application's cache folder: ``$SLICER_LNM_CACHE``, else ``slicer.app.cachePath/LNM`` inside the application,
+    else :func:`cache_dir`'s default (no application, for example a command-line worker).
+
+    Every caller in the application uses this one folder, so a file downloaded by one card serves every card (the
+    Clusters atlases name the Result card's peaks). Call it on the main thread (``slicer.app`` reads the settings) and
+    pass the folder to work that runs in a thread.
+    """
+    explicit = os.environ.get(CACHE_ENV)
+    if explicit:
+        return cache_dir(explicit)
+    app = getattr(sys.modules.get("slicer"), "app", None)  # never imports slicer: a plain Python worker has no application
+    try:
+        cachePath = str(app.cachePath or "") if app is not None else ""
+    except Exception:
+        cachePath = ""
+    return cache_dir(os.path.join(cachePath, "LNM") if cachePath else None)
 
 
 def manifest_path(cache=None):
@@ -663,12 +691,108 @@ class _PartLock:
             pass
 
 
-class _Transient(Exception):
-    """A download attempt failed in a way that may pass (dropped connection, 5xx); ``offline`` for no connection."""
+_URL_RE = re.compile(r"https?://[^\s,;)\]'\"]+")
 
-    def __init__(self, message, offline=False):
+
+def short_message(text, limit=160):
+    """One readable line of a failure text for a label: the first line, URLs replaced by their host, cut at a word with an ellipsis.
+
+    Labels word-wrap at spaces only: a long URL or an exception chain is clipped at the edge of the panel, and a
+    hard cut at a fixed length ends in the middle of a word.
+    """
+    lines = str(text or "").strip().splitlines()
+    line = " ".join(_URL_RE.sub(lambda match: host_of(match.group(0)), lines[0] if lines else "").split())
+    if len(line) <= limit:
+        return line
+    cut = line[:limit - 1]
+    if " " in cut and line[limit - 1] != " ":
+        cut = cut.rsplit(" ", 1)[0]
+    return cut.rstrip(" ,;:.") + "\u2026"
+
+
+def user_message(exc, limit=160):
+    """The sentence a failed download shows to the user: the text of a :class:`FetchError` (already one sentence), else a
+    plain notice (the exception class and its text go to the log, not to the screen).
+    """
+    if isinstance(exc, FetchError):
+        return short_message(getattr(exc, "message", None) or str(exc), limit)
+    logging.info(f"Slicer Studio: unexpected download failure: {exc!r}")
+    return "The download failed unexpectedly. The details are in the log."
+
+
+class _Transient(Exception):
+    """A download attempt failed in a way that may pass (dropped connection, 5xx); ``offline`` for no connection.
+
+    ``str()`` is a short sentence for the user; the raw exception text (urllib3 chains) is in ``detail`` and goes to the log only.
+    """
+
+    def __init__(self, message, offline=False, detail=None):
         super().__init__(message)
         self.offline = offline
+        self.detail = detail or message
+
+
+def host_of(url):
+    """The host name of ``url`` (what a message names), else the text itself."""
+    try:
+        return urllib.parse.urlsplit(str(url)).hostname or str(url)
+    except ValueError:
+        return str(url)
+
+
+def proxy_refusal_status(exc):
+    """The HTTP status (407, 403, ...) when a proxy answered the CONNECT of ``exc`` with a refusal, else None.
+
+    requests reports it as a ``ProxyError`` that wraps "Tunnel connection failed: 407 Proxy Authentication Required":
+    the proxy was reached, so "cannot be reached" would send the user to the wrong place.
+    """
+    import re
+
+    seen = set()
+    stack = [exc]
+    texts = []
+    while stack:
+        item = stack.pop()
+        if item is None or id(item) in seen:
+            continue
+        seen.add(id(item))
+        texts.append(str(item))
+        stack.extend(a for a in getattr(item, "args", ()) if not isinstance(a, (str, bytes)))
+        stack.append(getattr(item, "reason", None))
+    match = re.search(r"Tunnel connection failed:\s*(\d{3})", " ".join(texts))
+    return int(match.group(1)) if match else None
+
+
+def network_problem(exc, url):
+    """A short sentence for a failed request (``requests`` exception ``exc`` for ``url``); the raw text is left to the log.
+
+    Naming only the host: the exception texts of requests and urllib3 chain the whole URL, the retry count and the
+    socket error, and are of no use to the user.
+    """
+    import requests
+
+    host = host_of(url)
+    logging.info(f"Slicer Studio: request to {url} failed: {exc!r}")
+    if isinstance(exc, requests.exceptions.SSLError):
+        return f"The secure connection to {host} could not be verified. Check the date, the proxy and the network, and try again."
+    if isinstance(exc, requests.exceptions.ProxyError):
+        status = proxy_refusal_status(exc)
+        if status == 407:
+            return "The proxy server asks for a login (407). Check the proxy user name and password, or ask your IT department, and try again."
+        if status is not None:
+            return f"The proxy server refused the connection to {host} ({status}). Ask your IT department whether this site is allowed, and try again."
+        return f"No connection to {host}: the proxy server cannot be reached. Check the network and try again."
+    # requests wraps the read timeout of a streamed body (urllib3's ReadTimeoutError) in a plain ConnectionError
+    stalled = isinstance(exc, requests.exceptions.ReadTimeout) or any(type(arg).__name__ == "ReadTimeoutError" for arg in exc.args)
+    if stalled:
+        return f"{host} stopped sending data. Check the network and try again."
+    if isinstance(exc, (requests.exceptions.ChunkedEncodingError, requests.exceptions.ContentDecodingError)):
+        return f"The connection to {host} dropped. Check the network and try again."
+    if isinstance(exc, requests.exceptions.Timeout):
+        return f"No answer from {host}. Check the network and try again."
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return f"No connection to {host}. Check the network and try again."
+    return f"The request to {host} failed. Check the network and try again."
 
 
 class _Restart(Exception):
@@ -737,6 +861,27 @@ def _content_range(header):
     return start, total
 
 
+def _disk_full_error(part, exc):
+    """Remove the partial file that filled the disk and return the error to raise (``None`` when ``exc`` is another error).
+
+    A partial file left on a full disk would make every later write there fail, even for a file that fits, and nothing
+    in the app frees the space, so it is not kept for a Range resume (an interrupted connection still keeps it).
+    """
+    from . import jobs
+
+    if not jobs.is_disk_full_error(exc):
+        return None
+    try:
+        os.remove(part)
+    except OSError:
+        pass
+    folder = os.path.dirname(part)
+    return DiskFullError(
+        f"The disk is full: the file could not be saved in {folder}. The partial download was removed. Free some space on that disk and try again.",
+        path=folder,
+    )
+
+
 def _stream(session, url, part, size_hint, progress, cancel):
     """One attempt: download ``url`` into ``part``, resuming from its current size. Returns normally when the file is complete."""
     import requests
@@ -746,9 +891,11 @@ def _stream(session, url, part, size_hint, progress, cancel):
     try:
         response = session.get(url, headers=headers, stream=True, timeout=(CONNECT_TIMEOUT_S, READ_TIMEOUT_S), allow_redirects=True)
     except (requests.ConnectionError, requests.Timeout) as exc:
-        raise _Transient(f"cannot connect to {url}: {exc}", offline=True) from None
+        if proxy_refusal_status(exc) is not None:  # the proxy answered and said no: retrying cannot help
+            raise FetchError(network_problem(exc, url), code="http") from None
+        raise _Transient(network_problem(exc, url), offline=True, detail=f"cannot connect to {url}: {exc}") from None
     except requests.RequestException as exc:
-        raise FetchError(f"Request to {url} failed: {exc}", code="http") from None
+        raise FetchError(network_problem(exc, url), code="http") from None
     with response:
         status = response.status_code
         if status == 416 and start:
@@ -758,7 +905,7 @@ def _stream(session, url, part, size_hint, progress, cancel):
             os.remove(part)  # the file changed or the .part file is longer than it: start again
             raise _Restart()
         if status >= 500 or status in (408, 429):
-            raise _Transient(f"HTTP {status} from {url}")
+            raise _Transient(f"{host_of(url)} answered HTTP {status}. Try again later.", detail=f"HTTP {status} from {url}")
         if status >= 400:
             raise FetchError(f"HTTP {status} for {url}", code="http", status=status, url=url)
         if status == 206:
@@ -776,7 +923,7 @@ def _stream(session, url, part, size_hint, progress, cancel):
         _raise_if_cancelled(cancel, done)
         try:
             with open(part, mode) as f:
-                for chunk in response.iter_content(CHUNK_BYTES):
+                for chunk in raw_chunks(response):
                     if chunk:
                         f.write(chunk)
                         done += len(chunk)
@@ -784,9 +931,35 @@ def _stream(session, url, part, size_hint, progress, cancel):
                             progress(done, total)
                     _raise_if_cancelled(cancel, done)
         except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError, requests.exceptions.ContentDecodingError) as exc:
-            raise _Transient(f"the connection dropped after {done} bytes: {exc}", offline=done == start) from None
+            raise _Transient(network_problem(exc, url), offline=done == start, detail=f"the connection dropped after {done} bytes: {exc}") from None
+        except OSError as exc:
+            full = _disk_full_error(part, exc)
+            if full is None:
+                raise
+            raise full from None
         if expected_total is not None and done != expected_total:
-            raise _Transient(f"the connection closed after {done} of {expected_total} bytes")
+            raise _Transient(f"The connection to {host_of(url)} closed after {done:,} of {expected_total:,} bytes. Check the network and try again.",
+                             detail=f"the connection closed after {done} of {expected_total} bytes")
+
+
+def raw_chunks(response, size=CHUNK_BYTES):
+    """The body of ``response`` exactly as sent (a server that labels a .gz file ``Content-Encoding: gzip`` must not have it decoded:
+    Content-Length and Range offsets count the stored bytes). Errors are raised as ``requests`` raises them.
+    """
+    raw = getattr(response, "raw", None)
+    if raw is None or not hasattr(raw, "stream"):
+        yield from response.iter_content(size)
+        return
+    import requests
+    from urllib3.exceptions import ProtocolError, ReadTimeoutError, SSLError
+    try:
+        yield from raw.stream(size, decode_content=False)
+    except ProtocolError as exc:
+        raise requests.exceptions.ChunkedEncodingError(exc, response=response) from exc
+    except ReadTimeoutError as exc:
+        raise requests.ConnectionError(exc, response=response) from exc
+    except SSLError as exc:
+        raise requests.exceptions.SSLError(exc, response=response) from exc
 
 
 def _download(resource, dest, progress, cancel, session, retries):
@@ -817,14 +990,23 @@ def _download(resource, dest, progress, cancel, session, retries):
                 while time.monotonic() < deadline:
                     _raise_if_cancelled(cancel, os.path.getsize(part) if os.path.exists(part) else 0)
                     time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+            except DiskFullError:
+                raise  # another URL would fill the same disk
             except FetchError as exc:
                 last = exc
                 break
     if isinstance(last, FetchError):
         raise last
+    logging.info(f"Slicer Studio: download of {resource.title} failed: {getattr(last, 'detail', last)}")
+    # The partial file is mentioned only where there is one: it is not created before the first byte, nor after a refused connection
+    try:
+        kept = os.path.getsize(part)
+    except OSError:
+        kept = 0
+    resumes = " The partial download is kept and resumes next time." if kept else ""
     if last is not None and last.offline:
-        raise OfflineError(f"No network connection to download {resource.title}: {last}. A partial download is kept and resumes next time.", resource_id=resource.id)
-    raise FetchError(f"Download of {resource.title} was interrupted: {last}. The partial file is kept and resumes next time.", code="interrupted", resource_id=resource.id)
+        raise OfflineError(f"{last}{resumes}", resource_id=resource.id)
+    raise FetchError(f"Download of {resource.title} was interrupted. {last}{resumes}", code="interrupted", resource_id=resource.id)
 
 
 def _record_for(resource, path, url, sha256, recorded, override=False, archive=None):
@@ -965,6 +1147,11 @@ def _extract(resource, cache, archive, override=False):
                 for chunk in iter(lambda: source.read(HASH_CHUNK_BYTES), b""):
                     target.write(chunk)
                     digest.update(chunk)
+    except OSError as exc:
+        full = _disk_full_error(part, exc)
+        if full is None:
+            raise
+        raise full from None
     except zipfile.BadZipFile as exc:
         os.remove(archive)
         _drop_record(cache, _relpath(cache, archive))

@@ -24,7 +24,13 @@ accepted (addendum 4.1, never automatically, never bundled, no app-owned credent
   the next unconverted subject (:func:`connectome.from_tar_stream` checkpoints). ``--resume`` restarts the HTTP
   ``Range`` at that offset; archives that are done are skipped; subjects already in the bundle are never converted
   twice. With ``--keep-archives`` an interrupted archive is read again from its start, so that the stored file is
-  complete.
+  complete. A state whose bundle folder was deleted (no connectome.json or connectome.partial.json left) is not
+  trusted: the next fetch, with or without ``--resume``, starts again from the first archive (warning ``bundle_missing``).
+  A resume keeps the subjects already converted, so it may use the same subset or a larger one; a subset that leaves out
+  an archive that is (partly) converted is refused before anything is changed (exit code 2, ``code: subset_changed``).
+  When the provider has replaced an archive that is (partly) converted (its listed MD5 differs: a new dataset version
+  published while the fetch was paused), the converted subjects are discarded and the fetch starts again from the first
+  archive (warning ``catalog_differs``), so the bundle never mixes two versions or records a checksum it did not read.
 - **Integrity.** The whole-archive MD5 is computed on the fly and compared with the one the provider lists whenever
   the stream was read from its first byte (reconnections in the same run keep the hash valid); a stream that was
   resumed from a member offset records "not verified (resumed); members verified by gzip CRC" (every member's gzip
@@ -32,6 +38,11 @@ accepted (addendum 4.1, never automatically, never bundled, no app-owned credent
   once more to compute its MD5 again; if it still differs the job stops (exit code 1, ``code: checksum``) and the
   caller may run it again with ``--accept-checksum-mismatch``, which records ``checksumOverride`` in
   ``connectome.json`` (``source``) and in the run record.
+- **Subject subsets.** The archives of a subject subset (a named subset or ``subjects:N``) are estimated. For a Lead-DBS
+  entry the subset's subject ids are read from dataset_info.json and dataset_volsurf.mat: only they are converted, and the
+  next archives are read (warning ``subset_more_archives``) until the bundle holds all of them. Otherwise the bundle holds
+  every subject of the archives read; ``source.subset`` names the subset only when the bundle holds exactly its subjects,
+  and else records what it holds (the archives read, ``archives:00-01``), with a ``subset_differs`` warning.
 - **Keep-awake.** :class:`jobs.KeepAwake` runs ``caffeinate -i -w <pid>`` on macOS and calls
   SetThreadExecutionState on Windows; Linux does nothing.
 - **Result.** ``<dest>/<entry>.lnmc`` (connectome.json keeps ``format: "lnmc"``, version 1) with ``source{doi, version,
@@ -44,14 +55,17 @@ Command line (one JSON event per line, see ``jobs``; exit codes 0 done, 1 error,
 
     python -m LesionNetworkMappingLib.fetchconnectome --entry ID --dest DIR --terms-sha SHA256
         [--subset all|archives:00-01|subjects:N|NAME] [--streams 2] [--keep-archives] [--cancel-file F] [--resume]
-        [--accept-checksum-mismatch] [--catalog connectomes|FILE] [--prefetch-mb 32] [--run-root DIR]
+        [--accept-checksum-mismatch] [--catalog connectomes|FILE] [--prefetch-mb 32] [--run-root DIR] [--parent-pid PID]
     python -m LesionNetworkMappingLib.fetchconnectome terms --entry ID [--catalog connectomes|FILE]
         (shows the live terms text and its sha256; downloads nothing else)
     python -m LesionNetworkMappingLib.fetchconnectome check --entry ID [--catalog ...]
         (compares the live listing with the catalog)
 
 ``--server URL`` replaces the scheme, host and port of the catalog's API URLs (a mirror, or the fake Dataverse of the
-tests); the terms text must still match. The graphical interface never passes it.
+tests); the terms text must still match. The graphical interface never passes it. ``--parent-pid PID`` stops the job
+(cancelled, resumable) when that process is gone: the application passes its own pid, so that a fetch never keeps
+downloading after the application crashed (the PythonSlicer launcher outlives it, so the orphan watchdog alone does not
+notice).
 """
 
 import os
@@ -147,7 +161,7 @@ def destination_notice(destination, web=None):
     web = is_web_build() if web is None else web
     if not web or not destination:
         return ""
-    path = os.path.normpath(os.path.abspath(os.fspath(destination)))
+    path = os.path.normpath(_folder(destination))
     if path == WEB_DATA_ROOT or path.startswith(WEB_DATA_ROOT + os.sep):
         return ""
     return f"{destination} is inside the container but outside {WEB_DATA_ROOT}: connectomes saved there are lost when the container is removed. Use a folder under {WEB_DATA_ROOT}."
@@ -218,7 +232,7 @@ def _get_json(session, url, what):
         response.raise_for_status()
         return response.json()
     except Exception as exc:
-        raise jobs.JobError(f"{what} could not be fetched from {url}: {exc}", code="network") from None
+        raise jobs.JobError(f"{what} could not be fetched: {fetch.network_problem(exc, url)}", code="network") from None
 
 
 def _live_file(item):
@@ -319,10 +333,21 @@ def compare_catalog(entry, live):
     return differences
 
 
-def plan_files(entry, live, subset=None):
-    """The files a fetch needs, from the live listing: ``{"archives": [...], "others": [...], "selection": dict}``.
+def _plan_item(entry, catalog_file, live):
+    """The live file of a catalog file, as a plan item (see :func:`plan_files`)."""
+    is_archive = catalog_file.get("role") == "archive"
+    item = _match_live(catalog_file, live["files"])
+    if item is None:
+        raise jobs.JobError(f"{catalog_file['name']} is no longer listed in the dataset {entry['source'].get('doi')}; check the catalog for updates", code="listing")
+    return {**item, "role": catalog_file.get("role"), "size": catalog_file.get("size") if (is_archive and item["size"] is None) else item["size"]}
 
-    Each file is ``{id, name, folder, size, md5, tabular, role}`` with the live id and checksum.
+
+def plan_files(entry, live, subset=None):
+    """The files a fetch needs, from the live listing: ``{"archives": [...], "others": [...], "selection": dict, "more": [...]}``.
+
+    Each file is ``{id, name, folder, size, md5, tabular, role}`` with the live id and checksum. ``more`` lists the
+    catalog files of the other archives (name order), which a subject subset reads when its estimated archives
+    do not hold all its subjects.
     Raises ``jobs.JobError`` (code ``listing``) when a needed file is no longer listed.
     """
     try:
@@ -335,13 +360,10 @@ def plan_files(entry, live, subset=None):
         is_archive = catalog_file.get("role") == "archive"
         if is_archive and catalog_file["name"] not in chosen:
             continue
-        item = _match_live(catalog_file, live["files"])
-        if item is None:
-            raise jobs.JobError(f"{catalog_file['name']} is no longer listed in the dataset {entry['source'].get('doi')}; check the catalog for updates", code="listing")
-        item = {**item, "role": catalog_file.get("role"), "size": catalog_file.get("size") if (is_archive and item["size"] is None) else item["size"]}
-        (archives if is_archive else others).append(item)
+        (archives if is_archive else others).append(_plan_item(entry, catalog_file, live))
     archives.sort(key=lambda f: f["name"])
-    return {"archives": archives, "others": others, "selection": selection}
+    more = [f for f in catalogs.archives(entry) if f["name"] not in chosen]
+    return {"archives": archives, "others": others, "selection": selection, "more": more}
 
 
 #
@@ -374,7 +396,7 @@ class SignedUrlResolver:
         try:
             response = self.session.get(access, allow_redirects=False, stream=True, timeout=(CONNECT_TIMEOUT_S, READ_TIMEOUT_S))
         except Exception as exc:
-            raise _Transient(f"cannot reach {access}: {exc}") from None
+            raise _Transient(fetch.network_problem(exc, access)) from None
         try:
             status = response.status_code
             if status in REDIRECT_STATUSES and response.headers.get("Location"):
@@ -385,6 +407,8 @@ class SignedUrlResolver:
                 return access
             if status >= 500 or status in (408, 429):
                 raise _Transient(f"HTTP {status} from {access}")
+            if status in (404, 410):  # the file is gone, which is not a refusal: the dataset probably changed
+                raise jobs.JobError(f"HTTP {status} for {access}: the file is no longer at the provider; the dataset probably changed, check the catalog for updates", code="http", status=status)
             raise jobs.JobError(f"HTTP {status} for {access}: the provider does not allow this download", code="http", status=status)
         finally:
             response.close()
@@ -483,7 +507,7 @@ class ArchiveSource:
                     if resign_failures >= MAX_RESIGN_FAILURES:
                         raise jobs.JobError(f"{self.name}: the provider keeps refusing the signed URL (HTTP 403)", code="http", status=403) from None
                     if failures > MAX_FAILURES:
-                        raise jobs.JobError(f"{self.name}: the download keeps failing ({exc}); what was read is kept and the job can be resumed", code="network") from None
+                        raise jobs.JobError(f"{self.name}: the download keeps failing. {exc} What was downloaded is kept: Resume when you are online again.", code="network") from None
                     self.reconnects += 1
                     self._wait(RETRY_DELAYS_S[min(failures, len(RETRY_DELAYS_S) - 1)] if failures else 0.0)
                     continue
@@ -531,9 +555,9 @@ class ArchiveSource:
         try:
             response = self.resolver.session.get(url, headers={"Range": f"bytes={self._fetched}-"}, stream=True, timeout=(CONNECT_TIMEOUT_S, READ_TIMEOUT_S))
         except (requests.ConnectionError, requests.Timeout) as exc:
-            raise _Transient(f"cannot connect: {exc}") from None
+            raise _Transient(fetch.network_problem(exc, url)) from None
         except requests.RequestException as exc:
-            raise jobs.JobError(f"{self.name}: the request failed: {exc}", code="http") from None
+            raise jobs.JobError(f"{self.name}: {fetch.network_problem(exc, url)}", code="http") from None
         self._response = response
         with response:
             status = response.status_code
@@ -562,7 +586,7 @@ class ArchiveSource:
             self._check_total(total)
             self.connected.set()
             try:
-                for chunk in response.iter_content(CHUNK_BYTES):
+                for chunk in fetch.raw_chunks(response, CHUNK_BYTES):
                     if self._stop.is_set():
                         return False
                     if _is_cancelled(self.cancel):
@@ -582,7 +606,7 @@ class ArchiveSource:
                         return False
                     self._fetched += len(chunk)
             except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError, requests.exceptions.ContentDecodingError) as exc:
-                raise _Transient(f"the connection dropped at byte {self._fetched:,}: {exc}") from None
+                raise _Transient(f"the connection dropped at byte {self._fetched:,}. {fetch.network_problem(exc, url)}") from None
         return self.size is not None and self._fetched >= self.size
 
     # Consumer
@@ -678,14 +702,40 @@ def _entry_slug(entry):
     return re.sub(r"[^A-Za-z0-9._-]+", "_", entry["id"])
 
 
+def _folder(dest):
+    """``dest`` as an absolute folder, ``~`` expanded (the job's working folder is the module folder, never the user's)."""
+    return os.path.abspath(os.path.expanduser(os.fspath(dest)))
+
+
 def bundle_path(entry, dest):
     """``<dest>/<entry id>.lnmc``: the bundle a fetch writes."""
-    return os.path.join(os.path.abspath(os.fspath(dest)), f"{_entry_slug(entry)}.lnmc")
+    return os.path.join(_folder(dest), f"{_entry_slug(entry)}.lnmc")
+
+
+def lock_path(entry, dest):
+    """``<dest>/.<entry id>.lock``: the output lock a running fetch holds (``jobs.OutputLock``)."""
+    return os.path.join(_folder(dest), f".{_entry_slug(entry)}.lock")
+
+
+def running_fetch(entry, dest):
+    """The lock holder (``{pid, host, started}``) of a fetch of ``entry`` into ``dest`` that a live process is running, or None."""
+    lock = jobs.OutputLock(lock_path(entry, dest))
+    holder = lock.read()
+    return holder if holder is not None and not lock.is_stale(holder) else None
+
+
+def finished_fetch(entry, dest):
+    """The bundle path of a fetch of ``entry`` into ``dest`` that has finished (its state is complete), or None."""
+    data = read_state(entry, dest)
+    bundle = bundle_path(entry, dest)
+    if data and data.get("complete") and os.path.isfile(os.path.join(bundle, "connectome.json")):
+        return bundle
+    return None
 
 
 def work_dir(entry, dest):
     """``<dest>/<entry id>.fetch``: the state of a fetch, the accepted terms text, small files and kept archives."""
-    return os.path.join(os.path.abspath(os.fspath(dest)), f"{_entry_slug(entry)}.fetch")
+    return os.path.join(_folder(dest), f"{_entry_slug(entry)}.fetch")
 
 
 def bundle_name(entry):
@@ -735,11 +785,92 @@ def read_state(entry, dest):
     return state.data if state.exists else None
 
 
+def _state_lost_its_bundle(data, bundle):
+    """True when a fetch's state (``data``) records converted subjects but ``bundle`` holds neither connectome.json nor
+    connectome.partial.json (the user deleted the bundle folder): the state no longer describes what is on disk, and
+    trusting it would skip archives whose subjects are gone.
+    """
+    if not data or os.path.isfile(os.path.join(bundle, "connectome.json")) or os.path.isfile(os.path.join(bundle, "connectome.partial.json")):
+        return False
+    if data.get("complete"):
+        return True
+    return any(_archive_has_data(info) for info in (data.get("archives") or {}).values())
+
+
+def _archive_has_data(info):
+    """True when the state ``info`` of an archive says that (some of) its subjects were converted into the bundle."""
+    info = info or {}
+    return info.get("status") in ("done", "mismatch") or (info.get("status") == "partial" and (int(info.get("memberOffset") or 0) > 0 or int(info.get("subjectsDone") or 0) > 0))
+
+
+def _resume_subset_problem(entry, data, subset):
+    """Why the interrupted fetch whose state is ``data`` cannot be resumed with ``subset`` (a sentence), or None.
+
+    A resumed fetch only adds to the bundle: the subjects already converted stay in it. So a subset that leaves out an
+    archive the paused fetch has converted (part of) cannot be resumed; the same subset or a larger one can.
+    """
+    text = None if subset in (None, "", "all") else str(subset)
+    if not data or data.get("complete") or text == data.get("subset"):
+        return None
+    try:
+        selection = catalogs.resolve_subset(entry, text)
+    except ValueError:
+        return None  # plan_files refuses it with its own message
+    if entry.get("converter") == "leaddbs_vol" and not selection["exact"]:
+        return None  # a Lead-DBS subject subset reads the next archives until the bundle holds its subjects
+    wanted = {item["name"] for item in selection["archives"]}
+    outside = sorted(name for name, info in (data.get("archives") or {}).items() if name not in wanted and _archive_has_data(info))
+    if not outside:
+        return None
+    return (f"The paused download in this folder has already converted subjects from {', '.join(outside)}, which this subset leaves out. "
+            "Resume it with the subset it was started with (or a larger one), or choose another folder.")
+
+
+def resume_subset_problem(entry, dest, subset=None):
+    """Why the interrupted fetch of ``entry`` in ``dest`` cannot be resumed with ``subset`` (a sentence), or None (nothing
+    to resume, or it can be resumed with it). See :func:`_resume_subset_problem`.
+    """
+    data = read_state(entry, dest)
+    if not data or _state_lost_its_bundle(data, bundle_path(entry, dest)):
+        return None  # nothing is continued: the next download starts again
+    return _resume_subset_problem(entry, data, subset)
+
+
+def _forget_converted_archives(data):
+    """Reset a state whose bundle is gone (see :func:`_state_lost_its_bundle`): every archive is read again from its start.
+    The small files already downloaded (documents, participants table) are kept with their verification.
+    """
+    archive_names = set(data.get("archives") or {}) | set(data.get("sizes") or {})
+    data["archives"] = {}
+    files = {name: record for name, record in (data.get("files") or {}).items() if name not in archive_names}
+    data["files"] = files
+    data["checksumOverride"] = any((record or {}).get("verification") == VERIFICATION_OVERRIDE for record in files.values())
+    data["complete"] = False
+    data.pop("subjects", None)
+
+
+def _converted_archives_changed(data, live):
+    """The names of the archives whose subjects are (partly) in the bundle (see :func:`_archive_has_data`) but whose MD5 the
+    provider lists now differs from the one they were read with: the provider replaced them (a new dataset version) while
+    the fetch was paused. The subjects converted from them are the old data, which the new listing does not describe.
+    """
+    live_md5 = {}
+    for item in live.get("files") or []:
+        live_md5.setdefault(item.get("name"), set()).add(item.get("md5"))
+    changed = []
+    for name, info in sorted((data.get("archives") or {}).items()):
+        published = (info or {}).get("md5Published")
+        now = live_md5.get(name)
+        if published and _archive_has_data(info) and now and len(now) == 1 and None not in now and published not in now:
+            changed.append(name)
+    return changed
+
+
 def unfinished_fetch(entry, dest):
     """A summary of an interrupted fetch (``{"done", "total", "fraction", "archives"}``), or None when none is waiting."""
     data = read_state(entry, dest)
-    if not data or data.get("complete"):
-        return None
+    if not data or data.get("complete") or _state_lost_its_bundle(data, bundle_path(entry, dest)):
+        return None  # a state whose bundle was deleted is not continued: the next download starts again
     sizes = data.get("sizes") or {}
     total = sum(sizes.values())
     done = sum(sizes.get(name, 0) if info.get("status") == "done" else info.get("bytes", 0) for name, info in (data.get("archives") or {}).items())
@@ -767,7 +898,7 @@ def _provenance(entry, live, plan, terms_sha, results, full_set, participants, s
         "files": source_files,
     }
     if not full_set:
-        source["subset"] = plan["selection"].get("text") or "partial"
+        source["subset"] = plan["selection"].get("recorded") or plan["selection"].get("text") or "partial"
     if override:
         source["checksumOverride"] = True
     population = entry.get("population") or {}
@@ -783,6 +914,8 @@ def _provenance(entry, live, plan, terms_sha, results, full_set, participants, s
     }
     if entry.get("tr_s"):
         provenance["trS"] = entry["tr_s"]
+    if entry.get("space"):
+        provenance["space"] = entry["space"]  # the catalog states the space: the manager, circuits and the study card read it from connectome.json
     if participants:
         provenance["participants"] = participants
     return {k: v for k, v in provenance.items() if v not in (None, {})}
@@ -899,26 +1032,38 @@ def fetch_connectome(entry, dest, terms_sha, subset=None, streams=2, keep_archiv
     full_set = len(archives) == len(catalogs.archives(entry))
     plan["selection"]["text"] = None if subset in (None, "", "all") else str(subset)
 
-    dest = os.path.abspath(os.fspath(dest))
+    dest = _folder(dest)
     os.makedirs(dest, exist_ok=True)
     bundle = bundle_path(entry, dest)
     work = work_dir(entry, dest)
-    lock_path = os.path.join(dest, f".{_entry_slug(entry)}.lock")
-    lock = jobs.OutputLock(lock_path)
+    locked = lock_path(entry, dest)
+    lock = jobs.OutputLock(locked)
     holder = lock.read()
     if holder is not None and not lock.is_stale(holder):  # a live job is fetching it: say so before the "partly downloaded" refusals below
-        raise jobs.Locked(f"{lock_path} is locked by process {holder.get('pid')} on {holder.get('host')} since {holder.get('started')}", holder=holder)
+        raise jobs.Locked(f"{locked} is locked by process {holder.get('pid')} on {holder.get('host')} since {holder.get('started')}", holder=holder)
     state = FetchState(os.path.join(work, "state.json"))
+    if state.exists and _state_lost_its_bundle(state.data, bundle):
+        # The bundle folder was deleted after (part of) the fetch: its converted subjects are gone, so start again from the
+        # first archive instead of skipping the archives the state marks as converted (and refusing a new download)
+        emit("warning", code="bundle_missing", message=f"{os.path.basename(bundle)} is no longer in this folder: the download starts again from the beginning.")
+        _forget_converted_archives(state.data)
+        state.exists = False
     if not resume and (state.exists or os.path.exists(os.path.join(bundle, "connectome.partial.json"))):
         raise jobs.JobError(f"{os.path.basename(bundle)} is partly downloaded here: resume it (--resume) or choose another folder", code="exists")
     if not state.exists and os.path.exists(os.path.join(bundle, "connectome.json")):
         raise jobs.JobError(f"{os.path.basename(bundle)} exists already in this folder: choose another folder", code="exists")
+    problem = _resume_subset_problem(entry, state.data, subset) if resume and state.exists else None
+    if problem:  # refused before the state records the new subset
+        raise jobs.JobError(problem, code="subset_changed", exit_code=jobs.EXIT_USAGE)
 
     sizes = {item["name"]: item["size"] for item in archives}
     plan_info = catalogs.disk_plan(entry, subset, keep_archives)
     free = shutil.disk_usage(dest).free
     if plan_info["peak"] and not state.exists and free < plan_info["peak"] * DISK_MARGIN:
         raise jobs.JobError(f"Not enough free space in {dest}: the plan needs about {plan_info['peak']:,} B at the peak and {free:,} B are free", code="disk_space")
+    if not plan_info["peak"] and plan_info.get("peak_min") and not state.exists and free < plan_info["peak_min"]:
+        # The bundle size is known only at conversion, but the destination cannot hold even its lower bound
+        raise jobs.JobError(f"Not enough free space in {dest}: the plan needs at least about {plan_info['peak_min']:,} B and {free:,} B are free", code="disk_space")
 
     with lock:
         if lock.reclaimed:
@@ -943,6 +1088,14 @@ def fetch_connectome(entry, dest, terms_sha, subset=None, streams=2, keep_archiv
             raise
         except BaseException as exc:
             _update_run(run_root, run_id, status="failed", summary={"error": str(exc)}, ended=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+            if jobs.is_disk_full_error(exc):
+                try:
+                    free_now = f"{shutil.disk_usage(dest).free:,} B are free"
+                except OSError:
+                    free_now = "the disk is full"
+                needed = f"; the plan needs about {plan_info['peak']:,} B at the peak" if plan_info["peak"] else ""
+                raise jobs.JobError(f"The disk is full: {os.path.basename(bundle)} could not be written in {dest} ({free_now}{needed}). "
+                                    "What was converted is kept: free some space and resume (--resume).", code="disk_space") from exc
             raise
         _update_run(run_root, run_id, status="done", summary={k: summary[k] for k in ("subjects", "archives", "checksum_override", "unverified_resumed", "reconnects", "resigns", "bytes")}, outputs=[os.path.basename(bundle)],
                     ended=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
@@ -983,11 +1136,31 @@ def _run_fetch(entry, live, plan, terms_sha, state, work, bundle, dest, session,
         results[item["name"]] = {"md5": item.get("md5"), "bytes": size, "verification": verification}
         state.save()
 
-    for item in archives:
+    changed = _converted_archives_changed(data, live)
+    if changed:
+        # The subjects already converted from a replaced archive are the old data; which ones they are (and the runs staged
+        # for a subject that continues in the next archive) is not known per archive, so the bundle is discarded and every
+        # archive is read again from its start: the bundle never mixes two versions or records a checksum it did not read
+        emit("warning", code="catalog_differs", message=f"{', '.join(changed)} {'has' if len(changed) == 1 else 'have'} changed at the provider since this download was paused: "
+             "the subjects already converted are discarded and the download starts again from the first archive.")
+        shutil.rmtree(bundle, ignore_errors=True)
+        _forget_converted_archives(data)
+        results = data["files"]
+        state.save()
+
+    def restart_if_changed(item):
         info = data["archives"].get(item["name"])
         if info is not None and info.get("md5Published") and item.get("md5") and info["md5Published"] != item["md5"] and info.get("status") != "done":
             emit("warning", code="catalog_differs", message=f"{item['name']} has changed at the provider since it was started; it is read again from its start.")
             info.update({"status": "pending", "memberOffset": 0, "bytes": 0})
+
+    for item in archives:
+        restart_if_changed(item)
+
+    # A subject subset of a Lead-DBS dataset (a named subset, or the first N subjects) has known subject ids: only they
+    # are converted, and the archives after the estimated ones are read until the bundle holds all of them
+    subset_ids = _subset_subject_ids(plan["selection"], dataset_dir) if layout == "leaddbs_vol" and not full_set and not plan["selection"]["exact"] else None
+    more = list(plan.get("more") or []) if subset_ids is not None else []
 
     def completed():
         """Bytes of the archives that are converted (the checksum of a "mismatch" archive is pending only)."""
@@ -1022,11 +1195,15 @@ def _run_fetch(entry, live, plan, terms_sha, state, work, bundle, dest, session,
 
     def convert(source, item, info, last):
         """Convert one archive from its stream; returns the stream's result (see ``ArchiveSource.result``)."""
+        # The converter counts per stream (``subjects_done`` restarts at 0 in every archive, and in a resumed one), but the progress
+        # shows the subjects the bundle holds: those of the archives converted before plus the ones this archive adds
+        held = progress.subjects
+        added = 0
         try:
             for checkpoint in connectome.from_tar_stream(
                 source, bundle, layout=layout, name=bundle_name(entry), resume=True, start_offset=source.start, cancel=cancel, finalize=last, description=description,
                 citation=entry.get("citation") or "", data_use_terms=f"{entry.get('licence')} (accepted terms text sha256 {terms_sha[:12]}...)",
-                dataset_dir=dataset_dir if layout == "leaddbs_vol" else None, grid=_expected_grid(entry),
+                dataset_dir=dataset_dir if layout == "leaddbs_vol" else None, grid=_expected_grid(entry), subjects=subset_ids,
             ):
                 if checkpoint.get("cancelled"):
                     info.update({"status": "partial", "memberOffset": int(checkpoint["member_offset"]), "bytes": source.position})
@@ -1036,7 +1213,9 @@ def _run_fetch(entry, live, plan, terms_sha, state, work, bundle, dest, session,
                     info["memberOffset"] = int(checkpoint["member_offset"])
                     break
                 info.update({"status": "partial", "memberOffset": int(checkpoint["member_offset"]), "bytes": source.position, "subjectsDone": checkpoint.get("subjects_done", 0)})
-                progress.subjects = checkpoint.get("subjects_done", 0)
+                if not checkpoint.get("skipped"):
+                    added += 1  # a skipped subject (one the bundle holds already, or one outside the subset) adds nothing
+                progress.subjects = held + added
                 for message in checkpoint.get("warnings") or []:
                     emit("warning", code="conversion", message=message, archive=item["name"], subject=checkpoint.get("subject"))
                 state.save(force=False)
@@ -1046,6 +1225,14 @@ def _run_fetch(entry, live, plan, terms_sha, state, work, bundle, dest, session,
             info.update({"status": "partial", "bytes": source.position})
             state.save()
             raise jobs.Cancelled(done=progress.done(source.position), reason="cancelled") from None
+        except connectome.StreamIntegrityError as exc:
+            # The archive's checksum may match the provider's listing: the file is damaged upstream, and reading it again fails the same way
+            info.update({"status": "partial", "bytes": source.position})
+            state.save()
+            raise jobs.JobError(
+                f"{item['name']} is damaged upstream, in the data the provider serves ({exc}). Downloading it again gives the same damage. "
+                "Choose another subset of subjects that avoids it, or report it to the provider.",
+                code="damaged_member", file=item["name"]) from None
         finally:
             source.close()
 
@@ -1053,19 +1240,40 @@ def _run_fetch(entry, live, plan, terms_sha, state, work, bundle, dest, session,
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", connectome.ConversionWarning)
-            for position, index in enumerate(todo):
+            position = 0
+            while True:
+                if position == len(todo):
+                    missing = _missing_subjects(subset_ids, bundle)
+                    if not missing or not more:
+                        break
+                    # The estimated archives do not hold the whole subset: read the next one
+                    item = _plan_item(entry, more.pop(0), live)
+                    emit("warning", code="subset_more_archives", archive=item["name"],
+                         message=f"{len(missing)} subject(s) of {plan['selection']['text']} are not in the archives read so far: {item['name']} is read too.")
+                    restart_if_changed(item)
+                    archives.append(item)
+                    data["sizes"][item["name"]] = item["size"]
+                    progress.total += item["size"]
+                    progress.count = len(archives)
+                    if data["archives"].get(item["name"], {}).get("status") == "done":
+                        position = len(todo)
+                        continue  # converted already (a resumed fetch)
+                    todo.append(len(archives) - 1)
+                index = todo[position]
                 for ahead in todo[position : position + int(streams)]:
                     if ahead not in pool:
                         pool[ahead] = make_source(ahead)
+                position += 1
                 item = archives[index]
                 source = pool.pop(index)
                 info = state.archive(item["name"])
                 info.update({"md5Published": item.get("md5"), "size": item["size"]})
                 progress.archive, progress.index = item["name"], index + 1
+                progress.subjects = len(_bundle_subject_ids(bundle))  # what the bundle holds before this archive is converted (also in a resume)
                 progress.completed = completed()
                 if source is not None:
                     progress.update(source, force=True)
-                    result = convert(source, item, info, last=index == len(archives) - 1)
+                    result = convert(source, item, info, last=subset_ids is None and index == len(archives) - 1)
                     if keep_archives:
                         final = os.path.join(work, "archives", item["name"])
                         os.replace(final + ".part", final)
@@ -1090,10 +1298,25 @@ def _run_fetch(entry, live, plan, terms_sha, state, work, bundle, dest, session,
                 source.close()
         state.save()
 
-    subjects = len(connectome.ConnectomeBundle.open(bundle).subject_ids)
+    if not os.path.isfile(os.path.join(bundle, "connectome.json")):
+        # Converted without finalizing: whether another archive was needed was known only after each one (a subject subset),
+        # or no archive was left to convert with finalize=True (a resume whose archives were all converted when it was paused)
+        if not _bundle_subject_ids(bundle):
+            raise jobs.JobError(f"None of the subjects of {plan['selection']['text'] or 'the archives'} is in the archives of {entry['id']}", code="listing")
+        connectome.finalize_stream(bundle, layout=layout, name=bundle_name(entry), description=description, citation=entry.get("citation") or "",
+                                   data_use_terms=f"{entry.get('licence')} (accepted terms text sha256 {terms_sha[:12]}...)",
+                                   dataset_dir=dataset_dir if layout == "leaddbs_vol" else None, grid=_expected_grid(entry))
+    subject_ids = list(connectome.ConnectomeBundle.open(bundle).subject_ids)
+    subjects = len(subject_ids)
+    plan["selection"]["recorded"] = _recorded_subset(entry, plan, archives, subset_ids, subject_ids, full_set, emit)
     participants = _copy_documents(plan, files_dir, bundle)
     shutil.copyfile(os.path.join(work, "terms-accepted.txt"), os.path.join(bundle, "terms-accepted.txt"))
     keys = _provenance(entry, live, plan, terms_sha, results, full_set, participants, subjects, bool(data.get("checksumOverride")))
+    # set_metadata replaces the whole "source": keep the dataset's own tag and citation that the converter read from
+    # dataset_info.json (Lead-DBS), so that the conn-<tag>x<Subset> label equals the one of the same data converted from its folder
+    written = connectome.ConnectomeBundle.open(bundle).provenance.get("source")
+    if isinstance(written, dict):
+        keys["source"] = {**{k: written[k] for k in ("tag", "citation") if written.get(k)}, **keys.get("source", {})}
     connectome.set_metadata(bundle, **keys)
     data.update({"complete": True, "subjects": subjects})
     state.save()
@@ -1101,6 +1324,79 @@ def _run_fetch(entry, live, plan, terms_sha, state, work, bundle, dest, session,
     emit("result", kind="connectome", path=bundle, subjects=subjects, licence=entry.get("licence"), terms_sha256=terms_sha, checksum_override=bool(data.get("checksumOverride")))
     return {"path": bundle, "subjects": subjects, "archives": len(archives), "checksum_override": bool(data.get("checksumOverride")), "unverified_resumed": totals["unverified_resumed"],
             "reconnects": totals["reconnects"], "resigns": totals["resigns"], "bytes": totals["bytes"], "work_dir": work}
+
+
+def _subset_subject_ids(selection, dataset_dir):
+    """The subject ids of a subject subset of a Lead-DBS dataset, from its dataset_info.json and dataset_volsurf.mat in
+    ``dataset_dir``: a named subset, or the first N subjects of vol.subIDs. None when they cannot be known.
+    """
+    from . import connectome
+
+    text = str(selection.get("text") or "").strip()
+    try:
+        dataset = connectome._read_leaddbs_dataset(dataset_dir)
+    except Exception:
+        return None
+    named = connectome._leaddbs_subsets(dataset.info, dataset.subject_ids, dataset.n_listed)
+    if text in named:
+        return list(named[text])
+    if text and (catalogs._SUBJECT_SUBSET_PATTERN.match(text) or text.isdigit()) and selection.get("subjects"):
+        return list(dataset.subject_ids[: int(selection["subjects"])])
+    return None
+
+
+def _bundle_subject_ids(bundle):
+    """The subject ids a bundle holds (finished or not), from connectome.json or connectome.partial.json."""
+    for name in ("connectome.json", "connectome.partial.json"):
+        try:
+            with open(os.path.join(bundle, name), encoding="utf-8") as f:
+                return {entry["id"] for entry in json.load(f).get("subjects") or []}
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return set()
+
+
+def _missing_subjects(subset_ids, bundle):
+    """The subjects of ``subset_ids`` (None: no subset) that the bundle does not hold yet."""
+    if subset_ids is None:
+        return []
+    have = _bundle_subject_ids(bundle)
+    return [subject_id for subject_id in subset_ids if subject_id not in have]
+
+
+def _archive_spec(entry, archives):
+    """The archive subset ("archives:00-03", "archives:0,2,5") of the archives read, by index in the entry's name order."""
+    names = [f["name"] for f in catalogs.archives(entry)]
+    indices = sorted(names.index(item["name"]) for item in archives if item["name"] in names)
+    if indices and indices == list(range(len(indices))):
+        return f"archives:00-{indices[-1]:02d}"
+    return "archives:" + ",".join(str(i) for i in indices)
+
+
+def _recorded_subset(entry, plan, archives, subset_ids, subject_ids, full_set, emit):
+    """What ``source.subset`` of the bundle records: the subset asked for only when the bundle holds exactly its
+    subjects. Otherwise the subjects the bundle really holds are recorded (and a ``subset_differs`` warning says so):
+    the archives read, or the part of the named subset that they hold.
+    """
+    selection = plan["selection"]
+    text = selection.get("text")
+    if full_set or selection.get("exact") or not text:
+        return None
+    if subset_ids is not None:
+        wanted = set(subset_ids)
+        if set(subject_ids) == wanted:
+            return text
+        if set(subject_ids) < wanted:
+            recorded = f"{text} ({len(subject_ids)} of {len(wanted)} subjects)"
+            emit("warning", code="subset_differs", subset=text, subjects=len(subject_ids),
+                 message=f"{text} has {len(wanted)} subjects, but only {len(subject_ids)} of them are in the archives of the dataset: the bundle holds those {len(subject_ids)} and records them as {recorded!r}.")
+            return recorded
+    elif selection.get("subjects") is not None and len(subject_ids) == selection["subjects"]:
+        return text  # the first N subjects in archive order
+    recorded = _archive_spec(entry, archives)
+    emit("warning", code="subset_differs", subset=text, subjects=len(subject_ids),
+         message=f"{text} asks for {selection.get('subjects')} subjects, but the archives read ({recorded}) hold {len(subject_ids)}: the bundle holds all {len(subject_ids)} and records them as {recorded!r}.")
+    return recorded
 
 
 def _expected_grid(entry):
@@ -1170,9 +1466,12 @@ def _fetch_main(argv):
     parser.add_argument("--keep-archives", action="store_true", help="also keep the downloaded tar archives (about the size of the download)")
     parser.add_argument("--accept-checksum-mismatch", action="store_true", help="keep an archive whose checksum does not match (recorded as checksum_override)")
     parser.add_argument("--prefetch-mb", type=jobs.positive_int, default=DEFAULT_PREFETCH_MB, help="buffer per stream in MB")
+    parser.add_argument("--parent-pid", type=int, default=None, help="stop (cancelled, resumable) when this process is gone (the application that started the job)")
     jobs.add_common_arguments(parser)
     args = parser.parse_args(argv)
     cancel = jobs.CancelToken(args.cancel_file)
+    if args.parent_pid:
+        jobs.start_watchdogs(cancel, parent_pid=args.parent_pid, orphan=False)
     jobs.emit("start", job="fetchconnectome", argv=argv, threads=args.threads)
     entry = _load_entry(args)
     summary = fetch_connectome(entry, args.dest, args.terms_sha, subset=args.subset, streams=args.streams, keep_archives=args.keep_archives, cancel=cancel, resume=args.resume,

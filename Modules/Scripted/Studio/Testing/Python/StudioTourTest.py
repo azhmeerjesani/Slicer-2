@@ -498,6 +498,125 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
             self.assertEqual(slicer.mrmlScene.GetModifiedSinceRead(), modifiedBefore, tourId)
             self.assertEqual(self._viewState(studioShell), stateBefore, tourId)
 
+    def test_09b_offer_keeps_clear_of_notices(self):
+        """The offer avoids the buttons of the Library notices (an update, a required update), at both window sizes (BB-1)."""
+        from StudioLib import library, tour
+
+        studioShell = self._applyStudio()
+        settings = qt.QSettings()
+        # The last case: a short window and a wide card (a large font), where the bottom right corner covers the right end of
+        # the drop zone and the top right corner, where the notice buttons are, is the only place left
+        for width, height, cardWidth in SIZES[0] + (None,), SIZES[1] + (None,), (1366, 600, 450):
+            self._resize(width, height)
+            settings.remove("Studio/Tour")
+            studioShell.switchTo("library")
+            self._pump()
+            self.assertTrue(tour.offerTour(), (width, height))
+            self._pump()
+            card = tour.plugin().offerWidget()
+            self.assertIsNotNone(card)
+            if cardWidth is not None:
+                offerCard = tour.plugin().offerCard
+                offerCard.frame.setFixedWidth(cardWidth)
+                offerCard._fitHeight()
+                offerCard.updatePosition()
+                self._pump()
+            # The notice appears after the offer, with its buttons at the right end of the row, like "Update now" and "Skip"
+            notice = qt.QFrame()
+            notice.setObjectName("StudioTestNotice")
+            row = qt.QHBoxLayout(notice)
+            row.addWidget(qt.QLabel("A new version is available"))
+            row.addStretch(1)
+            buttons = []
+            for text in ("Update now", "Skip"):
+                button = qt.QPushButton(text)
+                button.setObjectName("StudioTestNotice" + text.split()[0])
+                row.addWidget(button)
+                buttons.append(button)
+            try:
+                library.showNotice("StudioTestNotice", notice)
+                self._wait(200)
+                self.assertTrue(card.isVisible())
+                offerRect = tour._rectIn(card, self.mainWindow)
+                for button in buttons:
+                    self.assertTrue(button.isVisible(), button.text)
+                    buttonRect = tour._rectIn(button, self.mainWindow)
+                    self.assertFalse(offerRect.intersects(buttonRect), (width, height, button.text, offerRect, buttonRect))
+                    at = qt.QApplication.widgetAt(button.mapToGlobal(qt.QPoint(button.width // 2, button.height // 2)))
+                    self.assertTrue(at is not None and at.objectName == button.objectName, (width, height, button.text, at))
+            finally:
+                library.closeNotice("StudioTestNotice")
+                notice.deleteLater()
+                self._pump()
+            tour.plugin().offerWidget().findChild("QPushButton", "StudioTourOfferNotNowButton").click()
+            self._pump()
+
+    def test_09c_offer_keeps_clear_of_toasts(self):
+        """A long toast (centred at the bottom, up to the canvas width) does not cover the offer card or its link (BB-1)."""
+        from StudioLib import tour
+
+        studioShell = self._applyStudio()
+        settings = qt.QSettings()
+        text = "Study cohortC created in place: 6 subjects (participants.tsv kept, backup in .studio)"
+        # 1229x691 is the window of a 1366x768 screen, where the toast reaches the card's left end
+        for width, height in SIZES + ((1229, 691), (1000, 700)):
+            self._resize(width, height)
+            settings.remove("Studio/Tour")
+            studioShell.switchTo("library")
+            self._pump()
+            self.assertTrue(tour.offerTour(), (width, height))
+            self._pump()
+            card = tour.plugin().offerWidget()
+            self.assertIsNotNone(card)
+            try:
+                studioShell.toast(text, sticky=True, action=lambda: None, actionText="Show folder")
+                self._wait(200)
+                toast = self.mainWindow.findChild("QFrame", "StudioStickyToast")
+                self.assertTrue(toast is not None and toast.isVisible(), (width, height))
+                offerRect = tour._rectIn(card, self.mainWindow)
+                toastRect = tour._rectIn(toast, self.mainWindow)
+                self.assertFalse(offerRect.intersects(toastRect), (width, height, offerRect, toastRect))
+                link = card.findChild("QPushButton", "StudioTourOfferMovedLink")
+                self.assertTrue(link.isVisible())
+                self.assertFalse(toastRect.intersects(tour._rectIn(link, self.mainWindow)), (width, height))
+            finally:
+                studioShell._stickyToast.hide()
+            tour.plugin().offerWidget().findChild("QPushButton", "StudioTourOfferNotNowButton").click()
+            self._pump()
+
+    def test_09d_offer_fits_its_text_after_a_font_change(self):
+        """USABILITY 9.4: after an application font change the offer card gets the height its wrapped text needs."""
+        from StudioLib import tour
+
+        studioShell = self._applyStudio()
+        self._resize(1366, 768)
+        qt.QSettings().remove("Studio/Tour")
+        studioShell.switchTo("library")
+        self._pump()
+        self.assertTrue(tour.offerTour())
+        self._pump()
+        card = tour.plugin().offerWidget()
+        text = card.findChild("QLabel", "StudioTourOfferText")
+        original = qt.QFont(qt.QApplication.font())
+        try:
+            for pixelSize in (20, 11):
+                font = qt.QFont(original)
+                font.setPixelSize(pixelSize)
+                slicer.app.setFont(font)
+                self._wait(300)
+                layout = card.layout()
+                needed = layout.totalHeightForWidth(card.width)
+                self.assertEqual(card.height, needed, f"font {pixelSize} px")
+                self.assertGreaterEqual(text.height, text.heightForWidth(text.width), f"font {pixelSize} px")
+                self.assertTrue(tour._rectIn(card, self.mainWindow).intersected(self.mainWindow.rect) == tour._rectIn(card, self.mainWindow))
+        finally:
+            slicer.app.setFont(original)
+            self._wait(300)
+            card = tour.plugin().offerWidget()
+            if card is not None:
+                card.findChild("QPushButton", "StudioTourOfferNotNowButton").click()
+            self._pump()
+
     def test_09_first_start_offer(self):
         """The first-start offer is a non-modal card shown once; any answer (or opening a file) is remembered."""
         from StudioLib import tour
@@ -810,4 +929,421 @@ class StudioTourTest(ScriptedLoadableModule.ScriptedLoadableModuleTest):
                 self.assertEqual(event.dropAction(), qt.Qt.IgnoreAction, widget.objectName)
         finally:
             tour.stopTour()
+            self._pump()
+
+    def test_15_targets_below_the_fold_are_scrolled_into_view(self):
+        """A control that is only scrolled out of its page (Library in a small window) is scrolled to, not skipped."""
+        from StudioLib import tour
+
+        studioShell = self._applyStudio()
+        self._resize(1366, 768)
+        studioShell.switchTo("library")
+        self._pump()
+        recentList = self.mainWindow.findChild("QWidget", "StudioRecentList")
+        self.assertIsNotNone(recentList)
+        scrollArea = recentList
+        while scrollArea is not None and not scrollArea.inherits("QScrollArea"):
+            scrollArea = scrollArea.parentWidget()
+        self.assertIsNotNone(scrollArea, "the Library page is not in a scroll area")
+        # A window so low that the list is below the fold, whatever is open
+        for height in (700, 600, 520, 460):
+            self._resize(1366, height)
+            scrollArea.verticalScrollBar().setValue(0)
+            self._pump()
+            if recentList.visibleRegion().isEmpty():
+                break
+        self.assertTrue(recentList.isVisible())
+        self.assertTrue(recentList.visibleRegion().isEmpty(), "the list is not below the fold in this window")
+        self.assertGreater(scrollArea.verticalScrollBar().maximum, 0)
+        self.assertTrue(tour.showMe("recent"), "Show me skipped a control that is only scrolled out")
+        self._pump()
+        player = tour.activePlayer()
+        self.assertIsNotNone(player)
+        self.assertGreater(scrollArea.verticalScrollBar().value, 0)
+        self.assertFalse(recentList.visibleRegion().isEmpty())
+        self._checkStep(player, "below-the-fold")
+        tour.stopTour()
+        self._pump()
+
+    def test_16_card_labels_are_sentence_case(self):
+        """The step counter and the "In 3D Slicer" caption of the card are sentence case, not capitals (VISUAL 2.4)."""
+        from StudioLib import tour
+
+        self._applyStudio()
+        self._resize(1366, 768)
+        self.assertTrue(tour.startTour("studio"))
+        try:
+            self._pump()
+            card = tour.activePlayer().card()
+            self.assertRegex(card.counterLabel.text, r"^Step 1 of \d+$")
+            self.assertEqual(card.slicerCaption.text, "In 3D Slicer")
+            for label in (card.counterLabel, card.slicerCaption):
+                self.assertNotEqual(label.font.capitalization(), qt.QFont.AllUppercase, label.objectName)
+                self.assertFalse(label.text.isupper(), label.objectName)
+        finally:
+            tour.stopTour()
+            self._pump()
+
+    def test_17_label_extent_without_a_readable_alignment(self):
+        """The tour card avoids the text of a centred or right-aligned Library label. When the alignment cannot be read
+        (Qt 6: the QFlags property is an opaque object in PythonQt), the whole label box counts, not the left edge.
+        """
+        from StudioLib import tour
+
+        class OpaqueFlags:
+            """What PythonQt with Qt 6 returns for a QFlags property: int() raises TypeError."""
+
+        class Qt6Label:
+            def property(self, name):
+                return OpaqueFlags()
+
+        self.assertIsNone(tour._labelAlignment(Qt6Label()))
+
+        canvas = qt.QWidget()
+        canvas.resize(700, 100)
+        column = qt.QWidget(canvas)
+        column.resize(700, 100)
+        layout = qt.QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        label = qt.QLabel("Open a file", column)
+        label.setAlignment(qt.Qt.AlignHCenter | qt.Qt.AlignVCenter)
+        layout.addWidget(label)
+        canvas.show()
+        try:
+            slicer.app.processEvents()
+
+            def labelRect():
+                rects = [rect for rect, _interactive in tour._pageContentItems(column, canvas)]
+                self.assertEqual(len(rects), 1)
+                return rects[0]
+
+            textWidth = label.sizeHint.width()
+            self.assertLess(textWidth, label.width)
+            centred = labelRect()
+            if tour._labelAlignment(label) is not None:  # Qt 5: the text is found where it is painted
+                self.assertEqual(centred.width(), textWidth)
+                self.assertEqual(centred.left(), (label.width - textWidth) // 2)
+
+            original = tour._labelAlignment
+            tour._labelAlignment = lambda widget: None
+            try:
+                unknown = labelRect()
+            finally:
+                tour._labelAlignment = original
+            self.assertEqual(unknown.left(), 0)
+            self.assertEqual(unknown.width(), label.width)
+        finally:
+            canvas.hide()
+            canvas.deleteLater()
+
+    def test_18_workspace_key_during_the_draw_tour(self):
+        """A workspace key (Ctrl+Alt+1, Ctrl+Alt+3) during the Draw tour takes the Lesion card out of the window: the
+        layouts that the watcher queued before the tour shows the step again must not map it to the window (a crash in
+        QWidget.mapTo). The tour goes on in Draw or ends, and Studio keeps running.
+        """
+        from StudioLib import tour, workspaces
+
+        # A widget that is no longer inside the window, and one that was deleted, have no rectangle in it
+        detached = qt.QFrame()
+        self.assertFalse(tour._isInside(detached, self.mainWindow))
+        self.assertTrue(tour._rectIn(detached, self.mainWindow).isEmpty())
+        detached.delete()
+        self.assertFalse(tour._isInside(detached, self.mainWindow))
+        self.assertTrue(tour._rectIn(detached, self.mainWindow).isEmpty())
+
+        studioShell = self._applyStudio()
+        self._resize(1366, 768)
+        self._loadVolume()
+        others = [key for key in ("map", "library") if workspaces.workspace(key) is not None and workspaces.isAvailable(workspaces.workspace(key))]
+        self.assertIn("library", others)
+        for other in others:
+            studioShell.switchTo("draw")
+            self._pump()
+            self.assertTrue(tour.startTour("draw"), other)
+            player = tour.activePlayer()
+            self._wait(300)
+            self.assertEqual(player.currentStep().id, "lesion", other)
+            self.assertEqual(player.target.objectName, "StudioLesionCard", other)
+            # What Ctrl+Alt+1 and Ctrl+Alt+3 do: the Draw panel and its Lesion card leave the window
+            studioShell.switchTo(other)
+            for index in range(10):
+                self._pump()
+                self._wait(tour.FOLLOW_INTERVAL_MS)
+            if player.active:
+                self.assertEqual(studioShell.currentWorkspace(), "draw", other)
+                self.assertTrue(tour._isInside(player.target, self.mainWindow), other)
+                self.assertTrue(self.mainWindow.rect.intersects(player.spotlightRect()), other)
+                tour.stopTour()
+                self._pump()
+            self.assertFalse(player.active, other)
+            self.assertIsNone(self.mainWindow.findChild("QWidget", "StudioTourOverlay"), other)
+
+    def test_19_show_me_editor_rows_with_draw_empty(self):
+        """With nothing open, Draw shows only its empty state (no "Tools" header, no "More tools"), and "Show me" of the
+        editor rows of the map spotlights that empty state instead of finding nothing (bug bash:
+        draw-empty-state-orphan-tools-header).
+        """
+        from StudioLib import migration, tour
+
+        studioShell = self._applyStudio()
+        self._resize(1366, 768)
+        self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")), 0)
+        studioShell.switchTo("draw")
+        self._pump()
+        emptyState = self.mainWindow.findChild("QWidget", "StudioDrawEmptyState")
+        self.assertIsNotNone(emptyState)
+        self.assertTrue(emptyState.isVisible())
+        toolsRow = self.mainWindow.findChild("QWidget", "StudioDrawToolsRow")
+        self.assertIsNotNone(toolsRow)
+        self.assertFalse(toolsRow.isVisible())
+        self.assertIsNone(tour.resolveTarget("SegmentEditorMoreToolsButton", studioShell))
+        for rowId in ("segment-editor-tools", "segment-editor-masking", "segment-editor-controls"):
+            row = migration.row(rowId)
+            self.assertIsNotNone(row, rowId)
+            self.assertTrue(tour.showMe(rowId), f"{rowId}: Show me found no control for {row.target}")
+            self.assertIn("StudioDrawEmptyState", row.target, rowId)
+            player = tour.activePlayer()
+            self.assertIsNotNone(player, rowId)
+            self.assertEqual(player.target.objectName, "StudioDrawEmptyState", rowId)
+            self._checkStep(player, f"empty-{rowId}")
+            player.stop()
+            self._pump()
+            self.assertIsNone(tour.activePlayer(), rowId)
+
+    def test_20_counter_total_is_the_same_all_tour(self):
+        """The counter keeps one total through a tour: steps whose control exists only hidden (the Loaded set and Studies
+        cards with none) are not counted, so 'Step 5 of 11' is not followed by 'Step 6 of 10' (bug bash).
+        """
+        from StudioLib import tour
+
+        studioShell = self._applyStudio()
+        self._resize(1366, 768)
+        for withData in (False, True):
+            if withData:
+                self._loadVolume()
+            studioShell.switchTo("library")
+            self._pump()
+            self.assertTrue(tour.startTour("library"))
+            player = tour.activePlayer()
+            self.assertIsNotNone(player)
+            counters = []
+            try:
+                for index in range(40):
+                    if not player.active:
+                        break
+                    self._pump()
+                    counters.append(str(player._card.counterLabel.text))
+                    player.next()
+            finally:
+                tour.stopTour()
+                self._pump()
+            label = f"library tour, data={withData}: {counters}"
+            totals = {text.rsplit(" ", 1)[-1] for text in counters}
+            self.assertEqual(len(totals), 1, label)
+            self.assertEqual(counters[-1], f"Step {len(counters)} of {len(counters)}", label)
+
+    def test_21_back_onto_a_try_it_step(self):
+        """Back from 'Draw is the Segment Editor' shows 'Three workspaces' (a Try-it step that is already done while Draw
+        is current) and stays there; Back goes on to step 1; clicking Draw again (after leaving it) still goes on (bug bash).
+        """
+        from StudioLib import tour
+
+        studioShell = self._applyStudio()
+        self._resize(1366, 768)
+        self.assertTrue(tour.startTour("studio"))
+        player = tour.activePlayer()
+        try:
+            while player.currentStep().id != "draw-tools":
+                player.next()
+                self._wait(tour.FOLLOW_INTERVAL_MS)
+            seen = [player.currentStep().id]
+            for index in range(len(player.tour.steps)):
+                if player.index == 0:
+                    break
+                player.card().backButton.click()
+                # Several follow ticks: the Try-it step must not bounce forward again
+                for tick in range(3):
+                    self._wait(tour.FOLLOW_INTERVAL_MS)
+                seen.append(player.currentStep().id)
+            self.assertEqual(seen[:3], ["draw-tools", "workspaces", "template"], seen)
+            self.assertEqual(player.index, 0, seen)
+            # Forward again: the Try-it step goes on only when Draw is chosen
+            while player.currentStep().id != "workspaces":
+                player.next()
+            self._wait(3 * tour.FOLLOW_INTERVAL_MS)
+            self.assertEqual(player.currentStep().id, "workspaces")
+            studioShell.topBar.workspaceButtons["draw"].click()
+            self._wait(400)
+            self.assertEqual(player.currentStep().id, "draw-tools")
+            # Back onto it, leave Draw, choose Draw again: it goes on
+            player.card().backButton.click()
+            self._wait(3 * tour.FOLLOW_INTERVAL_MS)
+            self.assertEqual(player.currentStep().id, "workspaces")
+            studioShell.switchTo("library")
+            self._wait(3 * tour.FOLLOW_INTERVAL_MS)
+            self.assertEqual(player.currentStep().id, "workspaces")
+            studioShell.topBar.workspaceButtons["draw"].click()
+            self._wait(400)
+            self.assertEqual(player.currentStep().id, "draw-tools")
+        finally:
+            tour.stopTour()
+            self._pump()
+
+    def test_22_keys_in_texts_are_shown_natively(self):
+        """On macOS every key named in a text is shown as the platform displays it ("⌘O"), not as the portable "Ctrl+O":
+        the tour card bodies, the ≡ menu, the cheat sheet gestures (bug bash). Linux shows no difference, so the
+        functions that render native keys return what macOS returns.
+        """
+        import ast
+        from StudioLib import appmenu, cheatsheet, migration, tours, ui
+
+        mac = {"Ctrl": "\u2318", "Alt": "\u2325", "Shift": "\u21e7"}
+
+        def macKey(key):
+            key = str(key)
+            if not key or " " in key.strip():
+                return key
+            parts = key.split("+")
+            if len(parts) < 2 or any(part not in mac for part in parts[:-1]):
+                return key
+            return "".join(mac[part] for part in sorted(parts[:-1], key=["Alt", "Shift", "Ctrl"].index)) + parts[-1]
+
+        originals = (migration.keyText, ui.keyText, cheatsheet._isMacOS)
+        migration.keyText = lambda key, native=True: macKey(key) if native and key else (key or "")
+        ui.keyText = macKey
+        cheatsheet._isMacOS = lambda: True
+        studioShell = None
+        try:
+            studioShell = self._applyStudio()
+            # Tour card bodies
+            raw = re.compile(r"\bCtrl\+")
+            for tour in tours.TOURS:
+                for step in tour.steps:
+                    body = step.bodyText(studioShell)
+                    self.assertIsNone(raw.search(body), f"{tour.id}/{step.id}: {body}")
+                    self.assertNotIn("{key:", body, f"{tour.id}/{step.id}")
+            self.assertIn("\u2318O", tours.tour("studio").steps[1].bodyText(studioShell))
+            # The ≡ menu
+            holder = qt.QWidget()
+            menu = appmenu.AppMenu(studioShell, holder)
+            shown = [str(action.text).split("\t", 1)[1] for action in menu.menu.actions() if "\t" in str(action.text)]
+            self.assertGreaterEqual(len(shown), 9, shown)
+            for text in shown:
+                # "Show inspector" asks Qt for the native text itself: on Linux it is the portable one
+                if text != "Ctrl+\\":
+                    self.assertIsNone(re.search(r"\bCtrl\+", text), text)
+            # The cheat sheet gestures follow the Command key of the view interactor
+            gestures = [key for row in cheatsheet._viewRows() for key in row[0]]
+            self.assertIn("\u2318+wheel", gestures)
+            self.assertIn("\u2318+left-drag", gestures)
+            self.assertFalse([key for key in gestures if key.startswith("Ctrl+")], gestures)
+            holder.deleteLater()
+            # Texts that join several keys name each one natively: the Redo tooltip and the Draw "?" key table
+            from StudioLib import draw
+
+            redoTip = str(studioShell.topBar.redoButton.toolTip)
+            self.assertIn("\u2318Y or \u21e7\u2318Z", redoTip)
+            self.assertIsNone(re.search(r"\b(Ctrl|Alt)\+", redoTip), redoTip)
+            drawHelp = draw.helpHtml(studioShell)[1]
+            self.assertIn("\u2325\u2190 \u00b7 \u2325\u2192", drawHelp)
+            self.assertIsNone(re.search(r"\b(Ctrl|Alt)\+", drawHelp), drawHelp)
+        finally:
+            migration.keyText, ui.keyText, cheatsheet._isMacOS = originals
+            if studioShell is not None:
+                studioShell.classic()
+                self._pump()
+        # Texts of the Studio modules never hard-code the portable key (they use {key:...}, ui.keyText or ui.tooltip)
+        allowed = ("Ctrl+F2", "AltGr+digit", "Inspector: Ctrl+")
+        import StudioLib
+
+        import LesionNetworkMappingUI
+
+        studioDirectory = os.path.dirname(os.path.dirname(os.path.abspath(StudioLib.__file__)))
+        lnmDirectory = os.path.dirname(os.path.abspath(LesionNetworkMappingUI.__file__))
+        sources = [os.path.join(studioDirectory, "Studio.py")]
+        for directory in (os.path.join(studioDirectory, "StudioLib"), lnmDirectory):
+            sources += [os.path.join(directory, name) for name in sorted(os.listdir(directory)) if name.endswith(".py")]
+        self.assertTrue(any(path.endswith("card_cohort.py") for path in sources), sources)
+        offenders = []
+        for path in sources:
+            with open(path, encoding="utf-8") as source:
+                tree = ast.parse(source.read())
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_" and node.args
+                        and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
+                    text = re.sub(r"\{key:[^}]*\}", "", node.args[0].value)
+                    # The Windows-only AltGr sentence of the Library help names the keys of that platform
+                    text = re.sub(r"On Windows, where AltGr.*?Ctrl\+Alt\+digit\.", "", text, flags=re.S)
+                    if re.search(r"\b(Ctrl|Alt)\+", text) and not any(item in text for item in allowed):
+                        offenders.append(f"{os.path.basename(path)}:{node.lineno}: {text[:80]}")
+        self.assertEqual(offenders, [], "portable keys in texts: use {key:...}, ui.keyText or ui.tooltip")
+        # The Library module help marks its keys; none is left as a marker
+        help_ = slicer.util.getModule("Studio").helpText
+        self.assertNotIn("{key:", help_)
+        self.assertIn(ui.keyText("Ctrl+K"), help_)
+
+    def test_23_texts_use_the_labels_on_screen(self):
+        """Tour and Search texts name the controls as they are labelled now: the Draw inspector row is "Overlay" (not the old
+        "Display"), the Library list is "Opened from elsewhere" (no "Recent" section) and its button "Start on template" (bug bash).
+        """
+        from StudioLib import migration, tours
+
+        studioShell = self._applyStudio()
+        try:
+            studioShell.switchTo("draw")
+            self._pump()
+            overlay = slicer.util.mainWindow().findChild("QLabel", "StudioDisplayOpacityLabel")
+            self.assertIsNotNone(overlay)
+            self.assertEqual(overlay.text, "Overlay")
+            displayStep = next(step for step in tours.tour("draw").steps if step.id == "display")
+            self.assertEqual(displayStep.target, "StudioDisplayCard")
+            self.assertEqual(displayStep.title, overlay.text)
+            self.assertIn(overlay.text, tours.tour("draw").description)
+            self.assertNotRegex(tours.tour("draw").description, r"\bDisplay\b")
+            studioShell.switchTo("library")
+            self._pump()
+            main = slicer.util.mainWindow()
+            self.assertEqual(main.findChild("QWidget", "StudioLibraryStartOnTemplateButton").text, "Start on template")
+            titles = [str(label.text) for label in main.findChildren("QLabel") if label.isVisible()]
+            self.assertIn("Opened from elsewhere", titles)
+            self.assertNotIn("Recent", titles)
+            self.assertNotRegex(tours.tour("library").description, r"\bRecent\b")
+            self.assertEqual(tours.tour("library").steps[[s.id for s in tours.tour("library").steps].index("recent")].title, "Opened from elsewhere")
+            self.assertNotIn("Recent", migration.row("recent").studio)
+            # Draw tools text with no scan open: the Library button is named as it reads
+            self.assertNotIn("Library, or Start on MNI template", tours._drawToolsBody(studioShell))
+        finally:
+            studioShell.classic()
+            self._pump()
+
+    def test_24_library_tour_not_offered_while_a_study_is_open(self):
+        """With a study open Library shows the study page, which none of the Library tour steps point at: the tour is then not
+        offered (Search, Help) instead of doing nothing; without a study it is offered and starts (bug bash).
+        """
+        from StudioLib import library, tour
+
+        studioShell = self._applyStudio()
+        original = library._studySession
+
+        def _fakeStudySession():
+            return object()
+
+        try:
+            studioShell.switchTo("library")
+            self._pump()
+            self.assertIn("library", [t["id"] for t in tour.availableTours()])
+            library._studySession = _fakeStudySession
+            self.assertNotIn("library", [t["id"] for t in tour.availableTours()])
+            self.assertFalse(tour.startTour("library"))
+            # The Help item falls back to the whole-app tour, which starts
+            self.assertTrue(tour.startWorkspaceTour())
+            self.assertEqual(tour.activeTour(), "studio")
+            tour.stopTour()
+            library._studySession = original
+            self.assertTrue(tour.startTour("library"))
+            self.assertEqual(tour.activeTour(), "library")
+        finally:
+            library._studySession = original
+            tour.stopTour()
+            studioShell.classic()
             self._pump()

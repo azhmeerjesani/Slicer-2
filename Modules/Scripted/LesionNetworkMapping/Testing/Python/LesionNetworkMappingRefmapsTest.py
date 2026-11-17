@@ -6,7 +6,8 @@ also with maps that do not cover every voxel), permutation p only for pairs buil
 under the null, also for two correlated scores of the same participants and for a score and its own dichotomy,
 small for a planted association; participants permuted jointly), no p for external maps, the cross-condition note threshold, the
 NeuroVault and van den Heuvel additions offline (licence shown, terms required, never redistributed) and the outputs
-(no local paths, heat-map figure); removing a downloaded entry deletes its file so adding it again downloads it again.
+(no local paths, heat-map figure); removing a downloaded entry deletes its file so adding it again downloads it again;
+a download or file that is not a complete NIfTI image (non-NIfTI gzip, truncated, cut image data) is refused and not kept.
 
 Run without Slicer's GUI:
 
@@ -91,12 +92,17 @@ class RegistryTest(RefmapsTestBase):
         moved = os.path.join(self.tmp, "moved")
         shutil.move(self.root, moved)
         self.assertTrue(os.path.isfile(refmaps.entry_path(refmaps.entries(moved)[0], moved)))
-        # Unknown licence: grey badge; a second add gets a new id
+        # Unknown licence: grey badge; adding the same file again replaces its entry (never a second, identical one)
         other = refmaps.add_file(path, root=moved)
         self.assertEqual(other["badge"], "grey")
-        self.assertNotEqual(other["id"], entry["id"])
-        refmaps.remove_entry(entry["id"], root=moved)
+        self.assertEqual(other["id"], entry["id"])
         self.assertEqual([item["id"] for item in refmaps.entries(moved)], [other["id"]])
+        # An explicit id still makes a separate entry for the same file
+        twin = refmaps.add_file(path, root=moved, entry_id="twin")
+        self.assertEqual([item["id"] for item in refmaps.entries(moved)], [entry["id"], "twin"])
+        refmaps.remove_entry(twin["id"], root=moved)
+        refmaps.remove_entry(entry["id"], root=moved)
+        self.assertEqual(refmaps.entries(moved), [])
         with self.assertRaises(refmaps.RefmapsError):
             refmaps.get_entry(entry["id"], moved)
 
@@ -135,17 +141,45 @@ class ResampleTest(RefmapsTestBase):
         np.testing.assert_allclose(values, coarse.reshape(-1)[self.bundle.mask_indices], rtol=1e-5)
 
     def test_partial_coverage_is_nan(self):
-        data = np.zeros(SHAPE)
+        data = np.full(SHAPE, np.nan)
         data[: SHAPE[0] // 2] = 1.0 + self.rng.random((SHAPE[0] // 2, *SHAPE[1:]))
         values = refmaps.map_on_grid(self.writeMap("half.nii.gz", data), self.bundle)
-        # Same grid: zeros are kept as values, not as "outside"
-        self.assertFalse(np.isnan(values).any())
-        shifted = self.bundle.affine.copy()
-        shifted[:3, 3] += 0.5  # off-grid: resampled, zero voxels count as not covered
-        values = refmaps.map_on_grid(self.writeMap("half_shift.nii.gz", data, shifted), self.bundle)
         i = np.unravel_index(self.bundle.mask_indices, SHAPE)[0]
+        # Same grid: NaN voxels are not covered
+        self.assertTrue(np.isnan(values[i >= SHAPE[0] // 2]).all())
+        self.assertTrue(np.isfinite(values[i < SHAPE[0] // 2]).all())
+        shifted = self.bundle.affine.copy()
+        shifted[:3, 3] += 0.5  # off-grid: resampled, NaN voxels count as not covered
+        values = refmaps.map_on_grid(self.writeMap("half_shift.nii.gz", data, shifted), self.bundle)
         self.assertTrue(np.isnan(values[i >= SHAPE[0] // 2 + 1]).all())
         self.assertTrue(np.isfinite(values[i < SHAPE[0] // 2 - 1]).all())
+        # A smaller field of view: the voxels outside it are not covered either
+        values = refmaps.map_on_grid(self.writeMap("half_fov.nii.gz", data[: SHAPE[0] // 2], shifted), self.bundle)
+        self.assertTrue(np.isnan(values[i >= SHAPE[0] // 2 + 1]).all())
+        self.assertTrue(np.isfinite(values[i < SHAPE[0] // 2 - 1]).all())
+
+    def test_zeros_are_values_on_any_grid(self):
+        """A binary ROI or a thresholded map keeps its zero voxels as values whatever grid its file is on."""
+        roi = np.zeros(SHAPE)
+        roi[3:8, 4:10, 3:7] = 1.0
+        field = _smooth_field(self.rng, SHAPE, 1.5)
+        field = field / field.std() * 3.0
+        thresholded = np.where(np.abs(field) > 1.0, field, 0.0)
+        fine_affine = np.diag([1.0, 1.0, 1.0, 1.0])
+        fine_affine[:3, 3] = self.bundle.affine[:3, 3] - 0.5
+        padded_affine = self.bundle.affine.copy()
+        padded_affine[:3, 3] -= 6.0
+        for name, data in (("roi", roi), ("thr", thresholded)):
+            on_grid = refmaps.map_on_grid(self.writeMap(f"{name}.nii.gz", data), self.bundle)
+            self.assertTrue(np.isfinite(on_grid).all(), name)
+            fine = np.repeat(np.repeat(np.repeat(data, 2, 0), 2, 1), 2, 2)
+            padded = np.pad(data, 3)  # same voxels, a larger field of view (as a 91x109x91 MNI file)
+            for label, path in (("1 mm", self.writeMap(f"{name}_1mm.nii.gz", fine, fine_affine)), ("padded", self.writeMap(f"{name}_pad.nii.gz", padded, padded_affine))):
+                values = refmaps.map_on_grid(path, self.bundle)
+                np.testing.assert_allclose(values, on_grid, atol=1e-5, err_msg=f"{name} {label}")
+            # Through the library (and its cache): the 1 mm ROI file is compared like its 2 mm copy
+            entry = refmaps.add_file(self.writeMap(f"{name}_lib.nii.gz", fine, fine_affine), root=self.root)
+            np.testing.assert_allclose(refmaps.resample_to(entry, self.bundle, root=self.root), on_grid, atol=1e-5, err_msg=name)
 
 
 class CompareTest(RefmapsTestBase):
@@ -391,11 +425,33 @@ class NoteTest(RefmapsTestBase):
         rows = refmaps.top_similar(current, candidates[4:], condition="depression")
         self.assertIn("clinically unrelated", rows[0]["note"])
 
+    def test_family_warning(self):
+        entry = {"title": "map_nlin6", "family": "fsl6", "space": "MNI152NLin6Asym"}
+        self.assertIn("template family fsl6 differs", refmaps.family_warning(entry, "MNI152NLin2009cAsym"))
+        self.assertIn("without a template-family transform", refmaps.family_warning(entry, "MNI152NLin2009cAsym"))
+        self.assertEqual(refmaps.family_warning({"title": "m", "family": "2009"}, "MNI152NLin2009cAsym"), "")
+        self.assertEqual(refmaps.family_warning({"title": "m"}, "MNI152NLin2009cAsym"), "")
+        # a native (non-template) grid is no family: no misleading "(native)" note
+        self.assertEqual(refmaps.family_warning(entry, "native"), "")
+        self.assertEqual(refmaps.family_warning({"title": "m", "family": "native"}, "MNI152NLin2009cAsym"), "")
+
     def test_connectome_reference_note(self):
         v = self.bundle.n_voxels
         current = self.rng.standard_normal(v)
         rows = refmaps.top_similar(current, [{"name": "μC_r", "values": current + 0.1 * self.rng.standard_normal(v), "kind": "connectome"}])
         self.assertIn("connectome", rows[0]["note"])
+
+    def test_connectome_axis_anchor_has_no_condition_notes(self):
+        v = self.bundle.n_voxels
+        anchor = self.rng.standard_normal(v)
+        cands = [{"name": "mu_like", "values": anchor.copy(), "condition": "tremor", "kind": "map"},
+                 {"name": "PC1", "values": anchor + 0.01 * self.rng.standard_normal(v), "kind": "connectome"}]
+        rows = refmaps.top_similar(anchor, cands, condition=None, anchor_name="μC_r")
+        self.assertEqual([row["note"] for row in rows], ["", ""])
+        # a study-map anchor still gets the notes
+        rows = refmaps.top_similar(anchor, cands, condition="aphasia")
+        self.assertTrue(all(row["note"] for row in rows))
+        self.assertIn("aphasia", " ".join(row["note"] for row in rows))
 
 
 class _FakeResponse:
@@ -412,8 +468,8 @@ class _FakeResponse:
 class _FakeSession:
     """Answers the NeuroVault API calls; the image file itself is already in the cache (adopted), so nothing is downloaded."""
 
-    def __init__(self, image, collection, images):
-        self.image, self.collection, self.images = image, collection, images
+    def __init__(self, image, collection, images, count=None):
+        self.image, self.collection, self.images, self.count = image, collection, images, count
         self.calls = []
 
     def get(self, url, params=None, timeout=None, **kwargs):
@@ -421,11 +477,73 @@ class _FakeSession:
         if "/images/" in url and "/collections/" not in url:
             return _FakeResponse(self.image)
         if url.endswith("/images/"):
-            return _FakeResponse({"results": self.images})
+            return _FakeResponse({"results": self.images} if self.count is None else {"results": self.images, "count": self.count})
         return _FakeResponse(self.collection)
 
 
 class SourcesTest(RefmapsTestBase):
+    def test_same_url_added_twice_refreshes_one_entry(self):
+        """Adding the same URL (or the same file) again replaces its entry: the library never lists one map twice, so Compare
+        never compares a map with itself.
+        """
+        import functools
+        import http.server
+        import threading
+        from unittest import mock
+
+        served = os.path.join(self.tmp, "served_twice")
+        os.makedirs(served)
+        nifti.write_nifti(os.path.join(served, "m.nii.gz"), _smooth_field(self.rng, SHAPE).astype(np.float32), self.bundle.affine)
+
+        class QuietHandler(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(QuietHandler, directory=served))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{server.server_address[1]}/m.nii.gz"
+        with mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}):
+            first = refmaps.add_url(url, title="Map", licence="CC0-1.0", root=self.root, offline=False)
+            second = refmaps.add_url(url, title="Map again", licence="CC0-1.0", root=self.root, offline=False)
+        self.assertEqual(second["id"], first["id"])
+        listed = refmaps.entries(self.root)
+        self.assertEqual([item["id"] for item in listed], [first["id"]])
+        self.assertEqual(listed[0]["title"], "Map again")
+        path = os.path.join(self.tmp, "again.nii.gz")
+        shutil.copyfile(refmaps.entry_path(first, self.root), path)
+        one = refmaps.add_file(path, root=self.root)
+        two = refmaps.add_file(path, root=self.root)
+        self.assertEqual(two["id"], one["id"])
+        # The same bytes added by another route are the same map: one entry, never compared with itself
+        self.assertEqual(one["id"], first["id"])
+        self.assertEqual([item["id"] for item in refmaps.entries(self.root)], [first["id"]])
+        self.assertEqual(len(os.listdir(os.path.join(self.root, "files"))), 1)
+        # A more informative second addition fills what the entry lacks
+        path2 = os.path.join(self.tmp, "other-name.nii.gz")
+        shutil.copyfile(path, path2)
+        three = refmaps.add_file(path2, licence="CC0-1.0", citation="Roe 2024", root=self.root)
+        self.assertEqual(three["id"], first["id"])
+        self.assertEqual(three["licence"], "CC0-1.0")
+        self.assertEqual(refmaps.entries(self.root)[0]["citation"], "Roe 2024")
+
+    def test_add_file_unwritable_folder_says_so(self):
+        """A data folder that cannot be written gives a sentence (no raw errno, no path of a temporary name), and nothing is registered."""
+        import errno
+        from unittest import mock
+
+        path = self.writeMap("ro.nii.gz", _smooth_field(self.rng, SHAPE))
+        for number, words in ((errno.EACCES, "cannot be written"), (errno.EROFS, "cannot be written"), (errno.ENOSPC, "is full")):
+            with mock.patch.object(refmaps.os, "makedirs", side_effect=OSError(number, os.strerror(number), self.root)):
+                with self.assertRaises(refmaps.RefmapsError) as caught:
+                    refmaps.add_file(path, root=self.root)
+            text = str(caught.exception)
+            self.assertIn(words, text)
+            self.assertIn(self.root, text)
+            self.assertNotIn("Errno", text)
+        self.assertEqual(refmaps.entries(self.root), [])
+
     def test_remove_url_entry_deletes_download(self):
         import functools
         import http.server
@@ -448,7 +566,10 @@ class SourcesTest(RefmapsTestBase):
         url = f"http://127.0.0.1:{server.server_address[1]}/m.nii.gz"
         with mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}):
             entry = refmaps.add_url(url, root=self.root, offline=False)
-            twin = refmaps.add_url(url, root=self.root, offline=False)  # a second entry sharing the downloaded file
+            repeat = refmaps.add_url(url, root=self.root, offline=False)  # the same URL again refreshes the entry, never a second one
+            self.assertEqual(repeat["id"], entry["id"])
+            self.assertEqual([item["id"] for item in refmaps.entries(self.root)], [entry["id"]])
+            twin = refmaps.add_url(url, root=self.root, offline=False, entry_id="twin")  # a second entry sharing the downloaded file
             path = refmaps.entry_path(entry, self.root)
             old = refmaps.resample_to(entry, self.bundle, root=self.root)
             refmaps.remove_entry(twin["id"], root=self.root)
@@ -463,6 +584,274 @@ class SourcesTest(RefmapsTestBase):
             new = refmaps.resample_to(again, self.bundle, root=self.root)
         np.testing.assert_allclose(new, -old, atol=1e-5)
         self.assertNotEqual(again["sha256"], entry["sha256"])
+
+    def test_url_with_very_long_file_name_is_added(self):
+        """A link whose file name is over 255 bytes (about 85 CJK letters) is stored under a shortened name, never a raw [Errno 36]."""
+        import http.server
+        import threading
+        from unittest import mock
+
+        served = os.path.join(self.tmp, "served-long")
+        os.makedirs(served)
+        long_name = "\u5730" * 90 + ".nii.gz"
+        nifti.write_nifti(os.path.join(served, "plain.nii.gz"), _smooth_field(self.rng, SHAPE).astype(np.float32), self.bundle.affine)
+
+        class QuietHandler(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def translate_path(self, path):
+                return os.path.join(served, "plain.nii.gz")
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), QuietHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        import urllib.parse
+
+        url = f"http://127.0.0.1:{server.server_address[1]}/any/" + urllib.parse.quote(long_name)
+        with mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}):
+            entry = refmaps.add_url(url, root=self.root, offline=False)
+        self.assertTrue(entry["file"].endswith(".nii.gz"))
+        self.assertLessEqual(len(os.path.basename(entry["file"]).encode("utf-8")), 100)
+        self.assertEqual(entry["title"], long_name)
+
+    def test_short_file_name(self):
+        self.assertEqual(refmaps._short_file_name("a.nii.gz"), "a.nii.gz")
+        cut = refmaps._short_file_name("m" * 290 + ".nii.gz")
+        self.assertTrue(cut.endswith(".nii.gz") and len(cut) <= 100)
+
+    def test_url_title_is_url_decoded(self):
+        """A link with %-escapes in its file name gives the decoded name as title and stored file name."""
+        import functools
+        import http.server
+        import threading
+        from unittest import mock
+
+        served = os.path.join(self.tmp, "served-pct")
+        os.makedirs(served)
+        nifti.write_nifti(os.path.join(served, "réal map.nii.gz"), _smooth_field(self.rng, SHAPE).astype(np.float32), self.bundle.affine)
+
+        class QuietHandler(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(QuietHandler, directory=served))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{server.server_address[1]}/r%C3%A9al%20map.nii.gz"
+        with mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}):
+            entry = refmaps.add_url(url, root=self.root, offline=False)
+        self.assertEqual(entry["title"], "réal map.nii.gz")
+        self.assertNotIn("%", entry["id"])
+        self.assertTrue(entry["file"].endswith("réal map.nii.gz"), entry["file"])
+
+    def test_unreadable_download_is_refused(self):
+        """A download that is not a complete NIfTI image (a gzip of something else, a truncated .nii.gz, with or
+        without Content-Length, a .nii with cut image data) is refused: no entry, no file and no recorded checksum.
+        """
+        import gzip
+        import http.server
+        import threading
+        from unittest import mock
+
+        good = os.path.join(self.tmp, "good.nii.gz")
+        nifti.write_nifti(good, _smooth_field(self.rng, SHAPE).astype(np.float32), self.bundle.affine, compresslevel=6)
+        with open(good, "rb") as f:
+            packed = f.read()
+        raw = os.path.join(self.tmp, "good.nii")
+        nifti.write_nifti(raw, np.ones(SHAPE, dtype=np.float32), self.bundle.affine)
+        with open(raw, "rb") as f:
+            plain = f.read()
+        files = {
+            "/good.nii.gz": packed,
+            "/garbage.nii.gz": gzip.compress(os.urandom(4096)),
+            "/trunc.nii.gz": packed[: len(packed) // 2],
+            "/nolen/trunc.nii.gz": packed[: len(packed) // 2],
+            "/nolen/tail.nii.gz": packed[:-4],  # all image data, but no gzip trailer (CRC and length)
+            "/cut.nii": plain[: len(plain) - 100],
+            "/dl/plaindl": plain,  # extensionless links (figshare, OSF): the content decides, not the name
+            "/dl/gzdl": packed,
+        }
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = files.get(self.path.split("?")[0])
+                if body is None:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                if not self.path.startswith("/nolen/"):
+                    self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+
+        def kept():
+            folder = os.path.join(self.root, refmaps.FILES_DIR)
+            return sorted(os.path.relpath(os.path.join(d, n), folder) for d, _, names in os.walk(folder) for n in names) if os.path.isdir(folder) else []
+
+        with mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}):
+            for name in ("/garbage.nii.gz", "/trunc.nii.gz", "/nolen/trunc.nii.gz", "/nolen/tail.nii.gz", "/cut.nii"):
+                with self.subTest(name=name):
+                    with self.assertRaises(refmaps.RefmapsError) as raised:
+                        refmaps.add_url(base + name, root=self.root, offline=False)
+                    message = str(raised.exception)
+                    self.assertIn("not a complete, readable NIfTI image", message)
+                    self.assertNotIn(self.tmp, message)  # no local path in what the user is shown
+                    self.assertEqual(refmaps.entries(self.root), [])
+                    self.assertEqual(kept(), [])
+                    self.assertEqual(fetch.read_manifest(self.root)["files"], {})
+            entry = refmaps.add_url(base + "/good.nii.gz", root=self.root, offline=False)
+        self.assertEqual([item["id"] for item in refmaps.entries(self.root)], [entry["id"]])
+        self.assertEqual(refmaps.resample_to(entry, self.bundle, root=self.root).shape, (self.bundle.n_voxels,))
+        # A local file with cut image data is refused before anything is copied
+        before = kept()
+        cut = os.path.join(self.tmp, "cut.nii")
+        with open(cut, "wb") as f:
+            f.write(plain[: len(plain) - 100])
+        with self.assertRaises(refmaps.RefmapsError) as raised:
+            refmaps.add_file(cut, root=self.root)
+        self.assertIn("incomplete", str(raised.exception))
+        self.assertEqual([item["id"] for item in refmaps.entries(self.root)], [entry["id"]])
+        self.assertEqual(kept(), before)
+        with mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}):
+            for name, suffix in (("/dl/plaindl", ".nii"), ("/dl/gzdl", ".nii.gz")):
+                with self.subTest(name=name):
+                    extensionless = refmaps.add_url(base + name + "?download=1", root=self.root, offline=False)
+                    path = refmaps.entry_path(extensionless, self.root)
+                    self.assertTrue(path.endswith(suffix) and os.path.isfile(path), path)
+                    self.assertIn(os.path.relpath(path, fetch.cache_dir(self.root)).replace(os.sep, "/"), fetch.read_manifest(self.root)["files"])
+
+    def test_extensionless_url_failure_never_names_internal_download_file(self):
+        """BB-1: failures of extensionless links said 'page.download: ...' / 'download.download: ...'."""
+        import http.server
+        from unittest import mock
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path.startswith("/page"):
+                    body = b"<html><body>Log in</body></html>"
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    self.send_error(404)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        with mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}):
+            for name in ("/page", "/404", "/osf/abc/download"):
+                with self.subTest(name=name):
+                    with self.assertRaises(refmaps.RefmapsError) as raised:
+                        refmaps.add_url(base + name, root=self.root, offline=False)
+                    message = str(raised.exception)
+                    self.assertNotIn(".download", message)
+                    self.assertIn(base[len("http://"):] + name, message)
+            with self.assertRaises(refmaps.RefmapsError) as raised:
+                refmaps.add_url(base + "/404", title="My map", root=self.root, offline=False)
+            self.assertTrue(str(raised.exception).startswith("My map:"))
+
+    def test_multi_volume_file_is_refused_up_front(self):
+        """BB-1: a 3-volume NIfTI was added ('Added ...') and then failed with a traceback on every Compare."""
+        four_d = os.path.join(self.tmp, "three_contrasts.nii.gz")
+        nifti.write_nifti(four_d, np.zeros(SHAPE + (3,), dtype=np.float32), self.bundle.affine)
+        with self.assertRaises(refmaps.RefmapsError) as raised:
+            refmaps.add_file(four_d, root=self.root)
+        message = str(raised.exception)
+        self.assertIn("3 volumes; give a single 3D map", message)
+        self.assertNotIn(self.tmp, message)
+        self.assertEqual(refmaps.entries(self.root), [])
+
+    def test_full_disk_keeps_no_partial_file_and_later_additions_work(self):
+        """BB-1: the .part file that filled the disk was kept, so every later addition (even a small map) failed with
+        "[Errno 28] No space left on device". The partial file is removed and the message says the disk is full and where.
+        """
+        import errno
+        import functools
+        import gzip
+        import http.server
+        import threading
+        from unittest import mock
+
+        served = os.path.join(self.tmp, "served")
+        os.makedirs(served)
+        with open(os.path.join(served, "big.nii.gz"), "wb") as f:
+            f.write(gzip.compress(os.urandom(3_000_000), compresslevel=1))
+        nifti.write_nifti(os.path.join(served, "small.nii.gz"), _smooth_field(self.rng, SHAPE).astype(np.float32), self.bundle.affine)
+
+        class QuietHandler(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(QuietHandler, directory=served))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        capacity = 1_000_000  # a small disk: the files below the registry root may hold this many bytes
+        realOpen = open
+
+        def used():
+            return sum(os.path.getsize(os.path.join(d, n)) for d, _, names in os.walk(self.root) for n in names)
+
+        class _Limited:
+            def __init__(self, path, *args):
+                self._f = realOpen(path, *args)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self._f.close()
+
+            def write(self, data):
+                if used() + len(data) > capacity:
+                    raise OSError(errno.ENOSPC, "No space left on device")
+                return self._f.write(data)
+
+            def __getattr__(self, name):
+                return getattr(self._f, name)
+
+        def SmallDisk(path, mode="r", *args, **kwargs):  # only the downloaded files (binary writes) fill the small disk
+            return _Limited(path, mode, *args, **kwargs) if "b" in mode and ("w" in mode or "a" in mode) else realOpen(path, mode, *args, **kwargs)
+
+        def partials():
+            folder = os.path.join(self.root, refmaps.FILES_DIR)
+            return [n for _, _, names in os.walk(folder) for n in names if n.endswith(".part")] if os.path.isdir(folder) else []
+
+        with mock.patch.dict(os.environ, {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}), mock.patch.object(fetch, "open", SmallDisk, create=True):
+            with self.assertRaises(refmaps.RefmapsError) as raised:
+                refmaps.add_url(base + "/big.nii.gz", root=self.root, offline=False)
+            message = str(raised.exception)
+            self.assertIn(f"The disk of {self.root} is full. Free some space or choose another folder.", message)  # the library sentence
+            self.assertNotIn(os.path.join(self.root, refmaps.FILES_DIR), message)  # not the internal hashed sub-folder
+            self.assertNotIn("partial", message)
+            self.assertNotIn("Errno", message)
+            self.assertEqual(partials(), [], "the partial file that filled the disk is not kept")
+            self.assertEqual(refmaps.entries(self.root), [])
+            entry = refmaps.add_url(base + "/small.nii.gz", root=self.root, offline=False)  # a map that fits can still be added
+        self.assertEqual([item["id"] for item in refmaps.entries(self.root)], [entry["id"]])
+        self.assertEqual(partials(), [])
 
     def test_neurovault_offline(self):
         path = self.writeMap("pain.nii.gz", _smooth_field(self.rng, SHAPE))
@@ -484,6 +873,96 @@ class SourcesTest(RefmapsTestBase):
         self.assertEqual(entry["source"]["collection_id"], "3324")
         self.assertTrue(any(call.startswith(refmaps.NEUROVAULT_API) for call in session.calls))
         self.assertEqual(refmaps.resample_to(entry, self.bundle, root=self.root).shape, (self.bundle.n_voxels,))
+
+    def test_neurovault_download_link_adds_the_linked_image(self):
+        """A NeuroVault download link (/media/images/<collection>/<file>) adds the image with that file, not image <collection>."""
+        path = self.writeMap("zstat1.nii.gz", _smooth_field(self.rng, SHAPE))
+        url = "https://neurovault.org/media/images/457/tfMRI_EMOTION_FACES-SHAPES_zstat1.nii.gz"
+        other = {"id": 3127, "name": "Other map", "file": "http://neurovault.org/media/images/457/other.nii.gz", "collection_id": 457}
+        image = {"id": 3128, "name": "tfMRI EMOTION FACES minus SHAPES zstat1", "file": url.replace("https", "http"), "collection_id": 457,
+                 "target_template_image": "GenericMNI", "file_size": os.path.getsize(path)}
+        collection = {"id": 457, "name": "HCP", "authors": "Doe J"}
+        resource = fetch.Resource({"id": "neurovault/3128", "urls": [url], "filename": os.path.basename(url), "checksum": fetch.RECORD_ON_FIRST_DOWNLOAD})
+        fetch.adopt(resource, path, cache=self.root)
+        session = _FakeSession({"id": 457, "name": "task003 003 rating all", "collection_id": 98}, collection, [other, image])
+        added = refmaps.add_neurovault(collection_id=457, file_name=os.path.basename(url), root=self.root, session=session, offline=True)
+        self.assertEqual([entry["id"] for entry in added], ["nv-3128"])
+        self.assertEqual(added[0]["source"]["collection_id"], "457")
+        with self.assertRaises(refmaps.RefmapsError) as raised:
+            refmaps.add_neurovault(collection_id=457, file_name="missing.nii.gz", root=self.root, session=session, offline=True)
+        self.assertIn("missing.nii.gz", str(raised.exception))
+        self.assertIn("neurovault.org/images/", str(raised.exception))
+        with self.assertRaises(refmaps.RefmapsError):
+            refmaps.add_neurovault(image_id=457, file_name="x.nii.gz", root=self.root, session=session, offline=True)
+
+    def test_neurovault_large_collection_reports_the_limit(self):
+        """A collection with more images than the listed 100 says so (info), instead of silently adding only the first ones."""
+        path = self.writeMap("m1.nii.gz", _smooth_field(self.rng, SHAPE))
+        url = "https://neurovault.org/media/images/950/m1.nii.gz"
+        image = {"id": 951, "name": "Map 1", "file": url.replace("https", "http"), "collection_id": 950, "target_template_image": "GenericMNI",
+                 "file_size": os.path.getsize(path)}
+        fetch.adopt(fetch.Resource({"id": "neurovault/951", "urls": [url], "filename": "m1.nii.gz", "checksum": fetch.RECORD_ON_FIRST_DOWNLOAD}),
+                    path, cache=self.root)
+        info = {}
+        session = _FakeSession(image, {"id": 950, "name": "C", "number_of_images": 6573}, [image], count=6573)
+        added = refmaps.add_neurovault(collection_id=950, root=self.root, session=session, offline=True, info=info)
+        self.assertEqual(len(added), 1)
+        self.assertEqual(info, {"listed": 1, "total": 6573})
+        info = {}
+        session = _FakeSession(image, {"id": 950, "name": "C"}, [image], count=1)
+        refmaps.add_neurovault(collection_id=950, root=self.root, session=session, offline=True, info=info)
+        self.assertEqual(info, {})
+
+    def test_neurovault_collection_stop_or_failure_adds_nothing(self):
+        """Stop or a failure part-way through a collection leaves no map of that add in the library."""
+        from LesionNetworkMappingLib import jobs
+
+        images = []
+        for number in (1, 2, 3):
+            path = self.writeMap(f"m{number}.nii.gz", _smooth_field(self.rng, SHAPE))
+            url = f"https://neurovault.org/media/images/900/m{number}.nii.gz"
+            images.append({"id": 900 + number, "name": f"Map {number}", "file": url.replace("https", "http"), "collection_id": 900,
+                           "target_template_image": "GenericMNI", "file_size": os.path.getsize(path)})
+            if number < 3:  # image 3 is not cached: offline, it fails
+                fetch.adopt(fetch.Resource({"id": f"neurovault/{900 + number}", "urls": [url], "filename": f"m{number}.nii.gz",
+                                            "checksum": fetch.RECORD_ON_FIRST_DOWNLOAD}), path, cache=self.root)
+        session = _FakeSession(images[0], {"id": 900, "name": "C"}, images)
+
+        class StopAfterOne:
+            def is_set(inner):
+                return len(refmaps.entries(self.root)) >= 1
+
+        with self.assertRaises(jobs.Cancelled):
+            refmaps.add_neurovault(collection_id=900, root=self.root, session=session, offline=True, cancel=StopAfterOne())
+        self.assertEqual(refmaps.entries(self.root), [])
+        with self.assertRaises((refmaps.RefmapsError, fetch.OfflineError)):
+            refmaps.add_neurovault(collection_id=900, root=self.root, session=session, offline=True)
+        self.assertEqual(refmaps.entries(self.root), [])
+
+    def test_neurovault_read_failures_are_short(self):
+        import requests
+
+        class Failing:
+            def __init__(self, exc):
+                self.exc = exc
+
+            def get(self, url, **kwargs):
+                raise self.exc
+
+        proxy = requests.exceptions.ProxyError("HTTPSConnectionPool(host='neurovault.org', port=443): Max retries exceeded with url: /api/images/63/ "
+                                               "(Caused by ProxyError('Unable to connect to proxy', NewConnectionError('Failed to establish')))")
+        for call in (lambda: refmaps.neurovault_image(63, session=Failing(proxy)), lambda: refmaps.neurovault_collection(3324, session=Failing(proxy)),
+                     lambda: refmaps.add_neurovault(image_id=63, root=self.root, session=Failing(proxy))):
+            with self.assertRaises(refmaps.RefmapsError) as raised:
+                call()
+            message = str(raised.exception)
+            self.assertEqual(message, "No connection to neurovault.org: the proxy server cannot be reached. Check the network and try again.")
+            self.assertNotIn("Max retries", message)
+        response = requests.Response()
+        response.status_code = 404
+        with self.assertRaises(refmaps.RefmapsError) as raised:
+            refmaps.neurovault_image(63, session=Failing(requests.HTTPError("404 Client Error: Not Found for url: https://neurovault.org/api/images/63/", response=response)))
+        self.assertEqual(str(raised.exception), "NeuroVault image 63 could not be read: NeuroVault answered HTTP 404 (no such item).")
 
     def test_vdh_needs_terms_and_pinned_commit(self):
         with self.assertRaises(refmaps.RefmapsError) as raised:
@@ -516,8 +995,106 @@ class SourcesTest(RefmapsTestBase):
         self.assertFalse(entry["redistribute"])
         self.assertEqual(entry["badge"], "grey")
         self.assertIn("never redistributed", entry["licence_note"])
+        # The "states no licence" wording appears once, with a full stop before the repository sentence
+        self.assertEqual(entry["licence_note"].lower().count("states no licence"), 1)
+        self.assertIn(". The van den Heuvel repository states no licence", entry["licence_note"])
         self.assertIn("ca410e6", entry["citation"])
         self.assertEqual(entry["source"]["commit"], "ca410e6")
+
+
+class VdhLicenceNoteTest(unittest.TestCase):
+    def test_gsp_note_does_not_repeat_the_no_licence_clause(self):
+        gsp = "GSP-derived: the GSP Open Access Data Use Terms apply (terms GSP-DUT-2014); the repository states no licence"
+        note = refmaps._vdh_licence_note(gsp)
+        self.assertEqual(note.lower().count("states no licence"), 1)
+        self.assertIn("(terms GSP-DUT-2014). The van den Heuvel repository states no licence:", note)
+        self.assertEqual(refmaps._vdh_licence_note(None), refmaps.VDH_NOTE)
+
+
+class MergeTest(RefmapsTestBase):
+    """``merge_into`` (Change folder > Move into a Slicer Studio folder whose LNM/ has its own library, BB-1): the maps of
+    both libraries stay listed, the moved files, records and caches follow their entries, nothing is lost on a failure.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.source = os.path.join(self.tmp, "A", "ReferenceMaps")
+        self.destination = os.path.join(self.tmp, "B", "ReferenceMaps")
+        self.shared = self.writeMap("shared.nii.gz", _smooth_field(self.rng, SHAPE))
+        self.own = self.writeMap("own.nii.gz", _smooth_field(self.rng, SHAPE))
+        self.theirs = refmaps.add_file(self.shared, title="B shared", root=self.destination)
+        self.same = refmaps.add_file(self.shared, title="A shared", root=self.source)  # the same id and file folder
+        self.mine = refmaps.add_file(self.own, title="A own", root=self.source)
+        self.assertEqual(self.same["id"], self.theirs["id"])
+        folder = self.same["file"].rsplit("/", 1)[0]
+        self.record = {"url": "https://example.org/shared.nii.gz", "sha256": self.same["sha256"]}
+        fetch._record_file(self.source, self.same["file"], self.record)
+        for root, content in ((self.source, "A"), (self.destination, "B")):
+            cache = os.path.join(root, refmaps.FILES_DIR, refmaps.RESAMPLED_DIR, refmaps._slug(self.same["id"], 64))
+            os.makedirs(cache)
+            with open(os.path.join(cache, "grid.npy"), "w") as f:
+                f.write(content)
+        self.folder = folder
+
+    @staticmethod
+    def move(source, destination):
+        os.rename(source, destination)
+
+    def test_both_libraries_stay_listed(self):
+        renamed = refmaps.merge_into(self.source, self.destination, self.move)
+        listed = refmaps.entries(self.destination)
+        self.assertEqual([entry["title"] for entry in listed], ["B shared", "A shared", "A own"])
+        self.assertEqual(len({entry["id"] for entry in listed}), 3, "every entry keeps an id of its own")
+        moved = listed[1]
+        self.assertEqual(moved["id"], self.same["id"] + "-2")
+        self.assertEqual(moved["file"], self.folder + "-2/shared.nii.gz", "the moved file folder whose name was taken")
+        self.assertEqual(listed[0]["file"], self.theirs["file"], "the destination's own entry is unchanged")
+        for entry in listed:
+            self.assertTrue(os.path.isfile(refmaps.entry_path(entry, self.destination)), entry["title"])
+            self.assertFalse(os.path.isabs(entry["file"]))
+        self.assertEqual(refmaps._sha256(refmaps.entry_path(listed[2], self.destination)), self.mine["sha256"])
+        self.assertEqual(fetch.read_manifest(self.destination)["files"].get(moved["file"]), self.record, "the fetch record follows the file")
+        caches = os.path.join(self.destination, refmaps.FILES_DIR, refmaps.RESAMPLED_DIR)
+        with open(os.path.join(caches, refmaps._slug(self.same["id"], 64), "grid.npy")) as f:
+            self.assertEqual(f.read(), "B", "the destination's cache is kept")
+        with open(os.path.join(caches, refmaps._slug(moved["id"], 64), "grid.npy")) as f:
+            self.assertEqual(f.read(), "A", "the moved cache follows its entry's new id")
+        self.assertEqual(renamed, {os.path.join(self.source, *self.folder.split("/")): os.path.join(self.destination, *(self.folder + "-2").split("/"))})
+        self.assertFalse(os.path.exists(self.source), "everything moved")
+        # The merged library works as any other: removing the moved entry keeps the destination's own one
+        refmaps.remove_entry(moved["id"], root=self.destination)
+        self.assertTrue(os.path.isfile(refmaps.entry_path(listed[0], self.destination)))
+
+    def test_failed_move_loses_no_entry(self):
+        calls = []
+
+        def move(source, destination):
+            calls.append(source)
+            if len(calls) == 2:
+                raise OSError("disk full")
+            os.rename(source, destination)
+
+        with self.assertRaises(OSError):
+            refmaps.merge_into(self.source, self.destination, move)
+        listed = refmaps.entries(self.destination) + refmaps.entries(self.source)
+        self.assertEqual(sorted(entry["title"] for entry in listed), ["A own", "A shared", "B shared"], "every map is in one library")
+        for root in (self.source, self.destination):
+            for entry in refmaps.entries(root):
+                self.assertTrue(os.path.isfile(refmaps.entry_path(entry, root)), (root, entry["title"]))
+        self.assertEqual(len(refmaps.entries(self.source)), 1, "the entry whose file did not move stays in the source library")
+        # Moving again finishes the merge
+        refmaps.merge_into(self.source, self.destination, self.move)
+        self.assertEqual(sorted(entry["title"] for entry in refmaps.entries(self.destination)), ["A own", "A shared", "B shared"])
+        self.assertFalse(os.path.exists(self.source))
+
+    def test_unreadable_registry_moves_nothing(self):
+        with open(os.path.join(self.source, refmaps.REGISTRY_JSON), "w") as f:
+            f.write("{not json")
+        before = sorted(os.listdir(self.source))
+        with self.assertRaises(refmaps.RefmapsError):
+            refmaps.merge_into(self.source, self.destination, self.move)
+        self.assertEqual(sorted(os.listdir(self.source)), before)
+        self.assertEqual([entry["title"] for entry in refmaps.entries(self.destination)], ["B shared"])
 
 
 class OutputsTest(RefmapsTestBase):
@@ -558,6 +1135,15 @@ class OutputsTest(RefmapsTestBase):
         figure = refmaps.heatmap_figure(names, matrix, None)
         self.assertGreater(figure.size[0], 200)
         self.assertIn("map 19", figure.caption)
+
+    def test_heatmap_colorbar_fits_with_long_names(self):
+        names = ["GSP1000 voxel degree map (van den Heuvel 2026)", "real.nii.gz"]
+        figure = refmaps.heatmap_figure(names, np.array([[1.0, -0.02], [-0.02, 1.0]]))
+        width = figure.base.size[0]
+        ticks = [a for a in figure.annotations if getattr(a, "kind", None) == "text" and str(a.text) in ("1", "r")]
+        self.assertTrue(ticks)
+        for tick in ticks:
+            self.assertLess(tick.x, width)
 
 
 if __name__ == "__main__":

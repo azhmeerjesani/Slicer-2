@@ -11,6 +11,7 @@ Studio folder is a temporary folder "Slicer Studio tést" (``SLICER_STUDIO_PROJE
 ``Studio/Templates/Default`` is restored afterwards.
 """
 
+import contextlib
 import gzip
 import hashlib
 import json
@@ -128,6 +129,13 @@ class StudioTemplatesTest(unittest.TestCase):
         self.inputMd5 = {path: _md5(path) for path in _allFiles(self.inputs)}
         templates.registerGrids(force=True)
         self.services = []
+        self.addCleanup(self._assertNoParentlessPanels)  # registered first, so it runs after every deleteLater cleanup
+
+    def _assertNoParentlessPanels(self):
+        # A parentless settings panel alive at exit makes Slicer exit abnormally (code 1) although every test passed
+        qt.QApplication.sendPostedEvents(None, 52)  # QEvent.DeferredDelete
+        leaked = [w for w in slicer.app.topLevelWidgets() if w.objectName == self.ui.PANEL_OBJECT_NAME]
+        self.assertEqual(leaked, [], "a test left a parentless TemplatesSettingsPanel alive (add self.addCleanup(panel.deleteLater))")
 
     def tearDown(self):
         from StudioLib import autosave_io
@@ -624,3 +632,1780 @@ class StudioTemplatesTest(unittest.TestCase):
         self.assertTrue(importer._isStudyTemplateChoice(builtin, other.id), "the default template")
         self.assertFalse(importer._isStudyTemplateChoice(builtin, template.id))
         self.assertFalse(importer._isStudyTemplateChoice(builtin, "user:not-here"))
+
+    #
+    # A lesion on a template that is not registered here (BB-1: removed, another computer, a study without it)
+    #
+
+    def test_12_missing_template_lesion_stays_mni(self):
+        import LesionNetworkMapping
+
+        from LesionNetworkMappingLib import nifti
+        from LesionNetworkMappingLib.study import Study
+
+        from StudioLib import draw, importer, space, study_ui
+
+        templates = self.templates
+        template = self._add(name="Lab ICBM 1.5", space="MNI152NLin6Asym")
+        expected = ("MNI152NLin6Asym", 1.5)
+        logic = LesionNetworkMapping.LesionNetworkMappingLogic()
+
+        def checkMni(segmentation, label):
+            self.assertEqual(space.spaceOf(segmentation), expected, label)
+            self.assertEqual(space.hemisphereWord(-20.0, segmentation), "Left", label)
+            check = logic.checkSeed(segmentation, segmentation.GetSegmentation().GetNthSegmentID(0))
+            self.assertEqual(tuple(check["space"] or ()), expected, f"{label}: Map's seed space")
+
+        # (1) The template is removed in Settings while a lesion drawn on it is open
+        volume, segmentation = importer.startOnTemplate(shell=self._shell(), templateId=template.id)
+        segmentId = segmentation.GetSegmentation().GetNthSegmentID(0)
+        lesion = np.zeros(slicer.util.arrayFromVolume(volume).shape, np.uint8)
+        lesion[60:70, 70:80, 30:40] = 1  # k, j, i: left hemisphere
+        slicer.util.updateSegmentBinaryLabelmapFromArray(lesion, segmentation, segmentId, volume)
+        checkMni(segmentation, "template registered")
+        self.assertTrue(templates.removeTemplate(template.id, confirmDelete=lambda: True))
+        self.assertIsNone(space.spaceOf(space.gridOf(segmentation)), "the grid alone is no longer known")
+        checkMni(segmentation, "template removed while open")
+        line, level = draw.DrawExtension._spaceLine(None, segmentation, volume)
+        self.assertNotIn("scan space", line or "")
+        self.assertNotEqual(level, "warn")
+        # (2) A project reopened without the template: its volume in Images/ still says Studio.Space; the lesion has no
+        # node reference to it
+        role = slicer.vtkMRMLSegmentationNode.GetReferenceImageGeometryReferenceRole()
+        segmentation.RemoveNodeReferenceIDs(role)
+        checkMni(segmentation, "volume on the same grid")
+        slicer.mrmlScene.Clear(0)
+
+        # (3) A study drawn on the template, opened where the template is not: the case opens on the built-in template
+        template = self._add(name="Lab ICBM 1.5", space="MNI152NLin6Asym")
+        record = templates.studyRecord(template)
+        study = Study.create(os.path.join(self.tempDir, "study missing template"), name="Study", template=record)
+        sid = "sub-case001"
+        study.add_subject(sid, {"group": "case", "status": "traced", "space": "MNI152NLin6Asym", "trace_template": "MNI152NLin6Asym"})
+        lesionPath = os.path.join(study.path, *study.lesion_relpath(sid).split("/"))
+        os.makedirs(os.path.dirname(lesionPath), exist_ok=True)
+        _data, affine, _header = nifti.read_nifti(template.imagePath)
+        mask = np.zeros(self.shape15, np.uint8)
+        mask[30:40, 70:80, 60:70] = 1  # i, j, k: left hemisphere
+        nifti.write_nifti(lesionPath, mask, affine)
+        study.set(sid, {"lesion": study.relpath(lesionPath)})
+        study.save()
+        self.assertTrue(templates.removeTemplate(template.id, confirmDelete=lambda: True))
+        settings = qt.QSettings()
+        recent = settings.value(study_ui.RECENT_STUDIES_KEY)
+        try:
+            session = study_ui.openStudy(study.path, shell=self._shell(), subject=sid, showLibrary=False)
+            slicer.app.processEvents()
+            self.assertIsNone(session.volumeNode().GetAttribute("Studio.TemplateId"), "the built-in template meanwhile")
+            checkMni(session.segmentationNode(), "study case without its template")
+        finally:
+            study_ui.closeStudy()
+            if recent is None:
+                settings.remove(study_ui.RECENT_STUDIES_KEY)
+            else:
+                settings.setValue(study_ui.RECENT_STUDIES_KEY, recent)
+            shutil.rmtree(study.path, ignore_errors=True)
+
+    def test_13_surfaces_without_coordinate_header_are_mni_ras(self):
+        from StudioLib import importer
+
+        templates = self.templates
+        folder = os.path.join(self.tempDir, "headerless surfaces")
+        os.makedirs(folder, exist_ok=True)
+
+        def ellipsoid(low, high):
+            source = vtk.vtkSphereSource()
+            source.SetThetaResolution(24)
+            source.SetPhiResolution(24)
+            source.SetRadius(0.5)
+            transform = vtk.vtkTransform()
+            transform.Translate(*[(a + b) / 2.0 for a, b in zip(low, high, strict=True)])
+            transform.Scale(*[b - a for a, b in zip(low, high, strict=True)])
+            moved = vtk.vtkTransformPolyDataFilter()
+            moved.SetTransform(transform)
+            moved.SetInputConnection(source.GetOutputPort())
+            triangles = vtk.vtkTriangleFilter()
+            triangles.SetInputConnection(moved.GetOutputPort())
+            triangles.Update()
+            return triangles.GetOutput()
+
+        def writeObj(path, polyData, comment=None):
+            # As FreeSurfer, BrainNet or nibabel exports write it: no coordinate system comment unless given
+            with open(path, "w", encoding="ascii") as f:
+                if comment:
+                    f.write(f"# {comment}\n")
+                for index in range(polyData.GetNumberOfPoints()):
+                    f.write("v {:.4f} {:.4f} {:.4f}\n".format(*polyData.GetPoint(index)))
+                ids = vtk.vtkIdList()
+                polys = polyData.GetPolys()
+                polys.InitTraversal()
+                while polys.GetNextCell(ids):
+                    f.write("f " + " ".join(str(ids.GetId(i) + 1) for i in range(ids.GetNumberOfIds())) + "\n")
+            return path
+
+        def writeWith(writer, path, polyData):
+            writer.SetFileName(path)
+            writer.SetInputData(polyData)
+            writer.Write()
+            return path
+
+        # A left hemisphere in MNI (RAS) coordinates, without a coordinate system comment, as .obj, .stl and legacy .vtk
+        hemisphere = ellipsoid((-68.0, -100.0, -44.0), (-4.0, 68.0, 76.0))
+        headerless = [writeObj(os.path.join(folder, "lh.pial.obj"), hemisphere),
+                      writeWith(vtk.vtkSTLWriter(), os.path.join(folder, "lh.pial.stl"), hemisphere),
+                      writeWith(vtk.vtkPolyDataWriter(), os.path.join(folder, "lh.pial.vtk"), hemisphere)]
+        for path in headerless:
+            self.assertEqual(templates.checkSurface(path), (True, ""), f"{os.path.basename(path)}: MNI coordinates are RAS")
+            bounds = templates._readSurfaceBounds(path)
+            self.assertLess(bounds[1], 0.0, f"{os.path.basename(path)} stays in the left hemisphere")
+            self.assertLess(bounds[2], -90.0, f"{os.path.basename(path)} keeps its occipital pole at the back")
+        # A file that states its coordinate system is still read in it: the same hemisphere stored as LPS
+        flipped = vtk.vtkTransformPolyDataFilter()
+        lpsTransform = vtk.vtkTransform()
+        lpsTransform.Scale(-1.0, -1.0, 1.0)
+        flipped.SetTransform(lpsTransform)
+        flipped.SetInputData(hemisphere)
+        flipped.Update()
+        lps = writeObj(os.path.join(folder, "lh.pial_lps.obj"), flipped.GetOutput(), comment="exported SPACE=LPS")
+        self.assertEqual(templates.checkSurface(lps), (True, ""))
+        self.assertLess(templates._readSurfaceBounds(lps)[1], 0.0)
+
+        # A small left-anterior structure on a template: its model is where the file says, not mirrored
+        blob = writeObj(os.path.join(folder, "left_blob.obj"), ellipsoid((-55.0, 5.0, 5.0), (-25.0, 35.0, 35.0)))
+        self.assertEqual(templates.checkSurface(blob), (True, ""))
+        # A small subcortical structure (amygdala-sized, under 20 mm in one direction) in the MNI box is accepted
+        amygdala = writeObj(os.path.join(folder, "left_amygdala.obj"), ellipsoid((-32.0, -12.0, -28.0), (-14.0, 3.0, -8.0)))
+        self.assertEqual(templates.checkSurface(amygdala), (True, ""), "a small surface inside the MNI box is accepted")
+        template = self._add(surfaces=(blob,), space="MNI152NLin6Asym")
+        importer.startOnTemplate(shell=self._shell(), templateId=template.id)
+        models = [node for node in slicer.util.getNodesByClass("vtkMRMLModelNode") if node.GetAttribute("Studio.Role") == templates.ROLE_SURFACE]
+        self.assertEqual(len(models), 1)
+        bounds = [0.0] * 6
+        models[0].GetRASBounds(bounds)
+        self.assertTrue(-56.0 < bounds[0] < bounds[1] < -24.0, f"left, not mirrored: {bounds}")
+        self.assertTrue(4.0 < bounds[2] < bounds[3] < 36.0, f"anterior, not mirrored: {bounds}")
+        # Saved with the project as Slicer writes models (with a coordinate system header), so official Slicer reads it unmirrored
+        path = os.path.join(folder, "saved_blob.vtk")
+        self.assertTrue(slicer.util.saveNode(models[0], path))
+        self.assertTrue(-56.0 < templates._readSurfaceBounds(path)[1] < -24.0)
+        shutil.rmtree(folder, ignore_errors=True)
+
+    @staticmethod
+    def _width(size):
+        size = size() if callable(size) else size
+        return size.width()
+
+    def test_14_long_names_are_elided(self):
+        """A long template name or file name is elided ("…", the whole text as tooltip) and does not widen the Settings list or the add dialog."""
+        templates, ui = self.templates, self.ui
+        longName = "MNI152 ICBM 2009c Nonlinear Asymmetric 0.5 mm T1-weighted skull-stripped from the McGill BIC website " * 2
+        panel = ui.TemplatesSettingsPanel()
+        panel.refresh()
+        before = self._width(panel.rowFor(templates.BUILTIN_DEFAULT).minimumSizeHint)
+        template = self._add(name=longName)
+        panel.refresh()
+        row = panel.rowFor(template.id)
+        nameLabel = row.findChild(qt.QLabel, "studioTemplateName")
+        self.assertIn("…", nameLabel.text)
+        self.assertIn(longName.strip(), nameLabel.toolTip.replace("</p>", ""))  # Studio wraps tool tips in rich text
+        self.assertLessEqual(self._width(nameLabel.sizeHint), ui.NAME_WIDTH + 2)
+        self.assertLessEqual(self._width(row.minimumSizeHint), before + ui.NAME_WIDTH)
+        shortRow = panel.rowFor(templates.BUILTIN_DEFAULT)
+        self.assertNotIn("…", shortRow.findChild(qt.QLabel, "studioTemplateName").text)
+        self.assertEqual(shortRow.findChild(qt.QLabel, "studioTemplateName").toolTip, "")
+        panel.deleteLater()
+        dialog = ui.AddTemplateDialog()
+        longFile = os.path.join(self.tempDir, "mni_icbm152_t1_tal_nlin_asym_09c_0.5mm_skull_stripped_brain_extracted_version_2009_final.nii.gz")
+        shutil.copy(self.image15, longFile)
+        dialog.setImage(longFile)
+        self.assertIn("…", dialog.fileLabel.text)
+        self.assertTrue(dialog.fileLabel.text.endswith(".nii.gz"))
+        self.assertIn(longFile, dialog.fileLabel.toolTip)
+        self.assertLessEqual(self._width(dialog.fileLabel.sizeHint), ui.FILE_NAME_WIDTH + 2)
+        dialog.deleteLater()
+        os.remove(longFile)
+
+    def test_15_sform_qform_disagreement_is_refused(self):
+        """A NIfTI file whose sform (MNI) and qform disagree is refused: the check reads the sform, while Slicer loads the
+        qform, so lesions drawn on it would be treated as MNI at the wrong place. A template added before the check (its
+        image changed afterwards) is not loaded either.
+        """
+        import struct
+
+        from LesionNetworkMappingLib import nifti
+
+        from StudioLib import importer
+
+        templates = self.templates
+        data, affine, _header = nifti.read_nifti(self.image15)
+        agreeing = os.path.join(self.tempDir, "agreeing_1.5mm.nii")
+        nifti.write_nifti(agreeing, data, affine)
+        disagreeing = os.path.join(self.tempDir, "disagreeing_1.5mm.nii")
+        shutil.copy(agreeing, disagreeing)
+        header = nifti.read_nifti_header(disagreeing)
+        endian = header["byteorder"]
+        with open(disagreeing, "r+b") as f:
+            f.seek(268)  # qoffset_x: the qform moves 40 mm to the right, the sform (MNI, code 4) stays
+            (qoffsetX,) = struct.unpack(endian + "f", f.read(4))
+            f.seek(268)
+            f.write(struct.pack(endian + "f", qoffsetX + 40.0))
+        header = nifti.read_nifti_header(disagreeing)
+        self.assertEqual((header["sform_code"], header["qform_code"]), (4, 4))
+        self.assertAlmostEqual(nifti.xform_disagreement(header), 40.0, places=3)
+        detection = templates.identify(disagreeing)
+        self.assertFalse(detection.ok)
+        self.assertEqual(detection.status, "refused")
+        self.assertIn("sform and qform", detection.message)
+        self.assertAlmostEqual(templates.readHeader(agreeing)["xformMm"], 0.0, places=3)
+        with self.assertRaises(templates.TemplateError):
+            self._add(disagreeing, name="Disagreeing")
+        self.assertFalse(os.path.exists(templates.templatesFolder()) and os.listdir(templates.templatesFolder()), "a refused add leaves nothing")
+        # As a brain mask of an agreeing template
+        ok, reason = templates.checkCompanion(templates.identify(agreeing), disagreeing)
+        self.assertFalse(ok)
+        self.assertIn("sform and qform", reason)
+        # A template added from an agreeing file whose image was replaced by the disagreeing one is not loaded at the qform
+        template = self._add(agreeing, name="Agreeing")
+        shutil.copy(disagreeing, template.imagePath)
+        with self.assertRaises(RuntimeError) as context:
+            importer.startOnTemplate(shell=self._shell(), templateId=template.id)
+        self.assertIn("sform and qform", str(context.exception))
+        self.assertFalse([node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode") if node.GetAttribute("Studio.TemplateId") == template.id])
+        for path in (agreeing, disagreeing):
+            os.remove(path)
+
+    def test_16_known_grid_template_space_wins_for_lesions(self):
+        """A template on a built-in grid (the bundled 2 mm grid, stored LAS) added with another space: a lesion drawn on
+        it is in the space chosen for the template (Draw's notice, the sidecar, Map's seed space and family check), not
+        in the grid's built-in space. A lesion on that grid with no tagged volume keeps the built-in space.
+        """
+        import LesionNetworkMapping
+
+        from StudioLib import draw, importer, space
+
+        self.assertEqual(self.templates.identify(self.las).status, "known")
+        template = self._add(self.las, name="SPM-like 2 mm", space="MNI152Lin")
+        expected = ("MNI152Lin", 2)
+        volume, segmentation = importer.startOnTemplate(shell=self._shell(), templateId=template.id)
+        self.assertEqual(space.spaceOf(volume), expected)
+        self.assertEqual(space.spaceOf(space.gridOf(segmentation)), ("MNI152NLin2009cAsym", 2), "the grid alone is the built-in grid")
+        segmentId = segmentation.GetSegmentation().GetNthSegmentID(0)
+        lesion = np.zeros(slicer.util.arrayFromVolume(volume).shape, np.uint8)
+        lesion[30:40, 50:60, 25:35] = 1  # k, j, i
+        slicer.util.updateSegmentBinaryLabelmapFromArray(lesion, segmentation, segmentId, volume)
+        self.assertEqual(space.spaceOf(segmentation), expected)
+        self.assertEqual(space.sharedGridSpace(segmentation), expected)
+        line, level = draw.DrawExtension._spaceLine(None, segmentation, volume)
+        self.assertEqual((line, level), (f"On {template.name} · MNI152Lin 2 mm", "neutral"))
+        sidecar = draw.writeSidecar(os.path.join(self.tempDir, "lesion_known_grid.nii.gz"), segmentation, volume)
+        with open(sidecar, encoding="utf-8") as f:
+            content = json.load(f)
+        os.remove(sidecar)
+        self.assertEqual(content["Space"], "MNI152Lin")
+        self.assertEqual(content["Template"]["space"], "MNI152Lin")
+        logic = LesionNetworkMapping.LesionNetworkMappingLogic()
+        role = slicer.vtkMRMLSegmentationNode.GetReferenceImageGeometryReferenceRole()
+        for label in ("drawn on the template", "no node reference (a reopened project)"):
+            check = logic.checkSeed(segmentation, segmentId)
+            self.assertEqual(tuple(check["space"] or ()), expected, f"{label}: Map's seed space")
+            self.assertIn("a few millimetres", logic.familyNotice(check["space"], "MNI152NLin2009cAsym"), label)
+            segmentation.RemoveNodeReferenceIDs(role)
+        self.assertEqual(space.spaceOf(segmentation), expected)
+        # Without the tagged template volume, a lesion on the grid is in the grid's built-in space
+        slicer.mrmlScene.RemoveNode(volume)
+        self.assertEqual(space.spaceOf(segmentation), ("MNI152NLin2009cAsym", 2))
+        self.assertIsNone(space.sharedGridSpace(segmentation))
+
+    def test_17_readded_same_name_loads_its_own_image(self):
+        """A template removed in Settings and another image added under the same name (the same id "user:<slug>"): Start on
+        template loads the new image, never the removed template's volume that is still in the scene (also when that volume
+        carries the id again, as in a project reopened after the change).
+        """
+        from StudioLib import draw, importer, space
+
+        templates = self.templates
+        shell = self._shell()
+        first = self._add(name="Swap", surfaces=(self.surface,))
+        oldVolume, _segmentation = importer.startOnTemplate(shell=shell, templateId=first.id)
+        self.assertEqual(tuple(oldVolume.GetImageData().GetDimensions()), self.shape15)
+        oldSpace = oldVolume.GetAttribute("Studio.Space")
+        surfaces = [node for node in slicer.util.getNodesByClass("vtkMRMLModelNode") if node.GetAttribute("Studio.TemplateId") == first.id]
+        self.assertEqual(len(surfaces), 1)
+        self.assertTrue(templates.removeTemplate(first.id, confirmDelete=lambda: True))
+        self.assertIsNotNone(slicer.mrmlScene.GetNodeByID(oldVolume.GetID()), "the removed template's volume stays in the scene")
+        self.assertEqual(oldVolume.GetAttribute("Studio.Space"), oldSpace, "and keeps its space")
+        self.assertEqual(oldVolume.GetAttribute("Studio.Role"), "template")
+        self.assertIsNone(surfaces[0].GetAttribute("Studio.TemplateId"))
+        second = self._add(self.las, name="Swap", space="MNI152NLin6Asym")
+        self.assertEqual(second.id, first.id)
+        volume, segmentation = importer.startOnTemplate(shell=shell, templateId=second.id)
+        self.assertNotEqual(volume.GetID(), oldVolume.GetID())
+        self.assertEqual(sorted(volume.GetImageData().GetDimensions()), sorted(self.bundledShape[:3]))
+        self.assertEqual(volume.GetAttribute("Studio.TemplateId"), second.id)
+        self.assertEqual(space.spaceOf(volume), ("MNI152NLin6Asym", 2))
+        self.assertIsNone(templates.templateOfNode(oldVolume))
+        line, _level = draw.DrawExtension._spaceLine(None, segmentation, volume)
+        self.assertEqual(line, f"On {second.name} · MNI152NLin6Asym 2 mm")
+        self.assertEqual(importer.loadTemplateVolume(second).GetID(), volume.GetID(), "the new volume is reused")
+        # The removed template's volume tagged with the id again (a project reopened after the change): not the new template
+        slicer.mrmlScene.RemoveNode(volume)
+        oldVolume.SetAttribute("Studio.TemplateId", second.id)
+        self.assertIsNone(templates.templateOfNode(oldVolume))
+        volume = importer.loadTemplateVolume(second)
+        self.assertNotEqual(volume.GetID(), oldVolume.GetID())
+        self.assertEqual(sorted(volume.GetImageData().GetDimensions()), sorted(self.bundledShape[:3]))
+        self.assertIsNone(oldVolume.GetAttribute("Studio.TemplateId"), "the stale volume no longer carries the id")
+        self.assertEqual(templates.templateOfNode(volume).id, second.id)
+
+    def test_18_new_lesion_on_template_uses_the_drawn_template(self):
+        """Two templates in the scene: Library's "New lesion on template" starts the lesion on the template that the user draws
+        on, whatever the scene order (it took the first template of the scene), also when Draw no longer edits it.
+        """
+        from StudioLib import importer, library
+
+        templates = self.templates
+        shell = self._shell()
+        user = self._add(name="Lab ICBM")
+        role = slicer.vtkMRMLSegmentationNode.GetReferenceImageGeometryReferenceRole()
+        for order in ((templates.BUILTIN_DEFAULT, user.id), (user.id, templates.BUILTIN_DEFAULT)):
+            for editorCleared in (False, True):
+                slicer.mrmlScene.Clear(0)
+                started = [importer.startOnTemplate(shell=shell, templateId=templateId) for templateId in order]
+                self.assertEqual(len({volume.GetID() for volume, _segmentation in started}), 2, order)
+                # Strokes on the lesion of the last template started: the one Draw edits
+                volume, segmentation = started[-1]
+                array = np.zeros(slicer.util.arrayFromVolume(volume).shape, np.uint8)
+                k, j, i = (n // 2 for n in array.shape)
+                array[k - 3:k + 3, j - 3:j + 3, i - 3:i + 3] = 1
+                slicer.util.updateSegmentBinaryLabelmapFromArray(array, segmentation, segmentation.GetSegmentation().GetNthSegmentID(0), volume)
+                editor = slicer.modules.SegmentEditorWidget.editor
+                self.assertEqual(editor.sourceVolumeNode().GetID(), volume.GetID())
+                if editorCleared:
+                    editor.setSegmentationNode(None)
+                    editor.setSourceVolumeNode(None)
+                lesion = library.newLesionOnTemplate(shell)
+                self.assertIsNotNone(lesion)
+                reference = lesion.GetNodeReference(role)
+                self.assertIsNotNone(reference)
+                self.assertEqual(reference.GetName(), volume.GetName(), (order, editorCleared))
+                self.assertEqual(reference.GetID(), volume.GetID(), (order, editorCleared))
+                # Draw now edits the new (empty) lesion on that template: the next one goes there too
+                self.assertEqual(library.templateToDrawOn().GetID(), volume.GetID(), (order, editorCleared))
+
+    def test_19_readded_same_name_gets_its_own_thumbnail(self):
+        """A template removed and another image added under the same name (the same id): the thumbnail is computed from the new
+        image at every size, not taken from the in-memory cache of the removed one.
+        """
+        from LesionNetworkMappingLib import nifti
+
+        templates = self.templates
+        first = self._add(name="Swap")
+        for size in (48, 96):
+            self.assertIsNotNone(templates.thumbnailPixmap(first, size))
+        self.assertEqual({key[1] for key in templates._thumbnails if key[0] == first.id}, {48, 96})
+        self.assertTrue(templates.removeTemplate(first.id, confirmDelete=lambda: True))
+        self.assertFalse([key for key in templates._thumbnails if key[0] == first.id], "no thumbnail of the removed template is kept")
+        data, affine, _header = nifti.read_nifti(self.image15)
+        ii, jj, _kk = np.indices(data.shape[:3])
+        checker = os.path.join(self.inputs, "checker_1.5mm.nii.gz")
+        nifti.write_nifti(checker, (((ii // 10 + jj // 10) % 2) * 1000).astype(np.float32), affine)
+        self.inputMd5[checker] = None
+        try:
+            second = self._add(checker, name="Swap")
+            self.assertEqual(second.id, first.id)
+            expected = templates.arrayToImage(templates.thumbnailArray(checker))
+            for size in (48, 96):
+                pixmap = templates.thumbnailPixmap(second, size)
+                self.assertIsNotNone(pixmap)
+                want = expected.scaled(size, size, qt.Qt.KeepAspectRatio, qt.Qt.SmoothTransformation)
+                self.assertTrue(pixmap.toImage() == want, f"thumbnail at {size} is the new image's")
+        finally:
+            self.inputMd5.pop(checker, None)
+            os.remove(checker)
+
+    def test_20_add_dialog_shows_every_warning_line(self):
+        """With several warnings (not cubic voxels, 4D, "does not say MNI") the wrapped warning label is as tall as its text needs:
+        the dialog has a fixed width, and its height used to come from the unwrapped label, which cut the privacy note.
+        """
+        from LesionNetworkMappingLib import nifti
+
+        data, affine, _header = nifti.read_nifti(self.image15)
+        stretched = affine.copy()
+        stretched[2, 2] = 3.0
+        path = os.path.join(self.tempDir, "several_warnings.nii.gz")
+        half = data[:, :, ::2].astype(np.float32)
+        nifti.write_nifti(path, np.stack([half, half], axis=-1), stretched)
+        dialog = self.ui.AddTemplateDialog()
+        try:
+            dialog.setImage(path)
+            lines = self.templates.identify(path).warnings
+            self.assertGreaterEqual(len(lines), 2, lines)
+            dialog.show()
+            slicer.app.processEvents()
+            for label in dialog.findChildren(qt.QLabel):
+                if label.isVisible() and label.wordWrap:
+                    self.assertGreaterEqual(label.height, label.heightForWidth(label.width), f"{label.objectName} is cut off: {label.text[:50]}")
+            warnings = dialog.warningLabel
+            self.assertTrue(warnings.isVisible())
+            self.assertGreaterEqual(warnings.height, warnings.heightForWidth(warnings.width))
+            dialog._setError("The mask is on another grid than the template image, so it cannot be used for normalizing scans to this template." * 2)
+            slicer.app.processEvents()
+            self.assertGreaterEqual(dialog.errorLabel.height, dialog.errorLabel.heightForWidth(dialog.errorLabel.width))
+            self.assertGreaterEqual(warnings.height, warnings.heightForWidth(warnings.width))
+        finally:
+            dialog.deleteLater()
+            os.remove(path)
+
+    def test_21_settings_panel_is_scheduled_by_the_classic_startup(self):
+        """Settings > Templates is also in a Classic launch (the Map and Normalize messages point to it): the Studio module's
+        startup hook, which runs in Classic and in Studio, schedules it (before: only the Studio plug-in did).
+        """
+        import Studio
+
+        ui = self.ui
+        installed = []
+        saved = (ui._installTimer, ui.installSettingsPanel, ui.DEFERRED_INSTALL_MS)
+        ui._installTimer = None  # as in a Classic launch: no Studio plug-in has run
+        ui.installSettingsPanel = lambda force=False: installed.append(True)
+        ui.DEFERRED_INSTALL_MS = 50
+        try:
+            Studio._onStartupCompleted()
+            self.assertIsNotNone(ui._installTimer)
+            self.assertTrue(ui._installTimer.isActive())
+            deadline = qt.QDateTime.currentMSecsSinceEpoch() + 5000
+            while not installed and qt.QDateTime.currentMSecsSinceEpoch() < deadline:
+                slicer.app.processEvents()
+            self.assertEqual(installed, [True])
+        finally:
+            if ui._installTimer is not None:
+                ui._installTimer.stop()
+            ui._installTimer, ui.installSettingsPanel, ui.DEFERRED_INSTALL_MS = saved
+
+    def test_22_start_on_template_from_map_shows_it_in_draw(self):
+        """Starting on a template while Map is shown: Draw shows that template in every slice view, the volume the Segment
+        Editor draws on (before: leaving Map put back the layers saved on entering it, so the views were black, or showed
+        the template shown before Map while the lesion was drawn on the new one).
+        """
+        from StudioLib import draw, importer, mappage
+        from StudioLib import shell as shellModule
+
+        if slicer.util.mainWindow() is None:
+            self.skipTest("Studio needs the main window")
+        applied = shellModule.instance() is None
+        if applied:
+            shell = shellModule.Shell(force=True)
+            shell.apply()
+            slicer.app.processEvents()
+        shell = shellModule.instance()
+        self.assertIsNotNone(shell)
+        template = self._add(name="Lab ICBM")
+
+        def backgrounds():
+            layoutManager = slicer.app.layoutManager()
+            return {name: layoutManager.sliceWidget(name).mrmlSliceCompositeNode().GetBackgroundVolumeID()
+                    for name in layoutManager.sliceViewNames()}
+
+        try:
+            for before, chosen in ((None, template.id), (None, self.templates.BUILTIN_DEFAULT),
+                                   (self.templates.BUILTIN_DEFAULT, template.id)):
+                slicer.mrmlScene.Clear(0)
+                shell.switchTo("library")
+                slicer.app.processEvents()
+                if before is not None:
+                    importer.startOnTemplate(shell=shell, templateId=before)
+                    slicer.app.processEvents()
+                shell.switchTo("map")
+                slicer.app.processEvents()
+                self.assertTrue(mappage.layersCaptured())
+                volume, _segmentation = importer.startOnTemplate(shell=shell, templateId=chosen)
+                slicer.app.processEvents()
+                case = f"{before} -> {chosen}"
+                self.assertEqual(shell.currentWorkspace(), "draw", case)
+                self.assertFalse(mappage.layersCaptured(), case)
+                self.assertEqual(set(backgrounds().values()), {volume.GetID()}, case)
+                self.assertEqual(draw.segmentEditor().sourceVolumeNode().GetID(), volume.GetID(), case)
+        finally:
+            shell.switchTo("library")
+            if applied:
+                shell.dispose()
+            slicer.app.processEvents()
+
+    def test_23_normalize_lists_only_usable_templates(self):
+        """Normalize offers a template only when it can register to it: a NRRD brain mask works (it used to fail after
+        registering with internal text that named the mask's absolute path), while an image with voxels that are not cubic or
+        not aligned with the axes, or a NRRD image, is not offered and the add dialog says why. An unexpected failure shows
+        a plain message without its internal text.
+        """
+        import SimpleITK as sitk
+        from LesionNetworkMappingLib import nifti
+        from LesionNetworkMappingUI import normalize_controller as nc
+
+        templates = self.templates
+        work = os.path.join(self.tempDir, "normalize-targets")
+        os.makedirs(work, exist_ok=True)
+        try:
+            data, affine, _header = nifti.read_nifti(self.image15)
+            # The brain mask saved as NRRD (an LPS header, as Slicer saves it)
+            nrrdMask = os.path.join(work, "mask.nrrd")
+            sitk.WriteImage(sitk.ReadImage(self.mask15), nrrdMask)
+            # Voxels that are not cubic
+            stretched = affine.copy()
+            stretched[2, 2] = 3.0
+            aniso = os.path.join(work, "aniso.nii.gz")
+            nifti.write_nifti(aniso, data[:, :, ::2], stretched)
+            anisoMask = os.path.join(work, "aniso_mask.nii.gz")
+            nifti.write_nifti(anisoMask, (data[:, :, ::2] > 10).astype(np.uint8), stretched)
+            # Cubic voxels, rotated 8 degrees about S around the centre of the image
+            angle = np.radians(8.0)
+            rotation = np.eye(4)
+            rotation[:2, :2] = ((np.cos(angle), -np.sin(angle)), (np.sin(angle), np.cos(angle)))
+            centre = affine @ np.append((np.asarray(data.shape[:3]) - 1) / 2.0, 1.0)
+            shift, back = np.eye(4), np.eye(4)
+            shift[:3, 3], back[:3, 3] = -centre[:3], centre[:3]
+            tilted = back @ rotation @ shift @ affine
+            oblique = os.path.join(work, "oblique.nii.gz")
+            nifti.write_nifti(oblique, data, tilted)
+            obliqueMask = os.path.join(work, "oblique_mask.nii.gz")
+            nifti.write_nifti(obliqueMask, (data > 10).astype(np.uint8), tilted)
+            # A NRRD image
+            nrrdImage = os.path.join(work, "image.nrrd")
+            sitk.WriteImage(sitk.ReadImage(self.image15), nrrdImage)
+
+            usable = self._add(mask=nrrdMask, name="NRRD mask", space="MNI152NLin2009bAsym")
+            self.assertTrue(usable.maskPath.endswith(".nrrd"))
+            self.assertTrue(usable.canNormalize())
+            self.assertFalse(any("Normalize" in line for line in templates.identify(self.image15).warnings))
+            refused = {}
+            for name, image, mask in (("Aniso", aniso, anisoMask), ("Oblique", oblique, obliqueMask), ("NRRD image", nrrdImage, nrrdMask)):
+                lines = templates.identify(image).warnings
+                self.assertTrue(any(line.startswith("Normalize cannot use it as a target") for line in lines), f"{name}: {lines}")
+                template = self._add(image, mask=mask, name=name, space="MNI")
+                self.assertFalse(template.canNormalize(), name)
+                refused[template.id] = name
+            offered = dict(nc.userTemplates())
+            self.assertIn(usable.id, offered)
+            self.assertFalse(set(refused) & set(offered), offered)
+
+            # An unexpected error: a plain message, never its internal text (which may name a local path)
+            secret = os.path.join(self.root, "Templates", "NRRD mask", "mask.nrrd")
+            event = {"code": "exception", "type": "ValueError", "message": f"Only single-file NIfTI-1 images are supported: {secret}"}
+            text, offer = nc.describeFailure({"message": event["message"], "code": "exception", "event": event})
+            self.assertNotIn(secret, text)
+            self.assertNotIn(self.tempDir, text)
+            self.assertIn("ValueError", text)
+            self.assertIsNone(offer)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def test_24_template_with_deleted_image_counts_as_not_on_this_computer(self):
+        """BB-1: a registered template whose image file was deleted is marked in Settings and the menu, Start names it (never its
+        raw id), and a study on it opens its cases on the built-in template with the "Add it…" notice.
+        """
+        from LesionNetworkMappingLib import nifti
+        from LesionNetworkMappingLib.study import Study
+
+        from StudioLib import importer, study_ui
+
+        templates, ui = self.templates, self.ui
+        template = self._add(name="Lab ICBM 1.5", space="MNI152NLin6Asym")
+        record = templates.studyRecord(template)
+        study = Study.create(os.path.join(self.tempDir, "study deleted image"), name="Study", template=record)
+        sid = "sub-case001"
+        study.add_subject(sid, {"group": "case", "status": "traced", "space": "MNI152NLin6Asym", "trace_template": "MNI152NLin6Asym"})
+        lesionPath = os.path.join(study.path, *study.lesion_relpath(sid).split("/"))
+        os.makedirs(os.path.dirname(lesionPath), exist_ok=True)
+        _data, affine, _header = nifti.read_nifti(template.imagePath)
+        mask = np.zeros(self.shape15, np.uint8)
+        mask[30:40, 70:80, 60:70] = 1
+        nifti.write_nifti(lesionPath, mask, affine)
+        study.set(sid, {"lesion": study.relpath(lesionPath)})
+        study.save()
+        os.remove(template.imagePath)
+        template = templates.templateById(template.id)
+        self.assertIsNotNone(template, "the template.json stays")
+        self.assertFalse(template.isAvailable())
+        # Settings > Templates and the menu say so
+        panel = ui.TemplatesSettingsPanel()
+        panel.refresh()
+        self.assertIsNotNone(panel.rowFor(template.id).findChild(qt.QLabel, "studioTemplateMissingChip"))
+        self.assertIsNone(panel.rowFor(templates.BUILTIN_DEFAULT).findChild(qt.QLabel, "studioTemplateMissingChip"))
+        panel.deleteLater()
+        menu = qt.QMenu()
+        ui.populateTemplateMenu(menu, onStart=lambda templateId: None)
+        texts = {action.data(): action.text for action in menu.actions() if action.objectName == "studioTemplateMenuItem"}
+        self.assertIn("image missing", texts[template.id])
+        self.assertNotIn("missing", texts[templates.BUILTIN_DEFAULT])
+        menu.deleteLater()
+        # Start on it: the message names the template, not its id
+        with self.assertRaises(RuntimeError) as raised:
+            importer.startOnTemplate(shell=self._shell(), templateId=template.id)
+        self.assertIn("Lab ICBM 1.5", str(raised.exception))
+        self.assertNotIn(template.id, str(raised.exception))
+        # The study opens its case on the built-in template, with the notice
+        settings = qt.QSettings()
+        recent = settings.value(study_ui.RECENT_STUDIES_KEY)
+        try:
+            session = study_ui.openStudy(study.path, shell=self._shell(), subject=sid, showLibrary=False)
+            slicer.app.processEvents()
+            self.assertIsNotNone(session.volumeNode(), "the case opened")
+            self.assertIsNone(session.volumeNode().GetAttribute("Studio.TemplateId"), "the built-in template meanwhile")
+            self.assertTrue(session._missingTemplateOffered, "the Add it… notice")
+        finally:
+            study_ui.closeStudy()
+            if recent is None:
+                settings.remove(study_ui.RECENT_STUDIES_KEY)
+            else:
+                settings.setValue(study_ui.RECENT_STUDIES_KEY, recent)
+            shutil.rmtree(study.path, ignore_errors=True)
+
+    def test_25_nrrd_template_gets_the_mid_axial_thumbnail(self):
+        """BB-1: a NRRD template (an accepted format) shows the same mid-axial slice as the NIfTI of the same grid, in the
+        Settings > Templates row and the add dialog (both take thumbnailPixmap/thumbnailArray), instead of the placeholder icon:
+        thumbnailArray had no NRRD reader.
+        """
+        import SimpleITK as sitk
+        from LesionNetworkMappingLib import nifti
+
+        templates = self.templates
+        work = os.path.join(self.tempDir, "nrrd-thumbnail")
+        os.makedirs(work, exist_ok=True)
+        try:
+            data, affine, _header = nifti.read_nifti(self.image15)
+            asymmetric = data.astype(np.float32).copy()
+            asymmetric[: data.shape[0] // 2] *= 0.5  # left-right and front-back differences show up in the slice
+            niftiPath = os.path.join(work, "asymmetric.nii.gz")
+            nifti.write_nifti(niftiPath, asymmetric, affine)
+            expected = templates.thumbnailArray(niftiPath)
+            self.assertIsNotNone(expected)
+            # gzip, an LPS header, as Slicer and SimpleITK save it
+            gzipPath = os.path.join(work, "asymmetric_lps.nrrd")
+            sitk.WriteImage(sitk.ReadImage(niftiPath), gzipPath)
+            # raw, an RAS header, written by hand
+            rawPath = os.path.join(work, "asymmetric_ras.nrrd")
+            header = ("NRRD0004\ntype: float\ndimension: 3\nspace: right-anterior-superior\nsizes: %d %d %d\n"
+                      "space directions: (%r,0,0) (0,%r,0) (0,0,%r)\nkinds: domain domain domain\nendian: little\nencoding: raw\n"
+                      "space origin: (%r,%r,%r)\n\n") % ((*data.shape[:3],) + tuple(float(affine[i, i]) for i in range(3)) + tuple(float(affine[i, 3]) for i in range(3)))
+            with open(rawPath, "wb") as handle:
+                handle.write(header.encode("ascii"))
+                handle.write(np.ascontiguousarray(asymmetric.transpose(2, 1, 0)).tobytes())
+            for path in (gzipPath, rawPath):
+                got = templates.thumbnailArray(path)
+                self.assertIsNotNone(got, path)
+                self.assertEqual(got.shape, expected.shape, path)
+                self.assertLessEqual(int(np.abs(got.astype(int) - expected.astype(int)).max()), 1, os.path.basename(path))
+                template = self._add(path, name="NRRD " + os.path.basename(path), space="MNI152NLin6Asym")
+                self.assertIsNotNone(templates.thumbnailPixmap(template, 48), path)
+            with self.assertRaises(ValueError):  # a file that is not a NRRD image has no thumbnail (never a wrong one)
+                templates.readNrrdData(niftiPath)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def test_26_moved_template_with_a_taken_name_gets_its_own_id(self):
+        """BB-1: moving the Slicer Studio folder into one that already has a template of the same name (or the same id under
+        another folder name, "Atlas X" and "atlas x") gives the moved template its own id and name ("My template 2",
+        "user:my-template-2"). Two templates used to share "user:my-template": the menu checked both, and the default, Studio
+        and Normalize each picked one of them by folder order, so a lesion could be registered to another image than the
+        one the user chose. The default and the scene's volumes of the moved template follow its new id; the templates that
+        were there keep theirs.
+        """
+        from LesionNetworkMappingLib import normalize
+        from LesionNetworkMappingUI import normalize_controller as nc
+
+        from StudioLib import autosave
+
+        templates, projects = self.templates, self.projects
+        newRoot = self.root
+        oldRoot = os.path.join(self.tempDir, "old folder", "Slicer Studio")
+        shutil.rmtree(os.path.dirname(oldRoot), ignore_errors=True)
+        settings = qt.QSettings()
+        try:
+            keptMine = self._add(name="My template", rootPath=newRoot)
+            keptAtlas = self._add(name="Atlas X", rootPath=newRoot)
+            movedMine = templates.addTemplate(self.bundled, mask=self.bundledMask, name="My template", rootPath=oldRoot, makeDefault=True)
+            movedAtlas = templates.addTemplate(self.bundled, mask=self.bundledMask, name="atlas x", rootPath=oldRoot)
+            alone = templates.addTemplate(self.bundled, mask=self.bundledMask, name="Only in the old folder", rootPath=oldRoot)
+            self.assertEqual((movedMine.id, movedAtlas.id), (keptMine.id, keptAtlas.id), "the same ids before the move")
+            self.assertNotEqual(movedMine.imageSha256, keptMine.imageSha256)
+            # A volume of the moved template in the scene (the project that follows the move)
+            volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "template volume")
+            volume.SetAttribute(templates.TEMPLATE_ID_ATTRIBUTE, movedMine.id)
+
+            os.environ.pop(projects.ROOT_ENVIRONMENT, None)
+            settings.setValue(projects.ROOT_KEY, oldRoot)
+            self.assertEqual(templates.defaultTemplateId(), "user:my-template")
+            service = autosave.AutosaveService(force=True, root=os.path.join(self.tempDir, "private autosave move"))
+            service.studioActiveOverride = True
+            service.reloadSettings()
+            self.services.append(service)
+            self.assertIn("Templates", service.moveRoot(newRoot, moveContent=True))
+            self.assertEqual(projects.root(), os.path.normpath(newRoot))
+
+            mine = sorted(templates.userTemplates(), key=lambda template: template.id)
+            ids = [template.id for template in mine]
+            self.assertEqual(len(ids), len(set(ids)), ids)
+            names = [template.name.lower() for template in mine]
+            self.assertEqual(len(names), len(set(names)), names)
+            bySha = {}
+            for template in mine:
+                bySha.setdefault(template.imageSha256, []).append((template.id, template.name))
+            self.assertEqual(sorted(bySha[keptMine.imageSha256]), [("user:atlas-x", "Atlas X"), ("user:my-template", "My template")],
+                             "the templates that were there keep their ids and names")
+            self.assertEqual(sorted(bySha[movedMine.imageSha256]), [("user:atlas-x-2", "atlas x 2"), ("user:my-template-2", "My template 2"),
+                                                                     ("user:only-in-the-old-folder", "Only in the old folder")])
+            with open(os.path.join(templates.templateById("user:my-template-2").folder, templates.TEMPLATE_JSON), encoding="utf-8") as f:
+                record = json.load(f)
+            self.assertEqual((record["id"], record["name"]), ("my-template-2", "My template 2"))
+            self.assertEqual(alone.slug, "only-in-the-old-folder")
+
+            # The default is still the image the user chose, for Studio and for Normalize
+            self.assertEqual(settings.value(templates.DEFAULT_KEY), "user:my-template-2")
+            self.assertEqual(templates.defaultTemplate().imageSha256, movedMine.imageSha256)
+            for templateId, sha in (("user:my-template", keptMine.imageSha256), ("user:my-template-2", movedMine.imageSha256),
+                                    ("user:atlas-x", keptAtlas.imageSha256), ("user:atlas-x-2", movedAtlas.imageSha256)):
+                self.assertEqual(templates.templateById(templateId).imageSha256, sha, templateId)
+                record = normalize.resolve_user_template(templateId, nc.templateDirectories())
+                self.assertEqual(record["sha256"]["image"], sha, templateId)
+            offered = nc.userTemplates()
+            self.assertEqual(len(offered), len(set(offered)), offered)
+            self.assertEqual(volume.GetAttribute(templates.TEMPLATE_ID_ATTRIBUTE), "user:my-template-2", "the scene follows the moved template")
+
+            # One checked item in Start on template
+            menu = qt.QMenu()
+            try:
+                self.ui.populateTemplateMenu(menu, onStart=lambda templateId: None)
+                checked = [action.data() for action in menu.actions() if action.checkable and action.checked]
+                self.assertEqual(checked, ["user:my-template-2"])
+            finally:
+                menu.deleteLater()
+        finally:
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            shutil.rmtree(os.path.dirname(oldRoot), ignore_errors=True)
+
+    def test_36_remembered_normalize_template_follows_the_moved_template(self):
+        """BB-1: after Change folder > Move into a folder with a same-name template, the template remembered by Normalize's
+        "Remember these options" (and the one chosen in an open Map card) follows the moved template's new id, as the default
+        does. It used to keep "user:my-template", which then named the other folder's template: Normalize registered to
+        another image and labelled the result with another space.
+        """
+        from LesionNetworkMappingLib import normalize
+        from LesionNetworkMappingUI import normalize_controller as nc
+
+        from StudioLib import autosave
+
+        templates, projects = self.templates, self.projects
+        newRoot = self.root
+        oldRoot = os.path.join(self.tempDir, "old folder 36", "Slicer Studio")
+        shutil.rmtree(os.path.dirname(oldRoot), ignore_errors=True)
+        settings = qt.QSettings()
+        held = {"templateId": "user:my-template"}
+
+        def follow(renamedIds):
+            held["templateId"] = renamedIds.get(held["templateId"], held["templateId"])
+
+        templates.addRenameListener(follow)
+        try:
+            kept = self._add(name="My template", rootPath=newRoot)
+            moved = templates.addTemplate(self.bundled, mask=self.bundledMask, name="My template", rootPath=oldRoot)
+            self.assertEqual(moved.id, kept.id)
+            settings.setValue(nc.LAST_OPTIONS_SETTING, json.dumps({"templateId": moved.id, "quality": "fine", "modality": "auto", "dilateMm": 4.0}))
+            os.environ.pop(projects.ROOT_ENVIRONMENT, None)
+            settings.setValue(projects.ROOT_KEY, oldRoot)
+            service = autosave.AutosaveService(force=True, root=os.path.join(self.tempDir, "private autosave move 36"))
+            service.studioActiveOverride = True
+            service.reloadSettings()
+            self.services.append(service)
+            self.assertIn("Templates", service.moveRoot(newRoot, moveContent=True))
+
+            renamed = templates.templateById("user:my-template-2")
+            self.assertIsNotNone(renamed)
+            self.assertEqual(renamed.imageSha256, moved.imageSha256)
+            remembered = nc.rememberedOptions()
+            self.assertEqual(remembered["templateId"], "user:my-template-2", "the remembered template follows the moved one")
+            self.assertEqual((remembered["quality"], remembered["dilateMm"]), ("fine", 4.0), "the other options are kept")
+            record = normalize.resolve_user_template(remembered["templateId"], nc.templateDirectories())
+            self.assertEqual(record["sha256"]["image"], moved.imageSha256)
+            self.assertEqual(nc.rememberedRequestOptions()["templateId"], "user:my-template-2")
+            self.assertEqual(held["templateId"], "user:my-template-2", "an id held in memory follows it too")
+            self.assertEqual(templates.templateById("user:my-template").imageSha256, kept.imageSha256)
+
+            # A remembered template that was not renamed, and an unreadable value, are left alone
+            for value in (json.dumps({"templateId": "user:my-template", "quality": "fine"}), "not json"):
+                settings.setValue(nc.LAST_OPTIONS_SETTING, value)
+                templates.followRenamedIds({"user:other": "user:other-2"})
+                self.assertEqual(str(settings.value(nc.LAST_OPTIONS_SETTING)), value)
+        finally:
+            templates.removeRenameListener(follow)
+            settings.remove(nc.LAST_OPTIONS_SETTING)
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            shutil.rmtree(os.path.dirname(oldRoot), ignore_errors=True)
+
+    def test_37_closed_projects_follow_the_moved_template(self):
+        """BB-1: after Change folder > Move into a folder with a same-name template, the scans of the moved projects that were
+        closed still name their own template ("user:my-template-2"), as the open project's do. Their scenes kept
+        "user:my-template": opened in the new folder, the scan was taken for that folder's template (same name and grid,
+        another image and space), and its NIfTI export wrote that template's space and checksum. The projects that were
+        there keep their ids. Also when the move is finished after a kill (the journal).
+        """
+        from StudioLib import autosave, niftiexport
+
+        templates, projects = self.templates, self.projects
+        newRoot = self.root
+        oldRoot = os.path.join(self.tempDir, "old folder 37", "Slicer Studio")
+        shutil.rmtree(os.path.dirname(oldRoot), ignore_errors=True)
+        settings = qt.QSettings()
+        stamp = 1600000000
+
+        def writeProject(root, name, templateId):
+            folder = os.path.join(root, projects.PROJECTS_DIR, name)
+            os.makedirs(folder)
+            scene = slicer.vtkMRMLScene()
+            node = scene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "scan")
+            node.SetAttribute(templates.TEMPLATE_ID_ATTRIBUTE, templateId)
+            node.SetAttribute("Studio.Note", "a;b%c")  # another attribute, encoded by the scene writer
+            path = os.path.join(folder, name + projects.SCENE_EXTENSION)
+            scene.SetRootDirectory(folder)
+            scene.SetURL(path)
+            self.assertTrue(scene.Commit(path))
+            os.utime(path, (stamp, stamp))
+            return path
+
+        def scanOf(path):
+            scene = slicer.vtkMRMLScene()
+            scene.SetRootDirectory(os.path.dirname(path))
+            scene.SetURL(path)
+            scene.Import()
+            nodes = [scene.GetNthNodeByClass(index, "vtkMRMLScalarVolumeNode")
+                     for index in range(scene.GetNumberOfNodesByClass("vtkMRMLScalarVolumeNode"))]
+            self.assertEqual(len(nodes), 1, path)
+            self.assertEqual(nodes[0].GetAttribute("Studio.Note"), "a;b%c")
+            return scene, nodes[0]
+
+        try:
+            kept = self._add(name="My template", rootPath=newRoot)
+            moved = templates.addTemplate(self.bundled, mask=self.bundledMask, name="My template", rootPath=oldRoot)
+            self.assertEqual(moved.id, kept.id)
+            theirs = writeProject(newRoot, "Untitled project", kept.id)
+            mine = writeProject(oldRoot, "Untitled project", moved.id)
+            other = writeProject(oldRoot, "Other project", "user:another-template")
+
+            os.environ.pop(projects.ROOT_ENVIRONMENT, None)
+            settings.setValue(projects.ROOT_KEY, oldRoot)
+            service = autosave.AutosaveService(force=True, root=os.path.join(self.tempDir, "private autosave move 37"))
+            service.studioActiveOverride = True
+            service.reloadSettings()
+            self.services.append(service)
+            self.assertIn("Templates", service.moveRoot(newRoot, moveContent=True))
+            self.assertEqual(templates.templateById("user:my-template-2").imageSha256, moved.imageSha256)
+
+            movedScene = os.path.join(newRoot, projects.PROJECTS_DIR, "Untitled project 2", "Untitled project" + projects.SCENE_EXTENSION)
+            _scene, scan = scanOf(movedScene)
+            self.assertEqual(scan.GetAttribute(templates.TEMPLATE_ID_ATTRIBUTE), "user:my-template-2", "the closed project follows")
+            self.assertEqual(templates.templateOfNode(scan).imageSha256, moved.imageSha256)
+            info = niftiexport.templateInfo(scan)
+            self.assertEqual((info["id"], info["sha256"], info["space"]), ("user:my-template-2", moved.imageSha256, moved.space))
+            self.assertEqual(int(os.path.getmtime(movedScene)), stamp, "the scene keeps its modification time")
+            _scene, scan = scanOf(theirs)
+            self.assertEqual(scan.GetAttribute(templates.TEMPLATE_ID_ATTRIBUTE), "user:my-template", "a project that was there keeps its id")
+            self.assertEqual(templates.templateOfNode(scan).imageSha256, kept.imageSha256)
+            _scene, scan = scanOf(os.path.join(newRoot, projects.PROJECTS_DIR, "Other project", os.path.basename(other)))
+            self.assertEqual(scan.GetAttribute(templates.TEMPLATE_ID_ATTRIBUTE), "user:another-template")
+            self.assertFalse(os.path.exists(mine))
+
+            # A move finished after a kill: Projects/ had moved, Templates/ had not
+            settings.remove(projects.ROOT_KEY)
+            os.environ[projects.ROOT_ENVIRONMENT] = self.root
+            again = os.path.join(self.tempDir, "old folder 37b", "Slicer Studio")
+            target = os.path.join(self.tempDir, "new folder 37b", "Slicer Studio")
+            for folder in (again, target):
+                shutil.rmtree(os.path.dirname(folder), ignore_errors=True)
+            templates.addTemplate(self.bundled, mask=self.bundledMask, name="Atlas", rootPath=target)
+            killedMoved = templates.addTemplate(self.image15, name="Atlas", rootPath=again)
+            writeProject(target, "Theirs", "user:atlas")
+            writeProject(again, "Mine", "user:atlas")
+            journalPath = os.path.join(self.tempDir, "journal 37.json")
+            journal = projects.MoveJournal(journalPath, again, target)
+            journal.setProjectsBefore({"Theirs"})
+            os.rename(os.path.join(again, projects.PROJECTS_DIR, "Mine"), os.path.join(target, projects.PROJECTS_DIR, "Mine"))
+            os.rmdir(os.path.join(again, projects.PROJECTS_DIR))
+            renamedIds = {}
+            projects.moveContent(again, target, renamedIds=renamedIds, journal=projects.MoveJournal(journalPath, again, target, resume=True))
+            self.assertEqual(renamedIds, {"user:atlas": "user:atlas-2"})
+            _scene, scan = scanOf(os.path.join(target, projects.PROJECTS_DIR, "Mine", "Mine" + projects.SCENE_EXTENSION))
+            self.assertEqual(scan.GetAttribute(templates.TEMPLATE_ID_ATTRIBUTE), "user:atlas-2")
+            self.assertEqual(templates.templateById("user:atlas-2", rootPath=target).imageSha256, killedMoved.imageSha256)
+            _scene, scan = scanOf(os.path.join(target, projects.PROJECTS_DIR, "Theirs", "Theirs" + projects.SCENE_EXTENSION))
+            self.assertEqual(scan.GetAttribute(templates.TEMPLATE_ID_ATTRIBUTE), "user:atlas")
+        finally:
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            for folder in ("old folder 37", "old folder 37b", "new folder 37b"):
+                shutil.rmtree(os.path.join(self.tempDir, folder), ignore_errors=True)
+            with contextlib.suppress(OSError):
+                os.remove(os.path.join(self.tempDir, "journal 37.json"))
+
+    def test_46_moved_normalization_results_follow_the_moved_template(self):
+        """BB-1: after Change folder > Move into a folder with a same-name template, the normalization results made on the
+        moved template (LNM/normalization/<scan>/ and a study's derivatives/normalization/<sub>/) name its new id
+        ("user:my-template-2"), as the scenes do. They kept "user:my-template", which then named the other folder's template:
+        Update MNI lesion warped onto that template's grid (or failed: "The image grid does not match"), and the result was
+        labelled and reviewed against it. The results of the template that kept the id keep it.
+        """
+        from LesionNetworkMappingLib import normalize
+        from LesionNetworkMappingUI import normalize_controller as nc
+
+        from StudioLib import autosave
+
+        templates, projects = self.templates, self.projects
+        newRoot = self.root
+        oldRoot = os.path.join(self.tempDir, "old folder 46", "Slicer Studio")
+        shutil.rmtree(os.path.dirname(oldRoot), ignore_errors=True)
+        settings = qt.QSettings()
+        stamp = 1600000000
+
+        def writeResult(folder, template):
+            os.makedirs(folder)
+            path = os.path.join(folder, normalize.PROVENANCE_JSON)
+            record = {"format": normalize.FORMAT, "status": "done", "fingerprint": "f" * 64, "subject": "sub-01",
+                      "template": {"id": template.id, "files": {"fixed": "image.nii.gz"}, "sha256": {"fixed": template.imageSha256},
+                                   "grid": {"id": "grid"}, "name": template.name, "space": template.space, "image_sha256": template.imageSha256},
+                      "outputs": {}}
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+            os.utime(path, (stamp, stamp))
+            return path
+
+        def templateOf(path):
+            return normalize.read_result(os.path.dirname(path))["template"]
+
+        try:
+            kept = self._add(name="My template", rootPath=newRoot)
+            moved = templates.addTemplate(self.bundled, mask=self.bundledMask, name="My template", rootPath=oldRoot)
+            self.assertEqual(moved.id, kept.id)
+            self.assertNotEqual(moved.imageSha256, kept.imageSha256)
+            theirs = writeResult(os.path.join(newRoot, projects.LNM_DIR, "normalization", "sub-01"), kept)
+            writeResult(os.path.join(oldRoot, projects.LNM_DIR, "normalization", "sub-01"), moved)
+            studyFolder = os.path.join(oldRoot, projects.STUDIES_DIR, "Study", "derivatives", "normalization", "sub-01")
+            writeResult(studyFolder, moved)
+            with open(os.path.join(oldRoot, projects.STUDIES_DIR, "Study", "study.json"), "w", encoding="utf-8") as f:
+                json.dump({"name": "Study"}, f)
+
+            os.environ.pop(projects.ROOT_ENVIRONMENT, None)
+            settings.setValue(projects.ROOT_KEY, oldRoot)
+            service = autosave.AutosaveService(force=True, root=os.path.join(self.tempDir, "private autosave move 46"))
+            service.studioActiveOverride = True
+            service.reloadSettings()
+            self.services.append(service)
+            self.assertIn("LNM", service.moveRoot(newRoot, moveContent=True))
+            self.assertEqual(templates.templateById("user:my-template-2").imageSha256, moved.imageSha256)
+
+            mine = os.path.join(newRoot, projects.LNM_DIR, "normalization", "sub-01 2", normalize.PROVENANCE_JSON)
+            study = os.path.join(newRoot, projects.STUDIES_DIR, "Study", "derivatives", "normalization", "sub-01", normalize.PROVENANCE_JSON)
+            for path in (mine, study):
+                template = templateOf(path)
+                self.assertEqual((template["id"], template["name"]), ("user:my-template-2", "My template 2"), path)
+                record = normalize.resolve_user_template(template["id"], nc.templateDirectories())
+                self.assertEqual(record["sha256"]["image"], moved.imageSha256, path)
+                self.assertEqual(nc.templateName(template["id"]), "My template 2")
+                self.assertEqual(int(os.path.getmtime(path)), stamp, "the record keeps its modification time")
+                self.assertEqual(normalize.read_result(os.path.dirname(path))["fingerprint"], "f" * 64)
+            template = templateOf(theirs)
+            self.assertEqual((template["id"], template["name"]), ("user:my-template", "My template"), "a result that was there keeps its id")
+
+            # Following again (a move finished after a kill) changes nothing
+            projects._movedNormalizationsFollowRenamedIds(newRoot, {"user:my-template": "user:my-template-2"})
+            self.assertEqual(templateOf(mine)["id"], "user:my-template-2")
+            self.assertEqual(templateOf(theirs)["id"], "user:my-template")
+        finally:
+            settings.remove(projects.ROOT_KEY)
+            settings.remove(projects.ROOT_CHOSEN_KEY)
+            shutil.rmtree(os.path.dirname(oldRoot), ignore_errors=True)
+
+    def test_27_cancelled_add_adds_nothing(self):
+        """BB-1: Cancel in "Add your own MNI template" adds nothing, for a 4D image as well. The first volume of a 4D image
+        was read and written without looking at Cancel, and the dialog registered a copy whose result came after Cancel:
+        the template was added after the dialog had closed ("Added the template ..."). The progress also stayed at 0 while
+        a 4D image was read.
+        """
+        templates, ui = self.templates, self.ui
+
+        def leftovers():
+            folder = templates.templatesFolder()
+            return sorted(os.listdir(folder)) if os.path.isdir(folder) else []
+
+        # Core: a 4D plan cancelled before the copy
+        plan = templates.prepareAdd(self.image4d, name="Cancelled before")
+        self.assertTrue(plan.firstVolume)
+        plan.cancelled = True
+        with self.assertRaises(templates.TemplateError):
+            templates.copyFiles(plan)
+        self.assertEqual(leftovers(), [])
+
+        # Core: Cancel while the 4D image is read (the progress moves before the copy ends)
+        class CancelOnProgress(templates.AddPlan):
+            seen = []
+
+            @property
+            def progress(self):
+                return self.__dict__.get("_progress", 0)
+
+            @progress.setter
+            def progress(self, value):
+                self.__dict__["_progress"] = value
+                if 0 < value < self.totalBytes:
+                    CancelOnProgress.seen.append(value)
+                    self.cancelled = True
+
+        plan = templates.prepareAdd(self.image4d, name="Cancelled while reading")
+        plan.__class__ = CancelOnProgress
+        with self.assertRaises(templates.TemplateError):
+            templates.copyFiles(plan)
+        self.assertTrue(CancelOnProgress.seen, "the progress moves while a 4D image is read")
+        self.assertEqual(leftovers(), [])
+
+        # The dialog: Cancel before the background copy runs, and Cancel after it is done but before its result is delivered
+        class HeldExecutor:
+            def __init__(self, runFirst):
+                self.runFirst, self.jobs = runFirst, []
+
+            def submit(self, function, *args, onDone=None, onError=None):
+                if self.runFirst:
+                    try:
+                        result = function(*args)
+                    except Exception as error:
+                        self.jobs.append(lambda: onError(error))
+                        return
+                    self.jobs.append(lambda: onDone(result))
+                else:
+                    self.jobs.append(lambda: InlineExecutor().submit(function, *args, onDone=onDone, onError=onError))
+
+            def release(self):
+                for job in self.jobs:
+                    job()
+
+        from StudioLib.autosave_io import InlineExecutor
+
+        toasts = []
+        message = ui.message
+        ui.message = lambda text, level="info": toasts.append(text)
+        try:
+            for name, image, runFirst in (("Cancelled 4D", self.image4d, False), ("Cancelled 4D late", self.image4d, True),
+                                          ("Cancelled 3D late", self.image15, True)):
+                added = []
+                executor = HeldExecutor(runFirst)
+                dialog = ui.AddTemplateDialog(executor=executor, onAdded=added.append)
+                try:
+                    dialog.setImage(image)
+                    dialog.nameEdit.setText(name)
+                    dialog.addTemplate()
+                    self.assertEqual(len(executor.jobs), 1, name)
+                    dialog.reject()
+                    executor.release()
+                    self.assertIsNone(dialog.template, name)
+                    self.assertEqual(added, [], name)
+                    self.assertEqual(templates.userTemplates(), [], name)
+                    self.assertEqual(leftovers(), [], name)
+                finally:
+                    dialog.deleteLater()
+            self.assertFalse([text for text in toasts if "Added" in text], toasts)
+        finally:
+            ui.message = message
+
+    def test_28_settings_panel_scrolls_so_many_templates_keep_the_dialog_on_screen(self):
+        """BB-1: Settings > Templates scrolls. Every template adds a row, and the panel's minimum height used to follow them (about
+        65 px each), so the Settings dialog grew taller than a 1366x768 screen with 7 templates and OK/Cancel left it.
+        """
+        templates, ui = self.templates, self.ui
+        panel = ui.TemplatesSettingsPanel()
+        try:
+            panel.show()  # the size hints are only exact for a shown panel
+            slicer.app.processEvents()
+            panel.refresh()
+            slicer.app.processEvents()
+            self.assertEqual(len(panel.rows), len(templates.listTemplates()))
+            few = panel.minimumSizeHint.height()
+            for index in range(12):
+                self._add(name=f"Lab average {index + 1}")
+            panel.refresh()
+            slicer.app.processEvents()
+            self.assertEqual(len(panel.rows), len(templates.listTemplates()))
+            self.assertGreaterEqual(len(panel.rows), 13)
+            self.assertEqual(panel.minimumSizeHint.height(), few, "the rows no longer raise the minimum height of the panel")
+            self.assertLess(panel.minimumSizeHint.height(), 400)
+            scrollArea = panel.findChild(qt.QScrollArea, "studioTemplatesScrollArea")
+            self.assertIsNotNone(scrollArea)
+            self.assertTrue(scrollArea.widgetResizable)
+            for objectName in ("studioTemplatesList", "studioTemplatesFamilyNotice", "studioTemplatesShowFolder", "studioTemplatesAddButton"):
+                widget = panel.findChild(qt.QWidget, objectName)
+                self.assertIsNotNone(widget, objectName)
+                self.assertTrue(scrollArea.isAncestorOf(widget), objectName)
+            # The rows are inside the scroll area (reachable by scrolling), not beside it
+            for row in panel.rows:
+                self.assertTrue(scrollArea.isAncestorOf(row))
+        finally:
+            panel.deleteLater()
+
+    def test_30_permission_denied_while_adding_is_said_in_plain_words(self):
+        """BB-1: a read-only Templates folder showed "[Errno 13] Permission denied: '.../Templates/.adding-<id>-<pid>'" (the error
+        number and the internal staging folder); it says "Permission denied" and names the folder, as Duplicate does.
+        """
+        from StudioLib import autosave_io
+
+        templates, ui = self.templates, self.ui
+        real = os.makedirs
+
+        def denied(path, *args, **kwargs):
+            if ".adding-" in str(path):
+                raise PermissionError(13, "Permission denied", str(path))
+            return real(path, *args, **kwargs)
+
+        dialog = ui.AddTemplateDialog(executor=autosave_io.InlineExecutor())
+        os.makedirs = denied
+        try:
+            dialog.setImage(self.las)
+            dialog.nameEdit.setText("Read only")
+            dialog.addTemplate()
+        finally:
+            os.makedirs = real
+        try:
+            text = dialog.errorLabel.text
+            self.assertIn("The template could not be added: Permission denied (in the folder " + os.path.basename(templates.templatesFolder()) + ")", text)
+            for raw in ("Errno", ".adding-", os.sep + os.path.basename(templates.templatesFolder()) + os.sep):
+                self.assertNotIn(raw, text)
+            self.assertFalse(dialog.errorLabel.isHidden())
+            self.assertIsNone(dialog.template)
+        finally:
+            dialog.deleteLater()
+
+    def test_29_readding_the_study_template_reopens_the_open_case_on_it(self):
+        """BB-1: after "Add it…" adds the study's missing template, the case that is open on the built-in template is
+        reopened on the added one (its lesion unchanged); it did stay on the fallback until another case was opened.
+        """
+        from LesionNetworkMappingLib import nifti
+        from LesionNetworkMappingLib.study import Study
+
+        from StudioLib import study_ui
+
+        templates, ui = self.templates, self.ui
+        template = self._add(name="Lab ICBM 1.5", space="MNI152NLin6Asym")
+        record = templates.studyRecord(template)
+        study = Study.create(os.path.join(self.tempDir, "study readd open case"), name="Study", template=record)
+        sid = "sub-case001"
+        study.add_subject(sid, {"group": "case", "status": "traced", "space": "MNI152NLin6Asym", "trace_template": "MNI152NLin6Asym"})
+        lesionPath = os.path.join(study.path, *study.lesion_relpath(sid).split("/"))
+        os.makedirs(os.path.dirname(lesionPath), exist_ok=True)
+        _data, affine, _header = nifti.read_nifti(template.imagePath)
+        mask = np.zeros(self.shape15, np.uint8)
+        mask[30:40, 70:80, 60:70] = 1
+        nifti.write_nifti(lesionPath, mask, affine)
+        study.set(sid, {"lesion": study.relpath(lesionPath)})
+        study.save()
+        templates.removeTemplate(template.id, confirmDelete=lambda: True)
+        self.assertIsNone(templates.templateForStudyRecord(record))
+        settings = qt.QSettings()
+        recent = settings.value(study_ui.RECENT_STUDIES_KEY)
+        shown = ui.offerMissingStudyTemplate
+        offered = {}
+        ui.offerMissingStudyTemplate = lambda *args, **kwargs: offered.update(kwargs)  # the notice is not shown; its callback is kept
+        try:
+            session = study_ui.openStudy(study.path, shell=self._shell(), subject=sid, showLibrary=False)
+            slicer.app.processEvents()
+            self.assertIsNone(session.volumeNode().GetAttribute("Studio.TemplateId"), "the built-in template meanwhile")
+            self.assertIn("onAdded", offered, "the Add it… notice")
+            added = templates.addTemplate(self.image15, name="Lab ICBM 1.5", space="MNI152NLin6Asym")
+            self.assertEqual(templates.templateForStudyRecord(record).id, added.id)
+            before = int(np.count_nonzero(study_ui.lesionMask(session.segmentationNode())[0]))
+            offered["onAdded"](added)
+            slicer.app.processEvents()
+            self.assertEqual(session.current(), sid, "the same case stays open")
+            self.assertEqual(session.volumeNode().GetAttribute("Studio.TemplateId"), added.id, "on the added template, not the fallback")
+            self.assertEqual(int(np.count_nonzero(study_ui.lesionMask(session.segmentationNode())[0])), before, "the lesion is unchanged")
+            fallbacks = [n for n in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode") if n.GetAttribute(study_ui.SUBJECT_ATTRIBUTE) == "template"
+                         and n.GetAttribute("Studio.TemplateId") != added.id]
+            self.assertEqual(fallbacks, [], "the fallback volume is gone from the scene")
+        finally:
+            ui.offerMissingStudyTemplate = shown
+            study_ui.closeStudy()
+            if recent is None:
+                settings.remove(study_ui.RECENT_STUDIES_KEY)
+            else:
+                settings.setValue(study_ui.RECENT_STUDIES_KEY, recent)
+            shutil.rmtree(study.path, ignore_errors=True)
+
+    def test_31_nrrd_without_a_space_is_read_as_slicer_loads_it(self):
+        """BB-1: a NRRD with no "space" field (or "space: 3D-right-handed", "scanner-xyz") was checked and registered as RAS,
+        but Slicer (ITK) reads it as LPS: the template loaded mirrored left-right and front-back, a lesion drawn on its left
+        hemisphere read "Right" while labelled MNI, and every Start on template loaded another copy. The header reader now
+        takes such coordinates as LPS, as Slicer does, so the grid checked is the grid loaded.
+        """
+        import vtk
+
+        from LesionNetworkMappingLib import nifti
+
+        from StudioLib import importer
+
+        templates = self.templates
+        work = os.path.join(self.tempDir, "nrrd-no-space")
+        os.makedirs(work, exist_ok=True)
+        data, affine, _header = nifti.read_nifti(self.bundled)
+        data = np.ascontiguousarray(data.astype(np.float32))
+
+        def write(name, spaceLine, signs):
+            path = os.path.join(work, name)
+            vectors = " ".join("(%s)" % ",".join(repr(float(affine[row, column] * signs[row])) for row in range(3)) for column in range(3))
+            origin = ",".join(repr(float(affine[row, 3] * signs[row])) for row in range(3))
+            header = (f"NRRD0004\ntype: float\ndimension: 3\n{spaceLine}sizes: {data.shape[0]} {data.shape[1]} {data.shape[2]}\n"
+                      f"space directions: {vectors}\nkinds: domain domain domain\nendian: little\nencoding: raw\nspace origin: ({origin})\n\n")
+            with open(path, "wb") as handle:
+                handle.write(header.encode("ascii"))
+                handle.write(data.transpose(2, 1, 0).tobytes())
+            return path
+
+        def loadedAffine(path):
+            node = slicer.util.loadVolume(path)
+            matrix = vtk.vtkMatrix4x4()
+            node.GetIJKToRASMatrix(matrix)
+            slicer.mrmlScene.RemoveNode(node)
+            return np.array([[matrix.GetElement(row, column) for column in range(4)] for row in range(4)])
+
+        try:
+            ras, lps = (1, 1, 1), (-1, -1, 1)
+            cases = [("ras.nrrd", "space: right-anterior-superior\n", ras, True), ("lps.nrrd", "space: left-posterior-superior\n", lps, True)]
+            for spaceLine, tag in (("space dimension: 3\n", "nospace"), ("space: 3D-right-handed\n", "rh3d"), ("space: scanner-xyz\n", "scanner")):
+                cases += [(f"{tag}_rasvalues.nrrd", spaceLine, ras, False), (f"{tag}_lpsvalues.nrrd", spaceLine, lps, True)]
+            for name, spaceLine, signs, onMni in cases:
+                path = write(name, spaceLine, signs)
+                header = templates.readNrrdHeader(path)
+                np.testing.assert_allclose(header["affine"], loadedAffine(path), atol=1e-4, err_msg=f"{name}: the grid checked is the grid Slicer loads")
+                np.testing.assert_allclose(templates.readNrrdData(path)[1], header["affine"], atol=1e-6, err_msg=name)
+                detection = templates.identify(path)
+                self.assertEqual(detection.ok, onMni, f"{name}: {detection.message}")
+            # The no-space file whose coordinates Slicer places at MNI: a template whose volume is reused and sides are right
+            template = self._add(os.path.join(work, "nospace_lpsvalues.nrrd"), name="No space NRRD")
+            shell = self._shell()
+            volume, _segmentation = importer.startOnTemplate(shell=shell, templateId=template.id)
+            self.assertTrue(templates.isNodeOnTemplateGrid(volume, template))
+            matrix = vtk.vtkMatrix4x4()
+            volume.GetIJKToRASMatrix(matrix)
+            self.assertLess(matrix.MultiplyPoint((20, 50, 40, 1))[0], 0, "voxel i=20 is in the left hemisphere, as in the NIfTI")
+            again, _segmentation = importer.startOnTemplate(shell=shell, templateId=template.id)
+            self.assertEqual(again.GetID(), volume.GetID(), "Start on template again reuses the volume")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def test_32b_nifti2_is_refused_in_plain_words_without_the_path(self):
+        """BB-1: a NIfTI-2 template image was refused with the reader's developer text, which ends in the file's full
+        local path, in the add dialog's detection line.
+        """
+        import struct
+
+        templates = self.templates
+        work = os.path.join(self.tempDir, "nifti2-plain")
+        os.makedirs(work, exist_ok=True)
+        header = bytearray(544)
+        header[0:4] = struct.pack("<i", 540)
+        header[16:80] = struct.pack("<8q", 3, 10, 10, 10, 1, 1, 1, 1)
+        path = os.path.join(work, "mni_nifti2.nii")
+        with open(path, "wb") as f:
+            f.write(bytes(header))
+        detection = templates.identify(path)
+        self.assertEqual(detection.status, "error")
+        self.assertIn("NIfTI-2", detection.message)
+        self.assertNotIn(work, detection.message)
+        self.assertNotIn("mni_nifti2", detection.message)
+        ok, reason = templates.checkCompanion(None, path)
+        self.assertFalse(ok)
+        self.assertNotIn(work, reason)
+
+    def test_32_nifti_pixdim_that_disagrees_with_the_sform_is_refused(self):
+        """BB-1: a NIfTI file with an MNI sform and no qform (qform_code 0) whose voxel sizes (pixdim) do not match the
+        sform was checked at the sform and added, but Slicer (ITK) loads it with the sform's directions and origin and
+        the pixdim voxel sizes: the brain was half size, a lesion drawn on it was labelled MNI tens of millimetres away
+        from its place, and every Start on template loaded another copy. Such a file is now refused in plain words (as
+        an image, as a brain mask, and as the image of a template added before the check); a matching pixdim is fine.
+        """
+        import struct
+
+        import vtk
+
+        from LesionNetworkMappingLib import nifti
+
+        from StudioLib import importer
+
+        templates = self.templates
+        work = os.path.join(self.tempDir, "pixdim-sform")
+        os.makedirs(work, exist_ok=True)
+        data, affine, _header = nifti.read_nifti(self.bundled)
+
+        def write(name, pixdim):
+            path = os.path.join(work, name)
+            nifti.write_nifti(path, data, affine, qform_code=0)  # the sform (MNI, code 4) alone
+            endian = nifti.read_nifti_header(path)["byteorder"]
+            with open(path, "r+b") as f:
+                f.seek(80)  # pixdim[1:4]
+                f.write(struct.pack(endian + "3f", *pixdim))
+            return path
+
+        def loadedAffine(path):
+            node = slicer.util.loadVolume(path)
+            matrix = vtk.vtkMatrix4x4()
+            node.GetIJKToRASMatrix(matrix)
+            slicer.mrmlScene.RemoveNode(node)
+            return np.array([[matrix.GetElement(row, column) for column in range(4)] for row in range(4)])
+
+        try:
+            matching = write("matching.nii", (2.0, 2.0, 2.0))
+            header = nifti.read_nifti_header(matching)
+            self.assertEqual((header["sform_code"], header["qform_code"]), (4, 0))
+            self.assertLess(nifti.pixdim_disagreement(header), 1e-3)
+            np.testing.assert_allclose(loadedAffine(matching), header["affine"], atol=1e-4, err_msg="a matching pixdim: Slicer loads the sform")
+            self.assertEqual(templates.identify(matching).status, "known")
+            for name, pixdim in (("half.nii", (1.0, 1.0, 1.0)), ("slightly.nii", (1.9, 1.9, 1.9))):
+                path = write(name, pixdim)
+                header = nifti.read_nifti_header(path)
+                np.testing.assert_allclose(templates.voxelSpacing(loadedAffine(path)), pixdim, atol=1e-4, err_msg=f"{name}: Slicer uses pixdim")
+                corner = np.asarray(self.bundledShape) - 1
+                self.assertAlmostEqual(nifti.pixdim_disagreement(header), float(np.linalg.norm(corner * (2.0 - np.asarray(pixdim)))), places=2)
+                detection = templates.identify(path)
+                self.assertFalse(detection.ok, name)
+                self.assertEqual(detection.status, "refused", name)
+                self.assertIn("pixdim", detection.message)
+                self.assertIn("2 × 2 × 2 mm", detection.message)  # noqa: RUF001
+                ok, reason = templates.checkCompanion(templates.identify(matching), path)
+                self.assertFalse(ok, name)
+                self.assertIn("pixdim", reason)
+            with self.assertRaises(templates.TemplateError):
+                self._add(os.path.join(work, "half.nii"), name="Pixdim 1 mm")
+            # A template added from a matching file whose image was replaced afterwards is not loaded at the pixdim size
+            template = self._add(matching, name="Matching pixdim")
+            volume, _segmentation = importer.startOnTemplate(shell=self._shell(), templateId=template.id)
+            self.assertTrue(templates.isNodeOnTemplateGrid(volume, template))
+            slicer.mrmlScene.Clear(0)
+            shutil.copy(os.path.join(work, "half.nii"), template.imagePath)
+            with self.assertRaises(RuntimeError) as context:
+                importer.startOnTemplate(shell=self._shell(), templateId=template.id)
+            self.assertIn("pixdim", str(context.exception))
+            self.assertFalse([node for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode") if node.GetAttribute("Studio.TemplateId") == template.id])
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def test_33_template_folder_copied_in_with_a_taken_id_gets_its_own(self):
+        """BB-1: a template folder copied by hand into Templates/ (a colleague's "Lab ICBM", made in another Slicer Studio
+        folder, or a duplicate made in the file manager) is listed as it is, but its template.json had the id of one of
+        yours. Both were "user:lab-icbm": both Start on template entries opened the same image (yours could not be
+        opened), and Remove… on your row sent the colleague's folder to the trash. The copy now gets its own id and name
+        ("Lab ICBM 2", "user:lab-icbm-2", written into its template.json); your template keeps its id, so the default
+        and everything else that refers to it stays yours.
+        """
+        from StudioLib import importer
+
+        templates, ui = self.templates, self.ui
+        otherRoot = os.path.join(self.tempDir, "colleague", "Slicer Studio")
+        shutil.rmtree(os.path.dirname(otherRoot), ignore_errors=True)
+        try:
+            mine = self._add(name="Lab ICBM")
+            templates.setDefault(mine.id)
+            theirs = templates.addTemplate(self.bundled, mask=self.bundledMask, name="Lab ICBM", rootPath=otherRoot)
+            self.assertEqual(theirs.id, mine.id, "the same id in both Slicer Studio folders")
+            folder = templates.templatesFolder()
+            shutil.copytree(theirs.folder, os.path.join(folder, "Lab ICBM from Ana"))
+            shutil.copytree(mine.folder, os.path.join(folder, "Lab ICBM copy"))
+
+            listed = {os.path.basename(template.folder): (template.id, template.name) for template in templates.userTemplates()}
+            self.assertEqual(listed, {"Lab ICBM": ("user:lab-icbm", "Lab ICBM"),
+                                      "Lab ICBM copy": ("user:lab-icbm-3", "Lab ICBM 3"),
+                                      "Lab ICBM from Ana": ("user:lab-icbm-2", "Lab ICBM 2")}, "yours keeps its id")
+            with open(os.path.join(folder, "Lab ICBM from Ana", templates.TEMPLATE_JSON), encoding="utf-8") as f:
+                record = json.load(f)
+            self.assertEqual((record["id"], record["name"]), ("lab-icbm-2", "Lab ICBM 2"), "written into the copy's template.json")
+            self.assertEqual(record["sha256"], theirs.sha256, "nothing else of the copy changes")
+            again = sorted((template.id, template.name) for template in templates.userTemplates())
+            self.assertEqual(again, sorted(listed.values()), "the ids stay the same when listed again")
+            self.assertEqual(templates.templateById(mine.id).folder, mine.folder)
+            self.assertEqual(templates.templateById("user:lab-icbm-2").imageSha256, theirs.imageSha256)
+            self.assertEqual(templates.defaultTemplateId(), mine.id)
+
+            # Start on template: one entry per template, each opens its own image
+            menu = qt.QMenu()
+            try:
+                ui.populateTemplateMenu(menu, onStart=lambda templateId: None)
+                entries = [action.data() for action in menu.actions() if action.objectName == "studioTemplateMenuItem" and action.text.startswith("Lab ICBM")]
+            finally:
+                menu.deleteLater()
+            self.assertEqual(sorted(entries), ["user:lab-icbm", "user:lab-icbm-2", "user:lab-icbm-3"])
+            for templateId, shape in (("user:lab-icbm", self.shape15), ("user:lab-icbm-2", self.bundledShape)):
+                volume, _segmentation = importer.startOnTemplate(shell=self._shell(), templateId=templateId)
+                self.assertEqual(tuple(volume.GetImageData().GetDimensions()), tuple(shape), templateId)
+                slicer.mrmlScene.Clear(0)
+
+            # Settings > Templates: Remove… on your row removes your folder, not the copy
+            panel = ui.TemplatesSettingsPanel()
+            try:
+                panel.refresh()
+                rowIds = [row.property("templateId") for row in panel.rows]
+                self.assertEqual(len(rowIds), len(set(rowIds)), rowIds)
+                self.assertTrue(panel.remove(mine.id, confirm=False))
+            finally:
+                panel.deleteLater()
+            self.assertEqual(sorted(os.listdir(folder)), ["Lab ICBM copy", "Lab ICBM from Ana"])
+        finally:
+            shutil.rmtree(os.path.dirname(otherRoot), ignore_errors=True)
+
+    def test_34_template_json_with_a_field_of_the_wrong_type_is_skipped(self):
+        """BB-1: one template.json edited by hand with a field of the wrong type ("resolution_mm": "2 mm", "sha256": "abc",
+        "shape": 97, "files" or "grid" that are not objects) made Template() raise, so the list, the grids, the Start menu and
+        Search all failed and Settings > Templates showed no row, not even the built-in one. The damaged folder is skipped
+        (like one with invalid JSON); the other templates and the built-in one stay listed and usable.
+        """
+        templates, ui = self.templates, self.ui
+        good = self._add(name="Good one")
+        other = self._add(path=self.bundled, name="Other one", mask=self.bundledMask)
+        path = os.path.join(other.folder, templates.TEMPLATE_JSON)
+        with open(path, encoding="utf-8") as f:
+            original = json.load(f)
+        builtinIds = [template.id for template in templates.builtinTemplates()]
+        self.assertTrue(builtinIds)
+        damages = (
+            {"resolution_mm": "2 mm"}, {"sha256": "abc"}, {"sha256": [1, 2]}, {"shape": 97}, {"shape": ["a"]}, {"files": "image.nii.gz"},
+            {"files": {"image": 5}}, {"files": {"image": "image.nii.gz", "surfaces": "a.vtk"}}, {"grid": [1, 2]},
+            {"grid": {"shape": 5, "affine": 3}}, {"grid": {"shape": [8, 8, 8], "affine": "x"}},
+        )
+        for damage in damages:
+            with self.subTest(damage=damage):
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(dict(original, **damage), f)
+                self.assertIsNone(templates.readRecord(other.folder))
+                self.assertEqual([template.id for template in templates.userTemplates()], [good.id])
+                self.assertEqual([template.id for template in templates.listTemplates()], builtinIds + [good.id])
+                self.assertTrue(templates.registerGrids(force=True))
+                self.assertIsNone(templates.templateById(other.id))
+                menu = qt.QMenu()
+                try:
+                    ui.populateTemplateMenu(menu, onStart=lambda templateId: None)
+                    entries = [action.data() for action in menu.actions() if action.objectName == "studioTemplateMenuItem"]
+                finally:
+                    menu.deleteLater()
+                self.assertIn(good.id, entries)
+                self.assertNotIn(other.id, entries)
+                ids = [item["id"] for item in ui.paletteItems()]
+                self.assertIn(f"templates.start.{good.slug}", ids)
+                self.assertNotIn(f"templates.start.{other.slug}", ids)
+                panel = ui.TemplatesSettingsPanel()
+                try:
+                    panel.refresh()
+                    rowIds = [row.property("templateId") for row in panel.rows]
+                finally:
+                    panel.deleteLater()
+                self.assertIn(good.id, rowIds)
+                self.assertTrue(set(builtinIds) & set(rowIds))
+        # Fixed by hand: listed again
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(original, f)
+        self.assertEqual(sorted(template.id for template in templates.userTemplates()), sorted([good.id, other.id]))
+
+    def test_35_file_dropped_on_a_text_field_of_the_add_dialog_is_the_template_image(self):
+        """BB-1: a file dropped on the Name field (or "Your label") of "Add your own MNI template" put its path in the field and
+        chose no image when the drag offered the path as text besides the URL (GNOME Files does). A file dropped anywhere
+        on the dialog is the template image; a drag that is no usable file (web link, folder, text file) is refused, with
+        the copy action for the rest, and never typed into a field.
+        """
+        text = os.path.join(self.inputs, "notes.txt")
+        with open(text, "w", encoding="utf-8") as f:
+            f.write("not an image")
+
+        def drag(widget, paths, kind, asText=True):
+            mimeData = qt.QMimeData()
+            urls = [qt.QUrl(path) if "://" in path else qt.QUrl.fromLocalFile(path) for path in paths]
+            mimeData.setUrls(urls)
+            if asText:
+                mimeData.setText("\n".join(paths))
+            point = qt.QPoint(widget.width // 2, widget.height // 2)
+            actions = qt.Qt.CopyAction | qt.Qt.MoveAction | qt.Qt.LinkAction
+            try:
+                if kind == "enter":
+                    event = qt.QDragEnterEvent(point, actions, mimeData, qt.Qt.LeftButton, qt.Qt.NoModifier)
+                else:
+                    event = qt.QDropEvent(qt.QPointF(point), actions, mimeData, qt.Qt.LeftButton, qt.Qt.NoModifier)
+            except (TypeError, ValueError):
+                self.skipTest("This PythonQt cannot make drag events")
+            event.ignore()
+            qt.QApplication.sendEvent(widget, event)
+            return event
+
+        dialog = self.ui.AddTemplateDialog()
+        try:
+            dialog.show()
+            slicer.app.processEvents()
+            for widget in (dialog.nameEdit, dialog.spaceLabelEdit, dialog):
+                with self.subTest(widget=widget.objectName or "dialog"):
+                    dialog.imagePath = None
+                    dialog.nameEdit.setText("")
+                    dialog.spaceLabelEdit.setText("")
+                    # Not usable: refused, no text typed
+                    for paths in (["http://example.org/a.nii.gz"], [self.inputs], [text]):
+                        enter = drag(widget, paths, "enter")
+                        self.assertFalse(enter.isAccepted(), paths)
+                        drop = drag(widget, paths, "drop")
+                        self.assertFalse(drop.isAccepted(), paths)
+                        self.assertEqual(dialog.nameEdit.text, "")
+                        self.assertEqual(dialog.spaceLabelEdit.text, "")
+                        self.assertIsNone(dialog.imagePath)
+                    # The template image, offered as a URL and as text
+                    enter = drag(widget, [self.image15], "enter")
+                    self.assertTrue(enter.isAccepted())
+                    self.assertEqual(enter.dropAction(), qt.Qt.CopyAction)
+                    drop = drag(widget, [self.image15], "drop")
+                    self.assertTrue(drop.isAccepted())
+                    self.assertEqual(dialog.imagePath, self.image15)
+                    self.assertNotIn(os.sep, dialog.nameEdit.text)
+                    self.assertEqual(dialog.spaceLabelEdit.text, "")
+        finally:
+            dialog.deleteLater()
+            os.remove(text)
+
+    def test_38_template_in_a_read_only_folder_is_not_half_removed(self):
+        """BB-1: removing a template from a read-only Templates folder (a share where only Templates/ is locked) asked
+        "There is no Trash here: delete the template folder for good?" (there is a Trash; the folder is read-only), then
+        deleted the template's files but not its folder and showed "[Errno 13] Permission denied". It now says the folder
+        is read-only, asks nothing and deletes nothing. Read-only is simulated (root may write anywhere).
+        """
+        from StudioLib import projects
+
+        templates = self.templates
+        realAccess, realTrash = os.access, projects.moveToTrash
+        for case in ("Templates folder", "template folder", "folder inside, no trash"):
+            with self.subTest(case=case):
+                template = self._add(name="Read only " + str(len(case)))
+                folder = template.folder
+                inside = os.path.join(folder, "inside")
+                os.makedirs(inside, exist_ok=True)
+                readOnly = {"Templates folder": os.path.dirname(folder), "template folder": folder}.get(case, inside)
+                before = sorted(os.listdir(folder))
+                asked = []
+
+                def access(path, mode, *args, readOnly=readOnly, **kwargs):
+                    if mode & os.W_OK and os.path.normpath(str(path)) == os.path.normpath(readOnly):
+                        return False
+                    return realAccess(path, mode, *args, **kwargs)
+
+                os.access = access
+                if case == "folder inside, no trash":
+                    projects.moveToTrash = lambda path: False
+                try:
+                    with self.assertRaises(templates.TemplateError) as context:
+                        templates.removeTemplate(template.id, confirmDelete=lambda asked=asked: asked.append(True) or True)
+                finally:
+                    os.access, projects.moveToTrash = realAccess, realTrash
+                text = str(context.exception)
+                self.assertIn("read-only", text)
+                self.assertIn("Nothing was deleted", text)
+                self.assertNotIn("Errno", text)
+                self.assertNotIn("Trash", text)
+                self.assertEqual(asked, [], "no question to delete for good")
+                self.assertEqual(sorted(os.listdir(folder)), before, "nothing deleted")
+                self.assertIsNotNone(templates.templateById(template.id))
+                shutil.rmtree(inside)
+                self.assertTrue(templates.removeTemplate(template.id, confirmDelete=lambda: True))
+                self.assertFalse(os.path.exists(folder))
+
+    def test_39_four_volume_mask_or_head_is_refused(self):
+        """BB-1: a brain mask or head image with several volumes is refused with a plain reason (it would be copied as it is and
+        Normalize would fail on it); the same 3D file is accepted.
+        """
+        templates = self.templates
+        detection = templates.identify(self.image15)
+        self.assertTrue(templates.checkCompanion(detection, self.mask15)[0])
+        ok, reason = templates.checkCompanion(detection, self.image4d)
+        self.assertFalse(ok)
+        self.assertIn("several volumes", reason)
+        self.assertIn(os.path.basename(self.image4d), reason)
+
+    def test_40_staging_folder_of_a_killed_add_is_removed(self):
+        """BB-1: an add killed while copying (crash, force quit, power cut) left its hidden ".adding-<id>-<pid>" folder in
+        Templates/ for good. The next read of Templates/ or add removes it, but not the folder of a live process.
+        """
+        import subprocess
+
+        templates = self.templates
+        folder = templates.templatesFolder()
+        os.makedirs(folder, exist_ok=True)
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        stale = os.path.join(folder, f".adding-big-7t-{dead.pid}")
+        stale2 = os.path.join(folder, f".adding-other-{dead.pid}")
+        live = os.path.join(folder, f".adding-live-{os.getppid()}")
+        for path in (stale, stale2, live):
+            os.makedirs(path, exist_ok=True)
+            with open(os.path.join(path, "image.nii.gz"), "wb") as f:
+                f.write(b"x" * 1000)
+        templates.userTemplates()
+        self.assertFalse(os.path.exists(stale), "read of Templates/ removes the dead add's folder")
+        self.assertTrue(os.path.exists(live), "the folder of a live process is kept")
+        os.makedirs(stale, exist_ok=True)
+        self._add(name="After kill")
+        self.assertFalse(os.path.exists(stale), "an add removes it too")
+        self.assertFalse(os.path.exists(stale2))
+        self.assertTrue(os.path.exists(live))
+        shutil.rmtree(live)
+
+    def test_41_missing_image_cannot_be_the_default(self):
+        """BB-1: "Set as default" on a template whose image is gone did nothing visible but wrote Studio/Templates/Default,
+        so the template became the default without notice when its file came back. Now the button is disabled, setDefault
+        refuses, and the palette entry says "image missing".
+        """
+        from StudioLib import templates_ui as ui
+
+        templates = self.templates
+        template = self._add(name="Lab ICBM")
+        os.remove(template.imagePath)
+        template = templates.templateById(template.id)
+        self.assertFalse(template.isAvailable())
+        panel = ui.TemplatesSettingsPanel()
+        self.addCleanup(panel.deleteLater)
+        panel.refresh()
+        button = panel.rowFor(template.id).findChild(qt.QPushButton, "studioTemplateSetDefault")
+        self.assertIsNotNone(button)
+        self.assertFalse(button.enabled, "disabled for an unusable template")
+        self.assertTrue(button.toolTip)
+        qt.QSettings().remove(templates.DEFAULT_KEY)
+        with self.assertRaises(ValueError):
+            templates.setDefault(template.id)
+        panel.setDefault(template.id)
+        self.assertFalse(qt.QSettings().contains(templates.DEFAULT_KEY), "nothing is written")
+        titles = [item["title"] for item in ui.paletteItems() if item["id"].startswith("templates.start.")]
+        self.assertIn("Start on Lab ICBM (image missing)", titles)
+        # A usable template still works
+        templates.setDefault(templates.BUILTIN_DEFAULT)
+
+    def test_42_names_are_shown_as_typed(self):
+        """'&' is not a menu mnemonic and '<b>..</b>' is not rich text in the Start on template menu and the Settings list."""
+        templates, ui = self.templates, self.ui
+        ampersand = self._add(name="R&D Lab ICBM")
+        markup = self._add(name="<b>Bold</b> brain", path=self.image15)
+        menu = qt.QMenu()
+        ui.populateTemplateMenu(menu, onStart=lambda templateId: None)
+        shown = {action.data(): action.text for action in menu.actions() if action.objectName == "studioTemplateMenuItem"}
+        self.assertEqual(shown[ampersand.id], "R&&D Lab ICBM")  # Qt displays "&&" as one "&"
+        self.assertEqual(shown[markup.id], "<b>Bold</b> brain")
+        menu.deleteLater()
+        panel = ui.TemplatesSettingsPanel()
+        panel.refresh()
+        for template, expected in ((ampersand, "R&D Lab ICBM"), (markup, "<b>Bold</b> brain")):
+            label = panel.rowFor(template.id).findChild(qt.QLabel, "studioTemplateName")
+            self.assertEqual(label.text, expected)
+            self.assertEqual(int(label.textFormat), int(qt.Qt.PlainText))
+        panel.deleteLater()
+
+    def test_43_space_label_field_fits_its_placeholder_at_larger_font(self):
+        original = qt.QApplication.font()
+        try:
+            for factor in (1.0, 1.25, 1.5):
+                font = qt.QFont(original)
+                font.setPointSizeF(original.pointSizeF() * factor)
+                qt.QApplication.setFont(font)
+                dialog = self.ui.AddTemplateDialog()
+                try:
+                    dialog.show()
+                    slicer.app.processEvents()
+                    edit = dialog.spaceLabelEdit
+                    fm = qt.QFontMetrics(edit.font)
+                    need = fm.horizontalAdvance(edit.placeholderText) if hasattr(fm, "horizontalAdvance") else fm.width(edit.placeholderText)
+                    self.assertGreaterEqual(edit.minimumWidth, need + 16, factor)
+                    self.assertGreaterEqual(edit.width, need + 16, factor)
+                finally:
+                    dialog.close()
+                    dialog.deleteLater()
+        finally:
+            qt.QApplication.setFont(original)
+
+    def test_39_four_d_nrrd_is_refused_without_a_first_volume_warning(self):
+        """BB-1: a 4D NRRD was refused ("cannot be used") while the dialog also said "only the first is used". The refusal
+        carries no first-volume warning; a 4D NIfTI is still accepted with it.
+        """
+        import numpy as np
+
+        templates = self.templates
+        path = os.path.join(self.tempDir, "four_d.nrrd")
+        header = ("NRRD0004\ntype: float\ndimension: 4\nspace: right-anterior-superior\nsizes: 2 97 115 97\n"
+                  "space directions: none (2,0,0) (0,2,0) (0,0,2)\nkinds: list domain domain domain\nendian: little\n"
+                  "encoding: raw\nspace origin: (-96,-132,-78)\n\n")
+        with open(path, "wb") as handle:
+            handle.write(header.encode() + np.zeros(2 * 97 * 115 * 97, dtype="<f4").tobytes())
+        try:
+            detection = templates.identify(path)
+        finally:
+            os.remove(path)
+        self.assertEqual(detection.status, "refused")
+        self.assertIn("several volumes", detection.message)
+        self.assertFalse(any("only the first" in line for line in detection.warnings), detection.warnings)
+        accepted = templates.identify(self.image4d)
+        self.assertTrue(accepted.ok)
+        self.assertTrue(any("only the first" in line for line in accepted.warnings))
+
+    def test_44_second_template_image_dropped_replaces_the_first(self):
+        """BB-1: dropping another template image after one was set was refused with "choose a brain mask or head image" and
+        the dialog kept the first image. A dropped plain image replaces the template image, as Change... does.
+        """
+        dialog = self.ui.AddTemplateDialog()
+        try:
+            dialog._onDropped([self.image4d])
+            self.assertEqual(dialog.imagePath, self.image4d)
+            dialog._onDropped([self.image15])
+            self.assertEqual(dialog.imagePath, self.image15)
+        finally:
+            dialog.deleteLater()
+
+    def test_45_mask_dropped_alone_is_not_the_template_image(self):
+        """BB-1: a file named ..._mask or ..._head dropped on an empty dialog became the template image."""
+        import shutil
+
+        folder = os.path.join(self.tempDir if hasattr(self, "tempDir") else os.path.dirname(self.image15), "bb45")
+        os.makedirs(folder, exist_ok=True)
+        mask = os.path.join(folder, "beta_brain_mask.nii.gz")
+        head = os.path.join(folder, "beta_head.nii.gz")
+        shutil.copy(self.image15, mask)
+        shutil.copy(self.image15, head)
+        dialog = self.ui.AddTemplateDialog()
+        try:
+            dialog._onDropped([mask])
+            self.assertIsNone(dialog.imagePath)
+            dialog._onDropped([head])
+            self.assertIsNone(dialog.imagePath)
+            dialog._onDropped([mask, self.image15])
+            self.assertEqual(dialog.imagePath, self.image15)
+            self.assertEqual(dialog.maskPath, mask)
+        finally:
+            dialog.deleteLater()
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_47_cut_short_image_is_refused(self):
+        """BB-1: a template image whose data stops before the end its header announces was accepted (the readers
+        zero-fill the rest, so it opened half black).
+        """
+        import shutil
+
+        from LesionNetworkMappingLib import nifti
+
+        templates = self.templates
+        folder = os.path.join(self.tempDir, "bb46")
+        os.makedirs(folder, exist_ok=True)
+        try:
+            whole = os.path.join(folder, "whole_1.5mm.nii")
+            data, affine, _header = nifti.read_nifti(self.image15)
+            nifti.write_nifti(whole, data, affine)
+            self.assertTrue(templates.identify(whole).ok)
+            cut = os.path.join(folder, "cut_1.5mm.nii")
+            with open(whole, "rb") as f:
+                body = f.read()
+            with open(cut, "wb") as f:
+                f.write(body[:len(body) // 2])
+            detection = templates.identify(cut)
+            self.assertFalse(detection.ok)
+            self.assertEqual(detection.status, "refused")
+            self.assertIn("is damaged", detection.message)
+            self.assertIn("stops after", detection.message)
+            with self.assertRaises(templates.TemplateError):
+                self._add(cut, name="Cut")
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)

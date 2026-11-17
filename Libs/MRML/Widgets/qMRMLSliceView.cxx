@@ -20,6 +20,7 @@
 
 // Qt includes
 #include <QApplication>
+#include <QCursor>
 #include <QDebug>
 #include <QDropEvent>
 #include <QShowEvent>
@@ -78,6 +79,7 @@ qMRMLSliceViewPrivate::qMRMLSliceViewPrivate(qMRMLSliceView& object)
   this->MRMLScene = nullptr;
   this->MRMLSliceNode = nullptr;
   this->InactiveBoxColor = QColor(95, 95, 113);
+  this->HasLeft = false;
 }
 
 //---------------------------------------------------------------------------
@@ -467,6 +469,14 @@ void qMRMLSliceView::enterEvent(QEvent* event)
   {
     return;
   }
+  Q_D(qMRMLSliceView);
+  if (d->HasLeft && d->LastLeaveGlobalPos == QCursor::pos())
+  {
+    // The pointer has not moved since it left the view: this is not the pointer entering the view but
+    // the Enter event that Qt sends to the view under a resting pointer when a popup (a menu, the
+    // search palette) closes. The keyboard focus stays where the popup gave it back.
+    return;
+  }
   QWidget* focusWidget = QApplication::focusWidget();
   if (focusWidget
       && (focusWidget->inherits("QLineEdit") || focusWidget->inherits("QAbstractSpinBox") || focusWidget->inherits("QTextEdit") || focusWidget->inherits("QPlainTextEdit")
@@ -476,6 +486,15 @@ void qMRMLSliceView::enterEvent(QEvent* event)
     return;
   }
   vtkWidget->setFocus(Qt::MouseFocusReason);
+}
+
+//------------------------------------------------------------------------------
+void qMRMLSliceView::leaveEvent(QEvent* event)
+{
+  Q_D(qMRMLSliceView);
+  d->LastLeaveGlobalPos = QCursor::pos();
+  d->HasLeft = true;
+  this->Superclass::leaveEvent(event);
 }
 
 //---------------------------------------------------------------------------

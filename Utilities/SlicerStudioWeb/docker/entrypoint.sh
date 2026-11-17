@@ -83,6 +83,12 @@ stop_all() {
   fi
   # Also stop instances that Slicer started itself (for example after "Restart").
   pkill -TERM -u "${user_id}" -x "${SLICER_PROCESS_NAMES}" 2> /dev/null || true
+  # Slicer saves the open project when it gets SIGTERM: keep the display until
+  # it has exited (at most 15 s; the launcher's "stop" gives the container 20 s).
+  for _ in $(seq 1 75); do
+    pgrep -u "${user_id}" -x "${SLICER_PROCESS_NAMES}" > /dev/null || break
+    sleep 0.2
+  done
   for pid in "${pids[@]}"; do
     kill -TERM "${pid}" 2> /dev/null || true
   done

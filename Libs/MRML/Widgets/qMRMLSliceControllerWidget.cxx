@@ -84,8 +84,9 @@
 
 namespace
 {
-/// Minimum width of the offset slider in the flat bar
-const int FlatSliderMinimumWidth = 48;
+/// Minimum width of the offset slider in the flat bar (10 px less than before: the room of the chevron that the
+/// application style draws beside the name of the orientation menu, so that the narrowest bar does not get wider)
+const int FlatSliderMinimumWidth = 38;
 /// Fixed space at the end of the bar layout (qMRMLViewControllerBarPrivate::init)
 const int FlatBarTrailingSpace = 5;
 /// Stretch of the optional parts of the flat bar (readout, fit button): they get the room they need before the
@@ -152,6 +153,14 @@ QString sliceOffsetSliderToolTip(vtkMRMLSliceNode* sliceNode, bool flat)
                                                       qMRMLSliceControllerWidget::tr("Drag to move the slice between %1 and %2").arg(negativeAxisLabel).arg(positiveAxisLabel));
   }
   return QString("%1 <-----> %2").arg(negativeAxisLabel).arg(positiveAxisLabel);
+}
+
+//---------------------------------------------------------------------------
+/// Return true if the volume is a figure image (Studio.Role = figure): a 2D picture with no patient directions.
+bool isFigureVolume(vtkMRMLVolumeNode* volumeNode)
+{
+  const char* roleAttribute = volumeNode ? volumeNode->GetAttribute("Studio.Role") : nullptr;
+  return roleAttribute && QString::fromUtf8(roleAttribute) == "figure";
 }
 
 //---------------------------------------------------------------------------
@@ -607,6 +616,11 @@ void qMRMLSliceControllerWidgetPrivate::setupFlatBar()
                    q,
                    [q]()
                    {
+                     // A figure has no patient directions: the default orientation of the view would show it edge-on
+                     if (q->isFigureBackground())
+                     {
+                       return;
+                     }
                      vtkMRMLSliceNode* sliceNode = q->mrmlSliceNode();
                      const char* defaultOrientation = sliceNode ? sliceNode->GetDefaultOrientation() : nullptr;
                      if (defaultOrientation && strlen(defaultOrientation) > 0 && strcmp(defaultOrientation, vtkMRMLSliceNode::GetReformatOrientationName()) != 0)
@@ -632,6 +646,8 @@ void qMRMLSliceControllerWidgetPrivate::setupFlatBar()
   this->SliceIndexLabel->setObjectName("SliceIndexLabel");
   this->SliceIndexLabel->setFixedHeight(this->OptionsButton->height());
   this->SliceIndexLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  // The reserved readout widths depend on the font of the label: measure them again when it changes
+  this->SliceIndexLabel->installEventFilter(this);
   holderLayout->addWidget(this->SliceIndexLabel);
   this->SliceIndexHolder->setVisible(false);
   this->FlatOnlyWidgets << this->SliceIndexHolder;
@@ -643,6 +659,7 @@ void qMRMLSliceControllerWidgetPrivate::setupFlatBar()
   this->BarLinkButton->setIcon(qMRMLSymbolicIconEngine::icon("unlink", "link"));
   this->BarLinkButton->setToolTip(
     Self::flatToolTip(qMRMLSliceControllerWidget::tr("Link views"), QString(), qMRMLSliceControllerWidget::tr("Keep zoom and slices of all views together")));
+  this->BarLinkButton->setAccessibleName(qMRMLSliceControllerWidget::tr("Link views"));
   // Hot linking stays available from the context menu (actions added to the button would make it a menu button)
   this->BarLinkButton->setContextMenuPolicy(Qt::CustomContextMenu);
   QMenu* linkMenu = new QMenu(qMRMLSliceControllerWidget::tr("Linked"), q);
@@ -730,9 +747,7 @@ void qMRMLSliceControllerWidgetPrivate::updateFlatStyle()
     {
       this->BarLinkButton->setChecked(this->MRMLSliceCompositeNode->GetLinkedControl());
     }
-    QFontMetrics fontMetrics(this->SliceIndexLabel->font());
-    this->FullReadoutWidth = std::max(this->FullReadoutWidth, fontMetrics.horizontalAdvance(QString("S 000.0 mm   000 / 000")) + 4);
-    this->CompactReadoutWidth = std::max(this->CompactReadoutWidth, fontMetrics.horizontalAdvance(QString("000 / 000")) + 4);
+    this->measureReadoutWidths(false);
     this->updateReadoutLabel();
     this->updateFlatBarFromMRMLSliceNode();
     this->updateFlatBarWidgetsVisibility();
@@ -762,6 +777,27 @@ void qMRMLSliceControllerWidgetPrivate::updateFlatStyle()
   {
     this->SliceOffsetSlider->setToolTip(sliceOffsetSliderToolTip(sliceNode, this->AppliedFlatStyle));
   }
+}
+
+// --------------------------------------------------------------------------
+void qMRMLSliceControllerWidgetPrivate::measureReadoutWidths(bool fromScratch)
+{
+  if (!this->SliceIndexLabel)
+  {
+    return;
+  }
+  // Room for the widest readout the label can show (and for the text now shown), in the current font of the label
+  const QFontMetrics fontMetrics = this->SliceIndexLabel->fontMetrics();
+  int fullWidth = std::max(fontMetrics.horizontalAdvance(QString("S 000.0 mm   000 / 000")), fontMetrics.horizontalAdvance(this->FullReadoutText)) + 4;
+  int compactWidth = std::max(fontMetrics.horizontalAdvance(QString("000 / 000")), fontMetrics.horizontalAdvance(this->CompactReadoutText)) + 4;
+  if (!fromScratch)
+  {
+    // The widths only grow while the font stays the same: a fixed width does not lay out the bar again
+    fullWidth = std::max(fullWidth, this->FullReadoutWidth);
+    compactWidth = std::max(compactWidth, this->CompactReadoutWidth);
+  }
+  this->FullReadoutWidth = fullWidth;
+  this->CompactReadoutWidth = compactWidth;
 }
 
 // --------------------------------------------------------------------------
@@ -846,7 +882,7 @@ void qMRMLSliceControllerWidgetPrivate::updateReadoutLabel()
   }
   // The full readout shows the slice index in the tertiary text color: "S 17.5 mm   49 / 97"
   QString shownText = text;
-  if (!this->CompactReadout && !this->ReadoutIndexText.isEmpty() && text.endsWith(this->ReadoutIndexText))
+  if (!this->CompactReadout && !this->ReadoutIndexText.isEmpty() && text.size() > this->ReadoutIndexText.size() && text.endsWith(this->ReadoutIndexText))
   {
     QColor indexColor = this->styleToken("text3");
     if (!indexColor.isValid())
@@ -926,6 +962,21 @@ void qMRMLSliceControllerWidgetPrivate::updateFlatBarFromMRMLSliceNode()
   {
     return;
   }
+  // Slice index in the first volume layer
+  vtkMRMLVolumeNode* volumeNode = nullptr;
+  if (this->MRMLSliceCompositeNode && q->mrmlScene())
+  {
+    for (const char* volumeID :
+         { this->MRMLSliceCompositeNode->GetBackgroundVolumeID(), this->MRMLSliceCompositeNode->GetForegroundVolumeID(), this->MRMLSliceCompositeNode->GetLabelVolumeID() })
+    {
+      volumeNode = volumeID ? vtkMRMLVolumeNode::SafeDownCast(q->mrmlScene()->GetNodeByID(volumeID)) : nullptr;
+      if (volumeNode && volumeNode->GetImageData())
+      {
+        break;
+      }
+      volumeNode = nullptr;
+    }
+  }
   // Position along the slice normal, as a direction letter and a distance (never a minus sign)
   double offset = this->SliceLogic->GetSliceOffset();
   vtkMatrix4x4* sliceToRAS = sliceNode->GetSliceToRAS();
@@ -946,26 +997,15 @@ void qMRMLSliceControllerWidgetPrivate::updateFlatBarFromMRMLSliceNode()
     }
   }
   const int decimals = (this->SliceOffsetResolution >= 0.5) ? 1 : 2;
-  QString position = QString("%1 %2 %3").arg(direction).arg(std::fabs(offset) * displayCoefficient, 0, 'f', decimals).arg(suffix);
+  QString position = isFigureVolume(volumeNode) ? QString() : QString("%1 %2 %3").arg(direction).arg(std::fabs(offset) * displayCoefficient, 0, 'f', decimals).arg(suffix);
 
-  // Slice index in the first volume layer
-  vtkMRMLVolumeNode* volumeNode = nullptr;
-  if (this->MRMLSliceCompositeNode && q->mrmlScene())
-  {
-    for (const char* volumeID :
-         { this->MRMLSliceCompositeNode->GetBackgroundVolumeID(), this->MRMLSliceCompositeNode->GetForegroundVolumeID(), this->MRMLSliceCompositeNode->GetLabelVolumeID() })
-    {
-      volumeNode = volumeID ? vtkMRMLVolumeNode::SafeDownCast(q->mrmlScene()->GetNodeByID(volumeID)) : nullptr;
-      if (volumeNode && volumeNode->GetImageData())
-      {
-        break;
-      }
-      volumeNode = nullptr;
-    }
-  }
   QString indexText;
   QString indexDescription;
-  if (volumeNode)
+  // A volume under a non-linear transform (the grid transform that the DICOM plugin adds to a series with a missing
+  // slice) has no slice index along a straight normal: the readout has the position only, and the index is not asked
+  // (vtkMRMLTransformNode would log an error each time)
+  vtkMRMLTransformNode* volumeTransformNode = volumeNode ? volumeNode->GetParentTransformNode() : nullptr;
+  if (volumeNode && (!volumeTransformNode || volumeTransformNode->IsTransformToWorldLinear()))
   {
     int sliceIndex = this->SliceLogic->GetSliceIndexFromOffset(offset, volumeNode);
     int sliceCount = sliceCountAlongNormal(volumeNode, sliceNode);
@@ -985,15 +1025,16 @@ void qMRMLSliceControllerWidgetPrivate::updateFlatBarFromMRMLSliceNode()
       indexDescription = qMRMLSliceControllerWidget::tr("the slice is outside the image");
     }
   }
-  QString text = indexText.isEmpty() ? position : position + QString("   ") + indexText;
+  // A figure has no patient directions: the readout is the slice index only, never "S 0.0 mm"
+  QString text = position.isEmpty() ? indexText : (indexText.isEmpty() ? position : position + QString("   ") + indexText);
   this->ReadoutIndexText = indexText;
   QString compactText = indexText.isEmpty() ? position : indexText;
   QString description = position;
   if (!indexDescription.isEmpty())
   {
-    description += QString(", ") + indexDescription;
+    description += (description.isEmpty() ? QString() : QString(", ")) + indexDescription;
   }
-  if (!isOnMniGrid(volumeNode))
+  if (!position.isEmpty() && !isOnMniGrid(volumeNode))
   {
     description += QString(" ") + qMRMLSliceControllerWidget::tr("(from the image origin, not the midline)");
   }
@@ -1602,6 +1643,13 @@ bool qMRMLSliceControllerWidgetPrivate::eventFilter(QObject* object, QEvent* eve
   }
   else if (object == this->BarWidget && event->type() == QEvent::Resize && this->AppliedFlatStyle)
   {
+    this->updateFlatBarWidgetsVisibility();
+  }
+  else if (object == this->SliceIndexLabel && event->type() == QEvent::FontChange && this->AppliedFlatStyle)
+  {
+    // The application font changed while the views are shown: the readout needs other widths (in both ways)
+    this->measureReadoutWidths(true);
+    this->updateReadoutLabel();
     this->updateFlatBarWidgetsVisibility();
   }
   else if (object == this->BarWidget && (event->type() == QEvent::PaletteChange || event->type() == QEvent::StyleChange) && this->AppliedFlatStyle)
@@ -2781,9 +2829,26 @@ void qMRMLSliceControllerWidget::moveBackgroundComboBox(bool more)
 }
 
 //---------------------------------------------------------------------------
+bool qMRMLSliceControllerWidget::isFigureBackground() const
+{
+  Q_D(const qMRMLSliceControllerWidget);
+  if (!d->MRMLSliceCompositeNode || !this->mrmlScene())
+  {
+    return false;
+  }
+  const char* backgroundID = d->MRMLSliceCompositeNode->GetBackgroundVolumeID();
+  return backgroundID && isFigureVolume(vtkMRMLVolumeNode::SafeDownCast(this->mrmlScene()->GetNodeByID(backgroundID)));
+}
+
+//---------------------------------------------------------------------------
 void qMRMLSliceControllerWidget::rotateSliceToLowestVolumeAxes()
 {
   Q_D(qMRMLSliceControllerWidget);
+  // A figure has no patient directions: rotating it to its "plane" would flip it and no longer fit
+  if (this->isFigureBackground())
+  {
+    return;
+  }
   vtkSmartPointer<vtkCollection> nodes = d->saveNodesForUndo("vtkMRMLSliceNode");
   if (!nodes.GetPointer())
   {

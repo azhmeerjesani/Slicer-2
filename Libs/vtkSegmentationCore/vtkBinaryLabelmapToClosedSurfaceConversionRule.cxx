@@ -291,6 +291,18 @@ bool vtkBinaryLabelmapToClosedSurfaceConversionRule::CreateClosedSurface(vtkOrie
   /// If input labelmap has non-background border voxels, then those regions remain open in the output closed surface.
   /// This function adds a 1 voxel padding to the labelmap in these cases.
   bool paddingNecessary = this->IsLabelmapPaddingNecessary(binaryLabelmap);
+  if (!paddingNecessary
+      && (binaryLabelmapExtent[1] - binaryLabelmapExtent[0] < 2    //
+          || binaryLabelmapExtent[3] - binaryLabelmapExtent[2] < 2 //
+          || binaryLabelmapExtent[5] - binaryLabelmapExtent[4] < 2))
+  {
+    // Every voxel of a labelmap that is thinner than 3 voxels in any direction is a border voxel, therefore no padding
+    // means that all voxels are background (for example a segment that was cleared but kept its tiny extent).
+    // There is nothing to convert, and the surface filters fail (and log an error) when an image dimension is 1.
+    vtkDebugMacro("Convert: No polygons can be created, input image has no foreground voxels");
+    closedSurfacePolyData->Initialize();
+    return true;
+  }
   if (paddingNecessary)
   {
     vtkSmartPointer<vtkImageConstantPad> padder = vtkSmartPointer<vtkImageConstantPad>::New();

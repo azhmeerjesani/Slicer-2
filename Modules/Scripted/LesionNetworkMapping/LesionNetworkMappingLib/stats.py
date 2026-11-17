@@ -5,6 +5,7 @@ voxels (masked vectors or flattened volumes).
 """
 
 import numpy as np
+from scipy import ndimage
 from scipy import stats as scipy_stats
 
 
@@ -219,6 +220,24 @@ def spatial_correlation(a, b, mask=None):
     return float((a @ b) / denominator) if denominator > 0 else float("nan")
 
 
+def _plateau_centre(score, active, ijk, best):
+    """Index (into the candidates) of the voxel nearest the centre of the plateau of equal maxima that holds ``best``.
+
+    Same rule as ``clusters._local_maxima``: the connected (26-neighbour) set of active voxels with exactly the
+    best score is one peak, reported at its voxel nearest the plateau's centroid (ties: first in index order).
+    """
+    equal = np.flatnonzero(active & (score == score[best]))
+    if len(equal) < 2:
+        return best
+    low = ijk[equal].min(axis=0)
+    box = np.zeros(tuple(ijk[equal].max(axis=0) - low + 1), dtype=bool)
+    box[tuple((ijk[equal] - low).T)] = True
+    labels, _ = ndimage.label(box, structure=np.ones((3, 3, 3), dtype=bool))
+    members = equal[labels[tuple((ijk[equal] - low).T)] == labels[tuple(ijk[best] - low)]]
+    centre = ijk[members].mean(axis=0)
+    return int(members[np.argmin(((ijk[members] - centre) ** 2).sum(axis=1))])
+
+
 def peak_table(values, grid, top_k=10, min_distance_mm=10.0, mask_indices=None, sign="both"):
     """Strongest peaks of a map, at least ``min_distance_mm`` apart.
 
@@ -239,7 +258,7 @@ def peak_table(values, grid, top_k=10, min_distance_mm=10.0, mask_indices=None, 
     active = np.ones(len(candidates), dtype=bool)
     peaks = []
     while len(peaks) < top_k and active.any():
-        best = int(np.argmax(np.where(active, score, -np.inf)))
+        best = _plateau_centre(score, active, ijk, int(np.argmax(np.where(active, score, -np.inf))))
         peaks.append({"value": float(values[candidates[best]]), "ijk": tuple(int(v) for v in ijk[best]), "world": tuple(float(v) for v in world[best])})
         active &= ((world - world[best]) ** 2).sum(axis=1) >= min_distance_mm**2
         active[best] = False

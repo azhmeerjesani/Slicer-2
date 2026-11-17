@@ -12,6 +12,8 @@ baseline (Cotovio et al. 2020: 8 mm between raters against 51 mm between lesions
 - :func:`network_r`: Pearson r of two network maps, always with :data:`NETWORK_LABEL` (optional, never the agreement).
 - :func:`summary`: every pair of the study → ``derivatives/qc/interrater.tsv`` (one row per pair: no path, rater labels
   only; read by the methods text, ``methods.py``) and ``derivatives/qc/interrater.json`` (medians, baseline, seeds).
+  :func:`prepare_summary` → :func:`compute_summary` → ``summary(computed=...)`` does the same in three steps, so that the
+  Library reads the masks and computes the metrics in a worker thread (files and numpy only) and writes on the main thread.
 - :func:`assign`: a seeded random fraction (or chosen subjects) gets a second tracing (``rater2_status`` = assigned);
   the seed, the fraction, the mode and the blind level are recorded in ``study.json`` ``agreement.assignments`` and
   in the audit log.
@@ -507,18 +509,67 @@ def _space_of(study, row):
     return space or getattr(study, "space", None)
 
 
-def study_pair(study, sid, grid2mm="auto"):
-    """:func:`pair_metrics` of a subject's two tracings (the 2 mm grid of its space with ``grid2mm`` "auto"), or None."""
+def _stamp(path):
+    """(size, mtime in ns) of a file, or None: tells whether a file changed after its metrics were computed."""
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return info.st_size, info.st_mtime_ns
+
+
+def pair_job(study, sid, grid2mm="auto"):
+    """What :func:`compute_pair` needs for a subject's two tracings, read from the study (the main thread; no image is read):
+    {"participant_id", "paths" (first, second), "stamps" (:func:`_stamp` of each), "grid" (the 2 mm grid of its space with
+    ``grid2mm`` "auto")}, or None (no pair).
+    """
     row = study.subject(sid)
     paths = pair_paths(study, row)
     if paths is None:
         return None
-    a, affine_a = load_mask(paths[0])
-    b, affine_b = load_mask(paths[1])
     grid = connectome_grid(_space_of(study, row)) if grid2mm == "auto" else grid2mm
+    return {"participant_id": sid, "paths": paths, "stamps": tuple(_stamp(path) for path in paths), "grid": grid}
+
+
+def compute_pair(job):
+    """:func:`pair_metrics` of a :func:`pair_job` (files and numpy only: safe in a worker thread)."""
+    a, affine_a = load_mask(job["paths"][0])
+    b, affine_b = load_mask(job["paths"][1])
+    grid = job["grid"]
     result = pair_metrics(a, b, affine_a, grid2mm=grid, affine_b=affine_b)
     result["grid_2mm_id"] = grid if isinstance(grid, str) else None
     return result
+
+
+def _same_job(a, b):
+    return a["paths"] == b["paths"] and a["stamps"] == b["stamps"] and a["grid"] == b["grid"]
+
+
+def study_pair(study, sid, grid2mm="auto"):
+    """:func:`pair_metrics` of a subject's two tracings (the 2 mm grid of its space with ``grid2mm`` "auto"), or None."""
+    job = pair_job(study, sid, grid2mm)
+    return None if job is None else compute_pair(job)
+
+
+def baseline_inputs(study, sids=None):
+    """The lesions of :func:`between_lesion_baseline`, read from the study (the main thread; no image is read): a list of
+    (participant_id, family, stored centroid (x, y, z) or None, lesion path or None, :func:`_stamp` of the path).
+    """
+    rows = [row for row in study.subjects if str(row.get("include", "1")) != "0" and (sids is None or row["participant_id"] in sids)]
+    items = []
+    for row in rows:
+        values = [_float(row.get(key)) for key in ("centroid_x", "centroid_y", "centroid_z")]
+        family = geometry.space_family(_space_of(study, row))
+        if family in ("native", "unknown") and not _missing(row.get("space")):
+            continue  # native-space lesions are not in a common space
+        if all(value is not None for value in values) and _missing(row.get("rater1_lesion")):
+            items.append((row["participant_id"], family, tuple(values), None, None))
+            continue
+        path = study.abspath(row.get("rater1_lesion") if not _missing(row.get("rater1_lesion")) else row.get("lesion"))
+        if not path or not os.path.isfile(path):
+            continue
+        items.append((row["participant_id"], family, None, path, _stamp(path)))
+    return items
 
 
 def between_lesion_baseline(study, sids=None):
@@ -528,24 +579,25 @@ def between_lesion_baseline(study, sids=None):
     Centroids come from ``centroid_x/y/z`` when the row has them, else from the lesion file (the first tracing before an
     adjudication). Included subjects with a lesion only; lesions of different spaces are not compared across families.
     """
-    rows = [row for row in study.subjects if str(row.get("include", "1")) != "0" and (sids is None or row["participant_id"] in sids)]
+    return baseline_from_inputs(baseline_inputs(study, sids))
+
+
+def baseline_from_inputs(items, cancel=None):
+    """:func:`between_lesion_baseline` of :func:`baseline_inputs` (files and numpy only: safe in a worker thread).
+
+    :param cancel: called before each lesion file is read; True stops with ``jobs.Cancelled``.
+    """
     centroids = {}
-    for row in rows:
-        values = [_float(row.get(key)) for key in ("centroid_x", "centroid_y", "centroid_z")]
-        family = geometry.space_family(_space_of(study, row))
-        if family in ("native", "unknown") and not _missing(row.get("space")):
-            continue  # native-space lesions are not in a common space
-        if all(value is not None for value in values) and _missing(row.get("rater1_lesion")):
-            centroids[row["participant_id"]] = (family, np.array(values))
+    for sid, family, values, path, _stamped in items:
+        if values is not None:
+            centroids[sid] = (family, np.array(values))
             continue
-        path = study.abspath(row.get("rater1_lesion") if not _missing(row.get("rater1_lesion")) else row.get("lesion"))
-        if not path or not os.path.isfile(path):
-            continue
+        _check_cancel(cancel)
         with contextlib.suppress(OSError, ValueError):
             mask, affine = load_mask(path)
             center = centroid_mm(mask, affine)
             if center is not None:
-                centroids[row["participant_id"]] = (family, center)
+                centroids[sid] = (family, center)
     ids = list(centroids)
     distances = []
     for index, first in enumerate(ids):
@@ -592,12 +644,61 @@ def _median(values):
     return float(statistics.median(values)) if values else None
 
 
-def summary(study, threshold=None, grid2mm="auto", write=True, update_rows=True):
+def _check_cancel(cancel, done=None):
+    if cancel is not None and cancel():
+        from .jobs import Cancelled
+
+        raise Cancelled(done=done)
+
+
+def prepare_summary(study, grid2mm="auto"):
+    """The first step of :func:`summary` in a worker thread: what :func:`compute_summary` reads, taken from the study on the main
+    thread (paths and file stamps only, no image is read). Pairs whose files cannot be found are left to :func:`summary`.
+    """
+    jobs = []
+    for row in study.subjects:
+        if status_of(row) not in PAIR_STATUSES:
+            continue
+        job = None
+        with contextlib.suppress(OSError, ValueError):
+            job = pair_job(study, row["participant_id"], grid2mm)
+        if job is not None:
+            jobs.append(job)
+    return {"grid2mm": grid2mm, "jobs": jobs, "baseline_inputs": baseline_inputs(study)}
+
+
+def compute_summary(prepared, progress=None, cancel=None):
+    """The second step, in a worker thread (files and numpy only; the study object is not touched): the metrics of every pair
+    of :func:`prepare_summary` and the between-lesion baseline. Pass the result to ``summary(study, computed=...)`` on the main
+    thread, which writes the files and the rows.
+
+    :param progress: ``progress(stage, done, total)``; stage "pairs" (``done`` of ``total`` pairs) or "baseline".
+    :param cancel: called before each file is read; True stops with ``jobs.Cancelled``.
+    """
+    jobs = prepared["jobs"]
+    pairs = []
+    for index, job in enumerate(jobs):
+        _check_cancel(cancel, index)
+        if progress is not None:
+            progress("pairs", index, len(jobs))
+        try:
+            pairs.append((job, compute_pair(job), None))
+        except (OSError, ValueError) as error:
+            pairs.append((job, None, str(error)))
+    if progress is not None:
+        progress("baseline", None, None)
+    baseline = baseline_from_inputs(prepared["baseline_inputs"], cancel)
+    return {"grid2mm": prepared["grid2mm"], "pairs": pairs, "baseline_inputs": prepared["baseline_inputs"], "baseline": baseline}
+
+
+def summary(study, threshold=None, grid2mm="auto", write=True, update_rows=True, computed=None):
     """Agreement of every pair of the study.
 
     :param threshold: Dice below which a pair is adjudicated (default: the study's, :func:`dice_threshold`).
     :param write: write ``derivatives/qc/interrater.tsv`` and ``interrater.json`` (atomically).
     :param update_rows: set ``rater2_dice`` of the rows in memory (the caller saves the study).
+    :param computed: the result of :func:`compute_summary` (a worker thread): its metrics are used for the pairs whose files and
+      grid are unchanged; a pair that changed meanwhile is computed here.
     :return: {"format", "version", "created", "n_pairs", "threshold", "median": {metric: value}, "median_2mm",
       "baseline" (:func:`between_lesion_baseline`), "below_threshold": [ids], "adjudicated", "modes", "assignments",
       "pairs": [tsv rows], "label_network", "text"}.
@@ -605,17 +706,26 @@ def summary(study, threshold=None, grid2mm="auto", write=True, update_rows=True)
     threshold = dice_threshold(study) if threshold is None else float(threshold)
     pairs = []
     tracers = done_tracers(study)
+    done = {}
+    if computed is not None and computed.get("grid2mm") == grid2mm:
+        done = {job["participant_id"]: (job, metrics, error) for job, metrics, error in computed["pairs"]}
     for row in study.subjects:
         sid = row["participant_id"]
         if status_of(row) not in PAIR_STATUSES:
             continue  # a second tracing in progress is not a pair yet
+        row_error = None
         try:
-            metrics = study_pair(study, sid, grid2mm)
+            job = pair_job(study, sid, grid2mm)
+            earlier = done.get(sid)
+            if job is None:
+                metrics = None
+            elif earlier is not None and _same_job(earlier[0], job):
+                metrics, row_error = earlier[1], earlier[2]
+            else:
+                metrics = compute_pair(job)
         except (OSError, ValueError) as error:
             metrics = None
             row_error = str(error)
-        else:
-            row_error = None
         if metrics is None:
             if row_error:
                 pairs.append({"participant_id": sid, "error": row_error})
@@ -648,7 +758,11 @@ def summary(study, threshold=None, grid2mm="auto", write=True, update_rows=True)
         if update_rows and dice is not None:
             study.set(sid, rater2_dice=round(dice, 4))
     good = [pair for pair in pairs if "error" not in pair]
-    baseline = between_lesion_baseline(study)
+    inputs = baseline_inputs(study)
+    if computed is not None and computed.get("baseline_inputs") == inputs:
+        baseline = computed["baseline"]
+    else:
+        baseline = baseline_from_inputs(inputs)
     out = {
         "format": SUMMARY_FORMAT,
         "version": SUMMARY_VERSION,

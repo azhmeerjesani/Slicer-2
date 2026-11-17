@@ -516,7 +516,9 @@ void qSlicerCoreApplicationPrivate::init()
 
   qSlicerExtensionsManagerModel* model = new qSlicerExtensionsManagerModel(q);
   model->setExtensionsSettingsFilePath(q->slicerRevisionUserSettingsFilePath());
-  model->setSlicerRequirements(q->revision(), q->os(), q->arch());
+  // The extensions server knows this build by the revision of the official build it is based on
+  // (Slicer Studio fork: Slicer_REVISION is the fork's own commit count, which matches no official build).
+  model->setSlicerRequirements(Slicer_EXTENSIONS_SERVER_REVISION, q->os(), q->arch());
   q->setExtensionsManagerModel(model);
 
   // Clear extension server settings with requested serverAPI changed
@@ -1612,10 +1614,11 @@ QString qSlicerCoreApplication::slicerSharePath() const
 //-----------------------------------------------------------------------------
 bool qSlicerCoreApplication::isEmbeddedModule(const QString& moduleFileName) const
 {
+  // Extensions are installed in <Slicer_EXTENSIONS_DIRBASENAME>-<Slicer_REVISION> (defaultExtensionsInstallPath),
+  // which is not the revision the extensions manager model sends to the server (Slicer_EXTENSIONS_SERVER_REVISION).
   QString slicerRevision = this->revision();
   std::string extensionBaseDir;
 #ifdef Slicer_BUILD_EXTENSIONMANAGER_SUPPORT
-  slicerRevision = this->extensionsManagerModel()->slicerRevision();
   extensionBaseDir = Slicer_EXTENSIONS_DIRBASENAME;
 #endif
   return vtkSlicerApplicationLogic::IsEmbeddedModule(moduleFileName.toStdString(), this->slicerHome().toStdString(), slicerRevision.toStdString(), extensionBaseDir);

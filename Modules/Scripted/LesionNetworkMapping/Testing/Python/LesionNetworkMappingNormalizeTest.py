@@ -248,8 +248,10 @@ class NormalizeTest(unittest.TestCase):
         code, events, _, _ = _run("run", "--scan", template, "--out", self.path("errors", "out"))
         self.assertEqual(code, normalize.EXIT_NOTHING_TO_DO)
         self.assertEqual(_first(events, "error")["code"], "already_template_space")
-        # no BRAINSFit on an emptied PATH
-        code, events, _, _ = _run("run", "--scan", scan, "--lesion", lesion, "--out", self.path("errors", "out"), env=_env(PATH=""))
+        # an explicit --brainsfit that does not exist. (An emptied PATH cannot be used here: under Slicer
+        # sys.executable is the PythonSlicer launcher, which puts Slicer's cli-modules back on PATH; the
+        # PATH lookup is covered by test_04_find_executable.)
+        code, events, _, _ = _run("run", "--scan", scan, "--lesion", lesion, "--out", self.path("errors", "out"), "--brainsfit", self.path("no-such-dir", "BRAINSFit"))
         self.assertEqual(code, jobs.EXIT_ERROR)
         self.assertEqual(_first(events, "error")["code"], "executable_missing")
         # a missing template (NLin6 files are never bundled)
@@ -262,6 +264,22 @@ class NormalizeTest(unittest.TestCase):
             error = _first(events, "error")
             self.assertEqual(error["code"], "template_missing")
             self.assertTrue(error["files"][0]["url"].startswith("https://templateflow.s3.amazonaws.com/"))
+
+    def test_04_find_executable(self):
+        """The PATH lookup of find_executable, without a launcher that re-adds Slicer's cli-modules to PATH."""
+        from unittest import mock
+
+        with mock.patch.object(normalize.shutil, "which", return_value=None):
+            with self.assertRaises(jobs.JobError) as raised:
+                normalize.find_executable("BRAINSFit")
+        self.assertEqual(raised.exception.code, "executable_missing")
+        here = os.path.abspath(__file__)
+        with mock.patch.object(normalize.shutil, "which", return_value=here):
+            self.assertEqual(normalize.find_executable("BRAINSFit"), here)
+        self.assertEqual(normalize.find_executable("BRAINSFit", here), here)
+        with self.assertRaises(jobs.JobError) as raised:
+            normalize.find_executable("BRAINSFit", self.path("no-such-dir", "BRAINSFit"))
+        self.assertEqual(raised.exception.code, "executable_missing")
 
     # Accuracy
 
@@ -473,6 +491,21 @@ class NormalizeTest(unittest.TestCase):
             if wrapper.poll() is None:
                 wrapper.kill()
 
+    def test_33_unwritable_output_folder(self):
+        """A folder that cannot be written ends as code output_unwritable naming it (not as an unexpected exception)."""
+        import errno
+        from unittest import mock
+
+        out = self.path("unwritable-out")
+        for error in (PermissionError(errno.EACCES, "Permission denied", out), OSError(errno.EROFS, "Read-only file system", out)):
+            with mock.patch.object(normalize.os, "makedirs", side_effect=error):
+                with self.assertRaises(jobs.JobError) as caught:
+                    normalize.normalize(self.subject["scan"], self.subject["lesion"], out, quality="affine", template_dirs=EXTRA_TEMPLATE_DIRS)
+            self.assertEqual(caught.exception.code, "output_unwritable")
+            self.assertIn(out, caught.exception.message)
+            self.assertEqual(caught.exception.fields.get("path"), out)
+        self.assertFalse(normalize.is_unwritable_error(OSError(errno.ENOSPC, "No space left on device")))
+
     def test_34_lock(self):
         run = self.affine_run()
         lock = os.path.join(run["out"], normalize.LOCK_NAME)
@@ -542,6 +575,23 @@ class NormalizeTest(unittest.TestCase):
         self.assertIn("--initial-transform", error["message"])
         self.assertFalse(os.path.exists(os.path.join(self.path("misaligned"), "sub-01_space-MNI152NLin2009cAsym_res-1_desc-lesion_mask.nii.gz")))
         self.assertEqual(self.record({"out": self.path("misaligned")})["status"], "error")
+
+    def test_37_child_failure_names_the_kept_log(self):
+        # a binary mask as the scan: BRAINSFit fails; the work folder is deleted but the logs are kept
+        lesion = self.subject["lesion"]
+        out = self.path("child_failed")
+        code, events, _, _ = _run("run", "--scan", lesion, "--lesion", lesion, "--out", out, "--quality", "affine", *TEMPLATE_DIR_ARGS)
+        self.assertEqual(code, jobs.EXIT_ERROR)
+        error = _first(events, "error")
+        self.assertEqual(error["code"], "child_failed")
+        kept = os.path.join(out, "logs", "last-error")
+        self.assertEqual(os.path.dirname(error["log"]), kept)
+        self.assertTrue(os.path.isfile(error["log"]), error["log"])
+        self.assertTrue(error["message"].endswith("see logs/last-error/" + os.path.basename(error["log"])), error["message"])
+        self.assertFalse([name for name in os.listdir(out) if name.startswith(".work-")])
+        record = self.record({"out": out})
+        self.assertEqual(record["status"], "error")
+        self.assertEqual(record["error"]["message"], error["message"])
 
     # Two-step, warp, batch, tilt
 
@@ -658,6 +708,31 @@ class NormalizeTest(unittest.TestCase):
         code, events, _, _ = _run("batch", "--study", study_path, "--subjects", "sub-03", "--quality", "affine")
         self.assertEqual(code, normalize.EXIT_NOTHING_TO_DO)
 
+    def test_43_batch_partial_failure(self):
+        """One subject fails (its scan file is missing): the exit code stays 1 and an error event says how many were normalized."""
+        study_path = self.path("partial-study")
+        study = Study.create(study_path, name="Partial batch", space=TEMPLATE)
+        for sid, name in (("sub-01", "a"), ("sub-02", "b")):
+            folder = os.path.join(study_path, "native", name)
+            os.makedirs(folder)
+            scan = os.path.join(folder, f"{sid}_T1w.nii.gz")
+            lesion = os.path.join(folder, f"{sid}_desc-lesion_mask.nii.gz")
+            if sid == "sub-01":
+                shutil.copyfile(self.subject["scan"], scan)
+            shutil.copyfile(self.subject["lesion"], lesion)
+            study.add_subject(sid, scan=study.relpath(scan), lesion=study.relpath(lesion), space="native")
+        study.save()
+        code, events, stderr, _ = _run("batch", "--study", study_path, "--quality", "affine", "--template", "auto")
+        self.assertEqual(code, 1, stderr[-2000:])
+        statuses = {e["subject"]: e["status"] for e in events if e["event"] == "result" and e.get("kind") == "subject"}
+        self.assertEqual(statuses, {"sub-01": "done", "sub-02": "failed"})
+        error = _first(events, "error", code="subjects_failed")
+        self.assertIsNotNone(error, events[-3:])
+        self.assertTrue(error["partial"])
+        self.assertTrue(error["message"].startswith("1 of 2 normalized, 1 failed"), error["message"])
+        self.assertEqual(events[-1]["event"], "done")
+        self.assertEqual(events[-1]["counts"], {"done": 1, "failed": 1})
+
     def test_50_tilt(self):
         dirs = EXTRA_TEMPLATE_DIRS
         if normalize.find_template(TEMPLATE, dirs=dirs)["files"]["head"] is None:
@@ -681,6 +756,133 @@ class NormalizeTest(unittest.TestCase):
         lesion, _ = _read(self.output(run, "lesion"))
         self.assertGreaterEqual(fixture.dice(lesion, straight_lesion), 0.85)
         self.assertEqual(record["qc"]["suggestion"], "review")  # more than one attempt
+
+
+class TemplateMaskStorageOrderTest(unittest.TestCase):
+    """The template brain mask may hold the image's voxels in another storage order (a LAS mask of a RAS image)."""
+
+    SHAPE = (6, 8, 5)
+
+    @staticmethod
+    def _grid(shape, spacing, origin, flip_x=False):
+        affine = np.diag([spacing[0], spacing[1], spacing[2], 1.0])
+        affine[:3, 3] = origin
+        if flip_x:  # same voxel centres, stored in the opposite i order
+            affine[0, 0] = -affine[0, 0]
+            affine[0, 3] = origin[0] + spacing[0] * (shape[0] - 1)
+        return affine
+
+    def _images(self, tmp, mask_data, mask_affine, image_data, image_affine):
+        names = {"fixed": os.path.join(tmp, "fixed.nii.gz"), "mask": os.path.join(tmp, "mask.nii.gz")}
+        nifti.write_nifti(names["fixed"], image_data.astype(np.float32), image_affine)
+        nifti.write_nifti(names["mask"], mask_data.astype(np.uint8), mask_affine)
+
+        class Context:
+            template = {"files": names}
+
+        return normalize._template_images(Context())
+
+    def test_mask_in_another_order_is_the_same_grid(self):
+        rng = np.random.default_rng(3)
+        image = rng.random(self.SHAPE)
+        mask = np.zeros(self.SHAPE, bool)
+        mask[1:4, 2:7, 0:3] = True  # not symmetric along any axis
+        origin = (-6.0, -8.0, -4.0)
+        ras = self._grid(self.SHAPE, (2.0, 2.0, 2.0), origin)
+        las = self._grid(self.SHAPE, (2.0, 2.0, 2.0), origin, flip_x=True)
+        transposed = np.array([[0.0, 2.0, 0.0, origin[0]], [2.0, 0.0, 0.0, origin[1]], [0.0, 0.0, 2.0, origin[2]], [0.0, 0.0, 0.0, 1.0]])
+        with tempfile.TemporaryDirectory() as tmp:
+            for label, mask_data, mask_affine, image_data, image_affine in (
+                ("same order", mask, ras, image, ras),
+                ("LAS mask, RAS image", mask[::-1], las, image, ras),
+                ("RAS mask, LAS image", mask, ras, image[::-1], las),
+            ):
+                _, got, affine, _ = self._images(tmp, mask_data, mask_affine, image_data, image_affine)
+                np.testing.assert_array_equal(got, mask if image_affine is ras else mask[::-1], err_msg=label)
+                np.testing.assert_allclose(affine, image_affine, atol=1e-4)
+            # axes swapped as well (i and j exchanged in the mask)
+            _, got, _, _ = self._images(tmp, mask.transpose(1, 0, 2), transposed, image, ras)
+            self.assertEqual(got.shape, self.SHAPE)
+            np.testing.assert_array_equal(got, mask)
+
+    def test_mask_on_another_grid_is_refused(self):
+        image = np.ones(self.SHAPE)
+        mask = np.ones(self.SHAPE, bool)
+        ras = self._grid(self.SHAPE, (2.0, 2.0, 2.0), (-6.0, -8.0, -4.0))
+        shifted = self._grid(self.SHAPE, (2.0, 2.0, 2.0), (-4.0, -8.0, -4.0), flip_x=True)  # also flipped: 2 mm off
+        coarse = self._grid((3, 4, 5), (4.0, 4.0, 2.0), (-6.0, -8.0, -4.0))
+        with tempfile.TemporaryDirectory() as tmp:
+            for label, mask_data, mask_affine in (("shifted", mask, shifted), ("other size", np.ones((3, 4, 5), bool), coarse)):
+                with self.assertRaises(jobs.JobError, msg=label) as raised:
+                    self._images(tmp, mask_data, mask_affine, image, ras)
+                self.assertEqual(raised.exception.code, "template_mismatch")
+
+    def test_nrrd_mask_is_read(self):
+        """A template you added may have a NRRD brain mask (the add dialog accepts NRRD): it used to fail after registering with
+        a ValueError that named the mask's absolute path (the mask was read as NIfTI only).
+        """
+        sitk = normalize._sitk()
+        mask = np.zeros(self.SHAPE, bool)
+        mask[1:4, 2:7, 0:3] = True
+        image = np.random.default_rng(5).random(self.SHAPE)
+        origin = (-6.0, -8.0, -4.0)
+        for label, affine in (("RAS", self._grid(self.SHAPE, (2.0, 2.0, 2.0), origin)), ("LAS", self._grid(self.SHAPE, (2.0, 2.0, 2.0), origin, flip_x=True))):
+            with tempfile.TemporaryDirectory() as tmp:
+                names = {"fixed": os.path.join(tmp, "fixed.nii.gz"), "mask": os.path.join(tmp, "mask.nrrd")}
+                nifti.write_nifti(names["fixed"], image.astype(np.float32), self._grid(self.SHAPE, (2.0, 2.0, 2.0), origin))
+                staged = os.path.join(tmp, "mask_source.nii.gz")
+                nifti.write_nifti(staged, (mask if label == "RAS" else mask[::-1]).astype(np.uint8), affine)
+                sitk.WriteImage(sitk.ReadImage(staged), names["mask"])  # the same voxels saved as NRRD (LPS header), as Slicer saves a mask
+
+                class Context:
+                    template = {"files": names}
+
+                _, got, _, _ = normalize._template_images(Context())
+                np.testing.assert_array_equal(got, mask, err_msg=label)
+
+
+class CheckTextTest(unittest.TestCase):
+    """'normalize check' with the text output (a terminal) lists the tools, the templates and why a user template is unusable."""
+
+    def test_text_output_lists_tools_templates_and_the_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "Missing mask")
+            os.makedirs(folder)
+            image = "tpl-MNI152NLin2009cAsym_res-02_desc-brain_T1w.nii.gz"
+            source = normalize.find_template(TEMPLATE)["files"]["fixed"]
+            self.assertTrue(source, "the bundled template image")
+            shutil.copy(source, os.path.join(folder, image))
+            grid = {"shape": [97, 115, 97], "affine": [[2.0, 0.0, 0.0, -96.5], [0.0, 2.0, 0.0, -132.5], [0.0, 0.0, 2.0, -78.5], [0.0, 0.0, 0.0, 1.0]]}
+            record = {"schema": "slicer-studio-template", "version": 1, "id": "missing-mask", "name": "Missing mask", "space": "MNI", "resolution_mm": 2, "shape": grid["shape"], "contrast": "T1w",
+                      "files": {"surfaces": [], "image": image, "mask": "my_brain_mask.nii.gz"}, "sha256": {}, "grid": grid, "notes": "", "added": "2026-10-29", "default": False}
+            with open(os.path.join(folder, "template.json"), "w", encoding="utf-8") as handle:
+                json.dump(record, handle)
+            process = subprocess.run(_command("check", "--template", "user:missing-mask", "--template-dir", tmp, "--events", "text"), check=False, capture_output=True, text=True, encoding="utf-8",
+                                     errors="replace", env=_env(), cwd=MODULE_DIR, timeout=120)
+        out = process.stdout
+        for name in ("BRAINSFit", "BRAINSResample", "BRAINSROIAuto"):
+            self.assertIn(f"  {name}: ", out)
+        self.assertIn("  template user:missing-mask: not usable: Template user:missing-mask", out)
+        self.assertIn("my_brain_mask.nii.gz", out)
+        self.assertIn("is missing from", out)
+        self.assertEqual(process.returncode, jobs.EXIT_ERROR)
+        error = [line for line in out.splitlines() if "[template_missing]" in line]
+        if error:  # the tools are installed: the error names the template problem, not a generic one
+            self.assertIn("my_brain_mask.nii.gz", error[0])
+
+    def test_text_format_of_a_check_result(self):
+        import io
+
+        sink = io.StringIO()
+        stream = normalize._EventStream(sink, text=True)
+        stream.write(json.dumps({"event": "result", "t": 0.1, "kind": "check", "ok": True,
+                                 "executables": {"BRAINSFit": {"found": True, "path": "/x/BRAINSFit", "version": "5.8.0"}, "BRAINSROIAuto": {"found": False, "message": "BRAINSROIAuto not found"}},
+                                 "templates": {"A": {"usable": True}, "B": {"usable": False, "files": {"fixed": {"found": False}}}}}) + "\n")
+        text = sink.getvalue()
+        self.assertIn("BRAINSFit: found, version 5.8.0 (/x/BRAINSFit)", text)
+        self.assertIn("BRAINSROIAuto: not found (BRAINSROIAuto not found)", text)
+        self.assertIn("template A: usable", text)
+        self.assertIn("template B: not usable: fixed file missing", text)
 
 
 if __name__ == "__main__":

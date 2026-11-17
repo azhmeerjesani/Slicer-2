@@ -301,14 +301,17 @@ class LoaderTest(_Base):
         self.assertIsNotNone(reference.load_reference(path, verify=False))
 
     def test_bundle_converted_again_with_other_data_is_stale(self):
-        # Same grid, mask, subjects, runs and dtype (identical connectome.json): only the time series differ
+        # Same grid, mask, subjects, runs and dtype: only the time series differ, so connectome.json differs only by
+        # its data fingerprint (connectome.NORMS_SHA256_KEY); the reference checks the norms files themselves
         path = self.copy_bundle("reconverted.lnmc")
         self.quiet_build(path, n_seeds=20, power_iters=1)
         with open(os.path.join(path, "connectome.json"), encoding="utf-8") as f:
-            manifest = f.read()
+            manifest = json.load(f)
         _write_bundle(path, seed=99)
         with open(os.path.join(path, "connectome.json"), encoding="utf-8") as f:
-            self.assertEqual(f.read(), manifest)
+            reconverted = json.load(f)
+        self.assertNotEqual(reconverted.pop(connectome.NORMS_SHA256_KEY), manifest.pop(connectome.NORMS_SHA256_KEY))
+        self.assertEqual(reconverted, manifest)
         self.assertIsNone(reference.load_reference(path))
         self.assertIsNone(reference.load_reference(path, strict=True))
         status = reference.reference_status(path)[0]
@@ -442,6 +445,15 @@ class ExternalMapTest(_Base):
 
 
 class CommandLineTest(_Base):
+    def test_estimate_of_a_very_fast_build_stays_positive(self):
+        # A frozen clock measures 0 s everywhere: the estimate is still a measured time, not 0.0 (which reads as "not measured")
+        from unittest import mock
+
+        with mock.patch.object(reference.time, "perf_counter", return_value=1.0):
+            info = reference.estimate(self.bundle, subjects=3, n_seeds=500)
+        self.assertIsNotNone(info["seconds"])
+        self.assertGreater(info["seconds"], 0)
+
     def run_cli(self, *args):
         result = subprocess.run([sys.executable, "-m", "LesionNetworkMappingLib.reference", *args], check=False, capture_output=True, text=True, env=_env(), cwd=self.tmp, timeout=600)
         events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]

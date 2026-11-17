@@ -133,10 +133,13 @@ the Qt 5 of Ubuntu 24.04, which is why the image is based on Ubuntu 24.04.
 ## Your files
 
 - The **data folder** (`~/SlicerStudioData` unless you choose another one with
-  `--data`) is the `Documents` folder of Slicer (also reachable as `/data`). File
-  dialogs open in Slicer's home folder: open `Documents` to find your files. It
-  is Slicer's default folder for saving scenes, and the DICOM database is
-  created there (`SlicerDICOMDatabase`).
+  `--data`) is the `Documents` folder of Slicer (also reachable as `/data`). The
+  file dialogs of Slicer Studio start there (see
+  [Lesion network mapping in the browser build](#lesion-network-mapping-in-the-browser-build));
+  a dialog that opens in Slicer's home folder instead (for example in Classic
+  mode) shows `Documents`, which is the same folder. It is Slicer's default
+  folder for saving scenes, and the DICOM database is created there
+  (`SlicerDICOMDatabase`).
 - Everything else inside the container is temporary: it is lost when the
   container is removed (`stop` removes it).
 - Slicer settings (and extensions) are kept between runs in the Docker volume
@@ -167,7 +170,10 @@ the Qt 5 of Ubuntu 24.04, which is why the image is based on Ubuntu 24.04.
   Studio stays usable down to about 1366x768.
 - **Quitting**: if you quit Slicer (File > Exit), it starts again after a few
   seconds, so the browser tab keeps working. "Restart Slicer" works as on the
-  desktop. Use `stop` to stop everything.
+  desktop. Use `stop` to stop everything. Stopping (`stop` or `Ctrl+C`) quits
+  Slicer as File > Exit does: the open project is saved first (`local` starts
+  Slicer with `SLICER_STUDIO_STOP_ON_SIGTERM=1` for this; the container needs no
+  setting).
 - **Extensions**: the Extensions Manager needs a package built with the system
   OpenSSL 3 (`Slicer_USE_SYSTEM_OpenSSL=ON`). An image built from an older
   package that bundles OpenSSL 1.1 cannot download the extension catalog
@@ -194,7 +200,12 @@ the Qt 5 of Ubuntu 24.04, which is why the image is based on Ubuntu 24.04.
 - **Figures enter through "Open figure...".** The browser build has no image clipboard
   and no drag-and-drop from your computer into Slicer, so paste and drop do not work;
   use "Open figure..." and pick the file from `/data`.
-- **File dialogs start in `/data`** until you choose another folder (the container's
+- **"Show in Files" and links.** The container has no file manager and no browser, so
+  "Show in Files", "Show folder", "Open folder" and link-outs (a DOI, a connectome page)
+  show a small window instead: the folder path (a path under `/data` is in your `--data`
+  folder on the host) or the link, with a Copy button.
+- **File dialogs start in `/data`** until you choose another folder ("Save a copy as..."
+  of an open project starts in its `Exports` folder, under `/data/Slicer Studio`; the container's
   start-up script sets the Studio settings `Studio/LastSaveFolder` and `Studio/LastOpenDirectory` when they are empty or point to a missing folder).
 - **Apple Silicon.** The image is `linux/amd64`, so on an Apple Silicon Mac it runs under
   emulation. The heavy lesion network mapping jobs (normalization to the template,

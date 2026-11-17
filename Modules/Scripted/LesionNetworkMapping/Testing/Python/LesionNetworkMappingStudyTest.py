@@ -84,6 +84,40 @@ class StudyTest(unittest.TestCase):
         self.assertTrue(Study.is_study(folder))
         self.assertFalse(Study.is_study(self.tmp))
 
+    def test_add_files_records_the_space_of_any_registry_grid(self):
+        """Lesions on ATLAS (McGill 2009a), SPM and user-template grids get that grid's space, not "native"."""
+        from LesionNetworkMappingLib import geometry
+
+        def on_grid(name, grid_id):
+            spec = geometry.GRID_BY_ID[grid_id]
+            return self._image(f"in/{name}_lesion.nii.gz", shape=spec.shape, affine=spec.affine)
+
+        on_grid("sub-mcgill", "McGill2009a-1mm")
+        on_grid("sub-spm", "SPM-1mm")
+        on_grid("sub-nlin6", "NLin6-2mm")
+        self._image("in/sub-native_lesion.nii.gz")
+        user_affine = np.array([[1.0, 0, 0, -60.0], [0, 1, 0, -80.0], [0, 0, 1, -40.0], [0, 0, 0, 1]])
+        geometry.register_grid(geometry.grid_spec_from_affine("user:studytest", (120, 150, 100), user_affine, "MNI152NLin2009cAsym"))
+        try:
+            self._image("in/sub-user_lesion.nii.gz", shape=(120, 150, 100), affine=user_affine)
+            created = Study.create(self.path("Spaces"))
+            created.add_files(self.path("in"))
+            spaces = {row["participant_id"]: row["space"] for row in created.subjects}
+            self.assertEqual(spaces, {
+                "sub-mcgill": "MNI152NLin2009aSym", "sub-spm": "MNI152Lin", "sub-nlin6": "MNI152NLin6Asym",
+                "sub-native": "native", "sub-user": "MNI152NLin2009cAsym",
+            })
+            self.assertEqual(study.detect_file_space(self.path("in/sub-mcgill_lesion.nii.gz")), "MNI152NLin2009aSym")
+            self.assertEqual(study.detect_file_space(self.path("in/sub-user_lesion.nii.gz")), "MNI152NLin2009cAsym")
+            self.assertEqual(study.detect_file_space(self.path("in/sub-native_lesion.nii.gz")), "native")
+            # An answered ambiguous grid gives its answer to lesions added later
+            created.grid_answers = {"SPM-1mm": "MNIColin27"}
+            on_grid("sub-spm2", "SPM-1mm")
+            created.add_files(self.path("in/sub-spm2_lesion.nii.gz"))
+            self.assertEqual(created.subject("sub-spm2")["space"], "MNIColin27")
+        finally:
+            geometry.unregister_grid("user:studytest")
+
     def test_unknown_columns_keep_their_order(self):
         folder = self.path("bids")
         os.makedirs(folder)
@@ -103,6 +137,48 @@ class StudyTest(unittest.TestCase):
         self.assertEqual(again.subjects, opened.subjects)
         self.assertEqual(self._tsv_lines(folder)[0].split("\t")[:6], ["participant_id", "age", "group", "sex", "score_b", "score_a"])
         self.assertEqual(again.subject("sub-02")["score_c"], "n/a")
+
+    def test_include_written_by_pandas(self):
+        # pandas writes an integer column with an empty cell as floats (1.0 / 0.0 / empty): every reader must see
+        # include = 0 as excluded and 1.0 as included, and the next save writes the values as Studio does
+        folder = self.path("pandas")
+        created = Study.create(folder)
+        for number in range(1, 5):
+            created.add_subject(f"sub-0{number}", status="traced", lesion=f"lesions/sub-0{number}_lesion.nii.gz")
+        created.save()
+        lines = self._tsv_lines(folder)
+        header = lines[0].split("\t")
+        column = {name: index for index, name in enumerate(header)}
+        cells = [line.split("\t") for line in lines[1:] if line]
+        for row, include in zip(cells, ("1.0", "0.0", "1.0", ""), strict=True):
+            row[column["include"]] = include
+        cells[1][column["status"]] = "Traced"  # another case of an allowed value
+        cells[3][column["status"]] = cells[3][column["qc"]] = ""  # a row appended without these columns
+        with open(os.path.join(folder, study.PARTICIPANTS_TSV), "w", encoding="utf-8") as f:
+            f.write("\n".join(["\t".join(header)] + ["\t".join(row) for row in cells]) + "\n")
+
+        opened = Study.open(folder)
+        rows, excluded = opened.analysis_rows()
+        self.assertEqual(([row["participant_id"] for row in rows], excluded), (["sub-01", "sub-03", "sub-04"], {study.EXCLUDED_INCLUDE: ["sub-02"]}))
+        self.assertEqual([sid for sid, _path in opened.lesion_paths(with_ids=True)], ["sub-01", "sub-03", "sub-04"])
+        self.assertEqual([row["include"] for row in opened.subjects], ["1", "0", "1", "1"])
+        self.assertEqual([(row["status"], row["qc"]) for row in opened.subjects][1:], [("traced", "unreviewed"), ("traced", "unreviewed"), ("untraced", "unreviewed")])
+        self.assertEqual([study.is_included(row) for row in opened.subjects], [True, False, True, True])
+        # The next save repairs the file
+        opened.save()
+        saved = [line.split("\t") for line in self._tsv_lines(folder)[1:] if line]
+        self.assertEqual([(row[column["include"]], row[column["status"]], row[column["qc"]]) for row in saved],
+                         [("1", "traced", "unreviewed"), ("0", "traced", "unreviewed"), ("1", "traced", "unreviewed"), ("1", "untraced", "unreviewed")])
+        # A float written on disk while the study is open is merged as the same value
+        saved[2][column["include"]] = "0.0"
+        with open(os.path.join(folder, study.PARTICIPANTS_TSV), "w", encoding="utf-8") as f:
+            f.write("\n".join(["\t".join(header)] + ["\t".join(row) for row in saved]) + "\n")
+        opened.set("sub-04", notes="kept")
+        opened.save()
+        self.assertEqual([row["include"] for row in opened.subjects], ["1", "0", "0", "1"])
+        self.assertEqual([row["include"] for row in Study.open(folder).subjects], ["1", "0", "0", "1"])
+        self.assertEqual([study.include_value(v) for v in ("1", "0", "1.0", "0.0", " 1.00 ", "-0.0", "True", "no", "N", "2", "n/a", "", None)],
+                         ["1", "0", "1", "0", "1", "0", "1", "0", "0", None, None, None, None])
 
     def test_validation(self):
         created = Study.create(self.path("v"))
@@ -137,10 +213,145 @@ class StudyTest(unittest.TestCase):
         with open(os.path.join(folder, study.PARTICIPANTS_TSV), "w", encoding="utf-8") as f:
             f.write("participant_id\tgroup\nsub-01\tcase\t\t\n")
         self.assertEqual(Study.open(folder).subject("sub-01")["group"], "case")
+        # Tables from Excel: empty column names after the last column (trailing tabs) are ignored, values under them are not
+        path = os.path.join(folder, "excel.tsv")
+        with open(path, "wb") as f:
+            f.write(b"participant_id\tgroup\t\t\r\nsub-01\tcase\t\t\r\nsub-02\tcontrol\t\t\r\n")
+        self.assertEqual(study.read_tsv(path)[0], ["participant_id", "group"])
+        with open(path, "wb") as f:
+            f.write(b"participant_id\tgroup\t\r\nsub-01\tcase\tx\r\n")
+        with self.assertRaisesRegex(ValueError, "line 2: 3 fields but only 2 columns"):
+            study.read_tsv(path)
+        with open(path, "wb") as f:
+            f.write(b"participant_id\t\tgroup\r\nsub-01\t\tcase\r\n")
+        with self.assertRaisesRegex(ValueError, "duplicate or empty column names"):
+            study.read_tsv(path)
+        # Windows-1252 and UTF-16 (Excel's Text and Unicode Text) are refused with what to do, not a raw codec error
+        for encoding in ("cp1252", "utf-16"):
+            with open(path, "wb") as f:
+                f.write("participant_id\tnotes\r\nsub-01\tcafé Müller\r\n".encode(encoding))
+            with self.assertRaises(study.TableError) as raised:
+                study.read_tsv(path)
+            self.assertIn("Save the table as UTF-8", str(raised.exception))
+            self.assertNotIn("codec", str(raised.exception))
+            self.assertNotIn(folder, str(raised.exception))
+            self.assertTrue(raised.exception.user_problem)
+            self.assertIsInstance(raised.exception, ValueError)
+        with open(path, "wb") as f:
+            f.write("participant_id\tnotes\r\nsub-01\tcafé\r\n".encode("utf-8-sig"))
+        self.assertEqual(study.read_tsv(path)[1][0]["notes"], "café")
         with open(os.path.join(folder, study.STUDY_JSON), "w", encoding="utf-8") as f:
             json.dump({"format": "slicer-studio-study", "version": 2}, f)
         with self.assertRaisesRegex(ValueError, "newer"):
             Study.open(folder)
+
+    def test_quoted_values_written_by_pandas(self):
+        # BIDS escapes a tab in a value with double quotes; pandas, R and Python's csv module also quote line breaks and
+        # quotes. Such a file must open, merge into an open study, and come back intact (it used to make the study unopenable).
+        import csv
+
+        def rewrite(folder, notes):
+            path = os.path.join(folder, study.PARTICIPANTS_TSV)
+            with open(path, encoding="utf-8", newline="") as f:
+                cells = list(csv.reader(f, delimiter="\t"))
+            if "mRS" not in cells[0]:
+                cells[0].append("mRS")
+            notes_column, mrs_column = cells[0].index("notes"), cells[0].index("mRS")
+            for number, row in enumerate(cells[1:]):
+                row += [""] * (len(cells[0]) - len(row))
+                row[notes_column], row[mrs_column] = notes.get(row[0], row[notes_column]), str(number)
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                csv.writer(f, dialect="excel-tab", lineterminator="\n").writerows(cells)
+            with open(path, encoding="utf-8") as f:
+                return f.read()
+
+        notes = {"sub-01": "left MCA\nsecond line", "sub-02": "tab\there", "sub-03": 'size 2" lesion', "sub-04": '"large" infarct'}
+        folder = self.path("quoted")
+        created = Study.create(folder)
+        for number in range(1, 5):
+            created.add_subject(f"sub-0{number}")
+        created.save()
+        text = rewrite(folder, notes)
+        self.assertIn('"tab\there"', text)
+        self.assertIn('"left MCA\nsecond line"', text)
+        opened = Study.open(folder)
+        self.assertEqual(opened.subject_ids, ["sub-01", "sub-02", "sub-03", "sub-04"])
+        # tabs and line breaks become one space, as Studio writes notes
+        expected = ["left MCA second line", "tab here", 'size 2" lesion', '"large" infarct']
+        self.assertEqual([opened.subject(sid)["notes"] for sid in opened.subject_ids], expected)
+        self.assertEqual([opened.subject(sid)["mRS"] for sid in opened.subject_ids], ["0", "1", "2", "3"])
+
+        # The same edit made while the study is open is merged by the next save, which writes
+        # typographic quotes (official 3D Slicer misreads straight ones) and holds what it wrote
+        created.set("sub-01", rater="AB")
+        rewrite(folder, notes)
+        created.save()
+        self.assertEqual([created.subject(sid)["mRS"] for sid in created.subject_ids], ["0", "1", "2", "3"])
+        self.assertEqual(created.subject("sub-01")["rater"], "AB")
+        self.assertEqual(created.subject("sub-04")["notes"], "\u201clarge\u201d infarct")
+        expected = ["left MCA second line", "tab here", "size 2\u201d lesion", "\u201clarge\u201d infarct"]
+
+        # What Studio writes stays one row per line and reads back the same in Studio and in a CSV reader
+        reopened = Study.open(folder)
+        self.assertEqual(reopened.subjects, created.subjects)
+        with open(os.path.join(folder, study.PARTICIPANTS_TSV), encoding="utf-8", newline="") as f:
+            cells = list(csv.reader(f, delimiter="\t"))
+        self.assertEqual(len(cells), 5)
+        notes_column = cells[0].index("notes")
+        self.assertEqual([row[notes_column] for row in cells[1:]], expected)
+        self.assertEqual([reopened.subject(sid)["notes"] for sid in reopened.subject_ids], expected)
+
+        # A file written before quoting, with a value that starts with a lone quote, still opens as it did
+        with open(os.path.join(folder, study.PARTICIPANTS_TSV), "w", encoding="utf-8") as f:
+            f.write('participant_id\tnotes\tgroup\nsub-01\t"unclosed note\tcase\nsub-02\tsize 2"\tcontrol\nsub-03\t"a" b\tn/a\n')
+        old = Study.open(folder)
+        self.assertEqual([(row["participant_id"], row["notes"], row["group"]) for row in old.subjects],
+                         [("sub-01", '"unclosed note', "case"), ("sub-02", 'size 2"', "control"), ("sub-03", '"a" b', "n/a")])
+
+    def test_quotes_typed_in_cells_read_alike_in_official_slicer(self):
+        """Straight double quotes in cells are written as typographic quotes in participants.tsv and
+        supplementary_lesions.tsv, so that official 3D Slicer (VTK's delimited text reader, which takes every
+        straight quote as a string delimiter and knows no escaped quote) reads every cell as Studio does.
+        """
+        try:
+            import mrml
+        except ImportError:
+            mrml = None
+        from LesionNetworkMappingLib import export
+
+        typed = {"sub-01": 'Müller "et al." 2020', "sub-02": 'a"quote', "sub-03": 'lesion 5" wide', "sub-04": '"Pure alexia" (Smith, "2019")'}
+        shown = {"sub-01": "Müller \u201cet al.\u201d 2020", "sub-02": "a\u201dquote", "sub-03": "lesion 5\u201d wide",
+                 "sub-04": "\u201cPure alexia\u201d (Smith, \u201c2019\u201d)"}
+        self.assertEqual(study.typographic_quotes("plain text"), "plain text")
+        folder = self.path("quotes")
+        created = Study.create(folder)
+        for sid, text in typed.items():
+            created.add_subject(sid, citation=text, notes=text, rater="AB")
+        self.assertEqual({sid: created.subject(sid)["citation"] for sid in typed}, shown)  # held as written
+        created.save()
+        tables = [os.path.join(folder, study.PARTICIPANTS_TSV), export.supplementary_lesions_tsv(created, self.path("supplementary_lesions.tsv"))]
+        for path in tables:
+            with open(path, encoding="utf-8") as f:
+                self.assertNotIn('"', f.read(), path)
+            columns, rows = study.read_tsv(path)
+            self.assertEqual({row["participant_id"]: row["citation"] for row in rows}, shown, path)
+            if mrml is None:
+                continue
+            # What official 3D Slicer's table reader makes of the file: the same columns and cells
+            scene = mrml.vtkMRMLScene()
+            storage = mrml.vtkMRMLTableStorageNode()
+            table = mrml.vtkMRMLTableNode()
+            scene.AddNode(storage)
+            scene.AddNode(table)
+            storage.SetFileName(path)
+            self.assertTrue(storage.ReadData(table), path)
+            vtable = table.GetTable()
+            read = [vtable.GetColumn(index).GetName() for index in range(vtable.GetNumberOfColumns())]
+            self.assertEqual(read, columns, path)
+            for number, row in enumerate(rows):
+                self.assertEqual([vtable.GetValue(number, index).ToString() for index in range(len(columns))],
+                                 [row[column] for column in columns], path)
+        self.assertEqual({row["participant_id"]: row["notes"] for row in Study.open(folder).subjects}, shown)
 
     def test_tsv_import_export(self):
         created = Study.create(self.path("s"))
@@ -161,8 +372,36 @@ class StudyTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             created.import_tsv(self.path("bad.tsv"))
         self.assertEqual(created.subject("sub-01")["group"], "case")  # validated before anything changed
+        # Other spellings of the fixed values keep their meaning: include 1.0 / 0.0 (pandas) or yes, status in another case
+        with open(self.path("pandas.tsv"), "w", encoding="utf-8") as f:
+            f.write("participant_id\tinclude\tstatus\nsub-01\t0.0\tTraced\nsub-02\tyes\tn/a\n")
+        created.import_tsv(self.path("pandas.tsv"))
+        self.assertEqual([(row["include"], row["status"]) for row in created.subjects[:2]], [("0", "traced"), ("1", "untraced")])
+        created.set("sub-01", include=1, status="untraced")
         created.save()
         self.assertEqual(Study.open(created.path).subjects, created.subjects)
+
+    def test_add_files_pairs_lesion_with_scan_of_its_session(self):
+        # Two sessions on different grids, the lesion traced on the later one: its own scan is chosen, not the
+        # session that sorts first (alphabetically ses-1 / ses-baseline)
+        folder = self.path("study")
+        created = Study.create(folder)
+        other_grid = NATIVE.copy()
+        other_grid[:3, 3] += 12.0
+        for sid, first, second in (("01", "1", "2"), ("02", "baseline", "followup")):
+            self._image(f"bids/sub-{sid}/ses-{first}/anat/sub-{sid}_ses-{first}_T1w.nii.gz", shape=(8, 9, 7))
+            self._image(f"bids/sub-{sid}/ses-{second}/anat/sub-{sid}_ses-{second}_T1w.nii.gz", shape=(9, 10, 6), affine=other_grid)
+            self._image(f"bids/sub-{sid}/ses-{second}/anat/sub-{sid}_ses-{second}_desc-lesion_mask.nii.gz", shape=(9, 10, 6), affine=other_grid, value=1)
+        # Same grid in both sessions: the lesion's session decides
+        self._image("bids/sub-03/ses-1/anat/sub-03_ses-1_T1w.nii.gz")
+        self._image("bids/sub-03/ses-2/anat/sub-03_ses-2_T1w.nii.gz")
+        self._image("bids/sub-03/ses-2/anat/sub-03_ses-2_desc-lesion_mask.nii.gz", value=1)
+        report = created.add_files([self.path("bids")], root=folder)
+        for sid, session in (("01", "2"), ("02", "followup"), ("03", "2")):
+            self.assertEqual(report["pairs"][f"sub-{sid}"]["scan"], self.path(f"bids/sub-{sid}/ses-{session}/anat/sub-{sid}_ses-{session}_T1w.nii.gz"), sid)
+            self.assertEqual(created.subject(f"sub-{sid}")["scan"], f"../bids/sub-{sid}/ses-{session}/anat/sub-{sid}_ses-{session}_T1w.nii.gz")
+        skipped = {os.path.basename(item["path"]) for item in report["skipped"]}
+        self.assertEqual(skipped, {"sub-01_ses-1_T1w.nii.gz", "sub-02_ses-baseline_T1w.nii.gz", "sub-03_ses-1_T1w.nii.gz"})
 
     def test_add_files_pairs_scans_and_lesions(self):
         folder = self.path("study")
@@ -338,6 +577,131 @@ class StudyTest(unittest.TestCase):
         self.assertEqual(study.format_value(float("nan")), "n/a")
         self.assertEqual(study.format_value(1e-9), "1e-09")
         self.assertEqual(study.format_value([]), "none")
+
+    def test_ids_that_differ_only_in_case_are_refused(self):
+        # Subject ids name the lesion files (lesions/<id>_space-..._desc-lesion_mask.nii.gz): on a case-insensitive
+        # disk (the macOS default) sub-P01 and sub-p01 would be one file, and one subject's lesion would replace the other's
+        created = Study.create(self.path("case"), space="MNI152NLin2009cAsym")
+        created.add_subject("P01", nihss="4")
+        with self.assertRaisesRegex(ValueError, "sub-p01 differs from sub-P01 only in letter case"):
+            created.add_subject("p01", nihss="17")
+        self.assertEqual(created.subject_ids, ["sub-P01"])
+        self.assertEqual(created.case_twin("sub-p01"), "sub-P01")
+        self.assertIsNone(created.case_twin("sub-P01"))
+        self.assertTrue(created.id_taken("sub-p01"))
+        self.assertFalse(created.id_taken("sub-p02"))
+        # A table: twins inside it, or a twin of a subject of the study, are refused before anything changes
+        with open(self.path("twins.tsv"), "w", encoding="utf-8") as f:
+            f.write("participant_id\tnihss\nsub-A02\t3\nsub-a02\t5\n")
+        with self.assertRaisesRegex(ValueError, "sub-a02 differs from sub-A02 only in letter case"):
+            created.import_tsv(self.path("twins.tsv"))
+        with open(self.path("twin_of_study.tsv"), "w", encoding="utf-8") as f:
+            f.write("participant_id\tnihss\nsub-P01\t5\nsub-p01\t17\n")
+        with self.assertRaisesRegex(ValueError, "sub-p01 differs from sub-P01 only in letter case"):
+            created.import_tsv(self.path("twin_of_study.tsv"))
+        self.assertEqual(created.subject_ids, ["sub-P01"])
+        self.assertEqual(created.subject("sub-P01")["nihss"], "4")
+        # Files: a file of a case twin of a subject is that subject's file (one name on macOS): no second row
+        lesion = self._image("drop/sub-p01_lesion.nii.gz", affine=MNI2009C_2MM, value=1)
+        report = created.add_files([lesion])
+        self.assertEqual(report["added"], [])
+        self.assertEqual(report["updated"], ["sub-P01"])
+        self.assertEqual(report["skipped"], [])
+        self.assertEqual(created.subject_ids, ["sub-P01"])
+        self.assertEqual(created.subject("sub-P01")["lesion"], created.relpath(lesion))
+        # Removing a subject frees its id in every case
+        created.remove_subject("sub-P01")
+        self.assertIsNone(created.case_twin("sub-p01"))
+        created.add_subject("p01")
+        self.assertEqual(created.subject_ids, ["sub-p01"])
+        self.assertEqual(len({path.casefold() for path in (created.lesion_relpath(sid) for sid in created.subject_ids)}), len(created))
+
+    def test_files_go_to_the_row_whose_id_differs_only_in_case(self):
+        # Adopt in place: participants.tsv says "Patient01" or "PATIENT03", the files say "patient01": one participant
+        created = Study.create(self.path("caseids"), space="MNI152NLin2009cAsym")
+        with open(self.path("caseids.tsv"), "w", encoding="utf-8") as f:
+            f.write("participant_id\tnihss\nPatient01\t4\npatient02\t5\nPATIENT03\t6\n")
+        created.import_tsv(self.path("caseids.tsv"))
+        self.assertEqual(created.subject_ids, ["sub-Patient01", "sub-patient02", "sub-PATIENT03"])
+        for n in (1, 2, 3):
+            self._image(f"caseids_in/patient0{n}_T1w.nii.gz", affine=MNI2009C_2MM)
+        for n in (1, 3):
+            self._image(f"caseids_in/patient0{n}_lesion.nii.gz", affine=MNI2009C_2MM, value=1)
+        report = created.add_files(self.path("caseids_in"))
+        self.assertEqual(report["skipped"], [])
+        self.assertEqual(report["added"], [])
+        self.assertEqual(sorted(report["updated"]), ["sub-PATIENT03", "sub-Patient01", "sub-patient02"])
+        self.assertEqual(created.subject_ids, ["sub-Patient01", "sub-patient02", "sub-PATIENT03"])
+        for sid, n, traced in (("sub-Patient01", 1, True), ("sub-patient02", 2, False), ("sub-PATIENT03", 3, True)):
+            row = created.subject(sid)
+            self.assertEqual(row["scan"], created.relpath(self.path(f"caseids_in/patient0{n}_T1w.nii.gz")))
+            self.assertEqual(row["lesion"], created.relpath(self.path(f"caseids_in/patient0{n}_lesion.nii.gz")) if traced else "n/a")
+            self.assertEqual(row["status"], "traced" if traced else "untraced")
+        self.assertEqual(sorted(report["pairs"]), ["sub-PATIENT03", "sub-Patient01", "sub-patient02"])
+        # New subjects: files spelling one id in different cases make one subject, not a skipped twin
+        scan = self._image("caseids_new/Patient09_T1w.nii.gz", affine=MNI2009C_2MM)
+        lesion = self._image("caseids_new/patient09_lesion.nii.gz", affine=MNI2009C_2MM, value=1)
+        report = created.add_files(self.path("caseids_new"))
+        self.assertEqual(report["skipped"], [])
+        self.assertEqual(len(report["added"]), 1)
+        row = created.subject(report["added"][0])
+        self.assertEqual(report["added"][0].casefold(), "sub-patient09")
+        self.assertEqual((row["scan"], row["lesion"], row["status"]), (created.relpath(scan), created.relpath(lesion), "traced"))
+
+    def test_subject_folders_name_their_files(self):
+        # patients/patient01/T1.nii.gz + lesion.nii.gz (BB-1): names made only of modality or lesion words take the
+        # subject id from their folder below the chosen folder (it was "0 subjects, 4 files skipped: no subject id")
+        for subject, names in (("patient01", ("T1", "lesion")), ("patient02", ("T1", "lesion")), ("P003", ("FLAIR", "mask"))):
+            for name in names:
+                self._image(f"sub-cohort/patients/{subject}/anat/{name}.nii.gz" if subject == "P003" else f"sub-cohort/patients/{subject}/{name}.nii.gz", value=int(name in ("lesion", "mask")))
+        patients = self.path("sub-cohort", "patients")
+        created = Study.create(self.path("study_folders"))
+        report = created.add_files(patients)
+        self.assertEqual(report["skipped"], [])
+        self.assertEqual(sorted(report["added"]), ["sub-P003", "sub-patient01", "sub-patient02"])
+        for sid, subject, folder, scan, lesion in (("sub-patient01", "patient01", "", "T1", "lesion"), ("sub-patient02", "patient02", "", "T1", "lesion"), ("sub-P003", "P003", "anat", "FLAIR", "mask")):
+            row = created.subject(sid)
+            self.assertEqual(report["pairs"][sid], {"scan": os.path.join(patients, subject, folder, f"{scan}.nii.gz") if folder else os.path.join(patients, subject, f"{scan}.nii.gz"),
+                                                    "lesion": os.path.join(patients, subject, folder, f"{lesion}.nii.gz") if folder else os.path.join(patients, subject, f"{lesion}.nii.gz")})
+            self.assertEqual((row["status"], row["source_id"]), ("traced", subject))
+        # The same files given one by one (createStudy) with the folder they were chosen in: the same subjects; folders
+        # above the chosen folder are never read ("sub-cohort" made one subject of all of them)
+        files = sorted(os.path.join(folder, name) for folder, _, names in os.walk(patients) for name in names)
+        in_place = Study.create(patients)
+        report = in_place.add_files(files, root=patients)
+        self.assertEqual((report["skipped"], sorted(report["added"])), ([], ["sub-P003", "sub-patient01", "sub-patient02"]))
+        # The chosen folder itself names no subject: files without an id directly in it are skipped, as before
+        self._image("flat/T1.nii.gz")
+        report = Study.create(self.path("study_flat")).add_files(self.path("flat"))
+        self.assertEqual((report["added"], [item["reason"] for item in report["skipped"]]), ([], ["no subject id"]))
+        # A BIDS subject folder chosen itself still names its files
+        self._image("bids_one/sub-09/anat/T1w.nii.gz")
+        self.assertEqual(Study.create(self.path("study_one")).add_files(self.path("bids_one", "sub-09"))["added"], ["sub-09"])
+
+    def test_modality_folder_chosen_takes_id_from_the_subject_folder_above(self):
+        # Import > add the folder sub-01/anat (or sub-01/ses-01/anat) itself, with no id in the file names: the chosen
+        # folder is a modality or session folder, so the subject folder above it names the files, as it did before the
+        # chosen folder bounded the search (BB-1 recheck). A chosen folder that is not one ("patients") still bounds it.
+        self._image("bids_in/sub-01/anat/T1w.nii.gz")
+        self._image("bids_in/sub-01/anat/lesion.nii.gz", value=1)
+        self._image("bids_in/sub-02/ses-01/anat/T1w.nii.gz")
+        self._image("bids_in/sub-02/ses-01/anat/lesion.nii.gz", value=1)
+        created = Study.create(self.path("study_in"))
+        report = created.add_files(self.path("bids_in", "sub-01", "anat"))
+        self.assertEqual((report["skipped"], report["added"]), ([], ["sub-01"]))
+        self.assertEqual(created.subject("sub-01")["status"], "traced")
+        report = created.add_files(self.path("bids_in", "sub-02", "ses-01", "anat"))
+        self.assertEqual((report["skipped"], report["added"]), ([], ["sub-02"]))
+        self.assertEqual(created.subject("sub-02")["status"], "traced")
+        # createStudy on such a folder: the files one by one, the folder as root
+        report = Study.create(self.path("study_in2")).add_files(
+            [self.path("bids_in", "sub-01", "anat", f"{name}.nii.gz") for name in ("T1w", "lesion")], root=self.path("bids_in", "sub-01", "anat"))
+        self.assertEqual((report["skipped"], report["added"]), ([], ["sub-01"]))
+        # The chosen folder names no subject but is not a modality folder: folders above it are not read
+        self._image("sub-outer/patients/T1.nii.gz")
+        self._image("sub-outer/patients/lesion.nii.gz", value=1)
+        report = Study.create(self.path("study_in3")).add_files(self.path("sub-outer", "patients"))
+        self.assertEqual((report["added"], [item["reason"] for item in report["skipped"]]), ([], ["no subject id"] * 2))
 
 
 if __name__ == "__main__":

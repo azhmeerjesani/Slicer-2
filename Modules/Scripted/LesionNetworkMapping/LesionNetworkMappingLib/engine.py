@@ -26,7 +26,7 @@ Command line (JSON events of the job protocol, see jobs.py: start, progress, sna
 error or cancelled; every event has "t", the seconds since the job started)::
 
     python -m LesionNetworkMappingLib.engine --bundle B.lnmc --lesion lesion1.nii.gz [--lesion ...]
-        --out DIR [--subjects N [--random] [--seed S] | --subject-list SPEC] [--threads K] [--snapshot-every K]
+        [--lesion-space SPACE ...] --out DIR [--subjects N [--random] [--seed S] | --subject-list SPEC] [--threads K] [--snapshot-every K]
         [--null-relocations K [--null-seed S] [--brain-mask MASK] [--null-voxels N] [--write-null]]
         [--accumulate welford|mean] [--split-half] [--desc-suffix PreviewN100] [--threshold-rule JSON]
         [--run-json run.json] [--cancel-file F]
@@ -58,6 +58,15 @@ map, the relocated-lesion null when --null-relocations is given (the relocated l
 seed columns of the same pass) and, when the bundle has valid reference maps (reference.py; never
 built here), the reference similarity and calibrated chip. It is reported in the "done" event ("qa")
 and in <out>/qa.json, which also identifies the reference ("reference": definition, sha256).
+
+The template space of each lesion (--lesion-space, one per --lesion or one for all; default: the space of
+the lesion file's grid when it is a known template grid) is recorded with its lesion in run.json ("space",
+"space_notice") and in the QA values ("lesion_space", "space_notice"): the notice says that a lesion on
+another MNI template family than the connectome gives an approximate map (see ``geometry.family_notice``).
+With a template (MNI) connectome, a lesion declared in a native space or in a space that is not a known MNI
+template space (Talairach, a misspelt label), or one that is not on a known template
+grid and whose header does not say MNI, is mapped with a "native_space" warning event and its notice says so
+(see ``native_space_notice``): it is never silently treated as MNI.
 """
 
 import os
@@ -70,13 +79,14 @@ if __name__ == "__main__":
 
 import re
 import time
+import zlib
 
 import numpy as np
 
 from . import jobs
 from .connectome import ConnectomeBundle, _is_cancelled
-from .geometry import from_masked_vector, resample_to_grid, to_masked_vector
-from .nifti import XFORM_WARNING_MM, read_nifti, read_nifti_header, write_nifti, xform_disagreement
+from .geometry import detect_space, family_notice, from_masked_vector, is_mni_space, resample_to_grid, space_family, to_masked_vector
+from .nifti import XFORM_MNI, XFORM_WARNING_MM, read_nifti, read_nifti_header, write_nifti, xform_disagreement
 
 RMAX = 0.999999  # r is clipped to +/-RMAX before the Fisher transform
 DEFAULT_CHUNK = 8192
@@ -203,6 +213,17 @@ def _clean_fraction(value, eps=1e-9):
     return 0.0 if value < eps else 1.0 if value > 1.0 - eps else value
 
 
+def _read_lesion_image(path):
+    """(data, affine) of a lesion NIfTI file; an unreadable file (not gzip, truncated, corrupt) raises a ValueError that names it."""
+    try:
+        data, affine, _ = read_nifti(path)
+    except FileNotFoundError:
+        raise
+    except (OSError, EOFError, zlib.error) as exc:
+        raise ValueError(f"{os.fspath(path)}: cannot be read (not a NIfTI file or corrupt): {type(exc).__name__}: {exc}") from exc
+    return data, affine
+
+
 def prepare_lesion(source, bundle, supersample=2, binarize=True, min_weight=MIN_WEIGHT):
     """Resample a lesion image onto the bundle grid as fractional occupancy and return (weights, qc).
 
@@ -211,7 +232,7 @@ def prepare_lesion(source, bundle, supersample=2, binarize=True, min_weight=MIN_
       set False for probabilistic seeds.
     """
     if isinstance(source, (str, os.PathLike)):
-        data, affine, _ = read_nifti(source)
+        data, affine = _read_lesion_image(source)
     else:
         data, affine = source
     data = np.nan_to_num(np.asarray(data, dtype=np.float64))
@@ -225,6 +246,23 @@ def prepare_lesion(source, bundle, supersample=2, binarize=True, min_weight=MIN_
     weights = lesion_weights(volume, bundle.mask_indices, min_weight)
     source_volume = float(np.clip(data, 0.0, None).sum() * abs(np.linalg.det(np.asarray(affine, dtype=np.float64)[:3, :3])))
     return weights, lesion_qc(volume, bundle.mask_indices, min_weight, bundle.grid.voxel_volume, source_volume)
+
+
+_FRACTIONAL_SEED_NAME = re.compile(r"_desc-lesionProb(_[A-Za-z0-9]+)?\.nii(\.gz)?$", re.IGNORECASE)
+
+
+def is_fractional_seed(path):
+    """True for a ``desc-lesionProb`` lesion file (a fractional lesion, e.g. the fractional extrusion of a 2D tracing).
+
+    Its values are fractions of a voxel, so it is always mapped with its values as weights (``binarize=False``): binarizing
+    every non-zero voxel would map whole voxels where the lesion has fractional edges.
+    """
+    return path is not None and isinstance(path, (str, os.PathLike)) and _FRACTIONAL_SEED_NAME.search(os.path.basename(os.fspath(path))) is not None
+
+
+def seed_probabilistic(path, probabilistic=False):
+    """Whether a lesion file is mapped with its values as weights: the run's ``probabilistic`` flag or a fractional seed."""
+    return bool(probabilistic) or is_fractional_seed(path)
 
 
 # Core computation
@@ -786,6 +824,102 @@ _BIDS_LABEL = re.compile(r"^sub-[A-Za-z0-9]+(?:_[A-Za-z0-9]+-[A-Za-z0-9]+)*$")  
 _LESION_IMAGE_ENTITIES = ("space", "res", "den", "label", "desc")
 
 
+def connectome_space(bundle):
+    """Template space of a bundle: the space of its grid when it is a known template grid, else the space its
+    connectome.json declares ("space", e.g. the synthetic demo's), else None.
+    """
+    try:
+        detected = detect_space((tuple(bundle.shape), bundle.affine))
+    except (TypeError, ValueError):
+        detected = None
+    if detected is not None:
+        return detected[0]
+    declared = (getattr(bundle, "metadata", None) or {}).get("space")
+    return str(declared) if declared else None
+
+
+def template_connectome(bundle):
+    """Whether the bundle is an MNI template connectome: on a known template grid, or declaring a template space in its
+    connectome.json (the Map workspace's test). A lesion mapped with it must be in MNI space.
+    """
+    try:
+        if detect_space((tuple(bundle.shape), bundle.affine)) is not None:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return space_family((getattr(bundle, "metadata", None) or {}).get("space")) not in ("native", "unknown")
+
+
+def _header_says_mni(path):
+    """Whether the transform of a lesion file that the engine uses (the sform, else the qform) has the MNI code (4)."""
+    try:
+        header = read_nifti_header(path)
+    except (OSError, TypeError, ValueError, KeyError):
+        return False
+    code = header["sform_code"] if header["sform_code"] > 0 else header["qform_code"]
+    return code == XFORM_MNI
+
+
+NATIVE_SPACE_NOTICE = ("The lesion is in native (subject) space, but the connectome is in MNI space: its scanner coordinates were used as "
+                       "MNI coordinates, so the map is not valid. Normalize the lesion to MNI first.")
+UNKNOWN_SPACE_NOTICE = ("The lesion is not on a known MNI template grid and its header does not say MNI, but the connectome is in MNI space: "
+                        "it was mapped as if it were in MNI space. If it is in native (scanner) space, normalize it to MNI first; "
+                        "if it is already in MNI space, give its template with --lesion-space.")
+#: The note for a lesion declared in a space that is not an MNI template space (Talairach, ...) or whose label is not
+#: recognised (a misspelt template name); "{space}" is the declared label
+NOT_MNI_SPACE_NOTICE = ("The lesion is in {space} space, which is not a known MNI template space, but the connectome is in MNI space: "
+                        "its coordinates were used as MNI coordinates, so the map is not valid. Transform the lesion to MNI first; "
+                        "if it is already in MNI space, give its MNI template with --lesion-space.")
+
+
+def native_space_notice(space, path, template):
+    """The note for a lesion that may not be in MNI space while the connectome is a template connectome
+    (:func:`template_connectome`), or "": a lesion declared in a native (subject) space, one declared in a space that
+    is not a known MNI template space (Talairach, a misspelt label: ``geometry.is_mni_space``), or one whose space is not
+    known (not on a known template grid, no --lesion-space) and whose header does not have the MNI code. The Map
+    workspace refuses such a lesion and the pipeline preflight excludes it; the command line maps it with this note
+    and a warning event, never silently.
+    """
+    if not template:
+        return ""
+    if space is None:
+        return "" if path is not None and _header_says_mni(path) else UNKNOWN_SPACE_NOTICE
+    if space_family(space) == "native":
+        return NATIVE_SPACE_NOTICE
+    return "" if is_mni_space(space) else NOT_MNI_SPACE_NOTICE.format(space=space)
+
+
+def is_space_warning(notice):
+    """Whether a lesion's space notice (:func:`native_space_notice`) says that it may not be in MNI space (a
+    "native_space" warning), not only that its MNI template family differs from the connectome's.
+    """
+    head, _sep, tail = NOT_MNI_SPACE_NOTICE.partition("{space}")
+    return notice in (NATIVE_SPACE_NOTICE, UNKNOWN_SPACE_NOTICE) or (bool(notice) and notice.startswith(head) and notice.endswith(tail))
+
+
+def _lesion_spaces(paths, given, bundle):
+    """[{"space", "space_notice"}] of the lesion files: the --lesion-space values (one per lesion or one for all),
+    else the space of each file's grid when it is a known template grid (None otherwise), with the native-space
+    notice (:func:`native_space_notice`) or else the template-family notice against the connectome's space ("" when
+    the families match or a space is not known).
+    """
+    target = connectome_space(bundle)
+    template = template_connectome(bundle)
+    out = []
+    for index, path in enumerate(paths):
+        if given:
+            space = given[index] if len(given) > 1 else given[0]
+        else:
+            try:
+                detected = detect_space(path)
+            except (OSError, TypeError, ValueError):
+                detected = None
+            space = detected[0] if detected is not None else None
+        space = str(space) if space else None
+        out.append({"space": space, "space_notice": native_space_notice(space, path, template) or family_notice(space, target)})
+    return out
+
+
 def _lesion_name(path):
     """Output name of a lesion file: its name without extension or, for BIDS-style names, its
     key-value entities except the lesion-image entities space, res, den, label and desc
@@ -805,10 +939,13 @@ def _lesion_name(path):
 def _unique_name(name, used):
     """``name``, or ``name`` with a counter when it is in ``used``: "lesion-2" or, for BIDS-style
     names, an extra entity that keeps the subject label valid ("sub-01_lesion-2", not "sub-01-2").
+    Names are compared ignoring letter case: they name map files, and "Lesion" and "lesion" are one
+    file on macOS.
     """
     pattern = "{}_lesion-{}" if _BIDS_LABEL.match(name) else "{}-{}"
+    folded = {other.casefold() for other in used}
     unique, counter = name, 2
-    while unique in used:
+    while unique.casefold() in folded:
         unique, counter = pattern.format(name, counter), counter + 1
     return unique
 
@@ -1122,6 +1259,7 @@ def main(argv=None):
     parser = jobs.JsonArgumentParser(prog="python -m LesionNetworkMappingLib.engine", description="Compute lesion network maps (or parcel seed maps) from a connectome bundle.")
     parser.add_argument("--bundle", required=True, help="connectome bundle directory (.lnmc)")
     parser.add_argument("--lesion", action="append", default=None, help="lesion NIfTI file (any grid; repeat for several lesions); required unless --parcels is given")
+    parser.add_argument("--lesion-space", action="append", default=None, metavar="SPACE", help="template space of the lesion (e.g. MNI152NLin6Asym; one per --lesion in order, or one for all; default: the space of the lesion file's grid when it is a known template grid), recorded with its template-family notice")
     parser.add_argument("--parcels", default=None, metavar="LABELS", help="parcel run instead of lesions: map every label of this label image (any grid; nearest-neighbour resampling, 0 is background) as a seed and write parcel_fz.f16.npy, parcel_C_fz.npy and parcel_labels.json")
     parser.add_argument("--out", required=True, help="output directory")
     parser.add_argument("--subjects", type=int, default=None, help="use only N subjects (default: all)")
@@ -1158,6 +1296,8 @@ def main(argv=None):
         parser.error("--subject-list cannot be combined with --subjects or --random")
     if (args.lesion is None) == (args.parcels is None):
         parser.error("give one or more --lesion files, or --parcels (not both)")
+    if args.lesion_space is not None and (args.lesion is None or len(args.lesion_space) not in (1, len(args.lesion))):
+        parser.error("give one --lesion-space per --lesion, or one for all lesions")
     if args.parcels is not None:
         for option, given in (("--null-relocations", args.null_relocations > 0), ("--write-null", args.write_null), ("--split-half", args.split_half), ("--snapshot-every", args.snapshot_every > 0), ("--accumulate welford", args.accumulate == "welford")):
             if given:
@@ -1179,7 +1319,10 @@ def main(argv=None):
         started = time.perf_counter()
         # Set by --cancel-file, SIGTERM/SIGINT or the orphan watchdog when run as a module (jobs.run_job)
         cancel = jobs.CancelToken(args.cancel_file, signals=False)
-        bundle = ConnectomeBundle.open(args.bundle)
+        try:
+            bundle = ConnectomeBundle.open(args.bundle)
+        except (OSError, ValueError) as exc:
+            raise jobs.JobError(f"--bundle {args.bundle} cannot be opened: {exc}", code="usage", exit_code=jobs.EXIT_USAGE) from None
         if bundle.kind != "timeseries":
             raise ValueError(f"The connectome {bundle.name!r} is a {bundle.kind!r} bundle; network maps need a time series connectome")
         subject_list = None
@@ -1197,13 +1340,16 @@ def main(argv=None):
         if args.parcels is not None:
             return _parcel_run(args, bundle, ids, run, cancel, started)
         names, weights, qc = [], [], []
-        for path in args.lesion:
+        spaces = _lesion_spaces(args.lesion, args.lesion_space, bundle)
+        for path, space in zip(args.lesion, spaces, strict=True):
             cancel.raise_if_cancelled(done=0)
-            lesion_weights_vector, lesion_qc_values = prepare_lesion(path, bundle, supersample=args.supersample, binarize=not args.probabilistic)
+            lesion_weights_vector, lesion_qc_values = prepare_lesion(path, bundle, supersample=args.supersample, binarize=not seed_probabilistic(path, args.probabilistic))
             name = _unique_name(_lesion_name(path), names)
             names.append(name)
             weights.append(lesion_weights_vector)
             qc.append({"lesion": name, **lesion_qc_values})
+            if is_space_warning(space["space_notice"]):
+                jobs.emit("warning", code="native_space", lesion=name, message=space["space_notice"])
             if lesion_qc_values["voxels_in_mask"] == 0:
                 jobs.emit("warning", lesion=name, message="The lesion does not overlap the connectome mask; its maps are all zero.")
             disagreement = xform_disagreement(read_nifti_header(path))
@@ -1239,8 +1385,8 @@ def main(argv=None):
         if run is not None:
             # Recorded before the computation so that a stopped run still documents its inputs
             run["lesions"] = [
-                {"name": name, "file": os.path.abspath(path), "sha256": file_sha256(path), **{key: value for key, value in values.items() if key != "lesion"}}
-                for name, path, values in zip(names, args.lesion, qc, strict=True)
+                {"name": name, "file": os.path.abspath(path), "sha256": file_sha256(path), **{key: value for key, value in values.items() if key != "lesion"}, **space}
+                for name, path, values, space in zip(names, args.lesion, qc, spaces, strict=True)
             ]
             run["maps"] = {name: {key: os.path.abspath(p) for key, p in output_paths(args.out, name, bundle.name, args.desc_suffix).items() if key in map_keys} for name in names}
             run["null"] = null_settings
@@ -1319,6 +1465,9 @@ def main(argv=None):
                 jobs.emit("warning", code="reference", lesion=name, message=f"The reference QA of this lesion is not available ({exc}).")
                 qa_values[name] = qa_lib.lesion_qa(statistic[index], degree, lesion_nulls, maps.null_voxels)
             start += count
+        for name, space in zip(names, spaces, strict=True):
+            # The template space of the lesion and its family notice are QA values (sidecar and qa.json)
+            qa_values[name] = {**qa_values[name], "lesion_space": space["space"], "space_notice": space["space_notice"]}
         qa_path = os.path.join(args.out, "qa.json")
         degree_info = qa_lib.read_degree_metadata(bundle.path) if degree is not None else None
         qa_record = {
@@ -1365,7 +1514,7 @@ def main(argv=None):
             done["run_json"] = os.path.abspath(args.run_json)
         jobs.emit("done", **done)
         return 0
-    except jobs.Cancelled:
+    except (jobs.Cancelled, jobs.JobError):
         raise
     except Exception as exc:
         message = f"{type(exc).__name__}: {exc}"

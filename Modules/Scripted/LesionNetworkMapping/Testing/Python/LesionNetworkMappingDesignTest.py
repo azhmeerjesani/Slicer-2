@@ -149,6 +149,18 @@ class DesignSpecTest(_StudyTestCase):
             DesignSpec.from_dict({"format": "slicer-lnm-design", "version": "1.0"})
 
 
+    def test_one_level_message_is_plain_language(self):
+        rows = [(f"sub-{i}", {"onelevel": "lit", "volume_ml": 10.0 + i}) for i in range(4)]
+        study = self.make_study(rows, roles={"onelevel": "group"})
+        for test, contrast in (("two_group", "two_sided"), ("anova", "F")):
+            with self.subTest(test=test), self.assertRaises(designlib.DesignError) as ctx:
+                designlib.build_design(study, DesignSpec(test=test, group_column="onelevel", contrast=contrast))
+            text = str(ctx.exception)
+            self.assertIn("a group comparison needs at least 2", text)
+            for code in ("two_group", "anova", "a anova"):
+                self.assertNotIn(code, text)
+
+
 class CodingTest(_StudyTestCase):
     def coding_study(self):
         rows = []
@@ -327,6 +339,29 @@ class NestingTest(_StudyTestCase):
         self.assertNotIn("group is nested in dataset", design.permute_reason)
         info = next(check for check in design.checks if check.code == "nested")
         self.assertEqual(info.detail["single_level_blocks"], ["d3"])
+
+    def test_control_database_without_case_source_records_limitations(self):
+        # A linked control set writes source_type=control_db on its rows only; the study's own cases keep no
+        # source_type. The design is still cases vs a control database, so the source confound is a limitation.
+        rows = [(f"sub-c{index:02d}", {"group": "case", "volume_ml": 5.0 + index}) for index in range(8)]
+        rows += [(f"sub-k{index:02d}", {"group": "control", "volume_ml": 6.3 + index, "source_type": "control_db"}) for index in range(12)]
+        design = designlib.build_design(self.make_study(rows, "linked"), DesignSpec())
+        self.assertEqual(design.design_type, "cases_vs_control_database")
+        self.assertEqual(design.block_column, "source_type")
+        self.assertIn("limitations recorded", design.permute_reason)
+        self.assertEqual(design.limitations, ["source_type (Cramér's V = 1.00 with group) cannot be adjusted for in this design"])
+        self.assertAlmostEqual(design.cramers_v["source_type"], 1.0)
+        # Partly nested (some own controls have no source_type either): the nesting is still recorded
+        rows += [(f"sub-o{index:02d}", {"group": "control", "volume_ml": 7.1 + index}) for index in range(6)]
+        partly = designlib.build_design(self.make_study(rows, "linked2"), DesignSpec())
+        self.assertEqual(partly.design_type, "cases_vs_control_database")
+        self.assertIn("limitations recorded", partly.permute_reason)
+        self.assertEqual(partly.limitations, ["source_type control_db holds a single level of group (cases vs a control database) and cannot be adjusted for in this design"])
+        # Every design that says "limitations recorded" records at least one
+        for study in (self.nested_study(), self.make_study([(f"sub-{d}{i}", {"group": "case" if i % 2 or d == "d3" else "control", "volume_ml": 5.0 + i, "dataset": d}) for d in ("d1", "d2", "d3") for i in range(6)], "partial3")):
+            built = designlib.build_design(study, DesignSpec())
+            self.assertIn("limitations recorded", built.permute_reason)
+            self.assertTrue(built.limitations, built.permute_reason)
 
     def test_missing_implicit_block_does_not_decide_nesting(self):
         rows = []
@@ -589,6 +624,44 @@ class ChecksTest(_StudyTestCase):
         self.assertIn("volume_off", _codes(reasoned.checks, "info"))
         self.assertNotIn("volume_off", _codes(reasoned.checks, "warn"))
 
+    def test_invalid_transform_of_a_covariate_is_refused_not_raised(self):
+        # log of 0 / a negative value and z of a constant make NaN columns: the design is blocked with the
+        # reason, build_design must not raise numpy's "SVD did not converge" from the collinearity step
+        rows = []
+        for index in range(24):
+            age = float(self.rng.uniform(20, 80)) if index > 1 else (0.0 if index == 0 else -3.0)
+            rows.append((f"sub-{index:02d}", {"group": "case" if index % 2 else "control", "volume_ml": float(self.rng.uniform(5, 40)), "age": age, "const": 5.0, "score": float(self.rng.uniform(1, 9))}))
+        study = self.make_study(rows, "badtransform", roles={"age": "covariate", "const": "covariate"})
+        cases = {
+            "group, log(age) with 0 and -3": (DesignSpec(covariates=["volume_ml", "age"], transforms={"age": "log"}), "log transform of age needs positive values (minimum -3)"),
+            "group, only covariate log(age)": (DesignSpec(covariates=["age"], transforms={"age": "log"}), "log transform of age needs positive values (minimum -3)"),
+            "group, z(const)": (DesignSpec(covariates=["volume_ml", "const"], transforms={"const": "z"}), "z transform of const needs values that vary"),
+            "continuous, log(age)": (DesignSpec(test="continuous", score_column="score", covariates=["volume_ml", "age"], transforms={"age": "log"}), "log transform of age needs positive values (minimum -3)"),
+        }
+        for label, (spec, message) in cases.items():
+            with self.subTest(label):
+                design = designlib.build_design(study, spec)
+                blocks = _codes(design.checks, "block")
+                self.assertIn("invalid_transform", blocks)
+                self.assertIn("non_finite_design", blocks)
+                self.assertNotIn("collinear_covariate", blocks)
+                self.assertIn(message, [check.message for check in design.checks if check.code == "invalid_transform"])
+
+    def test_constant_score_is_named_not_called_linearly_dependent(self):
+        rows = [(f"sub-{index:02d}", {"group": "case" if index % 2 else "control", "volume_ml": float(5 + index), "score": 5.0}) for index in range(12)]
+        study = self.make_study(rows, "constscore")
+        design = designlib.build_design(study, DesignSpec(test="continuous", score_column="score", covariates=["volume_ml"]))
+        blocks = _codes(design.checks, "block")
+        self.assertIn("constant_score", blocks)
+        self.assertNotIn("rank_deficient", blocks)
+        self.assertNotIn("contrast_not_estimable", blocks)
+        message = next(check.message for check in design.checks if check.code == "constant_score")
+        self.assertEqual(message, "score has the same value (5) for every included lesion: there is nothing to map")
+        # A score that varies has no such check
+        rows[0][1]["score"] = 6.0
+        varied = designlib.build_design(self.make_study(rows, "varscore"), DesignSpec(test="continuous", score_column="score", covariates=["volume_ml"]))
+        self.assertNotIn("constant_score", _codes(varied.checks))
+
     def test_dimensionality_imbalance(self):
         rows = []
         for index in range(30):
@@ -677,6 +750,17 @@ class PalmExportTest(_StudyTestCase):
 
     def palm_tokens(self, out):
         return self.command(out, "run_palm.sh", "palm")
+
+    def test_export_json_has_no_absolute_paths(self):
+        design = designlib.build_design(self.crossed_study(), DesignSpec(inference={"n_perm": 2000, "tfce": True, "seed": 3}))
+        _, _, out = self.export(design, "palm-nopath")
+        with open(os.path.join(out, "palm_export.json"), encoding="utf-8") as f:
+            manifest = json.load(f)
+        self.assertEqual(manifest["mask_file"], "mask.nii.gz")
+        self.assertIn("mask.nii.gz", manifest["files"])
+        for key, value in manifest.items():
+            if isinstance(value, str):
+                self.assertFalse(os.path.isabs(value) or os.path.dirname(self.mask_path) in value, (key, value))
 
     def test_two_sided_crossed_export(self):
         design = designlib.build_design(self.crossed_study(), DesignSpec(inference={"n_perm": 2000, "tfce": True, "seed": 3}))

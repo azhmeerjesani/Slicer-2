@@ -51,6 +51,16 @@ LABEL_ATLASES = (
 )
 #: Atlases used when the user has not chosen (those cached are used)
 DEFAULT_LABEL_ATLASES = LABEL_ATLASES
+#: Label atlases of each template family: a map is labelled with the atlases of its own family (families are not mixed).
+#: ``LABEL_ATLASES`` (fsl6) is also the choice for a map whose family has none here; the catalog has no Harvard-Oxford or
+#: Buckner atlas in the 2009 family.
+LABEL_FAMILY = "fsl6"
+LABEL_ATLASES_BY_FAMILY = {
+    "fsl6": LABEL_ATLASES,
+    "2009": ("schaefer2018-400-7n-2mm-2009c", "tian-s1-2mm-2009c"),
+}
+#: The chosen label atlases of each family (a JSON list of catalog ids each; fsl6 keeps the key it always had)
+ATLASES_SETTINGS = {"fsl6": ATLASES_SETTING, "2009": "Studio/LNM/Clusters/Atlases2009"}
 SHORT_NAMES = {
     "harvard-oxford-cortical-th25-2mm": "HO cortical",
     "harvard-oxford-subcortical-th25-2mm": "HO subcortical",
@@ -59,6 +69,9 @@ SHORT_NAMES = {
     "buckner2011-cerebellum-7n-1mm": "Buckner cerebellum (7n)",
     "buckner2011-cerebellum-17n-1mm": "Buckner cerebellum (17n)",
     "tian-s1-2mm": "Tian S1",
+    "schaefer2018-400-7n-2mm-2009c": "Schaefer-400 (7n, 2009c)",
+    "schaefer2018-400-17n-2mm-2009c": "Schaefer-400 (17n, 2009c)",
+    "tian-s1-2mm-2009c": "Tian S1 (2009c)",
 }
 #: Node attribute of the table node and of the group map volume of the Cohort card
 TABLE_ATTRIBUTE = "LNM.ClusterTable"
@@ -88,6 +101,16 @@ def _readFloat(key, default):
     except (TypeError, ValueError):
         return default
     return value if math.isfinite(value) and value >= 0 else default
+
+
+def formatCoordinate(value):
+    """A peak coordinate in mm as a whole number, rounded half away from zero and never "-0".
+
+    ``f"{v:.0f}"`` rounds half to even and prints a small negative value as "-0", which is wrong on a grid whose voxel
+    centres lie at .5 mm (the 2009c 2 mm grid): 19.5 became 20 but -58.5 became -58, and -0.5 became "-0".
+    """
+    rounded = math.floor(abs(value) + 0.5)
+    return f"-{rounded}" if value < 0 and rounded else str(rounded)
 
 
 def shortName(atlasId):
@@ -133,9 +156,11 @@ class MapSource:
     :ivar sign: "both", "pos" or "neg"; ``fromRule`` tells whether the threshold is the Result card's rule.
     :ivar runDir: folder of the run that made the map (its relocated null maps are looked for there), else None.
     :ivar desc: group map desc ("overlapPct", "meanT"...) for a group map; ``path`` the NIfTI file of a file or group map.
+    :ivar space: template space the app knows for the map (``Studio.Space`` of its volume, a file's sidecar), else None:
+      the space is then recognized from the grid (a map off the standard grids, such as a resampled or demo map, needs it).
     """
 
-    def __init__(self, key, name, statistic, volume, grid, indices, threshold, sign="both", n=None, fromRule=False, runDir=None, desc=None, path=None, notes=(), token=None):
+    def __init__(self, key, name, statistic, volume, grid, indices, threshold, sign="both", n=None, fromRule=False, runDir=None, desc=None, path=None, notes=(), token=None, space=None):
         self.key = key
         self.name = name
         self.statistic = statistic
@@ -151,6 +176,7 @@ class MapSource:
         self.path = path
         self.notes = list(notes)
         self.token = token  # identifies the version of the data (a volume's modification times, a file's)
+        self.space = space
 
     @property
     def value(self):
@@ -168,7 +194,51 @@ class MapSource:
 
     def stamp(self):
         """What the table of this source depends on: the data, the statistic, the threshold and the sign."""
-        return (self.key, self.token, self.statistic, self.value, self.sign)
+        return (self.key, self.token, self.statistic, self.value, self.sign, self.space)
+
+
+def labelFamily(source):
+    """Template family whose atlases label ``source`` (a :class:`MapSource` or None): "2009" for a map of the 2009 family
+    (its ``space``, else its grid), else "fsl6" (also when there is no map or its family has no atlases here).
+    """
+    if source is None:
+        return LABEL_FAMILY
+    from LesionNetworkMappingLib import atlases as atlasLib
+
+    family, _space = atlasLib.mask_family(source.grid.shape, source.grid.affine, space=source.space)
+    return family if family in LABEL_ATLASES_BY_FAMILY else LABEL_FAMILY
+
+
+def _templateSpace(space):
+    """``space`` when it names a template family the atlases know ("MNI152NLin6Asym"...), else None (native, unknown)."""
+    from LesionNetworkMappingLib.geometry import space_family
+
+    return str(space) if space and space_family(space) not in UNLABELLED_FAMILIES else None
+
+
+def volumeSpace(node):
+    """Template space of a map volume as the app knows it (``StudioLib.space.spaceOf``: its ``Studio.Space`` first, else
+    its grid), or None when that is no template family: the cards then recognize the space from the grid themselves.
+    """
+    try:
+        from . import normalize_controller
+
+        found = normalize_controller.spaceOf(node)
+    except Exception:
+        logging.exception("Lesion network mapping: the template space of a map could not be read")
+        return None
+    return _templateSpace(found[0]) if found else None
+
+
+def fileSpace(path):
+    """Template space declared for a map file (its ``_lnm.json`` sidecar: the connectome's space), or None."""
+    try:
+        from LesionNetworkMapping import LesionNetworkMappingLogic
+
+        return _templateSpace(LesionNetworkMappingLogic.mapFileInfo(path).get("space"))
+    except Exception:
+        logging.exception("Lesion network mapping: the sidecar of a map file could not be read")
+        return None
 
 
 def _volumeValues(node):
@@ -185,18 +255,49 @@ def _volumeValues(node):
     return volume, Grid(volume.shape, affine)
 
 
-def _maskIndices(volume, grid, bundle):
-    """The in-mask voxels: the connectome mask when the map lies on its grid, else the finite non-zero voxels."""
+def _inMask(volume, grid, bundle):
+    """``(volume, grid, indices)`` of a map with its in-mask voxels: the connectome mask when the map lies on its grid, else
+    the finite non-zero voxels.
+
+    A map that holds the connectome's voxels in another storage order (Slicer's reader stores the k axis of an FSL MNI
+    file the other way round, so a map read back from a scene or project is flipped) is first stored in the connectome's
+    order: the null maps' voxel sample, the ROI chart and the relocated-lesion nulls index the connectome mask voxels.
+    """
     import numpy as np
+
+    from LesionNetworkMappingLib.geometry import Grid, reorder_to_grid
 
     if bundle is not None:
         try:
-            if tuple(bundle.shape) == tuple(grid.shape) and np.allclose(np.asarray(bundle.affine), grid.affine, atol=1e-4):
-                return np.asarray(bundle.mask_indices)
-        except (AttributeError, TypeError, ValueError):
+            shape, affine = tuple(bundle.shape), np.asarray(bundle.affine, dtype=np.float64)
+            if shape == tuple(grid.shape) and np.allclose(affine, grid.affine, atol=1e-4):
+                return volume, grid, np.asarray(bundle.mask_indices)
+            moved = reorder_to_grid(volume, grid.affine, shape, affine)
+            if moved is not None:
+                return moved, Grid(shape, affine), np.asarray(bundle.mask_indices)
+        except (AttributeError, TypeError, ValueError, np.linalg.LinAlgError):
             pass
     flat = volume.reshape(-1)
-    return np.flatnonzero(np.isfinite(flat) & (flat != 0))
+    return volume, grid, np.flatnonzero(np.isfinite(flat) & (flat != 0))
+
+
+def _onFileGrid(volume, grid, path):
+    """``(volume, Grid)`` of a map stored in the voxel order of the NIfTI file ``path`` it was loaded from, when the two hold
+    the same voxels in another storage order; None when the map is already in that order or is not on the file's voxels.
+    """
+    import numpy as np
+
+    from LesionNetworkMappingLib.geometry import Grid, reorder_to_grid
+
+    try:
+        fileGrid = Grid.from_nifti(path)
+    except Exception:
+        logging.exception("Lesion network mapping: the grid of a map file could not be read")
+        return None
+    if fileGrid.shape == tuple(grid.shape) and np.allclose(fileGrid.affine, grid.affine, atol=1e-4):
+        return None
+    moved = reorder_to_grid(volume, grid.affine, fileGrid.shape, fileGrid.affine)
+    return None if moved is None else (moved, fileGrid)
 
 
 def _kindDefault(desc, volume):
@@ -215,6 +316,19 @@ def _kindDefault(desc, volume):
     if kind == "binary":
         return 0.5, "both"
     return None, "both"
+
+
+def _descStatistic(desc):
+    """The statistic of a group mean map from its desc ("T" for ``meanT`` / ``legacyWelchT``, "Fz" for ``meanFz``), else None.
+
+    One rule for the Cohort card's group map and for its file opened in the source menu (``group_conn-<label>_desc-meanT_map``),
+    so both get the same statistic, default threshold and Nulls run.
+    """
+    if desc in ("meanT", "legacyWelchT"):
+        return "T"
+    if desc == "meanFz":
+        return "Fz"
+    return None
 
 
 class SourceModel:
@@ -236,6 +350,12 @@ class SourceModel:
         self.minExtent = _readFloat(MIN_EXTENT_SETTING, DEFAULT_MIN_EXTENT_MM3)
         self.listeners = []
         self._cache = None
+        self._fileSpace = None  # (token, space) of the last map file read
+        self._fileOrder = None  # (key, (volume, grid, indices) or None) of the group map in its file's voxel order
+        # The Result card's rule re-resolved to another threshold or sign: the "Result rule" sources changed
+        thresholdChanged = getattr(ctx, "thresholdChanged", None)
+        if thresholdChanged is not None:
+            thresholdChanged.append(self.notify)
 
     #
     # State
@@ -371,7 +491,7 @@ class SourceModel:
 
         def load():
             volume, grid = _volumeValues(node)
-            return volume, grid, _maskIndices(volume, grid, self.ctx.bundle)
+            return _inMask(volume, grid, self.ctx.bundle)
 
         volume, grid, indices = self._loaded(token, load)
         if indices.size == 0 or not np.isfinite(volume).any():
@@ -397,6 +517,32 @@ class SourceModel:
             logging.exception("Lesion network mapping: the Result rule could not be read")
             return None, None
 
+    def ruleForCard(self, widget, statistic):
+        """(Resolved, sign) of the Result card's rule for the card's sign, else (None, None).
+
+        A top-x% rule's cut depends on its sign (the top x% of T, -T or |T|): when the card shows another tail than the
+        Result card, the rule is re-resolved for the card's sign, as the Result card's sign buttons do (onSignClicked);
+        the other rules are symmetric and keep their value.
+        """
+        resolved, ruleSign = self._ruleThreshold(widget, statistic)
+        if resolved is None or self.signChoice == "rule":
+            return resolved, ruleSign
+        sign = self.signChoice
+        rule = resolved.rule or {}
+        if rule.get("kind") != "top_pct" or rule.get("sign", "both") == sign:
+            return resolved, sign
+        try:
+            values = widget._mapValues(widget._ruleStatistic(rule))
+            if values is None:
+                return None, None
+            other = widget._resolveRule(dict(rule, sign=sign), resolved.n or None, values, None)
+        except Exception:
+            logging.exception("Lesion network mapping: the Result rule could not be resolved for the card's sign")
+            return None, None
+        if other is None or not math.isfinite(other.value) or other.value <= 0:
+            return None, None
+        return other, sign
+
     def _resultSource(self, node, volume, grid, indices, widget, token):
         statistic = "T"
         n = None
@@ -410,12 +556,11 @@ class SourceModel:
         run = self.ctx.currentRun
         if run is not None and widget is not None and getattr(widget, "loadedMap", None) is None and not getattr(run, "partial", False):
             runDir = run.runDir
-        resolved, ruleSign = self._ruleThreshold(widget, statistic)
+        # The rule for the card's sign: a top-x% rule is re-resolved for the tail the card shows
+        resolved, ruleSign = self.ruleForCard(widget, statistic)
         notes = []
         if resolved is not None and self.useRule:
             threshold, sign, fromRule = resolved, ruleSign or "both", True
-            if self.signChoice != "rule":
-                sign = self.signChoice
         else:
             threshold = self.custom if self.custom is not None else (resolved.value if resolved is not None else self._fallbackThreshold(statistic))
             sign = self.signChoice if self.signChoice != "rule" else (ruleSign or "both")
@@ -424,7 +569,7 @@ class SourceModel:
                 notes.append(_("The Result rule does not apply to the {statistic} map: type a threshold.").format(statistic=statistic))
         if n is None and resolved is not None:
             n = resolved.n or None
-        return MapSource("result", node.GetName(), statistic, volume, grid, indices, threshold, sign, n, fromRule, runDir, notes=notes, token=token)
+        return MapSource("result", node.GetName(), statistic, volume, grid, indices, threshold, sign, n, fromRule, runDir, notes=notes, token=token, space=volumeSpace(node))
 
     @staticmethod
     def _fallbackThreshold(statistic):
@@ -437,9 +582,10 @@ class SourceModel:
         if display.groupMapKind(desc) == "p":
             raise SourceError(_("A p map is not clustered: choose a statistic, count or conjunction map."))
         default, sign = _kindDefault(desc, volume)
-        if default is None:  # a statistic map (Welch t, mean T): the Result rule when it is a T rule, else a typical value
-            resolved, _sign = self._ruleThreshold(widget, "T")
-            default = resolved.value if resolved is not None else self._fallbackThreshold("T")
+        if default is None:  # a statistic map (Welch t, mean T, mean Fz): the Result rule of its statistic, else a typical value
+            ruleStatistic = _descStatistic(desc) or "T"
+            resolved, _sign = self._ruleThreshold(widget, ruleStatistic)
+            default = resolved.value if resolved is not None else self._fallbackThreshold(ruleStatistic)
         threshold = self.custom if self.custom is not None else default
         if self.signChoice != "rule":
             sign = self.signChoice
@@ -451,10 +597,35 @@ class SourceModel:
                 if name.endswith(f"_desc-{desc}_map.nii.gz") and name.startswith("group_"):
                     path = os.path.join(folder, name)
                     break
-        statistic = "T" if desc in ("meanT", "legacyWelchT") else ("Fz" if desc in ("meanFz",) else (desc or _("value")))
+        if path:
+            volume, grid, indices = self._inFileOrder(token, path, volume, grid, indices)
+        statistic = _descStatistic(desc) or desc or _("value")
         record = getattr(widget, "cohortInfo", None) if widget is not None else None
         n = record.get("n") if isinstance(record, dict) else None
-        return MapSource("group", node.GetName(), statistic, volume, grid, indices, threshold, sign, n, False, None, desc=desc, path=path, token=token)
+        return MapSource("group", node.GetName(), statistic, volume, grid, indices, threshold, sign, n, False, None, desc=desc, path=path, token=token, space=volumeSpace(node))
+
+    def _onConnectome(self, grid):
+        """True when ``grid`` is the open connectome's grid (the map's in-mask voxels are then the connectome mask)."""
+        import numpy as np
+
+        bundle = self.ctx.bundle
+        try:
+            return bundle is not None and tuple(bundle.shape) == tuple(grid.shape) and np.allclose(np.asarray(bundle.affine, dtype=np.float64), grid.affine, atol=1e-4)
+        except (AttributeError, TypeError, ValueError):
+            return False
+
+    def _inFileOrder(self, token, path, volume, grid, indices):
+        """``(volume, grid, indices)`` of a group map in the voxel order of its file (the cohort run's connectome order, which the
+        Nulls run's voxel sample indexes) when no connectome on its grid is open and the volume holds the file's voxels in
+        another storage order (a map read back from a scene or project); else unchanged.
+        """
+        if self._onConnectome(grid):
+            return volume, grid, indices
+        key = (token, path, os.stat(path).st_mtime_ns if os.path.isfile(path) else None)
+        if self._fileOrder is None or self._fileOrder[0] != key:
+            moved = _onFileGrid(volume, grid, path) if key[2] is not None else None
+            self._fileOrder = (key, None if moved is None else _inMask(moved[0], moved[1], None))
+        return self._fileOrder[1] or (volume, grid, indices)
 
     def _fileSource(self, key):
         import numpy as np
@@ -480,17 +651,19 @@ class SourceModel:
                 raise SourceError(_("The file is not a 3D map (shape {shape}): choose a statistic map.").format(shape="x".join(str(extent) for extent in data.shape)))
             volume = data.astype(np.float64)
             grid = Grid(volume.shape, affine)
-            return volume, grid, _maskIndices(volume, grid, self.ctx.bundle)
+            return _inMask(volume, grid, self.ctx.bundle)
 
         volume, grid, indices = self._loaded(token, load)
         if indices.size == 0 or not np.isfinite(volume).any():
             raise SourceError(_("The map has no values."))
         name = os.path.basename(path)
-        statistic = "T" if "desc-T" in name else ("Fz" if "AvgRFz" in name else ("r" if "AvgR" in name else _("value")))
         desc = None
         marker = "_desc-"
         if marker in name:
             desc = name.split(marker, 1)[1].split("_", 1)[0]
+        # A cohort's group mean map (desc-meanT / meanFz) reads as its statistic, as the Cohort card's group map does;
+        # else the per-lesion names (desc-T, AvgRFz, AvgR)
+        statistic = _descStatistic(desc) or ("T" if "desc-T" in name else ("Fz" if "AvgRFz" in name else ("r" if "AvgR" in name else _("value"))))
         if desc and display.groupMapKind(desc) == "p":
             raise SourceError(_("A p map is not clustered: choose a statistic, count or conjunction map."))
         default, sign = (_kindDefault(desc, volume) if desc else (None, "both"))
@@ -498,7 +671,9 @@ class SourceModel:
         threshold = self.custom if self.custom is not None else default
         if self.signChoice != "rule":
             sign = self.signChoice
-        return MapSource(key, name, statistic, volume, grid, indices, threshold, sign, None, False, None, desc=desc, path=path, token=token)
+        if self._fileSpace is None or self._fileSpace[0] != token:
+            self._fileSpace = (token, fileSpace(path))
+        return MapSource(key, name, statistic, volume, grid, indices, threshold, sign, None, False, None, desc=desc, path=path, token=token, space=self._fileSpace[1])
 
 
 def sharedModel(ctx):
@@ -541,6 +716,8 @@ class SourceBar:
         self.ruleCheck.setObjectName(f"{prefix}UseRuleCheckBox")
         self.ruleCheck.connect("toggled(bool)", self._onUseRule)
         layout.addWidget(self.ruleCheck)
+        # The threshold and the sign choice share a row that stacks when the inspector is too narrow for both (a larger
+        # application font makes them about 350 px wide): its minimum width must not make the inspector wider for good
         thresholdRow = qt.QHBoxLayout()
         self.thresholdLabel = qt.QLabel(_("Threshold"))
         thresholdRow.addWidget(self.thresholdLabel)
@@ -560,7 +737,7 @@ class SourceBar:
         self.signCombo.connect("activated(int)", self._onSign)
         thresholdRow.addWidget(self.signCombo)
         thresholdRow.addStretch(1)
-        layout.addLayout(thresholdRow)
+        widgets.addWrapRow(layout, thresholdRow)
         self.extentSpin = None
         if withExtent:
             extentRow = qt.QHBoxLayout()
@@ -607,7 +784,7 @@ class SourceBar:
     def openFile(self, path=None):
         """Choose a NIfTI map file (``path`` skips the dialog) and describe it."""
         if not path:
-            start = str(_settings().value(LAST_FOLDER_SETTING) or "")
+            start = str(_settings().value(LAST_FOLDER_SETTING) or "") or widgets.dialogStartFolder()
             path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), _("Open a map"), start, "NIfTI (*.nii *.nii.gz);;All files (*)")
         if path:
             self.model.addFile(path)
@@ -641,7 +818,7 @@ class SourceBar:
             fromRule = source is not None and source.fromRule
             ruleApplies = False
             if model.resolvedChoice() == "result" and source is not None:
-                resolved, _sign = model._ruleThreshold(mapWidget(), source.statistic)
+                resolved, _sign = model.ruleForCard(mapWidget(), source.statistic)
                 ruleApplies = resolved is not None
                 if ruleApplies:
                     self.ruleCheck.setText(_("Result rule: {text}").format(text=MapSource.thresholdText(MapSource("r", "", source.statistic, None, None, None, resolved, _sign or "both"))))
@@ -679,6 +856,7 @@ class AtlasManager:
         self.allowCrossFamily = False
         self.fetching = None  # {"thread", "timer", "state"} while a download runs
         self.message = ""
+        self.stopped = False  # True from a stop until the next download starts: only the card that shows the atlases' state may say so
         self._status = None
         self._memo = {}
 
@@ -693,6 +871,13 @@ class AtlasManager:
         from LesionNetworkMappingLib import fetch
 
         return fetch.find_resource(atlasId, ("atlases",))
+
+    @staticmethod
+    def cacheDir():
+        """The application's download cache (the folder the Result card's peak regions and the other cards read)."""
+        from LesionNetworkMappingLib import fetch
+
+        return fetch.app_cache_dir()
 
     def title(self, atlasId):
         if atlasId in self.override:
@@ -713,7 +898,8 @@ class AtlasManager:
 
                 resource = self.resource(atlasId)
                 labels = resource.label_resource()
-                self._status[atlasId] = bool(fetch.is_cached(resource) and (labels is None or fetch.is_cached(labels)))
+                cache = self.cacheDir()
+                self._status[atlasId] = bool(fetch.is_cached(resource, cache) and (labels is None or fetch.is_cached(labels, cache)))
             except Exception:
                 self._status[atlasId] = False
         return self._status[atlasId]
@@ -734,7 +920,7 @@ class AtlasManager:
                 continue
             if atlasId not in self._memo:
                 try:
-                    self._memo[atlasId] = atlases.Atlas.load(atlasId)
+                    self._memo[atlasId] = atlases.Atlas.load(atlasId, self.cacheDir())
                 except Exception:
                     logging.exception(f"Lesion network mapping: the atlas {atlasId} could not be loaded")
                     continue
@@ -773,6 +959,24 @@ class AtlasManager:
     def busy(self):
         return self.fetching is not None and self.fetching["thread"].is_alive()
 
+    @staticmethod
+    def failureText(errors, total):
+        """The line shown when downloads failed: one readable sentence (the same reason once), "" when none failed."""
+        if not errors:
+            return ""
+        reasons = " ".join(reason if reason[-1:] in ".!?\u2026" else reason + "." for reason in dict.fromkeys(errors))  # one sentence per distinct reason, in order
+        if len(errors) < total:
+            return _("Some atlases could not be downloaded. {reason}").format(reason=reasons)
+        return _("The atlases could not be downloaded. {reason}").format(reason=reasons)
+
+    def stop(self):
+        """Stop the running download (the partial file is kept; the card shows that it was stopped)."""
+        if self.busy():
+            self.fetching["state"]["cancel"].cancel("stopped")
+            self.fetching["state"]["text"] = _("Stopping…")
+            return True
+        return False
+
     def fetch(self, ids):
         """Download the missing atlases of ``ids`` in a background thread (an explicit user action; one at a time)."""
         if self.busy():
@@ -780,21 +984,35 @@ class AtlasManager:
         ids = [atlasId for atlasId in ids if not self.isCached(atlasId)]
         if not ids:
             return False
-        state = {"text": _("Downloading…"), "errors": [], "done": False}
+        from LesionNetworkMappingLib import jobs
+
+        self.stopped = False
+        token = jobs.CancelToken(signals=False)
+        state = {"text": _("Downloading…"), "errors": [], "done": False, "cancel": token, "stopped": False}
+        cache = self.cacheDir()  # resolved here: the thread never reads the application settings
 
         def work():
             from LesionNetworkMappingLib import fetch
 
-            for atlasId in ids:
+            for index, atlasId in enumerate(ids):
                 try:
                     resource = fetch.find_resource(atlasId, ("atlases",))
 
                     def progress(done, total, title=resource.title):
                         state["text"] = _("Downloading {title}… {pct}%").format(title=title, pct=int(100 * done / total)) if total else _("Downloading {title}…").format(title=title)
 
-                    fetch.fetch_set(resource, progress=progress)
+                    fetch.fetch_set(resource, cache=cache, progress=progress, cancel=token)
+                except jobs.Cancelled:
+                    state["stopped"] = True
+                    break
                 except Exception as exc:
-                    state["errors"].append(f"{atlasId}: {type(exc).__name__}: {exc}")
+                    logging.info(f"Lesion network mapping: the atlas {atlasId} could not be downloaded: {exc!r}")
+                    message = fetch.user_message(exc)
+                    state["errors"].append(message)
+                    if isinstance(exc, fetch.OfflineError):
+                        # No connection at all: the other atlases would each retry and fail the same way
+                        state["errors"].extend([message] * (len(ids) - index - 1))
+                        break
             state["done"] = True
 
         timer = qt.QTimer()
@@ -806,7 +1024,8 @@ class AtlasManager:
                 timer.stop()
                 self._status = None
                 self.fetching = None
-                self.message = _("Some atlases could not be downloaded: {errors}").format(errors="; ".join(state["errors"])) if state["errors"] else ""
+                self.stopped = bool(state["stopped"])
+                self.message = _("The download was stopped.") if state["stopped"] else self.failureText(state["errors"], len(ids))
             self.notify()
 
         timer.connect("timeout()", poll)
@@ -828,16 +1047,71 @@ def sharedAtlases(ctx):
     return manager
 
 
+def fetchQuestionText(manager, ids):
+    """The text of the "Get atlases" confirmation: the count (singular for one atlas), the size and the licence lines."""
+    count = len(ids)
+    one = _("Download {count} atlas file ({size}) from the open sources of the catalog (TemplateFlow, the Tian atlas site)?")
+    many = _("Download {count} atlas files ({size}) from the open sources of the catalog (TemplateFlow, the Tian atlas site)?")
+    text = (one if count == 1 else many).format(count=count, size=manager.sizeText(ids))
+    return text + "\n\n" + "\n".join(manager.describe(ids))
+
+
+def fetchQuestionDialog(text, parent=None):
+    """The "Get atlases" confirmation: a QDialog in the Studio dialog chrome (VISUAL 4.7) when Slicer Studio is part of
+    this build, else a plain QMessageBox (Classic). ``exec`` returns a truthy accepted value for "download".
+    """
+    parent = parent or slicer.util.mainWindow()
+    try:
+        from StudioLib import ui
+    except ImportError:
+        ui = None
+    if ui is None:
+        box = qt.QMessageBox(qt.QMessageBox.Question, _("Get atlases"), text, qt.QMessageBox.Ok | qt.QMessageBox.Cancel, parent)
+        box.setObjectName("LNMGetAtlasesDialog")
+        return box
+    dialog = qt.QDialog(parent)
+    dialog.setObjectName("LNMGetAtlasesDialog")
+    dialog.setWindowTitle(_("Get atlases"))
+    dialog.setMinimumWidth(460)
+    layout = qt.QVBoxLayout(dialog)
+    layout.setContentsMargins(24, 24, 24, 22)
+    layout.setSpacing(14)
+    header, _title, _body = ui.dialogHeader("download", _("Get atlases"), text, "LNMGetAtlases")
+    layout.addLayout(header)
+    buttons = qt.QHBoxLayout()
+    buttons.setSpacing(10)
+    buttons.addStretch(1)
+    cancel = qt.QPushButton(_("Cancel"))
+    cancel.setObjectName("LNMGetAtlasesCancelButton")
+    cancel.setMinimumHeight(36)
+    ui.setRole(cancel, "secondary")
+    cancel.connect("clicked()", dialog.reject)
+    buttons.addWidget(cancel)
+    download = qt.QPushButton(_("Download"))
+    download.setObjectName("LNMGetAtlasesDownloadButton")
+    download.setDefault(True)
+    download.setMinimumHeight(36)
+    download.setMinimumWidth(96)
+    ui.setRole(download, "primary")
+    download.connect("clicked()", dialog.accept)
+    buttons.addWidget(download)
+    layout.addLayout(buttons)
+    ui.dialogChrome(dialog)
+    return dialog
+
+
 def confirmFetch(manager, ids, parent=None):
     """Ask the user to confirm the download of atlases (their licences and size are named); return whether they agreed."""
     ids = manager.missing(ids)
     if not ids:
         return False
-    text = _("Download {count} atlas files ({size}) from the open sources of the catalog (TemplateFlow, the Tian atlas site)?").format(count=len(ids), size=manager.sizeText(ids))
-    text += "\n\n" + "\n".join(manager.describe(ids))
-    box = qt.QMessageBox(qt.QMessageBox.Question, _("Get atlases"), text, qt.QMessageBox.Ok | qt.QMessageBox.Cancel, parent or slicer.util.mainWindow())
-    run = getattr(box, "exec_", None) or box.exec  # Qt 5 PythonQt: exec_, Qt 6: exec
-    return run() == qt.QMessageBox.Ok
+    dialog = fetchQuestionDialog(fetchQuestionText(manager, ids), parent)
+    run = getattr(dialog, "exec_", None) or dialog.exec  # Qt 5 PythonQt: exec_, Qt 6: exec
+    try:
+        # QDialog returns Accepted (1); the Classic QMessageBox returns the Ok button
+        return run() in (qt.QDialog.Accepted, qt.QMessageBox.Ok)
+    finally:
+        dialog.deleteLater()
 
 
 #
@@ -904,7 +1178,7 @@ class ClustersCard:
         self.atlasButton.setMenu(self.atlasMenu)
         atlasRow.addWidget(self.atlasButton)
         layout.addLayout(atlasRow)
-        self.atlasBanner = widgets.banner("", [(_("Get atlases"), self.getAtlases)], level="neutral")
+        self.atlasBanner = widgets.banner("", [(_("Get atlases"), self.getAtlases), (_("Stop"), self.atlases.stop)], level="neutral")
         self.atlasBanner.setObjectName("LNMClustersAtlasBanner")
         self.atlasBanner.hide()
         layout.addWidget(self.atlasBanner)
@@ -934,6 +1208,7 @@ class ClustersCard:
         self.view.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
         self.view.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
         self.view.setSelectionMode(qt.QAbstractItemView.SingleSelection)
+        self.view.setTabKeyNavigation(False)  # Tab leaves the table, arrows move (SPEC 2.9)
         self.view.setAlternatingRowColors(True)
         self.view.setWordWrap(False)
         self.view.verticalHeader().setVisible(False)
@@ -1054,7 +1329,7 @@ class ClustersCard:
 
     def signature(self, source):
         """What the table on show depends on: the map (and its threshold), the minimum extent and the atlases."""
-        return (source.stamp(), self.model.minExtent, tuple(self.usableAtlasIds()), self.atlases.allowCrossFamily)
+        return (source.stamp(), self.model.minExtent, tuple(self.usableAtlasIds(source)), self.atlases.allowCrossFamily)
 
     def _currentSignature(self):
         try:
@@ -1069,6 +1344,7 @@ class ClustersCard:
         """The inputs may have changed: update the out-of-date chip, and make the table now when the card is open."""
         self._observeVolumes()
         self._refreshStatus()
+        self._refreshAtlases()  # the map (and so the family of its atlases) may have changed
         if self.expanded() and self._isStale():
             self.timer.start()
 
@@ -1131,29 +1407,50 @@ class ClustersCard:
     # Atlases
     #
 
-    def selectedAtlasIds(self):
-        """Atlas ids chosen for the labels: the setting, else the defaults."""
+    def _currentSource(self):
+        """The current map source, or None (no map, or it cannot be read: the table says why)."""
         try:
-            stored = json.loads(str(_settings().value(ATLASES_SETTING) or "null"))
+            return self.model.source()
+        except Exception:
+            return None
+
+    def atlasFamily(self, source=None):
+        """Template family of the label atlases offered for ``source`` (default: the current map); see :func:`labelFamily`."""
+        return labelFamily(source if source is not None else self._currentSource())
+
+    def labelAtlasIds(self, source=None):
+        """The label atlases offered for the family of ``source`` (default: the current map)."""
+        return LABEL_ATLASES_BY_FAMILY[self.atlasFamily(source)]
+
+    def selectedAtlasIds(self, source=None):
+        """Atlas ids chosen for the labels of the family of ``source`` (default: the current map): the setting, else the defaults."""
+        family = self.atlasFamily(source)
+        offered = LABEL_ATLASES_BY_FAMILY[family]
+        try:
+            stored = json.loads(str(_settings().value(ATLASES_SETTINGS[family]) or "null"))
         except ValueError:
             stored = None
         if isinstance(stored, list) and all(isinstance(item, str) for item in stored):
-            return [atlasId for atlasId in stored if atlasId in LABEL_ATLASES]
-        return list(DEFAULT_LABEL_ATLASES)
+            return [atlasId for atlasId in stored if atlasId in offered]
+        return list(offered)
 
-    def setSelectedAtlasIds(self, ids):
-        _settings().setValue(ATLASES_SETTING, json.dumps(list(ids)))
+    def setSelectedAtlasIds(self, ids, source=None):
+        """Remember the label atlases of the family of ``source`` (default: the current map); ids of another family are dropped."""
+        offered = self.labelAtlasIds(source)
+        _settings().setValue(ATLASES_SETTINGS[self.atlasFamily(source)], json.dumps([atlasId for atlasId in ids if atlasId in offered]))
         self._refreshAtlases()
         self.schedule()
 
-    def usableAtlasIds(self):
-        return [atlasId for atlasId in self.selectedAtlasIds() if self.atlases.isCached(atlasId)]
+    def usableAtlasIds(self, source=None):
+        return [atlasId for atlasId in self.selectedAtlasIds(source) if self.atlases.isCached(atlasId)]
 
     def _fillAtlasMenu(self):
         menu = self.atlasMenu
         menu.clear()
-        selected = set(self.selectedAtlasIds())
-        for atlasId in LABEL_ATLASES:
+        source = self._currentSource()
+        offered = self.labelAtlasIds(source)
+        selected = set(self.selectedAtlasIds(source))
+        for atlasId in offered:
             cached = self.atlases.isCached(atlasId, refresh=True)
             action = menu.addAction(shortName(atlasId) + ("" if cached else _(" (not downloaded)")))
             action.setCheckable(True)
@@ -1161,7 +1458,7 @@ class ClustersCard:
             action.setEnabled(cached)
             action.connect("toggled(bool)", lambda checked, key=atlasId: self._toggleAtlas(key, checked))
         menu.addSeparator()
-        missing = self.atlases.missing(LABEL_ATLASES)
+        missing = self.atlases.missing(offered)
         fetchAction = menu.addAction(_("Get missing atlases…"))
         fetchAction.setEnabled(bool(missing) and not self.atlases.busy())
         fetchAction.connect("triggered()", self.getAtlases)
@@ -1175,15 +1472,15 @@ class ClustersCard:
         ids = [item for item in self.selectedAtlasIds() if item != atlasId]
         if checked:
             ids.append(atlasId)
-        self.setSelectedAtlasIds([item for item in LABEL_ATLASES if item in ids])
+        self.setSelectedAtlasIds([item for item in self.labelAtlasIds() if item in ids])
 
     def _toggleCrossFamily(self, checked):
         self.atlases.allowCrossFamily = bool(checked)
         self.schedule()
 
     def getAtlases(self):
-        """Download the missing label atlases after the user confirmed (an explicit action; never implicit)."""
-        ids = self.atlases.missing(LABEL_ATLASES)
+        """Download the missing label atlases of the map's family after the user confirmed (an explicit action; never implicit)."""
+        ids = self.atlases.missing(self.labelAtlasIds())
         if ids and confirmFetch(self.atlases, ids):
             self.atlases.fetch(ids)
 
@@ -1193,21 +1490,31 @@ class ClustersCard:
             self.schedule()
 
     def _refreshAtlases(self):
-        usable = self.usableAtlasIds()
-        missing = self.atlases.missing(LABEL_ATLASES)
+        source = self._currentSource()
+        usable = self.usableAtlasIds(source)
+        missing = self.atlases.missing(self.labelAtlasIds(source))
         busy = self.atlases.busy()
         if usable:
             self.atlasLabel.setText(_("Labels: {names}").format(names=", ".join(shortName(atlasId) for atlasId in usable)))
+        elif not self.selectedAtlasIds(source) and any(self.atlases.isCached(atlasId) for atlasId in self.labelAtlasIds(source)):
+            # Atlases are on this computer but all unchecked in Atlases…: not the same as "not downloaded"
+            self.atlasLabel.setText(_("Labels: off (no atlas chosen, see Atlases…)"))
         else:
             self.atlasLabel.setText(_("Labels: none (no atlas on this computer)"))
         self.atlasLabel.setToolTip("\n".join(self.atlases.title(atlasId) for atlasId in usable))
-        self.atlasBanner.setVisible((bool(missing) and not usable) or busy)
+        stopped = bool(missing) and not busy and self.atlases.stopped
+        self.atlasBanner.setVisible((bool(missing) and not usable) or stopped or busy)
         if busy:
             widgets.setBannerText(self.atlasBanner, self.atlases.message or _("Downloading…"))
+        elif stopped:
+            names = ", ".join(shortName(atlasId) for atlasId in missing)
+            widgets.setBannerText(self.atlasBanner, _("The download was stopped. Not on this computer: {names} ({size}).").format(names=names, size=self.atlases.sizeText(missing)))
         elif missing and not usable:
             widgets.setBannerText(self.atlasBanner, self.atlases.message or _("The clusters are listed without anatomical labels: no atlas is on this computer ({size}).").format(size=self.atlases.sizeText(missing)))
         for button in self.atlasBanner.findChildren(qt.QToolButton):
-            button.setEnabled(not busy)
+            isStop = button.text == _("Stop")
+            button.setVisible(busy if isStop else True)
+            button.setEnabled(busy if isStop else not busy)
 
     #
     # The table
@@ -1292,12 +1599,13 @@ class ClustersCard:
                 if count > MAX_CLUSTERS:
                     self._showMessage(_("{count} clusters pass {threshold}: too many for a table. Raise the threshold or the minimum extent.").format(count=count, threshold=source.thresholdText()))
                     return None
-                atlasList = self.atlases.load(self.usableAtlasIds())
-                labeler = clusters.atlas_labeler(atlasList, top=3, min_pct=5.0, allow_cross_family=self.atlases.allowCrossFamily) if atlasList else None
+                atlasList = self.atlases.load(self.usableAtlasIds(source))
+                # The space the app knows for the map (Studio.Space, a sidecar) wins over recognizing its grid
+                labeler = clusters.atlas_labeler(atlasList, top=3, min_pct=5.0, space=source.space, allow_cross_family=self.atlases.allowCrossFamily) if atlasList else None
                 table = clusters.cluster_table(
                     source.volume, source.grid, None, source.threshold, sign=source.sign, min_extent_mm3=self.model.minExtent, labeler=labeler, extra_maps=self.siblingMaps(source), statistic=source.statistic,
                 )
-                family, _space = atlasLib.mask_family(source.grid.shape, source.grid.affine)
+                family, _space = atlasLib.mask_family(source.grid.shape, source.grid.affine, space=source.space)
         except Exception as exc:
             logging.exception("Lesion network mapping: the cluster table could not be made")
             self._showMessage(_("The cluster table could not be made: {error}").format(error=exc))
@@ -1373,7 +1681,7 @@ class ClustersCard:
             value = row["extra"].get(key[6:])
             return ("" if value is None or not math.isfinite(value) else f"{value:.2f}"), "r"
         if key in ("x", "y", "z"):
-            return f"{row['xyz']['xyz'.index(key)]:.0f}", "r"
+            return formatCoordinate(row["xyz"]["xyz".index(key)]), "r"
         if key == "side":
             if not self.knownSpace:
                 return "–", "c"  # noqa: RUF001
@@ -1435,7 +1743,7 @@ class ClustersCard:
                     if key == "labels":
                         item.setToolTip(text.replace("; ", "\n"))
                     elif key == "id":
-                        item.setToolTip(_("Peak {x:.0f}, {y:.0f}, {z:.0f}: click to jump there").format(x=row["xyz"][0], y=row["xyz"][1], z=row["xyz"][2]))
+                        item.setToolTip(_("Peak {x}, {y}, {z}: click to jump there").format(x=formatCoordinate(row["xyz"][0]), y=formatCoordinate(row["xyz"][1]), z=formatCoordinate(row["xyz"][2])))
                     self.itemModel.setItem(rowIndex, column, item)
         finally:
             self._loading = False
@@ -1460,16 +1768,34 @@ class ClustersCard:
             self.sortDescending = not self.sortDescending
         else:
             self.sortColumn, self.sortDescending = column, False
-        self._fillView()
+        self._refillKeepingSelection()
 
     def sortBy(self, key, descending=False):
         """Sort the clusters by a column key ("id", "mm3", "peak"...); each cluster keeps its sub-peaks below it."""
         for column, (_name, _tip, columnKey) in enumerate(self._columns):
             if columnKey == key:
                 self.sortColumn, self.sortDescending = column, bool(descending)
-                self._fillView()
+                self._refillKeepingSelection()
                 return True
         return False
+
+    def _refillKeepingSelection(self):
+        """Fill the view again in the new sort order, keeping the selected row (the same table: only the order changes)."""
+        index = self.view.currentIndex()
+        current = index.row() if index is not None and index.isValid() else -1
+        selected = self.displayRows[current] if 0 <= current < len(self.displayRows) else None
+        self._fillView()
+        if selected is None:
+            return
+        for rowIndex, row in enumerate(self.displayRows):
+            if row is selected:
+                self._loading = True  # the slice views stay where they are: the row was already selected
+                try:
+                    self.view.setCurrentIndex(self.itemModel.index(rowIndex, 0))
+                finally:
+                    self._loading = False
+                self._showDetail(rowIndex)
+                return
 
     def _onRowClicked(self, index):
         self.jumpToRow(index.row())
@@ -1482,7 +1808,7 @@ class ClustersCard:
         """What a row says in full: the cluster or sub-peak, its peak and side, and every atlas label with its share."""
         x, y, z = row["xyz"]
         side = {"L": _("left"), "R": _("right"), "midline": _("midline")}.get(row["hemisphere"], "") if self.knownSpace else ""
-        place = _("peak at {x:.0f}, {y:.0f}, {z:.0f}").format(x=x, y=y, z=z) + (f" ({side})" if side else "")
+        place = _("peak at {x}, {y}, {z}").format(x=formatCoordinate(x), y=formatCoordinate(y), z=formatCoordinate(z)) + (f" ({side})" if side else "")
         if row["subpeak"]:
             return _("Sub-peak {id}: {place}.").format(id=row["id"], place=place)
         text = _("Cluster {id}: {voxels:,} voxels ({mm3:,.0f} mm³), {place}.").format(id=row["id"], voxels=row["voxels"], mm3=row["mm3"], place=place)
@@ -1583,7 +1909,7 @@ class ClustersCard:
         if self.table is None:
             return None
         if not folder:
-            start = str(_settings().value(LAST_FOLDER_SETTING) or "")
+            start = str(_settings().value(LAST_FOLDER_SETTING) or "") or widgets.dialogStartFolder()
             folder = qt.QFileDialog.getExistingDirectory(slicer.util.mainWindow(), _("Export the cluster table into…"), start)
             if not folder:
                 return None
@@ -1602,8 +1928,12 @@ class ClustersCard:
             os.makedirs(folder, exist_ok=True)
             clusters.write_clusters(self.table, tsv_path=tsv, html_path=page, caption=self.caption())
         except Exception as exc:
-            logging.exception("Lesion network mapping: the cluster table could not be exported")
-            self.exportLabel.setText(_("Export failed: {error}").format(error=exc))
+            plain = widgets.unwritableMessage(exc)
+            if plain:  # expected (a folder the user cannot write): one line, no traceback, no errno or hidden file name
+                logging.warning("Lesion network mapping: the cluster table could not be exported: %s", plain)
+            else:
+                logging.exception("Lesion network mapping: the cluster table could not be exported")
+            self.exportLabel.setText(plain or _("Export failed: {error}").format(error=exc))
             self.exportLabel.show()
             raise
         self.lastFolder = folder
@@ -1615,7 +1945,7 @@ class ClustersCard:
 
     def showFolder(self):
         if self.lastFolder and os.path.isdir(self.lastFolder):
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(self.lastFolder))
+            widgets.showInFileManager(self.lastFolder)
 
 
 CARD = {

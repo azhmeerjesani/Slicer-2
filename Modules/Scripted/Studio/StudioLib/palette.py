@@ -718,6 +718,11 @@ def _selectTool(shell, effectName):
     if editor.sourceVolumeNode() is None:
         shell.toast(_("Open a scan or start on the MNI template first, then pick the tool"), 3500)
         return
+    if getattr(editor, "readOnly", False):
+        from . import draw
+
+        shell.toast(draw.readOnlyReason(editor.segmentationNode()) or _("This lesion is read-only here"), 3500)
+        return
     if effectName not in [name for name, index in _toolNamesAndIndexes(editor) if index is not None]:
         # A tool under "More tools": its tile is shown, so that the active tool is visible in Draw
         widget = getattr(slicer.modules, "SegmentEditorWidget", None)
@@ -727,7 +732,12 @@ def _selectTool(shell, effectName):
 
 
 def _openSettings(panel=None):
-    slicer.app.openSettingsDialog(panel or "")
+    # An empty panel name would make Qt log "QStackedWidget::setCurrentWidget: widget 0x0 not
+    # contained in stack" once the dialog has a current page: pass the name only when there is one
+    if panel:
+        slicer.app.openSettingsDialog(panel)
+    else:
+        slicer.app.openSettingsDialog()
 
 
 def _showToolBar(toolBar, shell):
@@ -795,6 +805,19 @@ def _undoRedo(which):
     editor = _segmentEditor()
     if editor is not None:
         getattr(editor, which)()
+
+
+def _canUndoRedo(which, shell):
+    """Undo and Redo of the lesion are Draw-only, as the top bar's buttons and Ctrl+Z are: in another workspace the
+    lesion is hidden, so an undo there would change it unseen. Offered when the Segment Editor has a step to take.
+    """
+    if shell is None or shell.currentWorkspace() != "draw":
+        return False
+    editor = _segmentEditor()
+    if editor is None:
+        return False
+    button = editor.findChild("QToolButton", "UndoButton" if which == "undo" else "RedoButton")
+    return button is None or bool(button.enabled)
 
 
 def _hasLesion():
@@ -944,9 +967,9 @@ class Index:
             Entry("action.shortcuts", _("Keyboard shortcuts"), action, shell.toggleCheatSheet, key="Ctrl+/",
                   synonyms=("shortcuts", "keys", "hotkeys", "cheat sheet", "keyboard", "key bindings"), iconName="keyboard"),
             Entry("action.undo", _("Undo"), action, lambda: _undoRedo("undo"), key="Ctrl+Z", synonyms=("undo", "revert", "take back"),
-                  enabled=lambda: _segmentEditor() is not None, description=_("Undo the last lesion edit"), iconName="undo-2"),
+                  enabled=lambda: _canUndoRedo("undo", shell), description=_("Undo the last lesion edit"), iconName="undo-2"),
             Entry("action.redo", _("Redo"), action, lambda: _undoRedo("redo"), key="Ctrl+Y", synonyms=("redo",),
-                  enabled=lambda: _segmentEditor() is not None, description=_("Redo the last undone lesion edit"), iconName="redo-2"),
+                  enabled=lambda: _canUndoRedo("redo", shell), description=_("Redo the last undone lesion edit"), iconName="redo-2"),
             Entry("action.recentMessages", _("Recent messages"), action, shell.showRecentMessages,
                   synonyms=("messages", "notifications", "toasts", "history"), iconName="history"),
             Entry("action.hidePanels", _("Hide panels"), view, shell.toggleFocusMode, key="Ctrl+6",
@@ -975,14 +998,16 @@ class Index:
                       description=_("Your default MNI template in Draw (the bundled MNI152NLin2009cAsym unless you chose your own), with an empty lesion"),
                       iconName="brain"),
                 Entry("action.newLesion", _("New lesion"), action, lambda: importer.newLesionSegmentation(shell=shell),
-                      synonyms=("another lesion", "new segmentation", "add lesion", "next lesion"), enabled=_hasScan,
+                      synonyms=("another lesion", "new segmentation", "add lesion", "next lesion"),
+                      enabled=lambda: _hasScan() and getattr(shell, "studySession", None) is None,
                       description=_("A new lesion on the scan of Draw; the previous one is hidden"), iconName="brush"),
             ]
         if draw is not None and hasattr(draw, "saveLesionDialog"):
             entries.append(Entry("draw.saveLesion", _("Save lesion as NIfTI…"), action, lambda: draw.saveLesionDialog(shell), key="Ctrl+Shift+S",
                                  synonyms=("export", "nifti", "save lesion", "nii", "nii.gz", "export lesion", "export segmentation", "save mask",
                                            "binary labelmap", "export mask"),
-                                 enabled=_hasLesion, description=_("The lesion as a NIfTI mask that official 3D Slicer, FSL and other tools read"),
+                                 enabled=lambda: _hasLesion() and not getattr(draw, "saveLesionBlockedReason", str)(),
+                                 description=_("The lesion as a NIfTI mask that official 3D Slicer, FSL and other tools read"),
                                  iconName="download"))
         # Export as NIfTI (A-11): images, segmentations and maps, the whole project, DICOM series
         niftiUi = _importOptional("StudioLib.niftiexport_ui")
@@ -1039,7 +1064,7 @@ class Index:
                 submenu = path[-1]
                 entryId = f"layout.{_slug(submenu)}.{_slug(text)}"
                 title = f"{submenu}: {text}"
-                entries.append(Entry(entryId, title, layoutTitle, action.trigger, KIND_LAYOUT, synonyms=(submenu.lower(),), group=finder.GROUP_OTHER,
+                entries.append(Entry(entryId, title, layoutTitle, lambda action=action: _triggerLayoutAction(shell, action), KIND_LAYOUT, synonyms=(submenu.lower(),), group=finder.GROUP_OTHER,
                                      iconName="layout-grid"))
                 continue
             data = action.data()
@@ -1055,7 +1080,7 @@ class Index:
             synonyms = ("four up", "2x2", "four views") if layoutId == slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView else ()
             # The classic layouts that the picker does not offer ("Tabbed 3D", "Triple 3D") come after the core modules and
             # commands of the same tier: "t" is Transforms, not a rarely used layout
-            entries.append(Entry(f"layout.{layoutId}" if layoutId is not None else f"layout.{_slug(text)}", text, layoutTitle, action.trigger,
+            entries.append(Entry(f"layout.{layoutId}" if layoutId is not None else f"layout.{_slug(text)}", text, layoutTitle, lambda action=action: _triggerLayoutAction(shell, action),
                                  KIND_LAYOUT, key, synonyms=synonyms, aliases=(title,) if title and title.lower() != text.lower() else (),
                                  priority=1 if key else 0, group=finder.GROUP_CORE if key else finder.GROUP_OTHER, iconName="layout-grid"))
         return entries
@@ -1135,12 +1160,17 @@ class Index:
         entries = []
         if menu is None:
             return entries
+        # Like Library's "Opened from elsewhere": only files that still exist and are the user's own (not the templates
+        # and samples that Studio downloaded into the cache or temporary folders)
+        from . import library
+
+        internal = library._internalFolders()
         for action in menu.actions():
             properties = action.property("fileParameters")
             if not properties:
                 continue
             fileName = str(properties.get("fileName", "") if hasattr(properties, "get") else "")
-            if not fileName:
+            if not fileName or library.isInternalPath(fileName, internal) or not os.path.exists(fileName):
                 continue
             title = os.path.basename(fileName)
             entries.append(Entry(f"recent:{fileName}", title, _("Recent file"), lambda properties=properties, action=action: _loadRecent(properties, action, shell),
@@ -1178,18 +1208,29 @@ def _slug(text):
 
 def _menuActions(menu, path=()):
     """``[(submenu path, action)]`` of the leaf actions of a menu (not separators)."""
+    from . import shell as shellModule
+
     result = []
     if menu is None:
         return result
     for action in menu.actions():
         if action.isSeparator():
             continue
-        submenu = action.menu()
+        submenu = shellModule.actionMenu(action)
         if submenu is not None:
             result += _menuActions(submenu, path + (str(action.text).replace("&", ""),))
         elif action.text:
             result.append((path, action))
     return result
+
+
+def _triggerLayoutAction(shell, action):
+    """Run a layout action of the View menu from Search; the view under the pointer keeps the keys afterwards."""
+    topBar = getattr(shell, "topBar", None) if shell is not None else None
+    if topBar is not None and hasattr(topBar, "runLayoutChange"):
+        topBar.runLayoutChange(action.trigger)
+    else:
+        action.trigger()
 
 
 def _setLayout(shell, layoutId):
@@ -1218,7 +1259,8 @@ def _settingsPanels(dialog):
     titles = []
 
     def visit(item):
-        title = str(item.text(0))
+        # CTK appends "*" to a page whose setting needs a restart (a theme or density change): not part of its name
+        title = str(item.text(0)).rstrip("* \t")
         if title:
             titles.append(title)
         for index in range(item.childCount()):
@@ -1611,7 +1653,7 @@ class Palette:
         field = qt.QLineEdit()
         field.setObjectName("StudioPaletteSearch")
         field.setFixedHeight(FIELD_HEIGHT - 2)
-        field.setClearButtonEnabled(True)
+        ui.setClearButton(field)
         field.setAccessibleName(_("Search"))
         fieldLayout.addWidget(field, 1)
         self.escKey = ui.kbd(_("Esc"))
@@ -1958,7 +2000,13 @@ class Palette:
 def _invoke(entry, shell):
     try:
         entry.callback()
-    except Exception:
+    except Exception as e:
+        if getattr(e, "user_problem", False):
+            # A problem with the user's own file: its message says what to do (a warning, not a program error)
+            logging.warning(f"Studio: {entry.title}: {e}")
+            if shell is not None and shell.isActive():
+                shell.toast(str(e), 8000, level="warning")
+            return
         logging.error(f"Studio: Search entry {entry.id} failed:\n{traceback.format_exc()}")
         if shell is not None and shell.isActive():
             shell.toast(_("{title} failed: see the error log").format(title=entry.title), 4000)

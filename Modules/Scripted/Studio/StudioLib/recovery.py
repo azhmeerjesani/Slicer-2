@@ -14,8 +14,11 @@ The autosave folder holds one folder per application session (``<date>-<time>-<p
 presenter (``autosave.instance().setRecoveryPresenter()``, A-01b), which reuses these functions.
 """
 
+import calendar
 import logging
 import os
+import re
+import tempfile
 import time
 import traceback
 
@@ -24,6 +27,7 @@ import slicer
 from slicer.i18n import tr as _
 
 from . import autosave_io as io
+from . import ui
 
 #: A locked session whose heartbeat is older than this is "possibly crashed" (its PID was reused)
 STALE_HEARTBEAT_S = 2 * 3600
@@ -37,6 +41,7 @@ THUMBNAIL_ICON_SIZE = 96
 
 _STATUS_TEXT = {
     "crashed": "closed unexpectedly",
+    "closed-for-update": "closed for the update",
     "possibly-crashed": "possibly closed unexpectedly",
     "closed-unsaved": "closed without saving",
     "running": "open in another Slicer",
@@ -54,10 +59,31 @@ def _statusText(status):
 
 
 def _parseTime(text):
+    """Seconds since the epoch of a session time: UTC ("...Z", as written now) or local time (no "Z", earlier versions); 0.0 if unreadable."""
     try:
+        if text.endswith("Z"):
+            return float(calendar.timegm(time.strptime(text[:-1], "%Y-%m-%dT%H:%M:%S")))
         return time.mktime(time.strptime(text, "%Y-%m-%dT%H:%M:%S"))
-    except (TypeError, ValueError, OverflowError):
+    except (AttributeError, TypeError, ValueError, OverflowError):
         return 0.0
+
+
+def showAutosaveFolder(path, root=None, parent=None):
+    """Show an autosave folder in the file manager. Studio project work does not autosave, so the recovery folder may not exist
+    yet: create it (as the first autosave does) instead of doing nothing, or say why it could not be shown.
+    """
+    from . import projects
+
+    root = root or io.defaultRoot()
+    if not path or not os.path.isdir(path):
+        path = root
+        try:
+            io.ensureRoot(path)
+        except OSError:
+            qt.QMessageBox.information(parent, _("Recovery location"),
+                                       _("Nothing has been autosaved yet, and the folder could not be created:") + "\n" + str(path))
+            return False
+    return projects.showInFileManager(path)
 
 
 class SlotInfo:
@@ -91,6 +117,8 @@ class SlotInfo:
             return "own-current" if self.state == "current" else "own-closed"
         if self.state == "closed-unsaved":
             return "closed-unsaved"
+        if self.session.status == "crashed" and self.session.closedForUpdate:
+            return "closed-for-update"
         return self.session.status
 
     def contentsText(self):
@@ -110,6 +138,8 @@ class SessionInfo:
         self.updated = self.data.get("updated") or self.data.get("heartbeat")
         self.heartbeat = self.data.get("heartbeat") or self.updated
         self.presentedCount = int(self.data.get("presentedCount") or 0)
+        #: Closed by Slicer Studio itself to install an update (offered like a crashed session, but not described as one)
+        self.closedForUpdate = bool(self.data.get("closedForUpdate"))
         self.lockInfo = ""
         self.slots = [SlotInfo(self, slot) for slot in self.data.get("slots") or [] if slot.get("name")]
         self.slots = [slot for slot in self.slots if slot.hasContent()]
@@ -154,7 +184,45 @@ def lockState(sessionDir):
     if lock.tryLock(0):
         lock.unlock()
         return "free"
+    # QLockFile treats the lock of a dead process as stale only when it can delete the lock file, which it cannot in a
+    # folder that cannot be written (for example a crashed session made read-only): look at the holder itself
+    if _lockHolderGone(lockPath):
+        return "free"
     return "locked"
+
+
+def _lockHolderGone(lockPath):
+    """True if the lock file names a process on this machine that no longer exists (POSIX only; never signals a process)."""
+    if os.name != "posix":
+        return False
+    try:
+        with open(lockPath, encoding="utf-8", errors="replace") as f:
+            lines = [line.strip() for line in f.read().split("\n")]
+        pid = int(lines[0])
+    except (OSError, ValueError, IndexError):
+        return False
+    if pid <= 0:
+        return False
+    # "This machine" as QLockFile decides it: the machine ID when the lock has one, else the host name
+    hostName = lines[2] if len(lines) > 2 else ""
+    hostId = lines[3] if len(lines) > 3 else ""
+    sameHost = not hostName or hostName == str(qt.QSysInfo.machineHostName())
+    try:
+        ownHostId = qt.QSysInfo.machineUniqueId()
+        ownHostId = bytes(ownHostId.data() if hasattr(ownHostId, "data") else ownHostId).decode("utf-8", "replace").strip()
+    except (TypeError, ValueError):
+        ownHostId = ""
+    if hostId and ownHostId:
+        sameHost = hostId == ownHostId
+    if not sameHost:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def scan(root, ownSessionId=None):
@@ -340,6 +408,7 @@ def autosaveSlotOfScene(scene, roots):
     """The slot folder (``scene-<n>``) of the autosave folder that the storage nodes of ``scene`` point into, or None."""
     canonicalRoots = [_canonical(root) for root in roots if root]
     storageNodes = scene.GetNodesByClass("vtkMRMLStorageNode")
+    storageNodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
     for index in range(storageNodes.GetNumberOfItems()):
         fileName = storageNodes.GetItemAsObject(index).GetFileName()
         if not fileName:
@@ -353,6 +422,17 @@ def autosaveSlotOfScene(scene, roots):
                 return directory
             directory = os.path.dirname(directory)
     return None
+
+
+def _defaultWriteOptions(scene, className):
+    """Write options (``autosave_io.storageWriteOptions()``) of a new storage node of ``className``."""
+    fresh = scene.CreateNodeByClass(className)
+    if fresh is None:
+        return None
+    try:
+        return io.storageWriteOptions(fresh)
+    finally:
+        fresh.UnRegister(None)
 
 
 def rehomeAfterLoad(scene, slotDir, manifest=None, restoreUrl=None):
@@ -370,6 +450,7 @@ def rehomeAfterLoad(scene, slotDir, manifest=None, restoreUrl=None):
     report = {"restored": 0, "written": 0, "copied": 0, "unlinked": 0, "changed": [], "missing": []}
     storableOfStorage = {}
     storableNodes = scene.GetNodesByClass("vtkMRMLStorableNode")
+    storableNodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
     for index in range(storableNodes.GetNumberOfItems()):
         node = storableNodes.GetItemAsObject(index)
         for storageIndex in range(node.GetNumberOfStorageNodes()):
@@ -377,6 +458,7 @@ def rehomeAfterLoad(scene, slotDir, manifest=None, restoreUrl=None):
             if storageNode is not None:
                 storableOfStorage[storageNode.GetID()] = node
     storageNodes = scene.GetNodesByClass("vtkMRMLStorageNode")
+    storageNodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
     for index in range(storageNodes.GetNumberOfItems()):
         storageNode = storageNodes.GetItemAsObject(index)
         fileName = storageNode.GetFileName()
@@ -406,9 +488,17 @@ def rehomeAfterLoad(scene, slotDir, manifest=None, restoreUrl=None):
                 replacement.SetFileName(original)
                 node.SetAndObserveStorageNodeID(replacement.GetID())
                 scene.RemoveNode(storageNode)
+                restored = replacement
             else:
                 storageNode.ResetFileNameList()
                 storageNode.SetFileName(original)
+                restored = storageNode
+            # The autosave wrote its private copy cropped and uncompressed: a later Save writes the user's file with the
+            # options it had (its full grid, compressed). Autosaves without recorded options: the defaults of the class.
+            options = entry.get("originalStorageOptions")
+            if options is None:
+                options = _defaultWriteOptions(scene, restored.GetClassName())
+            io.applyStorageWriteOptions(restored, options)
             node.StorableModified()
             report["written"] += 1
             report["restored"] += 1
@@ -450,6 +540,7 @@ def rehomeAfterLoad(scene, slotDir, manifest=None, restoreUrl=None):
 
 def sceneHasDisplayableData(scene):
     nodes = scene.GetNodesByClass("vtkMRMLDisplayableNode")
+    nodes.UnRegister(None)  # a new collection: release it, or it keeps its nodes alive after removal
     for index in range(nodes.GetNumberOfItems()):
         node = nodes.GetItemAsObject(index)
         if node.GetSaveWithScene() and not node.GetHideFromEditors() and not node.IsA("vtkMRMLSliceNode"):
@@ -488,14 +579,35 @@ def _service():
     return autosave.instance()
 
 
-def recover(slot, mode=None, parent=None):
-    """Load an autosaved slot and re-link its data to the original files. Return the report, or None if cancelled."""
+def recoveredText(count, time):
+    """The confirmation after a recovery, singular for one restored item."""
+    if count == 1:
+        return _("Recovered 1 item from the autosave of {time}. Use File › Save to keep it.").format(time=time)  # noqa: RUF001
+    return _("Recovered {count} items from the autosave of {time}. Use File › Save to keep them.").format(count=count, time=time)  # noqa: RUF001
+
+
+def _loadAutosavedScene(scenePath):
+    """Load the scene of an autosave slot without recording it as a recently loaded file.
+
+    The autosave folder is private (SPEC 9.9): recovering is not opening a file of the user. 3D Slicer adds every loaded file to
+    "RecentlyLoadedFiles" (a setting that official installations share, and that Library > Opened from elsewhere lists), where
+    the private path would stay after the session is deleted, and where opening it would bind the data to the autosave folder.
+    The main window records a file when the IO manager emits ``newFileLoaded``: that signal is blocked during the load.
+    """
+    ioManager = slicer.app.coreIOManager()
+    wasBlocked = ioManager.blockSignals(True)
+    try:
+        slicer.util.loadScene(scenePath)
+    finally:
+        ioManager.blockSignals(wasBlocked)
+
+
+def _loadSlot(slot, scenePath, manifest, replace):
+    """Load ``scenePath`` (the scene of ``slot``, or a part of it in the slot folder) and re-link its data to the original
+    files. ``replace``: clear the current scene first, else add to it. Return the report of ``rehomeAfterLoad()``, or
+    None if the load failed (the error is shown).
+    """
     scene = slicer.mrmlScene
-    if mode is None:
-        mode = askReplaceOrAdd(parent) if sceneHasDisplayableData(scene) else "replace"
-    if mode is None:
-        return None
-    manifest = io.readJson(os.path.join(slot.path, io.MANIFEST_FILE)) or {}
     restoreUrl = None
     service = _service()
     if service is not None:
@@ -504,7 +616,7 @@ def recover(slot, mode=None, parent=None):
         service.protectSlot(slot.path)
     report = None
     try:
-        if mode == "replace":
+        if replace:
             # Before beginRecovery(): unsaved changes of the replaced scene stay recoverable (closed-unsaved slot)
             scene.Clear(0)
         else:
@@ -513,32 +625,242 @@ def recover(slot, mode=None, parent=None):
             service.beginRecovery()
         try:
             with slicer.util.tryWithErrorDisplay(_("Failed to recover the autosaved scene."), waitCursor=True):
-                slicer.util.loadScene(slot.scenePath())
-                report = rehomeAfterLoad(scene, slot.path, manifest, restoreUrl)
+                loadError = None
+                try:
+                    _loadAutosavedScene(scenePath)
+                except Exception as error:
+                    # A node that cannot be read (for example its original file was moved or deleted) fails the load,
+                    # but the other nodes are loaded: they are re-linked like after a complete load, so that none stays
+                    # on the autosave folder (SPEC 9.9)
+                    loadError = error
+                loaded = rehomeAfterLoad(scene, slot.path, manifest, restoreUrl)
+                if loadError is not None and not loaded["missing"]:
+                    # Not explained by missing original files: report the error and keep the session offered
+                    raise loadError
+                report = loaded
         finally:
             if service is not None:
                 service.endRecovery()
     finally:
         if service is not None:
             service.releaseSlot(slot.path)
+    return report
+
+
+def _nodeAttributes(text):
+    """The node attributes of an MRML element's ``attributes`` value (``name:value;``, as ``vtkMRMLNode`` reads them)."""
+    attributes = {}
+    for item in (text or "").split(";"):
+        if item:
+            name, _separator, value = item.partition(":")
+            attributes[name] = value.replace("%3B", ";").replace("%25", "%")
+    return attributes
+
+
+def _referencedIds(element, ids):
+    """IDs of the other nodes of ``ids`` that ``element`` (an MRML node element) refers to, in any attribute."""
+    referenced = set()
+    for item in element.iter():
+        for key, value in item.attrib.items():
+            if key in ("id", "name", "attributes"):
+                continue
+            for token in re.split(r"[\s;:,]+", value):
+                if token in ids:
+                    referenced.add(token)
+    referenced.discard(element.get("id"))
+    return referenced
+
+
+def otherDataScene(sceneText, isRestored):
+    """The part of an autosaved scene (MRML text) that a recovery handler did not restore itself: ``(text, nodeIds)``,
+    or None when there is no such data.
+
+    ``isRestored(info)``: True for a node that the handler restored, with ``info`` ``{"tag", "id", "name",
+    "attributes"}`` (the node attributes as a dict). These nodes, the nodes that only they use (display and storage
+    nodes), the settings of the views and modules (singletons) and the subject hierarchy are left out; the other data
+    (point lists, tables, models...) is kept with the nodes it uses. References to the left out nodes are removed.
+    """
+    from xml.etree import ElementTree
+
+    root = ElementTree.fromstring(sceneText)
+    elements = {element.get("id"): element for element in root if element.get("id")}
+    candidates = {nodeId for nodeId, element in elements.items()
+                  if element.get("singletonTag") is None and element.tag != "SubjectHierarchy"}
+    references = {nodeId: _referencedIds(elements[nodeId], candidates) for nodeId in candidates}
+
+    def closure(start):
+        found, todo = set(start), list(start)
+        while todo:
+            for referenced in references.get(todo.pop(), ()):
+                if referenced not in found:
+                    found.add(referenced)
+                    todo.append(referenced)
+        return found
+
+    restored = set()
+    for nodeId in candidates:
+        element = elements[nodeId]
+        info = {"tag": element.tag, "id": nodeId, "name": element.get("name") or "", "attributes": _nodeAttributes(element.get("attributes"))}
+        try:
+            if isRestored(info):
+                restored.add(nodeId)
+        except Exception:
+            logging.error("Autosave: recovery handler failed:\n" + traceback.format_exc())
+    # A node that a kept node uses is kept even when a restored node uses it too (for example a shared transform)
+    kept = closure(candidates - closure(restored)) - restored
+    if not kept:
+        return None
+    for nodeId, element in elements.items():
+        if nodeId not in kept:
+            root.remove(element)
+            continue
+        text = element.get("references")
+        if text:
+            roles = []
+            for role in text.split(";"):
+                name, separator, ids = role.partition(":")
+                ids = [referenced for referenced in ids.split() if referenced in kept or referenced not in elements]
+                if separator and ids:
+                    roles.append(f"{name}:{' '.join(ids)};")
+            element.set("references", "".join(roles))
+    return '<?xml version="1.0" encoding="UTF-8"?>\n' + ElementTree.tostring(root, encoding="unicode"), kept
+
+
+#: (class, getter, setter) of the node references that ``_shownNodes()`` keeps (a getter returns a node ID or a node)
+_SHOWN_REFERENCES = (
+    ("vtkMRMLSliceCompositeNode", "GetBackgroundVolumeID", "SetBackgroundVolumeID"),
+    ("vtkMRMLSliceCompositeNode", "GetForegroundVolumeID", "SetForegroundVolumeID"),
+    ("vtkMRMLSliceCompositeNode", "GetLabelVolumeID", "SetLabelVolumeID"),
+    ("vtkMRMLSegmentEditorNode", "GetSegmentationNode", "SetAndObserveSegmentationNode"),
+    ("vtkMRMLSegmentEditorNode", "GetSourceVolumeNode", "SetAndObserveSourceVolumeNode"),
+)
+
+
+def _referencedId(node, getter):
+    value = getattr(node, getter)()
+    if value is not None and not isinstance(value, str):
+        value = value.GetID()
+    return value or None
+
+
+def _shownNodes():
+    """``[(node, getter, setter, node ID)]``: the volumes that the slice views show and the nodes that the Segment Editor edits."""
+    shown = []
+    for className, getter, setter in _SHOWN_REFERENCES:
+        for node in slicer.util.getNodesByClass(className):
+            if hasattr(node, getter) and hasattr(node, setter):
+                nodeId = _referencedId(node, getter)
+                if nodeId:
+                    shown.append((node, getter, setter, nodeId))
+    return shown
+
+
+def _restoreShownNodes(shown):
+    """Show again what ``_shownNodes()`` recorded where a load emptied it (when the node is still in the scene)."""
+    for node, getter, setter, nodeId in shown:
+        referenced = slicer.mrmlScene.GetNodeByID(nodeId)
+        if referenced is None or slicer.mrmlScene.GetNodeByID(node.GetID()) is not node or _referencedId(node, getter):
+            continue
+        getattr(node, setter)(nodeId if getter.endswith("ID") else referenced)
+
+
+def recoverOtherData(slot, isRestored):
+    """Add the data of ``slot`` that a recovery handler did not restore itself to the current scene (W3-07: after
+    "Reopen study at <sid>", the point lists, tables and other data that the card lists), re-linked like ``recover()``
+    does. ``isRestored``: see ``otherDataScene()``. Return the report, or None when there was nothing else to add or the
+    load failed. The session is not marked as recovered here (the caller does).
+    """
+    if not os.path.isfile(slot.scenePath()):
+        return None
+    try:
+        with open(slot.scenePath(), encoding="utf-8") as sceneFile:
+            other = otherDataScene(sceneFile.read(), isRestored)
+    except Exception:
+        logging.error(f"Autosave: cannot read the autosaved scene {slot.scenePath()}:\n{traceback.format_exc()}")
+        return None
+    if other is None:
+        return None
+    text, kept = other
+    manifest = io.readJson(os.path.join(slot.path, io.MANIFEST_FILE)) or {}
+    manifest = dict(manifest, entries={nodeId: entry for nodeId, entry in (manifest.get("entries") or {}).items() if nodeId in kept})
+    # In the slot folder, so that the relative file names of the scene stay valid (the folder is private, SPEC 9.9)
+    try:
+        handle, path = tempfile.mkstemp(prefix="StudioOtherData-", suffix=".mrml", dir=slot.path)
+    except OSError:
+        logging.error(f"Autosave: cannot recover the other data of {slot.path}:\n{traceback.format_exc()}")
+        return None
+    # Loading a scene into the current one empties the layers of the slice views and the segmentation of the Segment
+    # Editor (3D Slicer does so too): what the handler just showed stays shown
+    shown = _shownNodes()
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as sceneFile:
+            sceneFile.write(text)
+        report = _loadSlot(slot, path, manifest, replace=False)
+    finally:
+        _restoreShownNodes(shown)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    if report is not None and report["restored"]:
+        notify(recoveredText(report["restored"], _shortTime(slot.updated, timeOnlyToday=True)), report)
+    return report
+
+
+def _confirmReplaceOpenProject():
+    """Replacing the scene closes the open project, which is saved first (``_closeProjectOnSceneClose``). If that save
+    cannot be done (disk full, folder not writable), ask as Open project and Open scene do (``confirmReplaceProject``)
+    instead of losing its edits silently: no autosave slot keeps the scene of an open project. Return False if the user
+    keeps working in the project (the recovery must not go ahead). Without an open project nothing is asked here: the
+    replaced scene keeps a closed-unsaved autosave slot.
+    """
+    service = _service()
+    if service is None or getattr(service, "project", None) is None or not service.enabled():
+        return True
+    return service.confirmReplaceProject(_("Recover autosaved work"))
+
+
+def recover(slot, mode=None, parent=None):
+    """Load an autosaved slot and re-link its data to the original files. Return the report, or None if cancelled."""
+    scene = slicer.mrmlScene
+    if mode is None:
+        mode = askReplaceOrAdd(parent) if sceneHasDisplayableData(scene) else "replace"
+    if mode is None:
+        return None
+    if mode == "replace" and not _confirmReplaceOpenProject():
+        return None  # the open project could not be saved and the user keeps working in it
+    manifest = io.readJson(os.path.join(slot.path, io.MANIFEST_FILE)) or {}
+    report = _loadSlot(slot, slot.scenePath(), manifest, replace=mode == "replace")
     if report is None:
         return None
-    if not slot.session.own:
-        markSession(slot.session, "recovered")
+    markRecovered(slot)
     updated = _shortTime(slot.updated, timeOnlyToday=True)
-    text = _("Recovered {count} items from the autosave of {time}. Use File › Save to keep them.").format(count=report["restored"], time=updated)  # noqa: RUF001
+    text = recoveredText(report["restored"], updated)
     notify(text, report)
     return report
 
 
-def markSession(session, state, synchronous=False):
+def markRecovered(slot):
+    """Mark the session of ``slot`` as recovered, so that the next start does not offer it again (the scene of the running
+    session itself is not a recovery).
+    """
+    if not slot.session.own:
+        markSession(slot.session, "recovered")
+
+
+def markSession(session, state, synchronous=False, closedForUpdate=None):
     """Record the state of a session (recovered, discarded) in its session.json.
+
+    ``closedForUpdate=True`` also records that Slicer Studio closed the session to install an update.
 
     The write goes through the background writer, after the other writes of that file (``incrementPresented``).
     """
     data = dict(session.data)
     data["state"] = state
-    data["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    data["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    if closedForUpdate is not None:
+        data["closedForUpdate"] = bool(closedForUpdate)
+        session.closedForUpdate = bool(closedForUpdate)
     session.data = data
     session.status = state
     path = os.path.join(session.path, io.SESSION_FILE)
@@ -571,7 +893,31 @@ def notify(text, report=None):
     if slicer.app.testingEnabled():
         logging.info(" ".join([text] + details))
         return
-    slicer.util.infoDisplay(text, windowTitle=_("Recover autosaved work"), detailedText="\n".join(details) if details else None)
+    _classicMessage(text, details, report)
+
+
+def _classicMessage(text, details, report=None):
+    """The Classic message box. Its details section exists only when there are details."""
+    if report and report.get("missing"):
+        # Not only in the details: data of these files is not in the recovered scene
+        text += "\n\n" + _("These original files no longer exist and were not loaded: {files}").format(
+            files=", ".join(os.path.basename(p) for p in report["missing"][:5]))
+    if report and report.get("changed"):
+        # Also in the main text: the recovered work was made on the earlier version of these files
+        text += "\n\n" + _("These original files changed on disk since the autosave, so the recovered work may not fit them: {files}").format(
+            files=", ".join(os.path.basename(p) for p in report["changed"][:5]))
+    # slicer.util.messageBox treats the mere presence of the detailedText keyword as "has details" (it pads the
+    # window title and sets the text, None becoming the string "None"), so pass it only when there is something to show.
+    kwargs = {"detailedText": "\n".join(details)} if details else {}
+    slicer.util.infoDisplay(text, windowTitle=_("Recover autosaved work"), **kwargs)
+
+
+def discardQuestion(when):
+    """The confirmation text of Discard: the session goes to the Trash of the operating system, where it stays (with its
+    scene and data) until the Trash is emptied, so the text says so and does not claim that it is gone for good.
+    """
+    return _("Discard autosaved work from {time}? It is moved to the Trash, where it stays until you empty the Trash. "
+             "It may contain patient data.").format(time=when)
 
 
 def discard(session, confirm=True, parent=None):
@@ -581,19 +927,14 @@ def discard(session, confirm=True, parent=None):
     if confirm:
         when = _shortTime(session.updated)
         answer = qt.QMessageBox.question(parent or slicer.util.mainWindow(), _("Discard autosaved work"),
-                                         _("Discard autosaved work from {time}? This cannot be undone.").format(time=when),
+                                         discardQuestion(when),
                                          qt.QMessageBox.Discard | qt.QMessageBox.Cancel, qt.QMessageBox.Cancel)
         if answer != qt.QMessageBox.Discard:
             return False
     markSession(session, "discarded", synchronous=True)
-    moved = False
-    if hasattr(qt.QFile, "moveToTrash"):
-        try:
-            # The instance method: PythonQt does not expose the static overload
-            moved = bool(qt.QFile(session.path).moveToTrash())
-        except Exception:
-            moved = False
-    if not moved:
+    from . import projects
+
+    if not projects.moveToTrash(session.path):
         io.backgroundWriter().submit(io.removeTree, session.path)
     return True
 
@@ -676,12 +1017,14 @@ class RecoveryDialog(qt.QDialog):
         self.setObjectName("StudioRecoveryDialog")
         self.setWindowTitle(_("Recover unsaved work"))
         self.setModal(False)
-        self.resize(760, 360)
+        self.resize(760, 460)
         self._slots = {}
         layout = qt.QVBoxLayout(self)
-        self.textLabel = qt.QLabel()
-        self.textLabel.setWordWrap(True)
-        layout.addWidget(self.textLabel)
+        layout.setContentsMargins(24, 24, 24, 22)
+        layout.setSpacing(14)
+        # Header (VISUAL 4.7): the icon tile beside the title and the body text, which says why the dialog is shown
+        header, self.titleLabel, self.textLabel = ui.dialogHeader("archive-restore", _("Recover unsaved work"), " ", "StudioRecovery")
+        layout.addLayout(header)
         self.list = qt.QTreeWidget()
         self.list.setObjectName("StudioRecoveryList")
         self.list.setColumnCount(4)
@@ -694,39 +1037,54 @@ class RecoveryDialog(qt.QDialog):
         self.list.connect("itemSelectionChanged()", self._updateButtons)
         self.list.connect("itemDoubleClicked(QTreeWidgetItem*,int)", lambda item, column: self.onRecover())
         layout.addWidget(self.list, 1)
-        self.missingLabel = qt.QLabel()
-        self.missingLabel.setWordWrap(True)
+        # Shown instead of the list when nothing was autosaved
+        self.emptyLabel = ui.label(_("Nothing was autosaved yet. Slicer Studio saves your open work in the background."), "body", "text3",
+                                   "StudioRecoveryEmpty", wrap=True)
+        self.emptyLabel.setAlignment(qt.Qt.AlignCenter)
+        self.emptyLabel.hide()
+        layout.addWidget(self.emptyLabel, 1)
+        self.missingLabel = ui.label("", "caption", "text3", "StudioRecoveryMissing", wrap=True)
         self.missingLabel.hide()
         layout.addWidget(self.missingLabel)
+        # Footer (VISUAL 4.7): the links on the left, the single primary button on the right
         buttons = qt.QHBoxLayout()
-        self.settingsLink = qt.QLabel(f"<a href='settings'>{_('Autosave settings…')}</a>")
-        self.settingsLink.connect("linkActivated(QString)", lambda link: self.onSettings())
+        buttons.setSpacing(10)
+        self.settingsLink = ui.linkButtonWidget(_("Autosave settings…"), self.onSettings, "StudioRecoverySettingsLink")
         buttons.addWidget(self.settingsLink)
-        self.openFolderButton = qt.QPushButton(_("Open autosave folder"))
-        self.openFolderButton.connect("clicked()", self.onOpenFolder)
+        buttons.addSpacing(6)
+        self.openFolderButton = ui.linkButtonWidget(_("Open autosave folder"), self.onOpenFolder, "StudioRecoveryOpenFolderLink")
         buttons.addWidget(self.openFolderButton)
         buttons.addStretch(1)
         self.discardButton = qt.QPushButton(_("Discard…"))
         self.discardButton.setObjectName("StudioRecoveryDiscardButton")
+        self.discardButton.setMinimumHeight(36)
+        ui.setRole(self.discardButton, "secondary")
         self.discardButton.connect("clicked()", self.onDiscard)
         buttons.addWidget(self.discardButton)
         self.laterButton = qt.QPushButton(_("Later"))
         self.laterButton.setObjectName("StudioRecoveryLaterButton")
+        self.laterButton.setMinimumHeight(36)
+        ui.setRole(self.laterButton, "secondary")
         self.laterButton.connect("clicked()", self.close)
         buttons.addWidget(self.laterButton)
         self.recoverButton = qt.QPushButton(_("Recover"))
         self.recoverButton.setObjectName("StudioRecoveryRecoverButton")
         self.recoverButton.setDefault(True)
+        self.recoverButton.setMinimumHeight(36)
+        self.recoverButton.setMinimumWidth(96)
+        ui.setRole(self.recoverButton, "primary")
         self.recoverButton.connect("clicked()", self.onRecover)
         buttons.addWidget(self.recoverButton)
         layout.addLayout(buttons)
+        # Dialog chrome (VISUAL 4.7). Non-modal, so without the backdrop: the main window stays usable behind it
+        ui.dialogChrome(self, backdrop=False, styleSheet=self._styleSheet)
         self.startup = False
         self.root = None
 
     def setSessions(self, sessions, startup=False, root=None):
         self.startup = startup
         self.root = root
-        self.textLabel.setText(_("Slicer did not close normally. Work from these sessions was autosaved:") if startup else _("Autosaved work"))
+        self.textLabel.setText(self._introText(sessions, startup))
         self.laterButton.setText(_("Later") if startup else _("Close"))
         self.list.clear()
         self._slots = {}
@@ -754,7 +1112,26 @@ class RecoveryDialog(qt.QDialog):
         self.list.header().setSectionResizeMode(1, qt.QHeaderView.Stretch)
         if self.list.topLevelItemCount > 0:
             self.list.setCurrentItem(self.list.topLevelItem(0))
+        empty = self.list.topLevelItemCount == 0
+        self.list.setVisible(not empty)
+        self.emptyLabel.setVisible(empty)
         self._updateButtons()
+
+    @staticmethod
+    def _introText(sessions, startup):
+        if not startup:
+            return _("Work that Slicer Studio autosaved. Recover what you need and discard the rest.")
+        crashed = [s for s in sessions if s.status in ("crashed", "possibly-crashed")]
+        if crashed and all(s.status == "crashed" and s.closedForUpdate for s in crashed):
+            return _("Slicer Studio closed to install an update. Work from these sessions was autosaved:")
+        if any(s.closedForUpdate for s in crashed):
+            return _("Slicer did not close normally, or closed to install an update. Work from these sessions was autosaved:")
+        return _("Slicer did not close normally. Work from these sessions was autosaved:")
+
+    @staticmethod
+    def _styleSheet():
+        return (f"QTreeWidget#StudioRecoveryList {{ background-color: {ui.token('card-low').name()}; border: 1px solid {ui.token('hairline').name()};"
+                " border-radius: 10px; padding: 2px; }")
 
     def currentSlot(self):
         item = self.list.currentItem()
@@ -782,6 +1159,8 @@ class RecoveryDialog(qt.QDialog):
             try:
                 if canHandle(slot):
                     handle(slot)
+                    # A handler (reopen the study) recovers the work like "Recover" does: not offered again
+                    markRecovered(slot)
                     self.close()
                     return
             except Exception:
@@ -800,8 +1179,7 @@ class RecoveryDialog(qt.QDialog):
     def onOpenFolder(self):
         slot = self.currentSlot()
         path = slot.session.path if slot is not None else (self.root or io.defaultRoot())
-        if os.path.isdir(path):
-            qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(path))
+        showAutosaveFolder(path, root=self.root or io.defaultRoot(), parent=self)
 
     def onSettings(self):
         from . import autosave

@@ -10,8 +10,12 @@ Download. This module holds what outlives the dialog:
   "Fetching GSP1000 · 41% · 2 h 10 min". **Pause** stops the job (its state, with the member offset of the next
   unconverted subject, is kept next to the bundle); **Resume** starts it again with ``--resume``, and the Range of the
   download restarts at that offset. The finished bundle is registered like any other connectome.
+- The job gets ``--parent-pid`` (this application): when the application ends without stopping it (a crash), the job
+  stops by itself within a second, keeps its state and can be resumed; it never downloads on unseen.
 - An unfinished job is offered for resuming the next time the Map module loads (:func:`offerResume`: a non-modal
   question, one click to resume; never under ``--testing`` and never without a main window; nothing resumes by itself).
+  A job that finished without this application seeing it (it ended after the application did) is registered then, and
+  the user is told; a job that another process is still running (its lock is live) is reported instead of offered.
 - ``ACTIONS`` registers the action in the manager's Manage… menu.
 
 Settings (fork-only, D-S1): ``Studio/LNM/EnableConnectomeFetch`` (read only; absent or true means on, "false" switches
@@ -30,7 +34,7 @@ import qt
 import slicer
 from slicer.i18n import tr as _
 
-from . import jobrunner
+from . import jobrunner, widgets
 
 ENABLE_SETTING = "Studio/LNM/EnableConnectomeFetch"
 ACCEPTED_TERMS_TEXT_SETTING = "Studio/LNM/AcceptedTermsText"
@@ -148,7 +152,20 @@ class FetchController:
             return _("Read and accept the provider's terms first: nothing is downloaded before.")
         if not request.get("dest"):
             return _("Choose a destination folder.")
-        return None
+        if not os.path.isabs(os.path.expanduser(str(request["dest"]))):  # the job runs in the module folder: never write inside the application
+            return widgets.relativePathProblem(request["dest"])
+        dest = os.path.normpath(os.path.expanduser(str(request["dest"])))
+        return widgets.notAFolderProblem(dest) or widgets.unwritableProblem(dest)
+
+    def checkResumeSubset(self, request):
+        """Why the interrupted download of ``request`` cannot be resumed with its subset (it leaves out converted archives), or None."""
+        from LesionNetworkMappingLib import fetchconnectome
+
+        entry = self.entry(request)
+        try:
+            return fetchconnectome.resume_subset_problem(entry, request["dest"], request.get("subset")) if entry is not None else None
+        except Exception:
+            return None
 
     def arguments(self, request, resume=False, acceptChecksumMismatch=False):
         args = ["--entry", request["entry"], "--dest", request["dest"], "--terms-sha", request["termsSha"], "--streams", str(int(request.get("streams") or 2))]
@@ -162,6 +179,8 @@ class FetchController:
             args.append("--accept-checksum-mismatch")
         if self.catalogPath:
             args += ["--catalog", self.catalogPath]
+        # Stop with this application: the PythonSlicer launcher outlives a crashed application, so the job's own orphan watchdog does not notice
+        args += ["--parent-pid", str(os.getpid())]
         return args + list(self.extraArgs)
 
     def start(self, request, resume=False, acceptChecksumMismatch=False):
@@ -171,6 +190,8 @@ class FetchController:
         entry is not fetchable, or the user has not accepted the terms text with this sha256.
         """
         self.lastRequestError = self.checkRequest(request)
+        if resume and not self.lastRequestError:
+            self.lastRequestError = self.checkResumeSubset(request)
         if self.lastRequestError or self.isRunning():
             if not self.lastRequestError:
                 self.lastRequestError = _("A connectome is being fetched already.")
@@ -198,10 +219,29 @@ class FetchController:
         return self.start(request, resume=True, acceptChecksumMismatch=acceptChecksumMismatch)
 
     def discard(self):
-        """Forget an unfinished job's request (its files stay in the destination folder)."""
+        """Forget an unfinished job's request (its files stay in the destination folder); return the request forgotten, or None.
+
+        Nothing offers the download again, at the next launch or in the catalog dialog. A running job is not discarded (pause it first).
+        """
+        if self.isRunning():
+            return None
+        request = self.request if self.state in ("paused", "failed") else None
+        request = request or self.savedRequest()
+        if request and self.runningElsewhere(request) is not None:
+            return None  # another process runs this job and its saved request is what it is resumed from after a crash
         qt.QSettings().remove(ACTIVE_FETCH_SETTING)
-        self.state = "idle" if not self.isRunning() else self.state
+        if self.state != "done":
+            self.state = "idle"
+            self.request = None
+            self.error = self.errorEvent = None
         self._notify()
+        return request
+
+    @staticmethod
+    def discardedNotice(request):
+        """What to tell the user after :meth:`discard`: the downloaded files are still in the folder and can be deleted by hand."""
+        return _("The unfinished download was forgotten and will not be offered again. What was already downloaded stays in {dest}; delete that folder if you do not need it.").format(
+            dest=(request or {}).get("dest", ""))
 
     # Saved job
 
@@ -216,7 +256,11 @@ class FetchController:
         return request if isinstance(request, dict) and request.get("entry") and request.get("dest") else None
 
     def unfinished(self):
-        """``(request, summary)`` of an interrupted job that can be resumed, or None (a finished or missing one is forgotten)."""
+        """``(request, summary)`` of an interrupted job that can be resumed, or None (a finished or missing one is forgotten).
+
+        A saved job whose bundle is finished (the job ended after the application that started it) is registered first
+        (:meth:`adoptFinished`); a saved job that another live process is running (:meth:`runningElsewhere`) is not offered.
+        """
         from LesionNetworkMappingLib import fetchconnectome
 
         request = self.request if self.state in ("paused", "failed") else self.savedRequest()
@@ -225,13 +269,56 @@ class FetchController:
         entry = self.entry(request)
         if entry is None:
             return None
+        if self.runningElsewhere(request) is not None:
+            return None  # Resume would fail on its lock; the saved request stays until that job ends
         summary = fetchconnectome.unfinished_fetch(entry, request["dest"])
         if summary is None:
+            self.adoptFinished(request)
             # Forget the saved request only when the folder is reachable and holds no unfinished state (an unmounted drive does not forget it)
             if _settingText(ACTIVE_FETCH_SETTING) and not self.isRunning() and os.path.isdir(request["dest"]):
                 qt.QSettings().remove(ACTIVE_FETCH_SETTING)
             return None
         return request, summary
+
+    def runningElsewhere(self, request=None):
+        """The lock holder (``{pid, host, started}``) of the saved job when another live process is running it, else None."""
+        from LesionNetworkMappingLib import fetchconnectome
+
+        request = request or self.savedRequest()
+        if not request or self.isRunning():
+            return None
+        entry = self.entry(request)
+        if entry is None:
+            return None
+        try:
+            return fetchconnectome.running_fetch(entry, request["dest"])
+        except OSError:
+            return None
+
+    def adoptFinished(self, request=None):
+        """Register the bundle of the saved job when the job finished without this application seeing it; return its path or None.
+
+        That happens when the job ended after the application that started it (for example while it was closing); the bundle
+        is registered like the one of a job this application ran, and the saved request is forgotten.
+        """
+        from LesionNetworkMappingLib import fetchconnectome
+
+        request = request or self.savedRequest()
+        if not request or self.isRunning() or request != self.savedRequest():
+            return None
+        entry = self.entry(request)
+        if entry is None:
+            return None
+        bundle = fetchconnectome.finished_fetch(entry, request["dest"])
+        if bundle is None or not self._register(bundle):
+            return None
+        qt.QSettings().remove(ACTIVE_FETCH_SETTING)
+        self.request = dict(request)
+        self.state = "done"
+        self.error = self.errorEvent = None
+        self.resultPath = bundle
+        self._notify()
+        return bundle
 
     # Events
 
@@ -262,7 +349,12 @@ class FetchController:
             self.errorEvent = job.errorEvent or {}
             code = self.errorEvent.get("code")
             if code == "terms_mismatch":
-                self.error = _("The provider's terms text is not the text you accepted (it has changed). Open Get a connectome…, read the live text and accept it to continue. Nothing more was downloaded.")
+                self.error = _("The provider's terms text is not the text you accepted (it has changed). Read the new text below and accept it to continue. Nothing more was downloaded.")
+            elif code == "checksum":
+                # The job's own text names its command-line flag; the interface offers the same choice as a button
+                self.error = _("{name}: the checksum does not match the one the provider lists, also after reading it twice. "
+                               "Every file that was converted from it passed its integrity check. Choose Keep this data anyway… to keep it "
+                               "(recorded as checksum_override), or delete the folder and start again.").format(name=self.errorEvent.get("file") or self.shortName())
             else:
                 self.error = job.failureReason or _("The download failed.")
         self._notify()
@@ -275,18 +367,20 @@ class FetchController:
             LesionNetworkMappingLogic.registerConnectome(path)
         except Exception:
             logging.exception("Lesion network mapping: the fetched connectome could not be registered")
-            return
+            return False
         try:
             module = getattr(slicer.modules, "lesionnetworkmapping", None)
             widget = module.widgetRepresentation().self() if module is not None else None
-            if widget is not None and hasattr(widget, "refreshConnectomes"):
-                widget.refreshConnectomes(select=path)
+            if widget is not None and hasattr(widget, "refreshConnectomesAfterJob"):
+                # The open project keeps its connectome: the new bundle is chosen only when the project has none
+                widget.refreshConnectomesAfterJob(path)
         except Exception:
             logging.exception("Lesion network mapping: the connectome list could not be refreshed")
+        return True
 
     def status(self):
         """A dict for the interface: ``state``, ``fraction`` (0..1 or None), ``eta`` (text), ``archive``, ``subjects``, ``name``,
-        ``error``, ``mismatch`` (the failure is a checksum mismatch the user may accept) and ``path`` of a finished bundle.
+        ``error``, ``mismatch`` (the failure is a checksum mismatch the user may accept), ``damaged`` (an archive is damaged upstream: Resume cannot succeed), ``termsChanged`` (the provider's terms text changed: only accepting the live text helps) and ``path`` of a finished bundle.
         """
         job = self.job
         event = (job.lastEvent or {}) if job is not None else {}
@@ -305,6 +399,8 @@ class FetchController:
             "name": self.shortName() if self.request else "",
             "error": self.error,
             "mismatch": bool(self.errorEvent and self.errorEvent.get("code") == "checksum"),
+            "termsChanged": bool(self.errorEvent and self.errorEvent.get("code") == "terms_mismatch"),
+            "damaged": bool(self.errorEvent and self.errorEvent.get("code") == "damaged_member"),
             "path": self.resultPath,
             "warnings": [w.get("message") for w in (job.warnings if job is not None else [])],
         }
@@ -346,8 +442,22 @@ def openCatalog(ctx=None, bundlePath=None):
     return dialog
 
 
+def _showInformation(objectName, title, text):
+    """A non-modal information box over the main window (kept in ``_dialogs``)."""
+    box = qt.QMessageBox(qt.QMessageBox.Information, title, text, qt.QMessageBox.Ok, slicer.util.mainWindow())
+    box.setObjectName(objectName)
+    box.setModal(False)
+    _dialogs[objectName] = box
+    box.show()
+    return box
+
+
 def offerResume():
-    """Offer to resume an unfinished fetch (a non-modal question; one click). Never automatic, never under ``--testing``."""
+    """Offer to resume an unfinished fetch (a non-modal question; one click). Never automatic, never under ``--testing``.
+
+    A saved fetch that finished after the application ended is registered and reported instead; one that another live
+    process is still running is reported (where it writes, and which process) instead of offered.
+    """
     if _offered["done"]:
         return False
     app = getattr(slicer, "app", None)
@@ -355,16 +465,31 @@ def offerResume():
         return False
     _offered["done"] = True
     current = controller()
+    saved = current.savedRequest()
+    holder = current.runningElsewhere(saved) if saved else None
+    if holder is not None:
+        _showInformation("LNMFetchRunningElsewhere", _("Download still running"),
+                         _("Fetching {name} into {dest} is still running in another process (process {pid} on {host}, since {started}). It continues there; "
+                           "this application does not show its progress.").format(name=current.shortName(saved), dest=saved["dest"], pid=holder.get("pid"), host=holder.get("host"),
+                                                                                  started=holder.get("started")))
+        return True
     found = current.unfinished()
     if found is None:
+        if saved and current.state == "done" and current.resultPath:
+            _showInformation("LNMFetchFinishedNotice", _("Download finished"),
+                             _("Fetching {name} finished after Slicer was closed. The connectome is registered and ready in the Connectome card.").format(name=current.shortName(saved)))
+            return True
         return False
     request, summary = found
     percent = f" ({int(summary['fraction'] * 100)}%)" if summary.get("fraction") is not None else ""
-    box = qt.QMessageBox(qt.QMessageBox.Question, _("Unfinished download"), _("Fetching {name} stopped before it was finished{percent}. Resume it? It continues where it stopped; nothing is downloaded until you click Resume.").format(name=current.shortName(request), percent=percent),
-                         qt.QMessageBox.NoButton, slicer.util.mainWindow())
+    text = _("Fetching {name} stopped before it was finished{percent}. Resume it? It continues where it stopped; nothing is downloaded until you click Resume. "
+             "Discard forgets it; what was already downloaded stays in {dest} and can be deleted.").format(name=current.shortName(request), percent=percent, dest=request["dest"])
+    box = qt.QMessageBox(qt.QMessageBox.Question, _("Unfinished download"), text, qt.QMessageBox.NoButton, slicer.util.mainWindow())
     box.setObjectName("LNMFetchResumeOffer")
     resume = box.addButton(_("Resume"), qt.QMessageBox.AcceptRole)
-    box.addButton(_("Not now"), qt.QMessageBox.RejectRole)
+    notNow = box.addButton(_("Not now"), qt.QMessageBox.RejectRole)
+    discard = box.addButton(_("Discard"), qt.QMessageBox.DestructiveRole)
+    box.setEscapeButton(notNow)
     box.setModal(False)
 
     def answered(result):
@@ -373,6 +498,10 @@ def offerResume():
             current.request = request
             if current.resume() is None and current.lastRequestError:
                 dialog.showNotice(current.lastRequestError)
+        elif box.clickedButton() == discard:
+            current.request = request
+            current.discard()
+            _showInformation("LNMFetchDiscarded", _("Download forgotten"), current.discardedNotice(request))
 
     box.connect("finished(int)", answered)
     _dialogs["offer"] = box

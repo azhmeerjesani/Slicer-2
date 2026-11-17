@@ -1125,6 +1125,11 @@ int vtkMRMLScene::Commit(const char* url, vtkMRMLMessageCollection* userMessages
   else
   {
     ofs.close();
+    // A write or the final flush that failed (for example a full disk) leaves an incomplete scene file
+    if (ofs.fail())
+    {
+      vtkErrorToMessageCollectionMacro(userMessages, "vtkMRMLScene::Commit", "Scene writing failed: Could not write file " << url);
+    }
   }
 
   bool success = (userMessages->GetNumberOfMessagesOfType(vtkCommand::ErrorEvent) == 0);

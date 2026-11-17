@@ -32,11 +32,13 @@ imported only by the lookup); shared files hold no absolute paths.
 import csv
 import datetime
 import difflib
+import html
 import io
 import json
 import os
 import re
 import unicodedata
+import urllib.parse
 from xml.sax.saxutils import escape
 
 from . import study as study_module
@@ -45,6 +47,9 @@ NA = "n/a"
 SOURCES_DIR = "sources"
 RECORDS_TSV = (SOURCES_DIR, "records.tsv")
 STAGE_LOG_TSV = (SOURCES_DIR, "stage_log.tsv")
+#: Pairs of records the user chose to "Keep both" for (a screening decision, so it stays in the study)
+KEPT_PAIRS_TSV = (SOURCES_DIR, "kept_pairs.tsv")
+KEPT_COLUMNS = ("record_id", "other_record_id")
 PRISMA_DIR = ("derivatives", "prisma")
 PRISMA_COUNTS_JSON = "prisma_counts.json"
 PRISMA_FLOW_SVG = "prisma_flow.svg"
@@ -65,7 +70,10 @@ LOOKUP_TIMEOUT_S = 10
 CROSSREF_URL = "https://api.crossref.org/works/"
 ESUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 
-_DOI = re.compile(r"10\.\d{4,9}/[^\s\"<>]+", re.IGNORECASE)
+#: A DOI in text. Its suffix stops at white space, quotes and angle brackets, except for a bracketed segment with a colon,
+#: such as the "<111::aid-jsc318>" of a SICI-style DOI (10.1002/(sici)1099-1697(199803/04)7:2<111::aid-jsc318>3.0.co;2-q),
+#: so that an HTML tag after a DOI is not taken into it.
+_DOI = re.compile(r"10\.\d{4,9}/(?:[^\s\"<>]|<[^\s\"<>]*:[^\s\"<>]*>)+", re.IGNORECASE)
 _PMID = re.compile(r"^\d{1,9}$")
 
 
@@ -91,11 +99,11 @@ def _blank(value):
 
 def normalize_doi(value):
     """The DOI of a text ("https://doi.org/10.1000/ABC.", "doi:10.1000/abc" and the like) in lower case, or ""."""
-    text = _clean(value)
+    text = re.sub(r"%3c", "<", re.sub(r"%3e", ">", _clean(value), flags=re.IGNORECASE), flags=re.IGNORECASE)
     match = _DOI.search(text)
     if not match:
         return ""
-    return match.group(0).rstrip(".,;)]}>\"'").lower()
+    return match.group(0).rstrip(".,;)]}\"'").lower()
 
 
 def normalize_pmid(value):
@@ -104,10 +112,41 @@ def normalize_pmid(value):
     return match.group(1).lstrip("0") if match else ""
 
 
+def plain_text(value):
+    """A title or journal name from a web service as plain text: JATS/HTML tags removed, entities decoded.
+
+    Crossref sends ``Imaging in<i>Drosophila</i>`` and double-escaped quotes (``&amp;ldquo;``), which would show up
+    in tables and exports and keep the same paper from matching an imported record.
+    """
+    text = _clean(value)
+    if "<" in text:
+        text = re.sub(r"(?<=\w)(?=<(?:i|em|b|strong)\b[^>]*>)", " ", text, flags=re.IGNORECASE)  # "in<i>Fly</i>"
+        text = re.sub(r"</?[A-Za-z][^<>]*>", "", text)
+    for _ in range(2):  # Crossref escapes twice
+        if "&" not in text:
+            break
+        text = html.unescape(text)
+    return _clean(text)
+
+
 def normalize_title(value):
-    """Lower case, accents and punctuation removed, one space between words."""
-    text = unicodedata.normalize("NFKD", _clean(value)).encode("ascii", "ignore").decode("ascii").lower()
-    return " ".join(re.sub(r"[^a-z0-9]+", " ", text).split())
+    """Lower case, accents and punctuation removed, one space between words, in any script.
+
+    Letters, digits and marks of every script are kept (a Chinese or Russian title is compared in its own script, not
+    reduced to its ASCII part); the accents of Latin, Greek and Cyrillic letters are removed ("Étude" matches "etude"),
+    while marks that belong to other scripts (kana voicing marks, Indic vowel signs) stay.
+    """
+    kept = []
+    base = ""
+    for char in unicodedata.normalize("NFKD", plain_text(value)):
+        if unicodedata.combining(char):
+            if base and ord(base) < 0x0530:  # an accent on a Latin, Greek or Cyrillic letter
+                continue
+        else:
+            base = char
+        kept.append(char)
+    text = unicodedata.normalize("NFC", "".join(kept)).casefold()
+    return " ".join("".join(char if unicodedata.category(char)[0] in "LNM" else " " for char in text).split())
 
 
 def _year(value):
@@ -129,6 +168,21 @@ def draft(**fields):
 #
 
 
+class Parsed(list):
+    """The draft records a parser found (a list); ``skipped`` counts the entries it could not read (an unclosed BibTeX
+    entry, a CSV row or RIS record without title, DOI or PMID), so that the caller can tell the user.
+    """
+
+    skipped = 0
+
+
+def _parsed(records, total):
+    """``records`` as :class:`Parsed`, with ``skipped`` the entries of ``total`` that gave no record."""
+    out = Parsed(records)
+    out.skipped = max(0, total - len(records))
+    return out
+
+
 def _tagged(text, pattern):
     """[(tag, value)] of a tagged format (nbib: ``TI  - ``; RIS: ``TI  - ``); continuation lines are joined."""
     items = []
@@ -146,21 +200,30 @@ def parse_nbib(text):
     records, current = [], None
     for tag, value in _tagged(text, r"^([A-Z][A-Z0-9 ]{1,3}?)\s*- (.*)$"):
         if tag == "PMID":
-            current = {"authors": [], "pmid": value}
+            current = {"authors": [], "full_authors": [], "pmid": value}
             records.append(current)
         elif current is None:
             continue
         elif tag == "TI":
             current["title"] = value
-        elif tag in ("AU", "FAU") and (tag == "AU" or not current["authors"]):
+        elif tag == "AU":
             current["authors"].append(value)
+        elif tag == "FAU":
+            current["full_authors"].append(value)
         elif tag == "DP":
             current["year"] = value
         elif tag in ("TA", "JT") and (tag == "TA" or "journal" not in current):
             current["journal"] = value
         elif tag in ("LID", "AID") and "[doi]" in value and not current.get("doi"):
             current["doi"] = value.replace("[doi]", "")
-    return [draft(**{**record, "authors": "; ".join(record["authors"])}) for record in records]
+    out = []
+    for record in records:
+        # PubMed writes FAU (full name) and AU (short name) for the same author, so each author is kept once: the full
+        # names when every author has one, otherwise the short names (never both forms of the same person)
+        short, full = record.pop("authors"), record.pop("full_authors")
+        authors = full if full and len(full) >= len(short) else short
+        out.append(draft(**{**record, "authors": "; ".join(authors)}))
+    return out
 
 
 def parse_ris(text):
@@ -188,65 +251,113 @@ def parse_ris(text):
             current["pmid"] = value
         elif tag in ("N1", "M3") and "PMID" in value.upper() and not current.get("pmid"):
             current["pmid"] = value
-    return [draft(**{**record, "authors": "; ".join(record["authors"])}) for record in records if record.get("title") or record.get("doi") or record.get("pmid")]
+    kept = [draft(**{**record, "authors": "; ".join(record["authors"])}) for record in records if record.get("title") or record.get("doi") or record.get("pmid")]
+    return _parsed(kept, len(records))
 
 
-def _bibtex_value(text, index):
-    """(value, next index) of a BibTeX field value starting at ``index`` ({...}, "..." or a bare word)."""
+def _bibtex_value(text, index, limit=None):
+    """(value, next index) of a BibTeX field value starting at ``index`` ({...}, "..." or a bare word); the value is None
+    when a ``{`` or ``"`` is not closed before ``limit`` (the start of the next entry; default the end of ``text``).
+    """
+    limit = len(text) if limit is None else limit
     while index < len(text) and text[index].isspace():
         index += 1
     if index >= len(text):
         return "", index
     if text[index] == "{":
         depth, start = 0, index + 1
-        for position in range(index, len(text)):
+        for position in range(index, limit):
             if text[position] == "{":
                 depth += 1
             elif text[position] == "}":
                 depth -= 1
                 if depth == 0:
                     return text[start:position], position + 1
-        return text[start:], len(text)
+        return None, limit
     if text[index] == '"':
         position = index + 1
-        while position < len(text) and not (text[position] == '"' and text[position - 1] != "\\"):
+        while position < limit and not (text[position] == '"' and text[position - 1] != "\\"):
             position += 1
+        if position >= limit:
+            return None, limit
         return text[index + 1 : position], position + 1
     match = re.compile(r"[^,}\s]*").match(text, index)
     return match.group(0), match.end()
 
 
+_LATEX_MARKS = {"`": "\u0300", "'": "\u0301", "^": "\u0302", "~": "\u0303", "=": "\u0304", ".": "\u0307", '"': "\u0308"}
+_LATEX_LETTER_MARKS = {"u": "\u0306", "v": "\u030c", "H": "\u030b", "c": "\u0327", "k": "\u0328", "r": "\u030a", "b": "\u0331"}
+_LATEX_LETTERS = {"O": "\u00d8", "o": "\u00f8", "ss": "\u00df", "ae": "\u00e6", "AE": "\u00c6", "oe": "\u0153",
+                  "OE": "\u0152", "aa": "\u00e5", "AA": "\u00c5", "l": "\u0142", "L": "\u0141", "i": "i", "j": "j"}
+_LATEX_BASE = r"(\\[ij](?![A-Za-z])|[A-Za-z])"
+_LATEX_SYMBOL_ACCENT = re.compile(r"\\([`'^~=.\"])\s*(?:\{\s*" + _LATEX_BASE + r"\s*\}|" + _LATEX_BASE + ")")
+_LATEX_LETTER_ACCENT = re.compile(r"\\([uvHckrb])(?:\s*\{\s*" + _LATEX_BASE + r"\s*\}|\s+" + _LATEX_BASE + ")")
+_LATEX_SPECIAL = re.compile(r"\\(" + "|".join(sorted(_LATEX_LETTERS, key=len, reverse=True)) + r")(?![A-Za-z])\s*")
+_LATEX_ESCAPED = re.compile(r"\\([&%$#_])")
+
+
+def _latex_to_unicode(value):
+    r"""``value`` with the LaTeX accents of a BibTeX field decoded (``M{\"u}ller`` -> ``Müller``, ``Fern\'andez``,
+    ``Garc\'{\i}a``, ``\c{c}``, ``{\O}stergaard``, ``\ss``) and the escaped ``\& \% \$ \# \_`` unescaped; other
+    text, braces included, is left as it is.
+    """
+
+    def base(letter):
+        return letter[-1] if letter.startswith("\\") else letter
+
+    def accent(marks):
+        def replace(match):
+            letter = match.group(2) or match.group(3)
+            return unicodedata.normalize("NFC", base(letter) + marks[match.group(1)])
+
+        return replace
+
+    value = _LATEX_SYMBOL_ACCENT.sub(accent(_LATEX_MARKS), value)
+    value = _LATEX_LETTER_ACCENT.sub(accent(_LATEX_LETTER_MARKS), value)
+    value = _LATEX_SPECIAL.sub(lambda match: _LATEX_LETTERS[match.group(1)], value)
+    return _LATEX_ESCAPED.sub(lambda match: match.group(1), value)
+
+
 def parse_bibtex(text):
     """BibTeX entries (``@article{key, title = {...}, author = {A and B}, ...}``)."""
-    records = []
+    records, total = [], 0
+    starts = [found.start() for found in re.finditer(r"^[ \t]*@\w+\s*[{(]", text, re.M)]
     for match in re.finditer(r"@(\w+)\s*[{(]", text):
         if match.group(1).lower() in ("comment", "string", "preamble"):
             continue
+        limit = next((start for start in starts if start > match.start()), len(text))
+        total += 1
         index = text.find(",", match.end())
         if index < 0:
             continue
         fields = {}
+        malformed = False
         index += 1
         while index < len(text):
             field = re.compile(r"\s*([A-Za-z][\w-]*)\s*=").match(text, index)
             if not field:
                 break
-            value, index = _bibtex_value(text, field.end())
-            fields[field.group(1).lower()] = re.sub(r"[{}]", "", value)
+            value, index = _bibtex_value(text, field.end(), limit)
+            if value is None:
+                malformed = True  # an unclosed { or " : the entry is cut off, so it is skipped, not kept as a junk record
+                break
+            fields[field.group(1).lower()] = re.sub(r"[{}]", "", _latex_to_unicode(value))
             comma = re.compile(r"\s*,").match(text, index)
             index = comma.end() if comma else index
+        if malformed:
+            continue
         authors = "; ".join(part.strip() for part in re.split(r"\s+and\s+", fields.get("author", "")) if part.strip())
         record = draft(title=fields.get("title"), authors=authors, year=fields.get("year") or fields.get("date"),
                        journal=fields.get("journal") or fields.get("journaltitle") or fields.get("booktitle"),
                        doi=fields.get("doi") or fields.get("url"), pmid=fields.get("pmid") or fields.get("pubmed"))
         if record["title"] or record["doi"] or record["pmid"]:
             records.append(record)
-    return records
+    return _parsed(records, total)
 
 
 _CSV_NAMES = {
     "doi": ("doi", "digital object identifier", "di"),
-    "pmid": ("pmid", "pubmed id", "pubmedid", "pm id", "pubmed"),
+    "pmid": ("pmid", "pubmed id", "pubmedid", "pm id", "pubmed", "pm"),
     "title": ("title", "article title", "ti", "document title"),
     "authors": ("authors", "author", "author full names", "au", "author(s)"),
     "year": ("year", "publication year", "py", "pubyear", "date", "publication date"),
@@ -254,18 +365,34 @@ _CSV_NAMES = {
 }
 
 
+def _tab_header(text):
+    """Whether the first line of ``text`` is the header of a tab-delimited table with a DOI, PMID or title column (a Web of
+    Science tab-delimited export names them DI, PM and TI). A first line that holds a DOI is data, not a header.
+    """
+    first = text.lstrip("\ufeff").lstrip().split("\n", 1)[0]
+    if "\t" not in first or _DOI.search(first):
+        return False
+    cells = {cell.strip().lower() for cell in first.split("\t")}
+    return any(name in cells for key in ("doi", "pmid", "title") for name in _CSV_NAMES[key])
+
+
 def parse_csv(text):
     """A CSV (or TSV) with DOI and / or PMID columns; title, authors, year and journal columns are used when present."""
     text = text.lstrip("﻿")
     sample = text[:4096]
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
-    except csv.Error:
-        dialect = csv.excel
+    if _tab_header(text):
+        # A tab-delimited export (Web of Science "savedrecs.txt"): its cells hold commas and semicolons (authors, cited
+        # references), which can mislead the sniffer
+        dialect = csv.excel_tab
+    else:
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+        except csv.Error:
+            dialect = csv.excel
     reader = csv.reader(io.StringIO(text), dialect)
     rows = [row for row in reader if any(cell.strip() for cell in row)]
     if not rows:
-        return []
+        return Parsed()
     header = [cell.strip().lower() for cell in rows[0]]
     columns = {key: next((header.index(name) for name in names if name in header), None) for key, names in _CSV_NAMES.items()}
     if columns["doi"] is None and columns["pmid"] is None and columns["title"] is None:
@@ -276,7 +403,7 @@ def parse_csv(text):
         record = draft(**fields)
         if record["title"] or record["doi"] or record["pmid"]:
             records.append(record)
-    return records
+    return _parsed(records, len(rows) - 1)
 
 
 def parse_identifiers(text):
@@ -324,6 +451,10 @@ def detect_format(text, name=""):
         return "nbib"
     if extension in (".csv", ".tsv") or ("," in head.split("\n", 1)[0] and re.search(r"(?i)\b(doi|pmid|title)\b", head.split("\n", 1)[0])):
         return "csv"
+    if _tab_header(head):
+        # A tab-delimited table such as a Web of Science export (savedrecs.txt): read by its columns, not scanned for
+        # identifiers (which would add the DOIs of its cited references as search records)
+        return "csv"
     return "identifiers"
 
 
@@ -334,14 +465,46 @@ def parse_text(text, name=""):
     return kind, parser(text)
 
 
-def parse_file(path):
-    """Draft records of a file. Return ``(format, records)``. :raises SourcesError: for an unreadable file."""
+def decode_text(data, name=""):
+    """The text of the bytes of a reference file, without replacement characters.
+
+    UTF-8 (with or without a byte order mark) first, then UTF-16 with a byte order mark, then Windows-1252, which is what
+    EndNote, Reference Manager and other Windows programs often write (it also reads Latin-1 text with accents).
+
+    :raises SourcesError: for bytes that none of these decode, with what to do.
+    """
     try:
-        with open(path, encoding="utf-8-sig", errors="replace") as f:
-            text = f.read()
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        pass
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        try:
+            return data.decode("utf-16")
+        except UnicodeDecodeError:
+            pass
+    else:
+        try:
+            return data.decode("cp1252")
+        except UnicodeDecodeError:
+            pass
+    name = os.path.basename(os.fspath(name)) or "The file"
+    raise SourcesError(f"{name} is not saved as UTF-8 or Windows-1252 text. "
+                       "Export or save it again with the encoding UTF-8 and try again.")
+
+
+def read_text(path):
+    """The text of a reference file (see :func:`decode_text`). :raises SourcesError: for an unreadable file."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
     except OSError as e:
         raise SourcesError(f"Cannot read {os.path.basename(os.fspath(path))}: {e.strerror or e}") from e
-    return parse_text(text, os.fspath(path))
+    return decode_text(data, path)
+
+
+def parse_file(path):
+    """Draft records of a file. Return ``(format, records)``. :raises SourcesError: for an unreadable file."""
+    return parse_text(read_text(path), os.fspath(path))
 
 
 #
@@ -355,15 +518,30 @@ def _surname(author):
     if "," in author:
         return author.split(",")[0].strip()
     words = author.split()
-    if len(words) > 1 and re.fullmatch(r"[A-Z]{1,3}", words[-1]):
+    if len(words) > 1 and re.fullmatch(r"[A-Z]{1,3}|[A-Z]\.(?:[\s-]*[A-Z]\.)*", words[-1]):
         return " ".join(words[:-1])
     return words[-1] if words else ""
 
 
+_SCOPUS_AUTHOR = re.compile(r"[^,;]+\s[A-Z]\.(?:[\s-]*[A-Z]\.)*")
+
+
+def _split_authors(text):
+    """Authors of "A; B", "A and B" or the Scopus form "Chen W., Patel R." (surname, initials with periods)."""
+    text = _clean(text)
+    if not text:
+        return []
+    if ";" not in text and "," in text:
+        pieces = [part.strip() for part in text.split(",")]
+        if all(_SCOPUS_AUTHOR.fullmatch(part) for part in pieces):
+            return pieces
+    return [part.strip() for part in re.split(r";|\s+and\s+", text) if part.strip()]
+
+
 def _record_id_base(record):
     """Letters and digits of the first author's surname and the year ("smith2020"); "rec" without an author."""
-    authors = _clean(record.get("authors"))
-    first = re.split(r"[;]|\s+and\s+", authors)[0] if authors else ""
+    authors = _split_authors(record.get("authors"))
+    first = authors[0] if authors else ""
     surname = _surname(first)
     surname = re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFKD", surname).encode("ascii", "ignore").decode().lower())
     return (surname or "rec") + _year(record.get("year"))
@@ -372,6 +550,8 @@ def _record_id_base(record):
 def _citation(row):
     """"Smith et al. 2020, Brain" from a record row."""
     authors = [part.strip() for part in re.split(r";", _clean(row.get("authors"))) if part.strip()]
+    if len(authors) == 1:
+        authors = _split_authors(authors[0])
     if authors:
         who = _surname(authors[0]) + (" et al." if len(authors) > 1 else "")
     else:
@@ -398,6 +578,11 @@ class Records:
         self.rows = list(rows or [])
         self.extra_columns = list(extra_columns)
         self.log = list(log or [])
+        #: {frozenset({record_id, other_record_id})}: pairs the user kept as two records (:meth:`keep_both`)
+        self.kept_pairs = set()
+        # Why sources/records.tsv or stage_log.tsv could not be read, when this empty table stands in for them: save()
+        # then refuses, so the user's records and stage log are never written over
+        self.unreadable = None
 
     # Storage
 
@@ -409,9 +594,31 @@ class Records:
     def log_path(self):
         return os.path.join(self.study_path, *STAGE_LOG_TSV)
 
+    @property
+    def kept_path(self):
+        return os.path.join(self.study_path, *KEPT_PAIRS_TSV)
+
+    def is_kept(self, record_id, other_record_id):
+        """True when the user chose "Keep both" for this pair of records (in either order)."""
+        return frozenset((record_id, other_record_id)) in self.kept_pairs
+
+    def keep_both(self, record_id, other_record_id):
+        """Remember that the user keeps both records of a merge offer (written at once to ``sources/kept_pairs.tsv``)."""
+        self.kept_pairs.add(frozenset((record_id, other_record_id)))
+        self._save_kept_pairs()
+
+    def _save_kept_pairs(self):
+        rows = [{"record_id": min(pair), "other_record_id": max(pair)} for pair in self.kept_pairs if len(pair) == 2]
+        rows.sort(key=lambda row: (row["record_id"], row["other_record_id"]))
+        os.makedirs(os.path.dirname(self.kept_path), exist_ok=True)
+        study_module.write_tsv(self.kept_path, KEPT_COLUMNS, rows)
+
     @classmethod
     def open(cls, study_or_path):
-        """The records of a study (an empty table when there is no file yet)."""
+        """The records of a study (an empty table when there is no file yet).
+
+        :raises SourcesError: when ``sources/records.tsv`` or ``sources/stage_log.tsv`` cannot be read.
+        """
         base = getattr(study_or_path, "path", study_or_path)
         records = cls(base)
         if os.path.isfile(records.path):
@@ -419,22 +626,48 @@ class Records:
                 columns, rows = study_module.read_tsv(records.path)
             except (OSError, ValueError) as e:
                 raise SourcesError(f"sources/records.tsv cannot be read: {e}") from e
+            if "record_id" not in columns and (columns or rows):
+                # For example re-saved by a spreadsheet as comma-separated: every row would be dropped, and the next
+                # save would write the few new records over all of them
+                separated = next((name for sep, name in ((",", "comma"), (";", "semicolon")) if sep in "".join(columns)), None)
+                how = f" (it looks {separated}-separated)" if separated else ""
+                raise SourcesError(f"sources/records.tsv cannot be read: it has no record_id column{how}. "
+                                   "Save it again as tab-separated text")
             records.extra_columns = [column for column in columns if column not in COLUMNS]
-            for row in rows:
+            for line, row in enumerate(rows, start=2):
                 full = {column: ("" if row.get(column, NA) == NA else row.get(column, "")) for column in (*COLUMNS, *records.extra_columns)}
-                if full["record_id"]:
-                    full["stage"] = full["stage"] if full["stage"] in STAGES else IDENTIFIED
-                    records.rows.append(full)
+                if not full["record_id"]:
+                    if any(full.values()):  # a record the next save would drop
+                        raise SourcesError(f"sources/records.tsv cannot be read: row {line} has no record_id")
+                    continue
+                # Stages typed by hand ("Included") are matched without regard to case; a stage the app does not know
+                # is reported, not turned into "identified" (and saved so)
+                stage = full["stage"].strip().lower()
+                if stage and stage not in STAGES:
+                    raise SourcesError(f"sources/records.tsv cannot be read: record {full['record_id']} has the unknown stage "
+                                       f"{full['stage']!r} (expected one of {', '.join(STAGES)})")
+                full["stage"] = stage or IDENTIFIED
+                records.rows.append(full)
+        if os.path.isfile(records.kept_path):
+            try:
+                _columns, rows = study_module.read_tsv(records.kept_path)
+                records.kept_pairs = {frozenset((row.get("record_id", ""), row.get("other_record_id", ""))) for row in rows}
+            except (OSError, ValueError):
+                records.kept_pairs = set()  # only a convenience: the offers return
         if os.path.isfile(records.log_path):
             try:
                 _columns, rows = study_module.read_tsv(records.log_path)
                 records.log = [{column: ("" if row.get(column, NA) == NA else row[column]) for column in LOG_COLUMNS} for row in rows]
-            except (OSError, ValueError):
-                records.log = []
+            except (OSError, ValueError) as e:
+                # As for records.tsv: without the log, PRISMA would count full-text exclusions as screening ones and the
+                # next save would write the history over
+                raise SourcesError(f"sources/stage_log.tsv (the screening history) cannot be read: {e}") from e
         return records
 
     def save(self):
         """Write ``sources/records.tsv`` and ``stage_log.tsv`` (atomic)."""
+        if self.unreadable:
+            raise SourcesError(f"Nothing was saved: {self.unreadable}. Fix or move the file first")
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         study_module.write_tsv(self.path, [*COLUMNS, *self.extra_columns], self.rows)
         if self.log:
@@ -537,8 +770,18 @@ class Records:
             offers = self.merge_offers(added)
         return {"added": added, "merged": merged, "offers": offers}
 
+    def same_identifier(self, record_id, other_id):
+        """Whether two records have the same DOI or the same PMID (an exact duplicate, as :meth:`add` merges it)."""
+        a, b = self.get(record_id), self.get(other_id)
+        doi, pmid = normalize_doi(a["doi"]), normalize_pmid(a["pmid"])
+        return bool((doi and doi == normalize_doi(b["doi"])) or (pmid and pmid == normalize_pmid(b["pmid"])))
+
     def merge_offers(self, record_id=None):
-        """Pairs of records whose normalized titles match (ratio of at least :data:`TITLE_RATIO`) and have the same year.
+        """Pairs of records with the same DOI or PMID (ratio 1.0), or whose normalized titles match (ratio of at least
+        :data:`TITLE_RATIO`) and have the same year.
+
+        A DOI or PMID that a lookup (:func:`fill_from_lookup`) copied into a record can equal one of another record: the
+        pair is offered as the exact duplicate that :meth:`add` would have merged.
 
         :param record_id: only the pairs that involve this record, or one of these records (default: every pair).
         :return: ``[(record_id, other_record_id, ratio)]``, the older record first.
@@ -581,10 +824,30 @@ class Records:
                         if pair[:2] not in seen:
                             seen.add(pair[:2])
                             out.append(pair)
+        # Exact duplicates by identifier (whatever the titles say)
+        first = {}
+        for row in self.rows:
+            rid = row["record_id"]
+            for tag, value in (("doi", normalize_doi(row["doi"])), ("pmid", normalize_pmid(row["pmid"]))):
+                if not value:
+                    continue
+                if (tag, value) not in first:
+                    first[(tag, value)] = rid
+                    continue
+                other = first[(tag, value)]
+                if wanted is not None and rid not in wanted and other not in wanted:
+                    continue
+                if (other, rid) not in seen:
+                    seen.add((other, rid))
+                    out = [item for item in out if item[:2] != (other, rid)]
+                    out.append((other, rid, 1.0))
         return out
 
     def merge(self, keep, drop):
         """Merge record ``drop`` into ``keep`` (empty fields filled, ``n_cases`` and notes combined). Return the kept row.
+
+        The kept record takes the stage of ``drop`` when ``drop`` went further (an excluded ``keep`` too, when ``drop``
+        passed the stage ``keep`` was excluded at).
 
         The attachments folder of ``drop`` is left where it is. Cases that cite ``drop`` are not changed here; the
         caller relinks them with :func:`relink_cases`.
@@ -593,13 +856,33 @@ class Records:
         self._fill(row, other)
         if _blank(row["n_cases"]) and not _blank(other["n_cases"]):
             row["n_cases"] = other["n_cases"]
+        elif not _blank(other["n_cases"]):
+            # Both copies are the same paper: the larger case count wins (relink_cases with ``records`` then raises it to
+            # the cases linked to either copy)
+            mine, theirs = re.search(r"\d+", row["n_cases"]), re.search(r"\d+", other["n_cases"])
+            if theirs and (not mine or int(theirs.group(0)) > int(mine.group(0))):
+                row["n_cases"] = other["n_cases"]
         if other["notes"] and other["notes"] not in row["notes"]:
             row["notes"] = (row["notes"] + " " + other["notes"]).strip()
         rank = {stage: index for index, stage in enumerate(ADVANCE)}
         if row["stage"] != EXCLUDED and other["stage"] in rank and rank.get(row["stage"], 0) < rank[other["stage"]]:
             row["stage"] = other["stage"]
+        elif row["stage"] == EXCLUDED and other["stage"] in rank and rank.get(self.excluded_at(row), 0) < rank[other["stage"]]:
+            # The kept copy was excluded, but the duplicate went past the stage it was excluded at (included, say): the
+            # further decision wins, so the merge does not silently undo an inclusion (and drop its cases from PRISMA).
+            # Logged, so undo brings the exclusion back with its reason.
+            self._stamp(row, other["stage"], "")
         self.rows = [item for item in self.rows if item is not other]
-        self.log = [entry for entry in self.log if entry["record_id"] != drop]
+        # The stage lines of ``drop`` go (they would feed undo and excluded_at of a record that is gone), but the merges it
+        # absorbed earlier move to ``keep``: each one is a duplicate removed and stays counted (merged_count)
+        kept_log = []
+        for entry in self.log:
+            if entry["record_id"] == drop:
+                if entry["to"] != MERGED:
+                    continue
+                entry["record_id"] = keep
+            kept_log.append(entry)
+        self.log = kept_log
         # Kept in the log: a manual merge counts as a removed duplicate in the PRISMA counts
         self.log.append({"record_id": keep, "from": drop, "to": MERGED, "reason": "", "when": now_iso()})
         return row
@@ -644,8 +927,10 @@ class Records:
         return self.set_stage(record_id, EXCLUDED, reason)
 
     def _stage_before_exclusion(self, record_id):
+        # A reason change on an excluded record is logged excluded -> excluded (so undo restores the earlier reason): skip
+        # those lines, the stage it was excluded from is on the line that excluded it
         for entry in reversed(self.log):
-            if entry["record_id"] == record_id and entry["to"] == EXCLUDED:
+            if entry["record_id"] == record_id and entry["to"] == EXCLUDED and entry["from"] != EXCLUDED:
                 return entry["from"]
         return None
 
@@ -692,7 +977,7 @@ def _http_json(url, params=None, timeout=LOOKUP_TIMEOUT_S):
 
 
 def _crossref_record(message):
-    title = (message.get("title") or [""])[0]
+    title = plain_text((message.get("title") or [""])[0])
     authors = "; ".join(f"{a.get('family', '')}, {a.get('given', '')}".strip(", ") for a in message.get("author") or [] if a.get("family") or a.get("name"))
     year = ""
     for key in ("issued", "published-print", "published-online", "created"):
@@ -700,7 +985,7 @@ def _crossref_record(message):
         if parts and parts[0]:
             year = str(parts[0][0])
             break
-    journal = (message.get("container-title") or [""])[0]
+    journal = plain_text((message.get("container-title") or [""])[0])
     return draft(title=title, authors=authors, year=year, journal=journal, doi=message.get("DOI"))
 
 
@@ -710,7 +995,26 @@ def _esummary_record(entry):
         if item.get("idtype") == "doi":
             doi = item.get("value", "")
     authors = "; ".join(a.get("name", "") for a in entry.get("authors") or [] if a.get("name"))
-    return draft(title=entry.get("title"), authors=authors, year=entry.get("pubdate"), journal=entry.get("source"), doi=doi, pmid=entry.get("uid"))
+    return draft(title=plain_text(entry.get("title")), authors=authors, year=entry.get("pubdate"), journal=plain_text(entry.get("source")), doi=doi, pmid=entry.get("uid"))
+
+
+def _lookup_failure_text(error, kind):
+    """What to tell the user when the lookup raised ``error`` (an HTTP answer is not a connection problem)."""
+    status = getattr(getattr(error, "response", None), "status_code", None)  # requests.HTTPError carries the response
+    service = "Crossref" if kind == "DOI" else "PubMed"
+    if isinstance(status, int):
+        if status in (404, 410):
+            return f"{service} has no record for this {kind}"
+        if status == 429 or status >= 500:
+            return f"The lookup failed: {service} is busy or unavailable right now (HTTP {status}); try again later"
+        return f"The lookup failed: {service} did not accept the request (HTTP {status})"
+    if isinstance(error, ValueError):  # bad JSON
+        return f"The lookup failed: {service} sent an answer that could not be read; try again later"
+    from . import fetch
+
+    if fetch.proxy_refusal_status(error) is not None:
+        return f"The lookup failed: {fetch.network_problem(error, '')}"
+    return "The lookup failed; check the connection and try again"  # offline, proxy, timeout
 
 
 def lookup(doi="", pmid="", get=None):
@@ -725,7 +1029,7 @@ def lookup(doi="", pmid="", get=None):
     doi, pmid = normalize_doi(doi), normalize_pmid(pmid)
     try:
         if doi:
-            data = get(CROSSREF_URL + doi, None)
+            data = get(CROSSREF_URL + urllib.parse.quote(doi, safe="/:;()"), None)  # "<", ">" and "#" of a SICI DOI escaped
             message = data.get("message") if isinstance(data, dict) else None
             if not isinstance(message, dict):
                 raise SourcesError("Crossref sent no record for this DOI")
@@ -741,8 +1045,18 @@ def lookup(doi="", pmid="", get=None):
     except ImportError as e:
         raise SourcesError("The lookup needs the 'requests' package") from e
     except Exception as e:  # offline, timeout, HTTP error, bad JSON
-        raise SourcesError(f"The lookup failed ({type(e).__name__}); check the connection and try again") from e
+        raise SourcesError(_lookup_failure_text(e, "DOI" if doi else "PMID")) from e
     raise SourcesError("The record has no DOI or PMID to look up")
+
+
+def fill_from_lookup(records, record_id, found):
+    """Fill the empty fields of a record from a draft that :func:`lookup` returned (never overwrites). Return the fields filled.
+
+    Split from :func:`fetch_metadata` so that a card can run the request in a thread and change the records on the main thread.
+
+    :raises KeyError: for a record id that is not in ``records``.
+    """
+    return records._fill(records.get(record_id), found)
 
 
 def fetch_metadata(records, record_id, get=None):
@@ -752,7 +1066,7 @@ def fetch_metadata(records, record_id, get=None):
     """
     row = records.get(record_id)
     found = lookup(row["doi"], row["pmid"], get=get)
-    return records._fill(row, found)
+    return fill_from_lookup(records, record_id, found)
 
 
 #
@@ -782,7 +1096,7 @@ def add_cases(study, records, record_id, n):
     if not re.fullmatch(r"[A-Za-z0-9]+", record_id):
         raise ValueError(f"Invalid record id {record_id!r}")
     row = records.get(record_id)
-    existing = set(study.subject_ids)
+    existing = {sid.casefold() for sid in study.subject_ids}  # ids name files: sub-A01 and sub-a01 are one file on macOS
     values = {"record_id": record_id, "source_type": "case_report", "group": "case"}
     for column in ("doi", "pmid"):
         if row[column]:
@@ -794,21 +1108,44 @@ def add_cases(study, records, record_id, n):
     while len(created) < n:
         number += 1
         sid = f"sub-{record_id}{number:02d}"
-        if sid in existing:
+        if sid.casefold() in existing:
             continue
         study.add_subject(sid, values)
         created.append(sid)
-    # Keep the PRISMA case count in step with the study rows
-    digits = re.search(r"\d+", row["n_cases"])
-    row["n_cases"] = str(max(int(digits.group(0)) if digits else 0, len(linked_subjects(study, record_id))))
+    sync_case_count(study, records, record_id)
     return created
 
 
-def relink_cases(study, keep, drop):
-    """Point the cases of record ``drop`` at record ``keep`` (after :meth:`Records.merge`). Return the participant ids."""
+def sync_case_count(study, records, record_id):
+    """Keep the PRISMA case count in step with the study rows: raise the record's ``n_cases`` to the number of study rows
+    linked to it (a larger count entered for the paper is kept). Used by :func:`add_cases`, by
+    :func:`relink_cases` after a merge and by "New case from this paper".
+
+    :return: the record's previous ``n_cases`` text when it changed, else None (also for a record not in ``records``).
+    """
+    try:
+        row = records.get(record_id)
+    except KeyError:
+        return None
+    digits = re.search(r"\d+", row["n_cases"])
+    count = str(max(int(digits.group(0)) if digits else 0, len(linked_subjects(study, record_id))))
+    if count == row["n_cases"]:
+        return None
+    previous, row["n_cases"] = row["n_cases"], count
+    return previous
+
+
+def relink_cases(study, keep, drop, records=None):
+    """Point the cases of record ``drop`` at record ``keep`` (after :meth:`Records.merge`). Return the participant ids.
+
+    With ``records``, the ``n_cases`` of ``keep`` is then raised to the cases now linked to it (:func:`sync_case_count`),
+    so the cases of both copies stay counted in PRISMA. The caller saves the study and the records.
+    """
     moved = linked_subjects(study, drop)
     for sid in moved:
         study.set(sid, record_id=keep)
+    if records is not None:
+        sync_case_count(study, records, keep)
     return moved
 
 
@@ -823,9 +1160,15 @@ def search_log(study):
     return [dict(entry) for entry in entries if isinstance(entry, dict)] if isinstance(entries, list) else []
 
 
-def add_search(study, database, query="", date=None, records=None, duplicates=None):
-    """Append a search to ``study.json`` ``search`` (the caller saves the study). Return the entry."""
+def add_search(study, database, query="", date=None, records=None, duplicates=None, origin=None):
+    """Append a search to ``study.json`` ``search`` (the caller saves the study). Return the entry.
+
+    ``origin`` (one of :data:`ORIGINS`, optional) is where the records came from; the PRISMA counts attribute the
+    search's duplicates to it (a search without one counts as a database search).
+    """
     entry = {"database": _clean(database) or "Other", "query": _clean(query), "date": date or datetime.date.today().isoformat()}
+    if origin in ORIGINS:
+        entry["origin"] = origin
     if records is not None:
         entry["records"] = int(records)
     if duplicates is not None:
@@ -846,8 +1189,9 @@ def import_text(study, records, text, name="", origin="database", database=None,
         raise SourcesError("No record found in this file")
     report = records.add(drafts, origin=origin, n_cases=n_cases)
     report["format"], report["parsed"] = kind, len(drafts)
+    report["skipped"] = getattr(drafts, "skipped", 0)  # entries of the file that could not be read (not in the search log)
     add_search(study, database or ("Pasted identifiers" if kind == "identifiers" else os.path.basename(name) or kind.upper()), query,
-               records=len(drafts), duplicates=len(report["merged"]))
+               records=len(drafts), duplicates=len(report["merged"]), origin=origin)
     return report
 
 
@@ -859,13 +1203,22 @@ def prisma_counts(study, records=None):
     title and abstract screening; one excluded later, at the full-text stage, with its reason counted in
     ``fulltext_excluded_reasons``. ``cases`` is the sum of ``n_cases`` of the included records.
     """
-    records = records or Records.open(study)
+    records = records if records is not None else Records.open(study)
     searches = search_log(study)
     duplicates = sum(int(entry.get("duplicates") or 0) for entry in searches) + records.merged_count()
     unique = len(records.rows)
+    # ``identified_by_origin`` adds up to ``identified``: each duplicate counts under the origin it came from (the origin
+    # of its search, or of the record that absorbed it when merged by hand)
     by_origin = dict.fromkeys(ORIGINS, 0)
     for row in records.rows:
         by_origin[row["origin"] if row["origin"] in ORIGINS else "other"] += 1
+    for entry in searches:
+        by_origin[entry["origin"] if entry.get("origin") in ORIGINS else "database"] += int(entry.get("duplicates") or 0)
+    by_id = {row["record_id"]: row for row in records.rows}
+    for entry in records.log:
+        if entry["to"] == MERGED:
+            merged_origin = by_id.get(entry["record_id"], {}).get("origin")
+            by_origin[merged_origin if merged_origin in ORIGINS else "other"] += 1
     rank = {stage: index for index, stage in enumerate(ADVANCE)}
     excluded_screening, reasons = 0, {}
     sought = included = cases = 0
@@ -906,12 +1259,68 @@ def prisma_counts(study, records=None):
 _BOX_W, _BOX_H, _GAP = 250, 64, 44
 
 
+_NARROW_CHARS = frozenset("iljtfI.,:;'!|() -/[]")
+_WIDE_CHARS = frozenset("mwMW@%")
+
+
+def _text_width(text, size=12, bold=False):
+    """Estimated width in px of ``text`` in a Helvetica/Arial-like font (no font library needed; slightly generous)."""
+    em = 0.0
+    for char in text:
+        if unicodedata.east_asian_width(char) in ("W", "F"):
+            em += 1.0  # Chinese, Japanese and Korean glyphs and full-width forms are about one em wide
+        elif char in _WIDE_CHARS:
+            em += 0.85
+        elif char in _NARROW_CHARS:
+            em += 0.31
+        elif char.isupper():
+            em += 0.70
+        elif char.isdigit():
+            em += 0.56
+        else:
+            em += 0.54
+    return em * size * (1.08 if bold else 1.0)
+
+
+def _wrap_text(text, max_width, size=12, bold=False):
+    """Split ``text`` into lines that fit ``max_width`` px (break at spaces, inside a word only when it is too long alone)."""
+    lines, current = [], ""
+    for word in text.split():
+        candidate = f"{current} {word}" if current else word
+        if _text_width(candidate, size, bold) <= max_width:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+            current = ""
+        while _text_width(word, size, bold) > max_width and len(word) > 1:
+            cut = len(word) - 1
+            while cut > 1 and _text_width(word[:cut], size, bold) > max_width:
+                cut -= 1
+            lines.append(word[:cut])
+            word = word[cut:]
+        current = word
+    if current or not lines:
+        lines.append(current)
+    return lines
+
+
+def _wrap_box_lines(lines, w, bold_first=True, size=12):
+    """Wrap every line of a box so that it fits the box width (8 px padding each side)."""
+    wrapped = []
+    for index, text in enumerate(lines):
+        wrapped += _wrap_text(text, w - 16, size, bold_first and index == 0)
+    return wrapped
+
+
 def _box(x, y, w, h, lines, bold_first=True, fill="#f4f6f8"):
     out = [f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="4" fill="{fill}" stroke="#4a5560" stroke-width="1.2"/>']
     size, line_h = 12, 16
+    first_wrapped = len(_wrap_text(lines[0], w - 16, size, bold_first)) if lines else 0
+    lines = _wrap_box_lines(lines, w, bold_first, size)
     top = y + (h - line_h * len(lines)) / 2 + 12
     for index, text in enumerate(lines):
-        weight = ' font-weight="600"' if bold_first and index == 0 else ""
+        weight = ' font-weight="600"' if bold_first and index < first_wrapped else ""
         out.append(f'<text x="{x + w / 2}" y="{top + index * line_h:.0f}" text-anchor="middle" font-size="{size}"{weight}>{escape(text)}</text>')
     return out
 
@@ -933,8 +1342,13 @@ def prisma_flow_svg(counts):
     left, right = 70, 70 + _BOX_W + _GAP
     width = right + _BOX_W + 20
     rows_y = [20, 20 + (_BOX_H + _GAP), 20 + 2 * (_BOX_H + _GAP), 20 + 3 * (_BOX_H + _GAP)]
-    side_h = _BOX_H + 16 * (len(shown) + (1 if len(reasons) > len(shown) else 0))
-    height = rows_y[3] + _BOX_H + 30
+    side = [f"Full texts excluded (n = {n['fulltext_excluded']})"] + [f"{reason}: {count}" for reason, count in shown]
+    if len(reasons) > len(shown):
+        hidden = len(reasons) - len(shown)
+        side.append(f"{hidden} other reason{'' if hidden == 1 else 's'}")
+    side = _wrap_box_lines(side, _BOX_W)  # long reasons wrap inside the box instead of running past the figure's edge
+    side_h = max(_BOX_H, 16 * len(side) + 24)
+    height = max(rows_y[3] + _BOX_H, rows_y[2] + side_h) + 30
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" font-family="Helvetica, Arial, sans-serif" fill="#1f2933">',
         "<title>PRISMA 2020 flow diagram</title>",
@@ -957,12 +1371,9 @@ def prisma_flow_svg(counts):
     parts += _arrow(left + _BOX_W, rows_y[1] + _BOX_H / 2, right, rows_y[1] + _BOX_H / 2)
     parts += _box(left, rows_y[2], _BOX_W, _BOX_H, [f"Full texts assessed (n = {n['fulltext_sought']})"])
     parts += _arrow(left + _BOX_W / 2, rows_y[1] + _BOX_H, left + _BOX_W / 2, rows_y[2])
-    side = [f"Full texts excluded (n = {n['fulltext_excluded']})"] + [f"{reason}: {count}" for reason, count in shown]
-    if len(reasons) > len(shown):
-        side.append(f"{len(reasons) - len(shown)} other reasons")
-    parts += _box(right, rows_y[2], _BOX_W, max(side_h, _BOX_H), side)
+    parts += _box(right, rows_y[2], _BOX_W, side_h, side)
     parts += _arrow(left + _BOX_W, rows_y[2] + _BOX_H / 2, right, rows_y[2] + _BOX_H / 2)
-    parts += _box(left, rows_y[3], _BOX_W, _BOX_H, [f"Studies included (n = {n['included']})", f"{n['cases']} cases"], fill="#e8f3ec")
+    parts += _box(left, rows_y[3], _BOX_W, _BOX_H, [f"Studies included (n = {n['included']})", f"{n['cases']} case" + ("" if n["cases"] == 1 else "s")], fill="#e8f3ec")
     parts += _arrow(left + _BOX_W / 2, rows_y[2] + _BOX_H, left + _BOX_W / 2, rows_y[3])
     parts.append("</svg>")
     return "\n".join(parts) + "\n"
@@ -974,7 +1385,14 @@ def prisma_paths(study):
 
 
 def export_prisma(study, records=None):
-    """Write ``derivatives/prisma/prisma_counts.json`` and ``prisma_flow.svg`` (atomic). Return ``(counts, [paths])``."""
+    """Write ``derivatives/prisma/prisma_counts.json`` and ``prisma_flow.svg`` (atomic). Return ``(counts, [paths])``.
+
+    :raises SourcesError: when the records cannot be read (``records.tsv`` or ``stage_log.tsv``, or ``records`` is the
+        empty stand-in of an unreadable file): nothing is written, so an earlier export stays as it was.
+    """
+    records = records if records is not None else Records.open(study)
+    if getattr(records, "unreadable", None):
+        raise SourcesError(f"Nothing was written: {records.unreadable}. Fix or move the file first")
     counts = prisma_counts(study, records)
     json_path, svg_path = prisma_paths(study)
     os.makedirs(os.path.dirname(json_path), exist_ok=True)

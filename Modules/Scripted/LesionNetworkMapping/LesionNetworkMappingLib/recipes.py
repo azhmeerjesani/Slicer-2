@@ -31,10 +31,16 @@ sha256, primary rule, alpha, n_perm, seeds) and the plan's own sha256 (of its ca
 ``sha256`` field). After the lock, every parameter change is appended with its reason to
 ``analysis_plan_deviations.jsonl`` (:func:`record_deviation`), which the methods text reports (methods.py,
 "Deviations from the analysis plan"). :func:`plan_status` says whether the plan is open, locked or modified
-after the lock (its sha256 no longer matches). Paths in the plan are relative to the study (SPEC 9.7).
+after the lock (its sha256 no longer matches); such an edit is a deviation too (:func:`plan_modification`): it needs
+a reason before Run everything and the methods text reports it. Paths in the plan are relative to the study (SPEC 9.7).
+The analyses of the Map Cohort card (the Contrast GLM and the Symptom sLNM) hold their own permutations,
+covariates and inference options: :func:`analysis_pending` compares them with the locked plan apart from the
+threshold rule and Run everything's options, and their deviations are recorded as "<analysis>.<field>" (for
+example "contrast.n_perm"), so a deviation of one never changes what the other follows.
 
 Pipeline (A-04): :func:`to_pipeline_config` turns a recipe into ``pipeline.PipelineConfig`` fields and a
-recipe record (with the locked plan's sha256) for pipeline.json.
+recipe record (with the locked plan's sha256) for pipeline.json; :func:`pipeline_recipe` adds the steps outside the
+pipeline (the record that ``slicer-lnm --recipe`` and Run everything in Map pass on).
 
 Command line::
 
@@ -106,7 +112,7 @@ STEPS = {
 #: Where a step without a pipeline stage is run
 MANUAL_STEP_PLACES = {
     "coordinates": "Map ▸ Seed ▸ Coordinates",
-    "roi": "Map ▸ Recipe (ROI inference) or python -m LesionNetworkMappingLib.roi",
+    "roi": "command line: python -m LesionNetworkMappingLib.roi glm",
     "validation": "Map ▸ Validate",
     "robustness": "Map ▸ Robust",
 }
@@ -428,7 +434,9 @@ def rule_text(rule):
 
 
 def describe_change(field, old, new):
-    """Text of one change: "n_perm 1000 instead of 5000"."""
+    """Text of one change: "n_perm 1000 instead of 5000" (a reason is quoted: "reason volume is not a covariate: …")."""
+    if field == "design.volume_off_reason":  # a reason, not a setting: "X instead of none" read as one garbled phrase
+        return f"{FIELD_LABELS[field]}: {new}" if new else f"{FIELD_LABELS[field]} removed"
     return f"{FIELD_LABELS.get(field, field)} {format_value(field, new)} instead of {format_value(field, old)}"
 
 
@@ -675,6 +683,20 @@ def is_partial(recipe, module_available=None):
     return any(not step["available"] for step in available_steps(recipe, module_available))
 
 
+def distinct_labels(recipes, labeller=None):
+    """One list label per recipe. Recipes whose labels collide get their file name added, so they can be told apart."""
+    labels = [labeller(r) if labeller else r.title for r in recipes]
+    counts = {}
+    for label in labels:
+        counts[label] = counts.get(label, 0) + 1
+    result = []
+    for recipe, label in zip(recipes, labels, strict=True):
+        if counts[label] > 1 and recipe.path:
+            label += f" ({os.path.basename(recipe.path)})"
+        result.append(label)
+    return result
+
+
 def partial_badge(recipe, module_available=None):
     """"" or "2 steps not available in this build: Coordinate seeds, …"."""
     missing = [step["label"] for step in available_steps(recipe, module_available) if not step["available"]]
@@ -858,7 +880,7 @@ def lock_plan(study, recipe, params, hypotheses, now=None, locked_by=None, super
     """Lock the analysis plan of a study; return the plan dict (with its ``sha256``).
 
     :param recipe: the :class:`Recipe` the plan starts from (its record and the differences are stored).
-    :param params: the parameters to lock (normalized here); hypotheses' n_perm, alpha, rule and seeds win over them.
+    :param params: the parameters to lock (normalized here); hypotheses' n_perm, alpha, rule, seeds and primary contrast win over them.
     :param hypotheses: see :func:`normalize_hypotheses`.
     :param now: lock time (ISO text; default: now, UTC).
     :param supersede_reason: replace an existing plan (archived as ``analysis_plan.superseded-<sha8>.json``); the
@@ -871,8 +893,22 @@ def lock_plan(study, recipe, params, hypotheses, now=None, locked_by=None, super
         raise RecipeError(f"The analysis plan is already locked ({previous.get('locked_at')} · {str(previous.get('sha256'))[:8]}); changes are recorded as deviations")
     params = normalize_parameters(params)
     hyp = normalize_hypotheses(study, hypotheses, params)
-    # The hypotheses state the primary rule, alpha, n_perm and seeds: the parameters follow them
-    params = normalize_parameters({**params, "rule": hyp["primary_rule"], "alpha": hyp["alpha"], "n_perm": hyp["n_perm"], "seeds": hyp["seeds"]})
+    # The hypotheses state the primary rule, alpha, n_perm, seeds and (for a group hypothesis) the contrast: the
+    # parameters follow them, so the locked hypothesis is the test that runs (a contrast that differs from the recipe's
+    # is listed in deviations_from_recipe)
+    design = dict(params["design"])
+    if hyp["primary"]["kind"] == "contrast":
+        design["contrast"] = hyp["primary"]["contrast"]
+    params = normalize_parameters({**params, "rule": hyp["primary_rule"], "alpha": hyp["alpha"], "n_perm": hyp["n_perm"], "seeds": hyp["seeds"], "design": design})
+    # A score hypothesis is tested by the symptom sLNM step: a recipe without it gets the step, so Run everything tests
+    # the locked hypothesis (listed as a change from the recipe's steps)
+    recipe_steps = ordered_steps(recipe.steps)
+    steps = list(recipe_steps)
+    if hyp["primary"]["kind"] == "score" and "slnm" not in steps:
+        steps = ordered_steps(steps + ["slnm"])
+    deviations = [{key: change[key] for key in ("field", "recipe", "value", "description")} for change in diff(recipe, params)]
+    if steps != recipe_steps:
+        deviations.append({"field": "steps", "recipe": recipe_steps, "value": steps, "description": describe_change("steps", recipe_steps, steps)})
     name = getattr(study, "name", None) or os.path.basename(os.path.normpath(root))
     plan = {
         "format": PLAN_FORMAT,
@@ -882,8 +918,8 @@ def lock_plan(study, recipe, params, hypotheses, now=None, locked_by=None, super
         "study": {"name": name},
         "recipe": recipe.record(),
         "recipe_label": custom_label(recipe, params),
-        "deviations_from_recipe": [{key: change[key] for key in ("field", "recipe", "value", "description")} for change in diff(recipe, params)],
-        "steps": ordered_steps(recipe.steps),
+        "deviations_from_recipe": deviations,
+        "steps": steps,
         "parameters": params,
         "hypotheses": hyp,
         "note": "Pre-registration-lite plan: every later change of these parameters is recorded with its reason in analysis_plan_deviations.jsonl.",
@@ -971,20 +1007,97 @@ def plan_status(study):
     return {"state": state, "locked_at": plan.get("locked_at"), "sha256": stored, "sha8": stored[:8], "recipe": plan.get("recipe"), "deviations": len(deviations), "path": path, "chip": chip}
 
 
+#: Field of the deviation record that discloses a hand edit of ``analysis_plan.json`` after the lock
+PLAN_FILE_FIELD = "plan_file"
+
+
+def plan_modification(study):
+    """The edit of the locked plan file after the lock, or None (no plan, or the file still matches its sha256).
+
+    The plan's settings as the file holds them now are what :func:`effective_parameters` gives (the locked values are
+    no longer known), so the edit is a deviation: :func:`pending_deviations` asks for its reason (Run everything waits)
+    and the methods text reports it, with its reason once recorded (``field`` :data:`PLAN_FILE_FIELD`).
+
+    :return: {"field", "old" (sha256 stored at the lock), "new" (sha256 of the file now), "description",
+      "recorded" (a deviation with this ``new`` sha256 is in the log)}.
+    """
+    plan = read_plan(study)
+    if plan is None:
+        return None
+    stored = str(plan.get("sha256") or "")
+    actual = plan_sha256(plan)
+    if stored and stored == actual:
+        return None
+    recorded = any(item.get("field") == PLAN_FILE_FIELD and item.get("new") == actual for item in read_deviations(study))
+    description = f"analysis_plan.json edited after the lock (sha256 {stored[:8] or 'missing'} at the lock, {actual[:8]} now): the edited plan's settings are used"
+    return {"field": PLAN_FILE_FIELD, "old": stored or None, "new": actual, "description": description, "recorded": recorded}
+
+
+#: Deviations already warned about as skipped ({(log path, time, field, new)}): the Recipe card asks for the
+#: effective parameters on every poll, and one invalid record must not log a warning each time
+_SKIP_WARNED = set()
+
+
+class _Replay:
+    """Applies the recorded deviations of the plan's parameters in the order recorded.
+
+    A deviation that is valid only together with a later one (the covariates without volume_ml, recorded before the
+    reason volume is off: one Record writes both, in the order of the fields) is held back and applied together with
+    the later records, so it is not skipped and asked for again. A record that never becomes valid is skipped with one
+    warning.
+    """
+
+    def __init__(self, study, params, warn=True):
+        self.study, self.params, self.warn = study, params, warn
+        self.deferred = []  # (field, item, error) not valid yet
+
+    @staticmethod
+    def _set(params, items):
+        for item in items:
+            params = set_field(params, item["field"], item.get("new"))
+        return normalize_parameters(params)
+
+    def apply(self, item):
+        """Apply one deviation record; return the plan fields that took effect (empty for another field)."""
+        field = item.get("field")
+        if not field or not isinstance(field, str) or field not in flatten_parameters(self.params):
+            return []
+        held = [entry[1] for entry in self.deferred]
+        errors = (RecipeError, TypeError, ValueError, AttributeError)
+        if held:
+            try:
+                self.params = self._set(self.params, [*held, item])
+                self.deferred = []
+                return [entry["field"] for entry in held] + [field]
+            except errors:
+                pass
+        try:
+            self.params = self._set(self.params, [item])
+        except errors as exc:
+            self.deferred.append((field, item, exc))
+            return []
+        self.deferred = [entry for entry in self.deferred if entry[0] != field]  # older values of this field
+        return [field]
+
+    def finish(self):
+        """The parameters; warn (once) about the records that were never valid."""
+        for field, item, exc in self.deferred:
+            key = (deviations_path(self.study), str(item.get("time")), field, repr(item.get("new")))
+            if self.warn and key not in _SKIP_WARNED:
+                _SKIP_WARNED.add(key)
+                logging.warning(f"Deviation of {field} skipped (invalid recorded value {item.get('new')!r}): {exc}")
+        return self.params
+
+
 def effective_parameters(study):
     """The locked parameters with every recorded deviation applied (None without a plan)."""
     plan = read_plan(study)
     if plan is None:
         return None
-    params = normalize_parameters(plan.get("parameters") or {})
+    replay = _Replay(study, normalize_parameters(plan.get("parameters") or {}))
     for item in read_deviations(study):
-        field = item.get("field")
-        if field and field in flatten_parameters(params):
-            try:
-                params = normalize_parameters(set_field(params, field, item.get("new")))
-            except (RecipeError, TypeError, ValueError, AttributeError) as exc:
-                logging.warning(f"Deviation of {field} skipped (invalid recorded value {item.get('new')!r}): {exc}")
-    return params
+        replay.apply(item)
+    return replay.finish()
 
 
 def effective_steps(study):
@@ -1008,11 +1121,148 @@ def pending_deviations(study, current, steps=None):
     recorded = effective_parameters(study)
     if recorded is None:
         return []
-    out = [{**change, "description": describe_change(change["field"], change["old"], change["new"])} for change in compare_parameters(recorded, current)]
+    edited = plan_modification(study)
+    # A plan file edited after the lock is adopted only with a recorded reason (the methods text reports the edit)
+    out = [{key: edited[key] for key in ("field", "old", "new", "description")}] if edited and not edited["recorded"] else []
+    out += [{**change, "description": describe_change(change["field"], change["old"], change["new"])} for change in compare_parameters(recorded, current)]
     planned = ordered_steps(effective_steps(study))
     if steps is not None and ordered_steps(steps) != planned:
         steps = ordered_steps(steps)
         out.append({"field": "steps", "old": planned, "new": steps, "description": describe_change("steps", planned, steps)})
+    return out
+
+
+#: Analyses of the Map module that hold their own copy of plan parameters, with the text of their deviations: the Cohort
+#: card's Contrast and Symptom tabs, and the Null models card (its own kind, null cohorts, mode and seed)
+ANALYSIS_SCOPES = {"contrast": "Contrast GLM", "symptom": "Symptom sLNM", "nulls_card": "Null models card"}
+#: Plan parameters such an analysis may hold (the reason volume is off is a reason, not a setting: it is not compared)
+ANALYSIS_FIELDS = ("n_perm", "design.covariates", "design.tfce", "fdr", "statistic")
+#: Plan parameters the Null models card holds: the kind it runs (one of the planned kinds), K, the mode and the seed
+NULLS_CARD_FIELDS = ("nulls.kinds", "nulls.k", "nulls.mode", "seeds.nulls")
+#: The plan parameters of each analysis scope
+SCOPE_FIELDS = {"contrast": ANALYSIS_FIELDS, "symptom": ANALYSIS_FIELDS, "nulls_card": NULLS_CARD_FIELDS}
+
+
+def _analysis_value(field, value):
+    """``value`` of an analysis ``field`` in the plan's types (raises ValueError or TypeError)."""
+    if field in ("n_perm", "nulls.k", "seeds.nulls"):
+        if isinstance(value, bool):
+            raise ValueError(f"{field} must be a number")
+        return int(value)
+    if field in ("design.covariates", "nulls.kinds"):
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(f"{field} must be a list")
+        return [str(name) for name in value]
+    if field in ("design.tfce", "fdr"):
+        if not isinstance(value, bool):
+            raise ValueError(f"{field} must be true or false")
+        return value
+    return str(value)
+
+
+def _analysis_same(field, a, b):
+    """Whether the values ``a`` and ``b`` of an analysis ``field`` are the same setting."""
+    if field in ("design.covariates", "nulls.kinds"):
+        return sorted(a or []) == sorted(b or [])  # the order of the covariates (or null kinds) does not change the inference
+    return _same(a, b)
+
+
+def _analysis_covers(field, planned, value):
+    """Whether an analysis setting ``value`` of ``field`` is what the plan's ``planned`` value allows: the null kinds an
+    analysis runs must be among the planned kinds, any mode is the plan's "auto"; other fields are the same setting.
+    """
+    if field == "nulls.kinds":
+        return set(value or []) <= set(planned or [])
+    if field == "nulls.mode" and planned == "auto":
+        return True
+    return _analysis_same(field, planned, value)
+
+
+def analysis_follow(before, after, current):
+    """{field: value} an analysis should be set to after deviations were recorded: the fields whose followed value
+    changed from ``before`` to ``after`` (:func:`analysis_parameters` before and after recording) and whose ``current``
+    setting was still ``before`` (the analysis followed the plan; a setting the user changed is kept).
+
+    Without it a recorded change of the plan (for example Run everything's permutations) left the analyses that
+    follow it at the old value, which then showed as a change of theirs nobody made.
+    """
+    if not before or not after:
+        return {}
+    out = {}
+    for field in after:
+        if field not in current or _analysis_same(field, before.get(field), after.get(field)):
+            continue
+        try:
+            value = _analysis_value(field, current[field])
+        except (TypeError, ValueError):
+            continue
+        if _analysis_covers(field, before.get(field), value) and not _analysis_covers(field, after.get(field), value):
+            out[field] = copy.deepcopy(after.get(field))
+    return out
+
+
+def analysis_parameters(study, scope):
+    """{field: value} of the :data:`SCOPE_FIELDS` that the analysis ``scope`` follows under the locked plan: the plan's
+    parameters with the deviations of the plan (as :func:`effective_parameters`) and the analysis's own deviations
+    ("<scope>.<field>") applied in the order recorded (the latest change of a field wins).
+
+    :return: None without a locked plan, or when its parameters are not valid.
+    """
+    if scope not in ANALYSIS_SCOPES:
+        raise RecipeError(f"Unknown analysis {scope!r}; expected one of {', '.join(ANALYSIS_SCOPES)}")
+    fields = SCOPE_FIELDS[scope]
+    plan = read_plan(study)
+    if plan is None:
+        return None
+    try:
+        params = normalize_parameters(plan.get("parameters") or {})
+    except RecipeError as exc:
+        logging.warning(f"The locked plan's parameters are not valid: {exc}")
+        return None
+    replay = _Replay(study, params, warn=False)
+    own = {}  # the analysis's own deviations
+    prefix = f"{scope}."
+    for item in read_deviations(study):
+        field = str(item.get("field") or "")
+        if field.startswith(prefix) and field[len(prefix):] in fields:
+            field = field[len(prefix):]
+            try:
+                own[field] = _analysis_value(field, item.get("new"))
+            except (TypeError, ValueError) as exc:
+                logging.warning(f"Deviation of {scope}.{field} skipped (invalid recorded value {item.get('new')!r}): {exc}")
+        else:  # a deviation of the plan, as effective_parameters applies it
+            for applied in replay.apply(item):
+                own.pop(applied, None)
+    flat = flatten_parameters(replay.params)
+    return {field: copy.deepcopy(own[field] if field in own else flat.get(field)) for field in fields}
+
+
+def analysis_pending(study, scope, current):
+    """Changes of the analysis ``scope``'s ``current`` settings ({field: value} of :data:`SCOPE_FIELDS`) from what it
+    follows under the locked plan (:func:`analysis_parameters`) that still need a reason. Record each with
+    :func:`record_deviation` (``field`` "<scope>.<field>", ``description``).
+
+    The Null models card ("nulls_card") is compared only when the plan has null models (``nulls.mode`` other than
+    "off"); a kind outside the planned kinds is recorded as the planned kinds with that kind added.
+
+    :return: [{"field", "old", "new", "description", "scope"}]; empty without a plan.
+    """
+    planned = analysis_parameters(study, scope)
+    if planned is None:
+        return []
+    if scope == "nulls_card" and planned.get("nulls.mode") == "off":
+        return []
+    out = []
+    for field in SCOPE_FIELDS[scope]:
+        if field not in current:
+            continue
+        new, old = _analysis_value(field, current[field]), planned.get(field)
+        if field == "nulls.kinds":
+            if not old:  # the plan names no kinds: any kind is the plan's
+                continue
+            new = [*old, *(kind for kind in new if kind not in old)]
+        if not _analysis_covers(field, old, new):
+            out.append({"field": f"{scope}.{field}", "old": old, "new": new, "description": f"{ANALYSIS_SCOPES[scope]}: {describe_change(field, old, new)}", "scope": scope})
     return out
 
 
@@ -1041,6 +1291,18 @@ def steps_from_options(steps, options):
 
 #: Pipeline options of the Map "Run everything" card (card_pipeline.DEFAULT_OPTIONS keys) and the parameters they hold
 OPTION_FIELDS = (("sensitivity", "overlap"), ("perm", "n_perm"), ("tfce", "design.tfce"), ("extra_rules", "extra_rules"), ("preview_n", "preview_n"))
+#: One-sided contrasts the pipeline's case-vs-control GLM runs (pipeline --contrast; A is case, B is control)
+PIPELINE_ONE_SIDED = ("A>B", "B>A")
+
+
+def pipeline_contrast(params):
+    """The contrast of the pipeline's case-vs-control GLM for the parameters (pipeline --contrast).
+
+    A one-sided group contrast (A>B, B>A) is run as stated; anything else is the two-sided test (the F test of two
+    groups is the two-sided t test; the effect contrasts of a score design are not about the groups).
+    """
+    contrast = ((params or {}).get("design") or {}).get("contrast")
+    return contrast if contrast in PIPELINE_ONE_SIDED else "two_sided"
 
 
 def pipeline_options(params, steps, options=None):
@@ -1053,9 +1315,14 @@ def pipeline_options(params, steps, options=None):
     out["sensitivity"] = params["overlap"]
     out["perm"] = params["n_perm"]
     out["tfce"] = params["design"]["tfce"]
+    out["contrast"] = pipeline_contrast(params)
     out["extra_rules"] = list(params["extra_rules"])
     out["preview_n"] = params["preview_n"]
     out["preview_seed"] = params["seeds"]["preview"]
+    out["perm_seed"] = params["seeds"]["permutation"]
+    out["null_seed"] = params["seeds"]["nulls"]
+    out["alpha"] = params["alpha"]
+    out["fdr"] = params["fdr"]
     out["null_relocations"] = params["nulls"]["relocations"]
     out["native"] = params["native"]
     mode = params["nulls"]["mode"]
@@ -1088,8 +1355,21 @@ def parameters_from_map(base, rule=None, options=None):
                 elif option == "extra_rules":
                     value = [_rule(item) for item in value or []]
                 params = set_field(params, field, value)
+        contrast = options.get("contrast")
+        if contrast is not None and contrast != pipeline_contrast(params):
+            params["design"]["contrast"] = str(contrast)
         if options.get("preview_seed") is not None:
             params["seeds"]["preview"] = int(options["preview_seed"])
+        # What Run everything runs with (card_pipeline.configDict): a seed, alpha or FDR choice that differs from the
+        # locked plan is a deviation, as for the other settings
+        if options.get("perm_seed") is not None:
+            params["seeds"]["permutation"] = int(options["perm_seed"])
+        if options.get("null_seed") is not None:
+            params["seeds"]["nulls"] = int(options["null_seed"])
+        if options.get("alpha") is not None:
+            params["alpha"] = float(options["alpha"])
+        if isinstance(options.get("fdr"), bool):
+            params["fdr"] = options["fdr"]
         if options.get("null_relocations") is not None:
             params["nulls"]["relocations"] = options["null_relocations"]
         if options.get("native") in NATIVE_MODES:
@@ -1124,7 +1404,10 @@ def to_pipeline_config(recipe, study=None, params=None, module_available=None):
     if params is None:
         params = effective_parameters(study) if plan is not None and (plan.get("recipe") or {}).get("id") == recipe.id else apply(recipe)
     params = normalize_parameters(params)
+    # The locked plan's steps (for example sLNM added for a score hypothesis) when the plan is based on this recipe
     steps = recipe.steps
+    if plan is not None and (plan.get("recipe") or {}).get("id") == recipe.id:
+        steps = effective_steps(study) or steps
     options = pipeline_options(params, steps)
     config = {
         "rule": params["rule"],
@@ -1137,6 +1420,7 @@ def to_pipeline_config(recipe, study=None, params=None, module_available=None):
         "alpha": params["alpha"],
         "fdr": params["fdr"],
         "tfce": params["design"]["tfce"],
+        "contrast": pipeline_contrast(params),
         "covariates": params["design"]["covariates"],
         "scores": options["scores"],
         "nulls": options["nulls"],
@@ -1157,8 +1441,22 @@ def to_pipeline_config(recipe, study=None, params=None, module_available=None):
     record = {**recipe.record(), "label": custom_label(recipe, params), "steps": [{"id": step["id"], "status": step["status"]} for step in checked]}
     if plan is not None:
         record["plan_sha256"] = plan.get("sha256")
-    outside = [{"id": step, "label": STEPS[step][0], "where": MANUAL_STEP_PLACES.get(step, "Map")} for step in steps if STEPS[step][2] is None]
+        edited = plan_modification(study)
+        if edited and not edited["recorded"]:
+            logging.warning(f"The locked analysis plan was edited after the lock and the edit has no recorded reason: {edited['description']}")
+    from . import jobs
+
+    outside = [{"id": step, "label": STEPS[step][0], "where": jobs.command_text(MANUAL_STEP_PLACES.get(step, "Map"))} for step in steps if STEPS[step][2] is None]
     return {"config": config, "recipe": record, "steps": checked, "unavailable": [step["id"] for step in checked if not step["available"]], "outside_pipeline": outside}
+
+
+def pipeline_recipe(converted):
+    """pipeline.json "recipe" of a :func:`to_pipeline_config` result: its record with the ids of the steps outside the pipeline.
+
+    The command line (``slicer-lnm --recipe``) and Run everything in Map both record this, so methods and the report name
+    the recipe (and the locked plan's sha256) and list the recipe steps this run does not do.
+    """
+    return {**converted["recipe"], "outside_pipeline": [step["id"] for step in converted.get("outside_pipeline") or []]}
 
 
 # Command line
@@ -1167,7 +1465,9 @@ def to_pipeline_config(recipe, study=None, params=None, module_available=None):
 def _parser():
     import argparse
 
-    parser = argparse.ArgumentParser(prog="python -m LesionNetworkMappingLib.recipes", description="Analysis recipes and the analysis plan of lesion network mapping studies.")
+    from . import jobs
+
+    parser = argparse.ArgumentParser(prog=jobs.command_text("python -m LesionNetworkMappingLib.recipes"), description="Analysis recipes and the analysis plan of lesion network mapping studies.")
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("list", "show", "config"):
         sub = commands.add_parser(name)
