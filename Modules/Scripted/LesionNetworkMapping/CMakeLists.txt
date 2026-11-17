@@ -19,6 +19,15 @@ file(GLOB MODULE_PYTHON_LIB_RESOURCES CONFIGURE_DEPENDS
 if(LesionNetworkMapping_LIBRARY_ONLY)
   # The module user interface is disabled: install the library only (see Modules/Scripted/CMakeLists.txt)
   message(STATUS "Configuring Python library: ${MODULE_NAME}Lib")
+  if(COMMAND slicerStudioRecordVerbatimFiles)
+    slicerStudioRecordVerbatimFiles(
+      SCRIPTS "${MODULE_PYTHON_LIB_SCRIPTS}"
+      RESOURCES "${MODULE_PYTHON_LIB_RESOURCES}"
+      DESTINATION_DIR ${CMAKE_BINARY_DIR}/${Slicer_QTSCRIPTEDMODULES_LIB_DIR}
+      INSTALL_DIR ${Slicer_INSTALL_QTSCRIPTEDMODULES_LIB_DIR}
+      NO_INSTALL_SUBDIR
+      )
+  endif()
   ctkMacroCompilePythonScript(
     TARGET_NAME ${MODULE_NAME}Lib
     SCRIPTS "${MODULE_PYTHON_LIB_SCRIPTS}"

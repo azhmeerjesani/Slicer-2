@@ -1638,6 +1638,14 @@ check_bundle() {
       *) die "${EXIT_PACKAGE}" "${real} is built for '${archs}', expected ${HOST_ARCH}" ;;
     esac
   fi
+  # Code updates from main: the build records its commit (CMake/SlicerStudioBuildInfo.cmake); a release built
+  # from changed files, or without git, never takes code updates
+  local build_info="${contents}/bin/Python/studio_build_info.json"
+  if [ ! -f "${build_info}" ] || [ ! -f "${contents}/bin/Python/studio_build_files.json.gz" ]; then
+    warn "bin/Python/studio_build_info.json is missing: this application will not take code updates from main"
+  elif grep -q '"dirty": true' "${build_info}" || grep -q '"commit": null' "${build_info}"; then
+    warn "the application was built from a source tree with changes (or without git): it will not take code updates from main"
+  fi
 }
 
 #-----------------------------------------------------------------------------

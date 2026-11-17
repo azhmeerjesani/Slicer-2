@@ -2034,7 +2034,10 @@ def modulePath(moduleName):
     """
     import slicer  # noqa: F401
 
-    return eval("slicer.modules.%s.path" % moduleName.lower())
+    path = eval("slicer.modules.%s.path" % moduleName.lower())
+    # Slicer Studio: a module updated from main runs from the code update folder (see studio_overlay.py)
+    overlay = sys.modules.get("studio_overlay")
+    return overlay.mapPath(path) if overlay is not None else path
 
 
 def reloadScriptedModule(moduleName):

@@ -1,3 +1,15 @@
+# Slicer Studio: apply a staged code update from main (an overlay in the user's data folder) before anything below
+# imports a Slicer or Studio module (see studio_overlay.py). A problem there never stops the start-up.
+try:
+    import studio_overlay
+
+    studio_overlay.activateFromApplication()
+except Exception as _studioOverlayError:
+    import sys as _sys
+
+    print(f"Slicer Studio code update not applied: {_studioOverlayError}", file=_sys.stderr)
+    del _sys
+
 import logging
 
 # Importing ctk, qt, vtk, and slicer is necessary for subsequent use and to accommodate

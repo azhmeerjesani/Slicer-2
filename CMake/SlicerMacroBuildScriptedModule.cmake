@@ -97,6 +97,19 @@ macro(slicerMacroBuildScriptedModule)
     set(_no_install_subdir_option "")
   endif()
 
+  # Slicer Studio: the installed path of each file, for the code updates from main
+  if(COMMAND slicerStudioRecordVerbatimFiles)
+    slicerStudioRecordVerbatimFiles(
+      SCRIPTS "${MY_SLICER_SCRIPTS}"
+      RESOURCES "${MY_SLICER_RESOURCES}"
+      DESTINATION_DIR ${CMAKE_BINARY_DIR}/${Slicer_QTSCRIPTEDMODULES_LIB_DIR}${_destination_subdir}
+      INSTALL_DIR ${Slicer_INSTALL_QTSCRIPTEDMODULES_LIB_DIR}
+      ${_no_install_subdir_option}
+      MODULE_NAME ${MY_SLICER_NAME}
+      PYTHON_ROOT ${Slicer_INSTALL_QTSCRIPTEDMODULES_LIB_DIR}
+      )
+  endif()
+
   ctkMacroCompilePythonScript(
     TARGET_NAME ${MY_SLICER_NAME}
     SCRIPTS "${MY_SLICER_SCRIPTS}"

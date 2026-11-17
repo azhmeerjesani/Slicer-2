@@ -1134,6 +1134,8 @@ if(Slicer_USE_PYTHONQT)
   link_directories(${PYTHONQT_INSTALL_DIR}/lib)
   include(ctkMacroWrapPythonQt)
   include(ctkMacroCompilePythonScript)
+  # Slicer Studio: record the files copied verbatim, for the code updates from main
+  include(SlicerStudioBuildInfo)
 
   # Enable qMRMLWidgets python wrapping
   set(MRMLWidgets_WRAP_PYTHON ON)

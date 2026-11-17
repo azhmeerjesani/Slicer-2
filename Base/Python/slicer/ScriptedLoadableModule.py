@@ -1,6 +1,7 @@
 import importlib
 import logging
 import os
+import sys
 import unittest
 
 import ctk
@@ -52,7 +53,12 @@ This work is partially supported by PAR-07-249: R01CA131718 NA-MIC Virtual Colon
 
     def resourcePath(self, filename):
         """Return the absolute path of the module ``Resources`` directory."""
-        scriptedModulesPath = os.path.dirname(self.parent.path)
+        modulePath = self.parent.path
+        # Slicer Studio: a module updated from main runs from the code update folder (see studio_overlay.py)
+        overlay = sys.modules.get("studio_overlay")
+        if overlay is not None:
+            modulePath = overlay.mapPath(modulePath)
+        scriptedModulesPath = os.path.dirname(modulePath)
         return os.path.join(scriptedModulesPath, "Resources", filename)
 
     def getDefaultModuleDocumentationLink(self, docPage=None):

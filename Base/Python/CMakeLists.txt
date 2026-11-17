@@ -24,6 +24,7 @@ set(Slicer_PYTHON_SCRIPTS
   slicer/testing
   slicer/util
   slicerqt
+  studio_overlay
   mrml
   vtkAddon
   vtkITK
@@ -59,6 +60,17 @@ set(Slicer_PYTHON_RESOURCES
 if(Slicer_USE_SimpleITK)
   list(APPEND Slicer_PYTHON_SCRIPTS
     sitkUtils
+    )
+endif()
+
+# Slicer Studio: the installed path of each file, for the code updates from main
+# (slicerqt.py and studio_overlay.py run before an update applies: a change to them needs a new build)
+if(COMMAND slicerStudioRecordVerbatimFiles)
+  slicerStudioRecordVerbatimFiles(
+    SCRIPTS "${Slicer_PYTHON_SCRIPTS}"
+    RESOURCES "${Slicer_PYTHON_RESOURCES}"
+    DESTINATION_DIR ${Slicer_BINARY_DIR}/bin/Python
+    INSTALL_DIR ${Slicer_INSTALL_BIN_DIR}
     )
 endif()
 
