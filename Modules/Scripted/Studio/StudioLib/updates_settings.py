@@ -1,8 +1,10 @@
 """The "Updates" panel of the application settings (A-08), in Studio and in Classic.
 
 It shows this version, the latest release and its notes, and offers Check now, Update now and the automatic check
-setting. Only the fork-only key ``Studio/Updates/AutoCheck`` is written by the panel (SPEC 9.7 rule 5); its default
-lives in code (``updates.DEFAULT_SETTINGS``). The panel is not added under ``--testing``.
+setting. The section "Code from main" shows the code updates from main between releases (``updates_commit``): the
+installed build, the code that runs, the last check, Restart now, Go back and the switch. Only the fork-only keys
+``Studio/Updates/AutoCheck`` and ``Studio/Updates/CommitUpdates`` are written by the panel (SPEC 9.7 rule 5); their
+defaults live in code (``updates.DEFAULT_SETTINGS``). The panel is not added under ``--testing``.
 """
 
 import time
@@ -112,12 +114,66 @@ class UpdatesSettingsPanel(ctk.ctkSettingsPanel):
         self.privacyLabel.setWordWrap(True)
         ui.setText(self.privacyLabel, "caption")
         layout.addWidget(self.privacyLabel)
+
+        # Code updates from main between releases
+        layout.addSpacing(14)
+        layout.addWidget(ui.sectionLabel(_("Code from main")))
+        self.buildLabel = qt.QLabel()
+        self.buildLabel.setObjectName("StudioCommitBuildLabel")
+        self.buildLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
+        row(_("Installed build"), self.buildLabel)
+        self.runningLabel = qt.QLabel()
+        self.runningLabel.setObjectName("StudioCommitRunningLabel")
+        self.runningLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
+        row(_("Running code"), self.runningLabel, last=True)
+        self.commitStatusLabel = qt.QLabel()
+        self.commitStatusLabel.setObjectName("StudioCommitStatusLabel")
+        self.commitStatusLabel.setWordWrap(True)
+        self.commitStatusLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
+        ui.setText(self.commitStatusLabel, "caption")
+        layout.addWidget(self.commitStatusLabel)
+        commitButtons = qt.QHBoxLayout()
+        commitButtons.setSpacing(8)
+        self.commitCheckButton = qt.QPushButton(_("Check main now"))
+        self.commitCheckButton.setObjectName("StudioCommitCheckButton")
+        self.commitCheckButton.connect("clicked()", self.onCheckCommits)
+        ui.setRole(self.commitCheckButton, "secondary")
+        commitButtons.addWidget(self.commitCheckButton)
+        self.commitRestartButton = qt.QPushButton(_("Restart now"))
+        self.commitRestartButton.setObjectName("StudioCommitRestartButton")
+        self.commitRestartButton.connect("clicked()", self.onCommitRestart)
+        ui.setRole(self.commitRestartButton, "primary")
+        commitButtons.addWidget(self.commitRestartButton)
+        self.commitBackButton = qt.QPushButton(_("Go back"))
+        self.commitBackButton.setObjectName("StudioCommitBackButton")
+        self.commitBackButton.connect("clicked()", self.onCommitGoBack)
+        ui.setRole(self.commitBackButton, "secondary")
+        commitButtons.addWidget(self.commitBackButton)
+        commitButtons.addStretch(1)
+        layout.addLayout(commitButtons)
+        self.commitSwitch = ui.switch(_("Also get code updates from main between releases"), "StudioCommitUpdatesSwitch")
+        self.commitSwitch.setMinimumHeight(ui.SETTINGS_ROW_HEIGHT)
+        self.commitSwitch.toolTip = _("Python and resource files of new commits on main, checked at start-up. Anything compiled "
+                                      "into Slicer Studio waits for the next release.")
+        self.commitSwitch.checked = bool(updates.settingsValue("CommitUpdates"))
+        self.commitSwitch.connect("toggled(bool)", self.onCommitSwitch)
+        layout.addWidget(self.commitSwitch)
+        self.commitPrivacyLabel = qt.QLabel(_("A check asks github.com which commit is the newest on main and reads its list of files; "
+                                              "changed files come from raw.githubusercontent.com and are checked against that commit. "
+                                              "Nothing about you, this computer or your data is sent. Anyone who can change main can "
+                                              "change the code that Slicer Studio runs."))
+        self.commitPrivacyLabel.setObjectName("StudioCommitPrivacyLabel")
+        self.commitPrivacyLabel.setWordWrap(True)
+        ui.setText(self.commitPrivacyLabel, "caption")
+        layout.addWidget(self.commitPrivacyLabel)
         layout.addStretch(1)
         ui.bindStyleSheet(self, lambda: (
             f"QFrame#StudioSettingsRow {{ border: none; border-bottom: 1px solid {ui.token('hairline').name()}; background: transparent; }}"
             "QFrame#StudioSettingsRowLast { border: none; background: transparent; }"
-            f"QLabel#StudioUpdatesStatusLabel, QLabel#StudioUpdatesPrivacyLabel {{ color: {ui.token('text3').name()}; }}"
-            f"QLabel#StudioUpdatesVersionLabel, QLabel#StudioUpdatesLatestLabel {{ color: {ui.token('text2').name()}; }}"
+            f"QLabel#StudioUpdatesStatusLabel, QLabel#StudioUpdatesPrivacyLabel, QLabel#StudioCommitStatusLabel, "
+            f"QLabel#StudioCommitPrivacyLabel {{ color: {ui.token('text3').name()}; }}"
+            f"QLabel#StudioUpdatesVersionLabel, QLabel#StudioUpdatesLatestLabel, QLabel#StudioCommitBuildLabel, "
+            f"QLabel#StudioCommitRunningLabel {{ color: {ui.token('text2').name()}; }}"
             f"QTextBrowser#StudioUpdatesNotes {{ background-color: {ui.token('canvas').name()}; border: 1px solid {ui.token('hairline').name()}; border-radius: 8px; }}"))
 
         self._showFilter = _ShowEventFilter(self.refresh)
@@ -168,6 +224,119 @@ class UpdatesSettingsPanel(ctk.ctkSettingsPanel):
         self.updateButton.text = _("Update to {version}").format(version=status.version) if available else _("Update now")
         if updates.feedOverride() is not None:
             self.autoCheckBox.toolTip = _("The update address is set by {variable}.").format(variable=updates.FEED_ENVIRONMENT_VARIABLE)
+        self.refreshCommits()
+
+    def refreshCommits(self):
+        """The section "Code from main"."""
+        service = self.service
+        try:
+            description = updates.updates_commit.describe(str(slicer.app.slicerHome), updates.commitStateDirectory())
+        except Exception:
+            description = {"build": None, "running": updates.studio_overlay_status(), "state": None}
+        build = description.get("build") or {}
+        running = description.get("running") or {}
+        state = description.get("state") or {}
+        manifests = description.get("manifests") or {}
+        commit = build.get("commit")
+        if commit:
+            self.buildLabel.text = "{version} · {commit}{date}".format(
+                version=build.get("studioVersion") or updates.currentVersion(), commit=commit[:7], date=updates._commitDate(build.get("committed")))
+        else:
+            self.buildLabel.text = _("Slicer Studio {version} (commit not known)").format(version=updates.currentVersion())
+        active = running.get("active")
+        if active:
+            manifest = manifests.get(active) or {}
+            self.runningLabel.text = _("main @ {commit}{date}").format(commit=active[:7], date=updates._commitDate(manifest.get("committed")))
+            self.runningLabel.toolTip = manifest.get("subject") or ""
+        else:
+            self.runningLabel.text = _("The installed build")
+            self.runningLabel.toolTip = ""
+        pending = state.get("pending")
+        enabled = bool(updates.settingsValue("CommitUpdates"))
+        if bool(self.commitSwitch.checked) != enabled:
+            self.commitSwitch.blockSignals(True)
+            self.commitSwitch.checked = enabled
+            self.commitSwitch.blockSignals(False)
+        self.commitStatusLabel.text = self.commitStatusText(description)
+        checking = service is not None and service.commitChecking
+        self.commitCheckButton.enabled = service is not None and not checking and bool(commit) and updates.updates_commit.override() != "off"
+        self.commitCheckButton.text = _("Checking…") if checking else _("Check main now")
+        self.commitRestartButton.visible = bool(pending) and not state.get("disabled")
+        previous = state.get("previous") if active and state.get("active") == active else None
+        self.commitBackButton.visible = bool(active)
+        self.commitBackButton.text = (_("Go back to main @ {commit}").format(commit=previous[:7]) if previous
+                                      else _("Go back to the installed build"))
+
+    def commitStatusText(self, description):
+        build = description.get("build") or {}
+        running = description.get("running") or {}
+        state = description.get("state") or {}
+        parts = []
+        if updates.updates_commit.override() == "off":
+            return _("Code updates are turned off ({variable}=off).").format(variable=updates.updates_commit.ENVIRONMENT_VARIABLE)
+        if updates.channel() != "release":
+            parts.append(_("A development build never takes code updates."))
+        elif not build.get("commit"):
+            parts.append(_("This build does not know the commit it was made from: it takes no code updates."))
+        elif build.get("dirty"):
+            parts.append(_("This build was made from changed files: it takes no code updates."))
+        if state.get("disabled") and state.get("disabledReason") == "setting":
+            parts.append(_("Turned off: the installed build runs."))
+        pending = state.get("pending")
+        if pending == "installed":
+            parts.append(_("The installed build runs again from the next start."))
+        elif pending:
+            parts.append(_("main @ {commit} is ready and applies at the next start.").format(commit=pending[:7]))
+        rolledBack = state.get("rolledBack")
+        if isinstance(rolledBack, dict) and rolledBack.get("from"):
+            parts.append(_("main @ {commit} did not start and was undone.").format(commit=str(rolledBack["from"])[:7]))
+        if running.get("error"):
+            parts.append(_("The code update was not applied: {error}.").format(error=running["error"]))
+        result = self.service.commitResult if self.service is not None else None
+        if isinstance(result, dict):
+            kind = result.get("result")
+            head = str(result.get("head") or "")[:7]
+            if kind == "upToDate":
+                parts.append(_("main has no newer code for this build."))
+            elif kind == "ready" and result.get("already") == "active":
+                parts.append(_("Up to date with main @ {commit}.").format(commit=head))
+            elif kind == "ready" and result.get("staged") is False:
+                parts.append(_("main @ {commit} has code updates; they are not taken while a newer release is available.").format(commit=head))
+            elif kind == "needsBuild":
+                parts.append(updates.commitNeedsBuildText(result))
+            elif kind == "tooLarge":
+                parts.append(_("main @ {commit} changes too many files for a code update: it will come with the next release.").format(commit=head))
+            elif kind == "skipped":
+                parts.append(_("main @ {commit} was undone on this computer and is not taken again.").format(commit=head))
+            elif kind in ("failed", "unavailable") and result.get("error"):
+                parts.append(_("The last check of main failed: {error}.").format(error=result["error"]))
+            if kind in ("ready", "needsBuild") and result.get("paths"):
+                parts.append(_("Files: {paths}").format(paths=", ".join(result["paths"][:5]) + ("…" if len(result["paths"]) > 5 else "")))
+            last = updates.parseTime(result.get("checked")) if result.get("checked") else None
+            if last is not None:
+                parts.append(_("Checked {time}.").format(time=time.strftime("%Y-%m-%d %H:%M", time.localtime(last))))
+        return " ".join(parts)
+
+    def onCheckCommits(self):
+        if self.service is not None:
+            self.service.checkCommits(force=True)
+        self.refresh()
+
+    def onCommitRestart(self):
+        if self.service is not None:
+            self.service.restartForCommitUpdate()
+
+    def onCommitGoBack(self):
+        if self.service is not None:
+            self.service.goBackFromCommitUpdate()
+        self.refresh()
+
+    def onCommitSwitch(self, checked):
+        if self.service is not None:
+            self.service.setCommitUpdatesEnabled(bool(checked))
+        else:
+            updates.setSettingsValue("CommitUpdates", bool(checked))
+        self.refresh()
 
     def statusText(self):
         service = self.service

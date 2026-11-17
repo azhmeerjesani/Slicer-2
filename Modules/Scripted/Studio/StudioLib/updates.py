@@ -31,8 +31,18 @@ its size and SHA-256 are checked against the manifest before anything is install
 application after it exits (and puts the previous version back if anything fails). Unsaved work is autosaved: the
 session closed for the update is offered for recovery by the new version (``finishInstall()``).
 
+**Code updates from main.** Between releases, the Python and resource files of new commits on ``main`` are taken too
+(``updates_commit``, with the bootstrap ``bin/Python/studio_overlay.py``): a worker thread checks main a few seconds
+after the start-up decision (and daily), stages the files in the private state folder (``commit/<build commit>``) and
+shows "Update ready · Restart now · Later"; the next start applies them, and goes back by itself when that start
+fails. Commits that change compiled parts show a notice that they need a new build. A release install removes every
+code update (``installOnQuit()``, ``finishInstall()``), and releases are compared with the version of the build
+(``currentVersion()``), not with a ``version.py`` that a code update replaced.
+
 Settings (fork-only, SPEC 9.7 rule 5): ``Studio/Updates/AutoCheck`` (default true), ``Studio/Updates/LastCheck``,
-``Studio/Updates/LastManifest`` (the cached manifest) and ``Studio/Updates/SkippedVersion``. The defaults live in code.
+``Studio/Updates/LastManifest`` (the cached manifest), ``Studio/Updates/SkippedVersion``, and for the code updates
+``Studio/Updates/CommitUpdates`` (default true), ``CommitLastCheck``, ``CommitLastHead``, ``CommitLastResult`` and
+``CommitNoticeHead``. The defaults live in code.
 
 The functions above the "Service" section use no Qt and no Slicer object (the tests use them with local files).
 """
@@ -83,6 +93,8 @@ class _LazyModule:
 
 
 updates_install = _LazyModule(f"{__package__}.updates_install" if __package__ else "updates_install")
+#: Code updates from main between releases (imported when a check runs)
+updates_commit = _LazyModule(f"{__package__}.updates_commit" if __package__ else "updates_commit")
 
 #: Repository whose public releases are the updates (D-U1)
 REPOSITORY = "azhmeerjesani/Slicer-2"
@@ -137,7 +149,18 @@ def parseTime(text):
     return projects.parseTime(text) if text else None
 
 
-DEFAULT_SETTINGS = {"AutoCheck": True, "LastCheck": "", "LastManifest": "", "SkippedVersion": ""}
+DEFAULT_SETTINGS = {"AutoCheck": True, "LastCheck": "", "LastManifest": "", "SkippedVersion": "",
+                    # Code updates from main (updates_commit): on/off, the last check, its head and result, the head
+                    # whose notice was shown
+                    "CommitUpdates": True, "CommitLastCheck": "", "CommitLastHead": "", "CommitLastResult": "",
+                    "CommitNoticeHead": ""}
+
+#: Code updates from main: the check starts this long after the start-up decision (ms), the "now runs code from main"
+#: toast is shown this long after the start-up (after the start was confirmed, ms)
+COMMIT_CHECK_DELAY_MS = 8000
+COMMIT_APPLIED_TOAST_DELAY_MS = 7000
+COMMIT_NOTICE_OBJECT_NAME = "StudioCommitUpdateNotice"
+COMMIT_NOTICE_KEY = "commitUpdates"
 
 #: Object names (stable once released, SPEC 9.2)
 REQUIRED_DIALOG_OBJECT_NAME = "StudioRequiredUpdateDialog"
@@ -150,6 +173,53 @@ NOTICE_KEY = "updates"
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _ASSET_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,254}$")
+
+
+def _loadJson(text):
+    try:
+        value = json.loads(text) if text else None
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def studio_overlay_status():
+    """What the code update bootstrap (bin/Python/studio_overlay.py) did at this start ({} without it)."""
+    overlay = sys.modules.get("studio_overlay")
+    return overlay.status() if overlay is not None else {}
+
+
+def _commitDate(committed):
+    """" (Nov 16)" for the commit time ``committed`` (UTC, as written by ``isoTime``), or "" when unknown."""
+    import calendar
+
+    try:
+        seconds = calendar.timegm(time.strptime(str(committed), "%Y-%m-%dT%H:%M:%SZ")) if committed else None
+    except ValueError:
+        seconds = None
+    return f" ({time.strftime('%b %d', time.localtime(seconds))})" if seconds else ""
+
+
+def commitReadyText(result):
+    return _("Update ready · main @ {commit}{date}").format(commit=str(result.get("head") or "")[:7], date=_commitDate(result.get("committed")))
+
+
+def commitNeedsBuildText(result):
+    paths = result.get("paths") or []
+    example = _(", for example {path}").format(path=paths[0]) if paths else ""
+    return _("Newer code on main changes parts that are compiled into Slicer Studio ({count} files{example}). It needs a new "
+             "build and will come with the next release.").format(count=result.get("needsBuild") or len(paths), example=example)
+
+
+def relaunchCommand(slicerHome, key):
+    """The command that starts this installation again (macOS: ``open -n`` of the bundle; Linux: the launcher)."""
+    if not slicerHome:
+        return None
+    if key and key.startswith("macos"):
+        bundle = updates_install.installTarget(key, slicerHome)
+        return ["open", "-n", bundle] if bundle else None
+    launcher = os.path.join(slicerHome, "Slicer")
+    return [launcher] if os.path.isfile(launcher) else None
 
 
 class UpdateError(Exception):
@@ -311,8 +381,9 @@ def _policy(feed):
     return {"extraHosts": _overrideHosts(feed), "allowInsecureLoopback": overridden, "allowFile": overridden}
 
 
-def _open(url, feed, timeout, notFound=None):
-    """Open ``url`` with the redirect and host rules of ``feed``. Return the response.
+def _open(url, feed, timeout, notFound=None, data=None, headers=None, policy=None):
+    """Open ``url`` with the redirect and host rules of ``feed`` (or the rules ``policy``, a dict of ``checkUrl``
+    arguments). Return the response. ``data`` makes it a POST; ``headers`` are added to the request.
 
     A 404 means "no release with an update manifest" when the manifest is fetched; ``notFound`` is the message for
     another file (the release file of a download), where the manifest was found and the file is missing.
@@ -320,13 +391,15 @@ def _open(url, feed, timeout, notFound=None):
     import urllib.error
     import urllib.request
 
-    policy = _policy(feed)
+    policy = _policy(feed) if policy is None else policy
     checkUrl(url, **policy)
     handlers = [_checkedRedirectHandler(policy)]
     if urllib.parse.urlsplit(url).scheme.lower() == "https":
         handlers.append(urllib.request.HTTPSHandler(context=_sslContext()))
     opener = urllib.request.build_opener(*handlers)
-    request = urllib.request.Request(url, headers={"User-Agent": f"SlicerStudio/{versionModule.STUDIO_VERSION}", "Accept": "*/*"})
+    requestHeaders = {"User-Agent": f"SlicerStudio/{versionModule.STUDIO_VERSION}", "Accept": "*/*"}
+    requestHeaders.update(headers or {})
+    request = urllib.request.Request(url, data=data, headers=requestHeaders)
     try:
         return opener.open(request, timeout=timeout)
     except UpdateError:
@@ -978,7 +1051,38 @@ def instance():
 
 
 def currentVersion():
-    return currentVersionOverride or versionModule.STUDIO_VERSION
+    """The version of this build. With a code update from main, ``version.py`` may come from a newer commit: releases
+    are compared with the version the application was built with (the build information), so that a newer release
+    (which may change compiled code) is never hidden by an updated ``STUDIO_VERSION``.
+    """
+    if currentVersionOverride:
+        return currentVersionOverride
+    build = buildVersion()
+    return build or versionModule.STUDIO_VERSION
+
+
+#: Tests: replaces the build information (a dict like bin/Python/studio_build_info.json)
+buildInfoOverride = None
+
+
+def buildInfo():
+    """The build information of this installation (``studio_build_info.json``, read at start by ``studio_overlay``),
+    or None (a build tree, or a build without it)."""
+    if buildInfoOverride is not None:
+        return buildInfoOverride
+    overlay = sys.modules.get("studio_overlay")
+    return overlay.buildInfo() if overlay is not None else None
+
+
+def buildVersion():
+    info = buildInfo()
+    version = info.get("studioVersion") if isinstance(info, dict) else None
+    return version if versionModule.tryParse(version) is not None else None
+
+
+def commitStateDirectory():
+    """Private folder of the code updates from main (``<state>/commit/<build commit>/...``)."""
+    return os.path.join(stateDirectory(), "commit")
 
 
 def channel():
@@ -1145,6 +1249,16 @@ class UpdateService:
         self.startupWaitMs = None
         self._paletteRegistered = False
         self._runningRegistered = False
+        #: Code updates from main: the last result (a dict of updates_commit.check), the check task, the notice
+        self.commitResult = _loadJson(settingsValue("CommitLastResult"))
+        self.commitChecking = False
+        self._commitTask = None
+        self._commitTimer = None
+        self.commitNotice = None
+        self._commitRelaunchConnected = False
+        self._commitStartupShown = False
+        self._commitReadyShown = None
+        self._commitNoticeWhere = None
         manifest = cachedManifest()
         if manifest is not None:
             self.status = evaluate(manifest, currentVersion(), settingsValue("SkippedVersion"))
@@ -1186,11 +1300,16 @@ class UpdateService:
     def dispose(self):
         """Remove the user interface (tests)."""
         global _service
-        for timer in (self._noticeTimer, self._recheckTimer, self._tourHoldTimer):
+        for timer in (self._noticeTimer, self._recheckTimer, self._tourHoldTimer, self._commitTimer):
             if timer is not None:
                 timer.stop()
         if self._checkTask is not None:
             self._checkTask.timer.stop()
+        if self._commitTask is not None:
+            self._commitTask.cancel()
+            self._commitTask.timer.stop()
+            self._commitTask = None
+        self.hideCommitNotice()
         if self.job is not None:
             self.job.cancel()
             self.job.timer.stop()
@@ -1401,6 +1520,10 @@ class UpdateService:
         self._notify()
 
     def _maybeRecheck(self):
+        if self.commitChecksEnabled() and not self.commitChecking:
+            lastCommit = parseTime(settingsValue("CommitLastCheck")) or 0
+            if time.time() - lastCommit >= RECHECK_INTERVAL_S:
+                self.checkCommits()
         if not self.automaticChecksEnabled() or self.checking:
             return
         lastTime = parseTime(settingsValue("LastCheck")) or 0
@@ -1469,6 +1592,10 @@ class UpdateService:
             except Exception:
                 logging.error("Updates: " + traceback.format_exc())
         self._showAvailability(startup=True, offline=offline)
+        try:
+            self._startCommitUpdates()
+        except Exception:
+            logging.error("Updates: code updates from main: " + traceback.format_exc())
 
     def _showAvailability(self, startup=False, offline=False):
         status = self.status
@@ -1986,6 +2113,9 @@ class UpdateService:
             if others:
                 raise _otherWindowsError(others)
         self._relaunch = relaunch
+        # The release replaces the whole application: no code update from main may apply to it (the next start of
+        # this build, if the install does not happen, restores the setting)
+        self._clearCommitForRelease()
         if prepared.needsAdmin and not prepared.launched:
             prepared.launch(stateDirectory(), relaunch=relaunch, record=self._installRecord())
         elif not self._quitConnected:
@@ -2116,6 +2246,10 @@ class UpdateService:
 
     def _installRecord(self):
         record = {"from": currentVersion(), "package": self.prepared.package if self.prepared is not None else None}
+        info = buildInfo()
+        if isinstance(info, dict) and info.get("commit"):
+            # The code updates of this build are removed once the release is installed (finishInstall())
+            record["buildCommit"] = info["commit"]
         try:
             from StudioLib import autosave
 
@@ -2154,6 +2288,290 @@ class UpdateService:
         return True
 
     #
+    # Code updates from main (updates_commit, studio_overlay)
+    #
+
+    def commitChecksEnabled(self):
+        """Checks of main: the AutoCheck and CommitUpdates settings, a release installation (or an address set for tests
+        by SLICER_STUDIO_COMMIT_UPDATES), and nothing turned off by the environment."""
+        if feedOverride() == "off" or not settingsValue("AutoCheck") or not settingsValue("CommitUpdates"):
+            return False
+        value = updates_commit.override()
+        if value == "off":
+            return False
+        return channel() == "release" or bool(value)
+
+    def _startCommitUpdates(self):
+        """After the start-up decision: say what the code update of this start did, then check main a little later
+        (never during the start-up)."""
+        import qt
+
+        self._showCommitStartupMessages()
+        self._syncCommitSetting()
+        if not self.commitChecksEnabled():
+            return
+        self._commitTimer = qt.QTimer()
+        self._commitTimer.setSingleShot(True)
+        self._commitTimer.setInterval(COMMIT_CHECK_DELAY_MS)
+        self._commitTimer.connect("timeout()", self.checkCommits)
+        self._commitTimer.start()
+
+    def _syncCommitSetting(self):
+        """The bootstrap (studio_overlay) reads no setting: the CommitUpdates switch is mirrored into the state."""
+        info = buildInfo()
+        if not isinstance(info, dict) or not info.get("commit"):
+            return
+        base = info["commit"]
+        state = updates_commit.readState(commitStateDirectory(), base)
+        enabled = bool(settingsValue("CommitUpdates"))
+        if not enabled and not state.get("disabled"):
+            if os.path.isfile(os.path.join(updates_commit.baseDirectory(commitStateDirectory(), base), "state.json")):
+                updates_commit.setDisabled(commitStateDirectory(), base, True, "setting")
+        elif enabled and state.get("disabled") and state.get("disabledReason") == "setting":
+            updates_commit.setDisabled(commitStateDirectory(), base, False)
+
+    def setCommitUpdatesEnabled(self, enabled):
+        """The switch of Settings > Updates. Off: the installed code runs again from the next start."""
+        setSettingsValue("CommitUpdates", bool(enabled))
+        try:
+            self._syncCommitSetting()
+        except Exception:
+            logging.error("Updates: " + traceback.format_exc())
+        if enabled and self.commitChecksEnabled() and not self.commitChecking:
+            self.checkCommits()
+        self._notify()
+
+    def checkCommits(self, force=False):
+        """Check main in a worker thread (and stage its code when it can be applied). Return False if not started."""
+        if self.commitChecking:
+            return True
+        if not force and not self.commitChecksEnabled():
+            return False
+        import slicer
+
+        home = str(slicer.app.slicerHome)
+        stateRoot = commitStateDirectory()
+        # A newer release replaces the whole application: its code is not staged from main meanwhile. A development
+        # build only checks (it never applies a code update).
+        stage = not (self.status is not None and self.status.available)
+        stage = stage and (channel() == "release" or updates_commit.override() not in (None, "off"))
+        cached = self.commitResult if isinstance(self.commitResult, dict) else None
+        if force:
+            cached = None
+
+        def run(task):
+            result = updates_commit.check(home, stateRoot, cancelled=task.cancelled, cached=cached, stage=stage)
+            try:
+                base = result.get("base")
+                running = studio_overlay_status()
+                # Only after this start was confirmed: until then the previous version must stay for the rollback
+                if base and (running.get("state") != "active" or running.get("confirmed")):
+                    updates_commit.collectGarbage(stateRoot, base)
+            except Exception:
+                logging.warning("Updates: cleaning the code updates failed:\n" + traceback.format_exc())
+            return result
+
+        self.commitChecking = True
+        self._notify()
+        self._commitTask = _Task(run, self._onCommitChecked).start()
+        return True
+
+    def _onCommitChecked(self, result, error):
+        self.commitChecking = False
+        self._commitTask = None
+        if error is not None or not isinstance(result, dict):
+            result = {"result": "failed", "error": str(error) if error is not None else "no result", "checked": isoTime()}
+        kind = result.get("result")
+        if kind != "offline":
+            self.commitResult = result
+            setSettingsValue("CommitLastCheck", isoTime())
+            setSettingsValue("CommitLastHead", result.get("head") or "")
+            setSettingsValue("CommitLastResult", json.dumps(result, sort_keys=True))
+        if kind in ("failed",):
+            logging.warning(f"Updates: code update from main: {result.get('error')}")
+        else:
+            logging.info(f"Updates: code updates from main: {kind} ({(result.get('head') or '')[:7]})")
+        self._showCommitResult(result)
+        self._notify()
+
+    def _showCommitResult(self, result):
+        kind = result.get("result")
+        head = result.get("head") or ""
+        if kind == "ready" and result.get("staged") is not False and result.get("already") != "active":
+            # Once per run (Later hides it; the update applies at the next start anyway)
+            if self._commitReadyShown == head:
+                return
+            self._commitReadyShown = head
+            setSettingsValue("CommitNoticeHead", f"ready:{head}")
+            self.showCommitNotice(commitReadyText(result), [(_("Restart now"), self.restartForCommitUpdate), (_("Later"), self.hideCommitNotice)])
+        elif kind == "needsBuild":
+            if settingsValue("CommitNoticeHead") == f"needsBuild:{head}":
+                return
+            setSettingsValue("CommitNoticeHead", f"needsBuild:{head}")
+            self.showCommitNotice(commitNeedsBuildText(result), [(_("OK"), self.hideCommitNotice)])
+
+    def showCommitNotice(self, text, actions):
+        """A quiet notice (Studio: the Library canvas or the inspector notice slot; Classic: the status bar)."""
+        self.hideCommitNotice()
+        shell = _shell()
+        if shell is None:
+            mainWindow = _mainWindow()
+            if mainWindow is not None and mainWindow.statusBar() is not None:
+                mainWindow.statusBar().showMessage(text, 15000)
+            return None
+        from StudioLib import ui
+
+        widget = ui.noticeLine(text, actions)
+        widget.setObjectName(COMMIT_NOTICE_OBJECT_NAME)
+        widget.setToolTip(text)
+        where = self._placeNotice(shell, widget, COMMIT_NOTICE_KEY)
+        if where is None:
+            widget.deleteLater()
+            shell.toast(text, 8000)
+            return None
+        self.commitNotice, self._commitNoticeWhere = widget, where
+        return widget
+
+    def hideCommitNotice(self):
+        widget, where = self.commitNotice, self._commitNoticeWhere
+        self.commitNotice = self._commitNoticeWhere = None
+        if widget is not None:
+            self._removePlaced(widget, where, COMMIT_NOTICE_KEY)
+
+    def _showCommitStartupMessages(self):
+        """Once per start: the code update went back (warning), or this start runs a new code update (a toast once the
+        start is confirmed)."""
+        import qt
+
+        if self._commitStartupShown:
+            return
+        self._commitStartupShown = True
+        status = studio_overlay_status()
+        rolledBack = status.get("rolledBack")
+        if rolledBack:
+            target = rolledBack.get("to")
+            text = _("The code update {commit} did not start, so Slicer Studio went back to {target}.").format(
+                commit=str(rolledBack.get("from") or "")[:7],
+                target=(_("the installed version") if target in (None, "installed") else _("the code update {commit}").format(commit=str(target)[:7])))
+            self._showMessage("warn", text)
+        if status.get("promoted"):
+            qt.QTimer.singleShot(int(COMMIT_APPLIED_TOAST_DELAY_MS), self._showCommitApplied)
+
+    def _showCommitApplied(self):
+        status = studio_overlay_status()
+        if not status.get("promoted") or status.get("healthError"):
+            return
+        manifest = {}
+        try:
+            info = buildInfo() or {}
+            manifest = updates_commit.studio_overlay.readManifest(
+                updates_commit.baseDirectory(commitStateDirectory(), info.get("commit") or ""), status["promoted"]) or {}
+        except Exception:
+            pass
+        self._showMessage("ok", _("Slicer Studio now runs code from main @ {commit}{date}.").format(
+            commit=status["promoted"][:7], date=_commitDate(manifest.get("committed"))))
+
+    def _showMessage(self, level, text):
+        import slicer
+
+        logging.info(f"Updates: {text}")
+        shell = _shell()
+        if shell is not None:
+            shell.toast(text, 6000, sticky=level == "warn", level="consequence" if level == "warn" else "info")
+        elif level == "warn":
+            slicer.util.warningDisplay(text, windowTitle=_("Update"))
+        else:
+            mainWindow = _mainWindow()
+            if mainWindow is not None and mainWindow.statusBar() is not None:
+                mainWindow.statusBar().showMessage(text, 6000)
+
+    def restartForCommitUpdate(self):
+        """Restart now: close the main window (its own prompt asks about unsaved work) and start Slicer Studio again,
+        which applies the staged code update. Return True if the application is closing."""
+        import slicer
+
+        self.hideCommitNotice()
+        mainWindow = _mainWindow()
+        if mainWindow is None:
+            return False
+        if not self._commitRelaunchConnected:
+            slicer.app.connect("aboutToQuit()", self._relaunchForCommitUpdate)
+            self._commitRelaunchConnected = True
+        mainWindow.close()
+        if mainWindow.isVisible():
+            # Exit cancelled: the update applies at the next start
+            try:
+                slicer.app.disconnect("aboutToQuit()", self._relaunchForCommitUpdate)
+            except Exception:
+                pass
+            self._commitRelaunchConnected = False
+            return False
+        return True
+
+    def _relaunchForCommitUpdate(self):
+        import subprocess
+
+        import slicer
+
+        command = relaunchCommand(str(slicer.app.slicerHome), platformKey())
+        if not command:
+            return
+        try:
+            subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             env=updates_install.cleanEnvironment(), close_fds=True, start_new_session=True)
+        except OSError:
+            logging.error("Updates: the restart failed:\n" + traceback.format_exc())
+
+    def goBackFromCommitUpdate(self):
+        """Go back to the previous code update (or the installed code) at the next start. Return the target."""
+        info = buildInfo()
+        if not isinstance(info, dict) or not info.get("commit"):
+            return None
+        stateRoot = commitStateDirectory()
+        state = updates_commit.readState(stateRoot, info["commit"])
+        running = studio_overlay_status().get("active")
+        target = state.get("previous") if running and state.get("active") == running else None
+        updates_commit.requestRollback(stateRoot, info["commit"], target)
+        self._notify()
+        return target or "installed"
+
+    def _clearCommitForRelease(self):
+        info = buildInfo()
+        if isinstance(info, dict) and info.get("commit"):
+            try:
+                updates_commit.clearForRelease(commitStateDirectory(), info["commit"])
+            except Exception:
+                logging.error("Updates: " + traceback.format_exc())
+
+    def _restoreCommitAfterRelease(self, base):
+        """No release was installed: the code updates that ``installOnQuit()`` turned off for it are on again."""
+        info = buildInfo()
+        base = base or (info.get("commit") if isinstance(info, dict) else None)
+        if not base:
+            return
+        try:
+            updates_commit.restoreAfterRelease(commitStateDirectory(), base)
+        except Exception:
+            logging.error("Updates: " + traceback.format_exc())
+
+    def _finishCommitAfterRelease(self, record, succeeded):
+        """After a release install: the code updates of the replaced build are deleted (success), or turned on again
+        (failure, the previous version was kept)."""
+        old = record.get("buildCommit")
+        if not old:
+            return
+        try:
+            if succeeded:
+                updates_commit.forgetBase(commitStateDirectory(), old)
+                for name in ("CommitLastHead", "CommitLastResult", "CommitNoticeHead"):
+                    setSettingsValue(name, "")
+                self.commitResult = None
+            else:
+                updates_commit.restoreAfterRelease(commitStateDirectory(), old)
+        except Exception:
+            logging.error("Updates: " + traceback.format_exc())
+
+    #
     # Settings
     #
 
@@ -2187,6 +2605,7 @@ class UpdateService:
         if not os.path.exists(os.path.join(stateDir, "install.json")):  # updates_install.RECORD_FILE, without importing it
             # No update was installed: a prepared update that the previous run did not install is of no use any more
             self._removeAbandonedStaging()
+            self._restoreCommitAfterRelease(None)
             return None
         record, result = updates_install.readRecord(stateDir)
         if record is None:
@@ -2205,6 +2624,7 @@ class UpdateService:
         self._failedInstall = None
         newVersion = str(record.get("version") or "")
         succeeded = result == "ok" and versionModule.tryParse(newVersion) is not None and versionModule.compare(newVersion, currentVersion()) == 0
+        self._finishCommitAfterRelease(record, succeeded)
         if succeeded:
             backup = record.get("backup")
             if backup and os.path.isdir(backup):
