@@ -917,8 +917,9 @@ there is nothing to find today.**
   new commits on `main` (scripted modules and `bin/Python`), checked a few seconds after each start in the background
   with git's own protocol on github.com (no API) and files from `raw.githubusercontent.com` pinned to the commit and
   verified against its git object ids. They are prepared in the user data folder (never inside the application) and
-  apply at the next start ("Update ready · Restart now"); a start that fails goes back automatically. Commits that
-  change anything compiled (C++, CMake, `.ui`, ...) wait for the next release. Anyone who can push to `main` can change
+  apply at the next start ("Update ready · Restart now"); a start that fails, a crash loop or a module that fails to
+  load goes back automatically. Commits that change anything compiled (C++, CMake, `.ui`, ...) wait for the next
+  release, and a build whose commit `main` does not contain (another branch, or ahead of `main`) takes nothing. Anyone who can push to `main` can change
   the code that runs at every installation's next start, so protect the branch. Details:
   [Code updates from main](Docs/user_guide/install_studio.md#code-updates-from-main). This has been tested with a local
   fake repository and its files, not in a built application.

@@ -2454,6 +2454,13 @@ class UpdateService:
                 commit=str(rolledBack.get("from") or "")[:7],
                 target=(_("the installed version") if target in (None, "installed") else _("the code update {commit}").format(commit=str(target)[:7])))
             self._showMessage("warn", text)
+        loadFailed = status.get("loadFailed")
+        if isinstance(loadFailed, dict) and loadFailed.get("version"):
+            # A module of the code update failed while it loaded: this session runs the installed files of that
+            # folder, and the next start the previous version (studio_overlay._preseedFailed)
+            text = _("The code update {commit} could not load ({module}): it was undone, and Slicer Studio uses the earlier "
+                     "code from the next start.").format(commit=str(loadFailed["version"])[:7], module=loadFailed.get("module") or "")
+            self._showMessage("warn", text)
         if status.get("promoted"):
             qt.QTimer.singleShot(int(COMMIT_APPLIED_TOAST_DELAY_MS), self._showCommitApplied)
 

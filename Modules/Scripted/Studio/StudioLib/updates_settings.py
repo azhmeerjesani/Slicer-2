@@ -306,6 +306,9 @@ class UpdatesSettingsPanel(ctk.ctkSettingsPanel):
                 parts.append(updates.commitNeedsBuildText(result))
             elif kind == "tooLarge":
                 parts.append(_("main @ {commit} changes too many files for a code update: it will come with the next release.").format(commit=head))
+            elif kind == "notOnMain":
+                parts.append(_("This build was made from a commit that main does not contain (another branch, or a commit "
+                               "ahead of main): it takes no code updates from main."))
             elif kind == "skipped":
                 parts.append(_("main @ {commit} was undone on this computer and is not taken again.").format(commit=head))
             elif kind in ("failed", "unavailable") and result.get("error"):

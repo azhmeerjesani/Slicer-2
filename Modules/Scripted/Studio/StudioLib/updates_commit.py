@@ -16,19 +16,25 @@ paths only.
 
 1. the head H of ``refs/heads/main`` with git's smart HTTP protocol version 2 (``ls-refs``) from
    ``https://github.com/azhmeerjesani/Slicer-2.git``;
-2. the commit H and its trees, without blobs (``fetch`` with ``deepen 1`` and ``filter blob:none``): every object is
+2. B must be an ancestor of H (``baseIsOnMain``: the commits of main from H down to B, ``filter tree:0`` with ``have
+   B``, each hashed; a chain of parents from H must name B). A build made from another branch, or from a commit ahead
+   of main, takes nothing (``notOnMain``): main's code would be older than its own;
+3. the commit H and its trees, without blobs (``fetch`` with ``deepen 1`` and ``filter blob:none``): every object is
    hashed, the commit must hash to H, every tree to its id, so the listing L_H is exactly commit H's;
-3. the shipped listing L_B is checked against the tree id of B, and the two are compared;
-4. every changed path is classified (``classify``): applied (a mapped file, or a file added next to mapped files with
-   the same extension), ignored (documentation, tests, ...), or "needs a new build" (everything else);
-5. when every change can be applied, each needed file is downloaded from ``raw.githubusercontent.com`` pinned to H and
+4. the shipped listing L_B is checked against the tree id of B, and the two are compared;
+5. every changed path is classified (``classify``): applied (a mapped file, or a file added next to mapped files with
+   the same extension; a deletion only where the overlay hides the installed file: inside a regular package or a
+   folder without Python files), ignored (documentation, tests, developer and release tools), or "needs a new build"
+   (everything else);
+6. when every change can be applied, each needed file is downloaded from ``raw.githubusercontent.com`` pinned to H and
    accepted only when its git blob id matches the id in the verified tree.
 
 **Staging.** For every installed folder with a change (for example ``lib/Slicer-X.Y/qt-scripted-modules``), every
 top-level package, module or ``Resources`` folder that holds a mapped file is copied whole from the installation into
-``<state>/commit/<B>/staging/...``, the changed files are written in, deleted ones removed, and the result is compiled
-(a syntax error refuses the update). The folder is then renamed (atomically) to ``versions/<H>`` and ``state.json``
-gets ``pending = H``. ``studio_overlay.py`` (in ``bin/Python``, run by ``slicerqt.py`` before any Studio import)
+``<state>/commit/<B>/staging/...`` (except ``studio_overlay.py`` and ``slicerqt.py``, which run before an update
+applies; a unit with a symbolic link or compiled code is refused), the changed files are written in, deleted ones
+removed, and the result is compiled (a syntax error refuses the update). Under the state lock, the folder is then
+renamed (atomically) to ``versions/<H>`` and ``state.json`` gets ``pending = H``. ``studio_overlay.py`` (in ``bin/Python``, run by ``slicerqt.py`` before any Studio import)
 activates it at the next start, and rolls it back automatically when that start fails.
 
 **What is trusted.** TLS and GitHub for the id of the head of ``main``; SHA-1 (as git uses it) for everything else:
@@ -36,8 +42,9 @@ the files that run are byte for byte those of commit H. Commits are not signatur
 ``main`` can run code on every installation at its next start: protect ``main`` (required reviews, no force pushes).
 
 The environment variable ``SLICER_STUDIO_COMMIT_UPDATES`` turns this off (``off``) or replaces the repository address
-for tests (``http://127.0.0.1:<port>/<path>``: git at that address, files at ``<address>/raw/<commit>/<path>``);
-``SLICER_STUDIO_UPDATE_FEED=off`` also turns it off. No Qt here: the tests run it with plain Python.
+for tests (``http://127.0.0.1:<port>/<path>``, loopback addresses only: git at that address, files at
+``<address>/raw/<commit>/<path>``; any other value is ignored, and a version staged from a test address is applied only
+while it is set); ``SLICER_STUDIO_UPDATE_FEED=off`` also turns it off. No Qt here: the tests run it with plain Python.
 """
 
 import gzip
@@ -63,7 +70,7 @@ except ImportError:  # plain Python without Base/Python on sys.path
 
 REPOSITORY = "azhmeerjesani/Slicer-2"
 BRANCH = "main"
-GIT_URL = f"https://github.com/{REPOSITORY}.git"
+GIT_URL = studio_overlay.OFFICIAL_GIT_URL
 RAW_URL = "https://raw.githubusercontent.com/" + REPOSITORY + "/{commit}/{path}"
 ENVIRONMENT_VARIABLE = studio_overlay.ENVIRONMENT_VARIABLE
 BUILD_FILES_NAME = "studio_build_files.json.gz"
@@ -95,11 +102,14 @@ READY = "ready"
 NEEDS_BUILD = "needsBuild"
 TOO_LARGE = "tooLarge"
 UNAVAILABLE = "unavailable"
+NOT_ON_MAIN = "notOnMain"
 OFFLINE = "offline"
 FAILED = "failed"
 SKIPPED = "skipped"
 #: Results that do not change until main moves (the check reuses them for the same head)
-STABLE_RESULTS = (UP_TO_DATE, NEEDS_BUILD, TOO_LARGE)
+STABLE_RESULTS = (UP_TO_DATE, NEEDS_BUILD, TOO_LARGE, NOT_ON_MAIN)
+#: The build commit must be among this many commits of main below its head (else the build gets no code update)
+MAX_COMMITS_AHEAD = 5000
 
 _NATIVE_MAGIC = (b"\x7fELF", b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe")
 _NATIVE_SUFFIXES = (".so", ".dylib", ".pyd", ".dll", ".exe")
@@ -124,12 +134,12 @@ class VerificationError(CommitUpdateError):
 
 
 def override(env=None):
-    """The value of ``SLICER_STUDIO_COMMIT_UPDATES``: None when not set, "off", or the replacement address."""
+    """The value of ``SLICER_STUDIO_COMMIT_UPDATES``: "off", the replacement address of the tests (http(s) on this
+    computer only), or None (not set, or a value that is neither: "on", "1", another host... are ignored)."""
     env = os.environ if env is None else env
     if studio_overlay.isTurnedOff(env):
         return "off"
-    value = str(env.get(ENVIRONMENT_VARIABLE, "")).strip()
-    return value or None
+    return studio_overlay.overrideUrl(env)
 
 
 def endpoints(env=None):
@@ -141,8 +151,9 @@ def endpoints(env=None):
         return {"git": GIT_URL, "raw": RAW_URL, "policy": {"extraHosts": (), "allowInsecureLoopback": False, "allowFile": False}}
     base = value.rstrip("/")
     host = (urllib.parse.urlsplit(base).hostname or "").lower()
+    # Loopback only (studio_overlay.overrideUrl): no other host is ever allowed
     return {"git": base, "raw": base + "/raw/{commit}/{path}",
-            "policy": {"extraHosts": (host,) if host else (), "allowInsecureLoopback": True, "allowFile": False}}
+            "policy": {"extraHosts": (host,), "allowInsecureLoopback": True, "allowFile": False}}
 
 
 def _updates():
@@ -234,6 +245,22 @@ def fetchCommit(endpoint, head, cancelled=None):
     return fields, listing
 
 
+def baseIsOnMain(endpoint, base, head, cancelled=None):
+    """True when the build commit ``base`` is an ancestor of the head ``head`` of main, so that main is newer than the
+    build. The commits (no trees, no blobs: ``filter tree:0``) of main from its head down to ``base`` are fetched, with
+    ``have base`` so that the server stops there, and ``deepen MAX_COMMITS_AHEAD`` as a cap. Every commit is hashed; a
+    chain of parents from the head that names ``base`` proves it. A build made from a commit that main does not contain
+    (another branch, a commit ahead of main, an unpushed commit) is never "updated" to main's code."""
+    request = git.fetchRequest(head, _agent(), depth=MAX_COMMITS_AHEAD, filterSpec="tree:0", haves=[base])
+    answer = _postCommand(endpoint, request, FETCH_TIMEOUT_S, FETCH_DEADLINE_S, FETCH_MAX_BYTES, cancelled=cancelled)
+    try:
+        _shallow, pack = git.parseFetchResponse(answer)
+        objects = git.parsePack(pack)
+        return git.reachesCommit(objects, head, base)
+    except git.GitProtocolError as error:
+        raise VerificationError(f"the history of main could not be verified: {error}")
+
+
 def subjectOf(message):
     line = (message or "").strip().split("\n", 1)[0]
     line = "".join(c for c in line if c.isprintable())
@@ -269,6 +296,7 @@ class BuildFiles:
         self.bySrc = {}
         for entry in self.map:
             self.bySrc.setdefault(entry["src"], []).append(entry)
+        self.dsts = {entry["dst"] for entry in self.map}
         self.preOverlay = set(data.get("preOverlay") or [])
         self.scriptedRoot = data.get("scriptedRoot")
 
@@ -319,20 +347,36 @@ def loadBuildFiles(home, info):
 #
 
 
+#: Top-level files of the repository that are not part of the application
+_IGNORED_TOP_FILES = (".pre-commit-config.yaml", ".codespellrc", ".codespellignore", ".clang-format", ".readthedocs.yaml",
+                      ".ruff.toml", ".git-blame-ignore-revs", "CITATION.cff", "requirements-docs.txt")
+#: Files of developer tools anywhere in the tree
+_IGNORED_NAMES = ("pyproject.toml", ".ruff.toml", "setup.cfg", "pytest.ini", "tox.ini")
+
+
 def isIgnored(path):
-    """Changes that do not affect the application: documentation, tests, repository files, release scripts."""
+    """Changes that do not affect the application: documentation, tests, repository and developer files, the release,
+    packaging and web tools of Slicer Studio. Only paths that are not mapped get here (a mapped file is applied
+    whatever its name), and only files that no build step reads may be ignored."""
     parts = path.split("/")
-    if parts[0] in ("Docs", ".github"):
+    name = parts[-1]
+    if parts[0] in ("Docs", ".github", ".claude", ".devcontainer"):
         return True
-    if "Testing" in parts[:-1]:
+    if any(part in ("Testing", "tests") for part in parts[:-1]):
         return True
+    if name.endswith(".md"):
+        return True  # documentation (no build step reads a Markdown file below the top level; README.md is not mapped)
     if len(parts) == 1:
-        name = parts[0]
-        return name.endswith(".md") or name.startswith(".git") or name in (".pre-commit-config.yaml", ".codespellrc")
-    if path.startswith(("Utilities/Scripts/SlicerStudioRelease/", "Utilities/Scripts/SlicerStudioMacOS/")):
+        return name.startswith(".git") or name in _IGNORED_TOP_FILES
+    if name in _IGNORED_NAMES:
         return True
-    if len(parts) == 3 and parts[0] == "Utilities" and parts[1] == "Scripts" and parts[2].startswith("Studio") and "Check" in parts[2]:
-        return True
+    if parts[0] == "Utilities":
+        # Slicer Studio's developer, release, packaging and web tools (Utilities/Scripts/Studio*, SlicerStudio*,
+        # Utilities/SlicerStudio*): none is part of the application
+        if len(parts) >= 3 and parts[1] == "Scripts" and parts[2].startswith(("Studio", "SlicerStudio")):
+            return True
+        if parts[1].startswith("SlicerStudio"):
+            return True
     return False
 
 
@@ -356,6 +400,22 @@ class Classification:
         return UP_TO_DATE
 
 
+def _deletable(dst, root, buildFiles):
+    """True when deleting the installed file ``dst`` from its overlay unit hides it for real: the unit is a regular
+    package (its ``__init__.py`` is mapped; Python then never looks in the installed copy) or a folder without Python
+    files (resources, found through the overlay path). A deleted top-level module or folder, or a file of a namespace
+    package, would still be found in the installed files after the overlay folder: that needs a new build."""
+    relative = dst[len(root) + 1:]
+    if "/" not in relative:
+        return False
+    unit = relative.split("/", 1)[0]
+    if relative == f"{unit}/__init__.py":
+        return False  # the package would become a namespace package
+    if f"{root}/{unit}/__init__.py" in buildFiles.dsts:
+        return True
+    return not any(other.startswith(f"{root}/{unit}/") and other.endswith(".py") for other in buildFiles.dsts)
+
+
 def classify(changes, buildFiles):
     """Sort each change (path, old entry, new entry) of B -> H into applied, ignored or "needs a new build"."""
     result = Classification()
@@ -376,6 +436,9 @@ def classify(changes, buildFiles):
         mapped = buildFiles.bySrc.get(path)
         if mapped:
             if any(mode not in git.REGULAR_MODES for mode in modes) or (before and after and before[0] != after[0]):
+                result.needsBuild.append(path)
+                continue
+            if after is None and not all(_deletable(entry["dst"], entry["root"], buildFiles) for entry in mapped):
                 result.needsBuild.append(path)
                 continue
             for entry in mapped:
@@ -443,18 +506,34 @@ def _treeSize(path):
 
 def _copyUnit(source, destination):
     """Copy the installed unit ``source`` (a file or a folder) to ``destination``, keeping times (so that the compiled
-    files stay valid). Raise ``CommitUpdateError`` when it holds a native binary."""
-    if os.path.isdir(source) and not os.path.islink(source):
-        for folder, _dirs, files in os.walk(source):
-            for name in files:
-                if _isNative(os.path.join(folder, name)):
-                    raise CommitUpdateError(UNAVAILABLE, f"{os.path.basename(source)} holds compiled code")
-        shutil.copytree(source, destination, symlinks=True, copy_function=shutil.copy2)
+    files stay valid). Raise ``CommitUpdateError`` when it holds a native binary or a symbolic link (a write through a
+    link could reach the installation)."""
+    name = os.path.basename(source)
+    if os.path.islink(source):
+        raise CommitUpdateError(UNAVAILABLE, f"{name} is a symbolic link")
+    if os.path.isdir(source):
+        for folder, dirs, files in os.walk(source):
+            for entry in dirs + files:
+                if os.path.islink(os.path.join(folder, entry)):
+                    raise CommitUpdateError(UNAVAILABLE, f"{name} holds a symbolic link")
+            for entry in files:
+                if _isNative(os.path.join(folder, entry)):
+                    raise CommitUpdateError(UNAVAILABLE, f"{name} holds compiled code")
+        shutil.copytree(source, destination, symlinks=False, copy_function=shutil.copy2)
     else:
         if _isNative(source):
-            raise CommitUpdateError(UNAVAILABLE, f"{os.path.basename(source)} is compiled code")
+            raise CommitUpdateError(UNAVAILABLE, f"{name} is compiled code")
         os.makedirs(os.path.dirname(destination), exist_ok=True)
         shutil.copy2(source, destination, follow_symlinks=False)
+
+
+def _checkInside(path, folder):
+    """Raise ``VerificationError`` unless ``path`` (after links are followed) stays inside ``folder``: nothing is ever
+    written or deleted outside the staged copy."""
+    real = os.path.realpath(path)
+    top = os.path.realpath(folder)
+    if not (real == top or real.startswith(top.rstrip(os.sep) + os.sep)):
+        raise VerificationError(f"{os.path.basename(path)} is outside the update folder")
 
 
 def _writeFile(path, data, mode):
@@ -618,7 +697,7 @@ def forgetBase(stateRoot, base):
     return False
 
 
-def requestRollback(stateRoot, base, target=None):
+def requestRollback(stateRoot, base, target=None, env=None):
     """Go back from the running version to ``target`` (a staged version, or None for the installed files) at the next
     start. The version gone back from is not offered again until main moves on."""
 
@@ -626,7 +705,7 @@ def requestRollback(stateRoot, base, target=None):
         current = state.get("active")
         if current:
             studio_overlay.mark(state, "skipped", current)
-        if target and studio_overlay.validVersion(baseDirectory(stateRoot, base), target, base):
+        if target and studio_overlay.validVersion(baseDirectory(stateRoot, base), target, base, env):
             state["pending"] = target
         else:
             state["pending"] = "installed"
@@ -670,28 +749,39 @@ def collectGarbage(stateRoot, base, now=None):
     now = time.time() if now is None else now
     removed = []
     baseDir = baseDirectory(stateRoot, base)
-    keep = set()
+    versions = os.path.join(baseDir, studio_overlay.VERSIONS_FOLDER)
+    trash = []
 
     def change(state):
-        keep.update(value for value in (state.get("active"), state.get("previous"), state.get("pending")) if value)
+        # Under the lock: a stager publishes versions/<H> and sets pending = H under the same lock (stageUpdate), so
+        # a version is never seen here without its state. Doomed versions are only renamed here (fast), and removed
+        # after the lock is released.
+        keep = {value for value in (state.get("active"), state.get("previous"), state.get("pending")) if value}
         for boot in state.get("boots") or []:
             if isinstance(boot, dict) and studio_overlay.bootAlive(boot, now):
                 keep.add(boot.get("version"))
-        return False
-
-    if os.path.isfile(os.path.join(baseDir, studio_overlay.STATE_FILE)):
-        if studio_overlay.updateState(baseDir, base, change) is None:
-            return removed
-        versions = os.path.join(baseDir, studio_overlay.VERSIONS_FOLDER)
         try:
             names = os.listdir(versions)
         except OSError:
             names = []
         for name in names:
-            if name not in keep:
-                path = os.path.join(versions, name)
-                shutil.rmtree(path, ignore_errors=True)
-                removed.append(path)
+            if name in keep:
+                continue
+            target = os.path.join(baseDir, studio_overlay.STAGING_FOLDER, f"trash-{os.getpid()}-{secrets.token_hex(4)}")
+            try:
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                os.rename(os.path.join(versions, name), target)
+            except OSError:
+                continue
+            trash.append(target)
+            removed.append(os.path.join(versions, name))
+        return False
+
+    if os.path.isfile(os.path.join(baseDir, studio_overlay.STATE_FILE)):
+        if studio_overlay.updateState(baseDir, base, change) is None:
+            return removed
+        for path in trash:
+            shutil.rmtree(path, ignore_errors=True)
         _cleanStaging(baseDir, now)
     try:
         others = os.listdir(stateRoot)
@@ -751,7 +841,11 @@ def check(home, stateRoot, env=None, cancelled=None, cached=None, stage=True):
         return _result(UP_TO_DATE, base=base, head=head)
     if head in (state.get("bad") or []) or head in (state.get("skipped") or []):
         return _result(SKIPPED, base=base, head=head)
-    if head in (state.get("active"), state.get("pending")) and studio_overlay.validVersion(baseDir, head, base):
+    activationError = state.get("activationError") if isinstance(state.get("activationError"), dict) else None
+    if head == state.get("active") and activationError and activationError.get("version") == head:
+        # Staged, but the bootstrap could not apply it: say so instead of "up to date"
+        return _result(FAILED, base=base, head=head, error=f"the code update could not be applied: {activationError.get('error')}")
+    if head in (state.get("active"), state.get("pending")) and studio_overlay.validVersion(baseDir, head, base, env):
         manifest = studio_overlay.readManifest(baseDir, head) or {}
         try:
             # The staged files are checked again (a damaged file is downloaded again and replaced)
@@ -765,6 +859,9 @@ def check(home, stateRoot, env=None, cancelled=None, cached=None, stage=True):
         return dict(cached, checked=studio_overlay.isoTime(), cachedResult=True)
     try:
         buildFiles = loadBuildFiles(home, info)
+        if not baseIsOnMain(endpoint, base, head, cancelled):
+            return _result(NOT_ON_MAIN, base=base, head=head,
+                           error=f"this build was made from commit {base[:7]}, which {BRANCH} does not contain")
         fields, listing = fetchCommit(endpoint, head, cancelled)
         committed = studio_overlay.isoTime(fields["committed"]) if fields.get("committed") else None
         subject = subjectOf(fields.get("message"))
@@ -821,9 +918,14 @@ class _Downloader:
     def get(self, src, blob):
         """The bytes of ``src`` at the head commit, whose blob id must be ``blob``."""
         candidate = self.reuse.get(blob)
-        if candidate and blobIdOfFile(candidate) == blob:
-            with open(candidate, "rb") as f:
-                return f.read()
+        if candidate:
+            try:
+                with open(candidate, "rb") as f:
+                    data = f.read(MAX_BLOB_BYTES + 1)
+                if git.blobId(data) == blob:
+                    return data
+            except OSError:
+                pass  # removed meanwhile (another window cleaned it up): downloaded instead
         url = self.endpoint["raw"].format(commit=self.head, path=urllib.parse.quote(src, safe="/"))
         data = _request(url, self.endpoint["policy"], BLOB_TIMEOUT_S, FETCH_DEADLINE_S, MAX_BLOB_BYTES, cancelled=self.cancelled)
         if git.blobId(data) != blob:
@@ -833,6 +935,21 @@ class _Downloader:
         if self.total > MAX_TOTAL_BYTES:
             raise CommitUpdateError(TOO_LARGE, "the update is too large")
         return data
+
+
+def _isBootstrap(entry, buildFiles):
+    """True for a mapped file that runs before an update applies (``preOverlay``: studio_overlay.py, slicerqt.py)."""
+    if entry["src"] in buildFiles.preOverlay:
+        return True
+    unit = _unit(entry["dst"], entry["root"])
+    return unit.endswith(".py") and unit[:-3] in studio_overlay.BOOTSTRAP_MODULES
+
+
+def _envOf(endpoint):
+    """An environment in which ``endpoint`` is allowed (for ``studio_overlay.validVersion``)."""
+    if endpoint["git"] == GIT_URL:
+        return {}
+    return {ENVIRONMENT_VARIABLE: endpoint["git"]}
 
 
 def stageUpdate(home, stateRoot, info, buildFiles, listing, classification, headId, fields, endpoint, cancelled=None):
@@ -854,10 +971,12 @@ def stageUpdate(home, stateRoot, info, buildFiles, listing, classification, head
     downloader = _Downloader(endpoint, headId, cancelled, reuse)
     try:
         os.makedirs(filesDir)
-        # The units of each changed root: every top-level entry with a mapped (or added) file, and __pycache__
+        # The units of each changed root: every top-level entry with a mapped (or added) file, and __pycache__. The
+        # files that run before an update applies (studio_overlay.py, slicerqt.py) are never part of one: they are
+        # already loaded from the installation when the overlay is activated.
         units = {}
         for entry in buildFiles.map:
-            if entry["root"] in changedRoots:
+            if entry["root"] in changedRoots and not _isBootstrap(entry, buildFiles):
                 units.setdefault(entry["root"], set()).add(_unit(entry["dst"], entry["root"]))
         for item in classification.apply:
             units.setdefault(item["root"], set()).add(_unit(item["dst"], item["root"]))
@@ -886,13 +1005,14 @@ def stageUpdate(home, stateRoot, info, buildFiles, listing, classification, head
         sources = {}
         changedPython = []
         for entry in buildFiles.map:
-            if entry["root"] not in changedRoots or entry["dst"] in applied:
+            if entry["root"] not in changedRoots or entry["dst"] in applied or _isBootstrap(entry, buildFiles):
                 continue
             src, dst = entry["src"], entry["dst"]
             target = os.path.join(filesDir, dst)
             headEntry = listing.get(src)
             if headEntry is None:
                 continue
+            _checkInside(target, filesDir)
             files[dst] = headEntry[1]
             sources[dst] = src
             # Unchanged file: the installed copy must be the one of the build (a file changed by hand is downloaded)
@@ -905,6 +1025,7 @@ def stageUpdate(home, stateRoot, info, buildFiles, listing, classification, head
             if cancelled is not None and cancelled():
                 raise CommitUpdateError(OFFLINE, "cancelled")
             target = os.path.join(filesDir, dst)
+            _checkInside(target, filesDir)
             _removeCompiled(target)
             if item["action"] == "delete":
                 if os.path.lexists(target):
@@ -924,6 +1045,7 @@ def stageUpdate(home, stateRoot, info, buildFiles, listing, classification, head
             "format": FORMAT,
             "base": base,
             "commit": headId,
+            "source": endpoint["git"],
             "committed": studio_overlay.isoTime(fields["committed"]) if fields.get("committed") else None,
             "subject": subjectOf(fields.get("message")),
             "roots": changedRoots,
@@ -942,13 +1064,27 @@ def stageUpdate(home, stateRoot, info, buildFiles, listing, classification, head
         versions = os.path.join(baseDir, studio_overlay.VERSIONS_FOLDER)
         os.makedirs(versions, exist_ok=True)
         final = os.path.join(versions, headId)
-        try:
-            os.rename(staging, final)
-        except OSError:
-            if studio_overlay.validVersion(baseDir, headId, base) is None:
-                raise
-            shutil.rmtree(staging, ignore_errors=True)  # another window staged the same commit first
-        _fsyncFolder(versions)
+
+        def change(state):
+            # Published under the state lock, together with pending = head: collectGarbage (also under the lock) never
+            # sees versions/<head> without its state
+            if headId in (state.get("bad") or []) or headId in (state.get("skipped") or []):
+                return False
+            if studio_overlay.validVersion(baseDir, headId, base, _envOf(endpoint)) is None:
+                if os.path.lexists(final):
+                    shutil.rmtree(final)  # a damaged leftover
+                os.rename(staging, final)
+                _fsyncFolder(versions)
+            # else: another window staged the same commit first (the staging folder is removed below)
+            if state.get("active") == headId:
+                if state.get("pending"):
+                    state["pending"] = None
+                    return True
+                return False
+            state["pending"] = headId
+            return True
+
+        _update(stateRoot, base, change)
     except CommitUpdateError:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -958,20 +1094,8 @@ def stageUpdate(home, stateRoot, info, buildFiles, listing, classification, head
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
-
-    def change(state):
-        if headId in (state.get("bad") or []) or headId in (state.get("skipped") or []):
-            return False
-        if state.get("active") == headId:
-            if state.get("pending"):
-                state["pending"] = None
-                return True
-            return False
-        state["pending"] = headId
-        return True
-
-    _update(stateRoot, base, change)
-    return os.path.join(baseDir, studio_overlay.VERSIONS_FOLDER, headId)
+    shutil.rmtree(staging, ignore_errors=True)
+    return final
 
 
 def repairVersion(baseDir, version, manifest, endpoint, cancelled=None):
@@ -986,6 +1110,7 @@ def repairVersion(baseDir, version, manifest, endpoint, cancelled=None):
         if not (isinstance(dst, str) and _safeRelative(dst) and git.isObjectId(blob or "")):
             continue
         path = os.path.join(filesDir, dst)
+        _checkInside(path, filesDir)
         if blobIdOfFile(path) == blob:
             continue
         src = sources.get(dst)

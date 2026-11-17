@@ -12,7 +12,9 @@ tab-separated fields ``source (relative to --source)``, ``installed folder on sy
 
 Two files are written (only when their content changed, so that nothing is reinstalled needlessly):
 
-- ``studio_build_info.json``: the commit B the build was made from, its tree, its date, ``dirty`` (the working tree
+- ``studio_build_info.json``: the commit B the build was made from, its tree, its date, ``branch`` (the branch checked
+  out when it was built, for information: the application takes code updates only when main contains B, which it
+  checks against the repository), ``dirty`` (the working tree
   had changes to tracked files, or a recorded file is not tracked: such a build never takes commit updates) and
   ``studioVersion`` (``STUDIO_VERSION`` of ``StudioLib/version.py``). It is read at every start, so it stays small.
 - ``studio_build_files.json.gz``: the listing of B (path, mode and blob id of every tracked file, from
@@ -34,7 +36,6 @@ import time
 
 FORMAT = 1
 REPOSITORY = "azhmeerjesani/Slicer-2"
-BRANCH = "main"
 INFO_NAME = "studio_build_info.json"
 FILES_NAME = "studio_build_files.json.gz"
 VERSION_FILE = "Modules/Scripted/Studio/StudioLib/version.py"
@@ -82,7 +83,7 @@ def collect(source, records, scriptedRoot=None):
     """The build information and the build files of the source tree ``source`` (a dict each)."""
     source = os.path.abspath(source)
     head = _git(source, "rev-parse", "--verify", "HEAD")
-    info = {"format": FORMAT, "repository": REPOSITORY, "branch": BRANCH, "commit": None, "tree": None, "committed": None,
+    info = {"format": FORMAT, "repository": REPOSITORY, "branch": None, "commit": None, "tree": None, "committed": None,
             "dirty": True, "studioVersion": readVersion(source), "files": FILES_NAME}
     files = {"format": FORMAT, "commit": None, "tree": None, "entries": [], "map": [], "scriptedRoot": scriptedRoot,
              "preOverlay": list(PRE_OVERLAY)}
@@ -92,6 +93,7 @@ def collect(source, records, scriptedRoot=None):
     tree = (_git(source, "rev-parse", "HEAD^{tree}") or b"").decode().strip()
     committed = (_git(source, "log", "-1", "--format=%ct", "HEAD") or b"").decode().strip()
     prefix = (_git(source, "rev-parse", "--show-prefix") or b"").decode().strip()
+    branch = (_git(source, "rev-parse", "--abbrev-ref", "HEAD") or b"").decode().strip()
     listing = _git(source, "ls-tree", "-r", "-z", "--full-tree", "HEAD")
     status = _git(source, "status", "--porcelain", "--untracked-files=no")
     if listing is None or status is None or len(commit) != 40 or len(tree) != 40:
@@ -124,7 +126,7 @@ def collect(source, records, scriptedRoot=None):
             entry["module"] = module
         mapping.append(entry)
     mapping.sort(key=lambda entry: (entry["src"], entry["dst"]))
-    info.update(commit=commit, tree=tree, dirty=dirty,
+    info.update(commit=commit, tree=tree, dirty=dirty, branch=branch if branch and branch != "HEAD" else None,
                 committed=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(committed))) if committed.isdigit() else None)
     files.update(commit=commit, tree=tree, entries=entries, map=mapping, preOverlay=[prefix + path for path in PRE_OVERLAY])
     return info, files
@@ -170,6 +172,9 @@ def main(argv=None):
         print("make_build_info: no git commit: this build will not take code updates from main", file=sys.stderr)
     elif info["dirty"]:
         print("make_build_info: the source tree has changes: this build will not take code updates from main", file=sys.stderr)
+    elif info["branch"] != "main":
+        print(f"make_build_info: built from {info['branch'] or 'a detached HEAD'}, not main: this build takes code updates "
+              "from main only once main contains its commit", file=sys.stderr)
     return 0
 
 

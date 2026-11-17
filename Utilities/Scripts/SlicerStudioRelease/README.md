@@ -120,6 +120,11 @@ newer commits on `main` between releases (see
   publish: a build from a source tree with changes (`"dirty": true`) or without
   git (`"commit": null`) never takes code updates. `build_dmg.sh` warns about
   both;
+- build from a commit on `main`: the application takes code from `main` only
+  when `main` contains the commit it was built from (a build of another branch,
+  or of a commit ahead of `main`, takes nothing until `main` contains it).
+  `studio_build_info.json` records the branch for information, and
+  `make_build_info.py` warns when it is not `main`;
 - a release still replaces everything: installing it removes the code updates
   of the previous build.
 

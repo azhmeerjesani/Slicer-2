@@ -195,18 +195,50 @@ def parseLsRefs(data):
     return refs
 
 
-def fetchRequest(want, agent=None, depth=1, blobless=True):
+def fetchRequest(want, agent=None, depth=1, blobless=True, filterSpec=None, haves=()):
     """The body of a ``fetch`` of the commit ``want``: only that commit (``deepen``), without blobs (``filter
-    blob:none``), no progress messages."""
-    if not isObjectId(want):
+    blob:none``, or ``filterSpec`` such as ``tree:0`` for commits only), no progress messages. ``haves`` are commits the
+    client says it has: the server leaves out what they reach."""
+    if not isObjectId(want) or not all(isObjectId(have) for have in haves):
         raise ValueError("not an object id")
     arguments = ["no-progress", "ofs-delta"]
     if depth:
         arguments.append(f"deepen {int(depth)}")
-    if blobless:
+    if filterSpec:
+        if not re.match(r"^[a-z]+:[0-9a-z]+$", filterSpec):
+            raise ValueError("invalid filter")
+        arguments.append(f"filter {filterSpec}")
+    elif blobless:
         arguments.append("filter blob:none")
-    arguments += [f"want {want}", "done"]
+    arguments.append(f"want {want}")
+    arguments += [f"have {have}" for have in haves]
+    arguments.append("done")
     return _commandRequest("fetch", agent, arguments)
+
+
+def reachesCommit(objects, head, target, maxCommits=MAX_PACK_OBJECTS):
+    """True when the commit ``target`` is ``head`` or an ancestor of it through the (hash-verified) commits of
+    ``objects``: a chain of parents from ``head`` names ``target``. The commits of the chain are verified by their ids,
+    so the answer cannot be forged without a SHA-1 collision; a commit that is missing ends its branch of the walk."""
+    if head == target:
+        return True
+    seen = set()
+    stack = [head]
+    while stack:
+        oid = stack.pop()
+        if oid in seen:
+            continue
+        seen.add(oid)
+        if len(seen) > maxCommits:
+            raise GitProtocolError("too many commits")
+        entry = objects.get(oid)
+        if entry is None or entry[0] != "commit":
+            continue
+        parents = parseCommit(entry[1])["parents"]
+        if target in parents:
+            return True
+        stack.extend(parent for parent in parents if isObjectId(parent))
+    return False
 
 
 def parseFetchResponse(data, maxPackBytes=MAX_PACK_BYTES):
@@ -430,69 +462,51 @@ def parsePack(data, maxObjects=MAX_PACK_OBJECTS, maxInflated=MAX_INFLATED_BYTES,
     if position != len(body):
         raise GitProtocolError("unexpected data after the pack objects")
 
-    objects = {}
+    # Deltas are resolved in dependency order, in one pass: every object that is not a delta is ready; resolving an
+    # object makes ready the OFS deltas based on its offset and the REF deltas based on its id. Each delta is applied
+    # once (linear in the number of objects, whatever the order of the pack). A delta whose base never becomes ready
+    # (missing from the pack, or a cycle) is an error.
+    import collections
+
     resolved = {}  # offset -> (type name, data)
-
-    def resolve(offset):
-        # Iterative: follow the chain of bases down to an object that is not a delta (or one already resolved), then
-        # apply the deltas back up
-        chain = []
-        current = offset
-        while current not in resolved:
-            kind, payload, base = entries[current]
-            if kind in TYPE_NAMES:
-                resolved[current] = (TYPE_NAMES[kind], payload)
-                break
-            chain.append(current)
-            if len(chain) > MAX_DELTA_DEPTH:
-                raise GitProtocolError("delta chain too long")
-            if kind == OBJ_OFS_DELTA:
-                if base not in entries:
-                    raise GitProtocolError("damaged delta reference")
-                current = base
-            else:
-                current = byId.get(base)
-                if current is None:
-                    raise GitProtocolError("a delta base is missing from the pack")
-            if current in chain:
-                raise GitProtocolError("damaged delta reference")
-        for deltaOffset in reversed(chain):
-            baseType, baseData = resolved[current]
-            resolved[deltaOffset] = (baseType, applyDelta(baseData, entries[deltaOffset][1], maxInflated))
-            current = deltaOffset
-        return resolved[offset]
-
-    # Ids of the objects that are not deltas first: REF_DELTA bases are looked up by id
-    byId = {}
+    depth = {}
+    waitingOfs = {}  # base offset -> delta offsets
+    waitingRef = {}  # base id -> delta offsets
+    ready = collections.deque()
     for offset in order:
-        kind, payload, _base = entries[offset]
+        kind, payload, base = entries[offset]
         if kind in TYPE_NAMES:
-            oid = objectId(TYPE_NAMES[kind], payload)
-            byId[oid] = offset
-    pendingRefs = [offset for offset in order if entries[offset][0] in (OBJ_OFS_DELTA, OBJ_REF_DELTA)]
-    # A REF_DELTA may name a base that is itself a delta: resolve in rounds until nothing changes
-    progress = True
+            resolved[offset] = (TYPE_NAMES[kind], payload)
+            depth[offset] = 0
+            ready.append(offset)
+        elif kind == OBJ_OFS_DELTA:
+            if base not in entries:
+                raise GitProtocolError("damaged delta reference")
+            waitingOfs.setdefault(base, []).append(offset)
+        else:
+            waitingRef.setdefault(base, []).append(offset)
+    byId = {}
     total = 0
-    while pendingRefs and progress:
-        progress = False
-        remaining = []
-        for offset in pendingRefs:
-            kind, _payload, base = entries[offset]
-            if kind == OBJ_REF_DELTA and base not in byId:
-                remaining.append(offset)
+    while ready:
+        offset = ready.popleft()
+        typeName, content = resolved[offset]
+        oid = objectId(typeName, content)
+        byId.setdefault(oid, offset)
+        for deltaOffset in waitingOfs.pop(offset, []) + waitingRef.pop(oid, []):
+            if deltaOffset in resolved:
                 continue
-            typeName, content = resolve(offset)
-            total += len(content)
+            if depth[offset] + 1 > MAX_DELTA_DEPTH:
+                raise GitProtocolError("delta chain too long")
+            data = applyDelta(content, entries[deltaOffset][1], maxInflated)
+            total += len(data)
             if total > maxInflated:
                 raise GitProtocolError("the pack inflates to too many bytes")
-            byId[objectId(typeName, content)] = offset
-            progress = True
-        pendingRefs = remaining
-    if pendingRefs:
+            resolved[deltaOffset] = (typeName, data)
+            depth[deltaOffset] = depth[offset] + 1
+            ready.append(deltaOffset)
+    if len(resolved) != len(order):
         raise GitProtocolError("a delta base is missing from the pack")
-    for oid, offset in byId.items():
-        objects[oid] = resolve(offset)
-    return objects
+    return {oid: resolved[offset] for oid, offset in byId.items()}
 
 
 #

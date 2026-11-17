@@ -12,23 +12,34 @@ process, through ``SLICER_STUDIO_COMMIT_UPDATES``. A fake installation (``lib/Sl
 listing are also checked against git itself, and make_build_info.py against a temporary repository.
 
 - protocol: pkt-lines, capabilities, ls-refs, side-band and its error channel;
-- pack parser: trailer, OFS and REF deltas, truncated and damaged packs, size, count and inflation caps;
+- pack parser: trailer, OFS and REF deltas, truncated and damaged packs, size, count and inflation caps; deltas in any
+  order resolved in one pass (a long backwards REF chain, an OFS delta on a REF delta on a later REF delta, a cycle);
 - trees: unsafe names, the listing rebuilds the tree id;
-- classifier: mapped, added next to mapped files, ignored, needs a new build (C++, CMake, pre-overlay files, modes);
+- classifier: mapped, added next to mapped files, ignored (docs, tests, developer and release tools), needs a new build
+  (C++, CMake, pre-overlay files, modes, deletions that the overlay cannot hide);
+- the build commit must be on main (a build of another branch or ahead of main takes nothing);
 - check: up to date, ready (staged), needs a new build without downloading anything, ignored changes only, a tampered
   file or commit stages nothing, a redirect to another host and a host that is not allowed are refused, a slow server,
   offline;
 - staging: whole units, installed files verified against the build listing, deletes, compiled code in a unit refused, a
   syntax error refused, crash leftovers removed, two stagers at once;
 - bootstrap: promotion, base mismatch, turned off, not installed, testing, sys.path order, lazy pre-seeded modules, an
-  end-to-end import in a subprocess, mapPath;
+  end-to-end import in a subprocess, mapPath; as in the application: studio_overlay already imported (a bin/Python
+  update), activateFromApplication() with --testing read from the command options, a busy lock, no locks;
 - rollback: a start that died unconfirmed goes back to the previous version, then to the installed one; a live start
-  does not; Go back; garbage collection; main back at the build's commit; a damaged staged file is downloaded again;
+  does not; a crash loop after the confirmation; the health monitor (Studio's start-up report, quit early, the outcome
+  written at the exit); a module of the update that fails to load (rolled back at once, the installed files of that
+  folder for the rest of the session); Go back; garbage collection under the lock; main back at the build's commit; a
+  damaged staged file is downloaded again;
+- safety: units with symbolic links refused; the test address override is loopback only and a version staged from it
+  is used only while it is set; the start-up path starts no process;
+- CMake: slicerStudioRecordVerbatimFiles() path rules with cmake -P (Linux and macOS install roots), when cmake exists;
 - releases: clearForRelease, restore, forgetBase, the build version used for release decisions;
 - make_build_info.py: commit, tree, dirty, untracked recorded file, no absolute path in the outputs;
 - no GitHub API address in the new files.
 """
 
+import errno
 import gzip
 import hashlib
 import http.server
@@ -41,6 +52,7 @@ import sys
 import tempfile
 import textwrap
 import threading
+import types
 import time
 import unittest
 import urllib.parse
@@ -151,18 +163,20 @@ class Repo:
         self.commits = {}  # id -> {"files": {path: (mode, bytes)}, "objects": {...}, "listing": {...}}
         self.head = None
 
-    def commit(self, files, message="Change", when=1763337600):
+    def commit(self, files, message="Change", when=1763337600, parents=None):
+        """A new head; ``parents`` defaults to the current head (a commit on another branch: other parents)."""
         normalized = {}
         for path, value in files.items():
             mode, data = value if isinstance(value, tuple) else ("100644", value)
             normalized[path] = (mode, data.encode() if isinstance(data, str) else data)
         listing = {path: (mode, git.blobId(data)) for path, (mode, data) in normalized.items()}
         tree, objects = _treeObjects(listing)
-        parent = f"parent {self.head}\n" if self.head else ""
+        parents = ([self.head] if self.head else []) if parents is None else list(parents)
+        parent = "".join(f"parent {oid}\n" for oid in parents)
         data = (f"tree {tree}\n{parent}author A <a@example.org> {when} +0000\ncommitter A <a@example.org> {when} +0000\n\n{message}\n").encode()
         oid = git.objectId("commit", data)
         objects[oid] = ("commit", data)
-        self.commits[oid] = {"files": normalized, "objects": objects, "listing": listing, "tree": tree}
+        self.commits[oid] = {"files": normalized, "objects": objects, "listing": listing, "tree": tree, "parents": parents}
         self.head = oid
         return oid
 
@@ -275,6 +289,7 @@ class FakeGitServer:
         self.redirectRaw = None
         self.trickle = False
         self.useDeltas = True
+        self.historyFetches = []
         server = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -332,6 +347,22 @@ class FakeGitServer:
                 if command == "command=ls-refs":
                     answer = git.pktLine(f"{server.repo.head} refs/heads/main\n") + git.flushPkt()
                     return self._send(200, answer, "application/x-git-upload-pack-result")
+                if command == "command=fetch" and "filter tree:0" in lines:
+                    # The history of main down to the haves (commits only), at most "deepen" commits deep
+                    want = next(line[5:] for line in lines if line.startswith("want "))
+                    haves = {line[5:] for line in lines if line.startswith("have ")}
+                    depth = int(next((line[7:] for line in lines if line.startswith("deepen ")), "0"))
+                    server.historyFetches.append((want, sorted(haves), depth))
+                    commits, seen, queue = [], set(), [(want, 1)]
+                    while queue:
+                        oid, level = queue.pop(0)
+                        if oid in seen or oid in haves or oid not in server.repo.commits:
+                            continue
+                        seen.add(oid)
+                        commits.append(server.repo.commits[oid]["objects"][oid])
+                        if not depth or level < depth:
+                            queue.extend((parent, level + 1) for parent in server.repo.commits[oid]["parents"])
+                    return self._send(200, sideBand(writePack(commits)), "application/x-git-upload-pack-result")
                 if command == "command=fetch":
                     want = next(line[5:] for line in lines if line.startswith("want "))
                     commit = server.repo.commits[want]
@@ -380,7 +411,8 @@ class StudioCommitUpdatesTest(unittest.TestCase):
         self.base = self.repo.commit(BASE_FILES, "Base build")
         self.server = FakeGitServer(self.repo)
         self.env = {studio_overlay.ENVIRONMENT_VARIABLE: self.server.url}
-        self._overlayGlobals = {name: getattr(studio_overlay, name) for name in ("_status", "_buildInfo", "_roots", "_preseeded", "_boot")}
+        self._overlayGlobals = {name: getattr(studio_overlay, name) for name in ("_status", "_buildInfo", "_roots", "_preseeded", "_boot",
+                                                                                  "_applied", "_sysPath", "_sysModules", "_monitor")}
         self._constants = {name: getattr(updates_commit, name) for name in ("CHECK_DEADLINE_S", "MAX_FILES")}
         self.writeInstall()
 
@@ -453,7 +485,7 @@ class StudioCommitUpdatesTest(unittest.TestCase):
     def activate(self, sysPath=None, sysModules=None, env=None, **runValues):
         sysPath = [os.path.join(self.home, "bin", "..", PYROOT), os.path.join(self.home, ROOT), "/usr/lib/python3"] if sysPath is None else sysPath
         sysModules = {} if sysModules is None else sysModules
-        result = studio_overlay.activate(self.home, self.stateRoot, self.runInfo(**runValues), env=env if env is not None else {},
+        result = studio_overlay.activate(self.home, self.stateRoot, self.runInfo(**runValues), env=env if env is not None else self.env,
                                          sysPath=sysPath, sysModules=sysModules)
         return result, sysPath, sysModules
 
@@ -537,6 +569,32 @@ class StudioCommitUpdatesTest(unittest.TestCase):
         with self.assertRaises(git.GitProtocolError):
             git._inflate(zlib.compress(b"abcdef"), 0, 3, 100)
 
+    def test_PackDeltaOrder(self):
+        """Deltas are resolved in one pass whatever their order: a long REF_DELTA chain listed backwards (quadratic in
+        rounds before), and an OFS delta whose base is a REF_DELTA based on a later REF_DELTA."""
+        count = 3000
+        blobs = [b"start\n" + b"x" * 50]
+        for index in range(1, count):
+            blobs.append(blobs[-1] + f"{index}\n".encode())
+        # In the pack: blob count-1 first (a delta on count-2), ..., blob 0 (full) last
+        objects = [("blob", data) for data in reversed(blobs)]
+        deltas = {index: ("ref", index + 1) for index in range(count - 1)}
+        started = time.monotonic()
+        parsed = git.parsePack(writePack(objects, deltas))
+        self.assertLess(time.monotonic() - started, 20)
+        self.assertEqual(len(parsed), count)
+        self.assertEqual(parsed[git.blobId(blobs[-1])], ("blob", blobs[-1]))
+        z = b"zeta\n" * 40
+        w, x, y = z + b"w\n", z + b"w\nx\n", z + b"w\nx\ny\n"
+        objects = [("blob", x), ("blob", y), ("blob", w), ("blob", z)]
+        parsed = git.parsePack(writePack(objects, {0: ("ref", 2), 1: ("ofs", 0), 2: ("ref", 3)}))
+        for data in (w, x, y, z):
+            self.assertEqual(parsed[git.blobId(data)], ("blob", data))
+        # A cycle of REF deltas never resolves
+        cycle = writePack([("blob", x), ("blob", w)], {0: ("ref", 1), 1: ("ref", 0)})
+        with self.assertRaises(git.GitProtocolError):
+            git.parsePack(cycle)
+
     def test_PackAgainstGit(self):
         if shutil.which("git") is None:
             self.skipTest("git is not installed")
@@ -609,17 +667,28 @@ class StudioCommitUpdatesTest(unittest.TestCase):
         # ... but not with another extension, nor a new folder
         self.assertEqual(one("Modules/Scripted/Studio/StudioLib/new.ui", None, ("100644", blob)).kind, "needsBuild")
         self.assertEqual(one("Modules/Scripted/Studio/NewLib/x.py", None, ("100644", blob)).kind, "needsBuild")
-        # Deleted mapped file
-        result = one("Modules/Scripted/Studio/StudioLib/gone.py", ("100644", "a" * 40), None)
-        self.assertEqual((result.kind, result.apply[0]["action"]), ("ready", "delete"))
+        # Deleted mapped file: applied when the overlay hides it for real (a file of a regular package, a resource of a
+        # folder without Python files); a deleted top-level module or __init__.py would still be found in the
+        # installed files after the overlay folder
+        for path in ("Modules/Scripted/Studio/StudioLib/gone.py", "Modules/Scripted/Studio/Resources/Icons/a.svg", "Base/Python/slicer/util.py"):
+            result = one(path, ("100644", "a" * 40), None)
+            self.assertEqual((result.kind, result.apply[0]["action"]), ("ready", "delete"), path)
+        for path in ("Modules/Scripted/Other/Other.py", "Modules/Scripted/Studio/StudioLib/__init__.py"):
+            self.assertEqual(one(path, ("100644", "a" * 40), None).kind, "needsBuild", path)
         # Ignored
         for path in ("Docs/x.md", "README.md", "CLAUDE.md", ".gitignore", ".github/workflows/a.yml", "Modules/Scripted/Studio/Testing/Python/T.py",
-                     "Utilities/Scripts/SlicerStudioRelease/make_release.py", "Utilities/Scripts/SlicerStudioMacOS/build_dmg.sh"):
+                     "Utilities/Scripts/SlicerStudioRelease/make_release.py", "Utilities/Scripts/SlicerStudioMacOS/build_dmg.sh",
+                     "Utilities/Scripts/StudioBench.py", "Utilities/Scripts/StudioScreens.py", "Utilities/Scripts/StudioReadmeCheck.py",
+                     "Utilities/Scripts/StudioUsabilityGate/gate.py", "Utilities/Scripts/StudioSettingsCheck/check.py",
+                     "Utilities/Scripts/SlicerStudioSmokeCheck.py", "Utilities/SlicerStudioWeb/Dockerfile", "Utilities/SlicerStudioLNM/lnm.def",
+                     "Base/Python/tests/test_x.py", "Base/Python/slicer/tests/test_util.py", "Modules/Scripted/LesionNetworkMapping/pyproject.toml",
+                     "Modules/Scripted/Studio/NOTES.md", ".claude/settings.json", ".ruff.toml", "CITATION.cff"):
             self.assertEqual(one(path, ("100644", "a" * 40), ("100644", blob)).kind, "upToDate", path)
         # Needs a new build
         for path in ("Base/QTCore/qSlicerThing.cxx", "CMakeLists.txt", "Modules/Scripted/Studio/CMakeLists.txt", "Base/QTGUI/Resources/UI/x.ui",
                      "Base/QTGUI/Resources/qSlicerBaseQTGUI.qrc", "Modules/CLI/X/X.xml", "SuperBuild/External_X.cmake",
-                     "Base/Python/slicerqt.py", "Base/Python/studio_overlay.py", "Base/Python/vtk.py.in"):
+                     "Base/Python/slicerqt.py", "Base/Python/studio_overlay.py", "Base/Python/vtk.py.in", "Utilities/Scripts/qrcc.py",
+                     "Utilities/Templates/Modules/Scripted/TemplateKey.py", "Base/Python/slicer/kits.py.in", "License.txt"):
             self.assertEqual(one(path, ("100644", "a" * 40), ("100644", blob)).kind, "needsBuild", path)
         # Mode changes, symlinks and submodules
         self.assertEqual(one("Modules/Scripted/Studio/StudioLib/thing.py", ("100644", "a" * 40), ("100755", "a" * 40)).kind, "needsBuild")
@@ -689,6 +758,11 @@ class StudioCommitUpdatesTest(unittest.TestCase):
         self.assertEqual((again["result"], again.get("already")), ("ready", "pending"))
         self.assertEqual(len(self.server.requests) - before, 2)  # the capabilities and ls-refs only
         self.assertEqual(len(self.server.blobRequests()), 3)
+        # A deleted file of the update maps to its (missing) path in the overlay, not to the installed copy
+        self.activate()
+        gone = studio_overlay.mapPath(os.path.join(self.home, ROOT, "StudioLib", "gone.py"))
+        self.assertEqual(gone, os.path.join(files, ROOT, "StudioLib", "gone.py"))
+        self.assertFalse(os.path.exists(gone))
 
     def test_CheckNeedsBuildDownloadsNothing(self):
         self.change({"Modules/Scripted/Studio/StudioLib/thing.py": "VALUE = 'H'\n", "Base/QTCore/qSlicerThing.cxx": "int x;\n"})
@@ -921,7 +995,7 @@ class StudioCommitUpdatesTest(unittest.TestCase):
             import studio_overlay
             home = {self.home!r}
             sys.path.append(os.path.join(home, "bin", "..", {ROOT!r}))
-            result = studio_overlay.activate(home, {self.stateRoot!r}, {{"installed": True, "interactive": False, "pid": os.getpid()}}, env={{}})
+            result = studio_overlay.activate(home, {self.stateRoot!r}, {{"installed": True, "interactive": False, "pid": os.getpid()}}, env={self.env!r})
             # What the module factory of Slicer does: the module in sys.modules, else the installed file
             module = sys.modules.get("Studio")
             assert hasattr(module, "Studio"), "the factory would load the installed file"
@@ -1000,7 +1074,7 @@ class StudioCommitUpdatesTest(unittest.TestCase):
         studio_overlay.confirmStart(True)
         self.assertEqual((self.state()["active"], self.state()["previous"]), (second, first))
         # Go back to the previous version
-        updates_commit.requestRollback(self.stateRoot, self.base, first)
+        updates_commit.requestRollback(self.stateRoot, self.base, first, env=self.env)
         result, _path, _modules = self.activate()
         self.assertEqual(result["active"], first)
         self.assertIn(second, self.state()["skipped"])
@@ -1115,6 +1189,446 @@ class StudioCommitUpdatesTest(unittest.TestCase):
         self.assertIn("next release", text)
 
     #
+    # Review fixes: the real bootstrap conditions
+    #
+
+    def test_BinPythonUpdateApplies(self):
+        """A change to Base/Python (bin/Python) applies in the real start-up, where slicerqt.py has already imported
+        studio_overlay: the files that run before the overlay are never part of it."""
+        head = self.change({"Base/Python/slicer/util.py": "def modulePath():\n    return 'H'\n"})
+        result = self.check()
+        self.assertEqual(result["result"], "ready", result)
+        manifest = studio_overlay.readManifest(self.baseDir(), head)
+        self.assertEqual(manifest["roots"], [PYROOT])
+        self.assertNotIn("studio_overlay.py", manifest["units"][PYROOT])
+        self.assertNotIn("slicerqt.py", manifest["units"][PYROOT])
+        files = os.path.join(self.baseDir(), "versions", head, "files", PYROOT)
+        self.assertFalse(os.path.exists(os.path.join(files, "studio_overlay.py")))
+        self.assertFalse(os.path.exists(os.path.join(files, "slicerqt.py")))
+        self.assertEqual(_read(os.path.join(files, "slicer", "util.py")), "def modulePath():\n    return 'H'\n")
+        self.assertTrue(os.path.isfile(os.path.join(files, "slicer", "kits.py")))  # generated file of the package
+        result, sysPath, _modules = self.activate(sysModules={"studio_overlay": studio_overlay})
+        self.assertEqual(result["state"], "active", result)
+        self.assertIsNone(self.state()["activationError"])
+        self.assertEqual(sysPath.index(files) + 1, sysPath.index(os.path.join(self.home, "bin", "..", PYROOT)))
+        # No scripted module changed, so nothing is pre-seeded: the start still needs Studio's report to be confirmed
+        self.assertEqual(result["modules"], [])
+        self.assertEqual(studio_overlay.health(None)[0], "pending")
+        # A version staged before this fix (its units listed the bootstrap files) applies too
+        manifest["units"][PYROOT] = sorted(manifest["units"][PYROOT] + ["studio_overlay.py", "slicerqt.py"])
+        studio_overlay.writeJsonAtomic(os.path.join(self.baseDir(), "versions", head, "manifest.json"), manifest)
+        result, _path, _modules = self.activate(sysModules={"studio_overlay": studio_overlay, "__main__": sys.modules["__main__"]})
+        self.assertEqual(result["state"], "active", result)
+        # A unit that really was imported before still refuses the version
+        result, _path, _modules = self.activate(sysModules={"studio_overlay": studio_overlay, "slicer": object()})
+        self.assertEqual(result["state"], "inactive")
+        self.assertIn("slicer", result["error"])
+        # ... and the check says so instead of "up to date"
+        self.assertEqual(self.check()["result"], "failed")
+
+    def test_BuildNotOnMain(self):
+        """Only a build whose commit main contains takes main's code (never an older or another line of history)."""
+        other = self.repo.commit(dict(BASE_FILES, **{"Modules/Scripted/Studio/StudioLib/thing.py": "VALUE = 'old'\n"}), "Elsewhere", parents=[])
+        result = self.check()
+        self.assertEqual(result["result"], "notOnMain", result)
+        self.assertIn(self.base[:7], result["error"])
+        self.assertEqual(self.server.historyFetches[-1], (other, [self.base], updates_commit.MAX_COMMITS_AHEAD))
+        self.assertEqual(self.server.blobRequests(), [])
+        self.assertIsNone(self.state())
+        # The same head again is answered from the cached result
+        fetches = len(self.server.historyFetches)
+        self.assertEqual(self.check(cached=result)["result"], "notOnMain")
+        self.assertEqual(len(self.server.historyFetches), fetches)
+        # A build made from a commit ahead of main (for example a bug-bash branch with Python fixes): main's older code
+        # is not taken
+        self.repo.head = self.base
+        ahead = self.change({"Modules/Scripted/Studio/StudioLib/thing.py": "VALUE = 'fix'\n"}, "Fix on a branch")
+        self.repo.head = self.base
+        self.base = ahead
+        self.writeInstall(ahead)
+        self.assertEqual(self.check()["result"], "notOnMain")
+        self.assertIsNone(self.state())
+        # Once main contains the build commit, its newer code applies
+        self.repo.head = ahead
+        self.change({"Modules/Scripted/Studio/StudioLib/thing.py": "VALUE = 'merged'\n"}, "On main")
+        self.assertEqual(self.check()["result"], "ready")
+
+    def setLastBoot(self, **values):
+        state = self.state()
+        state["boots"][-1].update(values)
+        studio_overlay.writeState(self.baseDir(), state)
+
+    def test_CrashLoopRollsBack(self):
+        """A confirmed start that is gone within minutes without quitting is a crash; CRASH_LIMIT in a row roll back."""
+        first = self.stageHead()
+        self.activate(pid=self.deadPid())
+        self.setLastBoot(confirmed=True)
+        result, _path, _modules = self.activate(pid=self.deadPid())
+        self.assertIsNone(result["rolledBack"])
+        self.assertEqual(result["active"], first)
+        self.assertEqual(self.state()["crashes"], {"version": first, "count": 1})
+        # A clean quit in between resets the count
+        self.setLastBoot(confirmed=True, exited="clean")
+        self.activate(pid=self.deadPid())
+        self.assertIsNone(self.state()["crashes"])
+        # A settled start (it ran long enough) that is gone does not count either
+        self.setLastBoot(confirmed=True, settled=True)
+        self.activate(pid=self.deadPid())
+        self.assertIsNone(self.state()["crashes"])
+        # Crashes in a row: rolled back
+        for _index in range(studio_overlay.CRASH_LIMIT - 1):
+            self.setLastBoot(confirmed=True)
+            result, _path, _modules = self.activate(pid=self.deadPid())
+            self.assertIsNone(result["rolledBack"])
+        self.setLastBoot(confirmed=True)
+        result, _path, _modules = self.activate(pid=self.deadPid())
+        self.assertEqual(result["rolledBack"]["from"], first)
+        self.assertIsNone(result["active"])
+        self.assertIn(first, self.state()["bad"])
+        self.assertIsNone(self.state()["crashes"])
+
+    def monitor(self, app=None):
+        timers = []
+
+        def startTimer(ms, callback):
+            timers.append((ms, callback))
+            return object()
+
+        class Done:
+            def is_alive(self):
+                return False
+
+            def join(self, timeout=None):
+                pass
+
+        def startThread(target):
+            target()
+            return Done()
+
+        monitor = studio_overlay.HealthMonitor(app, startTimer, startThread)
+        studio_overlay._monitor = monitor
+        return monitor, timers
+
+    def lastBoot(self):
+        return self.state()["boots"][-1] if self.state()["boots"] else None
+
+    def test_HealthMonitor(self):
+        """The start is confirmed only after Studio reported a good start-up; a failure is rolled back at the next start;
+        quitting before Studio finished starting says nothing about the update; the outcome is written at the exit."""
+        head = self.stageHead()
+        self.activate()
+        monitor, timers = self.monitor()
+        monitor.onCompleted()
+        self.assertEqual(timers[-1][0], studio_overlay.HEALTH_DELAY_MS)
+        timers[-1][1]()
+        self.assertEqual(monitor.check(), "pending")  # Studio has not reported yet (for example a start-up dialog)
+        self.assertFalse(self.lastBoot()["confirmed"])
+        studio_overlay.reportStartup("Studio", True)
+        self.assertTrue(self.lastBoot()["confirmed"])
+        self.assertEqual(timers[-1][0], studio_overlay.SETTLE_DELAY_MS)
+        timers[-1][1]()
+        self.assertTrue(self.lastBoot()["settled"])
+        monitor.onQuit()
+        self.assertEqual(self.lastBoot()["exited"], "clean")
+        self.assertIsNone(studio_overlay._boot)
+        # Studio reports a failed start-up (for example the update service did not start): never confirmed, the outcome
+        # is written at the exit, and the next start goes back
+        result, _path, _modules = self.activate()
+        self.assertEqual((result["active"], len(self.state()["boots"])), (head, 1))
+        monitor, timers = self.monitor()
+        monitor.onCompleted()
+        timers[-1][1]()
+        studio_overlay.reportStartup("Studio", False, "ValueError: broken")
+        self.assertEqual(monitor.verdict, "failed")
+        self.assertIn("broken", studio_overlay.status()["healthError"])
+        monitor.onQuit()
+        self.assertEqual((self.lastBoot()["confirmed"], self.lastBoot()["exited"]), (False, "clean"))
+        result, _path, _modules = self.activate()
+        self.assertEqual(result["rolledBack"]["from"], head)
+        # Quit before the start-up completed, or while Studio was still starting: neither confirmed nor rolled back
+        second = self.stageHead({"Modules/Scripted/Studio/StudioLib/thing.py": "VALUE = 'H2'\n"})
+        for complete in (False, True):
+            result, _path, _modules = self.activate()
+            self.assertEqual(result["active"], second)
+            monitor, timers = self.monitor()
+            if complete:
+                monitor.onCompleted()
+                timers[-1][1]()
+            monitor.onQuit()
+            self.assertEqual((self.lastBoot()["confirmed"], self.lastBoot()["exited"]), (False, "early"))
+            result, _path, _modules = self.activate()
+            self.assertIsNone(result["rolledBack"])
+            self.assertEqual(result["active"], second)
+        # The Studio module could not be created: failed, whatever Studio reports
+        factory = types.SimpleNamespace(isRegistered=lambda name: True, isInstantiated=lambda name: False)
+        app = types.SimpleNamespace(moduleManager=lambda: types.SimpleNamespace(factoryManager=lambda: factory))
+        studio_overlay.reportStartup("Studio", True)
+        self.assertEqual(studio_overlay.health(app)[0], "failed")
+        # The Studio module is not loaded at all (for example an updated slicer package that fails): failed
+        factory = types.SimpleNamespace(isRegistered=lambda name: False, isInstantiated=lambda name: False)
+        self.assertEqual(studio_overlay.health(app), ("failed", "the Studio module is not loaded"))
+        # Loaded, created, reported: ok
+        factory = types.SimpleNamespace(isRegistered=lambda name: True, isInstantiated=lambda name: True)
+        self.assertEqual(studio_overlay.health(app), ("ok", None))
+
+    def test_ConfirmationSurvivesBusyLock(self):
+        """The confirmation waits for the lock and tries again; a start recorded while another window held the lock is
+        recorded later; a file system without locks works without one."""
+        import fcntl
+
+        head = self.stageHead()
+        self.activate(interactive=False)  # promote
+        holder = studio_overlay.StateLock(self.baseDir(), 1.0)
+        holder.__enter__()
+        self.assertTrue(holder.acquired)
+        try:
+            original = studio_overlay.LOCK_TIMEOUT_S
+            studio_overlay.LOCK_TIMEOUT_S = 0.1
+            result, _path, _modules = self.activate()
+        finally:
+            studio_overlay.LOCK_TIMEOUT_S = original
+            holder.__exit__(None, None, None)
+        self.assertEqual(result["state"], "active")  # applied, though nothing could be written
+        self.assertIn("bootDeferred", result)
+        self.assertIsNone(studio_overlay._findBoot(self.state(), head, os.getpid()))
+        self.assertTrue(studio_overlay.recordBoot())
+        self.assertFalse(studio_overlay._findBoot(self.state(), head, os.getpid())["confirmed"])
+        self.assertTrue(studio_overlay.confirmStart(True))
+        self.assertTrue(studio_overlay._findBoot(self.state(), head, os.getpid())["confirmed"])
+        # No locks on this file system (ENOLCK): the state is changed without one
+        original = fcntl.flock
+
+        def noLocks(*args):
+            raise OSError(errno.ENOLCK, "No locks available")
+
+        fcntl.flock = noLocks
+        try:
+            self.assertIsNotNone(studio_overlay.updateState(self.baseDir(), self.base, lambda state: True, timeout=0.1))
+            result, _path, _modules = self.activate()
+            self.assertEqual(result["state"], "active")
+            self.assertNotIn("bootDeferred", result)
+        finally:
+            fcntl.flock = original
+
+    def test_RunInfo(self):
+        """--testing is read from the command options (slicer.app.testingEnabled() does not exist before import slicer)."""
+        options = types.SimpleNamespace(testingEnabled=True, noMainWindow=False, modulesToIgnore=[])
+        app = types.SimpleNamespace(commandOptions=lambda: options, isInstalled=True)
+        info = studio_overlay._runInfo(app, {})
+        self.assertEqual((info["installed"], info["testing"], info["interactive"]), (True, True, False))
+        options.testingEnabled = False
+        info = studio_overlay._runInfo(app, {})
+        self.assertEqual((info["testing"], info["interactive"]), (False, True))
+        options.noMainWindow = True
+        self.assertFalse(studio_overlay._runInfo(app, {})["interactive"])
+        options.noMainWindow = False
+        options.modulesToIgnore = ["Studio"]
+        self.assertFalse(studio_overlay._runInfo(app, {})["interactive"])
+        self.assertFalse(studio_overlay._runInfo(types.SimpleNamespace(isInstalled=True), {})["interactive"])
+
+    def runBootstrap(self, body, env=None):
+        """Run ``body`` in a fresh Python, as slicerqt.py does: studio_overlay imported first, nothing else."""
+        script = textwrap.dedent(f"""
+            import json, os, sys, types
+            sys.path[:0] = [{os.path.join(SOURCE_DIR, 'Base', 'Python')!r}]
+            import studio_overlay
+            home, stateRoot, ROOT, PYROOT = {self.home!r}, {self.stateRoot!r}, {ROOT!r}, {PYROOT!r}
+            sys.path.append(os.path.join(home, "bin", "..", ROOT))
+            sys.path.append(os.path.join(home, PYROOT))
+            """) + textwrap.dedent(body)
+        output = subprocess.run([sys.executable, "-I", "-c", script], capture_output=True, text=True, timeout=60, check=False,
+                                env=dict(os.environ, **(self.env if env is None else env)))
+        self.assertEqual(output.returncode, 0, output.stderr)
+        return json.loads(output.stdout.strip().splitlines()[-1])
+
+    def test_ActivateFromApplication(self):
+        """activateFromApplication() with the application object of slicerqt.py: --testing applies nothing; a normal start
+        applies the update and connects the health monitor."""
+        head = self.stageHead()
+        body = """
+            import __main__
+            options = types.SimpleNamespace(testingEnabled={testing}, modulesToIgnore=[])
+            __main__._qSlicerCoreApplicationInstance = types.SimpleNamespace(commandOptions=lambda: options, isInstalled=True, slicerHome=home)
+            studio_overlay.stateRootFromApplication = lambda: stateRoot
+            scheduled = []
+            studio_overlay._scheduleHealthCheck = lambda app: scheduled.append(True)
+            status = studio_overlay.activateFromApplication()
+            print(json.dumps({{"state": status["state"], "reason": status["reason"], "scheduled": bool(scheduled),
+                              "studio": type(sys.modules.get("Studio")).__name__}}))
+            """
+        values = self.runBootstrap(body.format(testing=True))
+        self.assertEqual((values["state"], values["reason"], values["scheduled"]), ("inactive", "testing", False))
+        self.assertEqual(self.state()["pending"], head)  # nothing promoted under --testing
+        values = self.runBootstrap(body.format(testing=False))
+        self.assertEqual((values["state"], values["scheduled"], values["studio"]), ("active", True, "_LazyModule"))
+        self.assertEqual(self.state()["active"], head)
+
+    def test_PreseedFailureRollsBack(self):
+        """A scripted module of the update that fails while it loads: the update is rolled back at once, and the rest
+        of the session runs the installed files of that folder (not the installed Studio.py on the updated StudioLib)."""
+        head = self.stageHead({"Modules/Scripted/Studio/Studio.py": "from StudioLib import thing\nraise RuntimeError('broken')\n",
+                               "Modules/Scripted/Studio/StudioLib/thing.py": "VALUE = 'H'\n"})
+        self.activate(sysPath=[], sysModules={}, pid=self.deadPid(), interactive=False)  # promote
+        values = self.runBootstrap("""
+            import importlib.util
+            result = studio_overlay.activate(home, stateRoot, {"installed": True, "interactive": True, "pid": os.getpid()})
+            try:
+                loaded = hasattr(sys.modules["Studio"], "Studio")  # what the module factory of Slicer asks
+            except Exception:
+                loaded = False  # PyObject_HasAttrString swallows the error
+            # The module factory then loads the installed file
+            spec = importlib.util.spec_from_file_location("Studio", os.path.join(home, ROOT, "Studio.py"))
+            module = importlib.util.module_from_spec(spec)
+            sys.modules["Studio"] = module
+            spec.loader.exec_module(module)
+            print(json.dumps({"active": result["state"], "loaded": loaded, "overlayOnPath": any("versions" in entry for entry in sys.path),
+                              "status": studio_overlay.status(), "version": module.VERSION, "thing": module.thing.VALUE,
+                              "thingFile": module.thing.__file__, "health": studio_overlay.health(None)[0],
+                              "mapped": studio_overlay.mapPath(os.path.join(home, ROOT, "Studio.py"))}))
+            """)
+        self.assertEqual(values["active"], "active")
+        self.assertFalse(values["loaded"])
+        self.assertFalse(values["overlayOnPath"])
+        self.assertEqual(values["status"]["loadFailed"]["version"], head)
+        self.assertIn("broken", values["status"]["loadFailed"]["error"])
+        self.assertEqual((values["version"], values["thing"]), ("B", "B"))
+        self.assertEqual(values["thingFile"], os.path.join(self.home, "bin", "..", ROOT, "StudioLib", "thing.py"))
+        self.assertEqual(values["health"], "failed")
+        self.assertEqual(values["mapped"], os.path.join(self.home, ROOT, "Studio.py"))
+        state = self.state()
+        self.assertIsNone(state["active"])
+        self.assertIn(head, state["bad"])
+        self.assertEqual(state["rolledBack"]["from"], head)
+        self.assertEqual(state["boots"], [])
+
+    def test_SymlinkInUnitRefused(self):
+        """A unit with a symbolic link is refused: nothing is ever written through it into the installation."""
+        outside = os.path.join(self.tmp, "outside")
+        os.makedirs(outside)
+        os.symlink(outside, os.path.join(self.home, ROOT, "StudioLib", "linked"))
+        self.change({"Modules/Scripted/Studio/StudioLib/thing.py": "VALUE = 'H'\n"})
+        result = self.check()
+        self.assertEqual(result["result"], "unavailable", result)
+        self.assertIn("symbolic link", result["error"])
+        self.assertEqual(os.listdir(outside), [])
+        with self.assertRaises(updates_commit.VerificationError):
+            updates_commit._checkInside(os.path.join(self.home, ROOT, "StudioLib", "linked", "x.py"), os.path.join(self.home, ROOT))
+
+    def test_OverrideRestricted(self):
+        """SLICER_STUDIO_COMMIT_UPDATES: "off" or a loopback address; anything else is ignored. A version staged from a
+        test address is used only while that address is set."""
+        variable = studio_overlay.ENVIRONMENT_VARIABLE
+        for value in ("on", "1", "true", "https://example.org/repo", "http://192.168.1.2/repo", "ftp://127.0.0.1/x", "file:///tmp/x"):
+            self.assertIsNone(updates_commit.override({variable: value}), value)
+            self.assertEqual(updates_commit.endpoints({variable: value})["git"], updates_commit.GIT_URL, value)
+        self.assertEqual(updates_commit.override({variable: "OFF"}), "off")
+        self.assertEqual(updates_commit.override({variable: "http://127.0.0.1:8/r/"}), "http://127.0.0.1:8/r")
+        self.assertEqual(updates_commit.override({variable: "http://localhost:8/r"}), "http://localhost:8/r")
+        head = self.stageHead()
+        self.assertEqual(studio_overlay.readManifest(self.baseDir(), head)["source"], self.server.url)
+        result, _path, _modules = self.activate(interactive=False)
+        self.assertEqual(result["active"], head)
+        result, _path, _modules = self.activate(env={})
+        self.assertEqual(result["state"], "inactive")
+        self.assertIn("another address", result["error"])
+
+    def test_GarbageCollectionUnderLock(self):
+        """Versions are removed under the state lock (renamed away, then deleted): nothing is left behind."""
+        first = self.stageHead()
+        self.activate()
+        studio_overlay.confirmStart(True)
+        stray = os.path.join(self.baseDir(), "versions", "c" * 40)
+        os.makedirs(os.path.join(stray, "files"))
+        removed = updates_commit.collectGarbage(self.stateRoot, self.base)
+        self.assertEqual(removed, [stray])
+        self.assertEqual(os.listdir(os.path.join(self.baseDir(), "versions")), [first])
+        self.assertEqual([name for name in os.listdir(os.path.join(self.baseDir(), "staging")) if name.startswith("trash-")], [])
+        # The lock is busy: nothing is removed
+        os.makedirs(os.path.join(stray, "files"))
+        holder = studio_overlay.StateLock(self.baseDir(), 1.0)
+        holder.__enter__()
+        try:
+            original = studio_overlay.updateState.__defaults__
+            studio_overlay.updateState.__defaults__ = (0.1,)
+            self.assertEqual(updates_commit.collectGarbage(self.stateRoot, self.base), [])
+        finally:
+            studio_overlay.updateState.__defaults__ = original
+            holder.__exit__(None, None, None)
+        self.assertTrue(os.path.isdir(stray))
+
+    def test_StartPathStartsNoProcess(self):
+        """The start-up path never starts a process (no ps on macOS): the start time comes from /proc or is unknown."""
+        import inspect
+
+        self.assertEqual(list(inspect.signature(studio_overlay.processStartToken).parameters), ["pid"])
+        original = subprocess.run
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("a process was started")
+
+        subprocess.run = refuse
+        try:
+            self.assertTrue(studio_overlay.bootAlive({"pid": os.getpid(), "token": "not the token of this process", "confirmed": True})
+                            in (True, False))
+            self.stageHead()
+            self.activate()
+        finally:
+            subprocess.run = original
+
+    def test_CMakeRecorder(self):
+        """slicerStudioRecordVerbatimFiles() (cmake -P): installed paths relative to the Slicer home on Linux and macOS,
+        a module in a sub-folder (WITH_SUBDIR), Base/Python, generated and outside files left out."""
+        cmake = shutil.which("cmake")
+        if cmake is None:
+            self.skipTest("cmake is not installed")
+        source = os.path.join(self.tmp, "src")
+        binary = os.path.join(self.tmp, "bin")
+        for path in ("Modules/Scripted/Mod/Mod.py", "Modules/Scripted/Mod/ModLib/__init__.py", "Modules/Scripted/Mod/Resources/Icons/m.svg",
+                     "Modules/Scripted/Sub/Sub.py", "Base/Python/slicer/util.py", "Base/Python/slicerqt.py"):
+            os.makedirs(os.path.dirname(os.path.join(source, path)), exist_ok=True)
+            with open(os.path.join(source, path), "w") as f:
+                f.write("")
+        os.makedirs(binary)
+        recorder = os.path.join(SOURCE_DIR, "CMake", "SlicerStudioRecordVerbatimFiles.cmake").replace("\\", "/")
+        records = {}
+        for platform, installRoot in (("linux", "./"), ("macos", "Slicer Studio.app/Contents/")):
+            script = os.path.join(self.tmp, f"record-{platform}.cmake")
+            output = os.path.join(self.tmp, f"records-{platform}.tsv")
+            scripted = "lib/Slicer-5.9/qt-scripted-modules"
+            with open(script, "w") as f:
+                f.write(textwrap.dedent(f"""
+                    set(Slicer_SOURCE_DIR "{source}")
+                    set(Slicer_BINARY_DIR "{binary}")
+                    set(Slicer_INSTALL_ROOT "{installRoot}")
+                    include("{recorder}")
+                    set(CMAKE_CURRENT_SOURCE_DIR "{source}/Modules/Scripted/Mod")
+                    slicerStudioRecordVerbatimFiles(SCRIPTS "Mod;ModLib/__init__.py;{binary}/generated.py;../Other.py"
+                      RESOURCES "Resources/Icons/m.svg;Resources/missing.png"
+                      DESTINATION_DIR "{binary}/{scripted}" INSTALL_DIR "{installRoot}{scripted}" NO_INSTALL_SUBDIR
+                      MODULE_NAME Mod PYTHON_ROOT "{installRoot}{scripted}")
+                    set(CMAKE_CURRENT_SOURCE_DIR "{source}/Modules/Scripted/Sub")
+                    slicerStudioRecordVerbatimFiles(SCRIPTS "Sub.py" DESTINATION_DIR "{binary}/{scripted}/Sub"
+                      INSTALL_DIR "{installRoot}{scripted}" MODULE_NAME Sub PYTHON_ROOT "{installRoot}{scripted}")
+                    set(CMAKE_CURRENT_SOURCE_DIR "{source}/Base/Python")
+                    slicerStudioRecordVerbatimFiles(SCRIPTS "slicer/util;slicerqt" DESTINATION_DIR "{binary}/bin/Python" INSTALL_DIR "{installRoot}bin")
+                    get_property(_records GLOBAL PROPERTY _SLICER_STUDIO_VERBATIM_FILES)
+                    file(WRITE "{output}" "${{_records}}")
+                    """))
+            run = subprocess.run([cmake, "-P", script], capture_output=True, text=True, timeout=60, check=False)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            records[platform] = sorted(line for line in _read(output).splitlines() if line)
+        expected = sorted([
+            f"Modules/Scripted/Mod/Mod.py\t{scripted}\tMod.py\tMod",
+            f"Modules/Scripted/Mod/ModLib/__init__.py\t{scripted}\tModLib/__init__.py\t",
+            f"Modules/Scripted/Mod/Resources/Icons/m.svg\t{scripted}\tResources/Icons/m.svg\t",
+            f"Modules/Scripted/Sub/Sub.py\t{scripted}\tSub/Sub.py\tSub",
+            "Base/Python/slicer/util.py\tbin/Python\tslicer/util.py\t",
+            "Base/Python/slicerqt.py\tbin/Python\tslicerqt.py\t",
+        ])
+        self.assertEqual(records["linux"], expected)
+        self.assertEqual(records["macos"], expected)
+
+    #
     # make_build_info.py
     #
 
@@ -1149,6 +1663,7 @@ class StudioCommitUpdatesTest(unittest.TestCase):
         self.assertEqual(info["tree"], run("rev-parse", "HEAD^{tree}"))
         self.assertFalse(info["dirty"])
         self.assertEqual(info["studioVersion"], "1.2.3")
+        self.assertEqual(info["branch"], run("rev-parse", "--abbrev-ref", "HEAD"))
         with gzip.open(os.path.join(out, "studio_build_files.json.gz")) as f:
             files = json.load(f)
         self.assertEqual(len(files["map"]), len(MAP))

@@ -162,6 +162,40 @@ def _openPendingFileOpens():
 
 
 def _onStartupCompleted():
+    """Apply Studio, start the update service, autosave and the templates panel (``_completeStartup``), then tell the
+    code updates from main whether this all ran (``studio_overlay.reportStartup``): a start of a code update is
+    confirmed only then, so that an update that breaks the start-up of Studio or its update service (which must stay
+    able to fetch a fix from main) is rolled back at the next start. Keep this report when changing the start-up."""
+    ok = False
+    reason = None
+    try:
+        ok = _completeStartup()
+        if not ok:
+            reason = "the update service did not start"
+    except Exception as error:
+        reason = f"{error.__class__.__name__}: {error}"
+        raise
+    finally:
+        _reportStartupToCodeUpdates(ok, reason)
+
+
+def _reportStartupToCodeUpdates(ok, reason):
+    import sys
+
+    overlay = sys.modules.get("studio_overlay")
+    report = getattr(overlay, "reportStartup", None) if overlay is not None else None
+    if report is not None:
+        try:
+            report("Studio", ok, reason)
+        except Exception:
+            import logging
+            import traceback
+
+            logging.error("Studio: the start-up report failed:\n" + traceback.format_exc())
+
+
+def _completeStartup():
+    """The start-up of Studio (see ``_onStartupCompleted``). Return False when the update service could not start."""
     global _startupCompleted
     _startupCompleted = True
     if _pendingFileOpens:
@@ -200,6 +234,7 @@ def _onStartupCompleted():
             started.append(True)
             _startAutosave()
 
+    updatesStarted = True
     try:
         from StudioLib import updates
 
@@ -208,6 +243,7 @@ def _onStartupCompleted():
         import logging
         import traceback
 
+        updatesStarted = False
         logging.error("Updates could not be started:\n" + traceback.format_exc())
         startAutosave()
     # Settings > Templates is also there in Classic: the Normalize and Map messages of the Lesion Network Mapping module
@@ -221,6 +257,7 @@ def _onStartupCompleted():
         import traceback
 
         logging.error("Settings > Templates could not be scheduled:\n" + traceback.format_exc())
+    return updatesStarted
 
 
 def _startAutosave():

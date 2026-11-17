@@ -265,7 +265,15 @@ Between releases, an installed Slicer Studio also takes the newest code of the
   newer commits on `main` change such a file, nothing is applied and Slicer
   Studio says once "Newer code on main changes parts that are compiled into
   Slicer Studio (N files, for example ...). It needs a new build and will come
-  with the next release." Changes to documentation and tests are ignored.
+  with the next release." Changes to documentation, tests and the developer,
+  release and web tools are ignored. Deleting a Python file applies only inside
+  a package (a deleted top-level module, or a scripted module, would still be
+  found in the installed files, so it needs a new build).
+- **Only newer code.** A build takes code from `main` only when `main` contains
+  the commit it was built from (checked against the history of `main` each
+  time). A build made from another branch, or from a commit that is ahead of
+  `main` (for example a bug-fix branch), takes nothing, so its own newer code is
+  never replaced by older code from `main`; **Settings** > **Updates** says so.
 - **When.** A few seconds after each start (and once a day while Slicer Studio
   runs), in the background; it never slows the start-up down, and without a
   network connection nothing happens. While a newer release is available, code
@@ -286,20 +294,31 @@ Between releases, an installed Slicer Studio also takes the newest code of the
   work as usual) and starts it again; with **Later** the update applies the
   next time you start Slicer Studio. The first start with it says "Slicer
   Studio now runs code from main @ abc1234."
-- **Automatic rollback.** If Slicer Studio does not start properly with a code
-  update (it closes, crashes or an updated module fails to load within about 5
-  seconds after the start-up), the next start goes back to the previous code
-  update, or to the installed version, and says so. That commit is not taken
-  again; a later commit on `main` is. If something goes wrong later, **Go back**
-  in **Settings** > **Updates** returns to the previous code update or to the
-  installed build at the next start.
+- **Automatic rollback.** A start with a code update counts as good only when,
+  after the start-up, the Studio interface and the update service (which must
+  stay able to fetch a fix from `main`) have started and every updated module
+  loaded from the update. If Slicer Studio does not start properly with a code
+  update (it closes or crashes before that, or Studio reports that its start-up
+  failed), the next start goes back to the previous code update, or to the
+  installed version, and says so. It also goes back after two crashes in a row
+  within ten minutes of the start, and at once (for the rest of that session
+  the installed files are used) when an updated module fails to load. Closing
+  Slicer Studio while it is still starting (for example from a dialog shown at
+  the start) does not count against the update. That commit is not taken again;
+  a later commit on `main` is. If something goes wrong later, **Go back** in
+  **Settings** > **Updates** returns to the previous code update or to the
+  installed build at the next start. If Slicer Studio cannot be used at all,
+  start it once with the environment variable `SLICER_STUDIO_COMMIT_UPDATES=off`
+  (the installed code runs), or delete the folder `StudioUpdate/commit` in its
+  application data folder.
 - **Settings** > **Updates** > **Code from main** shows the installed build
   (version and commit), the code that runs, the last check, **Check main now**,
   **Restart now**, **Go back**, and the switch "Also get code updates from main
   between releases" (`Studio/Updates/CommitUpdates`, on by default). Turning it
   off brings back the installed code at the next start. The environment
   variable `SLICER_STUDIO_COMMIT_UPDATES=off` (or `SLICER_STUDIO_UPDATE_FEED=off`)
-  turns it off too.
+  turns it off too. (The tests also set it to a repository address on the same
+  computer; any other value is ignored.)
 - **Not updated:** development builds (a build tree or a source checkout), a
   build made from a source tree with uncommitted changes, the web version, runs
   under `--testing`, and the command-line tools that do not start the
