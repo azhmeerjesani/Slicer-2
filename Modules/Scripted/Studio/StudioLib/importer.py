@@ -2245,18 +2245,32 @@ def _routeStudyLoad(paths, kinds, shell):
         studySession.open(sids[0], switchToDraw=True)
         kept = [(path, kind) for path, kind in zip(paths, kinds, strict=True) if kind not in _TRACED_KINDS]
         return [path for path, _kind in kept], [kind for _path, kind in kept]
-    if not studySession.writeCurrent():
+    outside = traced[sids.index(None)]
+    message = _("Study {study} closed: {file} is not one of its subjects").format(study=studySession.name, file=os.path.basename(outside))
+    if not _closeStudyForOutsideLoad(studySession, shell, message, scene="scene" in kinds):
         return None
+    return paths, kinds
+
+
+def _closeStudyForOutsideLoad(studySession, shell, message, scene=False):
+    """Close the open study before data from outside it is loaded or started (``_routeStudyLoad()``: Open..., a drop, a
+    recent file, a DICOM folder; Start on template with another template): its current subject's edits are written first,
+    a scene then opens as its own project (``scene``), and a consequence toast ``message`` offers to reopen the study. Left
+    open, Draw would trace that data under the study's breadcrumb and it would be saved nowhere. Return False when the
+    current subject's edits could not be written (a toast says why, and the study stays open): nothing is loaded then.
+    """
+    if not studySession.writeCurrent():
+        return False
     from . import study_ui
 
-    studyPath, studyName, sid = studySession.path, studySession.name, studySession.current()
+    studyPath, sid = studySession.path, studySession.current()
     study_ui.closeStudy()
-    if "scene" in kinds:
+    if scene:
         _continueProjectAfterStudy()
-    outside = traced[sids.index(None)]
-    shell.toast(_("Study {study} closed: {file} is not one of its subjects").format(study=studyName, file=os.path.basename(outside)),
-                level="consequence", action=lambda: study_ui.openStudy(studyPath, shell, subject=sid), actionText=_("Reopen study"))
-    return paths, kinds
+    if shell is not None:
+        shell.toast(message, level="consequence", action=lambda: study_ui.openStudy(studyPath, shell, subject=sid),
+                    actionText=_("Reopen study"))
+    return True
 
 
 def _headerDataFiles(paths):
@@ -2924,6 +2938,17 @@ def loadRecentFile(properties, action=None, shell=None):
         # A lesion opens as with Open...: a probabilistic mask is not truncated to integers by the reader (it would
         # open empty), and the notes of its sidecar are restored (loadLesion, restoreSidecarText)
         return loadFiles([fileName], shell)
+    if shell is not None and fileName and os.path.exists(fileName):
+        # With a study open, as with Open... and a drop (loadFiles): a subject's own scan or lesion opens that subject, and
+        # any other scan, lesion or scene closes the study first. Triggered with the study open, the recent file's scan
+        # was traced under the study's breadcrumb and saved nowhere (BB-1)
+        kind = "scene" if isScene else fileKind(fileName)
+        if kind not in _TRACED_KINDS and _recordedFileType(properties) in ("VolumeFile", "SequenceFile", "SegmentationFile", "LabelMapVolumeFile"):
+            kind = "volume"  # a scan of another format (a FreeSurfer .mgz) recorded as a volume
+        routed = _routeStudyLoad([fileName], [kind], shell)
+        if routed is None or not routed[0]:
+            # The study stays open (its subject's edits could not be written), or the file opened its subject
+            return LoadResult()
     openNode = openNodeForFile(fileName) if shell is not None and not isScene else None
     if openNode is None and shell is not None and not isScene and os.path.isfile(fileName) and fileKind(fileName) == "lesion":
         openNode = openLabelMapAsLesion(fileName)
@@ -3308,6 +3333,11 @@ def _importDicom(path, files, shell):
     """Import the DICOM folder ``path``, or the DICOM ``files`` when ``path`` is None (``importDicomFolder()``)."""
     shell = _currentShell(shell)
     source = path if path is not None else os.path.dirname(files[0])
+    if shell is not None:
+        # With a study open, a DICOM series is not one of its subjects: the study is closed first, as with Open... and a
+        # file drop (``_routeStudyLoad()``). Left open, Draw traced the series under the study's breadcrumb, saved nowhere
+        if _routeStudyLoad([source], ["volume"], shell) is None:
+            return False
     if not hasattr(slicer.modules, "dicom"):
         openAddDataDialog([path] if path is not None else files)
         return False
@@ -4646,6 +4676,14 @@ def startOnTemplate(res=2, shell=None, volumeNode=None, templateId=None):
         # re-targeted: the case is a new subject whose lesion is written by Done -> next.
         studySession.newCase()
         return studySession.volumeNode(), studySession.segmentationNode()
+    if studySession is not None and volumeNode is None:
+        # Another template starts a case outside the study: the study is closed first, as with Open... and a file drop.
+        # Left open, the lesion was traced under the study's breadcrumb and saved nowhere (BB-1)
+        chosen = _chosenTemplate(templateId)
+        message = _("Study {study} closed: {template} is not its template").format(
+            study=studySession.name, template=getattr(chosen, "name", None) or templateId)
+        if not _closeStudyForOutsideLoad(studySession, shell, message):
+            return None, None
     forced2mm = False
     if volumeNode is None:
         template = _chosenTemplate(templateId)

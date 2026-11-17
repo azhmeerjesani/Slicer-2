@@ -196,6 +196,9 @@ Run with the main window and testing enabled::
 - ``test_16b_read_only_study_says_so_and_logs_one_line_warnings`` (BB-1): a study folder that cannot be written is said
   when it opens, its save status is not "All changes saved", PermissionErrors of the heartbeat, the study save and the lesion
   QC jobs are one-line warnings (no traceback, no errno or lock name in the toast) and the quit prompt names the tracing.
+- ``test_53b_recent_file_dicom_and_another_template_close_the_study_first`` (BB-1): with a study open, a scan from Search >
+  Recent files, a DICOM folder or files, and Start on template > another template close the study first (its subject's
+  edits are written, a toast offers to reopen it), as Open... and a file drop do; nothing loads when the edits cannot be written.
 - ``test_97_sliders_with_a_range_over_two_billion_steps_paint`` (BB-1): a slider or scroll bar whose integer range is 2^31
   steps or more (QSlider [INT_MIN, 0], the slice offset slider of a volume whose voxel size is 1e12 mm) paints and is
   hit-tested without SIGFPE (QStyle::sliderPositionFromValue() divided by zero on the int overflow of "max - min").
@@ -6315,6 +6318,126 @@ class StudioRegressionTest(unittest.TestCase):
             pump()
             slicer.app.sendPostedEvents(None, qt.QEvent.DeferredDelete)
             slicer.mrmlScene.Clear(0)
+
+    def test_53b_recent_file_dicom_and_another_template_close_the_study_first(self):
+        """With a study open, a scan from Search > Recent files or a dropped DICOM folder loaded into the study, and Start on
+        template > another template (your own) started a lesion outside it without closing it: Draw traced it under the
+        study's subject breadcrumb and nothing saved it (BB-1). These routes now close the study first, as Open... and a
+        file drop do (``importer._routeStudyLoad()``): the subject's edits are written, a toast offers to reopen the study,
+        and when the edits cannot be written nothing is loaded and the study stays open.
+        """
+        from StudioLib import importer, study_ui
+
+        try:
+            from LesionNetworkMappingLib import nifti
+        except ImportError:
+            self.skipTest("needs the lesion network mapping library")
+        events = []
+
+        class FakeStudy:
+            name = "Fake study"
+            path = os.path.join(self.directory, "Fake study")
+
+            def __init__(self, writable):
+                self.writable = writable
+
+            def current(self):
+                return "sub-01"
+
+            def writeCurrent(self):
+                events.append("write")
+                return self.writable
+
+            def subjectOfFile(self, path):
+                return None
+
+            def volumeNode(self):
+                return None
+
+            def segmentationNode(self):
+                return None
+
+            def templateRecord(self):
+                return {}
+
+            def newCase(self):
+                events.append("newCase")
+
+        class FakeShell:
+            def __init__(self):
+                self.toasts = []
+
+            def isActive(self):
+                return True
+
+            def toast(self, text, *args, **kwargs):
+                self.toasts.append(str(text))
+
+        state = {"session": None}
+
+        def closeStudy():
+            events.append("close")
+            state["session"] = None
+
+        class FakeAction:
+            def trigger(self):
+                events.append("load")
+
+        outside = os.path.join(self.directory, "patient08_T1w.nii.gz")
+        nifti.write_nifti(outside, np.zeros((4, 4, 4), np.uint8), np.eye(4))
+        dicomFile = os.path.join(self.directory, "dicom", "IM0001.dcm")
+        os.makedirs(os.path.dirname(dicomFile))
+        with open(dicomFile, "wb") as f:
+            f.write(b"\0" * 128 + b"DICM")
+        saved = (importer._studySession, study_ui.closeStudy, importer._afterLoad, importer._importDicomFileList,
+                 importer._chosenTemplate, importer._isStudyTemplateChoice, importer._startOnRegistryTemplate,
+                 slicer.util.selectModule, slicer.util.warningDisplay)
+        importer._studySession = lambda: state["session"]
+        study_ui.closeStudy = closeStudy
+        importer._afterLoad = lambda result, shell: None
+        importer._importDicomFileList = lambda files, database: (events.append("load"), False)[1]
+        importer._chosenTemplate = lambda templateId: types.SimpleNamespace(id=templateId, name="Another template")
+        importer._isStudyTemplateChoice = lambda studySession, templateId: False
+        importer._startOnRegistryTemplate = lambda template, shell: (events.append("load"), ("volume", "lesion"))[1]
+        slicer.util.selectModule = lambda *args, **kwargs: None
+        slicer.util.warningDisplay = lambda *args, **kwargs: None
+        try:
+            routes = (
+                ("recent file", lambda shell: importer.loadRecentFile({"fileName": outside, "fileType": "VolumeFile"}, FakeAction(), shell),
+                 "is not one of its subjects"),
+                ("DICOM files", lambda shell: importer.importDicomFiles([dicomFile], shell), "is not one of its subjects"),
+                ("another template", lambda shell: importer.startOnTemplate(shell=shell, templateId="user:another"),
+                 "is not its template"),
+            )
+            for name, route, toastText in routes:
+                with self.subTest(route=name):
+                    if name == "DICOM files" and not hasattr(slicer.modules, "dicom"):
+                        self.skipTest("needs the DICOM module")
+                    if name == "another template" and importer._templatesModule() is None:
+                        self.skipTest("needs the templates registry")
+                    # The subject's edits cannot be written: nothing is loaded, the study stays open
+                    del events[:]
+                    studioShell = FakeShell()
+                    session = FakeStudy(writable=False)
+                    state["session"] = session
+                    route(studioShell)
+                    self.assertEqual(events, ["write"])
+                    self.assertIs(state["session"], session)
+                    # Written: the study is closed before anything is loaded, and a toast offers to reopen it
+                    del events[:]
+                    state["session"] = FakeStudy(writable=True)
+                    route(studioShell)
+                    # (DICOM: the import itself may stop at the database of the test profile, after the close)
+                    expected = ["write", "close"] if name == "DICOM files" else ["write", "close", "load"]
+                    self.assertEqual(events[:len(expected)], expected, events)
+                    self.assertNotIn("newCase", events)
+                    self.assertIsNone(state["session"])
+                    self.assertTrue(any(toastText in text for text in studioShell.toasts), studioShell.toasts)
+        finally:
+            (importer._studySession, study_ui.closeStudy, importer._afterLoad, importer._importDicomFileList,
+             importer._chosenTemplate, importer._isStudyTemplateChoice, importer._startOnRegistryTemplate,
+             slicer.util.selectModule, slicer.util.warningDisplay) = saved
+            state["session"] = None
 
     def test_53_a_scan_opened_from_outside_a_study_never_feeds_done_next(self):
         """With a study open, a scan opened from outside it (Open…, Library, a drop) was traced under the study's breadcrumb:
