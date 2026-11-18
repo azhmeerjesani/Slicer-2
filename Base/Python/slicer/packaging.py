@@ -20,6 +20,7 @@ from __future__ import annotations
 import importlib
 import importlib.metadata
 import logging
+import os
 import shlex
 import slicer.util
 import sys
@@ -957,7 +958,20 @@ def _build_pip_args(
     if constraints is not None:
         args.extend(["-c", str(constraints)])
 
-    return args
+    return _studioProfileArgs(args)
+
+
+def _studioProfileArgs(args: list[str]) -> list[str]:
+    """Slicer Studio: install into the user profile (``--user``, with ``PYTHONUSERBASE`` set by ``studio_profile``),
+    so that the packages are kept when the application is replaced. Unchanged when the profile does not take the
+    packages (``Studio/Profile/PipToProfile`` off, PythonSlicer started on its own, a build without the profile)."""
+    if not os.environ.get("SLICER_STUDIO_PYTHON_USERBASE"):
+        return args
+    try:
+        import studio_profile
+    except ImportError:
+        return args
+    return studio_profile.pipArguments(args)
 
 
 def _pip_install_with_skips(
