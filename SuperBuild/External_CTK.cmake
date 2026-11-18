@@ -62,6 +62,8 @@ if(NOT DEFINED CTK_DIR AND NOT Slicer_USE_SYSTEM_${proj})
     list(APPEND EXTERNAL_PROJECT_OPTIONAL_CMAKE_CACHE_ARGS
       -DQt6_DIR:FILEPATH=${Qt6_DIR}
       -DCTK_QT_VERSION:STRING=6
+      # Find the Qt tools packages (moc, rcc, uic) of this Qt first (see SlicerBlockFindQtAndCheckVersion.cmake)
+      -DCMAKE_PREFIX_PATH:PATH=${Slicer_QT_PREFIX_PATH}
       )
   else()
     list(APPEND EXTERNAL_PROJECT_OPTIONAL_CMAKE_CACHE_ARGS

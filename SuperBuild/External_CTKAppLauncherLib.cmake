@@ -1,4 +1,7 @@
 
+# This builds the whole commontk/AppLauncher project. On macOS its build tree is
+# also the CTKAppLauncher_DIR (the native launcher executable, see
+# External_CTKAPPLAUNCHER.cmake), so it must use the Qt of the build.
 set(proj CTKAppLauncherLib)
 
 # Set dependency list
@@ -35,6 +38,8 @@ if(NOT DEFINED CTKAppLauncherLib_DIR AND NOT Slicer_USE_SYSTEM_${proj})
     list(APPEND EXTERNAL_PROJECT_OPTIONAL_CMAKE_CACHE_ARGS
       -DCTKAppLauncher_QT_VERSION:STRING=6
       -DQt6_DIR:FILEPATH=${Qt6_DIR}
+      # Find the Qt tools packages (moc, rcc, uic) of this Qt first (see SlicerBlockFindQtAndCheckVersion.cmake)
+      -DCMAKE_PREFIX_PATH:PATH=${Slicer_QT_PREFIX_PATH}
     )
   else()
     list(APPEND EXTERNAL_PROJECT_OPTIONAL_CMAKE_CACHE_ARGS

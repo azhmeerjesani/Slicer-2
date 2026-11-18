@@ -85,7 +85,64 @@ if(DEFINED CTK_Qt6_DIR AND NOT EXISTS "${CTK_Qt6_DIR}")
   message(FATAL_ERROR "error: You should probably re-configure CTK. CTK_Qt6_DIR points to a nonexistent directory: ${CTK_Qt6_DIR}")
 endif()
 
+#-----------------------------------------------------------------------------
+# Keep every Qt 6 CMake package (in particular the Qt6<Module>Tools packages that
+# define Qt6::qmake, Qt6::moc, Qt6::rcc and Qt6::uic) in the Qt installation
+# selected with Qt6_DIR.
+#
+# Qt looks up its Tools packages without NO_DEFAULT_PATH, and their version files
+# accept any newer version. A second Qt elsewhere on the machine (for example
+# Homebrew's /opt/homebrew/lib/cmake, found through the "<prefix>/bin" entries of
+# PATH, or the /usr/local system prefix of an Intel Mac) is then preferred to the
+# selected one: the build used its moc/rcc/uic, and the qmake-derived
+# QT_PLUGINS_DIR packaged its plugins (for example a Qt 6.12 libqcocoa next to Qt
+# 6.11 frameworks, which stops the application at start-up with "Plugin uses
+# incompatible Qt library").
+#
+# Qt installs all its CMake packages in one directory (<libdir>/cmake). The
+# paths are compared without resolving symlinks, because Homebrew links the
+# packages of several kegs into one such directory.
+set(_slicer_qt_cmake_dir "")
+if(Slicer_REQUIRED_QT_VERSION VERSION_GREATER_EQUAL "6" AND DEFINED Qt6_DIR AND EXISTS "${Qt6_DIR}"
+    AND "${QT_HOST_PATH}" STREQUAL "")
+  get_filename_component(_slicer_qt_cmake_dir "${Qt6_DIR}/.." ABSOLUTE)
+  get_filename_component(_slicer_qt_prefix "${Qt6_DIR}/../../.." ABSOLUTE)
+
+  # Forget Qt packages found in another Qt installation by an earlier configuration
+  # (a cached <Package>_DIR is used as is, whatever the search paths are).
+  get_cmake_property(_slicer_qt_cache_vars CACHE_VARIABLES)
+  foreach(_var IN LISTS _slicer_qt_cache_vars)
+    if(NOT _var MATCHES "^(Qt6[A-Za-z0-9]+)_DIR$" OR _var STREQUAL "Qt6_DIR")
+      continue()
+    endif()
+    set(_pkg "${CMAKE_MATCH_1}")
+    set(_value "${${_var}}")
+    get_filename_component(_value_name "${_value}" NAME)
+    if(NOT _value_name STREQUAL _pkg)
+      continue() # not a Qt package directory (or <Package>_DIR-NOTFOUND)
+    endif()
+    get_filename_component(_value_parent "${_value}/.." ABSOLUTE)
+    if(NOT _value_parent STREQUAL _slicer_qt_cmake_dir)
+      message(STATUS "Forgetting ${_var}=${_value}: it is not part of the Qt in ${_slicer_qt_cmake_dir}")
+      unset(${_var} CACHE)
+      unset(${_var})
+    endif()
+  endforeach()
+
+  # Search the selected Qt first (CMAKE_PREFIX_PATH comes before PATH and the
+  # system prefixes). "<entry>/<Package>*/" is a search location of find_package,
+  # so the CMake folder of Qt is enough; the whole prefix is not added, which
+  # would also put its include and lib folders (for example all of Homebrew's)
+  # first for find_path and find_library.
+  set(_slicer_qt_saved_prefix_path "${CMAKE_PREFIX_PATH}")
+  list(PREPEND CMAKE_PREFIX_PATH "${_slicer_qt_cmake_dir}")
+endif()
+
 __SlicerBlockFindQtAndCheckVersion_find_qt()
+
+if(NOT _slicer_qt_cmake_dir STREQUAL "")
+  set(CMAKE_PREFIX_PATH "${_slicer_qt_saved_prefix_path}")
+endif()
 
 set(_project_name ${Slicer_MAIN_PROJECT_APPLICATION_NAME})
 if(NOT Slicer_SOURCE_DIR)
@@ -93,8 +150,92 @@ if(NOT Slicer_SOURCE_DIR)
 endif()
 message(STATUS "Configuring ${_project_name} with Qt ${_major}.${_minor}.${_patch} (using modules: ${command_separated_module_list})")
 
+if(NOT _slicer_qt_cmake_dir STREQUAL "")
+  # Every Qt package must come from the selected Qt and have its version.
+  get_cmake_property(_slicer_qt_cache_vars CACHE_VARIABLES)
+  set(_slicer_qt_mismatches)
+  foreach(_var IN LISTS _slicer_qt_cache_vars)
+    if(NOT _var MATCHES "^(Qt6[A-Za-z0-9]+)_DIR$" OR _var STREQUAL "Qt6_DIR")
+      continue()
+    endif()
+    set(_pkg "${CMAKE_MATCH_1}")
+    set(_value "${${_var}}")
+    get_filename_component(_value_name "${_value}" NAME)
+    if(NOT _value_name STREQUAL _pkg)
+      continue()
+    endif()
+    get_filename_component(_value_parent "${_value}/.." ABSOLUTE)
+    if(NOT _value_parent STREQUAL _slicer_qt_cmake_dir)
+      list(APPEND _slicer_qt_mismatches "${_var}=${_value}")
+    elseif(DEFINED ${_pkg}_VERSION AND NOT "${${_pkg}_VERSION}" STREQUAL ""
+        AND NOT "${${_pkg}_VERSION}" VERSION_EQUAL "${_major}.${_minor}.${_patch}")
+      list(APPEND _slicer_qt_mismatches "${_pkg} ${${_pkg}_VERSION} (${_value})")
+    endif()
+  endforeach()
+  # The tools must be in the selected Qt prefix (compared as given, and with
+  # symlinks resolved: Homebrew links its kegs into one prefix).
+  set(_slicer_qt_install_prefix "${_slicer_qt_prefix}")
+  if(DEFINED QT6_INSTALL_PREFIX)
+    set(_slicer_qt_install_prefix "${QT6_INSTALL_PREFIX}")
+  endif()
+  get_filename_component(_slicer_qt_install_prefix_real "${_slicer_qt_install_prefix}" REALPATH)
+  foreach(_tool IN ITEMS qmake moc rcc uic)
+    if(NOT TARGET Qt6::${_tool})
+      continue()
+    endif()
+    get_target_property(_tool_location Qt6::${_tool} LOCATION)
+    get_filename_component(_tool_location_abs "${_tool_location}" ABSOLUTE)
+    get_filename_component(_tool_location_real "${_tool_location}" REALPATH)
+    string(FIND "${_tool_location_abs}/" "${_slicer_qt_install_prefix}/" _pos)
+    string(FIND "${_tool_location_real}/" "${_slicer_qt_install_prefix_real}/" _pos_real)
+    if(NOT _pos EQUAL 0 AND NOT _pos_real EQUAL 0)
+      list(APPEND _slicer_qt_mismatches "Qt6::${_tool}=${_tool_location}")
+    endif()
+  endforeach()
+  if(_slicer_qt_mismatches)
+    list(JOIN _slicer_qt_mismatches "\n  " _slicer_qt_mismatches_text)
+    message(FATAL_ERROR "error: Qt ${_major}.${_minor}.${_patch} was selected with Qt6_DIR=${Qt6_DIR}, "
+      "but these Qt packages or tools come from another Qt installation or version:\n  ${_slicer_qt_mismatches_text}\n"
+      "Another Qt (for example Homebrew's) is found first through PATH, CMAKE_PREFIX_PATH or a system prefix. "
+      "Remove it from PATH or put the selected Qt first in CMAKE_PREFIX_PATH, then configure a clean build tree.")
+  endif()
+endif()
+
 # Since neither Qt5 or Qt6 set CMake variables for plugins and binary directories,
 # we explicitly set them here.
+if(_major VERSION_GREATER_EQUAL "6" AND DEFINED QT6_INSTALL_PREFIX AND DEFINED QT6_INSTALL_PLUGINS)
+  # Use the install layout of the Qt package selected with Qt6_DIR (QtInstallPaths.cmake,
+  # the same answers as its "qmake -query") rather than the qmake that the Qt6::qmake
+  # target names, which could belong to another Qt.
+  set(QT_PLUGINS_DIR "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_PLUGINS}")
+  set(QT_BINARY_DIR "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}")
+  set(QT_LIBRARY_DIR "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_LIBS}")
+  message(STATUS "Setting QT_PLUGINS_DIR: ${QT_PLUGINS_DIR}")
+  message(STATUS "Setting QT_BINARY_DIR: ${QT_BINARY_DIR}")
+  message(STATUS "Setting QT_LIBRARY_DIR: ${QT_LIBRARY_DIR}")
+  # Passed by the superbuild as CMAKE_PREFIX_PATH to the projects built with Qt
+  # (CTK, PythonQt, VTK, ...), so that they find the Tools packages of this Qt too.
+  if(NOT _slicer_qt_cmake_dir STREQUAL "")
+    set(Slicer_QT_PREFIX_PATH "${_slicer_qt_cmake_dir}")
+  else()
+    set(Slicer_QT_PREFIX_PATH "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_LIBS}/cmake")
+  endif()
+
+  # The qmake of the selected Qt must report the same version (it is the qmake
+  # used by tools such as the PythonQt generator).
+  set(_slicer_qmake "${QT_BINARY_DIR}/qmake${CMAKE_EXECUTABLE_SUFFIX}")
+  if(EXISTS "${_slicer_qmake}" AND NOT CMAKE_CROSSCOMPILING)
+    execute_process(
+      COMMAND "${_slicer_qmake}" -query QT_VERSION
+      OUTPUT_VARIABLE _slicer_qmake_version
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      RESULT_VARIABLE _slicer_qmake_result
+      )
+    if(_slicer_qmake_result EQUAL 0 AND NOT _slicer_qmake_version VERSION_EQUAL "${_major}.${_minor}.${_patch}")
+      message(FATAL_ERROR "error: ${_slicer_qmake} reports Qt ${_slicer_qmake_version}, but Qt6_DIR=${Qt6_DIR} is Qt ${_major}.${_minor}.${_patch}")
+    endif()
+  endif()
+else()
 get_target_property(QMAKE_EXECUTABLE Qt${_major}::qmake LOCATION)
 
 execute_process(
@@ -129,6 +270,7 @@ if(NOT qmake_result EQUAL 0)
     message(FATAL_ERROR "Failed to get QT_LIBRARY_DIR using qmake")
 endif()
 message(STATUS "Setting QT_LIBRARY_DIR: ${QT_LIBRARY_DIR}")
+endif()
 
 # Sanity checks
 foreach(varname IN ITEMS QT_PLUGINS_DIR QT_BINARY_DIR QT_LIBRARY_DIR)

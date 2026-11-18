@@ -102,6 +102,9 @@ FAKED_PLATFORM=0
 MACOS_FLOOR=${DEFAULT_MACOS_MIN}
 BREW=""
 BREW_PREFIX=""
+# Homebrew tools the build may run, linked into ${WORK_DIR}/tools/brew-bin
+# (isolate_brew_path): never the whole of Homebrew's bin, which holds Qt's qmake.
+BREW_TOOLS="ccache git-lfs"
 CMAKE_BIN="cmake"
 QT_MODE=""
 QT_REQUESTED_VERSION=""
@@ -110,6 +113,7 @@ QT_CMAKE_DIR=""
 QT_VERSION_FOUND=""
 QT_MAJOR_MINOR=""
 QT_MINOS=""
+QT_CMAKE_SEARCH_DIR=""
 SLICER_BUILD_DIR=""
 LOG_DIR=""
 CPACK_DMG=""
@@ -185,8 +189,7 @@ Package:
 General:
   --ci                   Non-interactive and quieter output (build output goes
                          to the log file, with a progress line every 5 minutes).
-  --yes                  Answer yes to questions (deleting a build, installing
-                         Rosetta 2).
+  --yes                  Answer yes to questions (deleting a build).
   --dry-run              Print the plan and the commands without running them.
                          Works on any system; on Linux, set
                          SLICER_STUDIO_FAKE_UNAME=Darwin/arm64[/<macOS version>].
@@ -631,6 +634,7 @@ find_brew() {
     else
       BREW_PREFIX="/usr/local"
     fi
+    isolate_brew_path
     return 0
   fi
   # Prefer the Homebrew of the build architecture: an Apple Silicon Mac can
@@ -644,16 +648,54 @@ find_brew() {
     if [ -n "${candidate}" ] && [ -x "${candidate}" ]; then
       BREW=${candidate}
       BREW_PREFIX=$("${BREW}" --prefix 2>/dev/null)
-      # Make Homebrew's tools (ccache, git-lfs) visible to the build.
-      case ":${PATH}:" in
-        *":${BREW_PREFIX}/bin:"*) ;;
-        *) PATH="${BREW_PREFIX}/bin:${PATH}" ;;
-      esac
-      export PATH
+      isolate_brew_path
       return 0
     fi
   done
   return 1
+}
+
+isolate_brew_path() {
+  # Make only the Homebrew tools the build needs visible, not the whole of
+  # ${BREW_PREFIX}/bin. CMake turns every "<dir>/bin" of PATH into the search
+  # prefix "<dir>", and Qt looks up its Tools packages (moc, rcc, uic, qmake)
+  # without excluding those: with Homebrew's bin on PATH, a Homebrew Qt (for
+  # example 6.12) was used next to the official Qt (6.11) the build was
+  # configured with, and its plugins were packaged; the application then did
+  # not start ("Plugin uses incompatible Qt library"). Directories that hold
+  # another Qt's qmake are dropped from PATH for the same reason.
+  local tools_dir="${WORK_DIR}/tools/brew-bin"
+  local kept=() dropped=() entry
+  local IFS=:
+  for entry in ${PATH}; do
+    if [ -z "${entry}" ] || [ "${entry}" = "${tools_dir}" ]; then
+      continue
+    fi
+    if [ "${entry}" = "${BREW_PREFIX}/bin" ] || [ "${entry}" = "${BREW_PREFIX}/sbin" ] ||
+      [ -x "${entry}/qmake" ] || [ -x "${entry}/qmake6" ]; then
+      dropped+=("${entry}")
+    else
+      kept+=("${entry}")
+    fi
+  done
+  unset IFS
+  local tool
+  if [ "${DRY_RUN}" = 1 ]; then
+    info "would link ${BREW_TOOLS} from ${BREW_PREFIX}/bin into ${tools_dir}"
+  else
+    mkdir -p "${tools_dir}" || die "${EXIT_PREFLIGHT}" "could not create ${tools_dir}"
+    for tool in ${BREW_TOOLS}; do
+      ln -sfn "${BREW_PREFIX}/bin/${tool}" "${tools_dir}/${tool}"
+    done
+  fi
+  PATH="${tools_dir}"
+  if [ ${#kept[@]} -gt 0 ]; then
+    PATH="${PATH}:$(IFS=:; printf '%s' "${kept[*]}")"
+  fi
+  export PATH
+  if [ ${#dropped[@]} -gt 0 ]; then
+    info "not on PATH for the build (another Qt or all of Homebrew): ${dropped[*]}"
+  fi
 }
 
 resolve_locations() {
@@ -798,27 +840,6 @@ preflight() {
     add_preflight_problem "Homebrew is required to install the build tools. Install it from https://brew.sh with:
       /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"
     then run this script again"
-  fi
-
-  # Rosetta 2: the CTK application launcher used by the build tree and by the
-  # bundled PythonSlicer is only released as an x86_64 binary.
-  if [ "${HOST_ARCH}" = "arm64" ]; then
-    if [ "${FAKED_PLATFORM}" = 1 ]; then
-      info "would check: Rosetta 2 (needed by the x86_64-only CTK application launcher)"
-    elif ! /usr/bin/arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
-      if [ "${DRY_RUN}" = 1 ]; then
-        info "Rosetta 2 is missing and would be installed (softwareupdate --install-rosetta --agree-to-license)"
-      elif confirm "Rosetta 2 is required by the Slicer application launcher. Install it now?"; then
-        local sudo_cmd=()
-        if [ "$(id -u)" != 0 ]; then
-          sudo_cmd=(sudo)
-        fi
-        run ${sudo_cmd[@]+"${sudo_cmd[@]}"} /usr/sbin/softwareupdate --install-rosetta --agree-to-license ||
-          add_preflight_problem "installing Rosetta 2 failed"
-      else
-        add_preflight_problem "Rosetta 2 is required: run 'softwareupdate --install-rosetta --agree-to-license' (or re-run with --yes)"
-      fi
-    fi
   fi
 
   # Disk space
@@ -1164,6 +1185,8 @@ resolve_qt() {
       ;;
   esac
 
+  isolate_qt_environment
+
   # The application cannot run on an older macOS than its Qt libraries.
   QT_MINOS=$(qt_minimum_macos 2>/dev/null || true)
   if [ -n "${QT_MINOS}" ]; then
@@ -1188,6 +1211,62 @@ resolve_qt() {
   fi
 }
 
+isolate_qt_environment() {
+  # Every CMake project of the build (Slicer and each external project, which
+  # inherit this environment) searches the CMake folder of the selected Qt first
+  # for the Qt packages, including the Tools packages that Qt finds through the
+  # default search paths ("<entry>/<Package>*/" is a find_package location; the
+  # whole prefix is not added, so that its include and lib folders are not put
+  # first for find_path and find_library). Variables that point Qt programs at
+  # another Qt are removed.
+  QT_CMAKE_SEARCH_DIR=$(dirname "${QT_CMAKE_DIR}")
+  local var
+  for var in QTDIR QT_PLUGIN_PATH QT_QPA_PLATFORM_PLUGIN_PATH QT_HOST_PATH; do
+    if [ -n "${!var:-}" ]; then
+      info "unsetting ${var} (${!var}) for the build"
+      unset "${var}"
+    fi
+  done
+  CMAKE_PREFIX_PATH="${QT_CMAKE_SEARCH_DIR}${CMAKE_PREFIX_PATH:+:${CMAKE_PREFIX_PATH}}"
+  export CMAKE_PREFIX_PATH
+  info "CMAKE_PREFIX_PATH: ${CMAKE_PREFIX_PATH}"
+}
+
+check_qt_packages() {
+  # check_qt_packages <exit code>: every Qt package directory recorded in the
+  # CMake caches of the build tree (Slicer, CTK, PythonQt, VTK, ...) must be in
+  # the selected Qt (${QT_CMAKE_DIR}/..); a cached <Package>_DIR stays in use
+  # even after the search paths are fixed.
+  local exit_code=$1
+  local expected
+  expected=$(dirname "${QT_CMAKE_DIR}")
+  if [ "${DRY_RUN}" = 1 ]; then
+    info "would check that every Qt6*_DIR in ${BUILD_DIR}/**/CMakeCache.txt is in ${expected}"
+    return 0
+  fi
+  local problems="" cache line var value
+  while IFS= read -r cache; do
+    while IFS= read -r line; do
+      var=${line%%:*}
+      value=${line#*=}
+      case "${value}" in
+        *-NOTFOUND | "") continue ;;
+      esac
+      # Only Qt's own packages: the directory is named after the package
+      [ "$(basename "${value}")" = "${var%_DIR}" ] || continue
+      if [ "$(dirname "${value}")" != "${expected}" ]; then
+        problems="${problems}
+      ${cache#"${BUILD_DIR}"/}: ${var}=${value}"
+      fi
+    done < <(grep -E '^Qt[56][A-Za-z0-9]*_DIR:[A-Z]+=' "${cache}" 2>/dev/null)
+  done < <(find "${BUILD_DIR}" -maxdepth 4 -name CMakeCache.txt -type f 2>/dev/null)
+  if [ -n "${problems}" ]; then
+    die "${exit_code}" "the build uses Qt packages that are not part of the selected Qt (${expected}):${problems}
+    another Qt (for example Homebrew's) was found first; re-run with --clean"
+  fi
+  info "Qt packages of the build tree: all in ${expected}"
+}
+
 #-----------------------------------------------------------------------------
 # Configure and build
 #-----------------------------------------------------------------------------
@@ -1199,7 +1278,9 @@ write_fingerprint() {
     "arch=${HOST_ARCH}" \
     "qt_dir=${QT_CMAKE_DIR}" \
     "qt_version=${QT_VERSION_FOUND}" \
-    "macos_min=${MACOS_MIN}"
+    "macos_min=${MACOS_MIN}" \
+    "qt_tools=selected-qt-only" \
+    "app_launcher=built-from-source"
 }
 
 clean_build_dir() {
@@ -1304,7 +1385,7 @@ configure_superbuild() {
         # The build tree cannot be reused (CMake fixes the source path, Qt and
         # target in its cache). Offer to start it again; ccache may still
         # reuse some compiled objects.
-        if [ "${DRY_RUN}" = 0 ] && confirm "${BUILD_DIR} holds a build of another source folder, Qt or macOS target (shown above) that cannot be reused. Delete it and build again from ${SOURCE_DIR}?"; then
+        if [ "${DRY_RUN}" = 0 ] && confirm "${BUILD_DIR} holds a build of another source folder, Qt or macOS target, or one made by an earlier version of this script (shown above), that cannot be reused. Delete it and build again from ${SOURCE_DIR}?"; then
           ASSUME_YES=1 clean_build_dir
           section "Configure the superbuild"
         else
@@ -1474,6 +1555,7 @@ build_superbuild() {
   if [ "${DRY_RUN}" = 0 ] && command -v ccache >/dev/null 2>&1; then
     ccache --zero-stats >/dev/null 2>&1
   fi
+  check_qt_packages "${EXIT_CONFIGURE}"
   setup_pythonqt_generator
   reset_empty_pythonqt_wrappers
   local start=${SECONDS}
@@ -1481,6 +1563,8 @@ build_superbuild() {
     explain_build_failure
     die "${EXIT_BUILD}" "the build failed (see ${LOG_DIR}/build.log; re-run this script to continue)"
   fi
+  # The external projects (CTK, PythonQt, VTK, ...) are configured during the build.
+  check_qt_packages "${EXIT_BUILD}"
   if [ "${DRY_RUN}" = 0 ]; then
     info "build finished in $(format_duration $((SECONDS - start)))"
     if command -v ccache >/dev/null 2>&1; then
@@ -1720,6 +1804,7 @@ check_bundle() {
       *) die "${EXIT_PACKAGE}" "${real} is built for '${archs}', expected ${HOST_ARCH}" ;;
     esac
   fi
+  check_binaries "${app}" "${EXIT_PACKAGE}"
   # Code updates from main: the build records its commit (CMake/SlicerStudioBuildInfo.cmake); a release built
   # from changed files, or without git, never takes code updates
   local build_info="${contents}/bin/Python/studio_build_info.json"
@@ -1728,6 +1813,25 @@ check_bundle() {
   elif grep -q '"dirty": true' "${build_info}" || grep -q '"commit": null' "${build_info}"; then
     warn "the application was built from a source tree with changes (or without git): it will not take code updates from main"
   fi
+}
+
+check_binaries() {
+  # check_binaries <app> <exit code>: every Mach-O file has ${HOST_ARCH} code (no
+  # program that needs Rosetta 2), and every Qt framework, framework reference
+  # and Qt plugin has the Qt version of the bundled QtCore (a plugin of another
+  # Qt stops the application at start-up).
+  local app=$1 exit_code=$2
+  local checker="${SOURCE_DIR}/Utilities/Scripts/SlicerStudioMacOS/check_bundle_binaries.py"
+  if [ ! -f "${checker}" ]; then
+    warn "${checker} not found: the architecture and Qt version checks were skipped"
+    return 0
+  fi
+  local output
+  if ! output=$(python3 "${checker}" --app "${app}" --arch "${HOST_ARCH}" 2>&1); then
+    printf '%s\n' "${output}" | sed 's/^/    /' >&2
+    die "${exit_code}" "the application contains files for another architecture or another Qt version (listed above)"
+  fi
+  printf '%s\n' "${output}" | sed 's/^/    /'
 }
 
 #-----------------------------------------------------------------------------
@@ -1846,6 +1950,7 @@ PY
     )
   fi
   local python_code="import sys, numpy, ssl; print('PythonSlicer', sys.version.split()[0])"
+  local clean_env_code="print('SLICER_STUDIO_CLEAN_ENV_OK')"
   local log="${LOG_DIR}/smoke-${HOST_ARCH}.log"
   # Multi-line code cannot be given with --python-code (the command line
   # parser rejects it), so the check is run as a script.
@@ -1853,10 +1958,15 @@ PY
   if [ "${DRY_RUN}" = 1 ]; then
     print_cmd hdiutil attach -nobrowse -readonly -noautoopen -noverify -mountpoint "<mount point>" "${dmg}"
     print_cmd codesign --verify --deep --strict "<mount point>/${APP_NAME}.app"
+    print_cmd python3 "${SOURCE_DIR}/Utilities/Scripts/SlicerStudioMacOS/check_bundle_binaries.py" \
+      --app "<mount point>/${APP_NAME}.app" --arch "${HOST_ARCH}"
     info "would write ${check_script}"
-    print_cmd env SLICER_DISABLE_STARTUP_PREWARM=1 "<mount point>/${APP_NAME}.app/Contents/MacOS/Slicer" \
+    print_cmd env -i HOME="<temporary folder>/home" TMPDIR="<temporary folder>" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+      QT_DEBUG_PLUGINS=1 /usr/bin/arch -arch "${HOST_ARCH}" "<mount point>/${APP_NAME}.app/Contents/MacOS/Slicer" \
+      --no-splash --disable-settings --ignore-slicerrc --exit-after-startup --python-code "${clean_env_code}"
+    print_cmd env SLICER_DISABLE_STARTUP_PREWARM=1 /usr/bin/arch -arch "${HOST_ARCH}" "<mount point>/${APP_NAME}.app/Contents/MacOS/Slicer" \
       --no-splash --disable-settings --ignore-slicerrc --exit-after-startup --python-script "${check_script}"
-    print_cmd "<mount point>/${APP_NAME}.app/Contents/bin/PythonSlicer" -c "${python_code}"
+    print_cmd /usr/bin/arch -arch "${HOST_ARCH}" "<mount point>/${APP_NAME}.app/Contents/bin/PythonSlicer" -c "${python_code}"
     print_cmd "<mount point>/${APP_NAME}.app/Contents/bin/slicer-lnm" --version
     print_cmd hdiutil detach "<mount point>"
     return 0
@@ -1883,10 +1993,43 @@ PY
   if ! codesign --verify --deep --strict "${app}" >>"${log}" 2>&1; then
     warn "the code signature does not verify (see ${log})"
   fi
+  # Also catches disk images made before these checks existed.
+  local checker="${SOURCE_DIR}/Utilities/Scripts/SlicerStudioMacOS/check_bundle_binaries.py"
+  if [ -f "${checker}" ] && ! python3 "${checker}" --app "${app}" --arch "${HOST_ARCH}" >>"${log}" 2>&1; then
+    status=1
+    echo "    files for another architecture or another Qt version:"
+    grep "^error: " "${log}" | head -n 20 | sed 's/^/      /'
+  fi
 
-  print_cmd env SLICER_DISABLE_STARTUP_PREWARM=1 "${app}/Contents/MacOS/Slicer" \
+  # Start the application the way Finder does: no environment from this shell
+  # (no QT_PLUGIN_PATH, DYLD_* or Homebrew PATH) and only the native code
+  # (/usr/bin/arch fails with "Bad CPU type" instead of using Rosetta 2).
+  # QT_DEBUG_PLUGINS=1 reports why a Qt plugin is refused.
+  local clean_tmp="${LOG_DIR}/smoke-clean-env"
+  local clean_log="${LOG_DIR}/smoke-clean-env-${HOST_ARCH}.log"
+  rm -rf "${clean_tmp}"
+  mkdir -p "${clean_tmp}/home"
+  print_cmd env -i HOME="${clean_tmp}/home" TMPDIR="${clean_tmp}" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    QT_DEBUG_PLUGINS=1 /usr/bin/arch -arch "${HOST_ARCH}" "${app}/Contents/MacOS/Slicer" \
+    --no-splash --disable-settings --ignore-slicerrc --exit-after-startup --python-code "${clean_env_code}"
+  if ! run_with_timeout 600 env -i HOME="${clean_tmp}/home" TMPDIR="${clean_tmp}" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    QT_DEBUG_PLUGINS=1 USER="${USER:-}" /usr/bin/arch -arch "${HOST_ARCH}" "${app}/Contents/MacOS/Slicer" \
+    --no-splash --disable-settings --ignore-slicerrc --exit-after-startup --python-code "${clean_env_code}" >"${clean_log}" 2>&1; then
+    status=1
+    echo "    the application did not start in a clean environment (see ${clean_log})"
+  fi
+  if ! grep -q "SLICER_STUDIO_CLEAN_ENV_OK" "${clean_log}"; then
+    status=1
+  fi
+  if grep -E "incompatible Qt library|could not be initialized|Could not find the Qt platform plugin|Bad CPU type" "${clean_log}" | head -n 10 | sed 's/^/    /' | grep .; then
+    status=1
+  fi
+  cat "${clean_log}" >>"${log}"
+  rm -rf "${clean_tmp}"
+
+  print_cmd env SLICER_DISABLE_STARTUP_PREWARM=1 /usr/bin/arch -arch "${HOST_ARCH}" "${app}/Contents/MacOS/Slicer" \
     --no-splash --disable-settings --ignore-slicerrc --exit-after-startup --python-script "${check_script}"
-  if ! run_with_timeout 600 env SLICER_DISABLE_STARTUP_PREWARM=1 "${app}/Contents/MacOS/Slicer" \
+  if ! run_with_timeout 600 env SLICER_DISABLE_STARTUP_PREWARM=1 /usr/bin/arch -arch "${HOST_ARCH}" "${app}/Contents/MacOS/Slicer" \
     --no-splash --disable-settings --ignore-slicerrc --exit-after-startup --python-script "${check_script}" >>"${log}" 2>&1; then
     status=1
   fi
@@ -1902,9 +2045,10 @@ PY
   grep "SLICER_STUDIO_SMOKE " "${log}" | sed 's/^/    /'
 
   # PythonSlicer starts the application's own Python (used for background
-  # processing); it is an x86_64 launcher, run through Rosetta 2 on Apple Silicon.
-  print_cmd "${app}/Contents/bin/PythonSlicer" -c "${python_code}"
-  if ! run_with_timeout 180 "${app}/Contents/bin/PythonSlicer" -c "${python_code}" >>"${log}" 2>&1; then
+  # processing); it is the CTK application launcher, built natively with the
+  # bundled Qt.
+  print_cmd /usr/bin/arch -arch "${HOST_ARCH}" "${app}/Contents/bin/PythonSlicer" -c "${python_code}"
+  if ! run_with_timeout 180 /usr/bin/arch -arch "${HOST_ARCH}" "${app}/Contents/bin/PythonSlicer" -c "${python_code}" >>"${log}" 2>&1; then
     status=1
     echo "    PythonSlicer failed"
   fi
@@ -1923,6 +2067,13 @@ PY
   if [ "${status}" != 0 ]; then
     echo "    last 80 lines of ${log}:"
     tail -n 80 "${log}" | sed 's/^/    | /'
+    # Never leave a disk image built by this run that failed the test as the
+    # newest one to install or release (an image given to --smoke-only is kept).
+    if [ -n "${FINAL_DMG}" ] && [ "${dmg}" = "${FINAL_DMG}" ] && [ -f "${dmg}" ]; then
+      mv -f "${dmg}" "${dmg}.smoke-failed"
+      rm -f "${dmg}.sha256"
+      warn "renamed the disk image to ${dmg}.smoke-failed"
+    fi
     die "${EXIT_SMOKE}" "the start-up test failed (see ${log})"
   fi
   info "start-up test passed"

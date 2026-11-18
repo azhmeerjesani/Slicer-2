@@ -24,6 +24,8 @@ if(NOT DEFINED qRestAPI_DIR)
     list(APPEND EXTERNAL_PROJECT_OPTIONAL_CMAKE_CACHE_ARGS
       -DQt6_DIR:FILEPATH=${Qt6_DIR}
       -DqRestAPI_QT_VERSION:STRING=6
+      # Find the Qt tools packages (moc, rcc, uic) of this Qt first (see SlicerBlockFindQtAndCheckVersion.cmake)
+      -DCMAKE_PREFIX_PATH:PATH=${Slicer_QT_PREFIX_PATH}
       )
   else()
     list(APPEND EXTERNAL_PROJECT_OPTIONAL_CMAKE_CACHE_ARGS

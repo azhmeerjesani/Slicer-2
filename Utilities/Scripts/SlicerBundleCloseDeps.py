@@ -231,6 +231,13 @@ def close_deps(app, search_dirs, lib_subdir):
     changes = {}            # path -> list of (old_ref, new_ref)
     copied = []
     seen = set()
+    # Real source file of each library embedded by this script, by basename, and
+    # references that resolved to a *different* file of an already-embedded name.
+    # Redirecting such a reference silently would mix two builds of one library
+    # (for example Qt plugins of Homebrew's Qt 6.12 bound to the bundled Qt 6.11
+    # frameworks, which Qt then refuses to load).
+    sources = {}
+    conflicts = []
 
     def embed(source):
         """Copy an external library (or its whole framework) into the bundle and
@@ -240,6 +247,7 @@ def close_deps(app, search_dirs, lib_subdir):
         if framework is not None:
             src_fw, inner = framework
             dest_fw = os.path.join(frameworks_dir, os.path.basename(src_fw))
+            sources.setdefault(os.path.basename(src_fw), os.path.realpath(src_fw))
             if not os.path.exists(dest_fw):
                 shutil.copytree(src_fw, dest_fw, symlinks=True)
                 # A framework carries its own nested code (its versioned binary,
@@ -265,6 +273,7 @@ def close_deps(app, search_dirs, lib_subdir):
                 dest_dir = lib_dir
             os.makedirs(dest_dir, exist_ok=True)
             target = os.path.join(dest_dir, base)
+            sources.setdefault(base, os.path.realpath(source))
             if not os.path.exists(target):
                 shutil.copy2(source, target)
                 os.chmod(target, 0o755)
@@ -308,7 +317,15 @@ def close_deps(app, search_dirs, lib_subdir):
                 # the application's @loader_path/.. run-path).
                 continue
             name = os.path.basename(source)
-            target = embedded[name] if name in embedded else embed(source)
+            if name in embedded:
+                framework = framework_relative(source)
+                key = os.path.basename(framework[0]) if framework else name
+                origin = os.path.realpath(framework[0] if framework else source)
+                if key in sources and sources[key] != origin:
+                    conflicts.append((current, ref, origin, sources[key], framework is not None))
+                target = embedded[name]
+            else:
+                target = embed(source)
             new_ref = "@rpath/" + os.path.relpath(target, contents)
             if new_ref != ref:
                 changes.setdefault(current, []).append((ref, new_ref))
@@ -333,7 +350,15 @@ def close_deps(app, search_dirs, lib_subdir):
           % (len(set(copied)), len(changes), len(id_resets)))
     for base in sorted(set(copied)):
         print("  embedded:", base)
-    return True
+    failed = False
+    for current, ref, origin, kept, is_framework in conflicts:
+        kind = "error" if is_framework else "warning"
+        print("SlicerBundleCloseDeps: %s: %s references %s, which is %s, but the bundle embeds %s "
+              "under that name: the package mixes two installations of one library "
+              "(for example two Qt versions)" % (kind, os.path.relpath(current, app), ref, origin, kept),
+              file=sys.stderr)
+        failed = failed or is_framework
+    return not failed
 
 
 def fix_executable_rpaths(app):

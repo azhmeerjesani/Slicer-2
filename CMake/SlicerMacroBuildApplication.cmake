@@ -640,6 +640,19 @@ macro(slicerMacroBuildApplication)
       # within the build tree
       set(extraApplicationToLaunchListForBuildTree)
 
+      # Find the Qt tools again when an earlier configuration found them in another Qt
+      # (QT_BINARY_DIR is the bin directory of the Qt selected with Qt6_DIR/Qt5_DIR).
+      foreach(_qt_tool_var IN ITEMS QT_DESIGNER_EXECUTABLE QT_LCONVERT_EXECUTABLE QT_LRELEASE_EXECUTABLE QT_LUPDATE_EXECUTABLE)
+        if(${_qt_tool_var} AND NOT "${QT_BINARY_DIR}" STREQUAL "")
+          string(FIND "${${_qt_tool_var}}" "${QT_BINARY_DIR}/" _qt_tool_pos)
+          if(NOT _qt_tool_pos EQUAL 0)
+            message(STATUS "Finding ${_qt_tool_var} again in ${QT_BINARY_DIR} (was ${${_qt_tool_var}})")
+            unset(${_qt_tool_var} CACHE)
+            unset(${_qt_tool_var})
+          endif()
+        endif()
+      endforeach()
+
       if(NOT QT_DESIGNER_EXECUTABLE)
         # Since Qt only provides a CMake module to find the designer library, we work
         # around this limitation by finding the designer executable.

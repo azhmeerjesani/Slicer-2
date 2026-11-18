@@ -8,10 +8,27 @@ if(Slicer_USE_CTKAPPLAUNCHER)
     message(FATAL_ERROR "CTKAPPLAUNCHER_DIR variable is defined but corresponds to nonexistent directory")
   endif()
 
+  # On macOS the launcher is built from source, natively and against the Qt of
+  # the build: CTKAppLauncher is only released as an x86_64 macOS binary, which
+  # needs Rosetta 2 (that macOS 28 no longer supports), and it is shipped in
+  # the application as bin/PythonSlicer and bin/SlicerDesigner. The
+  # CTKAppLauncherLib project already builds the whole AppLauncher project, and
+  # its build tree (bin/CTKAppLauncher, CTKAppLauncherConfig.cmake) is a valid
+  # CTKAppLauncher_DIR.
+  if(APPLE)
+    option(Slicer_CTKAPPLAUNCHER_FROM_SOURCE "Build the CTK application launcher from source (macOS)" ON)
+    mark_as_advanced(Slicer_CTKAPPLAUNCHER_FROM_SOURCE)
+  else()
+    set(Slicer_CTKAPPLAUNCHER_FROM_SOURCE OFF)
+  endif()
+
   # Set dependency list
   set(${proj}_DEPENDENCIES "")
   if(WIN32)
     set(${proj}_DEPENDENCIES CTKResEdit)
+  endif()
+  if(Slicer_CTKAPPLAUNCHER_FROM_SOURCE)
+    set(${proj}_DEPENDENCIES CTKAppLauncherLib)
   endif()
 
   # Include dependent projects if any
@@ -21,7 +38,11 @@ if(Slicer_USE_CTKAPPLAUNCHER)
     message(FATAL_ERROR "Enabling Slicer_USE_SYSTEM_${proj} is not supported !")
   endif()
 
-  if(NOT DEFINED CTKAppLauncher_DIR)
+  if(NOT DEFINED CTKAppLauncher_DIR AND Slicer_CTKAPPLAUNCHER_FROM_SOURCE)
+    set(CTKAppLauncher_DIR ${CTKAppLauncherLib_DIR})
+    ExternalProject_Add_Empty(${proj} DEPENDS ${${proj}_DEPENDENCIES})
+
+  elseif(NOT DEFINED CTKAppLauncher_DIR)
 
     SlicerMacroGetOperatingSystemArchitectureBitness(VAR_PREFIX CTKAPPLAUNCHER)
     set(launcher_version "0.1.34")
@@ -32,8 +53,8 @@ if(Slicer_USE_CTKAPPLAUNCHER)
     elseif("${CTKAPPLAUNCHER_OS}" STREQUAL "linux")
       set(sha256 "e39f82151be485e2e097a254077c4f3b7c962765c0e1564cbc09360355f87b76")
     elseif("${CTKAPPLAUNCHER_OS}" STREQUAL "macosx")
-      # CTKAppLauncher is only released as an amd64 macOS binary (it runs fine
-      # on arm64 Macs through Rosetta 2), so use it unconditionally.
+      # Only with Slicer_CTKAPPLAUNCHER_FROM_SOURCE=OFF: the released macOS
+      # binary is amd64 only (it runs on arm64 Macs through Rosetta 2).
       set(CTKAPPLAUNCHER_ARCHITECTURE "amd64")
       set(sha256 "9d2f08fd68071562b17a2bfc18b6510a2a19596c593bf19deda1a9f1d3038ad0")
     endif()
