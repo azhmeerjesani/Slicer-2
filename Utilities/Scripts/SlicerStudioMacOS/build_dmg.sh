@@ -69,6 +69,7 @@ FINGERPRINT_NAME=".slicer-studio-build.conf"
 
 QT_SPEC="homebrew"
 SOURCE_DIR=""
+SOURCE_ORIGIN=""
 WORK_DIR=""
 BUILD_DIR=""
 OUT_DIR=""
@@ -148,7 +149,8 @@ Qt:
 
 Locations:
   --source DIR           Slicer source tree (default: the checkout containing
-                         this script).
+                         this script). A path with spaces is copied to
+                         <work-dir>/src and built from there.
   --work-dir DIR         Downloads, tools, Qt, logs and staging
                          (default: ~/SlicerStudio).
   --build-dir DIR        Superbuild directory; keep the path short and without
@@ -665,6 +667,42 @@ resolve_locations() {
   LOG_DIR="${WORK_DIR}/logs"
 }
 
+mirror_source_without_spaces() {
+  # The superbuild does not support spaces in the source path. When the
+  # checkout's path has one (for example a second download unpacked as
+  # "Slicer-2-main 2"), build from a copy at <work-dir>/src instead. The copy
+  # is refreshed with rsync on every run, so later edits in the checkout are
+  # picked up; it includes .git so that the build still records its commit.
+  SOURCE_ORIGIN=""
+  case "${SOURCE_DIR}" in
+    *" "*) ;;
+    *) return 0 ;;
+  esac
+  local mirror="${WORK_DIR}/src"
+  case "${mirror}" in
+    *" "*) return 0 ;; # preflight reports the spaces
+  esac
+  case "${mirror}/" in
+    "${SOURCE_DIR}/"*) return 0 ;;
+  esac
+  case "${SOURCE_DIR}/" in
+    "${mirror}/"*) return 0 ;;
+  esac
+  if [ ! -f "${SOURCE_DIR}/CMakeLists.txt" ]; then
+    return 0 # preflight reports that this is not a source tree
+  fi
+  section "Copying the source to a path without spaces"
+  info "from: ${SOURCE_DIR}"
+  info "to:   ${mirror}"
+  run mkdir -p "${mirror}" || die "${EXIT_PREFLIGHT}" "could not create ${mirror}"
+  run rsync -a --delete "${SOURCE_DIR}/" "${mirror}/" \
+    || die "${EXIT_PREFLIGHT}" "could not copy the source to ${mirror}"
+  SOURCE_ORIGIN=${SOURCE_DIR}
+  if [ "${DRY_RUN}" = 0 ]; then
+    SOURCE_DIR=${mirror} # a dry run only prints the copy, so it reads the checkout
+  fi
+}
+
 studio_version() {
   # STUDIO_VERSION of Modules/Scripted/Studio/StudioLib/version.py: the version
   # of Slicer Studio, written into Info.plist (CFBundleShortVersionString) and
@@ -691,7 +729,15 @@ resolve_minimum_macos() {
 
 preflight() {
   section "Preflight checks"
-  info "source:      ${SOURCE_DIR}"
+  # The path the superbuild sees: the copy when the checkout's path has spaces.
+  local build_source=${SOURCE_DIR}
+  if [ -n "${SOURCE_ORIGIN:-}" ]; then
+    build_source="${WORK_DIR}/src"
+  fi
+  info "source:      ${build_source}"
+  if [ -n "${SOURCE_ORIGIN:-}" ]; then
+    info "             (copy of ${SOURCE_ORIGIN}, whose path has spaces)"
+  fi
   info "work dir:    ${WORK_DIR}"
   info "build dir:   ${BUILD_DIR}"
   info "output dir:  ${OUT_DIR}"
@@ -704,17 +750,19 @@ preflight() {
   # Source tree
   if [ ! -f "${SOURCE_DIR}/CMakeLists.txt" ] || [ ! -d "${SOURCE_DIR}/Applications/SlicerApp" ]; then
     add_preflight_problem "${SOURCE_DIR} is not a Slicer source tree (use --source DIR)"
+  elif ! git -C "${SOURCE_DIR}" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    warn "${SOURCE_ORIGIN:-${SOURCE_DIR}} is not a git checkout (for example a downloaded ZIP), so the app cannot record which commit it was built from and will not take code updates from main; build from a clone instead: git clone https://github.com/azhmeerjesani/Slicer-2.git ~/Slicer-2"
   fi
 
   # Paths: the superbuild does not support spaces, and long paths overflow
   # Mach-O load commands ("malformed mach-o: load commands size").
-  case "${SOURCE_DIR}${BUILD_DIR}" in
-    *" "*) add_preflight_problem "the source and build paths must not contain spaces (source: '${SOURCE_DIR}', build: '${BUILD_DIR}'); use --build-dir or move the checkout" ;;
+  case "${build_source}${BUILD_DIR}" in
+    *" "*) add_preflight_problem "the source and build paths must not contain spaces (source: '${build_source}', build: '${BUILD_DIR}'); use a --build-dir and --work-dir without spaces, or move the checkout" ;;
   esac
   case "${BUILD_DIR}/" in
-    "${SOURCE_DIR}/"*) add_preflight_problem "the build directory must be outside the source tree" ;;
+    "${build_source}/"*) add_preflight_problem "the build directory must be outside the source tree" ;;
   esac
-  case "${SOURCE_DIR}/" in
+  case "${build_source}/" in
     "${BUILD_DIR}/"*) add_preflight_problem "the source tree must not be inside the build directory" ;;
   esac
   if [ "${#BUILD_DIR}" -gt 40 ]; then
@@ -1253,9 +1301,19 @@ configure_superbuild() {
         printf '%s\n' "${existing}" | sed 's/^/      /' >&2
         echo "    requested:" >&2
         printf '%s\n' "${wanted}" | sed 's/^/      /' >&2
-        die "${EXIT_CONFIGURE}" "${BUILD_DIR} was configured with a different source, architecture, Qt or minimum macOS; re-run with --clean (or use another --build-dir)"
+        # The build tree cannot be reused (CMake fixes the source path, Qt and
+        # target in its cache). Offer to start it again; ccache may still
+        # reuse some compiled objects.
+        if [ "${DRY_RUN}" = 0 ] && confirm "${BUILD_DIR} holds a build of another source folder, Qt or macOS target (shown above) that cannot be reused. Delete it and build again from ${SOURCE_DIR}?"; then
+          ASSUME_YES=1 clean_build_dir
+          section "Configure the superbuild"
+        else
+          die "${EXIT_CONFIGURE}" "${BUILD_DIR} was configured with a different source, architecture, Qt or minimum macOS; re-run with --clean (or use another --build-dir)"
+        fi
       fi
     fi
+  fi
+  if [ -f "${BUILD_DIR}/CMakeCache.txt" ] && [ -f "${BUILD_DIR}/Makefile" ]; then
     if [ "${RECONFIGURE}" = 0 ]; then
       if grep -q '^Slicer_BUILD_QT_DESIGNER_PLUGINS:BOOL=OFF$' "${BUILD_DIR}/CMakeCache.txt" && ! designer_plugins_in_extra_args; then
         # Earlier versions of this script turned the Qt Designer plugins off. Without them slicer.util.loadUI
@@ -1913,6 +1971,7 @@ main() {
     return 0
   fi
 
+  mirror_source_without_spaces
   resolve_minimum_macos
   preflight
   if [ "${SKIP_BUILD}" = 0 ]; then

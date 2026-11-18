@@ -36,6 +36,7 @@ Everything the script creates goes into `~/SlicerStudio`:
 | Path | Content |
 |---|---|
 | `~/SlicerStudio/S` | superbuild directory (`--build-dir`; keep the path short and without spaces) |
+| `~/SlicerStudio/src` | copy of the source, made only when the checkout's path has spaces (for example a second download unpacked as `Slicer-2-main 2`); refreshed on every run |
 | `~/SlicerStudio/dist` | final disk image and its `.sha256` checksum file (`--out-dir`) |
 | `~/SlicerStudio/logs` | `configure.log`, `build.log`, `package.log`, `packageverify.log`, `smoke-<arch>.log` |
 | `~/SlicerStudio/Qt-official`, `Qt-source` | Qt used by `--qt=official` or `--qt=source` |
@@ -127,7 +128,11 @@ Exit codes:
    - the Xcode Command Line Tools and Homebrew;
    - Rosetta 2, on Apple Silicon only;
    - free disk space;
-   - that the paths contain no spaces and stay short.
+   - that the build path contains no spaces and stays short (a source path with
+     spaces is copied to `~/SlicerStudio/src` first);
+   - that the source is a git checkout. A downloaded ZIP still builds, but the app
+     then cannot tell which commit it was built from and takes no code updates
+     from `main`, so build from `git clone https://github.com/azhmeerjesani/Slicer-2.git`.
 
    Rosetta 2 is needed because the CTK application launcher, used by the build
    tree and by the bundled `PythonSlicer`, is only released as an x86_64
