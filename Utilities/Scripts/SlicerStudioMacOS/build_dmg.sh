@@ -1288,9 +1288,19 @@ configure_superbuild() {
         printf '%s\n' "${existing}" | sed 's/^/      /' >&2
         echo "    requested:" >&2
         printf '%s\n' "${wanted}" | sed 's/^/      /' >&2
-        die "${EXIT_CONFIGURE}" "${BUILD_DIR} was configured with a different source, architecture, Qt or minimum macOS; re-run with --clean (or use another --build-dir)"
+        # The build tree cannot be reused (CMake fixes the source path, Qt and
+        # target in its cache). Offer to start it again; ccache may still
+        # reuse some compiled objects.
+        if [ "${DRY_RUN}" = 0 ] && confirm "${BUILD_DIR} holds a build of another source folder, Qt or macOS target (shown above) that cannot be reused. Delete it and build again from ${SOURCE_DIR}?"; then
+          ASSUME_YES=1 clean_build_dir
+          section "Configure the superbuild"
+        else
+          die "${EXIT_CONFIGURE}" "${BUILD_DIR} was configured with a different source, architecture, Qt or minimum macOS; re-run with --clean (or use another --build-dir)"
+        fi
       fi
     fi
+  fi
+  if [ -f "${BUILD_DIR}/CMakeCache.txt" ] && [ -f "${BUILD_DIR}/Makefile" ]; then
     if [ "${RECONFIGURE}" = 0 ]; then
       if grep -q '^Slicer_BUILD_QT_DESIGNER_PLUGINS:BOOL=OFF$' "${BUILD_DIR}/CMakeCache.txt" && ! designer_plugins_in_extra_args; then
         # Earlier versions of this script turned the Qt Designer plugins off. Without them slicer.util.loadUI
