@@ -141,6 +141,12 @@ the system. It runs on Ubuntu 24.04.
 
 3. Run the `Slicer` launcher in the extracted folder.
 
+4. Optional: to add Slicer Studio, with its icon, to the applications menu, run
+   `./install-desktop-entry.sh` in the extracted folder. It writes the menu
+   entry and the icons into `~/.local/share` for the current user only; run it
+   again after you move the folder, and `./install-desktop-entry.sh --uninstall`
+   to remove them.
+
 To install a newer build, extract it anywhere (a new folder, or in place of the
 old one when the old one already has the profile): your settings, extensions,
 Python packages and saved work are kept (see

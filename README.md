@@ -1,5 +1,7 @@
 # Slicer Studio
 
+<img src="Docs/images/studio/SlicerStudioLogo.svg" alt="Slicer Studio logo" width="96" height="96">
+
 Slicer Studio is an edition of [3D Slicer](https://www.slicer.org) for one kind of work: drawing brain
 lesions slice by slice and computing lesion network maps (LNM). It opens on a simple Library page, puts
 the Segment Editor next to a large axial view in a Draw workspace, and computes a lesion's network from a

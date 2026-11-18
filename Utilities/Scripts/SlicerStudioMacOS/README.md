@@ -320,6 +320,12 @@ reference for the build steps. Build disk images on a Mac with this script (see
   executable`**: the disk image was made by an earlier version of this script,
   with the x86_64-only `PythonSlicer` and `SlicerDesigner`. Rebuild with
   `--clean`.
+- **The Dock or Finder still shows the old 3D Slicer icon** after you install
+  a new disk image over an older one: macOS caches icons by application path.
+  Run `touch "/Applications/Slicer Studio.app"` and `killall Dock`. The icon is
+  `Contents/Resources/Slicer.icns`, made from
+  `Applications/SlicerApp/Resources/Brand/` by
+  `Utilities/Scripts/SlicerStudioBrand/make_brand_assets.py`.
 - **`malformed mach-o: load commands size`**: the build path is too long.
   Use a short `--build-dir`, such as `~/S`, together with `--clean`.
 - **The build stopped**: `~/SlicerStudio/logs/build.log` contains the error.

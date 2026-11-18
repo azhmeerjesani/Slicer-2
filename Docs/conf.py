@@ -157,7 +157,8 @@ source_suffix = [".rst", ".md"]
 master_doc = "index"
 
 # General information about the project.
-project = "3D Slicer"
+# Slicer Studio is based on 3D Slicer: the copyright of the documentation stays with the Slicer Community.
+project = "Slicer Studio"
 copyright = f"{date.today().year}, Slicer Community"
 author = "Slicer Community"
 
@@ -207,7 +208,8 @@ rst_prolog = open("global.rst.in").read()
 
 # If given, this must be the name of an image file (path relative to the configuration directory) that is the logo of the docs.
 # It is placed at the top of the sidebar; its width should therefore not exceed 200 pixels
-html_logo = "_static/images/3D-Slicer-Mark.png"
+html_logo = "_static/images/SlicerStudio-Mark.png"
+html_favicon = "_static/images/SlicerStudio-favicon.ico"
 
 # -- Options for HTML output ----------------------------------------------
 

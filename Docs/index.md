@@ -1,4 +1,6 @@
-# Welcome to 3D Slicer's documentation!
+# Slicer Studio documentation
+
+Slicer Studio is based on 3D Slicer. To install it, see [Install Slicer Studio](user_guide/install_studio.md); the 3D Slicer user guide follows.
 
 For older Slicer documentation (4.10 and earlier), refer to the [3D Slicer wiki](https://www.slicer.org/wiki/Documentation/4.10).
 
