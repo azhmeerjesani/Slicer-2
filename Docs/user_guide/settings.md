@@ -116,6 +116,17 @@ The **Views** panel has the usual defaults for new slice and 3D views, and these
   **Page Up / Page Down step** (`Studio/PageStepSlices`, 10 slices). The Classic interface, `--testing` and
   scripts keep the official behaviour whatever these say.
 
+### Profile
+
+The **Profile** panel shows the folder that keeps your extensions, Python packages, autosave and update state outside
+the application, so that reinstalling Slicer Studio keeps them (see
+[Your Slicer Studio profile](install_studio.md#your-slicer-studio-profile)).
+
+| Setting | Key | Default |
+| ------- | --- | ------- |
+| **Change…** (used from the next start; the environment variable `SLICER_STUDIO_PROFILE_DIR` wins) | `Studio/Profile/Directory` (`Studio/Profile/PendingDirectory` until the next start) | empty, meaning the application data folder |
+| Install pip packages into the profile (no button) | `Studio/Profile/PipToProfile` | true |
+
 ### Saving
 
 The **Saving** panel (in the Application Settings of Slicer Studio and of its classic interface; the save status in
