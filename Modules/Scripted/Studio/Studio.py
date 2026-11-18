@@ -268,7 +268,24 @@ def _completeStartup():
         import traceback
 
         logging.error("Studio: the copy of the settings and extensions could not be scheduled:\n" + traceback.format_exc())
+    # Settings > Profile, the macOS copy of newly installed extensions into the profile, and the restart that extensions
+    # carried forward from the previous build need (studio_profile)
+    qt.QTimer.singleShot(1000, _startProfile)
     return updatesStarted
+
+
+def _startProfile():
+    try:
+        from StudioLib import profile_extensions, profile_settings
+
+        profile_settings.install()
+        profile_extensions.install()
+        profile_settings.showRestartNoticeOnce()
+    except Exception:
+        import logging
+        import traceback
+
+        logging.error("Studio: the user profile could not be started:\n" + traceback.format_exc())
 
 
 def _startAutosave():
