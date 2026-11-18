@@ -126,7 +126,6 @@ Exit codes:
 1. **Preflight.** The script checks:
    - the macOS version (14 or newer) and the architecture;
    - the Xcode Command Line Tools and Homebrew;
-   - Rosetta 2, on Apple Silicon only;
    - free disk space;
    - that the build path contains no spaces and stays short (a source path with
      spaces is copied to `~/SlicerStudio/src` first);
@@ -134,9 +133,19 @@ Exit codes:
      then cannot tell which commit it was built from and takes no code updates
      from `main`, so build from `git clone https://github.com/azhmeerjesani/Slicer-2.git`.
 
-   Rosetta 2 is needed because the CTK application launcher, used by the build
-   tree and by the bundled `PythonSlicer`, is only released as an x86_64
-   binary.
+   Rosetta 2 is not needed. The CTK application launcher (the bundled
+   `PythonSlicer` and `SlicerDesigner`, and the launchers of the build tree) is
+   built from source for the Mac's own architecture, with the Qt of the build
+   (`SuperBuild/External_CTKAPPLAUNCHER.cmake`): the released CTKAppLauncher
+   binary for macOS is x86_64 only, which macOS 28 no longer supports.
+
+   Homebrew's `bin` folder is taken off `PATH` for the build, together with
+   any folder that holds another Qt's `qmake`. Only the Homebrew tools the
+   build needs (git-lfs, ccache) are linked into `~/SlicerStudio/tools/brew-bin`,
+   which is put on `PATH` instead. CMake turns each `<folder>/bin` of `PATH`
+   into a search prefix, and Qt finds its tools packages (qmake, moc, rcc, uic)
+   through those prefixes: with Homebrew's Qt on `PATH`, an official-Qt build
+   used Homebrew's tools and packaged Homebrew's Qt plugins.
 2. **Tools.** `brew install` of git-lfs, ccache and, with `--qt=homebrew`, qt.
    Only missing packages are installed.
 
@@ -157,7 +166,11 @@ Exit codes:
      scripted module `.ui` files (Line Profile, Surface Toolbox, extensions) with them. A build
      directory configured with them off by an earlier version of the script is configured again;
    - `CMAKE_OSX_ARCHITECTURES=$(uname -m)`, `CMAKE_OSX_DEPLOYMENT_TARGET`, the SDK;
-   - `Qt6_DIR` (or `Qt5_DIR`) and the matching `Slicer_REQUIRED_QT_VERSION`;
+   - `Qt6_DIR` (or `Qt5_DIR`) and the matching `Slicer_REQUIRED_QT_VERSION`,
+     with the Qt folder first in `CMAKE_PREFIX_PATH` (exported, so every
+     external project finds the Qt tools of the same Qt). `QTDIR`,
+     `QT_PLUGIN_PATH`, `QT_QPA_PLATFORM_PLUGIN_PATH` and `QT_HOST_PATH` are
+     unset;
    - `Slicer_USE_SYSTEM_QT=OFF`, so that Qt is embedded in the package.
 
    The compilers are wrapper scripts that call ccache. The superbuild passes the
@@ -166,8 +179,18 @@ Exit codes:
 
    The script records the source, architecture, Qt and minimum macOS of the
    build directory. Reusing that build directory with a different source,
-   architecture, Qt or minimum macOS is refused.
-5. **Build.** `make -C <build-dir> -j<jobs>`.
+   architecture, Qt or minimum macOS is refused. A build directory made by an
+   earlier version of the script, before the Qt tools were kept to the selected
+   Qt and the launcher was built from source, is refused the same way: run once
+   with `--clean`.
+
+   CMake itself (`CMake/SlicerBlockFindQtAndCheckVersion.cmake`) also stops
+   when a Qt package, `qmake`, `moc`, `rcc` or `uic` comes from another Qt
+   installation or version, and it takes the Qt plugin, binary and library
+   folders from the selected Qt's own `QtInstallPaths.cmake`.
+5. **Build.** `make -C <build-dir> -j<jobs>`. Before and after the build, the
+   script checks that every `Qt6*_DIR` recorded in the CMake caches of the build
+   tree (Slicer, CTK, PythonQt, VTK and the others) is in the selected Qt.
 6. **Package.** `make package` in `Slicer-build` (CPack DragNDrop), then
    `make packageverify`.
 7. **Disk image.** The script then runs these steps:
@@ -180,15 +203,32 @@ Exit codes:
       `Utilities/Scripts/SlicerSignBundleMacOS.py`. That script is more reliable
       than `codesign --deep` on a bundle this large. Then check the result with
       `codesign --verify --deep --strict`.
+
+      Before signing, `check_bundle_binaries.py` (in this folder) checks that
+      every Mach-O file in the bundle has code for the Mac's architecture (no
+      program needs Rosetta 2), and that every Qt framework, every reference to
+      a Qt framework and every Qt plugin has the Qt version of the bundled
+      `QtCore` (read from the install names and from each plugin's
+      `QTMETADATA` header). `SlicerBundleCloseDeps.py` also stops when two
+      different copies of one framework would be mixed in the bundle.
    4. Create the disk image with `hdiutil` (UDZO, volume name "Slicer Studio",
       with an `Applications` link), verify it, and write a SHA-256 checksum next
       to it.
-8. **Start-up test.** The script mounts the final disk image and starts
-   `Slicer Studio.app/Contents/MacOS/Slicer` with `--no-splash
-   --disable-settings --exit-after-startup` and a short Python check (main
-   window, core modules, numpy, ssl). It also runs the bundled `PythonSlicer`.
-   `--disable-settings` keeps the test away from your `Slicer.ini`. Skip the test
-   with `--no-smoke`.
+8. **Start-up test.** The script mounts the final disk image and runs the
+   architecture and Qt version checks again. It then starts
+   `Slicer Studio.app/Contents/MacOS/Slicer` twice, with `--no-splash
+   --disable-settings --exit-after-startup`:
+   - once the way Finder does, with an empty environment (`env -i`, a temporary
+     `HOME` and `TMPDIR`), `QT_DEBUG_PLUGINS=1`, and
+     `/usr/bin/arch -arch <arch>` so that a program without native code fails
+     instead of running through Rosetta 2. The test fails on `incompatible Qt
+     library` or `could not be initialized`;
+   - once with a short Python check (main window, core modules, numpy, ssl).
+
+   It also runs the bundled `PythonSlicer` and `slicer-lnm`.
+   `--disable-settings` keeps the test away from your `Slicer.ini`. A disk
+   image that fails the test is renamed to `*.dmg.smoke-failed`, so it is
+   never left as the newest image. Skip the test with `--no-smoke`.
 
 ## Next to the official 3D Slicer
 
@@ -231,12 +271,6 @@ downloaded, macOS blocks it the first time. Do one of the following:
 
 A disk image built on your own Mac is not quarantined.
 
-On Apple Silicon, the bundled `PythonSlicer` needs Rosetta 2:
-
-```console
-softwareupdate --install-rosetta --agree-to-license
-```
-
 The first start after installing can take a minute or two, while macOS checks
 the application's libraries. Slicer shows a progress window during that time.
 
@@ -251,8 +285,41 @@ reference for the build steps. Build disk images on a Mac with this script (see
 
 ## Troubleshooting
 
-- **`Bad CPU type in executable`** (PythonSlicer, launcher): install Rosetta 2
-  with `softwareupdate --install-rosetta --agree-to-license`.
+- **The application does not start, or quits at once**: start it from
+  Terminal with Qt's plugin report:
+
+  ```console
+  QT_DEBUG_PLUGINS=1 "/Applications/Slicer Studio.app/Contents/MacOS/Slicer"
+  ```
+
+  `Plugin uses incompatible Qt library (6.12.0)` followed by `no Qt platform
+  plugin could be initialized` means the Qt plugins in the application come
+  from another Qt than its Qt frameworks. Check the version of a plugin and of
+  the bundled QtCore with:
+
+  ```console
+  otool -L "/Applications/Slicer Studio.app/Contents/lib/QtPlugins/platforms/libqcocoa.dylib" | grep QtGui
+  otool -L "/Applications/Slicer Studio.app/Contents/Frameworks/QtCore.framework/QtCore" | head -n 2
+  ```
+
+  Disk images made by earlier versions of this script could have this
+  problem when Homebrew's `qt` was installed next to the official Qt
+  (`--qt=official`): the build found Homebrew's Qt tools first, through
+  Homebrew's `bin` folder on `PATH`. Rebuild with `--clean`; the script now
+  keeps Homebrew's Qt out of the build and checks the result.
+- **`these Qt packages or tools come from another Qt installation or version`**
+  (configure) or **`the build uses Qt packages that are not part of the selected
+  Qt`**: another Qt was found first, for example a Qt folder on `PATH` or in
+  `CMAKE_PREFIX_PATH`. Remove it from your shell's `PATH`, then run again with
+  `--clean`.
+- **`files for another architecture or another Qt version`** (packaging or
+  start-up test): `check_bundle_binaries.py` lists each file. Run it yourself
+  with `python3 check_bundle_binaries.py --app "/Applications/Slicer
+  Studio.app" --arch arm64`.
+- **macOS says the application needs Rosetta 2, or `Bad CPU type in
+  executable`**: the disk image was made by an earlier version of this script,
+  with the x86_64-only `PythonSlicer` and `SlicerDesigner`. Rebuild with
+  `--clean`.
 - **`malformed mach-o: load commands size`**: the build path is too long.
   Use a short `--build-dir`, such as `~/S`, together with `--clean`.
 - **The build stopped**: `~/SlicerStudio/logs/build.log` contains the error.

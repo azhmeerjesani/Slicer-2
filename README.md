@@ -1156,12 +1156,6 @@ signed ad hoc but not notarized, so macOS blocks it the first time: click **Open
 xattr -dr com.apple.quarantine "/Applications/Slicer Studio.app"
 ```
 
-On Apple Silicon, also install Rosetta 2 once, for the bundled `PythonSlicer` launcher:
-
-```console
-softwareupdate --install-rosetta --agree-to-license
-```
-
 > [!NOTE]
 > The macOS packages are the first Qt 6 builds of this fork. A disk image built on 2026-10-18 passed the
 > start-up test on macOS 15 with Apple Silicon (Qt 6.11.2) and the bundle self-containment check; other

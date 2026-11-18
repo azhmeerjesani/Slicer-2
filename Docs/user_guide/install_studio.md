@@ -94,13 +94,6 @@ open a downloaded copy, macOS blocks it. To allow it, do one of the following:
   Use this command if macOS reports that the application "is damaged and can't
   be opened".
 
-On a Mac with Apple Silicon, also install Rosetta 2 once. The bundled Python
-launcher (`PythonSlicer`), used for background processing, needs it:
-
-```console
-softwareupdate --install-rosetta --agree-to-license
-```
-
 The first start can take a minute or two, while macOS checks the application's
 libraries. A progress window is shown during that time.
 
