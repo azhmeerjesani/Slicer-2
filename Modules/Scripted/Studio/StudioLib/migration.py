@@ -185,7 +185,8 @@ ROWS = (
         _("≡ > Keyboard shortcuts ({key:Ctrl+/}): the keys of the workspace, the view gestures and the Esc steps, searchable; "
           "the 3D Slicer reference stays in ≡ > Help"),
         key="Ctrl+/", target="StudioAppMenuButton", keywords="keyboard shortcuts keys hotkeys cheat sheet gestures mouse"),
-    Row("about", _("Help > About 3D Slicer"), _("≡ > Help > About 3D Slicer"), target="StudioAppMenuButton", same=True,
+    Row("about", _("Help > About 3D Slicer"), _("≡ > Help > About Slicer Studio (the same box, named after Slicer Studio)"),
+        target="StudioAppMenuButton",
         keywords="about version license"),
     Row("documentation", _("Help > Documentation"), _("≡ > Help > Documentation ({key:Ctrl+1}); the ? button of the inspector shows help for the current tool"),
         officialKey="Ctrl+1", key="Ctrl+1", target="StudioAppMenuButton", same=True, keywords="help documentation manual"),

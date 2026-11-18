@@ -756,7 +756,7 @@ class CatalogDialog(qt.QDialog):
         elif running:
             hint = _("A connectome is being fetched.")
         elif self.runningElsewhereHere() is not None:
-            hint = _("Being downloaded by another Slicer window: wait until it finishes, or choose another folder.")
+            hint = _("Being downloaded by another Slicer Studio window: wait until it finishes, or choose another folder.")
         elif self.mismatchHere():
             hint = _("The checksum of an archive does not match: use Keep this data anyway…, or choose another folder. Reading the archive again would fail the same way.")
         elif resumeProblem := self.resumeSubsetProblem():

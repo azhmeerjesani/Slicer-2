@@ -422,11 +422,17 @@ void qSlicerApplicationPrivate::init()
   }
 #endif
 
+#ifndef Q_OS_MACOS
+  // On macOS the application window icon replaces the Dock icon
+  // (NSApp.applicationIconImage): keep the icon of the bundle (.icns), drawn on the
+  // macOS icon grid, instead of the full-bleed desktop icon.
   QIcon icon;
   icon.addFile(":/Icons/Medium/DesktopIcon.png");
   icon.addFile(":/Icons/Large/DesktopIcon.png");
   icon.addFile(":/Icons/XLarge/DesktopIcon.png");
+  icon.addFile(":/Icons/XXLarge/DesktopIcon.png");
   q->setWindowIcon(icon);
+#endif
 
   this->ToolTipTrapper = new ctkToolTipTrapper(q);
   this->ToolTipTrapper->setToolTipsTrapped(false);

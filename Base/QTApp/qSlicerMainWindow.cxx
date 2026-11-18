@@ -1753,8 +1753,23 @@ void qSlicerMainWindow::disclaimer()
     return;
   }
 
-  // Replace "%1" in the text by the name and version of the application
-  message = message.arg(app->mainApplicationDisplayName() + " " + app->applicationVersion());
+  // Replace "%1" in the text by the name and version of the application. applicationVersion() is the version of
+  // the 3D Slicer this application is based on, not its own version (SlicerStudioVersion, set by the Studio module).
+  QString nameAndVersion = app->mainApplicationDisplayName();
+  const QString studioVersion = app->property("SlicerStudioVersion").toString();
+  if (!studioVersion.isEmpty())
+  {
+    nameAndVersion += " " + studioVersion;
+  }
+  if (app->mainApplicationDisplayName() != QString("3D Slicer"))
+  {
+    nameAndVersion += " " + tr("(based on 3D Slicer %1)").arg(app->applicationVersion());
+  }
+  else
+  {
+    nameAndVersion += " " + app->applicationVersion();
+  }
+  message = message.arg(nameAndVersion);
 
   ctkMessageBox* disclaimerMessage = new ctkMessageBox(this);
   disclaimerMessage->setAttribute(Qt::WA_DeleteOnClose, true);

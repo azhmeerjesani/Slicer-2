@@ -449,7 +449,7 @@ int qSlicerApplicationHelper::postInitializeApplication(qSlicerApplication& app,
     // there is no main window but we need to show Python console
 #ifdef Slicer_USE_PYTHONQT
     ctkPythonConsole* pythonConsole = app.pythonConsole();
-    pythonConsole->setWindowTitle("Slicer Python Console");
+    pythonConsole->setWindowTitle(QObject::tr("Python Console"));
     pythonConsole->resize(600, 280);
     pythonConsole->show();
     pythonConsole->activateWindow();

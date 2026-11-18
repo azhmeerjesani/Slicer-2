@@ -234,7 +234,16 @@ class BuildFilesTest(unittest.TestCase):
     def test_QtFoldersComeFromTheSelectedQt(self):
         block = read("CMake", "SlicerBlockFindQtAndCheckVersion.cmake")
         self.assertIn('set(QT_PLUGINS_DIR "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_PLUGINS}")', block)
-        self.assertIn("list(PREPEND CMAKE_PREFIX_PATH", block)
+        self.assertIn("slicer_isolate_qt6_packages()", block)
+        isolate = read("CMake", "SlicerMacroIsolateQt6Packages.cmake")
+        self.assertIn("list(PREPEND CMAKE_PREFIX_PATH", isolate)
+        # The packages are isolated before the first Qt 6 lookup, which creates
+        # Qt6::qmake, Qt6::moc and Qt6::rcc (Qt6CoreTools).
+        top = read("CMakeLists.txt")
+        first = top.index("find_package(Qt6 COMPONENTS Core QUIET)")
+        self.assertIn("slicer_isolate_qt6_packages()", top[:first])
+        self.assertLess(top.index("find_package(Qt6 COMPONENTS Core QUIET)"),
+                        top.index("include(SlicerBlockFindQtAndCheckVersion)"))
         self.assertIn("come from another Qt installation or version", block)
         for project in ("CTK", "VTK", "qRestAPI", "CTKAppLauncherLib"):
             with self.subTest(project=project):

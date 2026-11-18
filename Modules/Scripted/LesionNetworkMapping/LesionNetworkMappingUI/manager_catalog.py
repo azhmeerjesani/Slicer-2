@@ -477,7 +477,7 @@ def offerResume():
     if found is None:
         if saved and current.state == "done" and current.resultPath:
             _showInformation("LNMFetchFinishedNotice", _("Download finished"),
-                             _("Fetching {name} finished after Slicer was closed. The connectome is registered and ready in the Connectome card.").format(name=current.shortName(saved)))
+                             _("Fetching {name} finished after Slicer Studio was closed. The connectome is registered and ready in the Connectome card.").format(name=current.shortName(saved)))
             return True
         return False
     request, summary = found

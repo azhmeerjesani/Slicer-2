@@ -1374,7 +1374,14 @@ configure_superbuild() {
   local fingerprint_file="${BUILD_DIR}/${FINGERPRINT_NAME}"
   local wanted
   wanted=$(write_fingerprint | grep -v '^#')
-  if [ -f "${BUILD_DIR}/CMakeCache.txt" ] && [ -f "${BUILD_DIR}/Makefile" ]; then
+  # In a dry run nothing is deleted: with --clean the tree counts as already
+  # deleted, and a tree that would be offered for deletion is reported and
+  # configured as a new one.
+  local dry_run_new_tree=0
+  if [ "${DRY_RUN}" = 1 ] && [ "${DO_CLEAN}" = 1 ]; then
+    dry_run_new_tree=1
+  fi
+  if [ "${dry_run_new_tree}" = 0 ] && [ -f "${BUILD_DIR}/CMakeCache.txt" ] && [ -f "${BUILD_DIR}/Makefile" ]; then
     if [ -f "${fingerprint_file}" ]; then
       local existing
       existing=$(grep -v '^#' "${fingerprint_file}")
@@ -1386,7 +1393,10 @@ configure_superbuild() {
         # The build tree cannot be reused (CMake fixes the source path, Qt and
         # target in its cache). Offer to start it again; ccache may still
         # reuse some compiled objects.
-        if [ "${DRY_RUN}" = 0 ] && confirm "${BUILD_DIR} holds a build of another source folder, Qt or macOS target, or one made by an earlier version of this script (shown above), that cannot be reused. Delete it and build again from ${SOURCE_DIR}?"; then
+        if [ "${DRY_RUN}" = 1 ]; then
+          info "would ask to delete ${BUILD_DIR} and configure again"
+          dry_run_new_tree=1
+        elif confirm "${BUILD_DIR} holds a build of another source folder, Qt or macOS target, or one made by an earlier version of this script (shown above), that cannot be reused. Delete it and build again from ${SOURCE_DIR}?"; then
           ASSUME_YES=1 clean_build_dir
           section "Configure the superbuild"
         else
@@ -1395,7 +1405,7 @@ configure_superbuild() {
       fi
     fi
   fi
-  if [ -f "${BUILD_DIR}/CMakeCache.txt" ] && [ -f "${BUILD_DIR}/Makefile" ]; then
+  if [ "${dry_run_new_tree}" = 0 ] && [ -f "${BUILD_DIR}/CMakeCache.txt" ] && [ -f "${BUILD_DIR}/Makefile" ]; then
     if [ "${RECONFIGURE}" = 0 ]; then
       if grep -q '^Slicer_BUILD_QT_DESIGNER_PLUGINS:BOOL=OFF$' "${BUILD_DIR}/CMakeCache.txt" && ! designer_plugins_in_extra_args; then
         # Earlier versions of this script turned the Qt Designer plugins off. Without them slicer.util.loadUI

@@ -44,7 +44,7 @@ _STATUS_TEXT = {
     "closed-for-update": "closed for the update",
     "possibly-crashed": "possibly closed unexpectedly",
     "closed-unsaved": "closed without saving",
-    "running": "open in another Slicer",
+    "running": "open in another Slicer Studio window",
     "closed": "closed normally",
     "recovered": "recovered",
     "discarded": "discarded",

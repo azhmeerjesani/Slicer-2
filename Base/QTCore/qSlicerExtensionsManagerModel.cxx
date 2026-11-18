@@ -1880,8 +1880,9 @@ bool qSlicerExtensionsManagerModel::installExtensionFromServer(const QString& ex
   {
     QString message = tr("Extension %1 has been installed from server.").arg(extensionName);
     message + "\n\n";
-    message += tr("Slicer must be restarted. Do you want to restart now ?");
-    QMessageBox::StandardButton answer = QMessageBox::question(nullptr, tr("Restart slicer ?"), message);
+    const QString appName = qSlicerCoreApplication::application()->mainApplicationDisplayName();
+    message += tr("%1 must be restarted. Do you want to restart now?").arg(appName);
+    QMessageBox::StandardButton answer = QMessageBox::question(nullptr, tr("Restart %1?").arg(appName), message);
     restartConfirmed = (answer == QMessageBox::StandardButton::Yes);
   }
   if (restartConfirmed)

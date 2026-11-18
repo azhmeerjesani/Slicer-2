@@ -119,6 +119,37 @@ class StudioBrandingTest(unittest.TestCase):
         self.assertIn('Exec="@LAUNCHER@" %F', entry)
         self.assertIn("install-desktop-entry.sh", read("Applications", "SlicerApp", "CMakeLists.txt"))
 
+    def test_DockIconStaysTheBundleIcon(self):
+        # On macOS QApplication::setWindowIcon replaces the Dock icon: the .icns (macOS icon grid) must stay
+        source = read("Base", "QTGUI", "qSlicerApplication.cxx")
+        guard = source.index("#ifndef Q_OS_MACOS\n  // On macOS the application window icon")
+        block = source[guard:source.index("#endif", guard)]
+        self.assertIn("q->setWindowIcon(icon);", block)
+        self.assertIn(":/Icons/XXLarge/DesktopIcon.png", block)
+
+    def test_VersionsAreLabelled(self):
+        # applicationVersion() is the 3D Slicer base version, never shown as the Slicer Studio version
+        self.assertIn('tr("Based on 3D Slicer %1")', read("Base", "QTApp", "qSlicerAboutDialog.cxx"))
+        self.assertIn('tr("(based on 3D Slicer %1)")', read("Base", "QTApp", "qSlicerMainWindow.cxx"))
+        self.assertIn('" (based on 3D Slicer %1)"', read("Base", "QTApp", "qSlicerErrorReportDialog.cxx"))
+        self.assertIn('slicer.app.setProperty("SlicerStudioVersion"', read("Modules", "Scripted", "Studio", "Studio.py"))
+
+    def test_NoBareSlicerAsTheProductName(self):
+        for parts, old in (
+            (("Modules", "Loadable", "SlicerWelcome", "Resources", "UI", "qSlicerWelcomeModuleWidget.ui"), "<string>Customize Slicer</string>"),
+            (("Base", "QTGUI", "Resources", "UI", "qSlicerExtensionsManagerWidget.ui"), "Slicer Extensions Manager"),
+            (("Base", "QTCore", "qSlicerExtensionsManagerModel.cxx"), "Slicer must be restarted"),
+            (("Base", "QTApp", "qSlicerApplicationHelper.hxx"), '"Slicer Python Console"'),
+            (("Base", "QTGUI", "qSlicerExtensionsServerWidget.cxx"), "#installing-3d-slicer"),
+            (("Modules", "Scripted", "Studio", "StudioLib", "recovery.py"), '"open in another Slicer"'),
+            (("Modules", "Scripted", "LesionNetworkMapping", "LesionNetworkMappingUI", "catalog_dialog.py"), "another Slicer window"),
+            (("Modules", "Scripted", "LesionNetworkMapping", "LesionNetworkMappingUI", "manager_catalog.py"), "after Slicer was closed"),
+            (("Base", "Python", "slicer", "packaging.py"), "until Slicer is restarted.\\n"),
+            (("Modules", "Scripted", "Studio", "StudioLib", "migration.py"), "≡ > Help > About 3D Slicer"),
+        ):
+            with self.subTest(path="/".join(parts)):
+                self.assertNotIn(old, read(*parts))
+
     def test_DiskImageInfoStrings(self):
         script = read("Utilities", "Scripts", "SlicerStudioMacOS", "build_dmg.sh")
         self.assertIn("NSHumanReadableCopyright", script)

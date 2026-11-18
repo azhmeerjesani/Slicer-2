@@ -736,7 +736,12 @@ endif()
   endif()
 
   if(Slicer_REQUIRED_QT_VERSION VERSION_GREATER_EQUAL "6")
+    # This first lookup creates Qt6::qmake, Qt6::moc and Qt6::rcc (Qt6CoreTools):
+    # keep them in the Qt selected with Qt6_DIR (see SlicerMacroIsolateQt6Packages.cmake).
+    include(SlicerMacroIsolateQt6Packages)
+    slicer_isolate_qt6_packages()
     find_package(Qt6 COMPONENTS Core QUIET)
+    slicer_restore_qt6_prefix_path()
     set(_webengine_qt_component "WebEngineCore")
     # Qt 6.9+ requires GuiPrivate for accessing QWindowsWindow (in qSlicerApplication::setHasBorderInFullScreen)
     if(WIN32 AND Qt6_VERSION VERSION_GREATER_EQUAL "6.9")

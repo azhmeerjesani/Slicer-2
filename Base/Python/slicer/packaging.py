@@ -484,13 +484,13 @@ def pip_ensure(
             if count == 1:
                 message = _(
                     "1 updated package was already loaded in memory "
-                    "and may not work correctly until Slicer is restarted.\n\n"
+                    "and may not work correctly until the application is restarted.\n\n"
                     "Would you like to restart now?",
                 )
             else:
                 message = _(
                     "{count} updated packages were already loaded in memory "
-                    "and may not work correctly until Slicer is restarted.\n\n"
+                    "and may not work correctly until the application is restarted.\n\n"
                     "Would you like to restart now?",
                 ).format(count=count)
             if slicer.util.confirmYesNoDisplay(

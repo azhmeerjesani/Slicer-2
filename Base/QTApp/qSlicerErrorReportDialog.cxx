@@ -52,10 +52,24 @@ qSlicerErrorReportDialog::qSlicerErrorReportDialog(QWidget* parentWidget)
   d->setupUi(this);
 
   QString instructionsText = d->InstructionsLabel->text();
-  QString appNameVersionPlatform = QString("%1 %2 %3")
-                                     .arg(qSlicerApplication::application()->mainApplicationDisplayName())
-                                     .arg(qSlicerApplication::application()->applicationVersion())
-                                     .arg(qSlicerApplication::application()->platform());
+  // applicationVersion() is the version of the 3D Slicer this application is based on, not its own version
+  // (SlicerStudioVersion, set by the Studio module): say so in the report.
+  qSlicerApplication* app = qSlicerApplication::application();
+  QString appNameVersion = app->mainApplicationDisplayName();
+  const QString studioVersion = app->property("SlicerStudioVersion").toString();
+  if (!studioVersion.isEmpty())
+  {
+    appNameVersion += " " + studioVersion;
+  }
+  if (app->mainApplicationDisplayName() != QString("3D Slicer"))
+  {
+    appNameVersion += QString(" (based on 3D Slicer %1)").arg(app->applicationVersion());
+  }
+  else
+  {
+    appNameVersion += " " + app->applicationVersion();
+  }
+  QString appNameVersionPlatform = QString("%1 %2").arg(appNameVersion).arg(app->platform());
   instructionsText.replace(QString("[appname-version-platform]"), QUrl::toPercentEncoding(appNameVersionPlatform));
   d->InstructionsLabel->setText(instructionsText);
 

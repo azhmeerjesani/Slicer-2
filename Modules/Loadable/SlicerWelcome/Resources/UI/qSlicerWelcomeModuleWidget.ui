@@ -121,7 +121,7 @@
       <item row="4" column="0">
        <widget class="QPushButton" name="EditApplicationSettingsButton">
         <property name="text">
-         <string>Customize Slicer</string>
+         <string>Customize Slicer Studio</string>
         </property>
         <property name="icon">
          <iconset resource="../qSlicerWelcomeModule.qrc">

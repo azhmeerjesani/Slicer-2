@@ -55,7 +55,15 @@ qSlicerAboutDialog::qSlicerAboutDialog(QWidget* parentWidget)
   d->CreditsTextBrowser->append("");
   if (!slicer->isCustomMainApplication())
   {
-    d->CreditsTextBrowser->append(slicer->applicationVersion() + " " + "r" + slicer->revision() + " / " + slicer->repositoryRevision());
+    // The version of this application (set by the Studio module) and, labelled as such, the version of the
+    // 3D Slicer it is based on: the two are different numbers.
+    const QString studioVersion = slicer->property("SlicerStudioVersion").toString();
+    if (!studioVersion.isEmpty())
+    {
+      d->CreditsTextBrowser->append(tr("Version %1").arg(studioVersion));
+    }
+    d->CreditsTextBrowser->append(
+      tr("Based on 3D Slicer %1").arg(slicer->applicationVersion() + " " + "r" + slicer->revision() + " / " + slicer->repositoryRevision()));
     d->CreditsTextBrowser->append("");
 #ifdef Slicer_BUILD_APPLICATIONUPDATE_SUPPORT
     if (qSlicerApplicationUpdateManager::isApplicationUpdateEnabled())

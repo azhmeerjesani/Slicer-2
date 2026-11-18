@@ -118,7 +118,7 @@ void qSlicerExtensionsServerWidgetPrivate::setFailurePage(const QStringList& err
     + qSlicerExtensionsServerWidget::tr("Check that <b>Slicer Studio</b> is properly installed.")
     + " "
 #endif
-      "<a href='https://slicer.readthedocs.io/en/latest/user_guide/getting_started.html#installing-3d-slicer'>"
+      "<a href='https://github.com/azhmeerjesani/Slicer-2/blob/main/Docs/user_guide/install_studio.md'>"
     + qSlicerExtensionsServerWidget::tr("Read more...")
     + "</a></li>"
       "        </ul>"

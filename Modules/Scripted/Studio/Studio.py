@@ -200,6 +200,9 @@ def _setWindowTitle():
     try:
         from StudioLib import version
 
+        # Read by the About box, the start-up disclaimer and the error report, which show the 3D Slicer version
+        # (applicationVersion) only as the base version
+        slicer.app.setProperty("SlicerStudioVersion", version.studioVersion())
         mainWindow = slicer.util.mainWindow()
         if mainWindow is not None:
             mainWindow.windowTitle = version.windowTitle()

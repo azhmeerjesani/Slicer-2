@@ -184,10 +184,13 @@ Exit codes:
    Qt and the launcher was built from source, is refused the same way: run once
    with `--clean`.
 
-   CMake itself (`CMake/SlicerBlockFindQtAndCheckVersion.cmake`) also stops
-   when a Qt package, `qmake`, `moc`, `rcc` or `uic` comes from another Qt
-   installation or version, and it takes the Qt plugin, binary and library
-   folders from the selected Qt's own `QtInstallPaths.cmake`.
+   CMake itself (`CMake/SlicerMacroIsolateQt6Packages.cmake`, called before the
+   first Qt lookup) forgets cached Qt packages of another Qt and searches the
+   selected Qt first. `CMake/SlicerBlockFindQtAndCheckVersion.cmake` then stops
+   when a Qt package, `qmake`, `moc`, `rcc` or `uic` still comes from another Qt
+   installation or version (configure again with `--clean`), and it takes the
+   Qt plugin, binary and library folders from the selected Qt's own
+   `QtInstallPaths.cmake`.
 5. **Build.** `make -C <build-dir> -j<jobs>`. Before and after the build, the
    script checks that every `Qt6*_DIR` recorded in the CMake caches of the build
    tree (Slicer, CTK, PythonQt, VTK and the others) is in the selected Qt.

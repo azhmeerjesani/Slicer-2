@@ -73,7 +73,7 @@ Windows and Linux; on macOS, Ctrl is ⌘.
 | View > Appearance > Show Status Bar | Hidden in Studio; messages show briefly at the bottom of the views and ≡ > View > Recent messages… lists them |
 | View > Toolbars | ≡ > View > Toolbars: a toolbar you turn on stays visible in Studio |
 | Help > Keyboard Shortcuts Reference | ≡ > Keyboard shortcuts (Ctrl+/): the keys of the workspace, the view gestures and the Esc steps, searchable; the 3D Slicer reference stays in ≡ > Help |
-| Help > About 3D Slicer | ≡ > Help > About 3D Slicer (same as 3D Slicer) |
+| Help > About 3D Slicer | ≡ > Help > About Slicer Studio (the same box, named after Slicer Studio) |
 | Help > Documentation (Ctrl+1) | ≡ > Help > Documentation (Ctrl+1); the ? button of the inspector shows help for the current tool (same as 3D Slicer) |
 | The 3D Slicer interface itself | ≡ > Classic interface (Ctrl+Alt+0) switches to it and back; your scene stays as it is |
 | Data module | Search > Data (Ctrl+K) opens it in the inspector; Library shows what you open |
