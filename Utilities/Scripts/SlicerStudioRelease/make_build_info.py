@@ -40,7 +40,7 @@ INFO_NAME = "studio_build_info.json"
 FILES_NAME = "studio_build_files.json.gz"
 VERSION_FILE = "Modules/Scripted/Studio/StudioLib/version.py"
 #: Files that run before a commit update can apply: a change to them always needs a new build
-PRE_OVERLAY = ("Base/Python/slicerqt.py", "Base/Python/studio_overlay.py")
+PRE_OVERLAY = ("Base/Python/slicerqt.py", "Base/Python/studio_overlay.py", "Base/Python/studio_profile.py")
 
 
 def _git(source, *arguments):

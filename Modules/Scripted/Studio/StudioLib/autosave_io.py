@@ -172,9 +172,11 @@ def sanitizeFileName(name, maxLength=60):
 
 
 def builtinRoot():
-    """The default autosave folder: the private application data folder (D-A1), never a user folder."""
-    base = qt.QStandardPaths.writableLocation(qt.QStandardPaths.AppLocalDataLocation)
-    return os.path.normpath(os.path.join(base, ROOT_FOLDER_NAME))
+    """The default autosave folder: in the user profile, the private application data folder by default (D-A1), never a
+    user folder."""
+    from . import profile_legacy
+
+    return os.path.normpath(os.path.join(profile_legacy.profileRoot(), ROOT_FOLDER_NAME))
 
 
 def defaultRoot():

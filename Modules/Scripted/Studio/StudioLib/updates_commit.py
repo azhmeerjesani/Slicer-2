@@ -31,8 +31,8 @@ paths only.
 
 **Staging.** For every installed folder with a change (for example ``lib/Slicer-X.Y/qt-scripted-modules``), every
 top-level package, module or ``Resources`` folder that holds a mapped file is copied whole from the installation into
-``<state>/commit/<B>/staging/...`` (except ``studio_overlay.py`` and ``slicerqt.py``, which run before an update
-applies; a unit with a symbolic link or compiled code is refused), the changed files are written in, deleted ones
+``<state>/commit/<B>/staging/...`` (except ``studio_overlay.py``, ``studio_profile.py`` and ``slicerqt.py``, which run before an
+update applies; a unit with a symbolic link or compiled code is refused), the changed files are written in, deleted ones
 removed, and the result is compiled (a syntax error refuses the update). Under the state lock, the folder is then
 renamed (atomically) to ``versions/<H>`` and ``state.json`` gets ``pending = H``. ``studio_overlay.py`` (in ``bin/Python``, run by ``slicerqt.py`` before any Studio import)
 activates it at the next start, and rolls it back automatically when that start fails.
@@ -938,7 +938,8 @@ class _Downloader:
 
 
 def _isBootstrap(entry, buildFiles):
-    """True for a mapped file that runs before an update applies (``preOverlay``: studio_overlay.py, slicerqt.py)."""
+    """True for a mapped file that runs before an update applies (``preOverlay``: studio_overlay.py, studio_profile.py,
+    slicerqt.py)."""
     if entry["src"] in buildFiles.preOverlay:
         return True
     unit = _unit(entry["dst"], entry["root"])
@@ -972,7 +973,7 @@ def stageUpdate(home, stateRoot, info, buildFiles, listing, classification, head
     try:
         os.makedirs(filesDir)
         # The units of each changed root: every top-level entry with a mapped (or added) file, and __pycache__. The
-        # files that run before an update applies (studio_overlay.py, slicerqt.py) are never part of one: they are
+        # files that run before an update applies (studio_overlay.py, studio_profile.py, slicerqt.py) are never part of one: they are
         # already loaded from the installation when the overlay is activated.
         units = {}
         for entry in buildFiles.map:

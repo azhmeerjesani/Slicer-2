@@ -25,6 +25,7 @@ set(Slicer_PYTHON_SCRIPTS
   slicer/util
   slicerqt
   studio_overlay
+  studio_profile
   mrml
   vtkAddon
   vtkITK
@@ -54,6 +55,15 @@ configure_file(
 
 list(APPEND Slicer_PYTHON_SCRIPTS ${CMAKE_CURRENT_BINARY_DIR}/slicer/kits.py)
 
+# Slicer Studio: the build values that the user profile (studio_profile.py) needs before the application has an
+# extensions manager to ask (a generated file: never replaced by a code update from main)
+configure_file(
+  studio_build_config.py.in
+  ${CMAKE_CURRENT_BINARY_DIR}/studio_build_config.py
+  @ONLY
+  )
+list(APPEND Slicer_PYTHON_SCRIPTS ${CMAKE_CURRENT_BINARY_DIR}/studio_build_config.py)
+
 set(Slicer_PYTHON_RESOURCES
   )
 
@@ -64,7 +74,7 @@ if(Slicer_USE_SimpleITK)
 endif()
 
 # Slicer Studio: the installed path of each file, for the code updates from main
-# (slicerqt.py and studio_overlay.py run before an update applies: a change to them needs a new build)
+# (slicerqt.py, studio_overlay.py and studio_profile.py run before an update applies: a change to them needs a new build)
 if(COMMAND slicerStudioRecordVerbatimFiles)
   slicerStudioRecordVerbatimFiles(
     SCRIPTS "${Slicer_PYTHON_SCRIPTS}"

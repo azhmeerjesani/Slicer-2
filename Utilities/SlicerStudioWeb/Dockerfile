@@ -157,9 +157,10 @@ COPY docker/openbox-rc.xml /etc/slicer-studio-web/openbox-rc.xml
 COPY docker/index.html /usr/share/novnc/index.html
 # A checkout with Windows line endings (Git for Windows converts to CRLF by
 # default) would give a script that cannot run: convert it to LF.
-# On Linux, Slicer keeps its revision-specific settings and extensions in
-# <installation>/slicer.org, which the user cannot write here: keep them in the
-# settings folder of the user instead (kept between runs with the home volume).
+# Slicer Studio builds keep their revision-specific settings in ~/.config/slicer.org
+# and the extensions and Python packages in the user profile (~/.local/share/slicer.org/Slicer),
+# both in the home volume, so this link is no longer used. It is kept for an image built
+# from an older Slicer Studio, which kept them in <installation>/slicer.org (not writable here).
 RUN set -eux; \
   sed -i 's/\r$//' /usr/local/bin/slicer-studio-web-entrypoint; \
   chmod 0755 /usr/local/bin/slicer-studio-web-entrypoint; \

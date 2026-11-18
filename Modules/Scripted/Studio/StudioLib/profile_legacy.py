@@ -488,7 +488,10 @@ class _Lock:
 
 
 def snapshotLocked(slicerHome, profileRootPath, revision=None, platform=None):
-    """``snapshot()`` under the snapshot lock of the profile; None when another Slicer Studio is taking one."""
+    """``snapshot()`` under the snapshot lock of the profile; None when another Slicer Studio is taking one, or when the
+    installation keeps nothing inside itself."""
+    if not slicerHome or not profileRootPath or not inAppLocations(slicerHome, platform):
+        return None
     with _Lock(os.path.join(profileRootPath, LEGACY_FOLDER)) as lock:
         if not lock.acquired:
             return None
@@ -506,7 +509,7 @@ def scheduleSnapshot():
     app = slicer.app
     if not app.isInstalled or app.testingEnabled():
         return False
-    if str(app.slicerRevisionUserSettingsFilePath).endswith("-tmp.ini"):
+    if str(app.applicationName).endswith("-tmp"):
         return False  # --disable-settings
     home = str(app.slicerHome)
     revision = str(app.revision)

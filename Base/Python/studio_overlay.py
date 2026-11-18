@@ -89,7 +89,7 @@ UNCONFIRMED_WITHOUT_TOKEN_S = 600
 #: Most entries kept in "bad" and "skipped"
 MAX_MARKED = 50
 #: Files that run before an update can apply (bin/Python): never taken from an overlay
-BOOTSTRAP_MODULES = ("studio_overlay", "slicerqt")
+BOOTSTRAP_MODULES = ("studio_overlay", "slicerqt", "studio_profile")
 
 _OFF_VALUES = ("off", "0", "none", "false", "no")
 _LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
@@ -1020,10 +1020,18 @@ def _runInfo(app, env):
 
 
 def stateRootFromApplication():
-    """``<AppLocalDataLocation>/StudioUpdate/commit`` (the same folder as ``StudioLib.updates.stateDirectory()``)."""
-    import qt
+    """``<profile>/StudioUpdate/commit`` (the same folder as ``StudioLib.updates.stateDirectory()``): the user profile
+    folder (``studio_profile.root()``), whose default is the private application data folder."""
+    try:
+        import studio_profile
+    except ImportError:  # a build without the user profile
+        studio_profile = None
+    if studio_profile is not None:
+        base = studio_profile.root()
+    else:
+        import qt
 
-    base = qt.QStandardPaths.writableLocation(qt.QStandardPaths.AppLocalDataLocation)
+        base = qt.QStandardPaths.writableLocation(qt.QStandardPaths.AppLocalDataLocation)
     return os.path.join(base, "StudioUpdate", "commit")
 
 

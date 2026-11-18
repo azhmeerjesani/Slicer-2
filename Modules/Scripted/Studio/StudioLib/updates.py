@@ -1007,13 +1007,12 @@ def cachedManifest():
 
 
 def stateDirectory():
-    """Private folder of the update state (install record, helper log, downloads)."""
-    import qt
-
+    """Private folder of the update state (install record, helper log, downloads), in the user profile."""
     if stateDirectoryOverride:
         return stateDirectoryOverride
-    base = qt.QStandardPaths.writableLocation(qt.QStandardPaths.AppLocalDataLocation)
-    return os.path.join(base, "StudioUpdate")
+    from . import profile_legacy
+
+    return os.path.join(profile_legacy.profileRoot(), "StudioUpdate")
 
 
 def downloadDirectory():

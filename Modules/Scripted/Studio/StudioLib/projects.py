@@ -414,7 +414,9 @@ MOVE_JOURNAL_FILE = "StudioMoveJournal.json"
 
 def moveJournalPath():
     """Where ``MoveJournal`` keeps its file, or None without an application data folder (main thread)."""
-    base = str(qt.QStandardPaths.writableLocation(qt.QStandardPaths.AppLocalDataLocation) or "")
+    from . import profile_legacy
+
+    base = str(profile_legacy.profileRoot() or "")
     return os.path.join(base, MOVE_JOURNAL_FILE) if base else None
 
 

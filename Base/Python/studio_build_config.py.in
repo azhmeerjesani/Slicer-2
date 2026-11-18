@@ -1,0 +1,9 @@
+"""Build values for the Slicer Studio user profile (configured by Base/Python/CMakeLists.txt; see studio_profile.py)."""
+
+#: The revision the extensions server knows this build by (Slicer_EXTENSIONS_SERVER_REVISION): the key of the
+#: extensions folder of the profile
+EXTENSIONS_SERVER_REVISION = "@Slicer_EXTENSIONS_SERVER_REVISION@"
+#: SLICER_REVISION_SPECIFIC_USER_SETTINGS_FILEBASENAME
+REVISION_SPECIFIC_SETTINGS_BASENAME = "@SLICER_REVISION_SPECIFIC_USER_SETTINGS_FILEBASENAME@"
+#: Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR
+STORE_SETTINGS_IN_APPLICATION_HOME_DIR = "@Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR@"

@@ -1211,6 +1211,19 @@ setup_compilers() {
   chmod 755 "${C_COMPILER}" "${CXX_COMPILER}"
 }
 
+settings_in_app_in_extra_args() {
+  # True when a --cmake-arg sets Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR (the user's choice is kept).
+  local arg
+  if [ ${#CMAKE_EXTRA_ARGS[@]} -gt 0 ]; then
+    for arg in "${CMAKE_EXTRA_ARGS[@]}"; do
+      case "${arg}" in
+        *Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR*) return 0 ;;
+      esac
+    done
+  fi
+  return 1
+}
+
 designer_plugins_in_extra_args() {
   # True when a --cmake-arg sets Slicer_BUILD_QT_DESIGNER_PLUGINS (the user's choice is kept).
   local arg
@@ -1248,6 +1261,9 @@ configure_superbuild() {
         # Earlier versions of this script turned the Qt Designer plugins off. Without them slicer.util.loadUI
         # cannot create CTK and qMRML widgets, and scripted modules such as Line Profile fail to open.
         info "${BUILD_DIR} was configured without the Qt Designer plugins: running CMake again to turn them on"
+      elif grep -q '^Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR:BOOL=ON$' "${BUILD_DIR}/CMakeCache.txt" && ! settings_in_app_in_extra_args; then
+        # Earlier builds kept the user's settings and extensions inside the application, so replacing it lost them
+        info "${BUILD_DIR} keeps the user's settings inside the application: running CMake again to keep them in the user profile"
       else
         info "already configured: ${BUILD_DIR} (use --reconfigure to run CMake again)"
         return 0
@@ -1271,6 +1287,9 @@ configure_superbuild() {
     # The Qt Designer plugins (CTK and qMRML widgets) are needed at run time too: slicer.util.loadUI
     # creates the widgets of scripted module .ui files with them.
     -DSlicer_BUILD_QT_DESIGNER_PLUGINS:BOOL=ON
+    # The user's settings, extensions and Python packages stay outside the application, so that dragging a new
+    # build over the old one keeps them (Base/Python/studio_profile.py; the default of this fork, stated here too).
+    -DSlicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR:BOOL=OFF
     "-DCMAKE_OSX_ARCHITECTURES:STRING=${HOST_ARCH}"
     "-DCMAKE_OSX_DEPLOYMENT_TARGET:STRING=${MACOS_MIN}"
     "-DCMAKE_OSX_SYSROOT:PATH=${sysroot}"

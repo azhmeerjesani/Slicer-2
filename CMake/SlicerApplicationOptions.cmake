@@ -77,7 +77,10 @@ message(STATUS "Configuring ${Slicer_MAIN_PROJECT_APPLICATION_NAME} organization
 #-----------------------------------------------------------------------------
 # Settings
 #-----------------------------------------------------------------------------
-set(SLICER_REVISION_SPECIFIC_USER_SETTINGS_FILEBASENAME "")
+# Slicer Studio fork: the revision-specific settings are named <app>Studio-<rev>.ini (SlicerStudio-<rev>.ini), so that
+# they never mix with the Slicer-<rev>.ini of an official Slicer that keeps its settings in the same user folder
+# (Base/Python/studio_profile.py carries them forward from one build to the next).
+set(SLICER_REVISION_SPECIFIC_USER_SETTINGS_FILEBASENAME "Studio")
 mark_as_superbuild(SLICER_REVISION_SPECIFIC_USER_SETTINGS_FILEBASENAME:STRING)
 
 #-----------------------------------------------------------------------------
@@ -256,5 +259,15 @@ endforeach()
 # it is recommended to install the application in a writeable directory and
 # enable Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR.
 #
-option(Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR "Store all settings in the application home directory (makes the application portable)" ON)
+# Slicer Studio fork: OFF. Settings and extensions kept inside the application are lost each time the application is
+# replaced (a new disk image dragged over the old one, a new Linux package, an in-app update). With OFF the
+# revision-specific settings live in the user's settings folder (~/.config/slicer.org/SlicerStudio-<rev>.ini) and the
+# user profile (Base/Python/studio_profile.py) keeps the extensions and the pip packages outside the application.
+option(Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR "Store all settings in the application home directory (makes the application portable)" OFF)
+# A build tree configured before the default changed still has ON in its cache: turn it OFF once. Set it ON again after
+# that first configuration to get a portable build.
+if(NOT Slicer_STUDIO_PROFILE_SETTINGS_DEFAULT_APPLIED)
+  set(Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR OFF CACHE BOOL "Store all settings in the application home directory (makes the application portable)" FORCE)
+  set(Slicer_STUDIO_PROFILE_SETTINGS_DEFAULT_APPLIED ON CACHE INTERNAL "Slicer Studio: Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR was turned OFF once")
+endif()
 mark_as_superbuild(Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR:BOOL)

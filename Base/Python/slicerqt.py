@@ -1,3 +1,16 @@
+# Slicer Studio: the user profile first (studio_profile.py): it carries the settings, extensions and Python packages of
+# the previous build forward, before the extensions manager and the module paths are read. A problem there never stops
+# the start-up.
+try:
+    import studio_profile
+
+    studio_profile.startup()
+except Exception as _studioProfileError:
+    import sys as _sys
+
+    print(f"Slicer Studio profile not set up: {_studioProfileError}", file=_sys.stderr)
+    del _sys
+
 # Slicer Studio: apply a staged code update from main (an overlay in the user's data folder) before anything below
 # imports a Slicer or Studio module (see studio_overlay.py). A problem there never stops the start-up.
 try:
