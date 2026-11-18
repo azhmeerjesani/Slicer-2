@@ -687,7 +687,8 @@ class StudioCommitUpdatesTest(unittest.TestCase):
         # Needs a new build
         for path in ("Base/QTCore/qSlicerThing.cxx", "CMakeLists.txt", "Modules/Scripted/Studio/CMakeLists.txt", "Base/QTGUI/Resources/UI/x.ui",
                      "Base/QTGUI/Resources/qSlicerBaseQTGUI.qrc", "Modules/CLI/X/X.xml", "SuperBuild/External_X.cmake",
-                     "Base/Python/slicerqt.py", "Base/Python/studio_overlay.py", "Base/Python/vtk.py.in", "Utilities/Scripts/qrcc.py",
+                     "Base/Python/slicerqt.py", "Base/Python/studio_overlay.py", "Base/Python/studio_profile.py", "Base/Python/vtk.py.in",
+                     "Utilities/Scripts/qrcc.py",
                      "Utilities/Templates/Modules/Scripted/TemplateKey.py", "Base/Python/slicer/kits.py.in", "License.txt"):
             self.assertEqual(one(path, ("100644", "a" * 40), ("100644", blob)).kind, "needsBuild", path)
         # Mode changes, symlinks and submodules
@@ -1462,6 +1463,27 @@ class StudioCommitUpdatesTest(unittest.TestCase):
         values = self.runBootstrap(body.format(testing=False))
         self.assertEqual((values["state"], values["scheduled"], values["studio"]), ("active", True, "_LazyModule"))
         self.assertEqual(self.state()["active"], head)
+
+    def test_StateRootFollowsProfile(self):
+        """The state of the code updates is in the user profile: SLICER_STUDIO_PROFILE_DIR moves it with the profile, and
+        without an override it stays in the application data folder (where it was before the profile)."""
+        import studio_profile
+        from unittest import mock
+
+        qt = types.ModuleType("qt")
+        qt.QSettings = lambda *args: types.SimpleNamespace(value=lambda key, default=None: default)
+        qt.QStandardPaths = types.SimpleNamespace(AppLocalDataLocation=0, writableLocation=lambda location: os.path.join(self.tmp, "appdata"))
+        app = types.SimpleNamespace(applicationName="Slicer", slicerHome=self.home, userSettings=None)
+        profile = os.path.join(self.tmp, "profile")
+        self.addCleanup(studio_profile.setRoot, None)
+        with mock.patch.dict(sys.modules, {"qt": qt}), mock.patch.object(studio_profile, "_application", lambda: app):
+            with mock.patch.dict(os.environ, {studio_profile.ENVIRONMENT_VARIABLE: profile}):
+                studio_profile.setRoot(None)
+                self.assertEqual(studio_overlay.stateRootFromApplication(), os.path.join(profile, "StudioUpdate", "commit"))
+            with mock.patch.dict(os.environ, {studio_profile.ENVIRONMENT_VARIABLE: ""}):
+                studio_profile.setRoot(None)
+                self.assertEqual(studio_overlay.stateRootFromApplication(), os.path.join(self.tmp, "appdata", "StudioUpdate", "commit"))
+        studio_profile.setRoot(None)
 
     def test_PreseedFailureRollsBack(self):
         """A scripted module of the update that fails while it loads: the update is rolled back at once, and the rest
