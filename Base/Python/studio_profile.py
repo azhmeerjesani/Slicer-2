@@ -8,8 +8,10 @@ profile folder ``<P>`` and in ``~/.config/slicer.org``:
   setting ``Studio/Profile/Directory`` of ``Slicer.ini``, else the private application data folder
   (``QStandardPaths.AppLocalDataLocation``: ``~/Library/Application Support/slicer.org/Slicer`` on macOS,
   ``${XDG_DATA_HOME:-~/.local/share}/slicer.org/Slicer`` on Linux), where autosave, the update state and the move
-  journal already were. A folder inside the application (or around it) or that cannot be written is refused, with
-  the reason printed, and the default is used.
+  journal already were. A folder inside the application (or around it), that cannot be written, or that does not
+  exist (renamed, a synced folder not restored yet: never created empty in its place) is refused, with the reason
+  printed and shown in Settings > Profile, and the default is used for that run without carrying, importing, syncing or
+  trashing anything. A folder chosen in Settings must be empty (the profile is copied there) or already hold a profile.
 - ``<P>/StudioExtensions/<server revision>-<os>-<arch>/``: the installed extensions. They are keyed by the revision
   of the official build the extensions server knows this build by (``Slicer_EXTENSIONS_SERVER_REVISION``), not by
   the fork's own revision (a commit count that changes with every build): every build of the same upstream base
@@ -17,12 +19,18 @@ profile folder ``<P>`` and in ``~/.config/slicer.org``:
   this is the extensions install folder (``Extensions/InstallPath``). On macOS the application always installs
   extensions inside the bundle (``Contents/Extensions-<rev>``, where their libraries find the application's), so the
   store is kept as a mirror of that folder: it is restored into a new bundle at the first start, and what the user
-  installs, updates or uninstalls is copied back (``StudioLib/profile_extensions.py``, and at every start). An
-  extension that the user uninstalled goes to ``<P>/StudioExtensions-trash/<date>/`` for 30 days, never deleted at once.
+  installs, updates or uninstalls is copied back (``StudioLib/profile_extensions.py``, and at every start). The marker
+  of a bundle (``.studio-extensions.json``) names the real path of the store and the extensions it held at its last
+  sync, so that several bundles share a store and a bundle that meets another store merges with it instead of
+  removing anything (``planExtensionsSync``). An extension that the user uninstalled goes to
+  ``<P>/StudioExtensions-trash/<date>/`` for 30 days, never deleted at once. An import of the extensions of a previous
+  build that did not finish is taken up again at the next starts (``importExtensions``).
 - ``<P>/StudioPython/<cache tag>-<platform>-<machine>/``: the Python packages that the user installs with pip
   (``slicer.util.pip_install`` adds ``--user`` with ``PYTHONUSERBASE`` set to this folder; the setting
   ``Studio/Profile/PipToProfile`` turns that off). Keyed by the Python ABI.
 - ``<P>/StudioLegacy/``: copies of what older builds kept inside the application (``StudioLib/profile_legacy.py``).
+  The first start of a new build also looks in the older builds themselves: on Linux the Slicer Studio folders next
+  to it, on macOS the other Slicer Studio bundles in Applications (the old build renamed while the new one starts).
 - ``<P>/StudioProfile.json``: what was carried forward and when; ``<P>/StudioProfile.lock``: the lock of the profile.
 - ``~/.config/slicer.org/SlicerStudio-<rev>.ini``: the revision-specific settings (the build sets
   ``Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR`` OFF and the file base name ``Studio``, so they are outside the
@@ -32,7 +40,8 @@ profile folder ``<P>`` and in ``~/.config/slicer.org``:
 
 ``startup(app)`` runs from ``slicerqt.py`` before anything else: Python starts before the application creates the
 extensions manager and reads the module paths, so what it changes applies to this run. It does nothing with
-``--testing`` or ``--disable-settings``, and it costs one settings read when there is nothing to do. On Linux the
+``--testing`` or ``--disable-settings``, nor in a portable build (``Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR``
+ON), and it costs one settings read and one small file read when there is nothing to do. On Linux the
 launcher has already set the library paths of this run, so after carrying extensions forward it asks for one restart
 (``Studio/Profile/RestartNeeded``; the Studio module shows it).
 
@@ -61,6 +70,8 @@ USERBASE_ENVIRONMENT_VARIABLE = "SLICER_STUDIO_PYTHON_USERBASE"
 #: Slicer.ini (fork-only keys)
 DIRECTORY_KEY = "Studio/Profile/Directory"
 PENDING_DIRECTORY_KEY = "Studio/Profile/PendingDirectory"
+#: The profile folder used before the last change in Settings (kept, never deleted: Settings > Profile shows it)
+PREVIOUS_DIRECTORY_KEY = "Studio/Profile/PreviousDirectory"
 PIP_KEY = "Studio/Profile/PipToProfile"
 #: The revision-specific settings file (fork-only file)
 INITIALIZED_KEY = "Studio/Profile/Initialized"
@@ -147,10 +158,12 @@ def expandPath(value, home):
     return os.path.normpath(value) if os.path.isabs(value) else None
 
 
-def validateOverride(path, forbiddenRoots=()):
+def validateOverride(path, forbiddenRoots=(), mustExist=False):
     """None when ``path`` can be the profile folder, else the reason it cannot: not absolute, inside an application
-    bundle, inside or around one of ``forbiddenRoots`` (the application, its update copies), not a folder, or not
-    writable."""
+    bundle, inside or around one of ``forbiddenRoots`` (the application, its update copies), not a folder, not
+    writable, or (``mustExist``) missing. A profile folder in use must exist: a missing one was renamed, moved or not
+    restored yet, and an empty folder made in its place would hide the real profile. Only a folder chosen in Settings
+    (``applyPendingDirectory``) is created."""
     if not path or not os.path.isabs(path):
         return "it is not an absolute folder"
     real = os.path.realpath(path)
@@ -161,6 +174,8 @@ def validateOverride(path, forbiddenRoots=()):
             return "it is inside the application (or holds it)"
     if os.path.exists(real) and not os.path.isdir(real):
         return "it is not a folder"
+    if mustExist and not os.path.isdir(real):
+        return "it does not exist (create it, or bring the profile back there, to use it)"
     probe = real
     while not os.path.exists(probe):
         parent = os.path.dirname(probe)
@@ -174,13 +189,14 @@ def validateOverride(path, forbiddenRoots=()):
 
 def resolveRoot(env, home, platform, settingValue, forbiddenRoots=(), default=None):
     """``(root, source, problem)``: the environment variable, else the setting, else ``default`` (else
-    ``defaultRoot``). An override that ``validateOverride`` refuses gives the default and the reason."""
+    ``defaultRoot``). An override that ``validateOverride`` refuses (a missing folder included) gives the default and
+    the reason: ``startup()`` then neither migrates nor syncs anything in that folder."""
     default = default or defaultRoot(env, home, platform)
     for source, raw in (("environment", env.get(ENVIRONMENT_VARIABLE)), ("setting", settingValue)):
         if raw is None or not str(raw).strip():
             continue
         path = expandPath(raw, home)
-        problem = validateOverride(path, forbiddenRoots)
+        problem = validateOverride(path, forbiddenRoots, mustExist=True)
         if problem is None:
             return path, source, None
         name = ENVIRONMENT_VARIABLE if source == "environment" else DIRECTORY_KEY
@@ -205,6 +221,10 @@ def applicationRoots(slicerHome, platform):
     return [home, target, os.path.join(parent, f".{name}.studio-previous"), os.path.join(parent, f".{name}.studio-update")]
 
 
+#: Inside a protected folder, the folders whose contents deleting code may remove (downloads, staged updates)
+REMOVABLE_INSIDE = ("StudioUpdate",)
+
+
 def protectedRoots(home=None, profileRoot=None):
     """Folders that deleting code (the updater, clean-ups) must never remove, nor any folder holding them: the
     profile and the user settings folder."""
@@ -216,11 +236,25 @@ def protectedRoots(home=None, profileRoot=None):
     return roots
 
 
+def removableInside(path, protected):
+    """True when ``path`` is strictly inside one of the ``REMOVABLE_INSIDE`` folders of ``protected`` (the update
+    state: what the updater downloads and stages there is its own to delete)."""
+    real = os.path.realpath(path)
+    for name in REMOVABLE_INSIDE:
+        folder = os.path.realpath(os.path.join(protected, name))
+        if real.startswith(folder.rstrip(os.sep) + os.sep):
+            return True
+    return False
+
+
 def checkRemovable(path, roots=None):
-    """Raise OSError when deleting ``path`` would delete one of ``roots`` (default ``protectedRoots()``) or part of it."""
+    """Raise OSError when deleting ``path`` would delete one of ``roots`` (default ``protectedRoots()``) or part of it,
+    except the contents of its update state folder (``removableInside``)."""
     roots = protectedRoots() if roots is None else roots
     for protected in roots:
-        if protected and (isInside(path, protected) or isInside(protected, path)):
+        if not protected:
+            continue
+        if isInside(protected, path) or (isInside(path, protected) and not removableInside(path, protected)):
             raise OSError(f"{path} holds Slicer Studio user data ({protected}): it is not deleted")
 
 
@@ -356,9 +390,9 @@ def _sha256(path):
     return digest.hexdigest()
 
 
-def verifyTree(source, copy):
+def verifyTree(source, copy, hashes=True):
     """None when ``copy`` holds every file, folder and link of ``source`` (same sizes, same SHA-256 up to
-    ``HASH_LIMIT``, same link targets), else the first difference."""
+    ``HASH_LIMIT`` when ``hashes``, same link targets), else the first difference."""
     for folder, dirs, files in os.walk(source):
         relative = os.path.relpath(folder, source)
         other = os.path.normpath(os.path.join(copy, relative))
@@ -379,43 +413,47 @@ def verifyTree(source, copy):
                 return f"missing file {os.path.join(relative, name)}"
             if os.path.islink(target) or copied.st_size != size:
                 return f"different file {os.path.join(relative, name)}"
-            if size <= HASH_LIMIT and _sha256(path) != _sha256(target):
+            if hashes and size <= HASH_LIMIT and _sha256(path) != _sha256(target):
                 return f"different content {os.path.join(relative, name)}"
     return None
 
 
 def cloneTree(source, destination, platform=None, run=subprocess.run):
     """Copy the folder ``source`` to ``destination`` (which must not exist): a clone where the file system can (APFS
-    ``cp -c``, Btrfs/XFS ``cp --reflink=auto``), else a plain copy. Links are copied as links."""
+    ``cp -c``, Btrfs/XFS ``cp --reflink=always``), else a plain copy. Links are copied as links. Return "clone" when
+    the file system cloned the files (they share their blocks with the source: nothing was read or written, so a check
+    of paths and sizes is enough), else "copy"."""
     platform = sys.platform if platform is None else platform
     if platform == "darwin":
-        commands = [["cp", "-c", "-R", "-p", source, destination], ["cp", "-R", "-p", source, destination]]
+        commands = [("clone", ["cp", "-c", "-R", "-p", source, destination]), ("copy", ["cp", "-R", "-p", source, destination])]
     elif platform.startswith("linux"):
-        commands = [["cp", "-a", "--reflink=auto", source, destination]]
+        commands = [("clone", ["cp", "-a", "--reflink=always", source, destination]), ("copy", ["cp", "-a", source, destination])]
     else:
         commands = []
-    for command in commands:
+    for kind, command in commands:
         try:
             if run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
-                return
+                return kind
         except OSError:
             pass
         shutil.rmtree(destination, ignore_errors=True)
     shutil.copytree(source, destination, symlinks=True)
+    return "copy"
 
 
 def copyTreeVerified(source, destination, platform=None, clone=cloneTree):
     """Copy the folder ``source`` to ``destination`` (which must not exist) through ``destination.partial-<pid>``,
-    checked with ``verifyTree`` before it is renamed in place. None on success, else the reason (nothing is left
-    behind). ``source`` is never changed."""
+    checked with ``verifyTree`` before it is renamed in place (paths and sizes only after a clone, which reads no
+    file: this runs at start-up). None on success, else the reason (nothing is left behind). ``source`` is never
+    changed."""
     if os.path.lexists(destination):
         return "the destination exists"
     partial = f"{destination}.partial-{os.getpid()}"
     shutil.rmtree(partial, ignore_errors=True)
     try:
         os.makedirs(os.path.dirname(destination), exist_ok=True)
-        clone(source, partial, platform)
-        problem = verifyTree(source, partial)
+        kind = clone(source, partial, platform)
+        problem = verifyTree(source, partial, hashes=kind != "clone")
         if problem is None:
             os.replace(partial, destination)
             return None
@@ -534,12 +572,51 @@ def _candidate(kind, revision, ini, home, extensions):
             "extensions": extensions if extensions and os.path.isdir(extensions) else None}
 
 
-def findRevisionCandidates(configDirs, profileRoot, slicerHome, currentRevision, platform):
+def applicationFolders(slicerHome, home=None):
+    """macOS: the folders where other Slicer Studio bundles may be: the folder of this bundle, ``/Applications`` and
+    ``~/Applications``."""
+    home = os.path.expanduser("~") if home is None else home
+    folders = []
+    probe = os.path.realpath(slicerHome) if slicerHome else ""
+    while probe and probe != os.path.dirname(probe):
+        if probe.endswith(".app"):
+            folders.append(os.path.dirname(probe))
+            break
+        probe = os.path.dirname(probe)
+    folders += ["/Applications", os.path.join(home, "Applications")]
+    return folders
+
+
+def _otherBundles(folders, slicerHome):
+    """macOS: ``Contents`` of the Slicer Studio bundles in ``folders`` (those with ``studio_build_info.json``) other
+    than the one of ``slicerHome``."""
+    current = os.path.realpath(slicerHome) if slicerHome else ""
+    found, seen = [], set()
+    for folder in folders:
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:
+            continue
+        for name in names:
+            if name.startswith(".") or not name.endswith(".app"):
+                continue
+            contents = os.path.join(folder, name, "Contents")
+            real = os.path.realpath(contents)
+            if real == current or real in seen or not os.path.isfile(os.path.join(contents, "bin", "Python", "studio_build_info.json")):
+                continue
+            seen.add(real)
+            found.append(contents)
+    return found
+
+
+def findRevisionCandidates(configDirs, profileRoot, slicerHome, currentRevision, platform, otherApplicationFolders=None):
     """Revision-specific settings files of previous Slicer Studio builds, newest first: a list of ``{"kind",
     "revision", "ini", "home", "mtime", "extensions"}`` (``home``: the Slicer home its relative paths are relative to;
     ``extensions``: its extensions folder, when one exists). Official Slicer files are never read: only
     ``SlicerStudio-<rev>.ini`` in ``configDirs``, the snapshots of ``StudioLegacy``, and ``slicer.org/Slicer-<rev>.ini``
-    inside this installation, the copy kept by an in-app update, and (Linux) Slicer Studio folders next to this one."""
+    inside this installation, the copy kept by an in-app update, and other Slicer Studio installations: on Linux the
+    folders next to this one, on macOS the bundles in ``otherApplicationFolders`` (default ``applicationFolders()``),
+    for example ``Slicer Studio old.app`` kept while the new build starts for the first time."""
     found = []
     home = os.path.realpath(slicerHome) if slicerHome else ""
     seen = set()
@@ -578,6 +655,10 @@ def findRevisionCandidates(configDirs, profileRoot, slicerHome, currentRevision,
                 sibling = os.path.join(parent, name)
                 if sibling != home and not name.startswith(".") and os.path.isfile(os.path.join(sibling, "bin", "Python", "studio_build_info.json")):
                     homes.append(("sibling", sibling))
+        else:
+            folders = applicationFolders(home) if otherApplicationFolders is None else otherApplicationFolders
+            for contents in _otherBundles(folders, home):
+                homes.append(("sibling", contents))
     for kind, folderHome in homes:
         for revision, ini in _revisionFiles(os.path.join(folderHome, ORGANIZATION), studioOnly=False):
             if kind == "installed" and revision == str(currentRevision):
@@ -742,17 +823,63 @@ def compatible(description, serverRevision, os_, arch):
     return True
 
 
-def planExtensionsSync(store, bundle, bundleSynced):
+def descriptionDigest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def planExtensionsSync(store, bundle, synced):
     """What to do between the store and the bundle's extensions folder (macOS); ``store`` and ``bundle`` are
-    ``extensionDescriptions()``. A bundle that was never synced (a new installation) gets what it lacks from the store
-    (``restore``). Otherwise the bundle is what the user has: what is new or changed there is copied to the store
-    (``capture``), and what the bundle no longer has goes to the trash (``trash``). Nothing is ever deleted."""
-    if not bundleSynced:
-        names = sorted(name for name in store if name not in bundle)
-        return {"action": "restore" if names else "noop", "restore": names, "capture": [], "trash": []}
-    capture = sorted(name for name, data in bundle.items() if store.get(name) != data)
-    trash = sorted(name for name in store if name not in bundle)
-    return {"action": "capture" if capture or trash else "noop", "restore": [], "capture": capture, "trash": trash}
+    ``extensionDescriptions()``, ``synced`` is ``{name: descriptionDigest}`` of what the bundle held at its last sync
+    with this same store (its marker), or None when it never synced with it (a new installation, another profile).
+
+    Without ``synced`` the two are merged both ways and nothing is removed: the bundle gets what only the store has
+    (``restore``) and the store what only the bundle has (``capture``). With it, a change made in this bundle since its
+    last sync is copied to the store (``capture``: installed or updated here), an extension that this bundle had at its
+    last sync and no longer has goes from the store to the trash (``trash``: uninstalled here; only when the store
+    still holds the version synced then), and what the store got from another application since is copied into the
+    bundle (``restore``: installed or updated there). Several bundles built on the same 3D Slicer share the store this
+    way. Nothing is ever deleted: a replaced copy goes to the trash."""
+    restore, capture, trash = [], [], []
+    for name in sorted(set(store) | set(bundle)):
+        inStore, inBundle = store.get(name), bundle.get(name)
+        if inStore == inBundle:
+            continue
+        if synced is None:
+            if inBundle is None:
+                restore.append(name)
+            elif inStore is None:
+                capture.append(name)
+            continue  # both have it, different: left as they are
+        before = synced.get(name)
+        if inBundle is not None:
+            if before is None or descriptionDigest(inBundle) != before:
+                capture.append(name)  # installed or updated in this bundle
+            elif inStore is not None and descriptionDigest(inStore) != before:
+                restore.append(name)  # updated through another application
+            # else: unchanged here and removed through another application: left in this bundle
+        elif before is not None:
+            if descriptionDigest(inStore) == before:
+                trash.append(name)  # uninstalled in this bundle
+        else:
+            restore.append(name)  # installed through another application
+    action = "noop"
+    if restore or capture or trash:
+        action = "restore" if restore and not capture and not trash else "capture" if not restore else "merge"
+    return {"action": action, "restore": restore, "capture": capture, "trash": trash}
+
+
+def storeIdentity(store):
+    """What the marker of a bundle records of the store it mirrors: its real path (another profile, or the same
+    revision in another profile folder, is another store)."""
+    return os.path.realpath(store)
+
+
+def syncedNames(marker, store):
+    """``{name: digest}`` of the marker when it was written for ``store``, else None."""
+    if not isinstance(marker, dict) or marker.get("store") != storeIdentity(store):
+        return None
+    names = marker.get("names")
+    return {str(name): str(digest) for name, digest in names.items()} if isinstance(names, dict) else None
 
 
 def copyExtension(name, source, destination, trashRoot=None, platform=None, now=None):
@@ -816,35 +943,74 @@ def purgeTrash(trashRoot, now=None, days=TRASH_DAYS):
     return removed
 
 
-def importExtensions(candidates, store, serverRevision, os_, arch, freeBytesFn=freeBytes, platform=None):
-    """Fill an empty ``store`` from the newest previous build that has extensions (``candidates`` of
+def importComplete(progress):
+    """True when the import record ``progress`` (``StudioProfile.json``, ``migrations["extensions:<store>"]``) has
+    nothing left to copy."""
+    if not isinstance(progress, dict):
+        return True
+    if "complete" in progress:
+        return bool(progress["complete"])
+    return not progress.get("problems")
+
+
+def importExtensions(candidates, store, serverRevision, os_, arch, freeBytesFn=freeBytes, platform=None, progress=None, onStart=None):
+    """Fill ``store`` from the newest previous build that has extensions (``candidates`` of
     ``findRevisionCandidates``), copying only the extensions built for this build, while ``RESERVED_FREE_BYTES``
-    stay free. Return ``{"source", "copied", "skipped", "problems"}`` (``source`` None when there was nothing)."""
-    result = {"source": None, "copied": [], "skipped": [], "problems": {}}
-    if extensionDescriptions(store):
+    stay free. ``progress`` is the record of an earlier import into this store (None: there was none): an import
+    that did not finish (the application quit or crashed during the copy, not enough space) is taken up again from
+    the same source at every start until nothing is left; a finished one, or a store that the user filled without
+    an import, is never filled again. ``onStart(candidate, names)`` is called before the first copy (to record that an import
+    is under way). Return ``{"source", "candidate", "copied", "skipped", "problems", "complete"}`` (``source`` None
+    when there was nothing to do)."""
+    result = {"source": None, "candidate": None, "copied": [], "skipped": [], "problems": {}, "complete": True}
+    if progress is None and extensionDescriptions(store):
         return result
-    for candidate in candidates:
-        folder = candidate.get("extensions")
-        found = extensionDescriptions(folder) if folder else {}
-        if not found:
+    if progress is not None and importComplete(progress):
+        return result
+    chosen = None
+    if progress is not None:
+        folder = progress.get("sourcePath")
+        if folder and extensionDescriptions(folder):
+            chosen = {"extensions": folder, "ini": progress.get("ini"), "home": progress.get("home"), "kind": progress.get("sourceKind"),
+                      "revision": progress.get("revision")}
+        else:
+            # The previous installation is gone: what was not copied cannot be any more (Settings > Profile lists it)
+            result.update(source=folder or "", candidate=None, complete=True,
+                          problems={str(name): "the previous installation is gone" for name in progress.get("problems") or {}})
+            return result
+    else:
+        for candidate in candidates:
+            folder = candidate.get("extensions")
+            if folder and extensionDescriptions(folder):
+                chosen = candidate
+                break
+    if chosen is None:
+        return result
+    folder = chosen["extensions"]
+    found = extensionDescriptions(folder)
+    result.update(source=folder, candidate=chosen)
+    os.makedirs(store, exist_ok=True)
+    present = extensionDescriptions(store)
+    todo = []
+    for name in sorted(found):
+        if not compatible(found[name], serverRevision, os_, arch):
+            result["skipped"].append(name)
+        elif name not in present:  # else copied by an earlier start, or installed by the user since
+            todo.append(name)
+    if onStart is not None:
+        onStart(chosen, todo)
+    for name in todo:
+        size = treeSize(os.path.join(folder, name))
+        free = freeBytesFn(store)
+        if free is None or free - size <= RESERVED_FREE_BYTES:
+            result["problems"][name] = "not enough free space"
             continue
-        result["source"] = folder
-        os.makedirs(store, exist_ok=True)
-        for name in sorted(found):
-            if not compatible(found[name], serverRevision, os_, arch):
-                result["skipped"].append(name)
-                continue
-            size = treeSize(os.path.join(folder, name))
-            free = freeBytesFn(store)
-            if free is None or free - size <= RESERVED_FREE_BYTES:
-                result["problems"][name] = "not enough free space"
-                continue
-            problem = copyExtension(name, folder, store, platform=platform)
-            if problem is None:
-                result["copied"].append(name)
-            else:
-                result["problems"][name] = problem
-        break
+        problem = copyExtension(name, folder, store, platform=platform)
+        if problem is None:
+            result["copied"].append(name)
+        else:
+            result["problems"][name] = problem
+    result["complete"] = not result["problems"]
     return result
 
 
@@ -861,9 +1027,10 @@ def syncBundle(store, bundle, trashRoot, freeBytesFn=freeBytes, platform=None, n
     storeFound = extensionDescriptions(store)
     bundleFound = extensionDescriptions(bundle)
     marker = readJson(os.path.join(bundle, SYNC_MARKER))
-    plan = planExtensionsSync(storeFound, bundleFound, marker is not None and marker.get("store") == os.path.basename(store))
+    synced = syncedNames(marker, store)
+    plan = planExtensionsSync(storeFound, bundleFound, synced)
     plan["done"], plan["problems"] = [], {}
-    if plan["action"] == "noop" and marker is not None:
+    if plan["action"] == "noop" and synced is not None and synced == {name: descriptionDigest(data) for name, data in bundleFound.items()}:
         return plan
     try:
         os.makedirs(bundle, exist_ok=True)
@@ -878,7 +1045,7 @@ def syncBundle(store, bundle, trashRoot, freeBytesFn=freeBytes, platform=None, n
             # A clone (APFS) takes no space; elsewhere the copy must leave the reserve free
             plan["problems"][name] = "not enough free space"
             continue
-        _record(plan, name, copyExtension(name, store, bundle, platform=platform))
+        _record(plan, name, copyExtension(name, store, bundle, trashRoot=trashRoot, platform=platform, now=now))
     for name in plan["capture"]:
         _record(plan, name, copyExtension(name, bundle, store, trashRoot=trashRoot, platform=platform, now=now))
     for name in plan["trash"]:
@@ -888,8 +1055,9 @@ def syncBundle(store, bundle, trashRoot, freeBytesFn=freeBytes, platform=None, n
         except OSError as error:
             plan["problems"][name] = str(error)
     if not plan["problems"]:
+        names = {name: descriptionDigest(data) for name, data in extensionDescriptions(bundle).items()}
         try:
-            writeJsonAtomic(os.path.join(bundle, SYNC_MARKER), {"format": FORMAT, "store": os.path.basename(store), "synced": time.time()})
+            writeJsonAtomic(os.path.join(bundle, SYNC_MARKER), {"format": FORMAT, "store": storeIdentity(store), "names": names, "synced": time.time()})
         except OSError as error:
             plan["problems"]["*"] = str(error)
     return plan
@@ -920,30 +1088,27 @@ def profileEnvironment(env, userBase, site):
     return {USERBASE_ENVIRONMENT_VARIABLE: userBase, "PYTHONUSERBASE": userBase, "PYTHONPATH": os.pathsep.join(paths)}
 
 
-def addUserSite(site, sysPath):
-    """Put ``site`` (and the folders its ``.pth`` files name; their ``import`` lines are not run) in ``sysPath`` before
-    the first site-packages folder, where Python puts the user site. Return the entries added."""
-    entries = [site]
+def addUserSite(site, sysPath=None):
+    """Add ``site`` as Python adds its user site (``site.addsitedir``: its ``.pth`` files are processed, ``import``
+    lines included, as editable installs and other packages need), then move what was added before the first
+    site-packages folder of ``sysPath`` (default ``sys.path``), where Python puts the user site. Return the entries
+    added."""
+    import site as _site
+
+    sysPath = sys.path if sysPath is None else sysPath
+    before = list(sysPath)
+    saved = sys.path
+    sys.path = sysPath  # addsitedir works on sys.path
     try:
-        names = sorted(name for name in os.listdir(site) if name.endswith(".pth"))
-    except OSError:
-        names = []
-    for name in names:
-        try:
-            with open(os.path.join(site, name), encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith(("#", "import ", "import\t")):
-                        continue
-                    path = os.path.normpath(os.path.join(site, line))
-                    if os.path.isdir(path):
-                        entries.append(path)
-        except OSError:
-            continue
-    entries = [entry for entry in entries if entry not in sysPath]
-    index = next((i for i, entry in enumerate(sysPath) if isinstance(entry, str) and os.path.basename(entry.rstrip("/")) in ("site-packages", "dist-packages")), len(sysPath))
-    sysPath[index:index] = entries
-    return entries
+        _site.addsitedir(site)
+    finally:
+        sys.path = saved
+    added = [entry for entry in sysPath if entry not in before]
+    added = list(dict.fromkeys(added))
+    rest = [entry for entry in sysPath if entry not in added]
+    index = next((i for i, entry in enumerate(rest) if isinstance(entry, str) and os.path.basename(entry.rstrip("/")) in ("site-packages", "dist-packages")), len(rest))
+    sysPath[:] = rest[:index] + added + rest[index:]
+    return added
 
 
 def previousPythonFolders(profileRoot, current):
@@ -1020,21 +1185,37 @@ def trimPrefetchLists(folder, keep=PREFETCH_KEEP):
     return removed
 
 
+def pendingDirectoryProblem(path, currentRoot, forbidden=()):
+    """None when the folder ``path`` can become the profile folder, else why not: ``validateOverride``, inside or
+    around the current profile, or a folder that holds other files (only an empty folder, or one that already holds a
+    Slicer Studio profile, chosen on purpose, can be used: nothing of the current profile would be found in another
+    folder)."""
+    problem = validateOverride(path, forbidden)
+    if problem is not None:
+        return problem
+    if currentRoot and os.path.realpath(path) == os.path.realpath(currentRoot):
+        return None
+    if currentRoot and (isInside(path, currentRoot) or isInside(currentRoot, path)):
+        return "it is inside the current profile folder (or holds it)"
+    if os.path.isdir(path) and os.listdir(path) and not os.path.isfile(os.path.join(path, MANIFEST_FILE)):
+        return "it is not empty and does not hold a Slicer Studio profile"
+    return None
+
+
 def applyPendingDirectory(userSettings, currentRoot, env, home, platform, forbidden):
     """A profile folder chosen in Settings takes effect at the next start (here, before anything uses the profile): the
-    current profile is copied there (verified) when that folder is empty, then ``Studio/Profile/Directory`` names it.
-    The old folder is kept. Return the new folder, or None."""
+    current profile is copied there (verified) when that folder is empty, or that folder is used as it is when it
+    already holds a profile; a folder with other files is refused (``pendingDirectoryProblem``). Only then does
+    ``Studio/Profile/Directory`` name it, and ``Studio/Profile/PreviousDirectory`` the old folder, which is kept.
+    Return the new folder, or None."""
     pending = userSettings.value(PENDING_DIRECTORY_KEY)
     if not pending:
         return None
     path = expandPath(pending, home)
-    problem = validateOverride(path, forbidden)
+    problem = pendingDirectoryProblem(path, currentRoot, forbidden) if path else "it is not an absolute folder"
     if problem is None and env.get(ENVIRONMENT_VARIABLE):
         problem = f"{ENVIRONMENT_VARIABLE} is set"
-    if problem is None and currentRoot and os.path.realpath(path) != os.path.realpath(currentRoot) and (
-            isInside(path, currentRoot) or isInside(currentRoot, path)):
-        problem = "it is inside the current profile folder (or holds it)"
-    if problem is None and os.path.realpath(path) != os.path.realpath(currentRoot):
+    if problem is None and currentRoot and os.path.realpath(path) != os.path.realpath(currentRoot):
         empty = not os.path.isdir(path) or not os.listdir(path)
         if empty and os.path.isdir(currentRoot):
             with ProfileLock(currentRoot) as lock:
@@ -1048,6 +1229,8 @@ def applyPendingDirectory(userSettings, currentRoot, env, home, platform, forbid
         _log(f"the profile folder was not changed to {pending}: {problem}")
         userSettings.sync()
         return None
+    if currentRoot and os.path.realpath(path) != os.path.realpath(currentRoot):
+        userSettings.setValue(PREVIOUS_DIRECTORY_KEY, currentRoot)
     userSettings.setValue(DIRECTORY_KEY, path)
     userSettings.sync()
     return path
@@ -1077,12 +1260,23 @@ def startup(app=None, platform=None):
     if not profile:
         _status.update(state="skipped", reason="no profile folder")
         return status()
+    config = buildConfig()
+    if portableBuild(config):
+        # Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR ON: a portable build keeps everything inside itself
+        _status.update(state="portable", root=profile)
+        return status()
+    _source, problem = rootSource()
     try:
-        os.makedirs(profile, exist_ok=True)
+        os.makedirs(profile, exist_ok=True)  # an override is used only when it exists (resolveRoot): this is the default
     except OSError as error:
         _status.update(state="error", reason=str(error))
         return status()
     _setUpPython(app, profile, userSettings)
+    if problem:
+        # The chosen profile folder is missing: this run uses the default folder, and nothing is carried, imported,
+        # synced or trashed (the real profile may come back; Settings > Profile shows the problem)
+        _status.update(state="fallback", root=profile, reason=problem)
+        return status()
     if not bool(_value(app, "isInstalled", False)):
         _status.update(state="build tree", root=profile)
         return status()
@@ -1090,7 +1284,6 @@ def startup(app=None, platform=None):
     if revisionSettings is None:
         return status()
     revision = str(_value(app, "revision", "") or "")
-    config = buildConfig()
     serverRevision = str(config.get("EXTENSIONS_SERVER_REVISION") or "")
     os_, arch = str(_value(app, "os", "") or ""), str(_value(app, "arch", "") or "")
     store = extensionsStore(profile, serverRevision, os_, arch) if serverRevision and os_ and arch else None
@@ -1105,7 +1298,7 @@ def startup(app=None, platform=None):
             revisionSettings.sync()
         except OSError as error:
             _log(f"the extensions folder {store} cannot be created: {error}")
-    if initialized and (bundle is None or store is None or _bundleLooksSynced(store, bundle)):
+    if initialized and not importPending(profile, store) and (bundle is None or store is None or _bundleLooksSynced(store, bundle)):
         _status.update(state="ready", root=profile)
         return status()
     with ProfileLock(profile) as lock:
@@ -1116,11 +1309,97 @@ def startup(app=None, platform=None):
     return status()
 
 
+def portableBuild(config=None):
+    """True for a build with ``Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR`` ON (``studio_build_config``): it keeps
+    its settings and extensions inside itself, so the profile neither takes its extensions nor carries settings."""
+    config = buildConfig() if config is None else config
+    return _truthy(config.get("STORE_SETTINGS_IN_APPLICATION_HOME_DIR", ""))
+
+
+def importKey(store):
+    return f"extensions:{os.path.basename(store)}"
+
+
+def importPending(profile, store):
+    """True when an import of extensions into ``store`` did not finish (one small file read)."""
+    if store is None:
+        return False
+    manifest = readJson(os.path.join(profile, MANIFEST_FILE)) or {}
+    progress = (manifest.get("migrations") or {}).get(importKey(store))
+    return progress is not None and not importComplete(progress)
+
+
+def pendingImports(profile):
+    """``{store name: {"source", "names"}}``: the imports of the profile that did not finish, or that finished without
+    some extensions (the previous installation is gone), with the names still missing."""
+    manifest = readJson(os.path.join(profile, MANIFEST_FILE)) or {}
+    found = {}
+    for key, entry in (manifest.get("migrations") or {}).items():
+        names = sorted(name for name in (entry.get("problems") or {}) if name != "*") if isinstance(entry, dict) else []
+        if not str(key).startswith("extensions:") or not names:
+            continue
+        found[str(key)[len("extensions:"):]] = {"source": entry.get("sourceName"), "names": names}
+    return found
+
+
+def otherStoreExtensions(profile, store):
+    """Names of the extensions in the other stores of ``profile`` for the same os and architecture as ``store`` (built
+    for another 3D Slicer: after a merge of a newer 3D Slicer they must be installed again)."""
+    base = os.path.join(profile, EXTENSIONS_FOLDER)
+    current = os.path.basename(store) if store else ""
+    _revision, _separator, suffix = current.partition("-")
+    try:
+        names = os.listdir(base)
+    except OSError:
+        return []
+    found = set()
+    for name in names:
+        if name == current or not suffix or not name.endswith("-" + suffix) or ".partial-" in name or name.startswith("."):
+            continue
+        found.update(extensionDescriptions(os.path.join(base, name)))
+    return sorted(found, key=str.lower)
+
+
+def planPathAdditions(old, current, ctx):
+    """The values to write so that ``current`` also has the paths of ``old`` (a previous build's settings) that lead
+    into this build's extensions folder (``ctx["newExtensions"]``) and that it lacks: for extensions copied after the
+    settings were carried forward (an import taken up again). Other paths are never added again (the user may have
+    removed them since)."""
+    newExtensions = ctx.get("newExtensions") or ""
+    newHome = ctx.get("newHome") or ""
+
+    def wanted(entries):
+        mapped = []
+        for entry in entries:
+            path = mapPath(entry, ctx)
+            if not path:
+                continue
+            absolute = path if os.path.isabs(path) else os.path.normpath(os.path.join(newHome, path))
+            if newExtensions and isInside(absolute, newExtensions) and path not in mapped:
+                mapped.append(path)
+        return mapped
+
+    plan = {}
+    for key in PATH_LIST_KEYS:
+        existing = _asList(current.get(key))
+        additions = [path for path in wanted(_asList(old.get(key))) if path not in existing]
+        if additions:
+            plan[key] = _settingsValue(existing + additions)
+    for group in LAUNCHER_PATH_GROUPS:
+        existing = _readArray(current, group)
+        additions = [path for path in wanted(_readArray(old, group)) if path not in existing]
+        if additions:
+            paths = existing + additions
+            plan[f"{group}/size"] = len(paths)
+            for index, path in enumerate(paths, start=1):
+                plan[f"{group}/{index}/path"] = path
+    return plan
+
+
 def _bundleLooksSynced(store, bundle):
     """The quick check of every start (macOS): the bundle was synced with this store and both hold the same
     extension descriptions."""
-    marker = readJson(os.path.join(bundle, SYNC_MARKER))
-    if marker is None or marker.get("store") != os.path.basename(store):
+    if syncedNames(readJson(os.path.join(bundle, SYNC_MARKER)), store) is None:
         return False
     return extensionDescriptions(store) == extensionDescriptions(bundle)
 
@@ -1139,7 +1418,7 @@ def _setUpPython(app, profile, userSettings):
     except OSError as error:
         _log(f"the Python packages folder cannot be created: {error}")
         return
-    addUserSite(site, sys.path)
+    addUserSite(site)
     for name, value in profileEnvironment(os.environ, userBase, site).items():
         os.environ[name] = value
         try:
@@ -1148,7 +1427,18 @@ def _setUpPython(app, profile, userSettings):
             pass
 
 
+def _carryContext(source, slicerHome, newExtensions, platform, old):
+    oldHome = str(source.get("home") or "")
+    oldExtensionRoots = [root for root in (source.get("extensions"), _inAppExtensions(oldHome, source.get("revision"), platform) if oldHome else None,
+                                           old.get("Extensions/InstallPath")) if root]
+    if source.get("kind") == "snapshot":
+        oldExtensionRoots.append(os.path.join(os.path.dirname(source["ini"]), "Extensions"))
+    return {"oldHome": oldHome, "newHome": os.path.realpath(slicerHome), "oldExtensionRoots": [str(root) for root in oldExtensionRoots],
+            "newExtensions": newExtensions}
+
+
 def _migrate(app, profile, revisionSettings, revision, slicerHome, store, bundle, serverRevision, os_, arch, initialized, platform):
+    started = time.monotonic()
     manifestPath = os.path.join(profile, MANIFEST_FILE)
     manifest = readJson(manifestPath) or {"format": FORMAT}
     configDir = os.path.dirname(str(_value(app, "slicerRevisionUserSettingsFilePath", "") or ""))
@@ -1156,13 +1446,37 @@ def _migrate(app, profile, revisionSettings, revision, slicerHome, store, bundle
     candidates = findRevisionCandidates([configDir, os.path.join(home, ".config", ORGANIZATION)], profile, slicerHome, revision, platform)
     restartNeeded = False
     newExtensions = None
-    # 1. Extensions: the store gets the extensions of the previous build when it has none yet
+    resumed = None
+    # 1. Extensions: the store gets the extensions of the previous build when it has none yet, and an import that did
+    # not finish is taken up again
     if store is not None:
-        imported = importExtensions(candidates, store, serverRevision, os_, arch, platform=platform)
-        if imported["source"]:
-            _recordMigration(manifest, f"extensions:{os.path.basename(store)}", "extensions", imported["source"],
-                             {"copied": imported["copied"], "skipped": imported["skipped"], "problems": imported["problems"]})
+        key = importKey(store)
+        progress = (manifest.get("migrations") or {}).get(key)
+        earlier = list(progress.get("copied") or []) if isinstance(progress, dict) else []
+
+        def onStart(candidate, names):
+            if not names:
+                return
+            _recordMigration(manifest, key, "extensions", candidate.get("extensions"), {
+                "sourcePath": candidate.get("extensions"), "ini": candidate.get("ini"), "home": candidate.get("home"),
+                "sourceKind": candidate.get("kind"), "revision": candidate.get("revision"), "copied": earlier, "skipped": [],
+                "problems": dict.fromkeys(names, "not copied yet"), "complete": False})
+            try:
+                writeJsonAtomic(manifestPath, manifest)
+            except OSError as error:
+                _log(f"the profile record cannot be written: {error}")
+
+        imported = importExtensions(candidates, store, serverRevision, os_, arch, platform=platform, progress=progress, onStart=onStart)
+        if imported["source"] is not None:
+            candidate = imported["candidate"] or {}
+            _recordMigration(manifest, key, "extensions", imported["source"], {
+                "sourcePath": imported["source"], "ini": candidate.get("ini"), "home": candidate.get("home"),
+                "sourceKind": candidate.get("kind"), "revision": candidate.get("revision"),
+                "copied": sorted(set(earlier) | set(imported["copied"])), "skipped": imported["skipped"], "problems": imported["problems"],
+                "complete": imported["complete"]})
             restartNeeded = restartNeeded or bool(imported["copied"])
+            if progress is not None and imported["copied"] and candidate.get("ini"):
+                resumed = candidate
             if imported["problems"] or imported["skipped"]:
                 _log(f"extensions not carried forward: {', '.join(sorted(set(imported['skipped']) | set(imported['problems'])))}")
         if bundle is not None:
@@ -1186,12 +1500,7 @@ def _migrate(app, profile, revisionSettings, revision, slicerHome, store, bundle
             current = _settingsDict(revisionSettings)
             defaultSettings = _value(app, "defaultSettings")
             defaults = _settingsDict(defaultSettings) if defaultSettings is not None else {}
-            oldExtensionRoots = [root for root in (source.get("extensions"), _inAppExtensions(source["home"], source["revision"], platform),
-                                                   old.get("Extensions/InstallPath")) if root]
-            if source["kind"] == "snapshot":
-                oldExtensionRoots.append(os.path.join(os.path.dirname(source["ini"]), "Extensions"))
-            ctx = {"oldHome": source["home"], "newHome": os.path.realpath(slicerHome), "oldExtensionRoots": [str(root) for root in oldExtensionRoots],
-                   "newExtensions": newExtensions}
+            ctx = _carryContext(source, slicerHome, newExtensions, platform, old)
             plan = planCarryForward(old, current, defaults, ctx)
             for key, value in plan.items():
                 revisionSettings.setValue(key, value)
@@ -1200,6 +1509,16 @@ def _migrate(app, profile, revisionSettings, revision, slicerHome, store, bundle
             if any(key.split("/")[0] in LAUNCHER_PATH_GROUPS for key in plan):
                 restartNeeded = True  # the launcher set the library paths of this run before they were carried
         revisionSettings.setValue(INITIALIZED_KEY, True)
+    elif resumed is not None and resumed.get("home") and os.path.isfile(str(resumed["ini"])):
+        # 3. Extensions copied by an import taken up again: their module and library paths, which the settings carried
+        # forward at an earlier start could not have (the extensions were not there yet)
+        import qt
+
+        old = _settingsDict(qt.QSettings(resumed["ini"], qt.QSettings.IniFormat))
+        ctx = _carryContext(resumed, slicerHome, newExtensions, platform, old)
+        plan = planPathAdditions(old, _settingsDict(revisionSettings), ctx)
+        for key, value in plan.items():
+            revisionSettings.setValue(key, value)
     if restartNeeded:
         revisionSettings.setValue(RESTART_KEY, True)
     revisionSettings.sync()
@@ -1211,4 +1530,7 @@ def _migrate(app, profile, revisionSettings, revision, slicerHome, store, bundle
     except OSError as error:
         _log(f"the profile record cannot be written: {error}")
     trimPrefetchLists(configDir)
-    _status.update(state="migrated", root=profile, restartNeeded=restartNeeded)
+    elapsed = time.monotonic() - started
+    if elapsed > 2:
+        _log(f"carrying the extensions and settings forward took {elapsed:.0f} s")
+    _status.update(state="migrated", root=profile, restartNeeded=restartNeeded, seconds=round(elapsed, 1))

@@ -264,10 +264,18 @@ endforeach()
 # revision-specific settings live in the user's settings folder (~/.config/slicer.org/SlicerStudio-<rev>.ini) and the
 # user profile (Base/Python/studio_profile.py) keeps the extensions and the pip packages outside the application.
 option(Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR "Store all settings in the application home directory (makes the application portable)" OFF)
-# A build tree configured before the default changed still has ON in its cache: turn it OFF once. Set it ON again after
-# that first configuration to get a portable build.
+# A build tree configured before the default changed still has ON in its cache: turn it OFF once. Only such a tree is
+# changed (one whose CMakeCache.txt existed before this configuration): on the first configuration of a tree (a fresh
+# superbuild, or the inner Slicer-build tree, which gets the superbuild's value), an ON given with -D is the user's
+# choice and is kept. Set it ON again after that once to get a portable build (or pass
+# -DSlicer_STUDIO_PROFILE_SETTINGS_DEFAULT_APPLIED:INTERNAL=ON with it).
 if(NOT Slicer_STUDIO_PROFILE_SETTINGS_DEFAULT_APPLIED)
-  set(Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR OFF CACHE BOOL "Store all settings in the application home directory (makes the application portable)" FORCE)
+  if(Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR AND EXISTS "${CMAKE_BINARY_DIR}/CMakeCache.txt")
+    message(STATUS "Slicer Studio: Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR turned OFF once in this build tree (the user profile keeps settings and extensions outside the application)")
+    set(Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR OFF CACHE BOOL "Store all settings in the application home directory (makes the application portable)" FORCE)
+  endif()
   set(Slicer_STUDIO_PROFILE_SETTINGS_DEFAULT_APPLIED ON CACHE INTERNAL "Slicer Studio: Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR was turned OFF once")
 endif()
 mark_as_superbuild(Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR:BOOL)
+# The inner Slicer-build tree takes the superbuild's decision as it is (never turned OFF there on its own)
+mark_as_superbuild(Slicer_STUDIO_PROFILE_SETTINGS_DEFAULT_APPLIED:BOOL)

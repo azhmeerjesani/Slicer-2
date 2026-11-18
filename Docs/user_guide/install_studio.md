@@ -69,9 +69,13 @@ macOS 15 or newer, and compiles Qt for hours elsewhere.
 1. Open the disk image.
 2. Drag **Slicer Studio** to **Applications**. Applications must be writable
    for installing extensions, so do not run the application from the disk
-   image. To install a newer build, drag it over the old one: your settings,
-   extensions, Python packages and saved work are kept (see
-   [Your Slicer Studio profile](#your-slicer-studio-profile)).
+   image. To install a newer build over a build made before the profile
+   existed, first rename the old one (for example to "Slicer Studio old"),
+   then drag the new one in, start it once, and delete the old one afterwards
+   (see [The first start of a new build](#the-first-start-of-a-new-build)).
+   Over a build that already has the profile you can drag the new one over
+   the old one: your settings, extensions, Python packages and saved work are
+   kept (see [Your Slicer Studio profile](#your-slicer-studio-profile)).
 3. Start **Slicer Studio** from Applications.
 
 Slicer Studio is signed ad hoc but not notarized by Apple. The first time you
@@ -145,8 +149,12 @@ the system. It runs on Ubuntu 24.04.
 3. Run the `Slicer` launcher in the extracted folder.
 
 To install a newer build, extract it anywhere (a new folder, or in place of the
-old one): your settings, extensions, Python packages and saved work are kept
-(see [Your Slicer Studio profile](#your-slicer-studio-profile)).
+old one when the old one already has the profile): your settings, extensions,
+Python packages and saved work are kept (see
+[Your Slicer Studio profile](#your-slicer-studio-profile)). Over a build made
+before the profile, use a new folder and start the new build once before you
+delete the old one (see
+[The first start of a new build](#the-first-start-of-a-new-build)).
 
 To uninstall, remove the folder. This keeps your profile; to remove it too, see
 [Start again from nothing](#start-again-from-nothing).
@@ -178,12 +186,14 @@ It holds:
 - `StudioExtensions`: the extensions you installed. Every build made from the
   same version of 3D Slicer uses them. A build based on a newer 3D Slicer needs
   extensions built for that version: it starts with none, and Settings >
-  Profile lists the ones to install again. On macOS the extensions also live
-  inside the application, where the Extensions Manager installs them; Slicer
-  Studio copies them into the profile as soon as you install, update or
-  uninstall one, and copies them into a newly installed application when it
-  starts. An extension you uninstall is kept in `StudioExtensions-trash` for 30
-  days.
+  Profile lists the ones of the older builds to install again. On macOS the
+  extensions also live inside the application, where the Extensions Manager
+  installs them; Slicer Studio copies them into the profile as soon as you
+  install, update or uninstall one, and copies them into a newly installed
+  application when it starts. When you keep two builds (for example a test
+  build next to "Slicer Studio"), an extension installed in one is copied into
+  the other when it starts. An extension you uninstall is kept in
+  `StudioExtensions-trash` for 30 days.
 - `StudioPython`: the Python packages you install (with `pip_install` or in the
   Python console). They are kept for each Python version: after an update to a
   newer Python, Settings > Profile offers to install them again.
@@ -204,15 +214,27 @@ Each build has its own settings file (`SlicerStudio-<number>.ini`). At its first
 start, a new build copies your settings from the previous build's file, and
 the extensions of the previous build into the profile when needed. If
 extensions were carried over, Slicer Studio asks to restart once, so that all
-their parts are loaded.
+their parts are loaded. If the copy could not finish (Slicer Studio was closed
+during it, or the disk was too full), it goes on at the next start, as long as
+the previous build is still there; Settings > Profile lists what is left.
 
 Builds made before the profile kept their settings and extensions inside the
-application. To bring them over, start the old build once before you replace
-it: it then copies them to `StudioLegacy` in the profile (an update made with
-**Update now** does this by itself). On Linux, a new build extracted next to the
-old folder finds them there too. Python packages installed in an old build are
-not copied: Settings > Profile names them, and **Reinstall…** installs them
-again.
+application, so replacing the application deletes them. Keep the old build
+until the new one has started once:
+
+- **macOS:** rename the old application in Applications (for example to
+  "Slicer Studio old"), drag the new one in, start the new one once, then
+  delete the old one. The new build finds the old one in Applications (or in
+  `~/Applications`) and copies its settings and extensions. Do not drag the new
+  build over an old one made before the profile.
+- **Linux:** extract the new build into a new folder next to the old one, start
+  it once, then delete the old folder.
+
+An update made with **Update now** keeps the previous version until its
+settings and extensions are copied. Builds that already copy them by
+themselves also keep a copy in `StudioLegacy` in the profile, a while after
+each start. Python packages installed in an old build are not copied:
+Settings > Profile names them, and **Reinstall…** installs them again.
 
 ### Settings > Profile
 
@@ -223,14 +245,22 @@ Python packages of a previous build that are not installed (**Reinstall…**).
 ### Move the profile
 
 - **Change…** in Settings > Profile chooses another folder. It is used from the
-  next start: the profile is copied there if the folder is empty, and the old
-  folder is kept (delete it yourself afterwards). Close other Slicer Studio
-  windows first.
+  next start: the profile is copied there if the folder is empty, or the
+  profile already in that folder is used as it is. A folder that holds other
+  files is refused. The old folder is kept (Settings > Profile names it; delete
+  it yourself afterwards). Close other Slicer Studio windows first.
 - Or set the environment variable `SLICER_STUDIO_PROFILE_DIR` to an absolute
-  folder (`~` is allowed). It wins over the setting.
+  folder (`~` is allowed) that exists. It wins over the setting.
 
-A folder inside the application, or that you cannot write, is not used:
-Slicer Studio uses the default folder and says why in the log.
+A folder inside the application, that you cannot write, or that does not exist
+(renamed, or a synced folder not restored yet) is not used: Slicer Studio uses
+the default folder for that run without carrying or removing anything, and
+says why in Settings > Profile and in the log.
+
+A portable build (configured with
+`Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR` ON) keeps its settings,
+extensions and Python packages inside itself, as official 3D Slicer does, and
+does not use the profile for them.
 
 To install Python packages inside the application instead (as official 3D
 Slicer does), set `Studio/Profile/PipToProfile` to `false` in `Slicer.ini`.

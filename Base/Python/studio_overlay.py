@@ -1026,12 +1026,15 @@ def stateRootFromApplication():
         import studio_profile
     except ImportError:  # a build without the user profile
         studio_profile = None
-    if studio_profile is not None:
-        base = studio_profile.root()
-    else:
+    base = studio_profile.root() if studio_profile is not None else ""
+    if not base or not os.path.isabs(base):
+        # No profile folder (a build without it, or it could not be resolved): never a path relative to the working
+        # folder of the process
         import qt
 
-        base = qt.QStandardPaths.writableLocation(qt.QStandardPaths.AppLocalDataLocation)
+        base = str(qt.QStandardPaths.writableLocation(qt.QStandardPaths.AppLocalDataLocation) or "")
+        if not os.path.isabs(base) and studio_profile is not None:
+            base = studio_profile.defaultRoot(os.environ, os.path.expanduser("~"), sys.platform)
     return os.path.join(base, "StudioUpdate", "commit")
 
 

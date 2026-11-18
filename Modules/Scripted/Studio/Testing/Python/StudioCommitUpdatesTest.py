@@ -1475,6 +1475,7 @@ class StudioCommitUpdatesTest(unittest.TestCase):
         qt.QStandardPaths = types.SimpleNamespace(AppLocalDataLocation=0, writableLocation=lambda location: os.path.join(self.tmp, "appdata"))
         app = types.SimpleNamespace(applicationName="Slicer", slicerHome=self.home, userSettings=None)
         profile = os.path.join(self.tmp, "profile")
+        os.makedirs(profile)  # an override is used only when the folder exists
         self.addCleanup(studio_profile.setRoot, None)
         with mock.patch.dict(sys.modules, {"qt": qt}), mock.patch.object(studio_profile, "_application", lambda: app):
             with mock.patch.dict(os.environ, {studio_profile.ENVIRONMENT_VARIABLE: profile}):

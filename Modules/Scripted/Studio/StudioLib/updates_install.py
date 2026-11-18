@@ -280,15 +280,26 @@ def protectedPaths():
     return studio_profile.protectedRoots()
 
 
+#: Inside a protected folder, the folder whose contents the updater may delete: its own state (downloads, staged
+#: updates, the commit overlay); ``studio_profile.REMOVABLE_INSIDE``
+UPDATE_STATE_FOLDER = "StudioUpdate"
+
+
 def checkRemovable(path, protected=None):
-    """Raise OSError when deleting ``path`` would delete user data (see ``protectedPaths``)."""
+    """Raise OSError when deleting ``path`` would delete user data (see ``protectedPaths``): a protected folder, a
+    folder that holds one, or anything inside one except the contents of its update state folder (``StudioUpdate``,
+    where the updater downloads and stages its own files)."""
     real = os.path.realpath(path)
     for folder in protectedPaths() if protected is None else protected:
         if not folder:
             continue
         folder = os.path.realpath(folder)
-        if real == folder or real.startswith(folder.rstrip(os.sep) + os.sep) or folder.startswith(real.rstrip(os.sep) + os.sep):
+        if real == folder or folder.startswith(real.rstrip(os.sep) + os.sep):
             raise OSError(f"{path} holds Slicer Studio user data ({folder}): it is not deleted")
+        if real.startswith(folder.rstrip(os.sep) + os.sep):
+            state = os.path.realpath(os.path.join(folder, UPDATE_STATE_FOLDER))
+            if not real.startswith(state.rstrip(os.sep) + os.sep):
+                raise OSError(f"{path} is Slicer Studio user data ({folder}): it is not deleted")
 
 
 def _removeTree(path, protected=None):

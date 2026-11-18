@@ -68,17 +68,22 @@ _DIST_INFO = re.compile(r"^(?P<name>.+?)-(?P<version>[^-]+)\.dist-info$")
 
 
 def profileRoot():
-    """The user profile folder: ``studio_profile.root()`` in a build that has it, else the private application data
-    folder (its default). Empty when there is none."""
+    """The user profile folder: ``studio_profile.root()`` in a build that has it, else (also when it has none, after an
+    error) the private application data folder, its default. Never a relative path: empty when there is none."""
     try:
         import studio_profile
     except ImportError:
         studio_profile = None
     if studio_profile is not None:
-        return studio_profile.root()
+        root = studio_profile.root()
+        if root and os.path.isabs(root):
+            return root
     import qt
 
-    return str(qt.QStandardPaths.writableLocation(qt.QStandardPaths.AppLocalDataLocation) or "")
+    root = str(qt.QStandardPaths.writableLocation(qt.QStandardPaths.AppLocalDataLocation) or "")
+    if not os.path.isabs(root) and studio_profile is not None:
+        root = studio_profile.defaultRoot(os.environ, os.path.expanduser("~"), sys.platform)
+    return root if os.path.isabs(root) else ""
 
 
 def inAppLocations(slicerHome, platform=None):
@@ -487,15 +492,65 @@ class _Lock:
         return False
 
 
-def snapshotLocked(slicerHome, profileRootPath, revision=None, platform=None):
-    """``snapshot()`` under the snapshot lock of the profile; None when another Slicer Studio is taking one, or when the
-    installation keeps nothing inside itself."""
+#: ``snapshotLocked`` results
+NOTHING, BUSY, DONE = "nothing", "busy", "done"
+
+
+def snapshotLocked(slicerHome, profileRootPath, revision=None, platform=None, freeBytesFn=None):
+    """``snapshot()`` under the snapshot lock of the profile. Return ``(status, folder)``: ``("nothing", None)`` when the
+    installation keeps no settings inside itself, ``("busy", None)`` when another Slicer Studio holds the lock (nothing
+    was copied: try again later), ``("done", folder)`` otherwise. Raise OSError when the snapshot cannot be written."""
     if not slicerHome or not profileRootPath or not inAppLocations(slicerHome, platform):
-        return None
+        return NOTHING, None
     with _Lock(os.path.join(profileRootPath, LEGACY_FOLDER)) as lock:
         if not lock.acquired:
-            return None
-        return snapshot(slicerHome, profileRootPath, revision=revision, platform=platform)
+            return BUSY, None
+        return DONE, snapshot(slicerHome, profileRootPath, revision=revision, platform=platform, freeBytesFn=freeBytesFn)
+
+
+def extensionFolders(slicerHome, platform=None):
+    """The extensions folders of the installation in ``slicerHome`` that hold at least one extension description."""
+    platform = sys.platform if platform is None else platform
+    base = slicerHome if platform == "darwin" else os.path.join(slicerHome, "slicer.org")
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        folder = os.path.join(base, name)
+        if re.fullmatch(r"Extensions-\d+", name) and os.path.isdir(folder) and any(entry.endswith(".s4ext") for entry in os.listdir(folder)):
+            found.append(folder)
+    return found
+
+
+#: In the extensions folder of a bundle (macOS) that ``studio_profile`` mirrors into the profile
+SYNC_MARKER = ".studio-extensions.json"
+
+
+def backupKeepReason(slicerHome, status, folder, platform=None):
+    """None when the previous version in ``slicerHome`` (kept by an in-app update) may be deleted after
+    ``snapshotLocked`` gave ``(status, folder)``, else why it must be kept: the lock was busy (no copy was made), the
+    snapshot could not copy its extensions, or it holds extensions that nothing has copied into the profile."""
+    if status == BUSY:
+        return "another Slicer Studio is copying user data"
+    if status == DONE:
+        data = _readJson(os.path.join(folder, SNAPSHOT_FILE)) if folder else None
+        if data is None:
+            return "no copy of its settings was made"
+        base = slicerHome if (platform or sys.platform) == "darwin" else os.path.join(slicerHome, "slicer.org")
+        source = os.path.join(base, str(data.get("extensionsFolder") or ""))
+        if data.get("extensions") and not data.get("extensionsCopied") and os.path.isdir(source):
+            return f"its extensions were not copied ({data.get('extensionsProblem') or 'unknown reason'})"
+        copied = os.path.realpath(source)
+    else:
+        copied = None
+    for extensions in extensionFolders(slicerHome, platform):
+        if copied and os.path.realpath(extensions) == copied:
+            continue
+        if not os.path.isfile(os.path.join(extensions, SYNC_MARKER)):
+            return f"{os.path.basename(extensions)} holds extensions that were not copied into the profile"
+    return None
 
 
 def scheduleSnapshot():

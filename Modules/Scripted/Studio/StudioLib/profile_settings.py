@@ -2,13 +2,18 @@
 build left behind (``studio_profile``).
 
 - The profile folder, with Show and Change… (a folder chosen here is used from the next start: ``studio_profile``
-  copies the profile there when that folder is empty; the old folder is kept). The environment variable
-  ``SLICER_STUDIO_PROFILE_DIR`` wins over the setting: the panel says so.
+  copies the profile there when that folder is empty, uses it as it is when it already holds a profile, and refuses
+  any other folder; the old folder is kept and named here). The environment variable ``SLICER_STUDIO_PROFILE_DIR``
+  wins over the setting: the panel says so.
 - The size of each part (autosave, extensions, Python packages, update state, copies of older builds), measured in a
   background thread when the panel is first shown.
 - What was carried forward from previous builds (``StudioProfile.json``).
 - Extensions and Python packages of a previous build that could not be carried forward (another Python or extensions
-  ABI, not enough space, or a build that kept them inside the application): Reinstall… installs them again.
+  ABI, a build based on another 3D Slicer, not enough space, or a build that kept them inside the application):
+  Reinstall… installs them again. Extensions that an unfinished import still has to copy are listed too.
+
+The widgets are made in ``__init__`` (CTK classes are wrapped by decorators in PythonQt: a Python override of a C++
+virtual such as ``showEvent`` is never called) and refreshed by an event filter each time the panel is shown.
 
 It writes only the fork-only keys ``Studio/Profile/*``. Not added under ``--testing``.
 """
@@ -47,14 +52,29 @@ def parts(profile):
     ]
 
 
+def currentStore(profile):
+    """The extensions store of this build in ``profile``, or None."""
+    import studio_profile
+
+    serverRevision = str(studio_profile.buildConfig().get("EXTENSIONS_SERVER_REVISION") or "")
+    if not serverRevision or not profile:
+        return None
+    return studio_profile.extensionsStore(profile, serverRevision, str(slicer.app.os), str(slicer.app.arch))
+
+
 def leftBehind(profile):
-    """``(extensions, packages)``: names that a previous build had and this one does not."""
+    """``(extensions, packages)``: names that a previous build had and this one does not: in the copies of older
+    builds, in the extensions stores of builds based on another 3D Slicer (same os and architecture), and in the
+    Python package folders of other Python versions."""
     import studio_profile
     from . import profile_legacy
 
     extensions, packages = set(), set()
     for _folder, data in profile_legacy.snapshots(profile):
         extensions.update(str(name) for name in data.get("extensions") or [])
+    store = currentStore(profile)
+    if store:
+        extensions.update(studio_profile.otherStoreExtensions(profile, store))
         packages.update(str(entry.get("name")) for entry in data.get("packages") or [] if isinstance(entry, dict) and entry.get("name"))
     current = studio_profile.pythonUserBase(profile)
     for _folder, names in studio_profile.previousPythonFolders(profile, current):
@@ -73,19 +93,29 @@ def leftBehind(profile):
     return sorted(extensions, key=str.lower), sorted(packages, key=str.lower)
 
 
+class _ShowEventFilter(qt.QObject):
+    def __init__(self, callback):
+        qt.QObject.__init__(self)
+        self.callback = callback
+
+    def eventFilter(self, obj, event):
+        if event.type() == qt.QEvent.Show:
+            self.callback()
+        return False
+
+
 class ProfileSettingsPanel(ctk.ctkSettingsPanel):
     def __init__(self, *args, **kwargs):
         ctk.ctkSettingsPanel.__init__(self, *args, **kwargs)
         self.setObjectName(PANEL_OBJECT_NAME)
-        self._built = False
         self._sizes = None
         self._sizesTimer = None
-
-    def showEvent(self, event):
-        if not self._built:
-            self._built = True
-            self._build()
-        self.refresh()
+        self._extensionsLeft, self._packagesLeft = [], []
+        self._build()
+        # Filled when shown (it reads the profile and measures it): an event filter, as a Python showEvent override of
+        # a CTK class is never called
+        self._showFilter = _ShowEventFilter(self.refresh)
+        self.installEventFilter(self._showFilter)
 
     def _build(self):
         layout = qt.QVBoxLayout(self)
@@ -112,6 +142,9 @@ class ProfileSettingsPanel(ctk.ctkSettingsPanel):
         self.sizesLabel = qt.QLabel()
         self.sizesLabel.wordWrap = True
         layout.addWidget(self.sizesLabel)
+        self.pendingLabel = qt.QLabel()
+        self.pendingLabel.wordWrap = True
+        layout.addWidget(self.pendingLabel)
         self.historyLabel = qt.QLabel()
         self.historyLabel.wordWrap = True
         layout.addWidget(self.historyLabel)
@@ -142,7 +175,14 @@ class ProfileSettingsPanel(ctk.ctkSettingsPanel):
             lines.append(problem)
         if pending:
             lines.append(_("From the next start: {folder}").format(folder=pending))
+        previous = slicer.app.userSettings().value(studio_profile.PREVIOUS_DIRECTORY_KEY)
+        if previous and profile and os.path.realpath(str(previous)) != os.path.realpath(profile) and os.path.isdir(str(previous)):
+            lines.append(_("The previous profile folder is kept (nothing was deleted there): {folder}").format(folder=previous))
         self.sourceLabel.text = "\n".join(lines)
+        unfinished = studio_profile.pendingImports(profile) if profile else {}
+        self.pendingLabel.text = "\n".join(
+            _("Extensions not copied yet from {source} (Slicer Studio tries again at each start while that installation exists): {names}").format(
+                source=entry.get("source") or "?", names=", ".join(entry["names"])) for entry in unfinished.values())
         manifest = studio_profile.readJson(os.path.join(profile, studio_profile.MANIFEST_FILE)) if profile else None
         history = []
         for _identifier, entry in sorted(((manifest or {}).get("migrations") or {}).items(), key=lambda item: str(item[1].get("at")), reverse=True)[:8]:
@@ -200,20 +240,20 @@ class ProfileSettingsPanel(ctk.ctkSettingsPanel):
         if not folder:
             return
         forbidden = studio_profile.applicationRoots(str(slicer.app.slicerHome), sys.platform)
-        problem = studio_profile.validateOverride(folder, forbidden)
-        current = studio_profile.root()
-        if problem is None and current and os.path.realpath(folder) != os.path.realpath(current) and (
-                studio_profile.isInside(folder, current) or studio_profile.isInside(current, folder)):
-            problem = _("it is inside the current profile folder (or holds it)")
+        problem = studio_profile.pendingDirectoryProblem(folder, studio_profile.root(), forbidden)
         if problem is not None:
             slicer.util.warningDisplay(_("This folder cannot hold the profile: {reason}.").format(reason=problem), windowTitle=_("Profile folder"))
             return
         settings = slicer.app.userSettings()
         settings.setValue(studio_profile.PENDING_DIRECTORY_KEY, folder)
         settings.sync()
-        if slicer.util.confirmYesNoDisplay(_("The profile moves to {folder} when Slicer Studio starts again: it is copied there if that "
-                                             "folder is empty (the current folder is kept). Close other Slicer Studio windows first.\n\n"
-                                             "Restart now?").format(folder=folder), windowTitle=_("Profile folder")):
+        if os.path.isfile(os.path.join(folder, studio_profile.MANIFEST_FILE)):
+            text = _("Slicer Studio uses the profile that is already in {folder} when it starts again (the current folder is kept, "
+                     "and nothing is copied from it). Close other Slicer Studio windows first.\n\nRestart now?")
+        else:
+            text = _("The profile is copied to {folder} when Slicer Studio starts again, then used from there (the current folder is kept). "
+                     "Close other Slicer Studio windows first.\n\nRestart now?")
+        if slicer.util.confirmYesNoDisplay(text.format(folder=folder), windowTitle=_("Profile folder")):
             slicer.util.restart()
         self.refresh()
 

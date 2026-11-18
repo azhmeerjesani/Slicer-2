@@ -1300,6 +1300,11 @@ configure_superbuild() {
     "-DCMAKE_C_COMPILER:FILEPATH=${C_COMPILER}"
     "-DCMAKE_CXX_COMPILER:FILEPATH=${CXX_COMPILER}"
   )
+  if settings_in_app_in_extra_args; then
+    # The user's own value of Slicer_STORE_SETTINGS_IN_APPLICATION_HOME_DIR: never turned OFF by the one-time change
+    # of CMake/SlicerApplicationOptions.cmake
+    args+=(-DSlicer_STUDIO_PROFILE_SETTINGS_DEFAULT_APPLIED:BOOL=ON)
+  fi
   if [ ${#CMAKE_EXTRA_ARGS[@]} -gt 0 ]; then
     args+=("${CMAKE_EXTRA_ARGS[@]}")
   fi

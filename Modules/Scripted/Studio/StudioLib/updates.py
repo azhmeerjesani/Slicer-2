@@ -933,9 +933,16 @@ def _removeQuietly(path):
         pass
 
 
-def _keepUserDataAndRemove(backup, profileRoot=None, onDone=None):
+#: When another Slicer Studio holds the snapshot lock: how often and how long to wait before trying again
+BACKUP_SNAPSHOT_TRIES = 10
+BACKUP_SNAPSHOT_RETRY_S = 30
+
+
+def _keepUserDataAndRemove(backup, profileRoot=None, onDone=None, platform=None, retryDelay=BACKUP_SNAPSHOT_RETRY_S, protected=None):
     """Delete the previous version kept by an update (``backup``) in a background thread, after copying the settings and
-    extensions it holds inside itself into the user profile (``profile_legacy.snapshot``). When that copy fails, the
+    extensions it holds inside itself into the user profile (``profile_legacy.snapshotLocked``). It is deleted only
+    when that copy is complete (``profile_legacy.backupKeepReason``): when another Slicer Studio holds the snapshot
+    lock it tries again a while later; when the copy fails, or could not take the extensions (not enough space), the
     previous version is kept (the next update replaces it)."""
 
     from . import profile_legacy
@@ -946,18 +953,34 @@ def _keepUserDataAndRemove(backup, profileRoot=None, onDone=None):
             root = profile_legacy.profileRoot()  # Qt: on the main thread
         except Exception:
             root = ""
+    protected = updates_install.protectedPaths() if protected is None else protected  # on the calling thread
+    home = profile_legacy.homeOfBackup(backup, platform)
+
+    def keep(reason):
+        logging.warning(f"Updates: the previous version is kept in {backup}: {reason}")
+        if onDone is not None:
+            onDone(backup, OSError(reason))
 
     def run():
-        try:
-            if root:
-                profile_legacy.snapshotLocked(profile_legacy.homeOfBackup(backup), root)
-        except Exception as error:
-            logging.warning(f"Updates: the settings and extensions of the previous version could not be copied ({error}); "
-                            f"it is kept in {backup}")
-            if onDone is not None:
-                onDone(backup, error)
-            return
-        updates_install.removeInBackground(backup, onDone).join()
+        reason = None
+        for attempt in range(BACKUP_SNAPSHOT_TRIES):
+            try:
+                if root:
+                    status, folder = profile_legacy.snapshotLocked(home, root, platform=platform)
+                else:
+                    status, folder = profile_legacy.NOTHING, None
+                    if profile_legacy.inAppLocations(home, platform):
+                        return keep("there is no user profile folder to copy its settings into")
+            except Exception as error:
+                return keep(f"its settings and extensions could not be copied ({error})")
+            reason = profile_legacy.backupKeepReason(home, status, folder, platform)
+            if status != profile_legacy.BUSY:
+                break
+            if attempt + 1 < BACKUP_SNAPSHOT_TRIES:
+                time.sleep(retryDelay)
+        if reason is not None:
+            return keep(reason)
+        updates_install.removeInBackground(backup, onDone, protected).join()
 
     thread = threading.Thread(target=run, name="StudioUpdateCleanup", daemon=True)
     thread.start()

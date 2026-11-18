@@ -188,6 +188,8 @@ class _Base(unittest.TestCase):
 class RootTest(_Base):
     def test_Precedence(self):
         default = self.path("default")
+        for name in ("fromEnv", "fromSetting", "home/p"):
+            os.makedirs(self.path(name), exist_ok=True)
         env = {studio_profile.ENVIRONMENT_VARIABLE: self.path("fromEnv")}
         self.assertEqual(studio_profile.resolveRoot(env, self.home, "linux", self.path("fromSetting"), default=default)[:2], (self.path("fromEnv"), "environment"))
         self.assertEqual(studio_profile.resolveRoot({}, self.home, "linux", self.path("fromSetting"), default=default)[:2], (self.path("fromSetting"), "setting"))
@@ -196,6 +198,17 @@ class RootTest(_Base):
         for value in ("", "   ", "relative/folder", "~user/x"):
             root, source, _problem = studio_profile.resolveRoot({studio_profile.ENVIRONMENT_VARIABLE: value} if value.strip() else {}, self.home, "linux", None, default=default)
             self.assertEqual((root, source), (default, "default"), value)
+
+    def test_MissingOverrideIsNeverCreated(self):
+        """A profile folder that was renamed or not restored yet is not used, and not made empty in its place."""
+        default = self.path("default")
+        missing = self.path("synced", "profile")
+        for env, setting in (({studio_profile.ENVIRONMENT_VARIABLE: missing}, None), ({}, missing)):
+            root, source, problem = studio_profile.resolveRoot(env, self.home, "linux", setting, default=default)
+            self.assertEqual((root, source), (default, "default"))
+            self.assertIn("does not exist", problem)
+        self.assertFalse(os.path.exists(missing))
+        self.assertIsNone(studio_profile.validateOverride(missing), "a folder chosen in Settings may be created")
 
     def test_Defaults(self):
         self.assertEqual(studio_profile.defaultRoot({}, "/Users/u", "darwin"), "/Users/u/Library/Application Support/slicer.org/Slicer")
@@ -235,6 +248,8 @@ class RootTest(_Base):
         """root() in the application: the environment variable, then Slicer.ini, then Qt's AppLocalDataLocation; with
         --disable-settings (``-tmp``) never an override."""
         default = self.path("qtdefault")
+        os.makedirs(self.path("chosen"))
+        os.makedirs(self.path("env"))
         settings = FakeSettings(values={studio_profile.DIRECTORY_KEY: self.path("chosen")})
         app = fakeApp(self.path("install"), 1, self.path("cfg", "SlicerStudio-1.ini"), settings, FakeSettings())
         with mock.patch.dict(sys.modules, {"qt": fakeQt(default)}), mock.patch("studio_profile._application", lambda: app):
@@ -272,6 +287,7 @@ class DerivedFoldersTest(_Base):
             self.assertNotIn("AppLocalDataLocation", body, name)
 
     def test_OverlayFollowsEnvironment(self):
+        os.makedirs(self.path("env"))
         app = fakeApp(self.path("install"), 1, self.path("cfg", "SlicerStudio-1.ini"), FakeSettings(), FakeSettings())
         with mock.patch.dict(sys.modules, {"qt": fakeQt(self.path("qtdefault"))}), mock.patch("studio_profile._application", lambda: app), \
                 mock.patch.dict(os.environ, {studio_profile.ENVIRONMENT_VARIABLE: self.path("env")}):
@@ -320,6 +336,27 @@ class CandidatesTest(_Base):
         found = studio_profile.findRevisionCandidates([], "", current, "200", "linux")
         self.assertEqual([(entry["kind"], entry["revision"]) for entry in found], [("sibling", "100")])
         self.assertEqual(found[0]["extensions"], os.path.join(sibling, "slicer.org", "Extensions-100"))
+
+    def test_MacOSOtherBundles(self):
+        """macOS: the old build renamed in Applications (or in ~/Applications) is found; other applications are not."""
+        apps, userApps = self.path("Applications"), os.path.join(self.home, "Applications")
+        current = os.path.join(apps, "Slicer Studio.app", "Contents")
+        makeStudioHome(current, "c" * 40)
+        old = os.path.join(apps, "Slicer Studio old.app", "Contents")
+        makeStudioHome(old)
+        writeIni(os.path.join(old, "slicer.org", "Slicer-100.ini"), {})
+        makeExtension(os.path.join(old, "Extensions-100"), "Foo", os_="macosx")
+        other = os.path.join(userApps, "Slicer Studio test.app", "Contents")
+        makeStudioHome(other)
+        writeIni(os.path.join(other, "slicer.org", "Slicer-90.ini"), {})
+        official = os.path.join(apps, "3D Slicer 5.8.app", "Contents")
+        writeIni(os.path.join(official, "slicer.org", "Slicer-999.ini"), {})
+        self.assertEqual(studio_profile.applicationFolders(current, self.home), [apps, "/Applications", userApps])
+        found = studio_profile.findRevisionCandidates([], "", current, "200", "darwin", otherApplicationFolders=[apps, userApps])
+        self.assertEqual(sorted((entry["kind"], entry["revision"]) for entry in found), [("sibling", "100"), ("sibling", "90")])
+        entry = next(entry for entry in found if entry["revision"] == "100")
+        self.assertEqual(entry["extensions"], os.path.join(old, "Extensions-100"))
+        self.assertEqual(entry["home"], os.path.realpath(old))
 
 
 class CarryForwardTest(_Base):
@@ -424,8 +461,34 @@ class CopyTest(_Base):
             return types.SimpleNamespace(returncode=1)
 
         destination = self.path("dst")
-        studio_profile.cloneTree(source, destination, "darwin", run=failing)
+        self.assertEqual(studio_profile.cloneTree(source, destination, "darwin", run=failing), "copy")
         self.assertIsNone(studio_profile.verifyTree(source, destination))
+
+    def test_CloneIsCheckedWithoutReading(self):
+        """After a clone (no data copied) the check compares paths and sizes only: no file is read at start-up."""
+        source = self.tree()
+        reads = []
+
+        def cloned(src, dst, platform=None):
+            shutil.copytree(src, dst, symlinks=True)
+            return "clone"
+
+        with mock.patch("studio_profile._sha256", lambda path: reads.append(path) or ""):
+            self.assertIsNone(studio_profile.copyTreeVerified(source, self.path("dst"), clone=cloned))
+            self.assertEqual(reads, [])
+            self.assertIsNone(studio_profile.copyTreeVerified(source, self.path("dst2"), clone=lambda s, d, p=None: shutil.copytree(s, d, symlinks=True)))
+            self.assertNotEqual(reads, [], "a plain copy is hashed")
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append(command[:3])
+            if "--reflink=always" in command:
+                return types.SimpleNamespace(returncode=1)
+            shutil.copytree(command[-2], command[-1], symlinks=True)
+            return types.SimpleNamespace(returncode=0)
+
+        self.assertEqual(studio_profile.cloneTree(source, self.path("dst3"), "linux", run=run), "copy")
+        self.assertEqual(calls, [["cp", "-a", "--reflink=always"], ["cp", "-a", source]])
 
 
 class SnapshotTest(_Base):
@@ -497,6 +560,72 @@ class SnapshotTest(_Base):
         makeStudioHome(home)
         self.assertIsNone(profile_legacy.snapshot(home, self.path("profile"), platform="linux"))
 
+    def test_ProfileRootIsNeverRelative(self):
+        with mock.patch("studio_profile.root", lambda: ""), mock.patch.dict(sys.modules, {"qt": fakeQt(self.path("qtdefault"))}):
+            self.assertEqual(profile_legacy.profileRoot(), self.path("qtdefault"))
+            saved = updates.stateDirectoryOverride
+            updates.stateDirectoryOverride = None
+            self.addCleanup(setattr, updates, "stateDirectoryOverride", saved)
+            self.assertEqual(updates.stateDirectory(), self.path("qtdefault", "StudioUpdate"))
+            self.assertEqual(studio_overlay.stateRootFromApplication(), self.path("qtdefault", "StudioUpdate", "commit"))
+        with mock.patch("studio_profile.root", lambda: ""), mock.patch.dict(sys.modules, {"qt": fakeQt("")}):
+            self.assertTrue(os.path.isabs(profile_legacy.profileRoot()))
+            self.assertTrue(os.path.isabs(studio_overlay.stateRootFromApplication()))
+
+    def test_BackupKeptUntilCopied(self):
+        """The previous version kept by an in-app update is deleted only once its user data is in the profile."""
+        plenty = lambda path: 100 * 1024 ** 3  # noqa: E731
+        profile = self.path("profile")
+        home, _extensions = self.oldInstall()
+        # Another Slicer Studio holds the snapshot lock: busy, nothing copied, the backup must stay
+        with profile_legacy._Lock(os.path.join(profile, "StudioLegacy")):
+            if sys.platform != "win32":
+                status, folder = profile_legacy.snapshotLocked(home, profile, platform="linux")
+                self.assertEqual((status, folder), (profile_legacy.BUSY, None))
+                self.assertIsNotNone(profile_legacy.backupKeepReason(home, status, folder, "linux"))
+        # Not enough space for the extensions: kept
+        status, folder = profile_legacy.snapshotLocked(home, profile, platform="linux", freeBytesFn=lambda path: 0)
+        self.assertEqual(status, profile_legacy.DONE)
+        self.assertIn("not copied", profile_legacy.backupKeepReason(home, status, folder, "linux"))
+        # Copied: may go
+        later = time.time() + 100
+        os.utime(os.path.join(home, "slicer.org", "Slicer-100.ini"), (later, later))
+        status, folder = profile_legacy.snapshotLocked(home, profile, platform="linux", freeBytesFn=plenty)
+        self.assertIsNone(profile_legacy.backupKeepReason(home, status, folder, "linux"))
+        # Nothing inside the application: may go, unless an extensions folder was never mirrored into the profile
+        bare = self.path("opt", "bare")
+        makeStudioHome(bare)
+        self.assertEqual(profile_legacy.snapshotLocked(bare, profile, platform="linux"), (profile_legacy.NOTHING, None))
+        self.assertIsNone(profile_legacy.backupKeepReason(bare, profile_legacy.NOTHING, None, "linux"))
+        contents = self.path("Apps", ".Slicer Studio.app.studio-previous", "Contents")
+        makeStudioHome(contents)
+        makeExtension(os.path.join(contents, "Extensions-200"), "Foo", os_="macosx")
+        self.assertIsNotNone(profile_legacy.backupKeepReason(contents, profile_legacy.NOTHING, None, "darwin"))
+        with open(os.path.join(contents, "Extensions-200", studio_profile.SYNC_MARKER), "w") as f:
+            json.dump({"format": 1}, f)
+        self.assertIsNone(profile_legacy.backupKeepReason(contents, profile_legacy.NOTHING, None, "darwin"))
+
+    def test_UpdateCleanupKeepsBackupWhenBusy(self):
+        profile = self.path("profile")
+        backup = self.path("opt", ".SlicerStudio.studio-previous")
+        makeStudioHome(backup)
+        writeIni(os.path.join(backup, "slicer.org", "Slicer-100.ini"), {})
+        makeExtension(os.path.join(backup, "slicer.org", "Extensions-100"), "Foo")
+        results = []
+        with mock.patch.object(updates, "BACKUP_SNAPSHOT_TRIES", 2):
+            with profile_legacy._Lock(os.path.join(profile, "StudioLegacy")):
+                updates._keepUserDataAndRemove(backup, profile, lambda path, error: results.append(error), platform="linux",
+                                               retryDelay=0, protected=[profile]).join(30)
+        self.assertIsInstance(results[0], OSError)
+        self.assertTrue(os.path.isdir(backup), "kept: no copy was made")
+        results.clear()
+        updates._keepUserDataAndRemove(backup, profile, lambda path, error: results.append(error), platform="linux",
+                                       retryDelay=0, protected=[profile]).join(30)
+        self.assertEqual(results, [None])
+        self.assertFalse(os.path.exists(backup))
+        snapshot = profile_legacy.snapshots(profile)[0][0]
+        self.assertTrue(os.path.isfile(os.path.join(snapshot, "Extensions", "Foo.s4ext")))
+
 
 @unittest.skipIf("slicer" in sys.modules or sys.platform == "darwin", "forks the process: plain Python on Linux only")
 class ConcurrencyTest(_Base):
@@ -534,12 +663,25 @@ class ConcurrencyTest(_Base):
 
 class ExtensionsTest(_Base):
     def test_Plan(self):
+        digest = studio_profile.descriptionDigest
         store = {"A": b"1", "B": b"2"}
-        self.assertEqual(studio_profile.planExtensionsSync(store, {}, False)["restore"], ["A", "B"])
-        self.assertEqual(studio_profile.planExtensionsSync(store, {"A": b"1"}, False)["restore"], ["B"])
-        self.assertEqual(studio_profile.planExtensionsSync(store, dict(store), True)["action"], "noop")
-        plan = studio_profile.planExtensionsSync(store, {"A": b"1b", "C": b"3"}, True)
+        self.assertEqual(studio_profile.planExtensionsSync(store, {}, None)["restore"], ["A", "B"])
+        self.assertEqual(studio_profile.planExtensionsSync(store, {"A": b"1"}, None)["restore"], ["B"])
+        synced = {"A": digest(b"1"), "B": digest(b"2")}
+        self.assertEqual(studio_profile.planExtensionsSync(store, dict(store), synced)["action"], "noop")
+        plan = studio_profile.planExtensionsSync(store, {"A": b"1b", "C": b"3"}, synced)
         self.assertEqual((plan["action"], plan["capture"], plan["trash"]), ("capture", ["A", "C"], ["B"]))
+        # Never synced with this store (another profile): merged both ways, nothing trashed
+        plan = studio_profile.planExtensionsSync({"Z": b"z", "A": b"other"}, {"X": b"x", "A": b"1"}, None)
+        self.assertEqual((plan["restore"], plan["capture"], plan["trash"]), (["Z"], ["X"], []))
+        # Another application installed X (new in the store) and updated A there: copied into this bundle
+        plan = studio_profile.planExtensionsSync({"A": b"1c", "B": b"2", "X": b"x"}, {"A": b"1", "B": b"2"}, synced)
+        self.assertEqual((plan["restore"], plan["capture"], plan["trash"]), (["A", "X"], [], []))
+        # Uninstalled here but updated elsewhere since: kept in the store
+        plan = studio_profile.planExtensionsSync({"A": b"1", "B": b"2-new"}, {"A": b"1"}, synced)
+        self.assertEqual(plan["trash"], [])
+        # Removed through another application, unchanged here: left alone (not captured back, not removed)
+        self.assertEqual(studio_profile.planExtensionsSync({"A": b"1"}, {"A": b"1", "B": b"2"}, synced)["action"], "noop")
 
     def test_SyncBundleNeverDeletes(self):
         store, bundle, trash = self.path("store"), self.path("bundle"), self.path("trash")
@@ -567,6 +709,41 @@ class ExtensionsTest(_Base):
         self.assertEqual(studio_profile.purgeTrash(trash, now=time.time()), [])
         self.assertEqual(studio_profile.purgeTrash(trash, now=time.time() + 31 * 86400), trashed)
 
+    def test_MarkerOfAnotherProfileNeverTrashes(self):
+        """A bundle synced with profile A, started with profile B: B's extensions are kept and merged both ways."""
+        plenty = lambda path: 100 * 1024 ** 3  # noqa: E731
+        storeA, storeB, bundle = self.path("A", "store"), self.path("B", "store"), self.path("bundle")
+        makeExtension(storeA, "X")
+        studio_profile.syncBundle(storeA, bundle, self.path("A", "trash"), platform="linux", freeBytesFn=plenty)
+        self.assertTrue(studio_profile._bundleLooksSynced(storeA, bundle))
+        makeExtension(storeB, "Z")
+        self.assertFalse(studio_profile._bundleLooksSynced(storeB, bundle), "the marker names the store it was synced with")
+        plan = studio_profile.syncBundle(storeB, bundle, self.path("B", "trash"), platform="linux", freeBytesFn=plenty)
+        self.assertEqual((plan["restore"], plan["capture"], plan["trash"], plan["problems"]), (["Z"], ["X"], [], {}))
+        self.assertEqual(sorted(studio_profile.extensionDescriptions(storeB)), ["X", "Z"])
+        self.assertFalse(os.path.exists(self.path("B", "trash")))
+
+    def test_TwoBundlesShareTheStore(self):
+        plenty = lambda path: 100 * 1024 ** 3  # noqa: E731
+        store, trash = self.path("store"), self.path("trash")
+        bundleA, bundleB = self.path("A"), self.path("B")
+        makeExtension(store, "Base")
+        for bundle in (bundleA, bundleB):
+            studio_profile.syncBundle(store, bundle, trash, platform="linux", freeBytesFn=plenty)
+        makeExtension(bundleA, "X")  # installed in A
+        self.assertEqual(studio_profile.syncBundle(store, bundleA, trash, platform="linux", freeBytesFn=plenty)["capture"], ["X"])
+        plan = studio_profile.syncBundle(store, bundleB, trash, platform="linux", freeBytesFn=plenty)
+        self.assertEqual((plan["restore"], plan["trash"]), (["X"], []), "B gets X instead of trashing it")
+        self.assertEqual(sorted(studio_profile.extensionDescriptions(bundleB)), ["Base", "X"])
+        self.assertEqual(sorted(studio_profile.extensionDescriptions(store)), ["Base", "X"])
+        self.assertFalse(os.path.exists(trash))
+        # Uninstalled in B: trashed from the store; A keeps its copy and does not bring it back
+        shutil.rmtree(os.path.join(bundleB, "X"))
+        os.remove(os.path.join(bundleB, "X.s4ext"))
+        self.assertEqual(studio_profile.syncBundle(store, bundleB, trash, platform="linux", freeBytesFn=plenty)["trash"], ["X"])
+        self.assertEqual(studio_profile.syncBundle(store, bundleA, trash, platform="linux", freeBytesFn=plenty)["action"], "noop")
+        self.assertNotIn("X", studio_profile.extensionDescriptions(store))
+
     def test_ImportOnlyCompatible(self):
         old = self.path("old")
         makeExtension(old, "Good")
@@ -577,11 +754,58 @@ class ExtensionsTest(_Base):
                                                  freeBytesFn=lambda path: 100 * 1024 ** 3, platform="linux")
         self.assertEqual((result["copied"], sorted(result["skipped"])), (["Good"], ["OtherAbi", "OtherOs"]))
         self.assertEqual(studio_profile.importExtensions([{"extensions": old}], store, SERVER_REVISION, "linux", "amd64")["source"], None,
-                         "a store with extensions is never filled again")
+                         "a store with extensions is never filled again (without an unfinished import)")
         empty = self.path("store2")
         result = studio_profile.importExtensions([{"extensions": old}], empty, SERVER_REVISION, "linux", "amd64",
                                                  freeBytesFn=lambda path: studio_profile.RESERVED_FREE_BYTES)
         self.assertEqual(result["problems"], {"Good": "not enough free space"})
+        self.assertFalse(result["complete"])
+
+    def test_UnfinishedImportIsTakenUpAgain(self):
+        old = self.path("old")
+        for name in ("A", "B", "C"):
+            makeExtension(old, name)
+        store = self.path("store")
+        started = []
+        space = {"free": 100 * 1024 ** 3}
+
+        def freeBytes(path):
+            return space["free"]
+
+        original = studio_profile.copyExtension
+        calls = []
+
+        def copyThenFull(name, *args, **kwargs):
+            calls.append(name)
+            problem = original(name, *args, **kwargs)
+            space["free"] = studio_profile.RESERVED_FREE_BYTES  # the disk is full after the first copy
+            return problem
+
+        candidate = {"extensions": old, "ini": self.path("old.ini"), "home": self.path("oldhome"), "kind": "sibling", "revision": "100"}
+        with mock.patch("studio_profile.copyExtension", copyThenFull):
+            first = studio_profile.importExtensions([candidate], store, SERVER_REVISION, "linux", "amd64", freeBytesFn=freeBytes,
+                                                    onStart=lambda chosen, names: started.append(list(names)))
+        self.assertEqual((first["copied"], sorted(first["problems"]), first["complete"]), (["A"], ["B", "C"], False))
+        self.assertEqual(started, [["A", "B", "C"]])
+        progress = {"sourcePath": old, "ini": candidate["ini"], "home": candidate["home"], "problems": first["problems"], "complete": False}
+        space["free"] = 100 * 1024 ** 3
+        second = studio_profile.importExtensions([], store, SERVER_REVISION, "linux", "amd64", freeBytesFn=freeBytes, progress=progress)
+        self.assertEqual((second["copied"], second["problems"], second["complete"]), (["B", "C"], {}, True))
+        self.assertEqual(sorted(studio_profile.extensionDescriptions(store)), ["A", "B", "C"])
+        done = dict(progress, complete=True, problems={})
+        self.assertIsNone(studio_profile.importExtensions([candidate], store, SERVER_REVISION, "linux", "amd64", progress=done)["source"])
+        # The source is gone: what is left is reported, and the import is not tried again
+        gone = dict(progress, sourcePath=self.path("deleted"), problems={"D": "not enough free space"})
+        result = studio_profile.importExtensions([], store, SERVER_REVISION, "linux", "amd64", progress=gone)
+        self.assertEqual((result["complete"], sorted(result["problems"])), (True, ["D"]))
+
+    def test_OtherStores(self):
+        profile = self.path("profile")
+        base = os.path.join(profile, "StudioExtensions")
+        makeExtension(os.path.join(base, "35000-linux-amd64"), "Old")
+        makeExtension(os.path.join(base, "35000-macosx-arm64"), "Mac")
+        makeExtension(os.path.join(base, f"{SERVER_REVISION}-linux-amd64"), "Current")
+        self.assertEqual(studio_profile.otherStoreExtensions(profile, os.path.join(base, f"{SERVER_REVISION}-linux-amd64")), ["Old"])
 
 
 class PythonPackagesTest(_Base):
@@ -602,11 +826,16 @@ class PythonPackagesTest(_Base):
         site = self.path("site")
         os.makedirs(os.path.join(site, "extra"))
         with open(os.path.join(site, "x.pth"), "w") as f:
-            f.write("extra\nimport os; os.abort()\n# comment\n")
+            # An editable install writes such a line: it must run, as it does for Python's own user site
+            f.write("extra\nimport os; os.environ['STUDIO_PROFILE_TEST_PTH'] = 'ran'\n# comment\n")
+        self.addCleanup(os.environ.pop, "STUDIO_PROFILE_TEST_PTH", None)
         sysPath = ["/app/lib/python3.12", "/app/lib/python3.12/site-packages", "/app/other"]
+        saved = list(sys.path)
         added = studio_profile.addUserSite(site, sysPath)
+        self.assertEqual(sys.path, saved, "only the given path list changes")
         self.assertEqual(added, [site, os.path.join(site, "extra")])
         self.assertEqual(sysPath[1:3], added, "before the bundled site-packages, as Python puts the user site")
+        self.assertEqual(os.environ.get("STUDIO_PROFILE_TEST_PTH"), "ran", "the import lines of .pth files run")
         self.assertEqual(studio_profile.addUserSite(site, sysPath), [], "added once")
 
     def test_PackagingUsesProfile(self):
@@ -633,6 +862,22 @@ class InstallerSafetyTest(_Base):
         os.makedirs(other)
         updates_install._removeTree(other, protected)
         self.assertFalse(os.path.exists(other))
+        # The updater's own downloads and staged copies in the profile can be removed (a download left by a crash)
+        downloads = os.path.join(profile, "StudioUpdate", "downloads")
+        os.makedirs(downloads)
+        package = os.path.join(downloads, "pkg.dmg")
+        open(package, "w").close()
+        errors = []
+        updates_install.removeInBackground(package, lambda path, error: errors.append(error), protected).join(10)
+        self.assertEqual(errors, [None])
+        self.assertFalse(os.path.exists(package))
+        for path in (os.path.join(profile, "StudioUpdate"), profile):
+            with self.assertRaises(OSError, msg=path):
+                updates_install._removeTree(path, protected)
+        studio_profile.checkRemovable(downloads, protected)
+        for path in (profile, os.path.join(profile, "StudioAutosave"), os.path.join(profile, "StudioUpdate"), self.tempDir):
+            with self.assertRaises(OSError, msg=path):
+                studio_profile.checkRemovable(path, protected)
 
     def test_HelperRefusesToReplaceUserData(self):
         apps = self.path("apps")
@@ -684,13 +929,14 @@ class StartupTest(_Base):
         os.environ.pop("XDG_DATA_HOME", None)
         os.environ.pop(studio_profile.ENVIRONMENT_VARIABLE, None)
 
-    def start(self, home, revision, platform, os_="linux"):
+    def start(self, home, revision, platform, os_="linux", user=None):
         revisionFile = os.path.join(self.config, f"SlicerStudio-{revision}.ini")
-        userSettings = FakeSettings(values={studio_profile.PIP_KEY: "false"})
+        userSettings = FakeSettings(values=dict({studio_profile.PIP_KEY: "false"}, **(user or {})))
         revisionSettings = FakeSettings(revisionFile)
         app = fakeApp(home, revision, revisionFile, userSettings, revisionSettings, os_=os_)
         studio_profile.setRoot(None)
-        with mock.patch("studio_profile._application", lambda: app):
+        with mock.patch("studio_profile._application", lambda: app), \
+                mock.patch("studio_profile.applicationFolders", lambda slicerHome, home=None: [os.path.dirname(os.path.dirname(slicerHome))]):
             state = studio_profile.startup(app, platform=platform)
         return app, userSettings, revisionSettings, state
 
@@ -758,6 +1004,74 @@ class StartupTest(_Base):
         self.assertEqual(sorted(studio_profile.extensionDescriptions(os.path.join(contents, "Extensions-210"))), ["Foo"])
         self.assertEqual(settings.value("Modules/AdditionalPaths"), "Extensions-210/Foo/lib/Slicer-5.13/qt-scripted-modules")
 
+    def test_MacOSRenamedOldBuild(self):
+        """A build made before the profile, renamed to "Slicer Studio old.app" while the new one starts once."""
+        apps = self.path("Applications")
+        old = os.path.join(apps, "Slicer Studio old.app", "Contents")
+        makeStudioHome(old, "b" * 40)
+        writeIni(os.path.join(old, "slicer.org", "Slicer-100.ini"), {
+            "Modules/AdditionalPaths": "Extensions-100/Foo/lib/Slicer-5.13/qt-scripted-modules"})
+        makeExtension(os.path.join(old, "Extensions-100"), "Foo", os_="macosx")
+        contents = os.path.join(apps, "Slicer Studio.app", "Contents")
+        makeStudioHome(contents, "c" * 40)
+        _app, _user, settings, state = self.start(contents, 200, "darwin", os_="macosx")
+        self.assertEqual(state["state"], "migrated")
+        self.assertEqual(sorted(studio_profile.extensionDescriptions(os.path.join(contents, "Extensions-200"))), ["Foo"])
+        self.assertEqual(settings.value("Modules/AdditionalPaths"), "Extensions-200/Foo/lib/Slicer-5.13/qt-scripted-modules")
+        self.assertTrue(os.path.isfile(os.path.join(old, "Extensions-100", "Foo.s4ext")), "the old build is never changed")
+
+    def test_LinuxImportTakenUpAgain(self):
+        """The first start could copy only some extensions: the next start copies the rest and adds their paths."""
+        old = self.path("opt", "SlicerStudio-old")
+        makeStudioHome(old)
+        writeIni(os.path.join(old, "slicer.org", "Slicer-100.ini"), {
+            "Modules/AdditionalPaths": ["slicer.org/Extensions-100/A/lib/Slicer-5.13/qt-scripted-modules",
+                                        "slicer.org/Extensions-100/B/lib/Slicer-5.13/qt-scripted-modules"]})
+        for name in ("A", "B"):
+            makeExtension(os.path.join(old, "slicer.org", "Extensions-100"), name)
+        new = self.path("opt", "SlicerStudio-new")
+        makeStudioHome(new, "c" * 40)
+        store = os.path.join(self.profile, "StudioExtensions", f"{SERVER_REVISION}-linux-amd64")
+        original = studio_profile.copyExtension
+        with mock.patch("studio_profile.copyExtension", lambda name, *a, **k: "interrupted" if name == "B" else original(name, *a, **k)):
+            _app, _user, settings, state = self.start(new, 200, "linux")
+        self.assertEqual(sorted(studio_profile.extensionDescriptions(store)), ["A"])
+        self.assertEqual(settings.value("Modules/AdditionalPaths"), os.path.join(store, "A", "lib", "Slicer-5.13", "qt-scripted-modules"))
+        self.assertTrue(studio_profile.importPending(self.profile, store))
+        self.assertEqual(studio_profile.pendingImports(self.profile)[os.path.basename(store)]["names"], ["B"])
+        _app, _user, settings, state = self.start(new, 200, "linux")
+        self.assertEqual(state["state"], "migrated", "not 'ready': the import is not finished")
+        self.assertEqual(sorted(studio_profile.extensionDescriptions(store)), ["A", "B"])
+        self.assertEqual(settings.value("Modules/AdditionalPaths"), [os.path.join(store, name, "lib", "Slicer-5.13", "qt-scripted-modules") for name in ("A", "B")])
+        self.assertTrue(settings.value(studio_profile.RESTART_KEY))
+        self.assertFalse(studio_profile.importPending(self.profile, store))
+        self.assertEqual(self.start(new, 200, "linux")[3]["state"], "ready")
+
+    def test_MissingProfileFolderChangesNothing(self):
+        missing = self.path("renamed-profile")
+        old = self.path("opt", "SlicerStudio-old")
+        makeStudioHome(old)
+        writeIni(os.path.join(old, "slicer.org", "Slicer-100.ini"), {"Extensions/ManagerEnabled": "true"})
+        makeExtension(os.path.join(old, "slicer.org", "Extensions-100"), "Foo")
+        new = self.path("opt", "SlicerStudio-new")
+        makeStudioHome(new, "c" * 40)
+        _app, _user, settings, state = self.start(new, 200, "linux", user={studio_profile.DIRECTORY_KEY: missing})
+        self.assertEqual(state["state"], "fallback")
+        self.assertFalse(os.path.exists(missing), "never created")
+        self.assertEqual(settings.writes, [], "nothing carried, the install folder unchanged")
+        self.assertFalse(os.path.exists(os.path.join(self.profile, "StudioExtensions")))
+
+    def test_PortableBuildKeepsEverythingInside(self):
+        new = self.path("opt", "SlicerStudio-new")
+        makeStudioHome(new)
+        config = types.SimpleNamespace(EXTENSIONS_SERVER_REVISION=SERVER_REVISION, STORE_SETTINGS_IN_APPLICATION_HOME_DIR="ON")
+        with mock.patch.dict(sys.modules, {"studio_build_config": config}):
+            _app, _user, settings, state = self.start(new, 200, "linux")
+        self.assertEqual(state["state"], "portable")
+        self.assertEqual(settings.writes, [])
+        off = types.SimpleNamespace(STORE_SETTINGS_IN_APPLICATION_HOME_DIR="OFF")
+        self.assertFalse(studio_profile.portableBuild({"STORE_SETTINGS_IN_APPLICATION_HOME_DIR": off.STORE_SETTINGS_IN_APPLICATION_HOME_DIR}))
+
     def test_TestingAndTemporarySettingsDoNothing(self):
         home = self.path("opt", "new")
         makeStudioHome(home)
@@ -780,9 +1094,27 @@ class StartupTest(_Base):
         self.assertEqual(settings.value(studio_profile.DIRECTORY_KEY), target)
         self.assertNotIn(studio_profile.PENDING_DIRECTORY_KEY, settings.values)
         self.assertTrue(all(key.startswith("Studio/Profile/") for key in settings.writes))
+        self.assertEqual(settings.value(studio_profile.PREVIOUS_DIRECTORY_KEY), self.profile)
         inside = FakeSettings(values={studio_profile.PENDING_DIRECTORY_KEY: os.path.join(self.profile, "sub")})
         self.assertIsNone(studio_profile.applyPendingDirectory(inside, self.profile, {}, self.home, "linux", []))
         self.assertNotIn(studio_profile.DIRECTORY_KEY, inside.values)
+        # A folder with other files is refused: the profile would be left behind
+        busy = self.path("documents")
+        os.makedirs(busy)
+        open(os.path.join(busy, "thesis.docx"), "w").close()
+        refused = FakeSettings(values={studio_profile.PENDING_DIRECTORY_KEY: busy})
+        self.assertIsNone(studio_profile.applyPendingDirectory(refused, self.profile, {}, self.home, "linux", []))
+        self.assertNotIn(studio_profile.DIRECTORY_KEY, refused.values)
+        self.assertEqual(os.listdir(busy), ["thesis.docx"])
+        self.assertIn("not empty", studio_profile.pendingDirectoryProblem(busy, self.profile))
+        # A folder that already holds a profile, chosen on purpose: used as it is, nothing copied into it
+        existing = self.path("other-profile")
+        os.makedirs(existing)
+        with open(os.path.join(existing, "StudioProfile.json"), "w") as f:
+            json.dump({"format": 1}, f)
+        chosen = FakeSettings(values={studio_profile.PENDING_DIRECTORY_KEY: existing})
+        self.assertEqual(studio_profile.applyPendingDirectory(chosen, self.profile, {}, self.home, "linux", []), existing)
+        self.assertEqual(sorted(os.listdir(existing)), ["StudioProfile.json"])
 
 
 if __name__ == "__main__":

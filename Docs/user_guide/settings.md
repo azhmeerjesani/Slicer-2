@@ -124,7 +124,7 @@ the application, so that reinstalling Slicer Studio keeps them (see
 
 | Setting | Key | Default |
 | ------- | --- | ------- |
-| **Change…** (used from the next start; the environment variable `SLICER_STUDIO_PROFILE_DIR` wins) | `Studio/Profile/Directory` (`Studio/Profile/PendingDirectory` until the next start) | empty, meaning the application data folder |
+| **Change…** (used from the next start; an empty folder, or one that already holds a profile; the environment variable `SLICER_STUDIO_PROFILE_DIR` wins) | `Studio/Profile/Directory` (`Studio/Profile/PendingDirectory` until the next start; the folder used before is kept in `Studio/Profile/PreviousDirectory`) | empty, meaning the application data folder |
 | Install pip packages into the profile (no button) | `Studio/Profile/PipToProfile` | true |
 
 ### Saving

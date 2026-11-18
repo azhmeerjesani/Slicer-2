@@ -34,6 +34,8 @@ def locations():
     app = slicer.app
     if not app.isInstalled or app.testingEnabled() or studio_profile.settingsDisabled(app):
         return None
+    if studio_profile.portableBuild() or studio_profile.rootSource()[1]:
+        return None  # a portable build, or the chosen profile folder is missing (this run uses the default)
     serverRevision = str(studio_profile.buildConfig().get("EXTENSIONS_SERVER_REVISION") or "")
     profile = studio_profile.root()
     if not serverRevision or not profile:
