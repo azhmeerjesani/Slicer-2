@@ -257,6 +257,17 @@ def _completeStartup():
         import traceback
 
         logging.error("Settings > Templates could not be scheduled:\n" + traceback.format_exc())
+    # The user profile: keep a copy of the settings and extensions that this installation holds inside itself, so that
+    # replacing the application does not lose them (profile_legacy)
+    try:
+        from StudioLib import profile_legacy
+
+        profile_legacy.scheduleSnapshot()
+    except Exception:
+        import logging
+        import traceback
+
+        logging.error("Studio: the copy of the settings and extensions could not be scheduled:\n" + traceback.format_exc())
     return updatesStarted
 
 

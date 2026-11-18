@@ -933,6 +933,37 @@ def _removeQuietly(path):
         pass
 
 
+def _keepUserDataAndRemove(backup, profileRoot=None, onDone=None):
+    """Delete the previous version kept by an update (``backup``) in a background thread, after copying the settings and
+    extensions it holds inside itself into the user profile (``profile_legacy.snapshot``). When that copy fails, the
+    previous version is kept (the next update replaces it)."""
+
+    from . import profile_legacy
+
+    root = profileRoot
+    if root is None:
+        try:
+            root = profile_legacy.profileRoot()  # Qt: on the main thread
+        except Exception:
+            root = ""
+
+    def run():
+        try:
+            if root:
+                profile_legacy.snapshotLocked(profile_legacy.homeOfBackup(backup), root)
+        except Exception as error:
+            logging.warning(f"Updates: the settings and extensions of the previous version could not be copied ({error}); "
+                            f"it is kept in {backup}")
+            if onDone is not None:
+                onDone(backup, error)
+            return
+        updates_install.removeInBackground(backup, onDone).join()
+
+    thread = threading.Thread(target=run, name="StudioUpdateCleanup", daemon=True)
+    thread.start()
+    return thread
+
+
 def formatSize(numberOfBytes):
     if numberOfBytes >= 1 << 30:
         return f"{numberOfBytes / (1 << 30):.1f} GB"
@@ -2635,7 +2666,7 @@ class UpdateService:
         if succeeded:
             backup = record.get("backup")
             if backup and os.path.isdir(backup):
-                updates_install.removeInBackground(backup)
+                _keepUserDataAndRemove(backup)
             self._finishedMessage = ("ok", _("Slicer Studio was updated to {version}.").format(version=newVersion))
         else:
             reason = result[len("failed"):].strip() if result and result.startswith("failed") else _("the installation did not finish")
