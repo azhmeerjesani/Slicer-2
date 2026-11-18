@@ -574,7 +574,7 @@ class RecoveryCard:
                                      lambda: owner.discard(newest) if newest is not None else None, "secondary")
         self.discardButton.setEnabled(newest is not None and newest.session.status not in ("running", "possibly-crashed"))
         if newest is not None and not self.discardButton.enabled:
-            self.discardButton.setToolTip(_("This session may still be open in another Slicer"))
+            self.discardButton.setToolTip(_("This session may still be open in another Slicer Studio window"))
         buttons.addWidget(self.discardButton)
         buttons.addStretch(1)
         self.allButton = _button(_("All autosaves…"), "StudioRecoveryCardAllButton", showRecoveryDialog, "ghost")

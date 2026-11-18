@@ -194,6 +194,22 @@ def _reportStartupToCodeUpdates(ok, reason):
             logging.error("Studio: the start-up report failed:\n" + traceback.format_exc())
 
 
+def _setWindowTitle():
+    """Name the main window "Slicer Studio <version>" (Main.cxx sets only the display name; also renames a window of
+    an older build, whose title was "3D Slicer <3D Slicer version>")."""
+    try:
+        from StudioLib import version
+
+        mainWindow = slicer.util.mainWindow()
+        if mainWindow is not None:
+            mainWindow.windowTitle = version.windowTitle()
+    except Exception:
+        import logging
+        import traceback
+
+        logging.error("Studio: cannot set the window title:\n" + traceback.format_exc())
+
+
 def _completeStartup():
     """The start-up of Studio (see ``_onStartupCompleted``). Return False when the update service could not start."""
     global _startupCompleted
@@ -209,6 +225,8 @@ def _completeStartup():
         qt.QTimer.singleShot(0, _openCommandLineArguments)
     # Imported lazily, so that the module costs nothing at startup when Studio is not used
     from StudioLib import shell
+
+    _setWindowTitle()
 
     if slicer.app.property("SlicerDisclaimerHandledByApplication"):
         # Receive the research-use disclaimer that the main window does not show (W3-03): it may come before Studio is

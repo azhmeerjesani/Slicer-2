@@ -313,7 +313,7 @@
     <string>Load Scene</string>
    </property>
    <property name="toolTip">
-    <string>Raise a file browser to select a scene (mrml, xcat or xml) to load. It first clears any existing scene in Slicer and resets the application state.</string>
+    <string>Raise a file browser to select a scene (mrml, xcat or xml) to load. It first clears any existing scene in the application and resets the application state.</string>
    </property>
   </action>
   <action name="FileLoadDataAction">

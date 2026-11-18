@@ -80,6 +80,29 @@ slicerMacroBuildApplication(
   )
 
 # --------------------------------------------------------------------------
+# Linux desktop entry of Slicer Studio: the icons and the entry template go into
+# share/Slicer-<version>/desktop, and install-desktop-entry.sh (which adds the
+# entry to the user's applications menu) next to the launcher.
+# --------------------------------------------------------------------------
+if(UNIX AND NOT APPLE AND ${PROJECT_NAME} STREQUAL ${Slicer_MAIN_PROJECT})
+  install(
+    DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/Resources/Linux/icons
+    DESTINATION ${Slicer_INSTALL_SHARE_DIR}/desktop
+    COMPONENT Runtime
+    )
+  install(
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/Resources/Linux/slicer-studio.desktop.in
+    DESTINATION ${Slicer_INSTALL_SHARE_DIR}/desktop
+    COMPONENT Runtime
+    )
+  install(
+    PROGRAMS ${CMAKE_CURRENT_SOURCE_DIR}/Resources/Linux/install-desktop-entry.sh
+    DESTINATION "."
+    COMPONENT Runtime
+    )
+endif()
+
+# --------------------------------------------------------------------------
 if(BUILD_TESTING)
   add_subdirectory(Testing)
 endif()

@@ -672,7 +672,7 @@ def checkSurface(path):
     if not isSurfaceFile(path):
         return False, _("Use a .vtk, .vtp, .stl, .obj, .ply or .gii surface")
     if not surfaceReaderAvailable(path):
-        return False, _("This Slicer cannot read {extension} surfaces (a GIfTI reader comes with extensions such as SlicerFreeSurfer).").format(
+        return False, _("This Slicer Studio cannot read {extension} surfaces (a GIfTI reader comes with extensions such as SlicerFreeSurfer).").format(
             extension=_lowerExtension(path))
     try:
         bounds = _readSurfaceBounds(path)

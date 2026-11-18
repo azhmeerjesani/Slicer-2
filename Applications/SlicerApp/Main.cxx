@@ -55,11 +55,8 @@ int SlicerAppMain(int argc, char* argv[])
     return exitCode;
   }
 
-  if (!window.isNull())
-  {
-    QString windowTitle = QString("%1 %2").arg(window->windowTitle()).arg(Slicer_VERSION_FULL);
-    window->setWindowTitle(windowTitle);
-  }
+  // The title is the display name ("Slicer Studio"), without the 3D Slicer version it is based on: the Studio module
+  // adds the Slicer Studio version when start-up is complete (StudioLib/version.py windowTitle()).
 
   return app.exec();
 }

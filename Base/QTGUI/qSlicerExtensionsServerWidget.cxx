@@ -109,13 +109,13 @@ void qSlicerExtensionsServerWidgetPrivate::setFailurePage(const QStringList& err
       "%1"
 #ifdef Q_OS_MAC
       "          <li><b>"
-    + qSlicerExtensionsServerWidget::tr("Extensions manager requires <em>3D Slicer</em> to be installed. "
-                                        "Open the disk image (.dmg) file, drag <em>Slicer.app</em> into the the <em>Applications</em> folder, "
-                                        "and launch <em>3D Slicer</em> from the <em>Applications</em> folder.")
+    + qSlicerExtensionsServerWidget::tr("Extensions manager requires <em>Slicer Studio</em> to be installed. "
+                                        "Open the disk image (.dmg) file, drag <em>Slicer Studio.app</em> into the <em>Applications</em> folder, "
+                                        "and launch <em>Slicer Studio</em> from the <em>Applications</em> folder.")
     + "</b> "
 #else
       "          <li>"
-    + qSlicerExtensionsServerWidget::tr("Check that <b>3D Slicer</b> is properly installed.")
+    + qSlicerExtensionsServerWidget::tr("Check that <b>Slicer Studio</b> is properly installed.")
     + " "
 #endif
       "<a href='https://slicer.readthedocs.io/en/latest/user_guide/getting_started.html#installing-3d-slicer'>"

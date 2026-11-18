@@ -58,10 +58,10 @@ void qSlicerWebDownloadWidget::handleDownload(QWebEngineDownloadItem* download)
   // if we don't return 'accept from this slot
   QMessageBox* messageBox = new QMessageBox(this);
   messageBox->setWindowTitle(tr("Web download"));
-  messageBox->setText(tr("Load data into Slicer or download to separate location."));
+  messageBox->setText(tr("Load data into Slicer Studio or download to separate location."));
   QPushButton* loadButton = messageBox->addButton(tr("Load..."), QMessageBox::AcceptRole);
   messageBox->setDefaultButton(loadButton);
-  loadButton->setToolTip(tr("Download the data and open in Slicer"));
+  loadButton->setToolTip(tr("Download the data and open in Slicer Studio"));
   QPushButton* saveButton = messageBox->addButton(tr("Save..."), QMessageBox::AcceptRole);
   saveButton->setToolTip(tr("Save to an arbitrary location"));
   QPushButton* abortlButton = messageBox->addButton(tr("Cancel"), QMessageBox::AcceptRole);

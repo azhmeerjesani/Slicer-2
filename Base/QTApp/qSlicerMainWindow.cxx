@@ -175,7 +175,7 @@ void qSlicerMainWindowPrivate::setupUi(QMainWindow* mainWindow)
   // ModulePanel
   //----------------------------------------------------------------------------
   this->PanelDockWidget->toggleViewAction()->setText(qSlicerMainWindow::tr("Show &Module Panel"));
-  this->PanelDockWidget->toggleViewAction()->setToolTip(qSlicerMainWindow::tr("Collapse/Expand the GUI panel and allows Slicer's viewers to occupy "
+  this->PanelDockWidget->toggleViewAction()->setToolTip(qSlicerMainWindow::tr("Collapse/Expand the GUI panel and allows the viewers to occupy "
                                                                               "the entire application window"));
   this->PanelDockWidget->toggleViewAction()->setShortcut(QKeySequence("Ctrl+5"));
   this->AppearanceMenu->insertAction(this->ShowStatusBarAction, this->PanelDockWidget->toggleViewAction());
@@ -442,7 +442,7 @@ void qSlicerMainWindowPrivate::setupUi(QMainWindow* mainWindow)
     else
     {
       ctkPythonConsole* pythonConsole = q->pythonConsole();
-      pythonConsole->setWindowTitle(qSlicerMainWindow::tr("Slicer Python Console"));
+      pythonConsole->setWindowTitle(qSlicerMainWindow::tr("Python Console"));
       pythonConsole->resize(600, 280);
       pythonConsole->hide();
       this->PythonConsoleToggleViewAction = new QAction("", this->ViewMenu);

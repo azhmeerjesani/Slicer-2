@@ -109,6 +109,16 @@ def studioVersion():
     return STUDIO_VERSION
 
 
+#: Name of the application, as the user sees it (window title, About box, Info.plist). The 3D Slicer identifiers
+#: (application name "Slicer", settings organization slicer.org, Slicer.ini) are unchanged, for compatibility.
+PRODUCT_NAME = "Slicer Studio"
+
+
+def windowTitle():
+    """Title of the main window: the product name and the Slicer Studio version (not the 3D Slicer base version)."""
+    return f"{PRODUCT_NAME} {STUDIO_VERSION}"
+
+
 def readVersionFile(path):
     """Read ``STUDIO_VERSION`` from a ``version.py`` file without importing it (for scripts). None if not found."""
     try:

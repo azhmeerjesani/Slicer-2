@@ -138,7 +138,7 @@ qSlicerSceneViewsModuleDialog::qSlicerSceneViewsModuleDialog(QWidget* parent /*=
   this->m_Logic = nullptr;
   this->setLayoutManager(qSlicerApplication::application()->layoutManager());
   this->setShowScaleFactorSpinBox(false);
-  this->setWindowTitle(tr("3D Slicer SceneView"));
+  this->setWindowTitle(tr("Scene View"));
 
   // default name
   QString name("SceneView");

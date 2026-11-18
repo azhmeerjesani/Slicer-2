@@ -45,7 +45,7 @@ Usage:
   --display-name NAME
                application display name shown on the splash (supports
                custom applications built on 3D Slicer); defaults to
-               "3D Slicer"
+               "Slicer Studio"
   --jobs N     accepted for backward compatibility; ignored (the security
                evaluation is serialized by the system, so the warm-up is
                sequential)
@@ -60,7 +60,7 @@ LIBRARY_EXTENSIONS = (".dylib", ".so")
 
 def parse_arguments(argv):
     options = {"scan": [], "stamp": None, "gui": False, "quiet": False,
-               "display_name": "3D Slicer", "libraries": []}
+               "display_name": "Slicer Studio", "libraries": []}
     index = 0
     while index < len(argv):
         argument = argv[index]

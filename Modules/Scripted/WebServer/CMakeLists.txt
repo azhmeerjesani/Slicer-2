@@ -18,7 +18,7 @@ set(MODULE_PYTHON_RESOURCES
   Resources/docroot/browse.html
   Resources/docroot/favicon.ico
   Resources/docroot/package.json
-  Resources/docroot/images/3DSlicer-DesktopIcon.png
+  Resources/docroot/images/SlicerStudio-DesktopIcon.png
   Resources/docroot/ServerTests/glMatrix-0.9.5.min.js
   Resources/docroot/ServerTests/index.html
   Resources/docroot/ServerTests/threeDCube.html

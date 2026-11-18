@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Slicer Studio</title>
+  <g transform="translate(100.00 100.00) scale(0.804688)">
+    <rect width="1024" height="1024" rx="228" fill="#0f1b33" />
+    <polygon points="232,640 512,500 792,640 512,780" fill="#2f6fe0" fill-opacity="0.35" />
+    <polygon points="232,520 512,380 792,520 512,660" fill="#2f6fe0" fill-opacity="0.65" />
+    <polygon points="232,400 512,260 792,400 512,540" fill="#2f6fe0" stroke="#7aa7ff" stroke-width="14" stroke-linejoin="round" />
+    <ellipse cx="584" cy="392" rx="58" ry="29" fill="#ff8a3d" />
+  </g>
+</svg>

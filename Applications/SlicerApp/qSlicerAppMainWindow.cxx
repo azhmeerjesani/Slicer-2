@@ -138,7 +138,7 @@ void qSlicerAppMainWindowPrivate::setupUi(QMainWindow* mainWindow)
   QAction* helpAboutSlicerAppAction = new QAction(mainWindow);
   helpAboutSlicerAppAction->setObjectName("HelpAboutSlicerAppAction");
   helpAboutSlicerAppAction->setText(qSlicerAppMainWindow::tr("About %1").arg(qSlicerApplication::application()->mainApplicationDisplayName()));
-  helpAboutSlicerAppAction->setToolTip(qSlicerAppMainWindow::tr("Provides a description of the Slicer effort and its support."));
+  helpAboutSlicerAppAction->setToolTip(qSlicerAppMainWindow::tr("About Slicer Studio and 3D Slicer, on which it is based."));
 
   //----------------------------------------------------------------------------
   // Calling "setupUi()" after adding the actions above allows the call
@@ -247,7 +247,7 @@ void qSlicerAppMainWindow::on_HelpKeyboardShortcutsAction_triggered()
   qSlicerActionsDialog actionsDialog(this);
   actionsDialog.setActionsWithNoShortcutVisible(false);
   actionsDialog.setMenuActionsVisible(false);
-  actionsDialog.addActions(this->findChildren<QAction*>(), "Slicer Application");
+  actionsDialog.addActions(this->findChildren<QAction*>(), qSlicerApplication::application()->mainApplicationDisplayName());
 
   // scan the modules for their actions
   QList<QAction*> moduleActions;

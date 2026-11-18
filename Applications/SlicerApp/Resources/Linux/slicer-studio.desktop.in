@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Slicer Studio
+GenericName=Lesion tracing and lesion network mapping
+Comment=Trace brain lesions and compute lesion network maps (based on 3D Slicer)
+Exec="@LAUNCHER@" %F
+Icon=slicer-studio
+Terminal=false
+Categories=Science;MedicalSoftware;Graphics;
+Keywords=lesion;segmentation;MRI;NIfTI;DICOM;network;Slicer;
+StartupWMClass=SlicerApp-real

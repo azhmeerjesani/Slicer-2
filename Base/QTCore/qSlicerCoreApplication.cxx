@@ -2056,20 +2056,24 @@ QString qSlicerCoreApplication::libraries() const
 //-----------------------------------------------------------------------------
 QString qSlicerCoreApplication::copyrights() const
 {
-  QString copyrightsText(QString("<table align=\"center\" border=\"0\" width=\"80%\"><tr>"
+  // Slicer Studio is a fork of 3D Slicer: the license, website and acknowledgments are those of 3D Slicer.
+  QString copyrightsText(QString("<p align=\"center\">%4</p>"
+                                 "<table align=\"center\" border=\"0\" width=\"80%\"><tr>"
                                  "<td align=\"center\"><a href=\"https://slicer.readthedocs.io/en/latest/user_guide/about.html#license\">%1</a></td>"
                                  "<td align=\"center\"><a href=\"https://slicer.org/\">%2</a></td>"
                                  "<td align=\"center\"><a href=\"https://slicer.readthedocs.io/en/latest/user_guide/about.html#acknowledgments\">%3</a></td>"
                                  "</tr></table>")
                            .arg(tr("Licensing Information"))
                            .arg(tr("Website"))
-                           .arg(tr("Acknowledgments")));
+                           .arg(tr("Acknowledgments"))
+                           .arg(tr("Slicer Studio is based on 3D Slicer (<a href=\"https://www.slicer.org/\">www.slicer.org</a>), "
+                                   "BSD-style license.")));
   return copyrightsText;
 }
 //-----------------------------------------------------------------------------
 QString qSlicerCoreApplication::acknowledgment() const
 {
-  QString acknowledgmentText(tr("Slicer is NOT an FDA approved medical device.<br><br>"
+  QString acknowledgmentText(tr("Slicer Studio, like 3D Slicer, is NOT an FDA approved medical device.<br><br>"
                                 "Supported by: NA-MIC, NAC, BIRN, NCIGT and the Slicer Community.<br><br>"
                                 "Special thanks to the NIH and our other supporters.<br><br>"
                                 "This work is part of the National Alliance for Medical Image Computing "

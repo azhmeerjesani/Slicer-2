@@ -3,7 +3,7 @@ set(APPLICATION_NAME
   Slicer
   )
 set(APPLICATION_DISPLAY_NAME
-  "3D Slicer"
+  "Slicer Studio"
   )
 
 set(VERSION_MAJOR
@@ -17,7 +17,7 @@ set(VERSION_PATCH
   )
 
 set(DESCRIPTION_SUMMARY
-  "Medical Visualization and Processing Environment for Research"
+  "Lesion tracing and lesion network mapping, based on 3D Slicer"
   )
 set(DESCRIPTION_FILE
   ${Slicer_SOURCE_DIR}/README.md

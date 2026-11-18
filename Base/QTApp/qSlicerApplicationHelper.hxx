@@ -30,6 +30,7 @@
 #include <QMouseEvent>
 #include <QSettings>
 #include <QSplashScreen>
+#include <QColor>
 #include <QTimer>
 
 // CTK includes
@@ -141,7 +142,8 @@ void splashMessage(QScopedPointer<QSplashScreen>& splashScreen, const QString& m
   {
     return;
   }
-  splashScreen->showMessage(message, Qt::AlignBottom | Qt::AlignHCenter);
+  // Light text: the Slicer Studio splash screen is dark navy (Resources/Brand/SlicerStudioSplash.svg)
+  splashScreen->showMessage(message, Qt::AlignBottom | Qt::AlignHCenter, QColor(201, 214, 242));
 }
 
 //----------------------------------------------------------------------------

@@ -70,7 +70,8 @@ qSlicerAboutDialog::qSlicerAboutDialog(QWidget* parentWidget)
       }
     }
 #else
-    QString downloadSiteLink = QString("<a href=\"https://download.slicer.org/\">%1</a>").arg(tr("download site"));
+    // The releases of Slicer Studio (not those of 3D Slicer, on download.slicer.org)
+    QString downloadSiteLink = QString("<a href=\"https://github.com/azhmeerjesani/Slicer-2/releases/latest\">%1</a>").arg(tr("download site"));
     d->CreditsTextBrowser->insertHtml(tr("Visit the %1 to check if a new version is available.").arg(downloadSiteLink));
     d->CreditsTextBrowser->append("");
 #endif

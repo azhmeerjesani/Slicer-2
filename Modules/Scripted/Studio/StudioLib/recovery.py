@@ -1125,8 +1125,8 @@ class RecoveryDialog(qt.QDialog):
         if crashed and all(s.status == "crashed" and s.closedForUpdate for s in crashed):
             return _("Slicer Studio closed to install an update. Work from these sessions was autosaved:")
         if any(s.closedForUpdate for s in crashed):
-            return _("Slicer did not close normally, or closed to install an update. Work from these sessions was autosaved:")
-        return _("Slicer did not close normally. Work from these sessions was autosaved:")
+            return _("Slicer Studio did not close normally, or closed to install an update. Work from these sessions was autosaved:")
+        return _("Slicer Studio did not close normally. Work from these sessions was autosaved:")
 
     @staticmethod
     def _styleSheet():

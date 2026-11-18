@@ -39,6 +39,7 @@ EXIT_SMOKE=8
 
 APP_NAME="Slicer Studio"
 APP_BUNDLE_ID="org.slicer.slicerstudio"
+APP_COPYRIGHT="Slicer Studio is based on 3D Slicer. Copyright Slicer Community and contributors; BSD-style license (see License.txt)."
 DMG_PREFIX="SlicerStudio"
 
 # Qt version used by --qt=official and --qt=source: the version
@@ -1664,7 +1665,7 @@ make_studio_dmg() {
   # Copy the application out of the CPack image under its new name.
   if [ "${DRY_RUN}" = 1 ]; then
     print_cmd hdiutil attach -nobrowse -readonly -noautoopen -noverify -mountpoint "<mount point>" "${CPACK_DMG}"
-    print_cmd ditto "<mount point>/<3D Slicer version>.app" "${app}"
+    print_cmd ditto "<mount point>/Slicer Studio <version>.app" "${app}"
     print_cmd hdiutil detach "<mount point>"
   else
     local mount_point source_app
@@ -1697,6 +1698,7 @@ make_studio_dmg() {
       run plutil -replace CFBundleDisplayName -string "${APP_NAME}" "${plist}" &&
       run plutil -replace CFBundleIdentifier -string "${APP_BUNDLE_ID}" "${plist}" &&
       run plutil -replace CFBundleShortVersionString -string "${studio}" "${plist}" &&
+      run plutil -replace NSHumanReadableCopyright -string "${APP_COPYRIGHT}" "${plist}" &&
       run plutil -lint "${plist}"
   }; then
     die "${EXIT_PACKAGE}" "updating ${plist} failed"
@@ -1710,6 +1712,9 @@ make_studio_dmg() {
       die "${EXIT_PACKAGE}" "could not read CFBundleVersion from ${plist}"
     fi
     info "3D Slicer version of the package: ${version}"
+    # Get Info in Finder: the Slicer Studio version and the 3D Slicer version it is based on
+    run plutil -replace CFBundleGetInfoString -string "${APP_NAME} ${studio}, based on 3D Slicer ${version}" "${plist}" ||
+      die "${EXIT_PACKAGE}" "updating ${plist} failed"
     check_bundle "${app}"
     # Let Finder refuse to start the application on a too old macOS instead
     # of failing to load its libraries.
