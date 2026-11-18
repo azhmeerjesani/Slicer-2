@@ -125,6 +125,20 @@ if others_running "$@"; then
     sleep 0.5
   done
 fi
+# The user's data (the user profile, the settings folder) must never be inside what is replaced or deleted
+protected=__PROTECTED__
+holds_protected() {
+  printf '%s\n' "$protected" | while IFS= read -r keep; do
+    [ -n "$keep" ] || continue
+    case "$keep/" in "$1"/*) exit 1 ;; esac
+  done
+  [ "$?" = "1" ]
+}
+for folder in "$target" "$backup" "$staged"; do
+  if holds_protected "$folder"; then
+    fail "$folder holds Slicer Studio user data; nothing was changed"
+  fi
+done
 log "installing $staged as $target"
 [ -e "$staged/$check" ] || fail "the new version is incomplete; nothing was changed"
 if [ -e "$backup" ]; then
@@ -153,6 +167,12 @@ log "installed"
 relaunch_application
 exit 0
 """.replace("__EXIT_WAIT_TICKS__", str(EXIT_WAIT_S * 2))
+
+
+def helperScript(protected=None):
+    """``HELPER_SCRIPT`` with the folders it must never replace or delete (``protectedPaths``, real paths)."""
+    folders = [os.path.realpath(folder) for folder in (protectedPaths() if protected is None else protected) if folder]
+    return HELPER_SCRIPT.replace("__PROTECTED__", shlex.quote("\n".join(folders)))
 
 
 class InstallError(Exception):
@@ -250,7 +270,29 @@ def _freeBytes(path):
         return None
 
 
-def _removeTree(path):
+def protectedPaths():
+    """The folders an update must never delete, nor any folder holding them: the user profile and the user settings
+    folder (``studio_profile.protectedRoots()``; without the profile, the user settings folder only)."""
+    try:
+        import studio_profile
+    except ImportError:
+        return [os.path.join(os.path.expanduser("~"), ".config", "slicer.org")]
+    return studio_profile.protectedRoots()
+
+
+def checkRemovable(path, protected=None):
+    """Raise OSError when deleting ``path`` would delete user data (see ``protectedPaths``)."""
+    real = os.path.realpath(path)
+    for folder in protectedPaths() if protected is None else protected:
+        if not folder:
+            continue
+        folder = os.path.realpath(folder)
+        if real == folder or real.startswith(folder.rstrip(os.sep) + os.sep) or folder.startswith(real.rstrip(os.sep) + os.sep):
+            raise OSError(f"{path} holds Slicer Studio user data ({folder}): it is not deleted")
+
+
+def _removeTree(path, protected=None):
+    checkRemovable(path, protected)
     if os.path.islink(path) or os.path.isfile(path):
         os.remove(path)
     elif os.path.isdir(path):
@@ -307,13 +349,15 @@ def processesRunningFrom(target, ownPid=None):
     return sorted(pid for pid in found if pid not in children)
 
 
-def removeInBackground(path, onDone=None):
-    """Delete the folder ``path`` in a background thread (for example the previous version after an update)."""
+def removeInBackground(path, onDone=None, protected=None):
+    """Delete the folder ``path`` in a background thread (for example the previous version after an update). A folder
+    that holds user data is refused (``checkRemovable``: ``onDone`` gets the error)."""
+    protected = protectedPaths() if protected is None else protected  # on the calling thread
 
     def run():
         error = None
         try:
-            _removeTree(path)
+            _removeTree(path, protected)
         except OSError as e:
             error = e
         if onDone is not None:
@@ -366,7 +410,7 @@ class PreparedInstall:
         resultPath = os.path.join(stateDir, RESULT_FILE)
         logPath = os.path.join(stateDir, LOG_FILE)
         with open(scriptPath, "w", encoding="utf-8", newline="\n") as f:
-            f.write(HELPER_SCRIPT)
+            f.write(helperScript())
         os.chmod(scriptPath, 0o700)
         if os.path.exists(resultPath):
             os.remove(resultPath)

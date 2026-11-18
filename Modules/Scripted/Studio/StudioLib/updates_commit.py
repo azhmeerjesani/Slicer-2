@@ -781,7 +781,8 @@ def collectGarbage(stateRoot, base, now=None):
         if studio_overlay.updateState(baseDir, base, change) is None:
             return removed
         for path in trash:
-            shutil.rmtree(path, ignore_errors=True)
+            if _isStrictlyInside(path, baseDir):
+                shutil.rmtree(path, ignore_errors=True)
         _cleanStaging(baseDir, now)
     try:
         others = os.listdir(stateRoot)
@@ -798,10 +799,16 @@ def collectGarbage(stateRoot, base, now=None):
             used = max(os.stat(os.path.join(folder, entry)).st_mtime for entry in os.listdir(folder)) if os.listdir(folder) else os.stat(folder).st_mtime
         except OSError:
             continue
-        if now - used > UNUSED_BASE_S:
+        if now - used > UNUSED_BASE_S and _isStrictlyInside(folder, stateRoot):
             shutil.rmtree(folder, ignore_errors=True)
             removed.append(folder)
     return removed
+
+
+def _isStrictlyInside(path, folder):
+    """True when ``path`` is inside ``folder`` (and not ``folder`` itself): clean-ups never delete anything else."""
+    path, folder = os.path.realpath(path), os.path.realpath(folder)
+    return path != folder and path.startswith(folder.rstrip(os.sep) + os.sep)
 
 
 #
